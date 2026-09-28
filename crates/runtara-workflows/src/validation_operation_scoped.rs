@@ -1,6 +1,7 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Where operation-scoped (suspending or control) Agent steps may appear.
+//! Where operation-scoped steps (suspending or control Agent steps and
+//! WaitForInstances steps) may appear.
 //!
 //! The verdicts come from `runtara_dsl::step_context_rules`; this module only
 //! works out which contexts a step is in. [`validate_suspending_steps`] judges
@@ -340,7 +341,12 @@ fn apply_shared_contexts(
     }
 }
 
-/// E028, E029, E131, E132 and W074-W078 for every Agent step of `graph`.
+/// The diagnostic label of a WaitForInstances site, in the place of an
+/// `agent:capability`.
+const WAIT_FOR_INSTANCES_LABEL: &str = "WaitForInstances";
+
+/// E028, E029, E131, E132 and W074-W078 for every Agent and WaitForInstances
+/// step of `graph`.
 pub(super) fn validate_suspending_steps(
     graph: &ExecutionGraph,
     catalog: &AgentCatalog,
@@ -351,6 +357,26 @@ pub(super) fn validate_suspending_steps(
         true,
         &EnclosingScope::default(),
         &mut |step_id, step, context| {
+            if let Step::WaitForInstances(_) = step {
+                let kinds = [(
+                    OperationScopedKind::WaitForInstances,
+                    WAIT_FOR_INSTANCES_LABEL.to_string(),
+                )];
+                let site = Site {
+                    step_id,
+                    child_workflow_id: None,
+                    timeout_ms: None,
+                };
+                apply_shared_contexts(
+                    &kinds,
+                    &site,
+                    context,
+                    context.graph_durable,
+                    context.enclosing_retry.as_deref(),
+                    result,
+                );
+                return;
+            }
             let Step::Agent(agent) = step else {
                 return;
             };
@@ -430,11 +456,13 @@ fn is_constant(value: &MappingValue) -> bool {
 }
 
 /// The first suspending and the first control call anywhere in a workflow's
-/// closure (nested graphs and deeper embeds included), as `agent:capability`.
+/// closure (nested graphs and deeper embeds included), as `agent:capability`,
+/// and whether it holds a WaitForInstances step.
 #[derive(Debug, Default)]
 struct ClosureOperationSites {
     suspending: Option<String>,
     control: Option<String>,
+    wait_for_instances: bool,
 }
 
 impl ClosureOperationSites {
@@ -445,6 +473,12 @@ impl ClosureOperationSites {
         }
         if let Some(capability) = &self.control {
             kinds.push((OperationScopedKind::Control, capability.clone()));
+        }
+        if self.wait_for_instances {
+            kinds.push((
+                OperationScopedKind::WaitForInstances,
+                WAIT_FOR_INSTANCES_LABEL.to_string(),
+            ));
         }
         kinds
     }
@@ -482,6 +516,7 @@ fn collect_closure_sites(
                     _ => {}
                 }
             }
+            Step::WaitForInstances(_) => sites.wait_for_instances = true,
             Step::EmbedWorkflow(embed) => embedded.push(embed.child_workflow_id.clone()),
             _ => {}
         },

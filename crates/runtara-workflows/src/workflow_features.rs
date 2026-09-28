@@ -63,6 +63,8 @@ pub enum WorkflowFeature {
     Delay,
     /// A workflow step waits for an external signal.
     WaitForSignal,
+    /// A workflow step waits for child runs to finish.
+    WaitForInstances,
     /// A workflow step can suspend and resume later.
     SuspendResume,
     /// A workflow step references a connection id.
@@ -435,6 +437,18 @@ impl FeatureAnalyzer {
                     self.visit_graph(on_wait, depth + 1, graph_durable);
                 }
             }
+            Step::WaitForInstances(step) => {
+                self.summary
+                    .features
+                    .insert(WorkflowFeature::WaitForInstances);
+                self.summary.features.insert(WorkflowFeature::SuspendResume);
+                if graph_durable {
+                    self.summary.features.insert(WorkflowFeature::Durability);
+                }
+                if step.timeout_ms.is_some() {
+                    self.summary.features.insert(WorkflowFeature::Timeout);
+                }
+            }
             Step::AiAgent(step) => {
                 self.summary.features.insert(WorkflowFeature::AiAgent);
                 if let Some(connection_id) = &step.connection_id {
@@ -475,6 +489,7 @@ fn step_has_breakpoint(step: &Step) -> bool {
         Step::GroupBy(step) => step.breakpoint.unwrap_or(false),
         Step::Delay(step) => step.breakpoint.unwrap_or(false),
         Step::WaitForSignal(step) => step.breakpoint.unwrap_or(false),
+        Step::WaitForInstances(step) => step.breakpoint.unwrap_or(false),
         Step::AiAgent(step) => step.breakpoint.unwrap_or(false),
     }
 }
@@ -494,6 +509,7 @@ pub(crate) fn step_type_name(step: &Step) -> &'static str {
         Step::GroupBy(_) => "GroupBy",
         Step::Delay(_) => "Delay",
         Step::WaitForSignal(_) => "WaitForSignal",
+        Step::WaitForInstances(_) => "WaitForInstances",
         Step::AiAgent(_) => "AiAgent",
     }
 }

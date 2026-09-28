@@ -1434,6 +1434,8 @@ fn step_manifest(
                 });
             }
         }
+        // The stdlib reads instanceIds, mode and timeoutMs from the step body.
+        Step::WaitForInstances(_) => {}
     }
 
     Ok(DirectStepManifest {
@@ -1725,6 +1727,7 @@ fn step_name(step: &Step) -> Option<&str> {
         Step::GroupBy(step) => step.name.as_deref(),
         Step::Delay(step) => step.name.as_deref(),
         Step::WaitForSignal(step) => step.name.as_deref(),
+        Step::WaitForInstances(step) => step.name.as_deref(),
         Step::AiAgent(step) => step.name.as_deref(),
     }
 }
@@ -1744,6 +1747,7 @@ fn step_type_name(step: &Step) -> &'static str {
         Step::GroupBy(_) => "GroupBy",
         Step::Delay(_) => "Delay",
         Step::WaitForSignal(_) => "WaitForSignal",
+        Step::WaitForInstances(_) => "WaitForInstances",
         Step::AiAgent(_) => "AiAgent",
     }
 }

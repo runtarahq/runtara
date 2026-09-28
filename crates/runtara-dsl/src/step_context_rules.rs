@@ -1,13 +1,16 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Where operation-scoped Agent steps may appear: the v1 context matrix.
+//! Where operation-scoped steps may appear: the v1 context matrix.
 //!
 //! An operation-scoped call site (see [`crate::agent_meta::is_operation_scoped`])
 //! is either a *suspending* capability, which parks its workflow with a typed
 //! suspension, or a capability of the built-in *control* agent, whose mutations
 //! the host makes replay-safe under the call site's operation identity. Both
 //! kinds need a stable operation identity; a suspending one additionally needs
-//! durable replay and a step deadline.
+//! durable replay and a step deadline. A `WaitForInstances` step is the third
+//! kind: it parks its run on a durable instance wait keyed by the step's
+//! identity, so it needs durable replay like a suspending capability, but its
+//! `timeoutMs` is the wait's business deadline, not a step deadline.
 //!
 //! [`STEP_CONTEXT_RULES`] is the single source for these rules. The workflow
 //! validator derives its codes from it (E028, E029, E131, E132, W074-W078),
@@ -15,13 +18,15 @@
 
 use crate::agent_meta::AgentCatalog;
 
-/// The two kinds of operation-scoped call site.
+/// The kinds of operation-scoped call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OperationScopedKind {
     /// A capability declaring `suspends` (including control's `wait`).
     Suspending,
     /// A non-suspending capability of the control agent.
     Control,
+    /// A `WaitForInstances` step.
+    WaitForInstances,
 }
 
 impl OperationScopedKind {
@@ -43,6 +48,7 @@ impl OperationScopedKind {
         match self {
             Self::Suspending => "suspending",
             Self::Control => "control",
+            Self::WaitForInstances => "waitForInstances",
         }
     }
 }
@@ -154,6 +160,8 @@ pub struct StepContextRule {
     pub suspending: ContextVerdict,
     /// Verdict for a non-suspending control capability.
     pub control: ContextVerdict,
+    /// Verdict for a `WaitForInstances` step.
+    pub wait_for_instances: ContextVerdict,
 }
 
 impl StepContextRule {
@@ -162,6 +170,7 @@ impl StepContextRule {
         match kind {
             OperationScopedKind::Suspending => self.suspending,
             OperationScopedKind::Control => self.control,
+            OperationScopedKind::WaitForInstances => self.wait_for_instances,
         }
     }
 }
@@ -176,6 +185,7 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         description: "A step in the workflow's top-level graph.",
         suspending: Allowed,
         control: Allowed,
+        wait_for_instances: Allowed,
     },
     StepContextRule {
         context: StepContext::BranchArm,
@@ -183,6 +193,7 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         description: "One arm of a Conditional, a Switch or conditioned executionPlan edges; only one arm runs.",
         suspending: Allowed,
         control: Allowed,
+        wait_for_instances: Allowed,
     },
     StepContextRule {
         context: StepContext::SequentialLoop,
@@ -190,6 +201,7 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         description: "The body of a While, or of a Split without a parallelism request; each iteration gets its own operation identity.",
         suspending: Allowed,
         control: Allowed,
+        wait_for_instances: Allowed,
     },
     StepContextRule {
         context: StepContext::EmbeddedWorkflow,
@@ -197,6 +209,7 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         description: "A step of a workflow embedded by EmbedWorkflow; the embed call site's context applies too.",
         suspending: Allowed,
         control: Allowed,
+        wait_for_instances: Allowed,
     },
     StepContextRule {
         context: StepContext::StepRetry,
@@ -204,6 +217,7 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         description: "The step's own maxRetries; every attempt keeps the step's operation identity.",
         suspending: Allowed,
         control: Allowed,
+        wait_for_instances: NotApplicable,
     },
     StepContextRule {
         context: StepContext::EnclosingRetry,
@@ -211,6 +225,7 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         description: "A Split or EmbedWorkflow retrying the region around the step; a retry replays the operation's first outcome instead of repeating it.",
         suspending: Warned { code: "W076" },
         control: Warned { code: "W076" },
+        wait_for_instances: Warned { code: "W076" },
     },
     StepContextRule {
         context: StepContext::ParallelSplit,
@@ -218,6 +233,7 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         description: "The body of a Split with parallelism other than 1; iterations holding the step run one at a time.",
         suspending: Serialized { code: "W075" },
         control: Serialized { code: "W075" },
+        wait_for_instances: Serialized { code: "W075" },
     },
     StepContextRule {
         context: StepContext::ParallelBranchGroup,
@@ -225,6 +241,7 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         description: "A branch of an unconditioned executionPlan fan-out; the whole group runs sequentially.",
         suspending: Serialized { code: "W075" },
         control: Serialized { code: "W075" },
+        wait_for_instances: Serialized { code: "W075" },
     },
     StepContextRule {
         context: StepContext::NonDurable,
@@ -232,6 +249,7 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         description: "The step (or the EmbedWorkflow call site around it) is not durable; a parked run would replay side effects.",
         suspending: Rejected { code: "E028" },
         control: Allowed,
+        wait_for_instances: Rejected { code: "E028" },
     },
     StepContextRule {
         context: StepContext::MissingTimeout,
@@ -239,6 +257,7 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         description: "The step has no timeout, or timeout 0; a suspending step needs a hard deadline.",
         suspending: Rejected { code: "E029" },
         control: Allowed,
+        wait_for_instances: NotApplicable,
     },
     StepContextRule {
         context: StepContext::TimeoutBelowDeadlineMargin,
@@ -246,6 +265,7 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         description: "The step timeout is at most the deadline margin, so the step times out instead of parking.",
         suspending: Warned { code: "W078" },
         control: NotApplicable,
+        wait_for_instances: NotApplicable,
     },
     StepContextRule {
         context: StepContext::OnErrorRegion,
@@ -253,6 +273,7 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         description: "A step reached only through an onError edge.",
         suspending: Rejected { code: "E131" },
         control: Allowed,
+        wait_for_instances: Rejected { code: "E131" },
     },
     StepContextRule {
         context: StepContext::OnWait,
@@ -260,6 +281,7 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         description: "A step inside a WaitForSignal onWait subgraph.",
         suspending: Rejected { code: "E131" },
         control: Rejected { code: "E132" },
+        wait_for_instances: Rejected { code: "E131" },
     },
     StepContextRule {
         context: StepContext::AiAgentTool,
@@ -267,6 +289,7 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         description: "The target of an AiAgent tool edge, or an EmbedWorkflow tool whose workflow holds such a step.",
         suspending: Rejected { code: "E131" },
         control: Rejected { code: "E132" },
+        wait_for_instances: Rejected { code: "E131" },
     },
     StepContextRule {
         context: StepContext::AiAgentMemory,
@@ -274,6 +297,7 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         description: "The target of an AiAgent memory edge.",
         suspending: Rejected { code: "E131" },
         control: Rejected { code: "E132" },
+        wait_for_instances: Rejected { code: "E131" },
     },
     StepContextRule {
         context: StepContext::ConstantRunLabelInLoop,
@@ -281,6 +305,7 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         description: "A control start inside a Split or While with a literal runLabel; run labels are unique per parent, so the second iteration fails with label-conflict.",
         suspending: NotApplicable,
         control: Warned { code: "W074" },
+        wait_for_instances: NotApplicable,
     },
     StepContextRule {
         context: StepContext::DynamicStartTarget,
@@ -288,6 +313,7 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         description: "A control start whose workflowId is not a literal, so the target is only checked when the step runs.",
         suspending: NotApplicable,
         control: Warned { code: "W077" },
+        wait_for_instances: NotApplicable,
     },
     StepContextRule {
         context: StepContext::PublishedWorkflowAgent,
@@ -298,6 +324,9 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         },
         control: PublishRefused {
             feature: "control-agent",
+        },
+        wait_for_instances: PublishRefused {
+            feature: "wait-for-instances",
         },
     },
 ];
@@ -336,10 +365,11 @@ pub fn step_context_rules_json() -> serde_json::Value {
         value
     };
     serde_json::json!({
-        "appliesTo": "Agent steps whose capability declares suspends, and every capability of the control agent",
+        "appliesTo": "Agent steps whose capability declares suspends, every capability of the control agent, and WaitForInstances steps",
         "suspendingRequirements": format!(
             "A suspending step must be durable (E028) and set timeout > 0 (E029); a timeout of at most {SUSPEND_DEADLINE_MARGIN_MS} ms times out instead of parking (W078)."
         ),
+        "waitForInstancesRequirements": "A WaitForInstances step must be durable (E028); its timeoutMs is the wait's business deadline, so E029 and W078 do not apply.",
         "rules": STEP_CONTEXT_RULES
             .iter()
             .map(|rule| serde_json::json!({
@@ -347,6 +377,7 @@ pub fn step_context_rules_json() -> serde_json::Value {
                 "description": rule.description,
                 "suspending": verdict(rule.suspending),
                 "control": verdict(rule.control),
+                "waitForInstances": verdict(rule.wait_for_instances),
             }))
             .collect::<Vec<_>>(),
     })
@@ -414,6 +445,50 @@ mod tests {
         );
     }
 
+    /// A WaitForInstances step follows the suspending placement rules, but
+    /// has no step retry or step deadline of its own.
+    #[test]
+    fn wait_for_instances_follows_the_suspending_placements() {
+        let verdict =
+            |context| step_context_rule(context).verdict(OperationScopedKind::WaitForInstances);
+        for context in [
+            StepContext::TopLevel,
+            StepContext::BranchArm,
+            StepContext::SequentialLoop,
+            StepContext::EmbeddedWorkflow,
+        ] {
+            assert_eq!(verdict(context), Allowed);
+        }
+        assert_eq!(verdict(StepContext::NonDurable).code(), Some("E028"));
+        for context in [
+            StepContext::OnErrorRegion,
+            StepContext::OnWait,
+            StepContext::AiAgentTool,
+            StepContext::AiAgentMemory,
+        ] {
+            assert_eq!(verdict(context).code(), Some("E131"));
+        }
+        for context in [StepContext::ParallelSplit, StepContext::ParallelBranchGroup] {
+            assert!(matches!(verdict(context), Serialized { code: "W075" }));
+        }
+        assert_eq!(verdict(StepContext::EnclosingRetry).code(), Some("W076"));
+        for context in [
+            StepContext::StepRetry,
+            StepContext::MissingTimeout,
+            StepContext::TimeoutBelowDeadlineMargin,
+            StepContext::ConstantRunLabelInLoop,
+            StepContext::DynamicStartTarget,
+        ] {
+            assert_eq!(verdict(context), NotApplicable);
+        }
+        assert_eq!(
+            verdict(StepContext::PublishedWorkflowAgent),
+            PublishRefused {
+                feature: "wait-for-instances"
+            }
+        );
+    }
+
     #[test]
     fn the_authoring_json_renders_every_rule() {
         let json = step_context_rules_json();
@@ -426,6 +501,10 @@ mod tests {
                 rule.suspending.code()
             );
             assert_eq!(rendered["control"]["code"].as_str(), rule.control.code());
+            assert_eq!(
+                rendered["waitForInstances"]["code"].as_str(),
+                rule.wait_for_instances.code()
+            );
         }
     }
 }

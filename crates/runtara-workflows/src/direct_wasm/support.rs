@@ -304,6 +304,13 @@ fn collect_workflow_agent_step_safety(
                 );
             }
         }
+        Step::WaitForInstances(_) => push_workflow_agent_safety_violation(
+            violations,
+            path,
+            step,
+            "wait-for-instances",
+            "WaitForInstances waits on the caller's own child runs, which a published agent does not have",
+        ),
         // Only workflows with no root runtime ownership can keep non-durable
         // retry/rate-limit waits local and unwind them on parent cancellation.
         Step::Agent(_) if cooperative_waits_supported => {}
@@ -1900,6 +1907,12 @@ fn collect_step_support(
             child_workflows,
             unsupported,
         ),
+        Step::WaitForInstances(_) => unsupported_step(
+            step,
+            "wait-for-instances",
+            "WaitForInstances steps are not lowered yet",
+            unsupported,
+        ),
         Step::AiAgent(ai_step)
             if supports_ai_agent_step_baseline(graph, ai_step, child_workflows) => {}
         Step::AiAgent(_) => unsupported_step(
@@ -2052,6 +2065,7 @@ fn step_type_name(step: &Step) -> &'static str {
         Step::GroupBy(_) => "GroupBy",
         Step::Delay(_) => "Delay",
         Step::WaitForSignal(_) => "WaitForSignal",
+        Step::WaitForInstances(_) => "WaitForInstances",
         Step::AiAgent(_) => "AiAgent",
     }
 }
@@ -2547,6 +2561,28 @@ mod tests {
             )),
             "{report:?}"
         );
+    }
+
+    #[test]
+    fn workflow_agent_safety_refuses_wait_for_instances() {
+        let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "wait", "steps": {
+                "wait": {"id": "wait", "stepType": "WaitForInstances",
+                    "instanceIds": {"valueType": "reference", "value": "data.children"}},
+                "finish": {"id": "finish", "stepType": "Finish"}},
+            "executionPlan": [{"fromStep": "wait", "toStep": "finish"}]}))
+        .expect("graph parses");
+        let report = analyze_workflow_agent_safety(&graph, &[], None);
+        assert_eq!(
+            report
+                .violations
+                .iter()
+                .map(|violation| (violation.path.as_str(), violation.feature.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("root/steps/wait", "wait-for-instances")],
+            "{report:?}"
+        );
+        assert!(report.parking_sites.is_empty(), "not a parking site");
     }
 
     #[test]

@@ -111,6 +111,7 @@ fn every_rule_code_maps_to_a_diagnostic_with_that_code() {
         for kind in [
             OperationScopedKind::Suspending,
             OperationScopedKind::Control,
+            OperationScopedKind::WaitForInstances,
         ] {
             let mut result = ValidationResult::default();
             apply_rule(
@@ -348,4 +349,136 @@ fn control_start_warns_on_constant_labels_in_loops_and_dynamic_targets() {
         diagnostics(single(start(literal("order-1"), dynamic))),
         one("W077", "start")
     );
+}
+
+fn wait_for_instances(id: &str) -> Value {
+    json!({"id": id, "stepType": "WaitForInstances",
+        "instanceIds": {"valueType": "reference", "value": "data.children"}})
+}
+
+#[test]
+fn wait_for_instances_follows_the_suspending_placements() {
+    // Supported: the top level of a durable workflow, loops and branch arms,
+    // with no timeout needed.
+    assert!(diagnostics(single(wait_for_instances("wait"))).is_empty());
+    let in_loop = single(json!({"id": "loop", "stepType": "Split",
+        "config": {"value": {"valueType": "immediate", "value": [1]}},
+        "subgraph": single(wait_for_instances("wait"))}));
+    assert!(diagnostics(in_loop).is_empty());
+
+    // Not durable.
+    let mut graph = single(wait_for_instances("wait"));
+    graph["durable"] = json!(false);
+    let parsed: ExecutionGraph = serde_json::from_value(graph.clone()).unwrap();
+    let result = validate_workflow(&parsed, &catalog());
+    assert!(
+        result.errors.iter().any(|error| error
+            .to_string()
+            .contains("is a WaitForInstances step but is not durable")),
+        "{:?}",
+        result.errors
+    );
+    assert_eq!(diagnostics(graph), one("E028", "wait"));
+
+    // onError region, onWait, AiAgent tool.
+    let on_error = json!({"entryPoint": "call", "steps": {
+        "call": agent("call", "utils", "plain"), "handler": wait_for_instances("handler"),
+        "finish": finish("finish")},
+        "executionPlan": [
+            {"fromStep": "call", "toStep": "handler", "label": "onError"},
+            {"fromStep": "call", "toStep": "finish"},
+            {"fromStep": "handler", "toStep": "finish"}]});
+    assert_eq!(diagnostics(on_error), one("E131", "handler"));
+    let on_wait = single(json!({"id": "signal", "stepType": "WaitForSignal",
+        "onWait": single(wait_for_instances("inner"))}));
+    assert_eq!(diagnostics(on_wait), one("E131", "inner"));
+    let tool = json!({"entryPoint": "ai", "steps": {
+        "ai": {"id": "ai", "stepType": "AiAgent", "connectionId": "llm",
+            "config": {"systemPrompt": {"valueType": "immediate", "value": "s"},
+                "userPrompt": {"valueType": "immediate", "value": "u"}}},
+        "tool": wait_for_instances("tool"), "finish": finish("finish")},
+        "executionPlan": [{"fromStep": "ai", "toStep": "tool", "label": "approve"},
+            {"fromStep": "ai", "toStep": "finish"}]});
+    assert_eq!(diagnostics(tool), one("E131", "tool"));
+
+    // Serialized in a parallel Split, warned under a retrying one.
+    let parallel = single(json!({"id": "loop", "stepType": "Split",
+        "config": {"value": {"valueType": "immediate", "value": [1, 2]}, "parallelism": 4},
+        "subgraph": single(wait_for_instances("wait"))}));
+    assert_eq!(diagnostics(parallel), one("W075", "wait"));
+    let retrying = single(json!({"id": "loop", "stepType": "Split",
+        "config": {"value": {"valueType": "immediate", "value": [1]}, "maxRetries": 2},
+        "subgraph": single(wait_for_instances("wait"))}));
+    assert_eq!(diagnostics(retrying), one("W076", "wait"));
+}
+
+#[test]
+fn an_embed_of_a_wait_for_instances_workflow_is_judged_at_its_call_site() {
+    let root = |durable: bool, retries: u32| {
+        let graph = single(json!({"id": "embed", "stepType": "EmbedWorkflow",
+            "childWorkflowId": "child", "childVersion": "latest",
+            "durable": durable, "maxRetries": retries}));
+        serde_json::from_value::<ExecutionGraph>(graph).unwrap()
+    };
+    let child = crate::validation::ClosureChildGraph {
+        workflow_id: "child".into(),
+        version: 1,
+        execution_graph: serde_json::from_value(single(wait_for_instances("wait"))).unwrap(),
+    };
+    let report = crate::validation::validate_workflow_closure(
+        "root",
+        &root(false, 0),
+        &catalog(),
+        std::slice::from_ref(&child),
+    );
+    assert_eq!(operation_diagnostics(&report.root), one("E028", "embed"));
+    assert!(
+        report.root.errors[0]
+            .to_string()
+            .contains("holds a WaitForInstances step"),
+        "{}",
+        report.root.errors[0]
+    );
+    let report =
+        crate::validation::validate_workflow_closure("root", &root(true, 2), &catalog(), &[child]);
+    assert_eq!(operation_diagnostics(&report.root), one("W076", "embed"));
+}
+
+#[test]
+fn literal_wait_for_instances_config_is_checked() {
+    let errors = |instance_ids: Value, timeout: Option<Value>| {
+        let mut step = wait_for_instances("wait");
+        step["instanceIds"] = json!({"valueType": "immediate", "value": instance_ids});
+        if let Some(timeout) = timeout {
+            step["timeoutMs"] = json!({"valueType": "immediate", "value": timeout});
+        }
+        let graph: ExecutionGraph = serde_json::from_value(single(step)).unwrap();
+        validate_workflow(&graph, &catalog())
+            .errors
+            .into_iter()
+            .filter_map(|error| match error {
+                ValidationError::InvalidWaitForInstancesConfig { field, .. } => Some(field),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(errors(json!(["a", "b", "a"]), Some(json!(1_000))).is_empty());
+    for bad in [json!([]), json!("a"), json!([1]), json!([""])] {
+        assert_eq!(errors(bad.clone(), None), ["instanceIds"], "{bad}");
+    }
+    let too_many: Vec<String> = (0..=1000).map(|i| format!("child-{i}")).collect();
+    assert_eq!(errors(json!(too_many), None), ["instanceIds"]);
+    let at_cap: Vec<String> = (0..1000).map(|i| format!("child-{i}")).collect();
+    assert!(errors(json!(at_cap), None).is_empty());
+    for bad in [json!(0), json!(-5), json!("soon"), json!(1.5)] {
+        assert_eq!(
+            errors(json!(["a"]), Some(bad.clone())),
+            ["timeoutMs"],
+            "{bad}"
+        );
+    }
+    // A mode other than all or any does not parse.
+    let mut step = wait_for_instances("wait");
+    step["mode"] = json!("some");
+    assert!(serde_json::from_value::<ExecutionGraph>(single(step)).is_err());
 }

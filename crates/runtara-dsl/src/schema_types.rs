@@ -15,7 +15,7 @@
 // including module.
 
 /// DSL version - bump when making breaking changes
-pub const DSL_VERSION: &str = "3.2.0";
+pub const DSL_VERSION: &str = "3.3.0";
 
 // ============================================================================
 // Root Types
@@ -369,6 +369,9 @@ pub enum Step {
 
     /// Wait for an external signal before continuing
     WaitForSignal(WaitForSignalStep),
+
+    /// Park the run until direct child runs finish (durable)
+    WaitForInstances(WaitForInstancesStep),
 
     /// LLM-driven agent that selects and calls tools in a loop
     AiAgent(AiAgentStep),
@@ -1180,6 +1183,92 @@ pub struct WaitForSignalActionConfig {
     /// Optional non-authoritative display/query context.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub context: HashMap<String, MappingValue>,
+}
+
+/// Park the run, without holding a runner, until direct child runs of this
+/// run finish.
+///
+/// `mode: all` (the default) settles when every run in `instanceIds` has
+/// finished, `any` when the first has. The optional `timeoutMs` is a business
+/// deadline: when it passes, the step settles with resolution `deadline` and
+/// what finished so far. It never cancels a child and is not an error. The
+/// first registration's deadline stands on every replay.
+///
+/// The output is the settled wait:
+/// `{mode, resolution: satisfied | deadline | empty, finished: [{instanceId,
+/// status, finishedAtMs, output, outputBytes, outputOmitted, error,
+/// errorOmitted}], remaining: [ids], deadlineMs}`. An empty `instanceIds`
+/// settles at once with resolution `empty`. Finished runs' outputs are inlined
+/// up to 256 KiB each (errors 16 KiB, 3 MiB per wait); larger values are
+/// omitted and flagged.
+///
+/// The workflow must be durable. Targets must be direct children of the run
+/// (started by it with control `start`), at most 1000 distinct ones.
+///
+/// Example:
+/// ```json
+/// {
+///   "stepType": "WaitForInstances",
+///   "id": "waitApprovals",
+///   "instanceIds": { "valueType": "reference", "value": "steps.startAll.outputs" },
+///   "mode": "all",
+///   "timeoutMs": { "valueType": "immediate", "value": 86400000 }
+/// }
+/// ```
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", schemars(title = "WaitForInstancesStep"))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WaitForInstancesStep {
+    /// Unique step identifier
+    pub id: String,
+
+    /// Human-readable step name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// The runs to wait for: an array of instance ids, each a direct child of
+    /// this run, at most 1000 distinct ones.
+    pub instance_ids: MappingValue,
+
+    /// `all` (default): settle when every run has finished. `any`: settle when
+    /// the first has.
+    #[serde(default)]
+    pub mode: WaitForInstancesMode,
+
+    /// Optional business deadline in milliseconds from the first time the
+    /// step runs. When it passes, the step settles with resolution `deadline`;
+    /// children keep running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<MappingValue>,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
+}
+
+/// When a WaitForInstances step settles.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum WaitForInstancesMode {
+    /// Every run has finished.
+    #[default]
+    All,
+    /// The first run has finished.
+    Any,
+}
+
+impl WaitForInstancesMode {
+    /// The mode's spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Any => "any",
+        }
+    }
 }
 
 /// LLM-driven agent that selects and calls tools in a loop.

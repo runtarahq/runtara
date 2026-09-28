@@ -667,6 +667,12 @@ impl ValidationErrorDto {
             | ValidationError::ControlCapabilityUnsupportedContext { step_id, .. } => {
                 (error.to_string(), Some(step_id.clone()), None, None)
             }
+            ValidationError::InvalidWaitForInstancesConfig { step_id, field, .. } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some(field.clone()),
+                None,
+            ),
         };
 
         Self {

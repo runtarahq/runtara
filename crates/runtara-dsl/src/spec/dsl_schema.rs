@@ -113,6 +113,23 @@ pub fn get_dsl_changelog() -> Value {
         "version": DSL_VERSION,
         "changes": [
             {
+                "version": "3.3.0",
+                "date": "2026-09-28",
+                "breaking": false,
+                "changes": [
+                    {
+                        "type": "added",
+                        "component": "step-type",
+                        "description": "WaitForInstances step: parks the run without a runner until direct child runs finish (mode all or any) or the optional timeoutMs deadline passes. Fields: instanceIds (1-1000 distinct direct children), mode (all by default), timeoutMs, breakpoint. Its output is the settled wait {mode, resolution, finished, remaining, deadlineMs}."
+                    },
+                    {
+                        "type": "added",
+                        "component": "validation",
+                        "description": "A WaitForInstances step must be durable (E028), may not sit in onError, WaitForSignal onWait or AiAgent tools/memory (E131), runs serialized in parallel regions (W075), warns under a retrying Split or EmbedWorkflow (W076), and cannot be published as a workflow-agent. A literal instanceIds must be a non-empty array of at most 1000 distinct ids, and a literal timeoutMs a positive integer (E133)."
+                    }
+                ]
+            },
+            {
                 "version": "3.2.0",
                 "date": "2026-09-27",
                 "breaking": false,

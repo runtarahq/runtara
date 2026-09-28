@@ -126,7 +126,7 @@ pub fn walk_graph_for_agents(
             }
             // Other step kinds carry no agent module reference of their
             // own: Finish, Conditional, Switch, Log, Error, Filter,
-            // GroupBy, Delay, AiAgent (LLM-driven; gated by provider, not
+            // GroupBy, Delay, WaitForInstances, AiAgent (LLM-driven; gated by provider, not
             // by the `enabled_agents` allowlist — left for a follow-up
             // if/when LLM providers join the per-agent gate).
             //

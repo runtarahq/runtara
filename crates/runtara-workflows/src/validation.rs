@@ -52,6 +52,7 @@
 //! | E029 | SuspendingCapabilityMissingTimeout | Suspending step has no timeout, or timeout 0 |
 //! | E131 | SuspendingCapabilityUnsupportedContext | Suspending step in onError, onWait or an AiAgent tool/memory |
 //! | E132 | ControlCapabilityUnsupportedContext | Control step in onWait or an AiAgent tool/memory |
+//! | E133 | InvalidWaitForInstancesConfig | WaitForInstances literal instanceIds or timeoutMs out of range |
 //! | E043 | InvalidChildVersion | Invalid child workflow version format |
 //! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
 //! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
@@ -491,6 +492,15 @@ pub enum ValidationError {
         context: String,
         child_workflow_id: Option<String>,
     },
+    /// A WaitForInstances step's literal `instanceIds` or `timeoutMs` can
+    /// never run: not an array of ids, empty, over the target cap, or a
+    /// timeout that is not a positive integer.
+    InvalidWaitForInstancesConfig {
+        step_id: String,
+        /// `instanceIds` or `timeoutMs`.
+        field: String,
+        message: String,
+    },
 }
 
 /// Information about a missing required input field.
@@ -565,6 +575,7 @@ impl ValidationError {
             Self::SuspendingCapabilityMissingTimeout { .. } => "E029",
             Self::SuspendingCapabilityUnsupportedContext { .. } => "E131",
             Self::ControlCapabilityUnsupportedContext { .. } => "E132",
+            Self::InvalidWaitForInstancesConfig { .. } => "E133",
         }
     }
 }
@@ -1235,10 +1246,11 @@ impl std::fmt::Display for ValidationError {
                 child_workflow_id: None,
             } => write!(
                 f,
-                "[E028] Step '{}' calls suspending capability '{}' but is not durable. \
+                "[E028] Step '{}' {} but is not durable. \
                  A suspending step parks its run and replays to it, so it must be \
                  durable: remove durable: false from the step and the workflow.",
-                step_id, capability
+                step_id,
+                suspending_site(capability)
             ),
             ValidationError::SuspendingCapabilityNotDurable {
                 step_id,
@@ -1247,9 +1259,11 @@ impl std::fmt::Display for ValidationError {
             } => write!(
                 f,
                 "[E028] EmbedWorkflow step '{}' is not durable, but workflow '{}' it \
-                 embeds calls suspending capability '{}'. The call site of a suspending \
+                 embeds {}. The call site of a suspending \
                  step must be durable: remove durable: false from the step and the workflow.",
-                step_id, child, capability
+                step_id,
+                child,
+                embedded_suspending_site(capability)
             ),
             ValidationError::SuspendingCapabilityMissingTimeout {
                 step_id,
@@ -1268,11 +1282,10 @@ impl std::fmt::Display for ValidationError {
                 child_workflow_id,
             } => write!(
                 f,
-                "[E131] Step '{}'{} calls suspending capability '{}' in an unsupported \
-                 context ({}): {}",
+                "[E131] Step '{}'{} {} in an unsupported context ({}): {}",
                 step_id,
                 embedded_suffix(child_workflow_id.as_deref()),
-                capability,
+                suspending_site(capability),
                 context,
                 operation_rule_description(context)
             ),
@@ -1291,7 +1304,35 @@ impl std::fmt::Display for ValidationError {
                 context,
                 operation_rule_description(context)
             ),
+            ValidationError::InvalidWaitForInstancesConfig {
+                step_id,
+                field,
+                message,
+            } => write!(
+                f,
+                "[E133] WaitForInstances step '{}' has an invalid {}: {}",
+                step_id, field, message
+            ),
         }
+    }
+}
+
+/// What a suspending site does, for diagnostics: a WaitForInstances step or
+/// a call to a suspending capability.
+fn suspending_site(capability: &str) -> String {
+    if capability == "WaitForInstances" {
+        "is a WaitForInstances step".to_string()
+    } else {
+        format!("calls suspending capability '{capability}'")
+    }
+}
+
+/// [`suspending_site`] for a workflow reached through an embed.
+fn embedded_suspending_site(capability: &str) -> String {
+    if capability == "WaitForInstances" {
+        "holds a WaitForInstances step".to_string()
+    } else {
+        format!("calls suspending capability '{capability}'")
     }
 }
 
@@ -2980,7 +3021,11 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
                 mappings.push(&action.context);
             }
         }
-        Step::Conditional(_) | Step::Switch(_) | Step::Delay(_) | Step::AiAgent(_) => {}
+        Step::Conditional(_)
+        | Step::Switch(_)
+        | Step::Delay(_)
+        | Step::WaitForInstances(_)
+        | Step::AiAgent(_) => {}
     }
 
     mappings
@@ -3033,6 +3078,12 @@ fn collect_unmapped_step_references(step: &Step) -> Vec<String> {
             extract_references_from_mapping_value(&delay_step.duration_ms, &mut refs);
         }
         Step::WaitForSignal(wait_step) => {
+            if let Some(timeout) = &wait_step.timeout_ms {
+                extract_references_from_mapping_value(timeout, &mut refs);
+            }
+        }
+        Step::WaitForInstances(wait_step) => {
+            extract_references_from_mapping_value(&wait_step.instance_ids, &mut refs);
             if let Some(timeout) = &wait_step.timeout_ms {
                 extract_references_from_mapping_value(timeout, &mut refs);
             }
@@ -4208,6 +4259,76 @@ const MAX_RETRY_DELAY_MS: u64 = 3_600_000; // 1 hour
 const MAX_ITERATIONS_RECOMMENDED: u32 = 10_000;
 const MAX_TIMEOUT_MS: u64 = 3_600_000; // 1 hour
 
+/// Most distinct runs one WaitForInstances step may wait on.
+pub const MAX_WAIT_FOR_INSTANCES_TARGETS: usize = 1000;
+
+/// E133: literal `instanceIds` must be a non-empty array of non-empty string
+/// ids with at most [`MAX_WAIT_FOR_INSTANCES_TARGETS`] distinct ones, and a
+/// literal `timeoutMs` a positive integer. References are checked when the
+/// step runs.
+fn validate_wait_for_instances_config(
+    step_id: &str,
+    wait: &runtara_dsl::WaitForInstancesStep,
+    result: &mut ValidationResult,
+) {
+    let mut invalid = |field: &str, message: String| {
+        result
+            .errors
+            .push(ValidationError::InvalidWaitForInstancesConfig {
+                step_id: step_id.to_string(),
+                field: field.to_string(),
+                message,
+            });
+    };
+    if let MappingValue::Immediate(immediate) = &wait.instance_ids {
+        match immediate.value.as_array() {
+            None => invalid(
+                "instanceIds",
+                "must be an array of instance ids".to_string(),
+            ),
+            Some(ids) if ids.is_empty() => invalid(
+                "instanceIds",
+                "names no runs; a wait needs at least one".to_string(),
+            ),
+            Some(ids) => {
+                let mut distinct = HashSet::new();
+                for id in ids {
+                    match id.as_str() {
+                        Some(id) if !id.trim().is_empty() => {
+                            distinct.insert(id);
+                        }
+                        _ => {
+                            invalid(
+                                "instanceIds",
+                                "must hold only non-empty string ids".to_string(),
+                            );
+                            return;
+                        }
+                    }
+                }
+                if distinct.len() > MAX_WAIT_FOR_INSTANCES_TARGETS {
+                    invalid(
+                        "instanceIds",
+                        format!(
+                            "names {} distinct runs; a wait names at most {}",
+                            distinct.len(),
+                            MAX_WAIT_FOR_INSTANCES_TARGETS
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    if let Some(MappingValue::Immediate(immediate)) = &wait.timeout_ms
+        && !immediate.value.as_u64().is_some_and(|ms| ms > 0)
+    {
+        invalid(
+            "timeoutMs",
+            "must be a positive integer number of milliseconds".to_string(),
+        );
+    }
+}
+
 fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult) {
     for (step_id, step) in &graph.steps {
         if let Some(max_retries) = crate::retry_budget::step_max_retries(step)
@@ -4219,6 +4340,9 @@ fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult)
             });
         }
         match step {
+            Step::WaitForInstances(wait) => {
+                validate_wait_for_instances_config(step_id, wait, result);
+            }
             Step::AiAgent(ai_step) => {
                 // Retry hygiene applies to LLM calls too (each retry re-bills).
                 if let Some(config) = ai_step.config.as_ref() {
@@ -4465,6 +4589,7 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
             Step::GroupBy(s) => s.name.as_ref(),
             Step::Delay(s) => s.name.as_ref(),
             Step::WaitForSignal(s) => s.name.as_ref(),
+            Step::WaitForInstances(s) => s.name.as_ref(),
             Step::AiAgent(s) => s.name.as_ref(),
         };
 
@@ -4991,6 +5116,7 @@ fn get_step_type_name(step: &Step) -> &'static str {
         Step::GroupBy(_) => "GroupBy",
         Step::Delay(_) => "Delay",
         Step::WaitForSignal(_) => "WaitForSignal",
+        Step::WaitForInstances(_) => "WaitForInstances",
         Step::AiAgent(_) => "AiAgent",
     }
 }
@@ -5963,6 +6089,12 @@ fn collect_references_from_step(step: &Step) -> Vec<String> {
                 extract_references_from_input_mapping(&action.context, &mut refs);
             }
         }
+        Step::WaitForInstances(wait_step) => {
+            extract_references_from_mapping_value(&wait_step.instance_ids, &mut refs);
+            if let Some(ref timeout) = wait_step.timeout_ms {
+                extract_references_from_mapping_value(timeout, &mut refs);
+            }
+        }
         Step::Error(error_step) => {
             if let Some(ref context) = error_step.context {
                 extract_references_from_input_mapping(context, &mut refs);
@@ -6097,6 +6229,15 @@ fn collect_template_static_references_from_step(step: &Step) -> Vec<String> {
                     &mut refs,
                 );
                 extract_template_static_references_from_input_mapping(&action.context, &mut refs);
+            }
+        }
+        Step::WaitForInstances(wait_step) => {
+            extract_template_static_references_from_mapping_value(
+                &wait_step.instance_ids,
+                &mut refs,
+            );
+            if let Some(ref timeout) = wait_step.timeout_ms {
+                extract_template_static_references_from_mapping_value(timeout, &mut refs);
             }
         }
         Step::Error(error_step) => {
