@@ -1179,7 +1179,7 @@ fn earliest_wake_deadline_ms(
         .filter_map(|wake| match wake {
             WorkflowWake::At(ms) => Some(*ms),
             WorkflowWake::OnSignal(wait) => wait.deadline_ms,
-            WorkflowWake::OnResume => None,
+            WorkflowWake::OnResume | WorkflowWake::Instances(_) => None,
         })
         .min()
 }
@@ -1392,6 +1392,17 @@ async fn park_invoke_suspend(
     instance_waits: &[String],
 ) {
     let wakes = &with_persistence_input_deadlines(persistence, instance_id, wakes).await;
+    // Instance waits arrive both from the run's own WaitForInstances steps and
+    // as `instances` wakes returned through a suspension.
+    let mut instance_waits = instance_waits.to_vec();
+    for wake in wakes {
+        if let runtara_component_host::lifecycle::WorkflowWake::Instances(id) = wake
+            && !instance_waits.contains(id)
+        {
+            instance_waits.push(id.clone());
+        }
+    }
+    let instance_waits = instance_waits.as_slice();
     let deadline_ms = earliest_wake_deadline_ms(wakes);
     if deadline_ms.is_none() && !has_on_signal_wake(wakes) && instance_waits.is_empty() {
         // Pure on-resume: already handled by the ack path.
@@ -2315,7 +2326,7 @@ mod tests {
             .map(|wake| match wake {
                 WorkflowWake::OnSignal(wait) => wait.deadline_ms,
                 WorkflowWake::At(ms) => Some(*ms),
-                WorkflowWake::OnResume => None,
+                WorkflowWake::OnResume | WorkflowWake::Instances(_) => None,
             })
             .collect();
         assert_eq!(

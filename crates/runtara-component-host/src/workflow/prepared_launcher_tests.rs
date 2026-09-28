@@ -12,6 +12,14 @@ const ERROR_TYPE: &str = r#"(type $error (record
     (field "code" string) (field "message" string) (field "category" string)
     (field "severity" string) (field "retryable" bool)
     (field "retry-after-ms" (option u64)) (field "attributes" (option string))))"#;
+/// The `runtara:agent/types` outcome every entry returns, and its exports.
+const OUTCOME_TYPES: &str = r#"(type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
+      (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+        (case "instances" string)))
+      (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+      (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))"#;
+const OUTCOME_EXPORTS: &str = r#"(export "signal-wait" (type $signal)) (export "wake" (type $wake))
+        (export "suspension" (type $suspension)) (export "outcome" (type $outcome))"#;
 const MEMORY: &str = r#"(memory (export "memory") 4)
     (global $next (mut i32) (i32.const 8192))
     (func (export "realloc") (param i32 i32 i32 i32) (result i32)
@@ -217,16 +225,19 @@ fn capability() -> String {
             if i32.const 2 call $probe end
           end
           (i32.store (i32.const 2048) (i32.const 0))
-          (i32.store (i32.const 2056) (local.get 2))
-          (i32.store (i32.const 2060) (local.get 3))
+          (i32.store (i32.const 2056) (i32.const 0))
+          (i32.store (i32.const 2060) (local.get 2))
+          (i32.store (i32.const 2064) (local.get 3))
           i32.const 2048))
       (core instance $host (export "initialized" (func $initialized)) (export "probe" (func $probe)))
       (core instance $m (instantiate $m (with "host" (instance $host))))
       {ERROR_TYPE}
+      {OUTCOME_TYPES}
       (func $invoke async (param "capability" string) (param "input" (list u8))
-        (result (result (list u8) (error $error)))
+        (result (result $outcome (error $error)))
         (canon lift (core func $m "invoke") (memory $m "memory") (realloc (func $m "realloc"))))
-      (instance $api (export "error-info" (type $error)) (export "invoke" (func $invoke)))
+      (instance $api (export "error-info" (type $error)) {OUTCOME_EXPORTS}
+        (export "invoke" (func $invoke)))
       (export "{CAPABILITY}" (instance $api)))"#
     )
 }
@@ -418,44 +429,45 @@ fn lifecycle() -> String {
       (core module $m
         {MEMORY}
         (data (i32.const 4000) "12")
-        (func (export "v1") (param i32 i32) (result i32)
+        (func (export "v1") (param i32 i32 i32 i32) (result i32)
           (i32.store (i32.const 2060) (i32.const 4000))
           (i32.store (i32.const 2064) (i32.const 1))
           i32.const 2048)
-        (func (export "v2") (param i32 i32) (result i32)
-          local.get 1 i32.eqz
+        (func (export "v2") (param i32 i32 i32 i32) (result i32)
+          local.get 3 i32.eqz
           if
             (i32.store (i32.const 2060) (i32.const 4001))
             (i32.store (i32.const 2064) (i32.const 1))
           else
             ;; The input 'f' returns error-info; other input returns on-resume.
-            local.get 0 i32.load8_u i32.const 102 i32.eq
+            local.get 2 i32.load8_u i32.const 102 i32.eq
             if (i32.store (i32.const 2048) (i32.const 1)) else
               (i32.store (i32.const 2056) (i32.const 1))
               (i32.store (i32.const 2060) (i32.const 4096))
               (i32.store (i32.const 2064) (i32.const 1))
+              (i32.store (i32.const 2068) (i32.const 0))
+              (i32.store (i32.const 2072) (i32.const 0))
               (i32.store (i32.const 4096) (i32.const 2))
             end
           end
           i32.const 2048))
       (core instance $m (instantiate $m))
       {ERROR_TYPE}
-      (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
-      (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")))
-      (type $outcome (variant (case "completed" (list u8)) (case "suspended" (list $wake))))
-      (func $v2 async (param "input" (list u8)) (result (result $outcome (error $error)))
+      {OUTCOME_TYPES}
+      (func $v2 async (param "capability-id" string) (param "input" (list u8))
+        (result (result $outcome (error $error)))
         (canon lift (core func $m "v2") (memory $m "memory") (realloc (func $m "realloc"))))
-      (instance $b (export "error-info" (type $error)) (export "signal-wait" (type $signal)) (export "wake" (type $wake))
-        (export "outcome" (type $outcome)) (export "invoke" (func $v2)))
-      (export "runtara:workflow/lifecycle@1.0.0" (instance $b)))"#
+      (instance $b (export "error-info" (type $error)) {OUTCOME_EXPORTS}
+        (export "invoke" (func $v2)))
+      (export "{}" (instance $b)))"#,
+        runtara_wit::workflow::ENTRY
     )
 }
 
 #[tokio::test]
 async fn workflow_entries_use_the_bound_version_and_preserve_all_outcome_kinds() {
     let fx = Fixture::new(false);
-    let launcher =
-        fx.launcher(fx.catalog(&lifecycle(), &[("v2", runtara_wit::workflow::LIFECYCLE)]));
+    let launcher = fx.launcher(fx.catalog(&lifecycle(), &[("v2", runtara_wit::workflow::ENTRY)]));
     assert!(matches!(
         launcher.prepare(request("v2", Entry::Capability("invoke".into()), vec![])),
         Err(ExecutionError::InvalidBinding)
@@ -549,14 +561,22 @@ fn malformed_child_signatures_are_rejected_before_any_initializer() {
         (
             "non-result return",
             CAPABILITY,
-            cap.replace("(result (result (list u8) (error $error)))", "(result u32)"),
+            cap.replace("(result (result $outcome (error $error)))", "(result u32)"),
         ),
         (
             "absent error payload",
             CAPABILITY,
             cap.replace(
+                "(result (result $outcome (error $error)))",
+                "(result (result $outcome))",
+            ),
+        ),
+        (
+            "bare list success (the retired agent ABI)",
+            CAPABILITY,
+            cap.replace(
+                "(result (result $outcome (error $error)))",
                 "(result (result (list u8) (error $error)))",
-                "(result (result (list u8)))",
             ),
         ),
         (
@@ -570,7 +590,10 @@ fn malformed_child_signatures_are_rejected_before_any_initializer() {
         (
             "capability output element",
             CAPABILITY,
-            cap.replace("(result (result (list u8)", "(result (result (list u16)"),
+            cap.replace(
+                "(case \"completed\" (list u8))",
+                "(case \"completed\" (list u16))",
+            ),
         ),
         (
             "error field name",
@@ -584,15 +607,15 @@ fn malformed_child_signatures_are_rejected_before_any_initializer() {
         ),
         (
             "lifecycle outcome order",
-            runtara_wit::workflow::LIFECYCLE,
+            runtara_wit::workflow::ENTRY,
             flow.replace(
-                "(case \"completed\" (list u8)) (case \"suspended\" (list $wake))",
-                "(case \"suspended\" (list $wake)) (case \"completed\" (list u8))",
+                "(case \"completed\" (list u8)) (case \"suspended\" $suspension)",
+                "(case \"suspended\" $suspension) (case \"completed\" (list u8))",
             ),
         ),
         (
             "wake deadline type",
-            runtara_wit::workflow::LIFECYCLE,
+            runtara_wit::workflow::ENTRY,
             flow.replace(
                 "(field \"deadline-ms\" (option u64))",
                 "(field \"deadline-ms\" (option u32))",
@@ -625,15 +648,13 @@ fn malformed_child_signatures_are_rejected_before_any_initializer() {
     }
 }
 
-/// S0.3: the lifecycle `wake` ABI is frozen. An artifact whose
-/// `lifecycle@0.2.0` wake grew a fourth case (say `instances(string)` for
-/// instance waits) is a different type: Wasmtime type-checks variants case for
-/// case, so the host's three-case `WorkflowWake` cannot bind its `invoke`, and
-/// every deployed host would refuse such an artifact. Typed agent suspension
-/// therefore parks through the existing `at` wake and attaches instance waits
-/// host-side instead of changing the lifecycle.
+/// The entry `wake` ABI is frozen: Wasmtime type-checks variants case for
+/// case. An artifact whose entry still carries the retired three-case wake
+/// (no `instances`) is a different type, so the host's four-case
+/// `WorkflowWake` cannot bind its `invoke`; a wake change ships as a new
+/// package version, never as an in-place edit.
 #[tokio::test]
-async fn a_four_case_lifecycle_wake_cannot_bind_the_three_case_host_type() {
+async fn a_three_case_entry_wake_cannot_bind_the_four_case_host_type() {
     #[derive(
         Debug,
         wasmtime::component::ComponentType,
@@ -641,15 +662,24 @@ async fn a_four_case_lifecycle_wake_cannot_bind_the_three_case_host_type() {
         wasmtime::component::Lower,
     )]
     #[component(variant)]
-    enum FourCaseWake {
+    enum ThreeCaseWake {
         #[component(name = "at")]
         At(u64),
         #[component(name = "on-signal")]
         OnSignal(crate::lifecycle::SignalWait),
         #[component(name = "on-resume")]
         OnResume,
-        #[component(name = "instances")]
-        Instances(String),
+    }
+    #[derive(
+        Debug,
+        wasmtime::component::ComponentType,
+        wasmtime::component::Lift,
+        wasmtime::component::Lower,
+    )]
+    #[component(record)]
+    struct ThreeCaseSuspension {
+        wakes: Vec<ThreeCaseWake>,
+        state: Vec<u8>,
     }
     #[derive(
         Debug,
@@ -658,40 +688,39 @@ async fn a_four_case_lifecycle_wake_cannot_bind_the_three_case_host_type() {
         wasmtime::component::Lower,
     )]
     #[component(variant)]
-    enum FourCaseOutcome {
+    enum ThreeCaseOutcome {
         #[component(name = "completed")]
         Completed(Vec<u8>),
         #[component(name = "suspended")]
-        Suspended(Vec<FourCaseWake>),
+        Suspended(ThreeCaseSuspension),
     }
 
     let source = format!(
         r#"(component
       (core module $m
         {MEMORY}
-        (func (export "invoke") (param i32 i32) (result i32)
+        (func (export "invoke") (param i32 i32 i32 i32) (result i32)
           (i32.store (i32.const 2056) (i32.const 1))
           (i32.store (i32.const 2060) (i32.const 4096))
           (i32.store (i32.const 2064) (i32.const 1))
-          (i32.store8 (i32.const 4096) (i32.const 3))
-          (i32.store (i32.const 4104) (i32.const 4200))
-          (i32.store (i32.const 4108) (i32.const 1))
+          (i32.store8 (i32.const 4096) (i32.const 2))
           i32.const 2048))
       (core instance $m (instantiate $m))
       {ERROR_TYPE}
       (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
-      (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
-        (case "instances" string)))
-      (type $outcome (variant (case "completed" (list u8)) (case "suspended" (list $wake))))
-      (func $invoke async (param "input" (list u8)) (result (result $outcome (error $error)))
+      (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")))
+      (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+      (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
+      (func $invoke async (param "capability-id" string) (param "input" (list u8))
+        (result (result $outcome (error $error)))
         (canon lift (core func $m "invoke") (memory $m "memory") (realloc (func $m "realloc"))))
-      (instance $lifecycle (export "error-info" (type $error)) (export "signal-wait" (type $signal))
-        (export "wake" (type $wake)) (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
-      (export "{}" (instance $lifecycle)))"#,
-        runtara_wit::workflow::LIFECYCLE
+      (instance $entry (export "error-info" (type $error)) {OUTCOME_EXPORTS}
+        (export "invoke" (func $invoke)))
+      (export "{}" (instance $entry)))"#,
+        runtara_wit::workflow::ENTRY
     );
     let engine = crate::engine::build_engine(&Default::default()).unwrap();
-    let component = Component::new(&engine, source).expect("a valid four-case component");
+    let component = Component::new(&engine, source).expect("a valid three-case component");
     let mut store = Store::new(&engine, ());
     // The engine interrupts on epochs; no ticker runs here.
     store.set_epoch_deadline(1 << 40);
@@ -700,16 +729,16 @@ async fn a_four_case_lifecycle_wake_cannot_bind_the_three_case_host_type() {
         .await
         .unwrap();
     let interface = instance
-        .get_export_index(&mut store, None, runtara_wit::workflow::LIFECYCLE)
+        .get_export_index(&mut store, None, runtara_wit::workflow::ENTRY)
         .unwrap();
     let invoke = instance
         .get_export_index(&mut store, Some(&interface), "invoke")
         .unwrap();
 
-    let Err(error) = instance.get_typed_func::<(Vec<u8>,), (
+    let Err(error) = instance.get_typed_func::<(String, Vec<u8>), (
         Result<crate::lifecycle::WorkflowOutcome, crate::lifecycle::WorkflowErrorInfo>,
     )>(&mut store, invoke) else {
-        panic!("the three-case host wake must not bind a four-case artifact");
+        panic!("the four-case host wake must not bind a three-case artifact");
     };
     let reason = format!("{error:#}");
     assert!(
@@ -717,17 +746,21 @@ async fn a_four_case_lifecycle_wake_cannot_bind_the_three_case_host_type() {
         "the mismatch is the wake variant's cases: {reason}"
     );
 
-    // Control: the same export binds a four-case mirror, so the refusal above
+    // Control: the same export binds a three-case mirror, so the refusal above
     // is the wake shape and nothing else.
-    let four_case = instance
+    let three_case = instance
         .get_typed_func::<
-            (Vec<u8>,),
-            (Result<FourCaseOutcome, crate::lifecycle::WorkflowErrorInfo>,),
+            (String, Vec<u8>),
+            (Result<ThreeCaseOutcome, crate::lifecycle::WorkflowErrorInfo>,),
         >(&mut store, invoke)
-        .expect("a four-case host type binds");
-    let (result,) = four_case.call_async(&mut store, (vec![],)).await.unwrap();
+        .expect("a three-case host type binds");
+    let (result,) = three_case
+        .call_async(&mut store, ("run".into(), vec![]))
+        .await
+        .unwrap();
     assert!(matches!(
         result,
-        Ok(FourCaseOutcome::Suspended(wakes)) if matches!(wakes.as_slice(), [FourCaseWake::Instances(_)])
+        Ok(ThreeCaseOutcome::Suspended(ThreeCaseSuspension { wakes, state }))
+            if matches!(wakes.as_slice(), [ThreeCaseWake::OnResume]) && state.is_empty()
     ));
 }

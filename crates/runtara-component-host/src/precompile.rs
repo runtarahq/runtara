@@ -657,12 +657,11 @@ pub struct ControlAudit {
     pub root_imports_control: bool,
 }
 
-/// Whether an export name is an agent interface (so its component is an
-/// agent, not workflow logic).
+/// Whether an export name is an agent interface. Workflow logic exports one
+/// too (its entry), so a component counts as an agent only when it also
+/// lacks the compiler's [`runtara_wit::workflow::LOGIC_SECTION`].
 fn is_agent_export(name: &str) -> bool {
-    name.contains("/capabilities@")
-        || name.contains("/suspendable@")
-        || name.starts_with(runtara_wit::control::PREFIX)
+    name.contains("/capabilities@") || name.starts_with(runtara_wit::control::PREFIX)
 }
 
 /// Audit which composed components can reach `runtara:control` (decision D2).
@@ -684,6 +683,7 @@ pub fn audit_control_importers(component: &[u8]) -> Result<ControlAudit> {
         control: bool,
         operation: bool,
         agent: bool,
+        workflow_logic: bool,
     }
     let mut frames: Vec<Frame> = Vec::new();
     let mut nested: Option<std::ops::Range<usize>> = None;
@@ -702,6 +702,7 @@ pub fn audit_control_importers(component: &[u8]) -> Result<ControlAudit> {
                     control: false,
                     operation: false,
                     agent: false,
+                    workflow_logic: false,
                 });
             }
             Payload::ModuleSection {
@@ -736,13 +737,20 @@ pub fn audit_control_importers(component: &[u8]) -> Result<ControlAudit> {
                     frame.agent |= is_agent_export(export?.name.0);
                 }
             }
+            Payload::CustomSection(section)
+                if section.name() == runtara_wit::workflow::LOGIC_SECTION =>
+            {
+                if let Some(frame) = frames.last_mut() {
+                    frame.workflow_logic = true;
+                }
+            }
             Payload::End(_) => {
                 let frame = frames.pop().context("unbalanced component nesting")?;
                 if frames.is_empty() {
                     audit.root_imports_control = frame.control;
                 } else if frame.component {
                     ensure!(
-                        !(frame.agent && frame.operation),
+                        !(frame.agent && !frame.workflow_logic && frame.operation),
                         "a composed agent imports runtara:workflow/operation or \
                          runtara:workflow/waits, which only compiled workflow logic may bind"
                     );

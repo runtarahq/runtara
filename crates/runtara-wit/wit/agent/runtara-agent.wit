@@ -18,37 +18,40 @@ interface types {
         retry-after-ms: option<u64>,
         attributes: option<string>,  // JSON object
     }
-}
 
-// Typed agent suspension.
-//
-// A capability declared `suspends` may answer an invocation with a suspension
-// instead of a result: the host keeps `state` as the operation's continuation
-// (at most 64 KiB), parks the calling workflow runner-free, and re-invokes the
-// capability when ANY wake fires or the step deadline passes.
-interface suspension {
-    /// When the host should re-invoke a suspended capability. Wakes form a
-    /// set with re-invoke-on-ANY semantics; the step deadline always applies
-    /// in addition.
+    /// A pending WaitForSignal: the deterministic signal id (the wait's
+    /// checkpoint id) and its persisted absolute timeout deadline.
+    record signal-wait {
+        checkpoint-id: string,
+        deadline-ms: option<u64>,
+    }
+
+    /// When the host should re-invoke. Wakes form a set with re-invoke-on-ANY
+    /// semantics; the caller's step deadline always applies in addition.
     variant wake {
         /// Re-invoke at (or after) this wall-clock ms since the Unix epoch.
         at(u64),
+        /// Re-invoke when the signal arrives, or at its deadline. Workflows only.
+        on-signal(signal-wait),
+        /// Pause or drain: re-invoke on relaunch. Workflows only.
+        on-resume,
         /// Re-invoke when the host-owned instance wait with this id settles.
         instances(string),
     }
 
-    /// A capability's request to be re-invoked later with `state` as its
-    /// continuation. `wakes` is non-empty.
+    /// A request to be re-invoked later. `wakes` is non-empty. `state` is a
+    /// native agent's continuation (at most 64 KiB); workflows keep their
+    /// state in checkpoints and return it empty.
     record suspension {
         wakes: list<wake>,
         state: list<u8>,
     }
 
-    /// The success arm of a suspendable `invoke`.
+    /// The success arm of every `invoke`: agents' and workflows' alike.
     variant outcome {
-        /// Terminal output (JSON bytes), exactly like `capabilities.invoke`.
+        /// Terminal output (JSON bytes).
         completed(list<u8>),
-        /// Park the operation and re-invoke later.
+        /// Park, and re-invoke when any wake fires.
         suspended(suspension),
     }
 }
@@ -62,7 +65,7 @@ interface continuation {
 }
 
 interface capabilities {
-    use types.{error-info};
+    use types.{error-info, outcome};
 
     // The connection (if any) is delivered inside `input` under `_connection`;
     // there is no out-of-band connection argument. A connection is an opaque
@@ -71,7 +74,7 @@ interface capabilities {
     invoke: async func(
         capability-id: string,
         input: list<u8>,
-    ) -> result<list<u8>, error-info>;
+    ) -> result<outcome, error-info>;
 }
 
 world agent {

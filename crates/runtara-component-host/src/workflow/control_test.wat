@@ -104,8 +104,8 @@
     (import "h" "invoke" (func $invoke (param i32 i32 i32 i32 i32)))
     ;; An ok output (list at +8) becomes `completed` (list at +12); an
     ;; error-info is laid out the same in both results.
-    (func (export "run") (param i32 i32) (result i32)
-      (call $invoke (local.get 0) (local.get 1) (i32.const 0) (i32.const 0) (i32.const 2048))
+    (func (export "run") (param i32 i32 i32 i32) (result i32)
+      (call $invoke (local.get 2) (local.get 3) (i32.const 0) (i32.const 0) (i32.const 2048))
       (if (i32.eqz (i32.load8_u (i32.const 2048)))
         (then
           (i32.store (i32.const 2064) (i32.load (i32.const 2060)))
@@ -118,12 +118,15 @@
     (field "category" string) (field "severity" string) (field "retryable" bool)
     (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
   (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
-  (type $lwake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")))
-  (type $loutcome (variant (case "completed" (list u8)) (case "suspended" (list $lwake))))
-  (func $run async (param "input" (list u8)) (result (result $loutcome (error $lerror)))
+  (type $lwake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+    (case "instances" string)))
+  (type $lsuspension (record (field "wakes" (list $lwake)) (field "state" (list u8))))
+  (type $loutcome (variant (case "completed" (list u8)) (case "suspended" $lsuspension)))
+  (func $run async (param "capability-id" string) (param "input" (list u8)) (result (result $loutcome (error $lerror)))
     (canon lift (core func $rc "run") (memory $rm "memory") (realloc (func $rm "realloc"))))
   (instance $lifecycle
     (export "error-info" (type $lerror)) (export "signal-wait" (type $signal))
-    (export "wake" (type $lwake)) (export "outcome" (type $loutcome))
+    (export "wake" (type $lwake)) (export "suspension" (type $lsuspension))
+    (export "outcome" (type $loutcome))
     (export "invoke" (func $run)))
-  (export "runtara:workflow/lifecycle@1.0.0" (instance $lifecycle))
+  (export "runtara:agent-workflow-agent/capabilities@1.0.0" (instance $lifecycle))

@@ -187,7 +187,7 @@ fn root_wat(exit: &str) -> String {
         (import "host" "complete" (func $complete (param i32 i32 i32)))
         (import "host" "signals" (func $signals (param i32)))
         (data (i32.const 4000) "42")
-        (func (export "invoke") (param i32 i32) (result i32)
+        (func (export "invoke") (param i32 i32 i32 i32) (result i32)
           (call $signals (i32.const 64))
           {exit}
           (i32.const 2048)))
@@ -196,13 +196,17 @@ fn root_wat(exit: &str) -> String {
       (type $error (record (field "code" string) (field "message" string) (field "category" string)
         (field "severity" string) (field "retryable" bool) (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
       (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
-      (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")))
-      (type $outcome (variant (case "completed" (list u8)) (case "suspended" (list $wake))))
-      (func $invoke async (param "input" (list u8)) (result (result $outcome (error $error)))
+      (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+        (case "instances" string)))
+      (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+      (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
+      (func $invoke async (param "capability-id" string) (param "input" (list u8))
+        (result (result $outcome (error $error)))
         (canon lift (core func $code "invoke") (memory $memory "memory") (realloc (func $memory "realloc"))))
       (instance $api (export "error-info" (type $error)) (export "signal-wait" (type $signal))
-        (export "wake" (type $wake)) (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
-      (export "runtara:workflow/lifecycle@1.0.0" (instance $api)))"#
+        (export "wake" (type $wake)) (export "suspension" (type $suspension))
+        (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
+      (export "runtara:agent-workflow-agent/capabilities@1.0.0" (instance $api)))"#
     )
 }
 const COMPLETE: &str = r#"(call $complete (i32.const 4000) (i32.const 2) (i32.const 64))

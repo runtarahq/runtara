@@ -52,8 +52,6 @@ pub mod agent {
     pub const TYPES: &str = concat!("runtara:agent/types@", v!());
     /// Any version of the types interface.
     pub const TYPES_PREFIX: &str = "runtara:agent/types@";
-    /// Suspension types of suspending capabilities.
-    pub const SUSPENSION: &str = concat!("runtara:agent/suspension@", v!());
     /// Continuation delivery, imported by suspending agents.
     pub const CONTINUATION: &str = concat!("runtara:agent/continuation@", v!());
     /// The reference capabilities shape the host binds against.
@@ -78,8 +76,18 @@ pub mod workflow {
     pub const PACKAGE: &str = concat!("runtara:workflow@", v!());
     /// Interface-name prefix of every workflow interface.
     pub const PREFIX: &str = "runtara:workflow/";
-    /// The invoke export of a compiled workflow.
-    pub const LIFECYCLE: &str = concat!("runtara:workflow/lifecycle@", v!());
+    /// Agent id of a top-level workflow's entry package: a root run exports
+    /// `runtara:agent-workflow-agent/capabilities` (a published workflow-agent
+    /// exports its slug instead). Reserved, so no workflow slug can take it.
+    pub const ENTRY_AGENT_ID: &str = "workflow-agent";
+    /// The entry export of a top-level workflow.
+    pub const ENTRY: &str = concat!("runtara:agent-workflow-agent/capabilities@", v!());
+    /// The capability id every workflow entry answers.
+    pub const ENTRY_CAPABILITY: &str = "run";
+    /// Custom section the compiler writes into every workflow-logic component.
+    /// It is how the host tells compiled workflow logic, which may bind this
+    /// package, from an agent: both export a `capabilities` interface.
+    pub const LOGIC_SECTION: &str = "runtara.direct_workflow.abi";
     pub const RUNTIME: &str = concat!("runtara:workflow/runtime@", v!());
     pub const TASKS: &str = concat!("runtara:workflow/tasks@", v!());
     pub const OPERATION: &str = concat!("runtara:workflow/operation@", v!());
@@ -168,7 +176,7 @@ pub struct AgentShape {
     /// The compiler's isolated-agent variant: `scoped-capabilities-v3`, whose
     /// `invoke` also takes the logical call context.
     pub scoped: bool,
-    /// Also declare and export `suspendable`, and import the continuation.
+    /// A suspending agent: import the continuation of the operation it runs in.
     pub suspendable: bool,
     /// Also export `runtara:trusted/execution`.
     pub trusted: bool,
@@ -191,6 +199,9 @@ pub fn capabilities_interface(shape: AgentShape) -> &'static str {
 pub fn agent_package(id: &str, shape: AgentShape) -> String {
     let version = VERSION;
     let interface = capabilities_interface(shape);
+    // The scoped isolation adapter's private interface keeps the bare list:
+    // the host adapter, not the agent, owns suspension there.
+    let result = if shape.scoped { "list<u8>" } else { "outcome" };
     let context = if shape.scoped {
         "\n        path: string, call-site: u32, activation: u32, attempt: u64,"
     } else {
@@ -200,23 +211,13 @@ pub fn agent_package(id: &str, shape: AgentShape) -> String {
         "package runtara:agent-{id}@{version};\n\
          \n\
          interface {interface} {{\n    \
-             use runtara:agent/types@{version}.{{error-info}};\n    \
+             use runtara:agent/types@{version}.{{error-info, outcome}};\n    \
              invoke: async func(\n        \
                  capability-id: string,\n        \
                  input: list<u8>,{context}\n    \
-             ) -> result<list<u8>, error-info>;\n\
+             ) -> result<{result}, error-info>;\n\
          }}\n"
     );
-    if shape.suspendable {
-        wit.push_str(&format!(
-            "\ninterface suspendable {{\n    \
-                 use runtara:agent/types@{version}.{{error-info}};\n    \
-                 use runtara:agent/suspension@{version}.{{outcome}};\n    \
-                 invoke: async func(capability-id: string, input: list<u8>) \
-                 -> result<outcome, error-info>;\n\
-             }}\n"
-        ));
-    }
     wit.push_str("\nworld agent {\n");
     if shape.suspendable {
         wit.push_str(&format!("    import {};\n", agent::CONTINUATION));
@@ -226,9 +227,6 @@ pub fn agent_package(id: &str, shape: AgentShape) -> String {
         wit.push_str(&format!("    import {};\n", control::API));
     }
     wit.push_str(&format!("    export {interface};\n"));
-    if shape.suspendable {
-        wit.push_str("    export suspendable;\n");
-    }
     if shape.trusted {
         wit.push_str(&format!("    export {};\n", trusted::EXECUTION));
     }

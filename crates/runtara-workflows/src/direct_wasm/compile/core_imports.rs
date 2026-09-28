@@ -835,9 +835,8 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_step_debug_start: u32,
     pub(super) stdlib_step_debug_end: u32,
     pub(super) stdlib_step_debug_error: u32,
-    /// Every per-agent invoke import, keyed by agent and interface: a
-    /// suspending agent is imported through both `capabilities` and
-    /// `suspendable`, whose flat signatures are identical.
+    /// Every per-agent invoke import, keyed by agent and interface
+    /// (`capabilities`, or the private scoped interface).
     pub(super) agent_invokes: BTreeMap<AgentImportKey, DirectAgentInvokeImport>,
     /// Canonical yield, including runtime-free workflow-agent loop boundaries.
     pub(super) thread_yield: Option<u32>,
@@ -869,15 +868,6 @@ impl DirectCoreFunctionIndices {
     /// The async lowering of [`Self::agent_invoke`].
     pub(super) fn agent_invoke_async(&self, agent: &str) -> Option<&DirectAgentInvokeImport> {
         standard_agent_import(&self.agent_invokes_async, agent)
-    }
-
-    /// The invoke import of one `(agent, interface)` pair.
-    pub(super) fn agent_import(
-        &self,
-        agent: &str,
-        interface: AgentInterface,
-    ) -> Option<&DirectAgentInvokeImport> {
-        self.agent_invokes.get(&(agent.to_string(), interface))
     }
 
     /// The operation-scope imports, present only when a call site needs them.
@@ -920,9 +910,6 @@ pub(super) enum AgentInterface {
     Capabilities,
     /// `runtara:agent-<id>/scoped-capabilities-v3`: the private isolated invoke.
     ScopedV3,
-    /// `runtara:agent-<id>/suspendable`: returns a typed outcome. Called only
-    /// at suspending sites.
-    Suspendable,
 }
 
 impl AgentInterface {
@@ -931,20 +918,19 @@ impl AgentInterface {
         match self {
             Self::Capabilities => "capabilities",
             Self::ScopedV3 => "scoped-capabilities-v3",
-            Self::Suspendable => runtara_agent_suspension::SUSPENDABLE_INTERFACE,
         }
     }
 
     fn from_wit_name(name: &str) -> Option<Self> {
-        [Self::Capabilities, Self::ScopedV3, Self::Suspendable]
+        [Self::Capabilities, Self::ScopedV3]
             .into_iter()
             .find(|interface| interface.wit_name() == name)
     }
 }
 
-/// An invoke import is identified by the agent AND the interface: the two
-/// interfaces of a suspending agent are type-identical, so the agent id alone
-/// would bind a site to the wrong one.
+/// An invoke import is identified by the agent AND the interface: a legacy
+/// isolated fixture may import both an agent's `capabilities` and its scoped
+/// interface.
 pub(super) type AgentImportKey = (String, AgentInterface);
 
 fn standard_agent_import<'a>(
@@ -1097,19 +1083,6 @@ fn is_wait_instances_import(
         && interface
             .map(|key| resolve.name_world_key(key))
             .is_some_and(|name| name == runtara_wit::workflow::WAITS)
-}
-
-/// True for `runtara:workflow/lifecycle.invoke` — the entry export
-/// under [`WorkflowRole::Root`].
-pub(super) fn is_lifecycle_invoke_export(
-    resolve: &Resolve,
-    interface: Option<&WorldKey>,
-    function: &WitFunction,
-) -> bool {
-    function.name == "invoke"
-        && interface
-            .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name.starts_with("runtara:workflow/lifecycle"))
 }
 
 /// True for the workflow-as-agent capability export: an `invoke` in a

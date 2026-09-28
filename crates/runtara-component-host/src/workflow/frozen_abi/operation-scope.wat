@@ -3,14 +3,17 @@
 ;; regenerate this file: it must keep linking for as long as the host runs
 ;; artifacts built against 1.0.0. See runtara-wit's versioning rule.
 (component
-  (type $ty-runtara:agent/suspension@1.0.0 (;0;)
+  (type $ty-runtara:agent/types@1.0.0 (;0;)
     (instance
-      (type (;0;) (variant (case "at" u64) (case "instances" string)))
-      (export (;1;) "wake" (type (eq 0)))
+      (type (;0;) (option u64))
+      (type (;1;) (record (field "checkpoint-id" string) (field "deadline-ms" 0)))
+      (export (;2;) "signal-wait" (type (eq 1)))
+      (type (;3;) (variant (case "at" u64) (case "on-signal" 2) (case "on-resume") (case "instances" string)))
+      (export (;4;) "wake" (type (eq 3)))
     )
   )
-  (import "runtara:agent/suspension@1.0.0" (instance $runtara:agent/suspension@1.0.0 (;0;) (type $ty-runtara:agent/suspension@1.0.0)))
-  (alias export $runtara:agent/suspension@1.0.0 "wake" (type $wake (;1;)))
+  (import "runtara:agent/types@1.0.0" (instance $runtara:agent/types@1.0.0 (;0;) (type $ty-runtara:agent/types@1.0.0)))
+  (alias export $runtara:agent/types@1.0.0 "wake" (type $wake (;1;)))
   (type $ty-runtara:workflow/operation@1.0.0 (;2;)
     (instance
       (alias outer 1 $wake (type (;0;)))

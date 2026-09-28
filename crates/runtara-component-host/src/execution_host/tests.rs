@@ -135,6 +135,7 @@ impl InvocationLauncher for Launcher {
                             deadline_ms: None,
                         }),
                         WorkflowWake::OnResume,
+                        WorkflowWake::Instances("nested/instances".into()),
                     ]),
                     Entry::Capability(ref name) if name == "timeout" => InvokeExit::Timeout,
                     Entry::Capability(ref name) if name == "trap" => InvokeExit::Trapped {
@@ -279,12 +280,13 @@ async fn wire_roundtrip_preserves_owned_bytes_error_metadata_and_wake_sets() {
                 let Ok(TaskOutcome::Suspended(wakes)) = outcome else {
                     panic!("{outcome:?}")
                 };
-                assert_eq!(wakes.len(), 3);
+                assert_eq!(wakes.len(), 4);
                 assert_eq!(wakes[0], WorkflowWake::At(1234));
                 assert!(
                     matches!(&wakes[1], WorkflowWake::OnSignal(s) if s.checkpoint_id == "nested/wait" && s.deadline_ms.is_none())
                 );
                 assert_eq!(wakes[2], WorkflowWake::OnResume);
+                assert_eq!(wakes[3], WorkflowWake::Instances("nested/instances".into()));
             }
             Entry::Capability(name) if name == "timeout" => {
                 assert_eq!(outcome, Ok(TaskOutcome::TimedOut))

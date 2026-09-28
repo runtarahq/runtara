@@ -15,7 +15,7 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_agent_suspend_sentinel_check, emit_fail_if_retptr_error_inplace, push_retptr_arg,
+    emit_fail_if_retptr_error_inplace, emit_forward_suspended_return, push_retptr_arg,
     push_retptr_i32_load, push_segment_args, push_zero_value,
 };
 use super::agent_io::emit_agent_connection_input;
@@ -132,18 +132,76 @@ pub(super) fn emit_agent_invoke(
         body.instruction(&Instruction::End);
     }
 
-    // A workflow-agent child shares this instance's runtime host, so a
-    // lifecycle suspend (pause/shutdown ack) can fire INSIDE the child; the
-    // capability channel carries it out as the suspend sentinel error.
-    // Re-raise it through our own ABI here — before retry classification,
-    // per-attempt checkpointing, or onError routing can misread it as a
-    // failure. Native agents never raise the sentinel (and the check is
-    // gated off their invokes entirely).
-    if static_data.agent_is_workflow_agent(agent_id) {
-        emit_agent_suspend_sentinel_check(body, indices);
+    // Every agent answers `result<outcome, error-info>`. A suspending site
+    // handles its own `suspended` (agent_suspend::emit_after_invoke); every
+    // other site normalizes here, before retry classification, per-attempt
+    // checkpointing or onError routing reads the result.
+    if !invoke.is_scoped() && !static_data.agent_suspends(agent_id) {
+        emit_normalize_outcome(
+            body,
+            indices,
+            static_data,
+            static_data.agent_is_workflow_agent(agent_id),
+        );
     }
     if scoped_deadline {
         body.instruction(&Instruction::End);
+    }
+}
+
+/// Normalize an agent's `result<outcome, error-info>` in the retptr area so
+/// readers see the plain `result<list<u8>, error-info>` layout:
+/// - `ok(completed(bytes))`: the list moves from @12/@16 to @8/@12;
+/// - `ok(suspended(..))` from a workflow-agent: this workflow suspends too
+///   ([`emit_forward_suspended_return`]);
+/// - `ok(suspended(..))` from any other agent: the step fails with
+///   `AGENT_UNEXPECTED_SUSPEND`, since this site cannot park;
+/// - `err(error-info)`: already in place.
+pub(super) fn emit_normalize_outcome(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    workflow_agent: bool,
+) {
+    super::abi::load_retptr_tag(body);
+    body.instruction(&Instruction::I32Eqz);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    super::abi::push_retptr_u8_load(body, 8);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    if workflow_agent {
+        emit_forward_suspended_return(body, indices);
+    } else {
+        let segment = static_data
+            .unexpected_suspend_error
+            .as_ref()
+            .expect("an agent call lays out the unexpected-suspend error");
+        super::agent_deadline::error_info(
+            body,
+            segment.offset,
+            crate::direct_wasm::static_data::AGENT_UNEXPECTED_SUSPEND_FIELDS,
+        );
+    }
+    body.instruction(&Instruction::Else);
+    emit_move_completed_list(body, 0);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+}
+
+/// Move an `ok(completed(list))` at `area` from @12/@16 to @8/@12.
+pub(super) fn emit_move_completed_list(body: &mut WasmFunction, area: i32) {
+    for (from, to) in [(12u64, 8u64), (16, 12)] {
+        body.instruction(&Instruction::I32Const(area));
+        body.instruction(&Instruction::I32Const(area));
+        body.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+            offset: from,
+            align: 2,
+            memory_index: 0,
+        }));
+        body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+            offset: to,
+            align: 2,
+            memory_index: 0,
+        }));
     }
 }
 

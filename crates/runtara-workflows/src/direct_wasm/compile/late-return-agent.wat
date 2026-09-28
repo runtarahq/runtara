@@ -11,6 +11,11 @@
   (type $error (record (field "code" string) (field "message" string)
     (field "category" string) (field "severity" string) (field "retryable" bool)
     (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
+  (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
+  (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+    (case "instances" string)))
+  (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+  (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
   (core module $memory
     (memory (export "memory") 1)
     (global $heap (mut i32) (i32.const 4096))
@@ -27,7 +32,7 @@
   (core func $drop-set (canon waitable-set.drop))
   (core func $cancel (canon subtask.cancel))
   (core func $drop (canon subtask.drop))
-  (core func $return (canon task.return (result (result (list u8) (error $error))) (memory $memory "memory")))
+  (core func $return (canon task.return (result (result $outcome (error $error))) (memory $memory "memory")))
   (core module $code
     (import "m" "memory" (memory 1))
     (import "h" "request" (func $request (param i64) (result i32)))
@@ -49,10 +54,11 @@
       (call $event (local.get $ptr) (local.get $len) (i32.const 0) (i32.const 0) (i32.const 128))
       (if (i32.load (i32.const 128)) (then unreachable)))
     (func $finish
-      ;; The canonical result flattens to 15 values: ok tag + list pointer/length,
-      ;; followed by zero padding for the inactive error-info alternative.
-      (call $return (i32.const 0) (i32.const 1024) (i32.const 31)
-        (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)
+      ;; The canonical result flattens to 15 values: ok tag, the `completed`
+      ;; outcome tag and list pointer/length, then zero padding for the inactive
+      ;; error-info alternative.
+      (call $return (i32.const 0) (i32.const 0) (i32.const 1024) (i32.const 31)
+        (i32.const 0) (i32.const 0) (i32.const 0)
         (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)
         (i64.const 0) (i32.const 0) (i32.const 0) (i32.const 0)))
     (func (export "invoke") (param i32 i32 i32 i32) (result i32) (local $status i32)
@@ -96,10 +102,12 @@
       (export "cancel" (func $cancel)) (export "drop" (func $drop))
       (export "return" (func $return))))))
   (func $invoke async (param "capability-id" string) (param "input" (list u8))
-    (result (result (list u8) (error $error)))
+    (result (result $outcome (error $error)))
     (canon lift (core func $code "invoke") async (callback (func $code "callback"))
       (memory $memory "memory") (realloc (func $memory "realloc"))))
   (instance $capabilities
     (export "error-info" (type $error))
+    (export "signal-wait" (type $signal)) (export "wake" (type $wake))
+    (export "suspension" (type $suspension)) (export "outcome" (type $outcome))
     (export "invoke" (func $invoke)))
   (export "runtara:agent-http/capabilities@1.0.0" (instance $capabilities)))

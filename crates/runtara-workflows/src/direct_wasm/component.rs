@@ -14,9 +14,7 @@
 //! names imports it never defines, and `wac` resolves them.
 
 use runtara_wit::stdlib::{JSON as STDLIB_JSON_INTERFACE, PACKAGE as STDLIB_PACKAGE};
-use runtara_wit::workflow::{
-    LIFECYCLE as LIFECYCLE_INTERFACE_NAME, RUNTIME as RUNTIME_INTERFACE_NAME,
-};
+use runtara_wit::workflow::RUNTIME as RUNTIME_INTERFACE_NAME;
 
 /// Package of the world direct-emitted workflow logic is encoded against, and
 /// of the logic component in the composition.
@@ -107,7 +105,7 @@ pub struct DirectComponentArtifacts {
     pub shared_components: Vec<DirectSharedComponentRequirement>,
     /// Agent components required for static composition.
     pub agent_components: Vec<DirectAgentComponentRequirement>,
-    /// Agents imported through `suspendable` as well as `capabilities`.
+    /// Agents with a suspending site: composed with the continuation import.
     pub suspending_agents: std::collections::BTreeSet<String>,
     /// Whether an operation-scoped site imports
     /// `runtara:workflow/operation`.
@@ -270,7 +268,17 @@ pub(super) fn agent_component(agent: &str) -> DirectAgentComponentRequirement {
 /// the workflow's own slug so every workflow-agent gets a distinct
 /// `runtara:agent-<slug>` package; this placeholder is also a RESERVED slug
 /// (the server rejects it) so a user workflow can never collide with it.
-pub const CAPABILITIES_EXPORT_AGENT_ID: &str = "workflow-agent";
+pub const CAPABILITIES_EXPORT_AGENT_ID: &str = runtara_wit::workflow::ENTRY_AGENT_ID;
+
+/// The package id a workflow's entry is exported under: the reserved entry id
+/// for a top-level run, the slug (or the same reserved fallback) for a
+/// published workflow-agent.
+pub(crate) fn entry_agent_id(role: WorkflowRole, export_agent_id: Option<&str>) -> &str {
+    match role {
+        WorkflowRole::Root => runtara_wit::workflow::ENTRY_AGENT_ID,
+        WorkflowRole::PublishedAgent => export_agent_id.unwrap_or(CAPABILITIES_EXPORT_AGENT_ID),
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 fn emit_world_wit(
@@ -323,15 +331,6 @@ fn emit_world_wit(
         out.push_str(&format!(
             "    import runtara:agent-{agent}/{interface}@{DIRECT_AGENT_WIT_VERSION};\n"
         ));
-        // A suspending agent is also imported through `suspendable`; the one
-        // `...agent-<id>` spread in the wac wires both exports of the same
-        // instance.
-        if suspending_agents.contains(agent) {
-            out.push_str(&format!(
-                "    import runtara:agent-{agent}/{}@{DIRECT_AGENT_WIT_VERSION};\n",
-                runtara_agent_suspension::SUSPENDABLE_INTERFACE
-            ));
-        }
         if let Some(pool) = parallel_pools.get(agent) {
             for member in 1..*pool {
                 let phantom =
@@ -342,15 +341,10 @@ fn emit_world_wit(
             }
         }
     }
-    match abi {
-        WorkflowRole::Root => out.push_str(&format!("    export {LIFECYCLE_INTERFACE_NAME};\n")),
-        WorkflowRole::PublishedAgent => {
-            let id = export_agent_id.unwrap_or(CAPABILITIES_EXPORT_AGENT_ID);
-            out.push_str(&format!(
-                "    export runtara:agent-{id}/capabilities@{DIRECT_AGENT_WIT_VERSION};\n"
-            ))
-        }
-    }
+    let id = entry_agent_id(abi, export_agent_id);
+    out.push_str(&format!(
+        "    export runtara:agent-{id}/capabilities@{DIRECT_AGENT_WIT_VERSION};\n"
+    ));
     out.push_str("}\n");
     out
 }
@@ -444,7 +438,7 @@ mod tests {
         assert!(
             artifacts
                 .world_wit
-                .contains("export runtara:workflow/lifecycle@1.0.0;")
+                .contains("export runtara:agent-workflow-agent/capabilities@1.0.0;")
         );
         assert!(!artifacts.world_wit.contains("wasi:cli/run"));
     }
@@ -496,7 +490,7 @@ world workflow {
     import runtara:host/timers@1.0.0;
     import runtara:agent-crypto/capabilities@1.0.0;
     import runtara:agent-object-model/capabilities@1.0.0;
-    export runtara:workflow/lifecycle@1.0.0;
+    export runtara:agent-workflow-agent/capabilities@1.0.0;
 }
 ";
         assert_eq!(
@@ -504,11 +498,7 @@ world workflow {
             "invoke world drifted — update the golden snapshot deliberately"
         );
         // The export line is the canonical interface name (single source).
-        assert!(
-            artifacts
-                .world_wit
-                .contains(runtara_wit::workflow::LIFECYCLE)
-        );
+        assert!(artifacts.world_wit.contains(runtara_wit::workflow::ENTRY));
     }
 
     #[test]

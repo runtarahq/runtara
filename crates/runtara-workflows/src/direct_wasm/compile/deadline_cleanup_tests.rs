@@ -34,11 +34,19 @@ fn agent(cpu_body: bool) -> anyhow::Result<Vec<u8>> {
       (type $error (record (field "code" string) (field "message" string)
         (field "category" string) (field "severity" string) (field "retryable" bool)
         (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
+      (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
+      (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+        (case "instances" string)))
+      (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+      (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
       (func $invoke async (param "capability-id" string) (param "input" (list u8))
-        (result (result (list u8) (error $error)))
+        (result (result $outcome (error $error)))
         (canon lift (core func $code "invoke") (memory $code "memory")
           (realloc (func $code "realloc")) {}))
-      (instance $agent (export "error-info" (type $error)) (export "invoke" (func $invoke)))
+      (instance $agent (export "error-info" (type $error))
+        (export "signal-wait" (type $signal)) (export "wake" (type $wake))
+        (export "suspension" (type $suspension)) (export "outcome" (type $outcome))
+        (export "invoke" (func $invoke)))
       (export "runtara:agent-http/capabilities@1.0.0" (instance $agent)))"#,
         if cpu_body {
             ""

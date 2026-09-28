@@ -47,6 +47,14 @@ pub(super) const AGENT_OPERATION_SCOPE_FIELDS: [&str; 4] = [
     "permanent",
     "error",
 ];
+/// The step error of an agent that answered `suspended` where the call site
+/// cannot park: the agent does not declare `suspends` for that capability.
+pub(super) const AGENT_UNEXPECTED_SUSPEND_FIELDS: [&str; 4] = [
+    runtara_agent_suspension::AGENT_UNEXPECTED_SUSPEND,
+    "The agent suspended a call that cannot park",
+    "permanent",
+    "error",
+];
 /// The step error of a suspension the host refused: it broke the caps (no
 /// wakes, more than 16, a wait id over 64 bytes, a state over 64 KiB) or named
 /// an instance wait its operation did not register.
@@ -200,8 +208,8 @@ pub(super) struct DirectCoreStaticData {
     /// `agent-scope-input` envelope wrap that namespaces the composed child's
     /// checkpoint ids under the invocation site.
     agent_workflow_agents: BTreeSet<u32>,
-    /// Agents whose capability suspends: invoked through `suspendable.invoke`
-    /// inside an operation scope, never inside a parallel window.
+    /// Agents whose capability suspends: invoked inside an operation scope,
+    /// never inside a parallel window.
     agent_suspending: BTreeSet<u32>,
     agent_operation_scoped: BTreeSet<u32>,
     /// `AGENT_OPERATION_SCOPE_FIELDS`, laid out only when an operation-scoped
@@ -210,6 +218,8 @@ pub(super) struct DirectCoreStaticData {
     /// `AGENT_INVALID_SUSPENSION_FIELDS`, laid out only when a suspending site
     /// exists.
     pub(super) invalid_suspension_error: Option<DirectDataSegment>,
+    /// `AGENT_UNEXPECTED_SUSPEND_FIELDS`, laid out whenever an agent is called.
+    pub(super) unexpected_suspend_error: Option<DirectDataSegment>,
     pub(super) heap_base: i32,
     pub(super) memory_min_pages: u64,
 }
@@ -432,6 +442,14 @@ impl DirectCoreStaticData {
             offset = align_i32(checked_offset_add(offset, fields.len())?, 16);
             Some(segment)
         };
+        let unexpected_suspend_error = if agent_capability_ids.is_empty() {
+            None
+        } else {
+            let fields = AGENT_UNEXPECTED_SUSPEND_FIELDS.concat();
+            let segment = DirectDataSegment::new(offset, fields.as_bytes());
+            offset = align_i32(checked_offset_add(offset, fields.len())?, 16);
+            Some(segment)
+        };
 
         let memory_min_pages = wasm_pages_for_bytes(offset)?;
         Ok(Self {
@@ -472,6 +490,7 @@ impl DirectCoreStaticData {
             agent_operation_scoped,
             operation_scope_error,
             invalid_suspension_error,
+            unexpected_suspend_error,
             heap_base: offset,
             memory_min_pages,
         })
@@ -565,6 +584,7 @@ impl DirectCoreStaticData {
         segments.extend(self.agent_capability_ids.values());
         segments.extend(self.operation_scope_error.as_ref());
         segments.extend(self.invalid_suspension_error.as_ref());
+        segments.extend(self.unexpected_suspend_error.as_ref());
         segments
     }
 }

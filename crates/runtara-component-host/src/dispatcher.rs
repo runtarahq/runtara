@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use wasmtime::component::{ComponentNamedList, Lift, Lower, TypedFunc};
 use wasmtime::{Engine, Store, UpdateDeadline};
 
-use crate::bindings::exports::runtara::agent::capabilities::ErrorInfo;
+use crate::bindings::exports::runtara::agent::capabilities::{ErrorInfo, Outcome};
 use crate::engine::{EPOCH_TICK, EngineConfig, build_engine, spawn_epoch_ticker};
 use crate::host_state::{
     CallContext, DEFAULT_GUEST_MEMORY_MAX_BYTES, DEFAULT_GUEST_TABLE_MAX_ELEMENTS, HostState,
@@ -362,7 +362,7 @@ impl ComponentDispatcherService {
                 )
             })?;
         type InvokeFunc =
-            wasmtime::component::TypedFunc<(String, Vec<u8>), (Result<Vec<u8>, ErrorInfo>,)>;
+            wasmtime::component::TypedFunc<(String, Vec<u8>), (Result<Outcome, ErrorInfo>,)>;
         let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
 
         let started = Instant::now();
@@ -395,6 +395,12 @@ impl ComponentDispatcherService {
             }
         };
 
+        // A test call cannot park: a suspension outside a workflow is an error.
+        let result = match result {
+            Ok(Outcome::Completed(out_bytes)) => Ok(out_bytes),
+            Ok(Outcome::Suspended(_)) => Err(unexpected_suspend(&req.capability_id)),
+            Err(error) => Err(error),
+        };
         Ok(match result {
             Ok(out_bytes) => TestResult {
                 success: true,
@@ -598,6 +604,20 @@ fn memory_limit_result(elapsed_ms: f64, max_bytes: usize) -> TestResult {
             retryable: false,
         }),
         execution_time_ms: elapsed_ms,
+    }
+}
+
+/// The error for a capability that returned `suspended` where nothing can park
+/// it: a direct or test invocation outside a workflow.
+pub(crate) fn unexpected_suspend(capability: &str) -> ErrorInfo {
+    ErrorInfo {
+        code: runtara_agent_suspension::AGENT_UNEXPECTED_SUSPEND.into(),
+        message: format!("capability `{capability}` suspended outside a workflow step"),
+        category: "permanent".into(),
+        severity: "error".into(),
+        retryable: false,
+        retry_after_ms: None,
+        attributes: None,
     }
 }
 

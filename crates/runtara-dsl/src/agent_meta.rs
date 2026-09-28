@@ -41,8 +41,8 @@ pub struct CapabilityMeta {
     pub rate_limited: bool,
     /// Requires isolated, credential-bearing execution by an approved built-in.
     pub trusted: bool,
-    /// May answer with a typed suspension instead of a result
-    /// (`runtara:agent/suspension`); invoked only through `suspendable.invoke`.
+    /// May answer with the `suspended` outcome instead of `completed`; a
+    /// workflow calls it only inside an operation scope.
     pub suspends: bool,
     /// Known errors this capability can return.
     /// Used for tooling hints, validation, and documentation generation.

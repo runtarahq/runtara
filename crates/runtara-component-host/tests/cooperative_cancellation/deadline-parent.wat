@@ -1,13 +1,31 @@
 ;; Deadline-selection prototype using standard Component Model subtasks.
 ;; The fixture barrier only controls readiness; guest code selects the outcome.
 (component
-  (import "runtara:agent-{{AGENT}}/capabilities@1.0.0" (instance $http
+  ;; Like a built Agent, the capabilities import names the shared
+  ;; `runtara:agent/types` outcome rather than redefining it.
+  (import "runtara:agent/types@1.0.0" (instance $types
+    (type $signal-def (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
+    (export "signal-wait" (type $signal (eq $signal-def)))
+    (type $wake-def (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+      (case "instances" string)))
+    (export "wake" (type $wake (eq $wake-def)))
+    (type $suspension-def (record (field "wakes" (list $wake)) (field "state" (list u8))))
+    (export "suspension" (type $suspension (eq $suspension-def)))
+    (type $outcome-def (variant (case "completed" (list u8)) (case "suspended" $suspension)))
+    (export "outcome" (type $outcome (eq $outcome-def)))
     (type $error-def (record (field "code" string) (field "message" string)
       (field "category" string) (field "severity" string) (field "retryable" bool)
       (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
+    (export "error-info" (type $error (eq $error-def)))))
+  (alias export $types "error-info" (type $error-info))
+  (alias export $types "outcome" (type $outcome))
+  (import "runtara:agent-{{AGENT}}/capabilities@1.0.0" (instance $http
+    (alias outer 1 $error-info (type $error-def))
     (export "error-info" (type $error (eq $error-def)))
+    (alias outer 1 $outcome (type $outcome-def))
+    (export "outcome" (type $outcome (eq $outcome-def)))
     (export "invoke" (func async (param "capability-id" string) (param "input" (list u8))
-      (result (result (list u8) (error $error)))))))
+      (result (result $outcome (error $error)))))))
   (import "runtara:host/timers@1.0.0" (instance $timers
     (export "sleep" (func async (param "ms" u64)))))
   (import "ready-barrier" (func $barrier async))
@@ -138,15 +156,19 @@
       (local.set $sibling (call $sibling (i32.const 128)))
       (call $race (local.get $target) (call $sleep (i64.const {{TIMEOUT}})))
       (if (i32.eqz (global.get $timed-out))
-        (then (if (i32.ne (i32.load8_u (i32.const 0)) (i32.const 0)) (then unreachable))))
+        (then
+          (if (i32.ne (i32.load8_u (i32.const 0)) (i32.const 0)) (then unreachable))
+          (if (i32.ne (i32.load8_u (i32.const 8)) (i32.const 0)) (then unreachable))))
       (call $resolve (local.get $sibling))
       (if (i32.ne (i32.load (i32.const 128)) (i32.const 7)) (then unreachable))
       ;; A second capability call in the same real Agent instance must still work.
       (call $resolve (call $invoke (i32.const 1536) (i32.const {{SECOND_CAPABILITY_LEN}}) (i32.const {{SECOND_INPUT_OFFSET}}) (i32.const {{SECOND_INPUT_LEN}}) (i32.const 64)))
       ;; Return the actual JSON success bytes to the native assertions.
+      ;; `ok(completed(bytes))`: result tag at +0, outcome tag at +8, list at +12.
       (if (i32.ne (i32.load8_u (i32.const 64)) (i32.const 0)) (then unreachable))
-      (i32.store (i32.const 96) (i32.load (i32.const 72)))
-      (i32.store (i32.const 100) (i32.load (i32.const 76)))
+      (if (i32.ne (i32.load8_u (i32.const 72)) (i32.const 0)) (then unreachable))
+      (i32.store (i32.const 96) (i32.load (i32.const 76)))
+      (i32.store (i32.const 100) (i32.load (i32.const 80)))
       (i32.const 96)))
   (core instance $code (instantiate $code
     (with "m" (instance $memory))

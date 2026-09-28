@@ -283,7 +283,9 @@ pub(super) fn emit_adapter_configured(
                     Instruction::MemoryFill(0),
                 ],
             );
-            // join.ok.completed bytes -> Agent result.ok.
+            // join.ok.completed bytes -> Agent result.ok: the private scoped
+            // interface answers the bare list at +8, the agent-shaped one
+            // `outcome::completed` (tag +8 already zeroed, list at +12).
             emit(
                 &mut body,
                 [
@@ -293,7 +295,7 @@ pub(super) fn emit_adapter_configured(
                     Instruction::If(BlockType::Empty),
                 ],
             );
-            address(&mut body, frame, 200);
+            address(&mut body, frame, if scoped { 200 } else { 204 });
             address(&mut body, frame, 48);
             emit(
                 &mut body,

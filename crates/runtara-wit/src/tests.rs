@@ -35,14 +35,12 @@ fn every_name_constant_names_a_real_interface() {
     }
     for name in [
         crate::agent::TYPES,
-        crate::agent::SUSPENSION,
         crate::agent::CONTINUATION,
         crate::agent::CAPABILITIES,
         crate::host::HTTP,
         crate::host::SQL,
         crate::host::CONNECTIONS,
         crate::host::TIMERS,
-        crate::workflow::LIFECYCLE,
         crate::workflow::RUNTIME,
         crate::workflow::TASKS,
         crate::workflow::OPERATION,
@@ -120,7 +118,7 @@ fn agent_package_resolves_for_every_shape() {
                     );
                     let capabilities = crate::capabilities_interface(shape);
                     assert!(package.interfaces.contains_key(capabilities));
-                    assert_eq!(package.interfaces.contains_key("suspendable"), suspendable);
+                    assert!(!package.interfaces.contains_key("suspendable"));
                     let world = &resolve.worlds[package.worlds["agent"]];
                     let imports: Vec<String> = world
                         .imports
@@ -312,14 +310,7 @@ fn workflow_package_declares_the_workflow_abi() {
     let resolve = resolve();
     let workflow = package(&resolve, crate::workflow::PACKAGE);
 
-    let lifecycle = interface(&resolve, workflow, "lifecycle");
-    assert!(lifecycle.functions.contains_key("invoke"));
-    for type_name in ["signal-wait", "wake", "outcome"] {
-        assert!(
-            lifecycle.types.contains_key(type_name),
-            "missing lifecycle type {type_name}"
-        );
-    }
+    assert!(!workflow.interfaces.contains_key("lifecycle"));
 
     let runtime = interface(&resolve, workflow, "runtime");
     for function in [
@@ -654,4 +645,39 @@ fn the_control_api_is_complete_and_frozen() {
     ] {
         assert_eq!(record_fields(&resolve, types, name), fields, "{name}");
     }
+}
+
+/// Every agent and every workflow answers `invoke` with the same outcome, and
+/// the wake variant keeps the lifecycle order with `instances` appended.
+#[test]
+fn agents_and_workflows_share_one_outcome() {
+    let resolve = resolve();
+    let agent = package(&resolve, crate::agent::PACKAGE);
+    let types = interface(&resolve, agent, "types");
+    assert_eq!(
+        variant_cases(&resolve, types, "wake"),
+        ["at", "on-signal", "on-resume", "instances"]
+    );
+    assert_eq!(
+        variant_cases(&resolve, types, "outcome"),
+        ["completed", "suspended"]
+    );
+    assert_eq!(
+        record_fields(&resolve, types, "suspension"),
+        ["wakes", "state"]
+    );
+    assert_eq!(
+        record_fields(&resolve, types, "signal-wait"),
+        ["checkpoint-id", "deadline-ms"]
+    );
+    let mut resolve = resolve;
+    let entry = crate::agent_package(crate::workflow::ENTRY_AGENT_ID, AgentShape::default());
+    let id = resolve.push_str("entry.wit", &entry).unwrap();
+    let world = &resolve.worlds[resolve.packages[id].worlds["agent"]];
+    assert!(
+        world
+            .exports
+            .keys()
+            .any(|key| resolve.name_world_key(key) == crate::workflow::ENTRY)
+    );
 }

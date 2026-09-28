@@ -263,8 +263,7 @@ fn suspending_and_control_sites_are_refused_in_on_wait_and_on_error() {
     assert!(text.contains("onError"), "{text}");
 }
 
-/// Each site binds its own `(agent, interface)` import: a suspending site the
-/// agent's `suspendable`, a plain one its `capabilities`, even on one agent.
+/// Suspending and plain sites on one agent share its `capabilities` import.
 /// Only artifacts with a suspending site lay out its refusal error.
 #[test]
 fn per_site_imports_and_the_suspension_error_follow_the_sites() {
@@ -275,12 +274,13 @@ fn per_site_imports_and_the_suspension_error_follow_the_sites() {
             {"fromStep": "pause", "toStep": "finish"}]});
     let result = compile(two_sites, WorkflowRole::Root).expect("compiles");
     let (world, logic) = world_and_logic(&result);
-    for interface in ["capabilities", "suspendable"] {
-        assert!(
-            world.contains(&format!("import runtara:agent-waiter/{interface}@1.0.0;")),
-            "{interface}: {world}"
-        );
-    }
+    // Both sites call the one `capabilities` interface; only the suspending
+    // one handles a `suspended` outcome through the operation scope.
+    assert!(
+        world.contains("import runtara:agent-waiter/capabilities@1.0.0;"),
+        "{world}"
+    );
+    assert!(!world.contains("suspendable"), "{world}");
     assert!(contains(&logic, b"AGENT_INVALID_SUSPENSION"));
 
     let read_only =
@@ -421,9 +421,8 @@ fn unscoped_workflows_carry_nothing_of_the_operation_scope() {
     assert_eq!(artifacts.world_wit, result.component_artifacts.world_wit);
 }
 
-/// (c) The offsets the emitter reads from a `suspendable.invoke` result are
-/// the canonical layout of the WIT, and the two agent interfaces are
-/// type-identical in their flat signature (which is why (b) is behavioural).
+/// (c) The offsets the emitter reads from an `invoke` result are the
+/// canonical layout of the WIT.
 #[test]
 fn the_emitted_result_offsets_match_the_wit_layout() {
     use wit_parser::{Int, Resolve, SizeAlign, Type, TypeDefKind};
@@ -455,11 +454,11 @@ fn the_emitted_result_offsets_match_the_wit_layout() {
         },
         other => panic!("not a variant: {other:?}"),
     };
-    let Some(Type::Id(result)) = invoke("suspendable").result else {
-        panic!("suspendable.invoke returns a result");
+    let Some(Type::Id(result)) = invoke("capabilities").result else {
+        panic!("capabilities.invoke returns a result");
     };
     let TypeDefKind::Result(result) = &resolve.types[result].kind else {
-        panic!("suspendable.invoke returns a result");
+        panic!("capabilities.invoke returns a result");
     };
     let result_payload =
         at(sizes.payload_offset(Int::U8, [result.ok.as_ref(), result.err.as_ref()]));
@@ -536,18 +535,5 @@ fn the_emitted_result_offsets_match_the_wit_layout() {
     assert_eq!(
         at(sizes.payload_offset(Int::U8, [result.ok.as_ref(), result.err.as_ref()])),
         DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET
-    );
-
-    // Type-identical flat signatures: only the result's shape differs.
-    let mangling = wit_parser::ManglingAndAbi::Legacy(wit_parser::LiftLowerAbi::AsyncCallback);
-    let signature =
-        |interface: &str| resolve.wasm_signature(mangling.import_variant(), invoke(interface));
-    assert_eq!(
-        signature("capabilities").params,
-        signature("suspendable").params
-    );
-    assert_eq!(
-        signature("capabilities").results,
-        signature("suspendable").results
     );
 }

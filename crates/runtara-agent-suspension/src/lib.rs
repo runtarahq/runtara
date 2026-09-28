@@ -7,10 +7,6 @@
 //! canonical layout, and the guest-side [`Suspendable`] / [`SuspendContext`]
 //! types. Natively this crate has no dependencies.
 
-/// Name of the per-agent interface a suspending agent exports beside
-/// `capabilities`, inside its own `runtara:agent-<id>` package.
-pub const SUSPENDABLE_INTERFACE: &str = "suspendable";
-
 /// Largest continuation (`suspension.state`) the host keeps per operation.
 pub const MAX_CONTINUATION_BYTES: usize = 64 * 1024;
 
@@ -39,12 +35,13 @@ pub const AGENT_CONTINUATION_REJECTED: &str = "AGENT_CONTINUATION_REJECTED";
 pub const AGENT_UNEXPECTED_SUSPEND: &str = "AGENT_UNEXPECTED_SUSPEND";
 
 /// Canonical-ABI layout (wasm32) of the `types` interface: what the direct
-/// emitter reads from a `suspendable.invoke` result and what the host's
+/// emitter reads from a `capabilities.invoke` result and what the host's
 /// component-type mirrors must match. Pinned against `wit_parser::SizeAlign`
 /// by this crate's tests. Byte sizes and offsets.
 pub mod layout {
-    /// `wake`: a u8 discriminant, the payload 8-aligned for `at(u64)`.
-    pub const WAKE_SIZE: u32 = 16;
+    /// `wake`: a u8 discriminant, the payload 8-aligned; the largest case is
+    /// `on-signal(signal-wait)` (a string and an `option<u64>`).
+    pub const WAKE_SIZE: u32 = 32;
     pub const WAKE_ALIGN: u32 = 8;
     pub const WAKE_PAYLOAD_OFFSET: u32 = 8;
     /// `suspension`: `wakes` then `state`, each a pointer and a length.
@@ -57,7 +54,7 @@ pub mod layout {
     pub const OUTCOME_SIZE: u32 = 20;
     pub const OUTCOME_ALIGN: u32 = 4;
     pub const OUTCOME_PAYLOAD_OFFSET: u32 = 4;
-    /// `result<outcome, error-info>` of `suspendable.invoke`: `error-info`
+    /// `result<outcome, error-info>` of `capabilities.invoke`: `error-info`
     /// holds an `option<u64>`, so both arms sit 8-aligned after the tag.
     pub const INVOKE_RESULT_PAYLOAD_OFFSET: u32 = 8;
 }
@@ -154,7 +151,7 @@ mod tests {
         let id = resolve
             .interfaces
             .iter()
-            .find(|(id, _)| resolve.id_of(*id).as_deref() == Some(runtara_wit::agent::SUSPENSION))
+            .find(|(id, _)| resolve.id_of(*id).as_deref() == Some(runtara_wit::agent::TYPES))
             .map(|(id, _)| id)
             .expect("runtara:agent/suspension");
         &resolve.interfaces[id]
@@ -175,13 +172,13 @@ mod tests {
                 other => panic!("{name}: unexpected {other:?}"),
             }
         };
-        assert_eq!(cases("wake"), ["at", "instances"]);
+        assert_eq!(cases("wake"), ["at", "on-signal", "on-resume", "instances"]);
         assert_eq!(cases("suspension"), ["wakes", "state"]);
         assert_eq!(cases("outcome"), ["completed", "suspended"]);
     }
 
     #[test]
-    fn the_generated_suspending_agent_declares_the_documented_interface() {
+    fn the_generated_suspending_agent_imports_its_continuation() {
         let mut resolve = resolve();
         let shape = runtara_wit::AgentShape {
             suspendable: true,
@@ -191,11 +188,7 @@ mod tests {
             .push_str("probe.wit", &runtara_wit::agent_package("probe", shape))
             .unwrap();
         let package = &resolve.packages[id];
-        let interface = &resolve.interfaces[package.interfaces[SUSPENDABLE_INTERFACE]];
-        assert!(matches!(
-            interface.functions["invoke"].kind,
-            wit_parser::FunctionKind::AsyncFreestanding
-        ));
+        assert!(!package.interfaces.contains_key("suspendable"));
         let world = &resolve.worlds[package.worlds["agent"]];
         assert!(
             world
@@ -203,13 +196,6 @@ mod tests {
                 .keys()
                 .any(|key| resolve.name_world_key(key) == runtara_wit::agent::CONTINUATION)
         );
-        assert!(world.exports.keys().any(|key| {
-            resolve.name_world_key(key)
-                == format!(
-                    "runtara:agent-probe/{SUSPENDABLE_INTERFACE}@{}",
-                    runtara_wit::VERSION
-                )
-        }));
     }
 
     /// The canonical layout of the suspension types equals the constants the
@@ -278,12 +264,12 @@ mod tests {
         assert_eq!(payload_offset("outcome"), layout::OUTCOME_PAYLOAD_OFFSET);
 
         let package = &resolve.packages[id];
-        let suspendable = &resolve.interfaces[package.interfaces[SUSPENDABLE_INTERFACE]];
-        let Some(Type::Id(result)) = suspendable.functions["invoke"].result else {
-            panic!("suspendable.invoke returns a result");
+        let capabilities = &resolve.interfaces[package.interfaces["capabilities"]];
+        let Some(Type::Id(result)) = capabilities.functions["invoke"].result else {
+            panic!("capabilities.invoke returns a result");
         };
         let TypeDefKind::Result(result) = &resolve.types[result].kind else {
-            panic!("suspendable.invoke returns a result");
+            panic!("capabilities.invoke returns a result");
         };
         assert_eq!(
             bytes(sizes.payload_offset(Int::U8, [result.ok.as_ref(), result.err.as_ref()])),

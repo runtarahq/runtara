@@ -100,7 +100,7 @@ impl InvocationLauncher for PreparedInvocationLauncher {
             .catalog
             .resolve(&request.binding)
             .ok_or(ExecutionError::InvalidBinding)?;
-        let lifecycle = binding.interface == runtara_wit::workflow::LIFECYCLE;
+        let lifecycle = binding.interface == runtara_wit::workflow::ENTRY;
         if lifecycle != matches!(request.entry, Entry::Workflow) {
             return Err(ExecutionError::InvalidBinding);
         }

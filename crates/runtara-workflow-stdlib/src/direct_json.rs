@@ -5624,19 +5624,9 @@ pub fn invoke_error_fields(error: &[u8]) -> DirectInvokeErrorFields {
         // An object without a message string still surfaces everything.
         None => raw,
     };
-    // The `__rt_suspended__` and `__rt_on_signal__` codes are RESERVED: they
-    // are how a composed workflow-agent's lifecycle suspend and signal wait
-    // cross the capability boundary, and the composing parent re-raises its
-    // own suspend (or signal park) on seeing one. Every user-authored terminal
-    // error (Error steps, bubbled agent errors) flows through here — remap a
-    // spoofed sentinel so a workflow error can never silently suspend its
-    // parent instead of failing it.
-    let mut code = field("code");
-    if code == "__rt_suspended__" {
-        code = "__rt_suspended__:user".to_string();
-    } else if code == "__rt_on_signal__" {
-        code = "__rt_on_signal__:user".to_string();
-    }
+    // A suspension crosses the agent boundary as a typed `suspended` outcome,
+    // so no error code is reserved: every code passes through as written.
+    let code = field("code");
     DirectInvokeErrorFields {
         code,
         message,
@@ -14305,34 +14295,12 @@ mod invoke_error_and_delay_key_tests {
     use serde_json::json;
 
     #[test]
-    fn user_error_cannot_spoof_the_suspend_sentinel() {
-        // `__rt_suspended__` is the reserved code a composed workflow-agent's
-        // lifecycle suspend uses to cross the capability boundary; a
-        // user-authored error carrying it must be remapped, or an Error step
-        // could silently SUSPEND its composing parent instead of failing it.
-        let fields =
-            invoke_error_fields(br#"{"code":"__rt_suspended__","message":"spoof attempt"}"#);
-        assert_eq!(fields.code, "__rt_suspended__:user");
-        assert_eq!(fields.message, "spoof attempt");
-    }
-
-    #[test]
-    fn user_error_cannot_spoof_the_signal_wait_sentinel() {
-        // `__rt_on_signal__` is the reserved code a composed workflow-agent's
-        // signal wait uses to cross the capability boundary, carrying the
-        // route in `message`. A user-authored error carrying it must be
-        // remapped, or an Error step could park its composing parent on an
-        // arbitrary signal instead of failing it.
-        let fields = invoke_error_fields(
-            br#"{"code":"__rt_on_signal__","message":"approval","retryAfterMs":1}"#,
-        );
-        assert_eq!(fields.code, "__rt_on_signal__:user");
-        assert_eq!(fields.message, "approval");
-        // Only the exact reserved code is remapped.
-        assert_eq!(
-            invoke_error_fields(br#"{"code":"__rt_on_signal__x"}"#).code,
-            "__rt_on_signal__x"
-        );
+    fn former_sentinel_codes_are_ordinary_error_codes() {
+        // Suspension is a typed outcome now; no error code is reserved.
+        for code in ["__rt_suspended__", "__rt_on_signal__"] {
+            let error = format!(r#"{{"code":"{code}","message":"m"}}"#);
+            assert_eq!(invoke_error_fields(error.as_bytes()).code, code);
+        }
     }
 
     #[test]

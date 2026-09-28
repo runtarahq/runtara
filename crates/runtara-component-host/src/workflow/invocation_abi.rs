@@ -6,18 +6,17 @@ use wasmtime::component::types::{ComponentFunc, Type};
 
 type Check = fn(&Type) -> bool;
 
-pub(super) fn validate(invoke: &ComponentFunc, interface: &str) -> Result<()> {
-    let lifecycle = interface == runtara_wit::workflow::LIFECYCLE;
+/// Every entry, workflow or agent, is `invoke(capability-id, input) ->
+/// result<outcome, error-info>`.
+pub(super) fn validate(invoke: &ComponentFunc) -> Result<()> {
     let mut params = invoke.params();
-    if !lifecycle {
-        ensure!(
-            params.next().is_some_and(|(_, ty)| string(&ty)),
-            "isolated capability invoke requires a string capability argument"
-        );
-    }
+    ensure!(
+        params.next().is_some_and(|(_, ty)| string(&ty)),
+        "isolated invoke requires a string capability argument"
+    );
     ensure!(
         params.next().is_some_and(|(_, ty)| bytes(&ty)) && params.next().is_none(),
-        "isolated invoke requires exactly one input byte-list argument after its capability, if any"
+        "isolated invoke requires exactly one input byte-list argument after its capability"
     );
     let mut results = invoke.results();
     let Some(Type::Result(result)) = results.next() else {
@@ -27,9 +26,8 @@ pub(super) fn validate(invoke: &ComponentFunc, interface: &str) -> Result<()> {
         results.next().is_none(),
         "isolated invoke must return exactly one result"
     );
-    let success: Check = if lifecycle { outcome } else { bytes };
     ensure!(
-        result.ok().as_ref().is_some_and(success),
+        result.ok().as_ref().is_some_and(outcome),
         "incompatible isolated invoke success ABI"
     );
     ensure!(
@@ -37,7 +35,6 @@ pub(super) fn validate(invoke: &ComponentFunc, interface: &str) -> Result<()> {
         "incompatible isolated invoke error ABI"
     );
     // Both sync and async component functions are supported by call_async.
-    // In particular the lifecycle 0.1.0 binding remains sync-typed.
     Ok(())
 }
 
@@ -111,15 +108,19 @@ fn wake(ty: &Type) -> bool {
             ("at", Some(u64_)),
             ("on-signal", Some(signal_wait)),
             ("on-resume", None),
+            ("instances", Some(string)),
         ],
     )
 }
 fn wakes(ty: &Type) -> bool {
     matches!(ty, Type::List(list) if wake(&list.ty()))
 }
+fn suspension(ty: &Type) -> bool {
+    fields(ty, &[("wakes", wakes), ("state", bytes)])
+}
 fn outcome(ty: &Type) -> bool {
     cases(
         ty,
-        &[("completed", Some(bytes)), ("suspended", Some(wakes))],
+        &[("completed", Some(bytes)), ("suspended", Some(suspension))],
     )
 }

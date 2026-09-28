@@ -581,7 +581,7 @@ fn emit_terminal_run_plan_mapping(
     if let Some(DirectHandledTarget { branch_depth }) = handled_target {
         body.instruction(&Instruction::Br(branch_depth));
     } else {
-        // Terminal completion from an onError handler — same per-ABI exit
+        // Terminal completion from an onError handler — same exit
         // shape as the entry function's own tail, including the terminal-status
         // suppression (omit-runtime, and PublishedAgent where the caller
         // owns instance lifecycle).
@@ -589,24 +589,12 @@ fn emit_terminal_run_plan_mapping(
             super::core_module::emit_complete(body, indices, output_ptr_local, output_len_local);
         }
         super::deadline_scope::close_alarm(body, indices);
-        match indices.abi {
-            crate::direct_wasm::component::WorkflowRole::Root => {
-                super::core_module::emit_invoke_ok_completed_return(
-                    body,
-                    output_ptr_local,
-                    output_len_local,
-                );
-                body.instruction(&Instruction::Return);
-            }
-            crate::direct_wasm::component::WorkflowRole::PublishedAgent => {
-                super::core_module::emit_capabilities_ok_return(
-                    body,
-                    output_ptr_local,
-                    output_len_local,
-                );
-                body.instruction(&Instruction::Return);
-            }
-        }
+        super::core_module::emit_invoke_ok_completed_return(
+            body,
+            output_ptr_local,
+            output_len_local,
+        );
+        body.instruction(&Instruction::Return);
     }
 }
 

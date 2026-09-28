@@ -532,59 +532,21 @@ pub(super) fn emit_wait_for_signal_plan(
     // threshold applies here, unlike a Delay: a Wait is open-ended by
     // construction — what would be blocked for is the poll interval, not a
     // known wait — so parking is right however short that interval is.
-    match indices.abi {
-        crate::direct_wasm::component::WorkflowRole::Root => {
-            // `suspended(on-signal{signal-id, deadline})`: the host parks the
-            // instance (sleep_until = timeout deadline, or NULL when there is
-            // none) and the custom-signal waker relaunches it when the signal
-            // arrives; the replay re-polls the now-present signal and continues.
-            emit_entry_suspend_on_signal(
-                body,
-                indices,
-                DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
-                DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
-                Some((
-                    DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
-                    DIRECT_WAIT_DEADLINE_MS_LOCAL,
-                )),
-            );
-        }
-        crate::direct_wasm::component::WorkflowRole::PublishedAgent => {
-            // A workflow-agent child cannot emit the suspended arm — its result
-            // type has none — but it can still stop holding the parent's
-            // runner. Raise the suspend sentinel instead: the parent re-raises
-            // it through its own ABI and the chain unwinds to the real instance
-            // owner, which parks. The custom-signal waker relaunches that
-            // instance when the signal lands, and replay rebuilds this same
-            // nested route and re-polls. A timed wait carries its absolute
-            // deadline out through the sentinel so the owner parks until it; an
-            // untimed one is open-ended by construction and parks with no
-            // deadline at all.
-            //
-            // Park ON THE SIGNAL, carrying the route and any timeout deadline.
-            // A bare resume would be dropped by `park_invoke_suspend` before it
-            // stamped `waiting_signal`, and the custom-signal waker would then
-            // never relaunch this instance at all.
-            super::abi::emit_suspend_on_signal_return(
-                body,
-                indices,
-                DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
-                DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
-                Some((
-                    DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
-                    DIRECT_WAIT_DEADLINE_MS_LOCAL,
-                )),
-            );
-            // Unreachable after the return above. Retained only so
-            // workflow-agent artifacts stay byte-identical; drop it with the
-            // next lowering-tag bump.
-            body.instruction(&Instruction::LocalGet(DIRECT_WAIT_POLL_INTERVAL_MS_LOCAL));
-            push_retptr_arg(body);
-            body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
-            emit_abandon_input_on_error(body, indices, route_ptr_local, route_len_local);
-            body.instruction(&Instruction::Br(0));
-        }
-    }
+    // `suspended(on-signal{checkpoint-id, deadline})`: the host parks the
+    // instance (sleep_until = timeout deadline, or NULL when there is none) and
+    // the custom-signal waker relaunches it when the signal arrives; the replay
+    // re-polls the now-present signal and continues. A published workflow-agent
+    // returns the same outcome, and its parent forwards it.
+    emit_entry_suspend_on_signal(
+        body,
+        indices,
+        DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+        DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+        Some((
+            DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+            DIRECT_WAIT_DEADLINE_MS_LOCAL,
+        )),
+    );
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
 

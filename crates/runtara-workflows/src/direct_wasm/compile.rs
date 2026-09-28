@@ -79,9 +79,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use runtara_dsl::ExecutionGraph;
-use runtara_wit::workflow::{
-    LIFECYCLE as LIFECYCLE_INTERFACE_NAME, RUNTIME as RUNTIME_INTERFACE_NAME,
-};
+use runtara_wit::workflow::RUNTIME as RUNTIME_INTERFACE_NAME;
 use sha2::{Digest, Sha256};
 use wasm_encoder::{CustomSection, Encode, Function as WasmFunction, Instruction, Section};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -137,15 +135,16 @@ use super::support::{
     analyze_workflow_agent_safety, workflow_agent_requires_runtime,
 };
 
-/// Direct workflow artifact ABI version for the unified invoke export
-/// (`runtara:workflow/lifecycle.invoke`).
-pub const DIRECT_WORKFLOW_INVOKE_ABI_VERSION: u32 = 2;
+/// Direct workflow artifact ABI version: every workflow exports
+/// `runtara:agent-<id>/capabilities.invoke -> result<outcome, error-info>`.
+/// Bumped whenever the export shape changes, so cached artifacts recompile.
+pub const DIRECT_WORKFLOW_INVOKE_ABI_VERSION: u32 = 3;
 /// Custom section containing [`DirectWorkflowManifest`] JSON.
 pub const DIRECT_WORKFLOW_MANIFEST_SECTION: &str = "runtara.direct_workflow.manifest";
 /// Custom section containing [`DirectWorkflowSupportReport`] JSON.
 pub const DIRECT_WORKFLOW_SUPPORT_SECTION: &str = "runtara.direct_workflow.support";
 /// Custom section containing direct artifact ABI metadata JSON.
-pub const DIRECT_WORKFLOW_ABI_SECTION: &str = "runtara.direct_workflow.abi";
+pub const DIRECT_WORKFLOW_ABI_SECTION: &str = runtara_wit::workflow::LOGIC_SECTION;
 /// Version for `artifact-metadata.json` emitted beside direct artifacts.
 pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION: u32 = 4;
 /// Sidecar filename containing direct artifact dependency/provenance metadata.
@@ -1399,33 +1398,21 @@ fn emit_direct_artifact(
     export_agent_id: Option<&str>,
     scoped_agents: &std::collections::BTreeSet<String>,
 ) -> Result<(Vec<u8>, std::collections::BTreeMap<String, u32>), DirectCompileError> {
-    let abi_json = match abi {
-        super::component::WorkflowRole::Root => serde_json::to_vec(&serde_json::json!({
-            "abiVersion": DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
-            "artifactKind": "direct-invoke-component",
-            "componentRunExport": LIFECYCLE_INTERFACE_NAME,
-            "entryPointExecutable": true,
-            "runtimeExecutable": true,
-            "outputMode": "invoke-result-outcome",
-            "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
-            "stepCount": manifest.feature_summary.total_steps,
-            "note": "unified invoke export: input as the call argument, terminal result as result<outcome, error-info>; runtime interface host-satisfied; complete/fail still fire additively"
-        }))?,
-        super::component::WorkflowRole::PublishedAgent => serde_json::to_vec(&serde_json::json!({
-            "abiVersion": DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
-            "artifactKind": "direct-agent-capability-component",
-            "componentRunExport": format!(
-                "runtara:agent-{}/capabilities@{DIRECT_AGENT_WIT_VERSION}",
-                export_agent_id.unwrap_or(super::component::CAPABILITIES_EXPORT_AGENT_ID)
-            ),
-            "entryPointExecutable": true,
-            "runtimeExecutable": true,
-            "outputMode": "capabilities-invoke-list",
-            "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
-            "stepCount": manifest.feature_summary.total_steps,
-            "note": "workflow-as-agent: exports runtara:agent-<slug>/capabilities.invoke(cap-id, input) -> result<list<u8>, error-info>; zero runtime imports; pure/non-suspending"
-        }))?,
-    };
+    let entry_id = super::component::entry_agent_id(abi, export_agent_id);
+    let abi_json = serde_json::to_vec(&serde_json::json!({
+        "abiVersion": DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
+        "artifactKind": match abi {
+            super::component::WorkflowRole::Root => "direct-invoke-component",
+            super::component::WorkflowRole::PublishedAgent => "direct-agent-capability-component",
+        },
+        "componentRunExport": format!("runtara:agent-{entry_id}/capabilities@{DIRECT_AGENT_WIT_VERSION}"),
+        "entryPointExecutable": true,
+        "runtimeExecutable": true,
+        "outputMode": "invoke-result-outcome",
+        "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
+        "stepCount": manifest.feature_summary.total_steps,
+        "note": "every workflow exports capabilities.invoke(\"run\", input) -> result<outcome, error-info>; a published workflow-agent under its slug, a top-level run under the reserved entry id"
+    }))?;
 
     let (mut component, parallel_pools) = emit_direct_component(
         manifest,
@@ -1606,21 +1593,17 @@ fn build_direct_component_resolve_with_waits(
     let operation_scope = operation_scope || !suspending_agents.is_empty();
     // Every runtara package, once; the world below imports only what it names.
     let mut resolve = runtara_wit::resolve().map_err(component_error)?;
-    match abi {
-        super::component::WorkflowRole::Root => {}
-        super::component::WorkflowRole::PublishedAgent => {
-            // Export the agent capability interface under the workflow's own
-            // slug. The reserved-slug check at save time guarantees the export
-            // package can never collide with an imported native agent's.
-            let id = export_agent_id.unwrap_or(super::component::CAPABILITIES_EXPORT_AGENT_ID);
-            resolve
-                .push_str(
-                    format!("runtara-agent-{id}.wit"),
-                    &runtara_wit::agent_package(id, runtara_wit::AgentShape::default()),
-                )
-                .map_err(component_error)?;
-        }
-    }
+    // Every workflow exports its entry as an agent package: a published
+    // workflow-agent under its slug, a top-level run under the reserved entry
+    // id. The reserved-slug check at save time guarantees the export package
+    // can never collide with an imported agent's.
+    let entry_id = super::component::entry_agent_id(abi, export_agent_id);
+    resolve
+        .push_str(
+            format!("runtara-agent-{entry_id}.wit"),
+            &runtara_wit::agent_package(entry_id, runtara_wit::AgentShape::default()),
+        )
+        .map_err(component_error)?;
     for agent in agents {
         let shape = runtara_wit::AgentShape {
             scoped: scoped_agents.contains(agent),
@@ -1692,12 +1675,6 @@ fn build_direct_component_resolve_with_waits(
         workflow_wit.push_str(&format!(
             "    import runtara:agent-{agent}/{interface}@{AGENT_WIT_VERSION};\n",
         ));
-        if suspending_agents.contains(agent) {
-            workflow_wit.push_str(&format!(
-                "    import runtara:agent-{agent}/{}@{AGENT_WIT_VERSION};\n",
-                runtara_agent_suspension::SUSPENDABLE_INTERFACE
-            ));
-        }
         if let Some(pool) = parallel_pools.get(agent) {
             for member in 1..*pool {
                 let phantom = split_parallel::pool_member_component_id(agent, member);
@@ -1707,17 +1684,9 @@ fn build_direct_component_resolve_with_waits(
             }
         }
     }
-    match abi {
-        super::component::WorkflowRole::Root => {
-            workflow_wit.push_str(&format!("    export {LIFECYCLE_INTERFACE_NAME};\n"))
-        }
-        super::component::WorkflowRole::PublishedAgent => {
-            let id = export_agent_id.unwrap_or(super::component::CAPABILITIES_EXPORT_AGENT_ID);
-            workflow_wit.push_str(&format!(
-                "    export runtara:agent-{id}/capabilities@{AGENT_WIT_VERSION};\n"
-            ))
-        }
-    }
+    workflow_wit.push_str(&format!(
+        "    export runtara:agent-{entry_id}/capabilities@{AGENT_WIT_VERSION};\n"
+    ));
     workflow_wit.push_str("}\n");
     let package = resolve
         .push_str("runtara-workflow.wit", &workflow_wit)

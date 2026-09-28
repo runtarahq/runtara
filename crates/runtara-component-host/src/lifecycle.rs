@@ -1,8 +1,8 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Host-side mirror of `runtara:workflow/lifecycle` — the unified
-//! invoke export a workflow compiled with the invoke ABI exposes instead of
-//! `wasi:cli/run` (Phase 3 of the agent/workflow unification).
+//! Host-side mirror of the `runtara:agent/types` outcome every workflow entry
+//! returns: a compiled workflow exports `runtara:agent-<id>/capabilities` and
+//! answers `invoke("run", input)` like an agent.
 //!
 //! Field order and kebab names must match the WIT exactly; wasmtime
 //! type-checks them against the component's export when the typed function is
@@ -10,12 +10,14 @@
 
 use std::path::Path;
 
-/// Fully-qualified component export name of the lifecycle interface —
+/// Fully-qualified component export name of a top-level workflow's entry —
 /// re-exported from the canonical WIT crate so the host and the compiler
 /// cannot drift apart.
-pub use runtara_wit::workflow::LIFECYCLE as LIFECYCLE_INTERFACE_NAME;
+pub use runtara_wit::workflow::ENTRY as ENTRY_INTERFACE_NAME;
+/// The capability id a workflow entry answers.
+pub use runtara_wit::workflow::ENTRY_CAPABILITY;
 
-/// WIT mirror of `lifecycle.error-info` (field-for-field the agent error).
+/// WIT mirror of `runtara:agent/types.error-info`.
 #[derive(
     Debug,
     Clone,
@@ -37,7 +39,7 @@ pub struct WorkflowErrorInfo {
     pub attributes: Option<String>,
 }
 
-/// WIT mirror of `lifecycle.signal-wait`.
+/// WIT mirror of `runtara:agent/types.signal-wait`.
 #[derive(
     Debug,
     Clone,
@@ -55,7 +57,7 @@ pub struct SignalWait {
     pub deadline_ms: Option<u64>,
 }
 
-/// WIT mirror of `lifecycle.wake`.
+/// WIT mirror of `runtara:agent/types.wake`.
 #[derive(
     Debug,
     Clone,
@@ -76,11 +78,31 @@ pub enum WorkflowWake {
     /// Lifecycle pause/drain: re-invoke on relaunch.
     #[component(name = "on-resume")]
     OnResume,
+    /// Re-invoke when the host-owned instance wait with this id settles.
+    #[component(name = "instances")]
+    Instances(String),
 }
 
-/// WIT mirror of `lifecycle.outcome` — the invoke success arm. `suspended`
-/// carries a wake-SET (re-invoke on ANY; sequential lowering emits
-/// singletons).
+/// WIT mirror of `runtara:agent/types.suspension`. A workflow's `state` is
+/// always empty (its state lives in checkpoints); a native agent's is its
+/// continuation.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    wasmtime::component::ComponentType,
+    wasmtime::component::Lift,
+    wasmtime::component::Lower,
+)]
+#[component(record)]
+pub struct WorkflowSuspension {
+    pub wakes: Vec<WorkflowWake>,
+    pub state: Vec<u8>,
+}
+
+/// WIT mirror of `runtara:agent/types.outcome` — the invoke success arm.
+/// `suspended` carries a wake-SET (re-invoke on ANY).
 #[derive(
     Debug,
     Clone,
@@ -95,7 +117,7 @@ pub enum WorkflowOutcome {
     #[component(name = "completed")]
     Completed(Vec<u8>),
     #[component(name = "suspended")]
-    Suspended(Vec<WorkflowWake>),
+    Suspended(WorkflowSuspension),
 }
 
 /// The top-level execution export discovered in a workflow component.
@@ -106,7 +128,7 @@ pub enum WorkflowOutcome {
 /// their image kind rather than treating all components as workflows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowEntrypoint {
-    /// The component exports `runtara:workflow/lifecycle.invoke`.
+    /// The component exports the workflow entry's `capabilities.invoke`.
     LifecycleInvoke,
     /// The component exports the retired direct-workflow `wasi:cli/run` entry.
     LegacyCliRun,
@@ -147,7 +169,7 @@ pub fn inspect_workflow_entrypoint(wasm: &[u8]) -> anyhow::Result<WorkflowEntryp
                 for export in reader {
                     let export = export?;
                     let name = export.name.0;
-                    if name == LIFECYCLE_INTERFACE_NAME {
+                    if name == ENTRY_INTERFACE_NAME {
                         lifecycle = true;
                     }
                     if name == "wasi:cli/run@0.2.3" || name.starts_with("wasi:cli/run@") {
@@ -195,7 +217,7 @@ pub fn exports_lifecycle_invoke(
     pre.component()
         .component_type()
         .exports(engine)
-        .any(|(name, _)| name == LIFECYCLE_INTERFACE_NAME)
+        .any(|(name, _)| name == ENTRY_INTERFACE_NAME)
 }
 
 #[cfg(test)]
@@ -208,7 +230,7 @@ mod tests {
             (core instance $i (instantiate $m))
             (func $invoke (canon lift (core func $i "invoke")))
             (instance $lifecycle (export "invoke" (func $invoke)))
-            (export "runtara:workflow/lifecycle@1.0.0" (instance $lifecycle))
+            (export "runtara:agent-workflow-agent/capabilities@1.0.0" (instance $lifecycle))
         )
     "#;
 

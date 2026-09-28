@@ -561,7 +561,7 @@ fn shared_components_dir() -> PathBuf {
         b"embed-workflow-result",
         b"embed-workflow-output-from-result",
         b"embed-workflow-error",
-        b"__rt_on_signal__:user",
+        b"runtara:workflow-stdlib/json@1.0.0",
     ];
     assert!(
         required_stdlib_markers.iter().all(|marker| {
@@ -1468,7 +1468,7 @@ fn earliest_timed_deadline_ms(
         .filter_map(|wake| match wake {
             WorkflowWake::At(ms) => Some(*ms),
             WorkflowWake::OnSignal(wait) => wait.deadline_ms,
-            WorkflowWake::OnResume => None,
+            WorkflowWake::OnResume | WorkflowWake::Instances(_) => None,
         })
         .min()
 }
@@ -1487,7 +1487,7 @@ fn scheduler_would_relaunch(wakes: &[runtara_component_host::lifecycle::Workflow
         && wakes.iter().all(|wake| match wake {
             WorkflowWake::At(_) => true,
             WorkflowWake::OnSignal(wait) => wait.deadline_ms.is_some(),
-            WorkflowWake::OnResume => false,
+            WorkflowWake::OnResume | WorkflowWake::Instances(_) => false,
         })
 }
 
@@ -7533,7 +7533,7 @@ fn drive_wake_scheduler(
                         thread::sleep(Duration::from_millis(ms.saturating_sub(now_ms()) + 1));
                     }
                 }
-                WorkflowWake::OnResume => {}
+                WorkflowWake::OnResume | WorkflowWake::Instances(_) => {}
             }
         }
         let wakeable = wakes.iter().any(|wake| match wake {
@@ -7541,7 +7541,7 @@ fn drive_wake_scheduler(
             WorkflowWake::OnSignal(wait) => {
                 wait.deadline_ms.is_some() || host.has_accepted_response(&wait.checkpoint_id)
             }
-            WorkflowWake::OnResume => false,
+            WorkflowWake::OnResume | WorkflowWake::Instances(_) => false,
         });
         legs.push(ParkLeg::Parked(wakes));
         assert!(
@@ -8757,15 +8757,13 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
     std::mem::forget(temp);
 }
 
-/// A composed workflow-agent's Error step cannot forge the reserved sentinels.
+/// A composed workflow-agent's Error step cannot park its parent.
 ///
-/// `__rt_on_signal__` (a nested signal wait, route in `message`) and
-/// `__rt_suspended__` (a nested lifecycle suspend) are how a child's park
-/// crosses the capability boundary; the parent matches the code byte for byte
-/// and re-raises the park. A user-authored Error step carrying either code
-/// must reach the parent as an ordinary failure with the `:user` suffix — the
-/// parent routes `onError` (or fails without it), and never parks on a signal
-/// or suspends.
+/// A child's park crosses the capability boundary only as the `suspended` arm
+/// of the outcome, never as an error code. An Error step carrying the former
+/// reserved codes (`__rt_on_signal__`, `__rt_suspended__`) reaches the parent
+/// as an ordinary failure with that code unchanged: the parent routes
+/// `onError` (or fails without it), and never parks on a signal or suspends.
 #[test]
 fn workflow_agent_error_step_cannot_spoof_signal_park_or_suspend() {
     let components_dir = direct_e2e_components_dir();
@@ -8927,20 +8925,20 @@ fn workflow_agent_error_step_cannot_spoof_signal_park_or_suspend() {
                     .await
             });
 
-            let expected_code = format!("{sentinel}:user");
+            let expected_code = sentinel.to_string();
             match (route_on_error, run.exit) {
                 (true, runtara_component_host::InvokeExit::Completed(output)) => {
                     let output: Value = serde_json::from_slice(&output).expect("output is JSON");
                     assert_eq!(
                         output["code"],
                         Value::String(expected_code.clone()),
-                        "{sentinel}: onError must see the remapped code: {output}"
+                        "{sentinel}: onError must see the code: {output}"
                     );
                 }
                 (false, runtara_component_host::InvokeExit::Failed(error)) => {
                     assert_eq!(
                         error.code, expected_code,
-                        "{sentinel}: the parent must fail with the remapped code: {error:?}"
+                        "{sentinel}: the parent must fail with the code: {error:?}"
                     );
                 }
                 (_, other) => panic!(
@@ -8952,10 +8950,10 @@ fn workflow_agent_error_step_cannot_spoof_signal_park_or_suspend() {
     }
 }
 
-/// A hand-written agent returning a raw reserved code cannot park or suspend
-/// its parent. Tagged `workflow-agent` in the catalog (so the parent would
-/// re-raise the code) but resolved from the primary components dir, it must
-/// not compose. Untagged, the code is an ordinary step failure.
+/// A hand-written agent returning a former reserved code cannot park or
+/// suspend its parent. Tagged `workflow-agent` in the catalog but resolved
+/// from the primary components dir, it must not compose. Untagged, the code is
+/// an ordinary step failure.
 #[test]
 fn a_non_staged_agent_cannot_park_its_parent_with_a_reserved_code() {
     let bundle = direct_e2e_components_dir();
@@ -9112,12 +9110,11 @@ fn a_non_staged_agent_cannot_park_its_parent_with_a_reserved_code() {
                             "{sentinel}: onError must see the agent's failure: {output}"
                         );
                     }
-                    // The terminal Err leaves through the stdlib remap: the
-                    // raw reserved code never reaches a caller.
+                    // The terminal Err carries the agent's code unchanged.
                     (false, runtara_component_host::InvokeExit::Failed(error)) => assert_eq!(
                         error.code,
-                        format!("{sentinel}:user"),
-                        "{sentinel}: the parent must fail with the remapped code: {error:?}"
+                        sentinel.to_string(),
+                        "{sentinel}: the parent must fail with the code: {error:?}"
                     ),
                     (_, other) => panic!(
                         "{sentinel} (onError={route_on_error}): a native agent's reserved code \
@@ -9129,14 +9126,13 @@ fn a_non_staged_agent_cannot_park_its_parent_with_a_reserved_code() {
     }
 }
 
-/// A reserved code bubbling out of a staged workflow-agent is remapped.
+/// A former reserved code bubbling out of a staged workflow-agent is an error.
 ///
-/// The staged workflow-agent calls an ordinary agent that fails with a raw
+/// The staged workflow-agent calls an ordinary agent that fails with a former
 /// reserved code, and has no `onError`, so the agent's error becomes the
-/// workflow-agent's own terminal `Err`. That `Err` leaves through the stdlib
-/// remap as `<code>:user`, so the root that composes the workflow-agent (and
-/// re-raises its reserved codes) sees an ordinary failure: it routes `onError`
-/// or fails, and never parks on the route in `message` or suspends.
+/// workflow-agent's own terminal `Err`. The root that composes it sees an
+/// ordinary failure with the code unchanged: it routes `onError` or fails, and
+/// never parks on the route in `message` or suspends.
 #[test]
 fn a_reserved_code_bubbling_out_of_a_staged_workflow_agent_cannot_park_the_root() {
     let bundle = direct_e2e_components_dir();
@@ -9336,24 +9332,23 @@ fn a_reserved_code_bubbling_out_of_a_staged_workflow_agent_cannot_park_the_root(
                     .await
             });
 
-            // The workflow-agent's terminal Err was remapped before the root
-            // saw it, so both arms see the `:user` code. Any other exit
-            // (Suspended above all) means the raw code reached the root's
-            // re-raise.
-            let expected_code = format!("{sentinel}:user");
+            // Only the outcome's suspended arm parks, so both arms see the
+            // code unchanged. Any other exit (Suspended above all) means an
+            // error code was read as a park.
+            let expected_code = sentinel.to_string();
             match (route_on_error, run.exit) {
                 (true, runtara_component_host::InvokeExit::Completed(output)) => {
                     let output: Value = serde_json::from_slice(&output).expect("output is JSON");
                     assert_eq!(
                         output["code"],
                         Value::String(expected_code.clone()),
-                        "{sentinel}: onError must see the remapped code: {output}"
+                        "{sentinel}: onError must see the code: {output}"
                     );
                 }
                 (false, runtara_component_host::InvokeExit::Failed(error)) => {
                     assert_eq!(
                         error.code, expected_code,
-                        "{sentinel}: the root must fail with the remapped code: {error:?}"
+                        "{sentinel}: the root must fail with the code: {error:?}"
                     );
                 }
                 (_, other) => panic!(

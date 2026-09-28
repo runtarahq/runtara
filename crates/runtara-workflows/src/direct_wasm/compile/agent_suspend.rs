@@ -3,13 +3,13 @@
 //! Lowering of a suspending Agent call site (typed agent suspension).
 //!
 //! A capability the catalog declares `suspends` is invoked through its
-//! agent's `suspendable` interface instead of `capabilities`, inside the
-//! compiler-emitted `runtara:workflow/operation`:
+//! agent's `capabilities`, inside the compiler-emitted
+//! `runtara:workflow/operation`:
 //!
 //! 1. `scope.enter(checkpoint-key, attempt, load)` names the operation. The
 //!    host derives `op_hash = sha256(checkpoint-key)` and hands the saved
 //!    continuation to the capability itself (`runtara:agent/continuation`).
-//!    `suspendable.invoke` never carries one, so this module passes none.
+//!    `invoke` never carries one, so this module passes none.
 //! 2. `suspended { wakes, state }`: `scope.suspend(state, wakes)` persists the
 //!    continuation for the entered attempt, then the workflow returns the
 //!    unchanged lifecycle
@@ -60,7 +60,7 @@ use crate::direct_wasm::manifest::{DirectAgentManifest, DirectEdgeManifest, Dire
 // Canonical layout of `result<outcome, error-info>` in the retptr area, where
 // `outcome = variant { completed(list<u8>), suspended(suspension) }`,
 // `suspension = record { wakes: list<wake>, state: list<u8> }` and
-// `wake = variant { at(u64), instances(string) }`. The error arm is the same
+// `wake = variant { at(u64), on-signal(signal-wait), on-resume, instances(string) }`. The error arm is the same
 // `error-info` at +8 as `capabilities.invoke`'s. Every offset comes from
 // `runtara_agent_suspension::layout`, which `runtara-agent-suspension`'s tests pin against
 // the WIT's `SizeAlign`; `agent_suspend_tests` re-derives them here.
@@ -438,7 +438,7 @@ pub(super) fn emit_exit(body: &mut WasmFunction, indices: &DirectCoreFunctionInd
     body.instruction(&Instruction::Call(indices.operation_scope().exit));
 }
 
-/// Consume a `suspendable.invoke` result left in the retptr area.
+/// Consume a suspending site's `invoke` result left in the retptr area.
 ///
 /// A suspension parks the workflow and returns from the entry function,
 /// unless it is refused or too close to the step deadline: then the retptr

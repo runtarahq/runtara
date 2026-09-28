@@ -2,55 +2,11 @@
 //
 // Only compiled workflow logic imports these interfaces (published
 // workflow-agents included); ordinary agents are denied the whole package.
-// A workflow exports `lifecycle` and imports the rest.
+// A workflow exports its entry as a `runtara:agent-<id>/capabilities` package
+// (see `runtara:agent`) and imports these.
 //
 // Released WIT is never edited, only versioned (see `runtara-wit`'s crate docs).
 package runtara:workflow@1.0.0;
-
-// The workflow invoke export. Input arrives as the call argument (JSON bytes,
-// the `{data, variables}` envelope) and the terminal result is the return
-// value. `invoke` is async-typed: blocking legality is keyed to the function
-// type under the component-model-async rules, and a workflow's task must be
-// allowed to block (it enters async-typed agent exports and, in parallel
-// regions, waits on waitable-sets). The lift stays the plain sync ABI.
-interface lifecycle {
-    use runtara:agent/types@1.0.0.{error-info};
-
-    /// One pending wait: the deterministic signal id (checkpoint id) the
-    /// instance is parked on, plus the persisted absolute timeout deadline.
-    record signal-wait {
-        checkpoint-id: string,
-        deadline-ms: option<u64>,
-    }
-
-    /// Why the run stopped early — how to re-invoke it.
-    variant wake {
-        /// Re-invoke at (or after) this wall-clock ms-since-epoch.
-        at(u64),
-        /// Re-invoke when the signal arrives, or at its deadline.
-        on-signal(signal-wait),
-        /// Lifecycle pause/drain: re-invoke on relaunch.
-        on-resume,
-    }
-
-    /// The success arm. `suspended` carries a wake-SET with re-invoke-on-ANY
-    /// semantics: sequential lowering emits singletons today, but the set
-    /// shape is load-bearing for future parallel branches / joins (see the
-    /// plan's concurrency-forward note) — single-wake would be an ABI break.
-    variant outcome {
-        completed(list<u8>),         // terminal output (JSON bytes)
-        suspended(list<wake>),
-    }
-
-    /// Async-TYPED since 0.2.0 (ABI v2): blocking
-    /// legality is keyed to the function type under the ratified
-    /// component-model-async rules, and a workflow's task must be allowed to
-    /// block — it transitively enters async-typed agent exports and, in
-    /// parallel regions, waits on waitable-sets. The lift stays the plain
-    /// sync ABI (the emitted core signature is unchanged); wasmtime drives
-    /// the export as an async task via call_async.
-    invoke: async func(input: list<u8>) -> result<outcome, error-info>;
-}
 
 // Lifecycle and persistence services: persisted input, terminal status,
 // events, cancellation, heartbeat, checkpoints and durable sleep.
@@ -166,8 +122,7 @@ interface runtime {
 // Generic owned child executions. Private runtime ABI, not part of the DSL:
 // no compilation, graph traversal, retry or recovery policy in the host.
 interface tasks {
-    use runtara:agent/types@1.0.0.{error-info};
-    use lifecycle.{wake};
+    use runtara:agent/types@1.0.0.{error-info, wake};
 
     resource task;
 
@@ -224,7 +179,7 @@ interface tasks {
 // owns, where `checkpoint-key` is the canonical v2 Agent checkpoint key of
 // the call site. Identity never comes from agent input.
 interface operation {
-    use runtara:agent/suspension@1.0.0.{wake};
+    use runtara:agent/types@1.0.0.{wake};
 
     /// Enter the operation of this call site. With `load`, the continuation
     /// saved for `attempt` becomes the operation's context, which the host

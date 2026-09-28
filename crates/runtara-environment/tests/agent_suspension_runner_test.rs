@@ -3,7 +3,7 @@
 //! `runtara:workflow/operation` and `runtara:agent/continuation`
 //! -> operation continuations on PostgreSQL.
 //!
-//! The agent is a fixture component: its `suspendable.invoke` suspends on an
+//! The agent is a fixture component: its `pause` capability suspends on an
 //! `at` wake with a fixed state, and once the host hands that state back as
 //! its continuation it completes with it. Requires staged components and an
 //! isolated TEST_ENVIRONMENT_DATABASE_URL.
@@ -32,9 +32,9 @@ fn components() -> PathBuf {
 }
 
 /// An ordinary suspending agent `suspend-fixture`. `capabilities.invoke`
-/// answers `plain`; `suspendable.invoke` reads its continuation through the
-/// host context and completes with it, or, without one, suspends at
-/// `WAKE_AT_MS` with `STATE`. Its result lives at 2048: the ok tag, the
+/// answers `plain`; `pause` reads its continuation through the host context
+/// and completes with it, or, without one, suspends at `WAKE_AT_MS` with
+/// `STATE`. Its result lives at 2048: the ok tag, the
 /// outcome discriminant at +8 and its payload at +12; the one wake at 1536.
 fn fixture_component() -> Vec<u8> {
     wat::parse_str(format!(
@@ -56,12 +56,18 @@ fn fixture_component() -> Vec<u8> {
     (import "h" "continuation" (func $continuation (param i32)))
     (data (i32.const 1024) "\22capabilities\22")
     (data (i32.const 1056) "\22paused\22")
-    (func (export "plain") (param i32 i32 i32 i32) (result i32)
+    ;; `plain` and `pause` differ in their second byte.
+    (func (export "invoke") (param i32 i32 i32 i32) (result i32)
+      (if (i32.eq (i32.load8_u offset=1 (local.get 0)) (i32.const 0x6c))
+        (then (return (call $plain))))
+      (call $pause))
+    (func $plain (result i32)
       (i32.store8 (i32.const 2048) (i32.const 0))
-      (i32.store (i32.const 2056) (i32.const 1024))
-      (i32.store (i32.const 2060) (i32.const 14))
+      (i32.store8 (i32.const 2056) (i32.const 0))
+      (i32.store (i32.const 2060) (i32.const 1024))
+      (i32.store (i32.const 2064) (i32.const 14))
       (i32.const 2048))
-    (func (export "suspendable") (param i32 i32 i32 i32) (result i32)
+    (func $pause (result i32)
       (call $continuation (i32.const 3072))
       (i32.store8 (i32.const 2048) (i32.const 0))
       (if (i32.load8_u (i32.const 3072))
@@ -84,21 +90,20 @@ fn fixture_component() -> Vec<u8> {
   (type $error (record (field "code" string) (field "message" string)
     (field "category" string) (field "severity" string) (field "retryable" bool)
     (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
-  (type $wake (variant (case "at" u64) (case "instances" string)))
+  (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
+  (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+    (case "instances" string)))
   (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
   (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
-  (func $plain async (param "capability-id" string) (param "input" (list u8))
-    (result (result (list u8) (error $error)))
-    (canon lift (core func $code "plain") (memory $memory "memory") (realloc (func $memory "realloc"))))
-  (func $suspendable async (param "capability-id" string) (param "input" (list u8))
+  (func $invoke async (param "capability-id" string) (param "input" (list u8))
     (result (result $outcome (error $error)))
-    (canon lift (core func $code "suspendable") (memory $memory "memory") (realloc (func $memory "realloc"))))
-  (instance $capabilities (export "error-info" (type $error)) (export "invoke" (func $plain)))
-  (instance $suspendable (export "error-info" (type $error)) (export "wake" (type $wake))
+    (canon lift (core func $code "invoke") (memory $memory "memory") (realloc (func $memory "realloc"))))
+  (instance $capabilities
+    (export "error-info" (type $error))
+    (export "signal-wait" (type $signal)) (export "wake" (type $wake))
     (export "suspension" (type $suspension)) (export "outcome" (type $outcome))
-    (export "invoke" (func $suspendable)))
-  (export "runtara:agent-suspend-fixture/capabilities@1.0.0" (instance $capabilities))
-  (export "runtara:agent-suspend-fixture/suspendable@1.0.0" (instance $suspendable)))"#,
+    (export "invoke" (func $invoke)))
+  (export "runtara:agent-suspend-fixture/capabilities@1.0.0" (instance $capabilities)))"#,
         state_len = STATE.len(),
     ))
     .expect("the fixture agent parses")

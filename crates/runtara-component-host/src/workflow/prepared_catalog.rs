@@ -102,7 +102,7 @@ impl PreparedChildCatalog {
             else {
                 anyhow::bail!("isolated binding interface has no invoke function");
             };
-            invocation_abi::validate(&invoke, &binding.interface).with_context(|| {
+            invocation_abi::validate(&invoke).with_context(|| {
                 format!(
                     "invalid isolated binding `{}` ({})",
                     binding.id, binding.interface

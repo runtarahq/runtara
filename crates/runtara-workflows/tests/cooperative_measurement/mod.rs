@@ -458,7 +458,12 @@ fn random_service(
             let export = instance
                 .get_export_index(&mut store, Some(&iface), "invoke")
                 .unwrap();
-            type Output = (Result<Vec<u8>, runtara_component_host::ErrorInfo>,);
+            type Output = (
+                Result<
+                    runtara_component_host::lifecycle::WorkflowOutcome,
+                    runtara_component_host::lifecycle::WorkflowErrorInfo,
+                >,
+            );
             let invoke = instance
                 .get_typed_func::<(String, Vec<u8>), Output>(&mut store, export)
                 .unwrap();
@@ -466,7 +471,12 @@ fn random_service(
             let start = Instant::now();
             let (result,) = invoke.call_async(&mut store, args).await.unwrap();
             let elapsed = micros(start);
-            let value: f64 = serde_json::from_slice(&result.unwrap()).unwrap();
+            let runtara_component_host::lifecycle::WorkflowOutcome::Completed(output) =
+                result.unwrap()
+            else {
+                panic!("a pure capability completes");
+            };
+            let value: f64 = serde_json::from_slice(&output).unwrap();
             assert!((0.0..1.0).contains(&value));
             elapsed
         });

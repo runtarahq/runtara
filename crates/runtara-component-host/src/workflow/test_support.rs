@@ -60,7 +60,7 @@ pub(super) fn parent_wat(root_exit: &str) -> String {
             "i32.const 42))",
             r#"i32.const 42)
   (data (i32.const 3500) "42")
-  (func (export "invoke") (param i32 i32) (result i32)
+  (func (export "invoke") (param i32 i32 i32 i32) (result i32)
     call $run drop
     (i32.store (i32.const 2048) (i32.const 0))
     (i32.store (i32.const 2056) (i32.const 0))
@@ -72,15 +72,17 @@ pub(super) fn parent_wat(root_exit: &str) -> String {
         "  (func (export \"run\") async (result u32) (canon lift (core func $code \"run\"))))",
         r#"  (alias export $tasks "error-info" (type $error))
 (alias export $tasks "wake" (type $wake))
-(type $outcome (variant (case "completed" (list u8)) (case "suspended" (list $wake))))
-(func $invoke async (param "input" (list u8)) (result (result $outcome (error $error)))
+(type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+(type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
+(func $invoke async (param "capability-id" string) (param "input" (list u8)) (result (result $outcome (error $error)))
   (canon lift (core func $code "invoke") (memory $mem "memory") (realloc (func $mem "realloc"))))
 (instance $lifecycle
   (export "error-info" (type $error))
   (export "wake" (type $wake))
+  (export "suspension" (type $suspension))
   (export "outcome" (type $outcome))
   (export "invoke" (func $invoke)))
-(export "runtara:workflow/lifecycle@1.0.0" (instance $lifecycle)))"#,
+(export "runtara:agent-workflow-agent/capabilities@1.0.0" (instance $lifecycle)))"#,
     );
     wat
 }

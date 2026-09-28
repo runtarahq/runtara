@@ -1193,10 +1193,7 @@ fn direct_compile_embeds_manifest_and_support_sections() {
                     ))
                 );
                 assert_eq!(abi["artifactKind"], "direct-invoke-component");
-                assert_eq!(
-                    abi["componentRunExport"],
-                    "runtara:workflow/lifecycle@1.0.0"
-                );
+                assert_eq!(abi["componentRunExport"], runtara_wit::workflow::ENTRY);
                 assert_eq!(abi["entryPointExecutable"].as_bool(), Some(true));
                 assert_eq!(abi["runtimeExecutable"].as_bool(), Some(true));
                 assert_eq!(abi["outputMode"], "invoke-result-outcome");
@@ -1269,7 +1266,7 @@ fn direct_compile_exports_lifecycle_invoke_and_imports_components() {
             Payload::ComponentExportSection(reader) => {
                 for export in reader {
                     let export = export.expect("component export");
-                    if export.name.0 == "runtara:workflow/lifecycle@1.0.0" {
+                    if export.name.0 == runtara_wit::workflow::ENTRY {
                         assert_eq!(export.kind, ComponentExternalKind::Instance);
                         saw_run_export = true;
                     }
@@ -10447,7 +10444,7 @@ fn direct_compile_writes_component_scaffold_sidecars() {
     assert_eq!(wac, result.component_artifacts.wac_source);
     assert!(world_wit.contains("import runtara:workflow-stdlib/json@1.0.0;"));
     assert!(world_wit.contains("import runtara:workflow/runtime@1.0.0;"));
-    assert!(world_wit.contains("export runtara:workflow/lifecycle@1.0.0;"));
+    assert!(world_wit.contains("export runtara:agent-workflow-agent/capabilities@1.0.0;"));
     assert!(wac.contains("new runtara:workflow-stdlib"));
     // HostImport default: the runtime component is neither instantiated nor
     // spread — its interface bubbles to the composed artifact's imports.
@@ -10989,7 +10986,7 @@ fn abi_is_part_of_the_lowering_tag() {
 
     let tag = super::direct_lowering_tag();
     assert!(
-        tag.contains("abi=invoke-v2"),
+        tag.contains("abi=invoke-v3"),
         "the tag must name the ABI, or changing it cannot invalidate a cached image: {tag}"
     );
     assert!(

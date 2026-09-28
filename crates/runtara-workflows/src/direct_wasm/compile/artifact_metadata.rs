@@ -431,12 +431,9 @@ pub const STAGED_WORKFLOW_AGENT_DENIED_PREFIXES: &[&str] = &[
     runtara_wit::control::PREFIX,
     runtara_wit::workflow::OPERATION_PREFIX,
     runtara_wit::workflow::WAITS_PREFIX,
-    SUSPENSION_INTERFACE_PREFIX,
     CONTINUATION_INTERFACE_PREFIX,
 ];
 
-/// Any version of the agent suspension types.
-const SUSPENSION_INTERFACE_PREFIX: &str = "runtara:agent/suspension@";
 /// Any version of the continuation interface.
 const CONTINUATION_INTERFACE_PREFIX: &str = "runtara:agent/continuation@";
 
@@ -492,7 +489,7 @@ fn agent_import_allowed(import: &str) -> bool {
 }
 
 fn agent_import_granted(import: &str, grants: AgentImportGrants) -> bool {
-    if import == runtara_wit::agent::SUSPENSION || import == runtara_wit::agent::CONTINUATION {
+    if import == runtara_wit::agent::CONTINUATION {
         grants.suspends
     } else if import == runtara_wit::trusted::EXECUTOR {
         grants.trusted
@@ -1407,10 +1404,7 @@ mod tests {
 
     #[test]
     fn the_suspension_context_is_admitted_only_for_agents_declaring_suspends() {
-        let imports = [
-            runtara_wit::agent::SUSPENSION,
-            runtara_wit::agent::CONTINUATION,
-        ];
+        let imports = [runtara_wit::agent::CONTINUATION];
         resolve_declared_agent("pauser", FixtureDir::Primary, &imports, true)
             .expect("a suspending agent reads its continuation");
         resolve_declared_agent("pauser", FixtureDir::Staging, &imports, true)
@@ -1427,14 +1421,10 @@ mod tests {
         resolve_declared_agent("control", FixtureDir::Primary, CONTROL_AGENT_IMPORTS, false)
             .expect("the bundled control agent forwards to the executor");
         // Control no longer suspends, so it gets no suspension interface.
-        for import in [
-            runtara_wit::agent::SUSPENSION,
-            runtara_wit::agent::CONTINUATION,
-        ] {
-            let error = resolve_declared_agent("control", FixtureDir::Primary, &[import], false)
-                .expect_err("control never suspends");
-            assert!(error.to_string().contains(import), "{error}");
-        }
+        let import = runtara_wit::agent::CONTINUATION;
+        let error = resolve_declared_agent("control", FixtureDir::Primary, &[import], false)
+            .expect_err("control never suspends");
+        assert!(error.to_string().contains(import), "{error}");
         for (agent, location) in [
             ("controller", FixtureDir::Primary),
             ("pauser", FixtureDir::Primary),
@@ -1724,7 +1714,6 @@ mod tests {
         // Granted imports link too: `denied` control stubs and a context
         // without a continuation, so the full bundle loads in the dispatcher.
         for entry in CONTROL_AGENT_IMPORTS.iter().chain(&[
-            runtara_wit::agent::SUSPENSION,
             runtara_wit::agent::CONTINUATION,
             runtara_wit::trusted::EXECUTOR,
         ]) {

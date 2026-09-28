@@ -158,6 +158,13 @@ pub struct CapabilityInvocation<'a> {
     pub input: Vec<u8>,
 }
 
+/// Every entry, a workflow's or an agent's: `invoke(capability-id, input) ->
+/// result<outcome, error-info>`.
+type InvokeFunc = wasmtime::component::TypedFunc<
+    (String, Vec<u8>),
+    (Result<crate::lifecycle::WorkflowOutcome, crate::lifecycle::WorkflowErrorInfo>,),
+>;
+
 enum InvocationEntry<'a> {
     Lifecycle {
         interface: Option<&'a str>,
@@ -1451,16 +1458,12 @@ impl WorkflowExecutor {
                             .ok_or_else(|| {
                                 anyhow::anyhow!("capability interface has no `invoke` export")
                             })?;
-                        type CapabilityFunc = wasmtime::component::TypedFunc<
-                            (String, Vec<u8>),
-                            (Result<Vec<u8>, crate::lifecycle::WorkflowErrorInfo>,),
-                        >;
-                        let invoke: CapabilityFunc =
+                        let invoke: InvokeFunc =
                             instance.get_typed_func(&mut store, invoke_index)?;
                         let (result,) = invoke
                             .call_async(&mut store, ((*capability).to_owned(), input))
                             .await?;
-                        return Ok(result.map(crate::lifecycle::WorkflowOutcome::Completed));
+                        return Ok(result);
                     }
                     let iface_idx = if let InvocationEntry::Lifecycle {
                         interface: Some(interface),
@@ -1469,32 +1472,28 @@ impl WorkflowExecutor {
                         instance
                             .get_export_index(&mut store, None, interface)
                             .ok_or_else(|| {
-                                anyhow::anyhow!("missing lifecycle interface `{interface}`")
+                                anyhow::anyhow!("missing workflow entry interface `{interface}`")
                             })?
                     } else {
-                        instance.get_export_index(&mut store, None, crate::lifecycle::LIFECYCLE_INTERFACE_NAME)
+                        instance.get_export_index(&mut store, None, crate::lifecycle::ENTRY_INTERFACE_NAME)
                                 .ok_or_else(|| anyhow::anyhow!(
                                     "workflow component does not export {} — \
-                                     not an invoke-shaped artifact (use execute() for wasi:cli/run artifacts)",
-                                    crate::lifecycle::LIFECYCLE_INTERFACE_NAME
+                                     not a workflow entry (use execute() for wasi:cli/run artifacts)",
+                                    crate::lifecycle::ENTRY_INTERFACE_NAME
                                 ))?
                     };
                     let invoke_idx = instance
                         .get_export_index(&mut store, Some(&iface_idx), "invoke")
                         .ok_or_else(|| {
-                            anyhow::anyhow!("lifecycle interface has no `invoke` export")
+                            anyhow::anyhow!("workflow entry interface has no `invoke` export")
                         })?;
-                    type InvokeFunc = wasmtime::component::TypedFunc<
-                        (Vec<u8>,),
-                        (
-                            Result<
-                                crate::lifecycle::WorkflowOutcome,
-                                crate::lifecycle::WorkflowErrorInfo,
-                            >,
-                        ),
-                    >;
                     let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
-                    let (result,) = invoke.call_async(&mut store, (input,)).await?;
+                    let (result,) = invoke
+                        .call_async(
+                            &mut store,
+                            (crate::lifecycle::ENTRY_CAPABILITY.to_owned(), input),
+                        )
+                        .await?;
                     // post-return is driven automatically by wasmtime 44's typed
                     // call path; the store is single-use anyway (fresh per run).
                     Ok::<_, anyhow::Error>(result)
@@ -1537,8 +1536,8 @@ impl WorkflowExecutor {
             Ok(Ok(Ok(crate::lifecycle::WorkflowOutcome::Completed(output)))) => {
                 InvokeExit::Completed(output)
             }
-            Ok(Ok(Ok(crate::lifecycle::WorkflowOutcome::Suspended(wakes)))) => {
-                InvokeExit::Suspended(wakes)
+            Ok(Ok(Ok(crate::lifecycle::WorkflowOutcome::Suspended(suspension)))) => {
+                InvokeExit::Suspended(suspension.wakes)
             }
             Ok(Ok(Err(error))) => InvokeExit::Failed(error),
             Ok(Err(trap)) => match data.termination {
@@ -1628,13 +1627,25 @@ impl WorkflowExecutor {
         let invoke_idx = instance
             .get_export_index(&mut store, Some(&iface_idx), "invoke")
             .ok_or_else(|| anyhow::anyhow!("interface `{iface_name}` has no `invoke` export"))?;
-        type InvokeFunc =
-            wasmtime::component::TypedFunc<(String, Vec<u8>), (Result<Vec<u8>, crate::ErrorInfo>,)>;
         let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
         let (result,) = invoke
             .call_async(&mut store, (capability_id.to_string(), input))
             .await?;
-        Ok(result)
+        Ok(match result {
+            Ok(crate::lifecycle::WorkflowOutcome::Completed(output)) => Ok(output),
+            Ok(crate::lifecycle::WorkflowOutcome::Suspended(_)) => {
+                Err(crate::dispatcher::unexpected_suspend(capability_id))
+            }
+            Err(error) => Err(crate::ErrorInfo {
+                code: error.code,
+                message: error.message,
+                category: error.category,
+                severity: error.severity,
+                retryable: error.retryable,
+                retry_after_ms: error.retry_after_ms,
+                attributes: error.attributes,
+            }),
+        })
     }
 }
 
@@ -1645,7 +1656,8 @@ impl WorkflowExecutor {
 pub enum InvokeExit {
     /// `Ok(outcome::completed(bytes))` — the terminal output.
     Completed(Vec<u8>),
-    /// `Ok(outcome::suspended(wakes))` — re-invoke when ANY wake fires.
+    /// `Ok(outcome::suspended(..))` — re-invoke when ANY wake fires. A
+    /// workflow's suspension state is always empty, so only the wakes remain.
     Suspended(Vec<crate::lifecycle::WorkflowWake>),
     /// `Err(error-info)` — the terminal failure.
     Failed(crate::lifecycle::WorkflowErrorInfo),

@@ -417,7 +417,6 @@ pub(super) fn emit_direct_core_module(
             &mut code,
             imported_function_count,
             &mut next_defined_function,
-            import_indices.operation_scope.is_some(),
         );
         for key in scoped_async {
             let params = import_indices.agent_invokes[&key].params.clone();
@@ -578,7 +577,6 @@ pub(super) fn emit_direct_core_module(
             &mut code,
             imported_function_count,
             &mut next_defined_function,
-            import_indices.operation_scope.is_some(),
         );
     }
     export_initialize(
@@ -666,9 +664,7 @@ fn export_core_function(
     );
     exports.export(&export_name, ExportKind::Func, function_index);
 
-    let body = if super::core_imports::is_lifecycle_invoke_export(resolve, interface, function)
-        || super::core_imports::is_capabilities_invoke_export(resolve, interface, function)
-    {
+    let body = if super::core_imports::is_capabilities_invoke_export(resolve, interface, function) {
         // The entry export of the current ABI (the world declares exactly one):
         // `lifecycle.invoke` under Root, `capabilities.invoke`
         // under PublishedAgent.
@@ -711,11 +707,6 @@ fn export_realloc(
     code: &mut CodeSection,
     imported_function_count: u32,
     next_defined_function: &mut u32,
-    // Honour the requested alignment. Needed once an 8-aligned value (the
-    // `wake` list of a suspension) is lowered into this memory; without such
-    // a site the historic unaligned bump allocator keeps every other workflow
-    // byte-identical.
-    aligned: bool,
 ) {
     let type_index = push_core_type(
         types,
@@ -731,8 +722,10 @@ fn export_realloc(
     exports.export(&realloc_name, ExportKind::Func, function_index);
 
     let mut body = WasmFunction::new([(3, ValType::I32)]);
+    // Honour the requested alignment: every agent's outcome can carry an
+    // 8-aligned `wake` list, which the canonical ABI lowers into this memory.
     body.instruction(&Instruction::GlobalGet(0));
-    if aligned {
+    {
         // `align` (param 2) is a power of two by the canonical ABI.
         body.instruction(&Instruction::LocalGet(2));
         body.instruction(&Instruction::I32Add);
@@ -744,11 +737,7 @@ fn export_realloc(
         body.instruction(&Instruction::I32And);
     }
     body.instruction(&Instruction::LocalSet(4));
-    body.instruction(&if aligned {
-        Instruction::LocalGet(4)
-    } else {
-        Instruction::GlobalGet(0)
-    });
+    body.instruction(&Instruction::LocalGet(4));
     body.instruction(&Instruction::LocalGet(3));
     body.instruction(&Instruction::I32Add);
     body.instruction(&Instruction::LocalSet(5));
@@ -937,29 +926,16 @@ fn direct_run_function(
     // input-len @3). The input params ALIAS the SOURCE locals (2/3), which
     // init-manifest's error path scribbles into — so stash the input onto
     // DATA_PTR/DATA_LEN (0/1) BEFORE init-manifest runs. (The cap-id at 0/1 is
-    // unused: a workflow-agent has a single self-capability.)
-    if matches!(config.abi, WorkflowRole::PublishedAgent) {
-        body.instruction(&Instruction::LocalGet(2));
-        body.instruction(&Instruction::LocalSet(DATA_PTR_LOCAL));
-        body.instruction(&Instruction::LocalGet(3));
-        body.instruction(&Instruction::LocalSet(DATA_LEN_LOCAL));
-    }
+    // unused: every workflow entry answers the single `run` capability.)
+    body.instruction(&Instruction::LocalGet(2));
+    body.instruction(&Instruction::LocalSet(DATA_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(3));
+    body.instruction(&Instruction::LocalSet(DATA_LEN_LOCAL));
 
     push_segment_args(&mut body, &config.static_data.manifest);
     push_retptr_arg(&mut body);
     body.instruction(&Instruction::Call(indices.stdlib_init_manifest));
     emit_fail_if_retptr_error(&mut body, indices, SOURCE_PTR_LOCAL, SOURCE_LEN_LOCAL);
-
-    match config.abi {
-        WorkflowRole::Root => {
-            // The input envelope arrived as the call argument — params 0/1 ARE
-            // (DATA_PTR, DATA_LEN); no load-input round-trip.
-        }
-        WorkflowRole::PublishedAgent => {
-            // Input already stashed onto DATA_PTR/DATA_LEN above (before
-            // init-manifest could clobber the aliased SOURCE params).
-        }
-    }
 
     body.instruction(&Instruction::I32Const(config.static_data.steps.offset));
     body.instruction(&Instruction::LocalSet(STEPS_PTR_LOCAL));
@@ -1013,17 +989,9 @@ fn direct_run_function(
         emit_complete(&mut body, indices, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
     }
     super::deadline_scope::close_alarm(&mut body, indices);
-    match config.abi {
-        WorkflowRole::Root => {
-            // The terminal result travels as the return value:
-            // Ok(outcome::completed(output)).
-            emit_invoke_ok_completed_return(&mut body, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
-        }
-        WorkflowRole::PublishedAgent => {
-            // Agent capability shape: Ok(output) as a bare list<u8>.
-            emit_capabilities_ok_return(&mut body, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
-        }
-    }
+    // The terminal result travels as the return value:
+    // Ok(outcome::completed(output)).
+    emit_invoke_ok_completed_return(&mut body, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
     body.instruction(&Instruction::End);
     body
 }
@@ -1083,42 +1051,5 @@ pub(super) fn emit_invoke_ok_completed_return(
         memory_index: 0,
     }));
     // The return value: the result area's address.
-    body.instruction(&Instruction::I32Const(0));
-}
-
-/// Write `Ok(output)` for the agent-capabilities export into the fixed result
-/// area and leave its pointer on the stack.
-///
-/// Canonical-ABI layout of `result<list<u8>, error-info>` (payload align 8 —
-/// error-info carries a `u64`): result disc u8 @0 (0 = ok); ok payload = the
-/// `list<u8>` directly at @8: ptr @8, len @12. (Contrast the lifecycle export's
-/// `result<outcome, error-info>`, whose ok arm is `outcome::completed` — a
-/// variant disc @8 plus the list at @12/@16.) The error arm is `error-info` at
-/// @8, byte-identical to the lifecycle error arm, so the shared err writer
-/// applies unchanged.
-pub(super) fn emit_capabilities_ok_return(
-    body: &mut WasmFunction,
-    output_ptr_local: u32,
-    output_len_local: u32,
-) {
-    // Zero the header (result disc @0 = 0 = ok) and the ok payload slot.
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::I32Const(16));
-    body.instruction(&Instruction::MemoryFill(0));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::LocalGet(output_ptr_local));
-    body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
-        offset: 8,
-        align: 2,
-        memory_index: 0,
-    }));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::LocalGet(output_len_local));
-    body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
-        offset: 12,
-        align: 2,
-        memory_index: 0,
-    }));
     body.instruction(&Instruction::I32Const(0));
 }

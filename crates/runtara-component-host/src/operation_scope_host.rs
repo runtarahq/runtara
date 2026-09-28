@@ -28,66 +28,21 @@ use wasmtime::component::Linker;
 
 use crate::workflow::WorkflowState;
 
-/// WIT mirror of `runtara:agent/suspension.wake`.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    wasmtime::component::ComponentType,
-    wasmtime::component::Lift,
-    wasmtime::component::Lower,
-)]
-#[component(variant)]
-pub enum SuspensionWake {
-    /// Re-invoke at (or after) this wall-clock ms since the Unix epoch.
-    #[component(name = "at")]
-    At(u64),
-    /// Re-invoke when this host-owned instance wait settles.
-    #[component(name = "instances")]
-    Instances(String),
-}
+/// The suspension types are the shared `runtara:agent/types` mirrors.
+pub use crate::lifecycle::{
+    WorkflowOutcome as SuspendableOutcome, WorkflowSuspension as Suspension,
+    WorkflowWake as SuspensionWake,
+};
 
-/// WIT mirror of `runtara:agent/suspension.suspension`.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    wasmtime::component::ComponentType,
-    wasmtime::component::Lift,
-    wasmtime::component::Lower,
-)]
-#[component(record)]
-pub struct Suspension {
-    pub wakes: Vec<SuspensionWake>,
-    pub state: Vec<u8>,
-}
-
-/// WIT mirror of `runtara:agent/suspension.outcome`.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    wasmtime::component::ComponentType,
-    wasmtime::component::Lift,
-    wasmtime::component::Lower,
-)]
-#[component(variant)]
-pub enum SuspendableOutcome {
-    #[component(name = "completed")]
-    Completed(Vec<u8>),
-    #[component(name = "suspended")]
-    Suspended(Suspension),
-}
-
-impl SuspensionWake {
-    fn to_contract(&self) -> runtara_agent_suspension::Wake {
-        match self {
-            Self::At(at) => runtara_agent_suspension::Wake::At(*at),
-            Self::Instances(id) => runtara_agent_suspension::Wake::Instances(id.clone()),
+/// The contract form of a native agent's wake: only `at` and `instances` are
+/// an agent's to return; `on-signal` and `on-resume` belong to workflow logic.
+fn to_contract(wake: &SuspensionWake) -> Option<runtara_agent_suspension::Wake> {
+    match wake {
+        SuspensionWake::At(at) => Some(runtara_agent_suspension::Wake::At(*at)),
+        SuspensionWake::Instances(id) => {
+            Some(runtara_agent_suspension::Wake::Instances(id.clone()))
         }
+        SuspensionWake::OnSignal(_) | SuspensionWake::OnResume => None,
     }
 }
 
@@ -250,11 +205,15 @@ impl OperationScopeState {
                 runtara_agent_suspension::AGENT_INVALID_SUSPENSION
             )
         };
-        let contract: Vec<_> = wakes.iter().map(SuspensionWake::to_contract).collect();
+        let contract = wakes
+            .iter()
+            .map(to_contract)
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| invalid("an agent may wake only `at` or on `instances`".into()))?;
         runtara_agent_suspension::validate_suspension(&contract, state).map_err(invalid)?;
         if let Some(foreign) = wakes.iter().find_map(|wake| match wake {
             SuspensionWake::Instances(id) => Some(id),
-            SuspensionWake::At(_) => None,
+            _ => None,
         }) {
             return Err(invalid(format!(
                 "`{foreign}` is not an instance wait this operation registered; agents cannot register one"

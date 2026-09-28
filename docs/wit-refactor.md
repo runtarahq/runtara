@@ -481,6 +481,19 @@ This is the shape change: the emitter's hand-written layouts change here, and
 nowhere else. Sub-steps 5a–5d land as one PR (guest and host must agree).
 Sub-step 5e can follow separately.
 
+Progress: `CliRunHttp` deleted (532ef6c1); `WorkflowAbi` became
+`WorkflowRole{Root, PublishedAgent}` (bed692a1); 5a–5c landed as one commit.
+Differences from the text below:
+- The ABI version went from 2 to 3; Phase 3 had not bumped it.
+- A single forwarded wake still uses the @88 scratch writers. Two or more are
+  returned verbatim, without the step-deadline `at` (to add with 5d).
+- WaitForInstances still parks with `at`/`on-resume` plus the
+  `instance_waits` side channel; the runner also accepts `instances` wakes.
+  A composed workflow-agent shares its parent's Store, so the side channel
+  covers it.
+- Former reserved codes (`__rt_on_signal__`, `__rt_suspended__`) are ordinary
+  error codes now, passed through unchanged.
+
 **5a. WIT (`runtara-wit`)**
 - Replace `runtara:agent/types` and `suspension` with the unified `types`
   above. `capabilities.invoke` returns `outcome`.

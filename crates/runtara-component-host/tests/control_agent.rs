@@ -419,9 +419,15 @@ async fn plain_agent_instances_only_forward() {
                 .get_export_index(&mut store, Some(&exported), "invoke")
                 .unwrap();
             let invoke = instance
-                .get_typed_func::<(String, Vec<u8>), (Result<Vec<u8>, runtara_component_host::ErrorInfo>,)>(
-                    &mut store, invoke,
-                )
+                .get_typed_func::<
+                    (String, Vec<u8>),
+                    (
+                        Result<
+                            runtara_component_host::bindings::exports::runtara::agent::capabilities::Outcome,
+                            runtara_component_host::ErrorInfo,
+                        >,
+                    ),
+                >(&mut store, invoke)
                 .unwrap();
             let (result,) = invoke
                 .call_async(
