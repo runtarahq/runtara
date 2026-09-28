@@ -1,0 +1,280 @@
+// The host ABI of compiled workflow logic.
+//
+// Only compiled workflow logic imports these interfaces (published
+// workflow-agents included); ordinary agents are denied the whole package.
+// A workflow exports `lifecycle` and imports the rest.
+//
+// Released WIT is never edited, only versioned (see `runtara-wit`'s crate docs).
+package runtara:workflow@1.0.0;
+
+// The workflow invoke export. Input arrives as the call argument (JSON bytes,
+// the `{data, variables}` envelope) and the terminal result is the return
+// value. `invoke` is async-typed: blocking legality is keyed to the function
+// type under the component-model-async rules, and a workflow's task must be
+// allowed to block (it enters async-typed agent exports and, in parallel
+// regions, waits on waitable-sets). The lift stays the plain sync ABI.
+interface lifecycle {
+    use runtara:agent/types@1.0.0.{error-info};
+
+    /// One pending wait: the deterministic signal id (checkpoint id) the
+    /// instance is parked on, plus the persisted absolute timeout deadline.
+    record signal-wait {
+        checkpoint-id: string,
+        deadline-ms: option<u64>,
+    }
+
+    /// Why the run stopped early — how to re-invoke it.
+    variant wake {
+        /// Re-invoke at (or after) this wall-clock ms-since-epoch.
+        at(u64),
+        /// Re-invoke when the signal arrives, or at its deadline.
+        on-signal(signal-wait),
+        /// Lifecycle pause/drain: re-invoke on relaunch.
+        on-resume,
+    }
+
+    /// The success arm. `suspended` carries a wake-SET with re-invoke-on-ANY
+    /// semantics: sequential lowering emits singletons today, but the set
+    /// shape is load-bearing for future parallel branches / joins (see the
+    /// plan's concurrency-forward note) — single-wake would be an ABI break.
+    variant outcome {
+        completed(list<u8>),         // terminal output (JSON bytes)
+        suspended(list<wake>),
+    }
+
+    /// Async-TYPED since 0.2.0 (ABI v2): blocking
+    /// legality is keyed to the function type under the ratified
+    /// component-model-async rules, and a workflow's task must be allowed to
+    /// block — it transitively enters async-typed agent exports and, in
+    /// parallel regions, waits on waitable-sets. The lift stays the plain
+    /// sync ABI (the emitted core signature is unchanged); wasmtime drives
+    /// the export as an async task via call_async.
+    invoke: async func(input: list<u8>) -> result<outcome, error-info>;
+}
+
+// Lifecycle and persistence services: persisted input, terminal status,
+// events, cancellation, heartbeat, checkpoints and durable sleep.
+interface runtime {
+    record signal-info {
+        signal-type: string,
+        command-id: string,
+        payload: list<u8>,
+        checkpoint-id: option<string>,
+    }
+
+    record custom-signal-info {
+        signal-id: string,
+        checkpoint-id: string,
+        payload: list<u8>,
+    }
+
+    record checkpoint-result {
+        found: bool,
+        state: list<u8>,
+        pending-signal: option<signal-info>,
+        custom-signal: option<custom-signal-info>,
+    }
+
+    load-input: func() -> result<list<u8>, string>;
+
+    instance-id: func() -> result<string, string>;
+
+    complete: func(output: list<u8>) -> result<_, string>;
+
+    fail: func(error: list<u8>) -> result<_, string>;
+
+    custom-event: func(
+        kind: string,
+        payload: list<u8>,
+    ) -> result<_, string>;
+
+    debug-mode-enabled: func() -> result<bool, string>;
+
+    breakpoint-pause: func() -> result<_, string>;
+
+    heartbeat: func() -> result<_, string>;
+
+    /// Read the pending lifecycle command without acknowledging it or publishing
+    /// terminal/suspended status. Rate limiting may return none between polls.
+    /// The guest retains an observed command while cleaning up active subtasks,
+    /// then calls handle-checkpoint-signal with its type and command-id.
+    /// Custom WaitForSignal payloads are not consumed by this operation.
+    poll-signal: func() -> result<option<signal-info>, string>;
+
+    /// Legacy consuming helper; do not use while subtasks still need cleanup.
+    is-cancelled: func() -> result<bool, string>;
+
+    check-signals: func() -> result<bool, string>;
+
+    poll-custom-signal: func(
+        checkpoint-id: string,
+    ) -> result<option<list<u8>>, string>;
+
+    /// Durable managed-input state, independent of debug telemetry.
+    variant input-state {
+        open,
+        accepted(list<u8>),
+        closed(string),
+    }
+
+    /// Register the immutable wait descriptor (JSON), with its original deadline.
+    /// Tenant and invocation authority come from the host, never the descriptor.
+    register-input: func(
+        descriptor: list<u8>,
+        deadline-ms: option<u64>,
+    ) -> result<_, string>;
+
+    /// Read accepted bytes or expire an unanswered wait using persistence time.
+    poll-input: func(signal-id: string) -> result<input-state, string>;
+
+    /// Abandon this wait without replacing a response that already won.
+    close-input: func(signal-id: string) -> result<input-state, string>;
+
+    now-ms: func() -> result<u64, string>;
+
+    durable-sleep: func(ms: u64) -> result<_, string>;
+
+    blocking-sleep: func(ms: u64) -> result<_, string>;
+
+    get-checkpoint: func(
+        checkpoint-id: string,
+    ) -> result<option<list<u8>>, string>;
+
+    checkpoint: func(
+        checkpoint-id: string,
+        state: list<u8>,
+    ) -> result<checkpoint-result, string>;
+
+    handle-checkpoint-signal: func(
+        signal-type: string,
+        command-id: string,
+    ) -> result<bool, string>;
+
+    record-retry-attempt: func(
+        checkpoint-id: string,
+        attempt-number: u32,
+        error-message: option<string>,
+    ) -> result<_, string>;
+
+    durable-sleep-checkpoint: func(
+        checkpoint-id: string,
+        state: list<u8>,
+        ms: u64,
+    ) -> result<_, string>;
+}
+
+// Generic owned child executions. Private runtime ABI, not part of the DSL:
+// no compilation, graph traversal, retry or recovery policy in the host.
+interface tasks {
+    use runtara:agent/types@1.0.0.{error-info};
+    use lifecycle.{wake};
+
+    resource task;
+
+    variant entry {
+        capability(string),
+        workflow,
+    }
+
+    // Generated by the parent. The launch adapter validates this relative to
+    // its immutable root/tenant/parent scope; it is not an authorization token.
+    record invocation-context {
+        path: string,
+        attempt: u64,
+    }
+
+    enum execution-error {
+        unavailable,
+        closed,
+        capacity,
+        invalid-binding,
+        invalid-context,
+        invalid-task,
+        worker-lost,
+    }
+
+    enum cancel-status {
+        requested,
+        already-requested,
+        already-terminal,
+    }
+
+    variant task-outcome {
+        completed(list<u8>),
+        failed(error-info),
+        suspended(list<wake>),
+        cancelled,
+        timed-out,
+        trapped(string),
+    }
+
+    // No compilation, graph traversal, retry or recovery policy in the host.
+    start: func(binding: string, entry: entry, input: list<u8>, context: invocation-context)
+        -> result<task, execution-error>;
+    request-cancel: func(handle: borrow<task>) -> result<cancel-status, execution-error>;
+    // A terminal result is published only after execution has been destroyed.
+    join: async func(handle: borrow<task>) -> result<task-outcome, execution-error>;
+    // Idempotent while the resource remains owned. Cancels/reaps live work.
+    release: async func(handle: borrow<task>) -> result<_, execution-error>;
+}
+
+// Compiler-emitted operation scope around an operation-scoped call site (a
+// suspending capability or a control mutation). The host keys everything by
+// `op-hash = sha256(checkpoint-key)` together with the caller instance it
+// owns, where `checkpoint-key` is the canonical v2 Agent checkpoint key of
+// the call site. Identity never comes from agent input.
+interface operation {
+    use runtara:agent/suspension@1.0.0.{wake};
+
+    /// Enter the operation of this call site. With `load`, the continuation
+    /// saved for `attempt` becomes the operation's context, which the host
+    /// hands to the capability (`runtara:agent/continuation`, or the
+    /// control executor's `continuation` argument).
+    enter: func(checkpoint-key: string, attempt: u32, load: bool) -> result<_, string>;
+
+    /// Persist `state` as the entered operation's continuation, attach its
+    /// instance waits, and leave the operation. The caller then parks until
+    /// any wake fires or the step deadline passes. Rejects a suspension that
+    /// breaks the caps (no wakes, more than 16, a wait id over 64 bytes, a
+    /// state over 64 KiB).
+    suspend: func(state: list<u8>, wakes: list<wake>) -> result<_, string>;
+
+    /// Leave the operation after the capability completed (`failed` false) or
+    /// failed. A failure discards the continuation, so a replay starts the
+    /// operation afresh.
+    exit: func(failed: bool);
+
+    /// Drop everything kept for the operation once its result is
+    /// checkpointed. Idempotent.
+    release: func(checkpoint-key: string);
+}
+
+// Durable instance waits of a WaitForInstances step: the run waits for its
+// direct child runs to finish. `key` is the step's canonical v2
+// `wait-instances` checkpoint key; the host keys the wait by
+// `wait-id = sha256(key)` together with the tenant and the waiting run.
+//
+// Requests and reads are JSON bytes:
+// - request: `{instanceIds: [string], mode: "all" | "any", deadlineMs?: u64}`;
+// - read: `{mode, resolution: null | "satisfied" | "deadline" | "empty",
+//   finished: [{instanceId, status, finishedAtMs, output, outputBytes,
+//   outputOmitted, error, errorOmitted}], remaining: [string], deadlineMs}`,
+//   pending while `resolution` is null;
+// - error: `{code, message, retryAfterMs?}` with code `invalid`, `denied`,
+//   `not-child`, `not-found`, `too-large`, `replay-conflict`, `closed` or
+//   `unavailable`.
+interface waits {
+    /// Register the wait of this step on `request`, or find it on replay (the
+    /// first registration's targets, mode and deadline stand), and read it
+    /// without blocking. A pending read makes the run park on the wait when
+    /// it suspends. A failed call closes the step's wait, so a retry
+    /// registers afresh.
+    register: func(key: string, request: list<u8>) -> result<list<u8>, string>;
+
+    /// Read the step's registered wait without blocking.
+    poll: func(key: string) -> result<list<u8>, string>;
+
+    /// Drop the step's settled wait once its result is checkpointed.
+    /// Idempotent.
+    release: func(key: string);
+}

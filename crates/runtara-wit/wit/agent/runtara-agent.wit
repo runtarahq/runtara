@@ -1,0 +1,79 @@
+// The shared vocabulary of every runtara component, and the agent export shape.
+//
+// Every agent and every compiled workflow uses `types`. Each agent exports a
+// copy of `capabilities` under its own `runtara:agent-<id>` package (generated
+// by `runtara_wit::agent_package`); the interface here is the reference shape
+// the host binds against. Inputs and outputs are opaque bytes carrying JSON.
+//
+// Released WIT is never edited, only versioned (see `runtara-wit`'s crate docs).
+package runtara:agent@1.0.0;
+
+interface types {
+    record error-info {
+        code: string,
+        message: string,
+        category: string,            // "transient" | "permanent" | "timeout" | ...
+        severity: string,            // "warning" | "error" | "critical"
+        retryable: bool,
+        retry-after-ms: option<u64>,
+        attributes: option<string>,  // JSON object
+    }
+}
+
+// Typed agent suspension.
+//
+// A capability declared `suspends` may answer an invocation with a suspension
+// instead of a result: the host keeps `state` as the operation's continuation
+// (at most 64 KiB), parks the calling workflow runner-free, and re-invokes the
+// capability when ANY wake fires or the step deadline passes.
+interface suspension {
+    /// When the host should re-invoke a suspended capability. Wakes form a
+    /// set with re-invoke-on-ANY semantics; the step deadline always applies
+    /// in addition.
+    variant wake {
+        /// Re-invoke at (or after) this wall-clock ms since the Unix epoch.
+        at(u64),
+        /// Re-invoke when the host-owned instance wait with this id settles.
+        instances(string),
+    }
+
+    /// A capability's request to be re-invoked later with `state` as its
+    /// continuation. `wakes` is non-empty.
+    record suspension {
+        wakes: list<wake>,
+        state: list<u8>,
+    }
+
+    /// The success arm of a suspendable `invoke`.
+    variant outcome {
+        /// Terminal output (JSON bytes), exactly like `capabilities.invoke`.
+        completed(list<u8>),
+        /// Park the operation and re-invoke later.
+        suspended(suspension),
+    }
+}
+
+/// Continuation delivery for suspending agents: the state saved by the last
+/// suspension of the operation this call runs in, or none on its first
+/// invocation. The host derives the operation from its own execution state,
+/// never from guest arguments.
+interface continuation {
+    continuation: func() -> option<list<u8>>;
+}
+
+interface capabilities {
+    use types.{error-info};
+
+    // The connection (if any) is delivered inside `input` under `_connection`;
+    // there is no out-of-band connection argument. A connection is an opaque
+    // id: the host proxy resolves credentials by (id, tenant), so nothing
+    // secret crosses this boundary.
+    invoke: async func(
+        capability-id: string,
+        input: list<u8>,
+    ) -> result<list<u8>, error-info>;
+}
+
+world agent {
+    export capabilities;
+}

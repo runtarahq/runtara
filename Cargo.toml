@@ -38,6 +38,7 @@ members = [
     "crates/runtara-control-contract",
     "crates/runtara-workflow-wit",
     "crates/runtara-invocation-contract",
+    "crates/runtara-wit",
     "crates/runtara-component-host",
     "crates/agents/runtara-agent-crypto",
     "crates/agents/runtara-agent-xml",

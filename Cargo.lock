@@ -5094,6 +5094,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtara-wit"
+version = "8.9.12"
+dependencies = [
+ "runtara-control-contract",
+ "wit-parser 0.247.0",
+]
+
+
+[[package]]
 name = "runtara-workflow-runtime"
 version = "8.9.12"
 dependencies = [

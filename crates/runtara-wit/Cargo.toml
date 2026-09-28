@@ -1,0 +1,24 @@
+[package]
+name = "runtara-wit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Canonical WIT contracts of every runtara component"
+keywords = ["wasm", "component-model", "wit"]
+categories = ["development-tools"]
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# `resolve()`: every package in one wit_parser resolve (compiler and tests).
+resolve = ["dep:wit-parser"]
+
+[dependencies]
+wit-parser = { version = "0.247", optional = true }
+
+[dev-dependencies]
+runtara-control-contract = { path = "../runtara-control-contract" }
+wit-parser = "0.247"
