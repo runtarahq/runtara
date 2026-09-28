@@ -3,9 +3,9 @@
  *
  * Mirrors `on_error_route_shape_supported` in
  * `crates/runtara-workflows/src/direct_wasm/support.rs`: Agent, EmbedWorkflow,
- * Split, While, AiAgent and WaitForSignal steps may carry `onError` edges;
- * every other step type is rejected by the direct compiler, so the editor must
- * not offer an error route there. The backend aliases with spaces are included
+ * Split, While, AiAgent, WaitForSignal and WaitForInstances steps may carry
+ * `onError` edges; every other step type is rejected by the direct compiler,
+ * so the editor must not offer an error route there. The backend aliases with spaces are included
  * because loaded workflows may carry the display form of the step type.
  */
 const STEP_TYPES_WITH_ERROR_ROUTING = new Set([
@@ -17,6 +17,8 @@ const STEP_TYPES_WITH_ERROR_ROUTING = new Set([
   'While',
   'WaitForSignal',
   'Wait For Signal',
+  'WaitForInstances',
+  'Wait for Instances',
 ]);
 
 /**

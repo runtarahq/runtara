@@ -49,7 +49,9 @@ describe('suspension helpers', () => {
   it('labels suspension reasons', () => {
     expect(suspensionReasonLabel('paused')).toBe('Paused');
     expect(suspensionReasonLabel('waiting_signal')).toBe('Waiting for signal');
-    expect(suspensionReasonLabel('waiting_instances')).toBe('Waiting for runs');
+    expect(suspensionReasonLabel('waiting_instances')).toBe(
+      'Waiting for instances'
+    );
     expect(suspensionReasonLabel('sleeping')).toBe('Sleeping');
     expect(suspensionReasonLabel('shutdown')).toBe('Shutdown');
     expect(suspensionReasonLabel(null)).toBeNull();
@@ -67,7 +69,9 @@ describe('suspension helpers', () => {
 
   it('builds the waiting toolbar text', () => {
     expect(waitingStatusText('waiting_signal')).toBe('Waiting for signal');
-    expect(waitingStatusText('waiting_instances')).toBe('Waiting for runs');
+    expect(waitingStatusText('waiting_instances')).toBe(
+      'Waiting for instances'
+    );
     expect(waitingStatusText('sleeping')).toBe('Waiting (sleeping)');
     expect(waitingStatusText(null)).toBe('Waiting');
   });

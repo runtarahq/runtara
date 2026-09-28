@@ -23,6 +23,7 @@ import { FilterStepField } from './FilterStepField';
 import { GroupByStepField } from './GroupByStepField';
 import { AiAgentStepField } from './AiAgentStepField';
 import { WaitForSignalStepField } from './WaitForSignalStepField';
+import { WaitForInstancesStepField } from './WaitForInstancesStepField';
 import { LogStepField } from './LogStepField';
 import { WhileStepField } from './WhileStepField';
 import { DelayStepField } from './DelayStepField';
@@ -522,6 +523,12 @@ function InputMappingWrapper(config: Record<string, unknown>) {
 
   if (stepType === 'WaitForSignal') {
     return <WaitForSignalStepField {...config} name={config.name as string} />;
+  }
+
+  if (stepType === 'WaitForInstances') {
+    return (
+      <WaitForInstancesStepField {...config} name={config.name as string} />
+    );
   }
 
   if (stepType === 'Log') {

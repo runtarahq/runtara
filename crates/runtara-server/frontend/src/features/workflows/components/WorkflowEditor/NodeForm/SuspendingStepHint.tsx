@@ -10,9 +10,9 @@ import {
 import { NodeFormContext } from './NodeFormContext';
 
 /**
- * Inline hint on an Agent step whose capability suspends the run (control
- * `wait`): the step must stay durable (E028) and set a timeout above 0 ms
- * (E029). Turns into a warning while either requirement is unmet.
+ * Inline hint on an Agent step whose capability suspends the run (a
+ * long-polling agent): the step must stay durable (E028) and set a timeout
+ * above 0 ms (E029). Turns into a warning while either requirement is unmet.
  */
 export function SuspendingStepHint() {
   const form = useFormContext();

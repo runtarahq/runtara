@@ -155,7 +155,12 @@ function markBackEdges(
 }
 
 /** Step types whose in-flight execution is what parks a suspended run. */
-const DURABLE_WAIT_STEP_TYPES = new Set(['WaitForSignal', 'Delay', 'Wait']);
+const DURABLE_WAIT_STEP_TYPES = new Set([
+  'WaitForSignal',
+  'WaitForInstances',
+  'Delay',
+  'Wait',
+]);
 
 export function buildReplayModel(
   summaries: StepSummaryLike[],
@@ -164,7 +169,8 @@ export function buildReplayModel(
 ): ReplayModel {
   // A parked run records its durable-wait step as `running` (never `suspended`),
   // and suspension is an instance-level state. So when the instance is suspended,
-  // reclassify a still-running WaitForSignal/Delay as the parked (amber) node.
+  // reclassify a still-running WaitForSignal/WaitForInstances/Delay as the
+  // parked (amber) node.
   const instanceSuspended = options.instanceStatus === 'suspended';
   const nodes = new Map<string, ReplayGraphNode>();
   const nodeIds: string[] = [];

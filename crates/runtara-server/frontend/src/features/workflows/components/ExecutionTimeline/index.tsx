@@ -25,6 +25,7 @@ import {
   Wrench,
   Hand,
   Brain,
+  Merge,
 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Badge } from '@/shared/components/ui/badge';
@@ -179,6 +180,14 @@ const stepTypeConfig: Record<
     dot: 'bg-amber-500',
     label: 'Wait For Signal',
     icon: Hand,
+  },
+  WaitForInstances: {
+    text: 'text-amber-500',
+    bg: 'bg-amber-500/10',
+    border: 'border-amber-500',
+    dot: 'bg-amber-500',
+    label: 'Wait for Instances',
+    icon: Merge,
   },
   Default: {
     text: 'text-gray-500',

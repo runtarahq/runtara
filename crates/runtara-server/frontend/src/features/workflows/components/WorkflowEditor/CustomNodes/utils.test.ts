@@ -3353,3 +3353,173 @@ describe('Mapping-object round-trip (Log/Error/WaitForSignal contexts)', () => {
     expect(step2).not.toHaveProperty('action');
   });
 });
+
+describe('WaitForInstances round-trip', () => {
+  function makeWaitInstancesGraph(
+    extra: Record<string, unknown> = {}
+  ): ExecutionGraphDto & { entryPoint: string } {
+    return makeGraph({
+      id: 'waitRuns',
+      stepType: 'WaitForInstances',
+      name: 'Wait for approvals',
+      instanceIds: {
+        valueType: 'reference',
+        value: 'steps.startAll.outputs.instanceIds',
+      },
+      mode: 'any',
+      timeoutMs: { valueType: 'immediate', value: 86400000 },
+      renderingParameters: { x: 0, y: 0 },
+      ...extra,
+    });
+  }
+
+  function editEntry(node: Node, type: string, patch: Record<string, unknown>) {
+    const mapping = ((node.data as any).inputMapping || []) as any[];
+    const idx = mapping.findIndex((item) => item.type === type);
+    expect(idx, `inputMapping entry '${type}' missing`).toBeGreaterThanOrEqual(
+      0
+    );
+    mapping[idx] = { ...mapping[idx], ...patch };
+  }
+
+  it('loads as a basic node with its fields in the form mapping', () => {
+    const { nodes } = executionGraphToReactFlow(
+      makeWaitInstancesGraph() as any
+    );
+    const node = nodes.find((n) => n.id === 'waitRuns')!;
+    expect(node.type).toBe(NODE_TYPES.BasicNode);
+    expect((node.data as any).inputMapping).toEqual([
+      {
+        type: 'instanceIds',
+        value: 'steps.startAll.outputs.instanceIds',
+        valueType: 'reference',
+        typeHint: 'array',
+      },
+      {
+        type: 'mode',
+        value: 'any',
+        valueType: 'immediate',
+        typeHint: 'string',
+      },
+      {
+        type: 'timeoutMs',
+        value: 86400000,
+        valueType: 'immediate',
+        typeHint: 'number',
+      },
+    ]);
+  });
+
+  it('round-trips every field with exactly the DSL keys', () => {
+    const step = roundTripStep(makeWaitInstancesGraph({ breakpoint: true }));
+    expect(step).toEqual({
+      id: 'waitRuns',
+      stepType: 'WaitForInstances',
+      name: 'Wait for approvals',
+      instanceIds: {
+        valueType: 'reference',
+        value: 'steps.startAll.outputs.instanceIds',
+      },
+      mode: 'any',
+      timeoutMs: { valueType: 'immediate', value: 86400000 },
+      breakpoint: true,
+    });
+  });
+
+  it('keeps an absent mode and timeout absent', () => {
+    const graph = makeWaitInstancesGraph();
+    const raw = graph.steps!.waitRuns as Record<string, unknown>;
+    delete raw.mode;
+    delete raw.timeoutMs;
+
+    const step = roundTripStep(graph);
+    expect(step).not.toHaveProperty('mode');
+    expect(step).not.toHaveProperty('timeoutMs');
+    expect(step).not.toHaveProperty('inputMapping');
+  });
+
+  it('round-trips a literal id array and a reference default', () => {
+    const literal = roundTripStep(
+      makeWaitInstancesGraph({
+        instanceIds: { valueType: 'immediate', value: ['run-a', 'run-b'] },
+      })
+    );
+    expect(literal.instanceIds).toEqual({
+      valueType: 'immediate',
+      value: ['run-a', 'run-b'],
+    });
+
+    const withDefault = roundTripStep(
+      makeWaitInstancesGraph({
+        instanceIds: {
+          valueType: 'reference',
+          value: 'variables.children',
+          default: [],
+        },
+      })
+    );
+    expect(withDefault.instanceIds).toEqual({
+      valueType: 'reference',
+      value: 'variables.children',
+      default: [],
+    });
+  });
+
+  it('round-trips a composite array of references', () => {
+    const instanceIds = {
+      valueType: 'composite',
+      value: [
+        { valueType: 'reference', value: 'steps.startA.outputs.instanceId' },
+        { valueType: 'reference', value: 'steps.startB.outputs.instanceId' },
+      ],
+    };
+    const step = roundTripStep(makeWaitInstancesGraph({ instanceIds }));
+    expect(step.instanceIds).toEqual(instanceIds);
+  });
+
+  it('serializes form edits and drops cleared or unrepresentable fields', () => {
+    const { nodes, edges } = executionGraphToReactFlow(
+      makeWaitInstancesGraph() as any
+    );
+    const node = nodes.find((n) => n.id === 'waitRuns')!;
+    // Form-only fields that must never reach the deny_unknown_fields step.
+    Object.assign(node.data as any, {
+      durable: true,
+      executionTimeout: 120,
+      maxRetries: 3,
+      retryDelay: 1000,
+      retryStrategy: 'Linear',
+    });
+
+    editEntry(node, 'instanceIds', {
+      value: '["run-a", "run-b"]',
+      valueType: 'immediate',
+    });
+    editEntry(node, 'mode', { value: 'all' });
+    editEntry(node, 'timeoutMs', {
+      value: 'data.deadlineMs',
+      valueType: 'reference',
+    });
+
+    let round = composeExecutionGraph(nodes, edges, { name: 'wait-edit' });
+    let step = (round!.steps as Record<string, any>).waitRuns;
+    expect(step).toEqual({
+      id: 'waitRuns',
+      stepType: 'WaitForInstances',
+      name: 'Wait for approvals',
+      instanceIds: { valueType: 'immediate', value: ['run-a', 'run-b'] },
+      mode: 'all',
+      timeoutMs: { valueType: 'reference', value: 'data.deadlineMs' },
+    });
+
+    editEntry(node, 'timeoutMs', {
+      value: '{{ data.t }}',
+      valueType: 'template',
+    });
+    editEntry(node, 'instanceIds', { value: '', valueType: 'reference' });
+    round = composeExecutionGraph(nodes, edges, { name: 'wait-clear' });
+    step = (round!.steps as Record<string, any>).waitRuns;
+    expect(step).not.toHaveProperty('timeoutMs');
+    expect(step).not.toHaveProperty('instanceIds');
+  });
+});

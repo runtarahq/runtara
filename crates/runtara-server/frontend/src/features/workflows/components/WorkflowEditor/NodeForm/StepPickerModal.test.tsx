@@ -1,10 +1,11 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { NodeFormContext } from './NodeFormContext';
 import type { ExtendedAgent } from '@/features/workflows/queries';
 import type { EntitlementsSnapshot } from '@/shared/entitlements';
+import type { StepTypeInfo } from '@/generated/RuntaraRuntimeApi';
 
 // Auth — the hook eventually pulls a token even if no fetch runs.
 vi.mock('react-oidc-context', () => ({
@@ -29,7 +30,7 @@ vi.mock('@/features/workflows/hooks', async () => {
 });
 
 // useEntitlements is exercised indirectly via the inlined snapshot.
-import { StepPickerPanel } from './StepPickerModal';
+import { StepPickerPanel, type StepPickerResult } from './StepPickerModal';
 
 function snapshot(agents: string[]): EntitlementsSnapshot {
   return {
@@ -70,7 +71,9 @@ const fakeAgents: ExtendedAgent[] = [
 
 function renderPicker(
   snap: EntitlementsSnapshot,
-  agentList: ExtendedAgent[] = fakeAgents
+  agentList: ExtendedAgent[] = fakeAgents,
+  stepTypes: StepTypeInfo[] = [],
+  onSelect: (result: StepPickerResult) => void = () => {}
 ) {
   window.__RUNTARA_CONFIG__ = { entitlements: snap };
   const queryClient = new QueryClient({
@@ -81,7 +84,7 @@ function renderPicker(
       <MemoryRouter>
         <NodeFormContext.Provider
           value={{
-            stepTypes: [],
+            stepTypes,
             agents: agentList,
             workflows: [],
             executionGraph: null,
@@ -89,7 +92,7 @@ function renderPicker(
             previousSteps: [],
           }}
         >
-          <StepPickerPanel onSelect={() => {}} />
+          <StepPickerPanel onSelect={onSelect} />
         </NodeFormContext.Provider>
       </MemoryRouter>
     </QueryClientProvider>
@@ -132,6 +135,80 @@ describe('StepPickerPanel — entitlement-aware agent filter', () => {
     ).not.toBeInTheDocument();
     expect(
       screen.queryByTestId('step-picker-agent-csv')
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe('StepPickerPanel — step types', () => {
+  beforeEach(() => {
+    delete window.__RUNTARA_CONFIG__;
+  });
+
+  afterEach(() => {
+    delete window.__RUNTARA_CONFIG__;
+  });
+
+  it('selects WaitForInstances by id or by its display name alone', () => {
+    const onSelect = vi.fn();
+    renderPicker(
+      snapshot([]),
+      [],
+      [
+        {
+          name: 'Wait for Instances',
+          description: 'Park until child runs finish',
+        } as StepTypeInfo,
+      ],
+      onSelect
+    );
+
+    fireEvent.click(
+      screen.getByTestId('step-picker-step-type-waitforinstances')
+    );
+    expect(onSelect).toHaveBeenCalledWith({
+      stepType: 'WaitForInstances',
+      name: 'Wait for Instances',
+    });
+  });
+
+  it('keeps WaitForInstances out of the AI Agent tool picker', () => {
+    window.__RUNTARA_CONFIG__ = { entitlements: snapshot([]) };
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter>
+          <NodeFormContext.Provider
+            value={{
+              stepTypes: [
+                {
+                  id: 'WaitForInstances',
+                  name: 'Wait for Instances',
+                } as StepTypeInfo,
+                {
+                  id: 'WaitForSignal',
+                  name: 'Wait for Signal',
+                } as StepTypeInfo,
+              ],
+              agents: [],
+              workflows: [],
+              executionGraph: null,
+              isLoading: false,
+              previousSteps: [],
+            }}
+          >
+            <StepPickerPanel mode="tool" onSelect={() => {}} />
+          </NodeFormContext.Provider>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    expect(
+      screen.getByTestId('step-picker-step-type-waitforsignal')
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId('step-picker-step-type-waitforinstances')
     ).not.toBeInTheDocument();
   });
 });

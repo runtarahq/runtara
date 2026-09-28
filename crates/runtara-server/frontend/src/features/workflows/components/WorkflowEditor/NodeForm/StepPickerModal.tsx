@@ -91,6 +91,7 @@ function normalizeStepType(stepType: StepTypeInfo): string {
   const knownMappings: Record<string, string> = {
     'AI Agent': 'AiAgent',
     'Wait for Signal': 'WaitForSignal',
+    'Wait for Instances': 'WaitForInstances',
   };
   return knownMappings[name] ?? name.replace(/\s+/g, '');
 }

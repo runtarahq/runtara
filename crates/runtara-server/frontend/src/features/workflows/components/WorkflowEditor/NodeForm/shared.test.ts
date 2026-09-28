@@ -54,6 +54,19 @@ const SHAPES: Record<string, OutputShapeJson> = {
     },
     siblingFields: [],
   },
+  WaitForInstances: {
+    outputs: {
+      kind: 'object',
+      fields: [
+        { name: 'mode', type: 'string' },
+        { name: 'resolution', type: 'string' },
+        { name: 'finished', type: 'array' },
+        { name: 'remaining', type: 'array' },
+        { name: 'deadlineMs', type: 'integer' },
+      ],
+    },
+    siblingFields: [],
+  },
 };
 
 function graphWithUpstream(
@@ -180,6 +193,20 @@ describe('composePreviousSteps control-step output shapes', () => {
     );
     expect(byName['items']).toBe('array');
     expect(byName['count']).toBe('integer');
+  });
+
+  it('suggests the settled wait fields of a WaitForInstances step', () => {
+    const [wait] = previousStepsFor(
+      graphWithUpstream('waitRuns', 'WaitForInstances', 'Wait for runs')
+    );
+
+    expect(wait.outputs.map((o) => [o.path, o.type])).toEqual([
+      ["steps['waitRuns'].outputs.mode", 'string'],
+      ["steps['waitRuns'].outputs.resolution", 'string'],
+      ["steps['waitRuns'].outputs.finished", 'array'],
+      ["steps['waitRuns'].outputs.remaining", 'array'],
+      ["steps['waitRuns'].outputs.deadlineMs", 'integer'],
+    ]);
   });
 
   it('falls back to a generic outputs suggestion when the shape cache is cold', () => {

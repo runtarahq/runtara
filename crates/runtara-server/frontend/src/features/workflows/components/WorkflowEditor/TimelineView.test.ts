@@ -126,6 +126,7 @@ describe('getTimelineRouteAddActions — error handler coverage', () => {
       'Split',
       'While',
       'WaitForSignal',
+      'WaitForInstances',
     ]) {
       const nodeType =
         stepType === 'AiAgent' ? NODE_TYPES.AiAgentNode : NODE_TYPES.BasicNode;

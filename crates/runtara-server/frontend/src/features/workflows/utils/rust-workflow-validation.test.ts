@@ -19,6 +19,7 @@ import {
   validateWorkflowStartInputsWithRust,
 } from './rust-workflow-validation';
 import { analyzeFormWithRust } from '@/shared/forms';
+import { NODE_TYPES, STEP_TYPES } from '@/features/workflows/config/workflow';
 
 const wasmBytes = readFileSync(
   path.resolve(process.cwd(), 'src/wasm/validation/runtara_validation_bg.wasm')
@@ -329,5 +330,34 @@ describe('rust workflow validation WASM', () => {
     expect(switchShape.outputShape.siblingFields).toEqual([
       expect.objectContaining({ name: 'route', type: 'string' }),
     ]);
+
+    const waitInstances = (await getStaticStepTypeSchemaWithRust(
+      'WaitForInstances'
+    )) as any;
+    expect(waitInstances.outputShape.outputs.kind).toBe('object');
+    expect(waitInstances.outputShape.outputs.fields).toEqual([
+      expect.objectContaining({ name: 'mode', type: 'string' }),
+      expect.objectContaining({ name: 'resolution', type: 'string' }),
+      expect.objectContaining({ name: 'finished', type: 'array' }),
+      expect.objectContaining({ name: 'remaining', type: 'array' }),
+      expect.objectContaining({ name: 'deadlineMs', type: 'integer' }),
+    ]);
+  });
+
+  it('registers the WaitForInstances step under the id and display name the WASM serves', async () => {
+    const stepTypes = await getStaticStepTypesWithRust();
+    const waitInstances = stepTypes.step_types.find(
+      (stepType: { id?: string }) => stepType.id === 'WaitForInstances'
+    ) as { id: string; name: string; category?: string } | undefined;
+
+    expect(waitInstances).toEqual(
+      expect.objectContaining({
+        id: 'WaitForInstances',
+        name: 'Wait for Instances',
+      })
+    );
+    // The editor looks nodes up by either spelling.
+    expect(STEP_TYPES[waitInstances!.id]).toBe(NODE_TYPES.BasicNode);
+    expect(STEP_TYPES[waitInstances!.name]).toBe(NODE_TYPES.BasicNode);
   });
 });

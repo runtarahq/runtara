@@ -295,6 +295,7 @@ function getStepIcon(stepType: string) {
       return Bot;
     case 'Delay':
     case 'WaitForSignal':
+    case 'WaitForInstances':
       return Pause;
     case 'Log':
       return PenLine;

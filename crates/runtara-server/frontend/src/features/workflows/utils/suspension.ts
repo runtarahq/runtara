@@ -8,7 +8,7 @@ interface SuspendableRun {
 const REASON_LABELS: Record<SuspensionReason, string> = {
   paused: 'Paused',
   waiting_signal: 'Waiting for signal',
-  waiting_instances: 'Waiting for runs',
+  waiting_instances: 'Waiting for instances',
   sleeping: 'Sleeping',
   shutdown: 'Shutdown',
 };
