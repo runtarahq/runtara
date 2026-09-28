@@ -48,7 +48,7 @@ fn push_slot_i64(body: &mut WasmFunction, slot_ptr_local: u32, offset: i32) {
 /// `track_events: false`; this makes it structural rather than a policy the
 /// library path can bypass.
 fn events_enabled(indices: &DirectCoreFunctionIndices, track_events: bool) -> bool {
-    track_events && indices.abi != crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
+    track_events && indices.abi != crate::direct_wasm::component::WorkflowRole::PublishedAgent
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -442,7 +442,7 @@ pub(super) fn emit_step_breakpoint(
     // Stripped at compile time rather than ignored at runtime: the artifact
     // then carries no breakpoint import at all, so it cannot pause, and that is
     // provable from the artifact instead of resting on a flag.
-    if indices.abi == crate::direct_wasm::component::WorkflowAbi::AgentCapabilities {
+    if indices.abi == crate::direct_wasm::component::WorkflowRole::PublishedAgent {
         return;
     }
 

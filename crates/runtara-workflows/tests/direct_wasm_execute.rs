@@ -17,7 +17,7 @@ use base64::Engine;
 use runtara_database_contract::*;
 use runtara_workflows::direct_wasm::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DirectArtifactMetadata, DirectCompilationInput,
-    DirectCompileError, WorkflowAbi, analyze_direct_wasm_support, compile_direct_workflow,
+    DirectCompileError, WorkflowRole, analyze_direct_wasm_support, compile_direct_workflow,
     compile_direct_workflow_composed, compile_direct_workflow_composed_configured,
     compose_direct_workflow, emit_direct_component_artifacts,
 };
@@ -1133,7 +1133,7 @@ fn run_direct_workflow_capture_attempt(
             agent_slug: None,
         },
         components_dir,
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         // Runtime import kept — omit-runtime has its own dedicated test.
         false,
     )
@@ -6229,7 +6229,7 @@ fn compile_invoke_abi_artifact_full(
             agent_slug: None,
         },
         components_dir,
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         omit_runtime,
     )
     .expect("invoke-abi compile+compose succeeds");
@@ -6260,7 +6260,7 @@ fn compile_invoke_abi_artifact_with_children(
             agent_slug: None,
         },
         components_dir,
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("child invoke-abi compile+compose succeeds");
@@ -6410,8 +6410,8 @@ fn compile_agent_capabilities_artifact(
             agent_slug: None,
         },
         components_dir,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
-        // omit_runtime is forced true for AgentCapabilities by the compiler.
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
+        // omit_runtime is forced true for PublishedAgent by the compiler.
         false,
     )
     .expect("agent-capabilities compile+compose succeeds");
@@ -6420,7 +6420,7 @@ fn compile_agent_capabilities_artifact(
 }
 
 /// Workflow-as-agent slice a: a pure workflow compiled with the
-/// `AgentCapabilities` ABI exports `runtara:agent-<slug>/capabilities.invoke(
+/// `PublishedAgent` ABI exports `runtara:agent-<slug>/capabilities.invoke(
 /// capability-id, input) -> result<list<u8>, error-info>` — the exact agent
 /// shape — and is invocable AS an agent through a wasmtime typed call. With no
 /// explicit slug, the export id derives from the graph name via the shared
@@ -6433,10 +6433,7 @@ fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
         compile_agent_capabilities_artifact(&components_dir, "workflow-as-agent", PURE_PASSTHROUGH);
 
     // Shape: agent-shaped export under the derived slug, zero runtime imports.
-    assert!(
-        compiled.omit_runtime,
-        "AgentCapabilities implies omit-runtime"
-    );
+    assert!(compiled.omit_runtime, "PublishedAgent implies omit-runtime");
     let world = &compiled.component_artifacts.world_wit;
     assert!(
         world.contains("export runtara:agent-pure-passthrough/capabilities@1.0.0"),
@@ -6497,7 +6494,7 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
             agent_slug: Some("delay-agent".to_string()),
         },
         &components_dir,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("a durable workflow now compiles as an agent");
@@ -6552,7 +6549,7 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
                 agent_slug: Some(id.to_string()),
             },
             &components_dir,
-            runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+            runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
             false,
         )
         .expect("agent compile succeeds")
@@ -8595,7 +8592,7 @@ fn direct_wasm_execute_invoke_wait_parks_on_signal_then_resumes() {
 }
 
 /// P5 full-parity loop, in process: a child workflow PUBLISHED as an agent
-/// (compiled with the AgentCapabilities ABI under its slug, staged under the
+/// (compiled with the PublishedAgent ABI under its slug, staged under the
 /// native-agent naming convention with a synthesized meta sidecar) is composed
 /// into a PARENT workflow like any native agent — targeted by an ordinary
 /// Agent step as `agentId: <slug>, capabilityId: "run"` — and the parent
@@ -8640,7 +8637,7 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
             agent_slug: Some("shout-echo".to_string()),
         },
         &components_dir,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("child agent compile+compose succeeds");
@@ -8719,7 +8716,7 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
             agent_catalog: Some(catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("parent compile succeeds");
@@ -8816,7 +8813,7 @@ fn workflow_agent_error_step_cannot_spoof_signal_park_or_suspend() {
                 agent_slug: Some(slug.clone()),
             },
             &components_dir,
-            runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+            runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
             false,
         )
         .expect("child agent compile+compose succeeds");
@@ -8895,7 +8892,7 @@ fn workflow_agent_error_step_cannot_spoof_signal_park_or_suspend() {
                     agent_catalog: Some(catalog.clone()),
                     agent_slug: None,
                 },
-                runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+                runtara_workflows::direct_wasm::WorkflowRole::Root,
                 false,
             )
             .expect("parent compile succeeds");
@@ -9064,7 +9061,7 @@ fn a_non_staged_agent_cannot_park_its_parent_with_a_reserved_code() {
                         }),
                         agent_slug: None,
                     },
-                    WorkflowAbi::InvokeHostImports,
+                    WorkflowRole::Root,
                     false,
                 )
                 .expect("parent compile succeeds");
@@ -9225,7 +9222,7 @@ fn a_reserved_code_bubbling_out_of_a_staged_workflow_agent_cannot_park_the_root(
                 agent_slug: Some(slug.clone()),
             },
             &components,
-            runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+            runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
             false,
         )
         .expect("workflow-agent compile+compose succeeds");
@@ -9304,7 +9301,7 @@ fn a_reserved_code_bubbling_out_of_a_staged_workflow_agent_cannot_park_the_root(
                     agent_catalog: Some(catalog.clone()),
                     agent_slug: None,
                 },
-                WorkflowAbi::InvokeHostImports,
+                WorkflowRole::Root,
                 false,
             )
             .expect("root compile succeeds");
@@ -9420,7 +9417,7 @@ fn parent_workflow_invokes_published_durable_workflow_agent() {
             agent_slug: Some("durable-delay-echo".to_string()),
         },
         &components_dir,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("durable child publishes as an agent");
@@ -9487,7 +9484,7 @@ fn parent_workflow_invokes_published_durable_workflow_agent() {
             agent_catalog: Some(catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("parent compile succeeds");
@@ -9585,7 +9582,7 @@ fn composed_durable_child_checkpoints_are_namespaced_per_invocation_site() {
             agent_slug: Some("ns-delay-echo".to_string()),
         },
         &components_dir,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("durable child publishes as an agent");
@@ -9670,7 +9667,7 @@ fn composed_durable_child_checkpoints_are_namespaced_per_invocation_site() {
             agent_catalog: Some(catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("parent compile succeeds");
@@ -9809,7 +9806,7 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
             agent_slug: Some("ns-grandchild".to_string()),
         },
         &components_dir,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("grandchild publishes as an agent");
@@ -9873,7 +9870,7 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
             agent_catalog: Some(grandchild_catalog),
             agent_slug: Some("ns-mid".to_string()),
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("mid compiles as an agent");
@@ -9935,7 +9932,7 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
             agent_catalog: Some(mid_catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("top compile succeeds");
@@ -10043,7 +10040,7 @@ fn stale_durable_workflow_agent_artifact_fails_compose() {
             agent_slug: Some("stale-durable".to_string()),
         },
         &components_dir,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("durable child compiles as an agent");
@@ -10120,7 +10117,7 @@ fn stale_durable_workflow_agent_artifact_fails_compose() {
             agent_catalog: Some(catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("parent compile itself succeeds");
@@ -10192,7 +10189,7 @@ fn uncertified_pure_workflow_agent_artifact_fails_compose() {
             agent_slug: Some("stale-pure".to_string()),
         },
         &components_dir,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("pure child compiles as an agent");
@@ -10263,7 +10260,7 @@ fn uncertified_pure_workflow_agent_artifact_fails_compose() {
             agent_catalog: Some(catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("parent compile succeeds");
@@ -10329,7 +10326,7 @@ fn composed_children_waiting_on_same_step_get_per_site_signal_ids() {
             agent_slug: Some("sig-approve-echo".to_string()),
         },
         &components_dir,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("waiting child publishes as an agent");
@@ -10406,7 +10403,7 @@ fn composed_children_waiting_on_same_step_get_per_site_signal_ids() {
             agent_catalog: Some(catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("parent compile succeeds");
@@ -10575,7 +10572,7 @@ fn embedded_children_waiting_on_same_step_get_per_site_signal_ids() {
             agent_catalog: None,
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("embed parent compiles");
@@ -10700,7 +10697,7 @@ fn scoped_signal_wait_survives_drain_and_resume() {
             agent_slug: Some("sig-drain-echo".to_string()),
         },
         &components_dir,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("waiting child publishes as an agent");
@@ -10763,7 +10760,7 @@ fn scoped_signal_wait_survives_drain_and_resume() {
             agent_catalog: Some(catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("parent compile succeeds");
@@ -10885,7 +10882,7 @@ fn pause_during_composed_child_wait_suspends_and_resumes() {
             agent_slug: Some("pause-approve-echo".to_string()),
         },
         &components_dir,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("waiting child publishes as an agent");
@@ -10948,7 +10945,7 @@ fn pause_during_composed_child_wait_suspends_and_resumes() {
             agent_catalog: Some(catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("parent compile succeeds");
@@ -11122,7 +11119,7 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
             agent_slug: Some("pause-grandchild".to_string()),
         },
         &components_dir,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("grandchild publishes as an agent");
@@ -11185,7 +11182,7 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
             agent_catalog: Some(grandchild_catalog),
             agent_slug: Some("pause-mid".to_string()),
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("mid compiles as an agent");
@@ -11247,7 +11244,7 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
             agent_catalog: Some(mid_catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("top compile succeeds");
@@ -11379,7 +11376,7 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
             agent_slug: Some("tool-delay-echo".to_string()),
         },
         &components_dir,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("durable tool child publishes as an agent");
@@ -11444,7 +11441,7 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
             agent_catalog: Some(catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("parent compile succeeds");
@@ -13003,7 +13000,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             agent_catalog: Some(dispatcher.catalog()),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )
     .unwrap();
@@ -13122,7 +13119,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             agent_catalog: Some(dispatcher.catalog()),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )
     .unwrap();
@@ -13179,7 +13176,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             agent_catalog: Some(dispatcher.catalog()),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )
     .unwrap();
@@ -13218,7 +13215,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             agent_slug: Some("trusted-wrapper".into()),
         },
         &components,
-        WorkflowAbi::AgentCapabilities,
+        WorkflowRole::PublishedAgent,
         false,
     )
     .unwrap();
@@ -13256,7 +13253,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             )),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )
     .unwrap();
@@ -13371,7 +13368,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             agent_catalog: Some(dispatcher.catalog()),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )
     .unwrap();
@@ -13534,7 +13531,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             agent_slug: Some("trusted-wrapper".into()),
         },
         &upgraded_components,
-        WorkflowAbi::AgentCapabilities,
+        WorkflowRole::PublishedAgent,
         false,
     )
     .unwrap();
@@ -13797,7 +13794,7 @@ async fn a_stale_trusted_pin_fails_only_its_own_agent_calls() {
                 agent_catalog: Some(dispatcher.catalog()),
                 agent_slug: None,
             },
-            WorkflowAbi::InvokeHostImports,
+            WorkflowRole::Root,
             false,
         )
         .unwrap();
@@ -14069,7 +14066,7 @@ async fn trusted_presigning_as_an_ai_tool_keeps_credentials_out_of_model_message
             agent_catalog: Some(dispatcher.catalog()),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )
     .unwrap();

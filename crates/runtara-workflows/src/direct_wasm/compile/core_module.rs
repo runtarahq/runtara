@@ -42,9 +42,9 @@ pub(super) struct DirectCoreConfig {
     pub(super) run_plan: DirectRunPlan,
     pub(super) static_data: DirectCoreStaticData,
     pub(super) track_events: bool,
-    /// Top-level export shape (see `component::WorkflowAbi`). Defaults to
+    /// Top-level export shape (see `component::WorkflowRole`). Defaults to
     /// `lifecycle.invoke`; set via [`Self::with_abi`].
-    pub(super) abi: crate::direct_wasm::component::WorkflowAbi,
+    pub(super) abi: crate::direct_wasm::component::WorkflowRole,
     /// When true, the component imports no `runtara:workflow/runtime`,
     /// so the emitter must NOT lower any `runtime.*` call — the terminal
     /// `complete`/`fail` are dropped and the result travels solely in-band via
@@ -62,7 +62,7 @@ impl DirectCoreConfig {
         track_events: bool,
     ) -> Result<Self, DirectCompileError> {
         Self::new_inner(manifest, manifest_json, track_events, None)
-            .map(|config| config.with_abi(crate::direct_wasm::component::WorkflowAbi::default()))
+            .map(|config| config.with_abi(crate::direct_wasm::component::WorkflowRole::default()))
     }
 
     pub(super) fn new_with_workflow_id(
@@ -75,7 +75,7 @@ impl DirectCoreConfig {
     }
 
     /// Override the export shape.
-    pub(super) fn with_abi(mut self, abi: crate::direct_wasm::component::WorkflowAbi) -> Self {
+    pub(super) fn with_abi(mut self, abi: crate::direct_wasm::component::WorkflowRole) -> Self {
         self.abi = abi;
         self
     }
@@ -95,7 +95,7 @@ impl DirectCoreConfig {
         let variables_json =
             direct_core_variables_json(&manifest.graph.variables, workflow_id, manifest.version)?;
         Ok(Self {
-            abi: crate::direct_wasm::component::WorkflowAbi::default(),
+            abi: crate::direct_wasm::component::WorkflowRole::default(),
             omit_runtime: false,
             run_plan: direct_run_plan(manifest)?,
             static_data: DirectCoreStaticData::new_with_child_workflows(
@@ -178,7 +178,7 @@ pub(super) fn emit_direct_core_module(
     // A pure callable workflow can cooperate between CPU loop iterations
     // without a runtime or I/O import. This is a canonical intrinsic, not a
     // host scheduler API, and works with the existing synchronous lift.
-    if config.abi == crate::direct_wasm::component::WorkflowAbi::AgentCapabilities {
+    if config.abi == crate::direct_wasm::component::WorkflowRole::PublishedAgent {
         types.ty().function([], [ValType::I32]);
         imports.import(
             "$root",
@@ -249,7 +249,7 @@ pub(super) fn emit_direct_core_module(
         import_indices.waitable_set_wait = Some(builtin(
             if matches!(
                 config.abi,
-                crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
+                crate::direct_wasm::component::WorkflowRole::PublishedAgent
             ) {
                 "[cancellable][waitable-set-wait]"
             } else {
@@ -670,8 +670,8 @@ fn export_core_function(
         || super::core_imports::is_capabilities_invoke_export(resolve, interface, function)
     {
         // The entry export of the current ABI (the world declares exactly one):
-        // `lifecycle.invoke` under InvokeHostImports, `capabilities.invoke`
-        // under AgentCapabilities.
+        // `lifecycle.invoke` under Root, `capabilities.invoke`
+        // under PublishedAgent.
         // `direct_run_function` shapes its prologue, param fold, and return
         // convention from `config.abi` and the export's param count.
         direct_run_function(import_indices, config, signature.params.len())
@@ -908,7 +908,7 @@ fn direct_run_function(
     config: &DirectCoreConfig,
     export_param_count: usize,
 ) -> WasmFunction {
-    use crate::direct_wasm::component::WorkflowAbi;
+    use crate::direct_wasm::component::WorkflowRole;
 
     const DATA_PTR_LOCAL: u32 = 0;
     const DATA_LEN_LOCAL: u32 = 1;
@@ -938,7 +938,7 @@ fn direct_run_function(
     // init-manifest's error path scribbles into — so stash the input onto
     // DATA_PTR/DATA_LEN (0/1) BEFORE init-manifest runs. (The cap-id at 0/1 is
     // unused: a workflow-agent has a single self-capability.)
-    if matches!(config.abi, WorkflowAbi::AgentCapabilities) {
+    if matches!(config.abi, WorkflowRole::PublishedAgent) {
         body.instruction(&Instruction::LocalGet(2));
         body.instruction(&Instruction::LocalSet(DATA_PTR_LOCAL));
         body.instruction(&Instruction::LocalGet(3));
@@ -951,11 +951,11 @@ fn direct_run_function(
     emit_fail_if_retptr_error(&mut body, indices, SOURCE_PTR_LOCAL, SOURCE_LEN_LOCAL);
 
     match config.abi {
-        WorkflowAbi::InvokeHostImports => {
+        WorkflowRole::Root => {
             // The input envelope arrived as the call argument — params 0/1 ARE
             // (DATA_PTR, DATA_LEN); no load-input round-trip.
         }
-        WorkflowAbi::AgentCapabilities => {
+        WorkflowRole::PublishedAgent => {
             // Input already stashed onto DATA_PTR/DATA_LEN above (before
             // init-manifest could clobber the aliased SOURCE params).
         }
@@ -1004,22 +1004,22 @@ fn direct_run_function(
 
     // The additive `runtime.complete` records terminal status/output host-side
     // during the migration. Suppressed when the runtime is omitted (nothing to
-    // call) and under AgentCapabilities. Production workflow-agents are
+    // call) and under PublishedAgent. Production workflow-agents are
     // statically certified non-suspending and omit runtime; the retained
     // lower-level runtime-importing test/migration shape shares the parent's
     // instance, so completing it here would finish the parent mid-flight. The
     // capability return value is the sole terminal result.
-    if !config.omit_runtime && !matches!(config.abi, WorkflowAbi::AgentCapabilities) {
+    if !config.omit_runtime && !matches!(config.abi, WorkflowRole::PublishedAgent) {
         emit_complete(&mut body, indices, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
     }
     super::deadline_scope::close_alarm(&mut body, indices);
     match config.abi {
-        WorkflowAbi::InvokeHostImports => {
+        WorkflowRole::Root => {
             // The terminal result travels as the return value:
             // Ok(outcome::completed(output)).
             emit_invoke_ok_completed_return(&mut body, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
         }
-        WorkflowAbi::AgentCapabilities => {
+        WorkflowRole::PublishedAgent => {
             // Agent capability shape: Ok(output) as a bare list<u8>.
             emit_capabilities_ok_return(&mut body, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
         }

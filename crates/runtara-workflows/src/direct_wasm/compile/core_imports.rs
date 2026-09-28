@@ -177,7 +177,7 @@ pub(super) struct DirectCoreImportIndices {
 impl DirectCoreImportIndices {
     pub(super) fn require_all(
         self,
-        abi: crate::direct_wasm::component::WorkflowAbi,
+        abi: crate::direct_wasm::component::WorkflowRole,
         omit_runtime: bool,
         has_connections: bool,
     ) -> Result<DirectCoreFunctionIndices, DirectCompileError> {
@@ -697,7 +697,7 @@ pub(super) struct DirectCoreFunctionIndices {
     /// The top-level export shape the module is emitted against. Threaded
     /// through the indices because every lowerer already receives them, and
     /// the return convention at fail and suspend sites depends on it.
-    pub(super) abi: crate::direct_wasm::component::WorkflowAbi,
+    pub(super) abi: crate::direct_wasm::component::WorkflowRole,
     /// When true, the component imports no runtime; the terminal `complete`/
     /// `fail` are NOT lowered and the result travels solely via the invoke
     /// return value. Runtime index fields hold a poison sentinel and must never
@@ -898,7 +898,7 @@ impl DirectCoreFunctionIndices {
     /// Whether the terminal `runtime.complete`/`runtime.fail` calls lower.
     ///
     /// Suppressed when the runtime is omitted (nothing to call) and under the
-    /// `AgentCapabilities` export. Production workflow-agents omit the runtime
+    /// `PublishedAgent` export. Production workflow-agents omit the runtime
     /// after static non-suspending certification; the retained lower-level
     /// runtime-importing test/migration shape shares the parent's instance, so
     /// its terminal `complete` would finish the parent mid-flight. An agent
@@ -908,7 +908,7 @@ impl DirectCoreFunctionIndices {
         !self.omit_runtime
             && !matches!(
                 self.abi,
-                crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
+                crate::direct_wasm::component::WorkflowRole::PublishedAgent
             )
     }
 }
@@ -1100,7 +1100,7 @@ fn is_wait_instances_import(
 }
 
 /// True for `runtara:workflow/lifecycle.invoke` — the entry export
-/// under [`WorkflowAbi::InvokeHostImports`].
+/// under [`WorkflowRole::Root`].
 pub(super) fn is_lifecycle_invoke_export(
     resolve: &Resolve,
     interface: Option<&WorldKey>,

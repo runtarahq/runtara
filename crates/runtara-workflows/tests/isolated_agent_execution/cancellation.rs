@@ -173,7 +173,7 @@ async fn execute_cancelled_http(parallel: bool, recover: bool, root_stop: bool) 
             agent_catalog: None,
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
         ["http".into()].into(),
     )

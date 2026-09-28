@@ -167,7 +167,7 @@ async fn run_retry_in_scope(
                 agent_slug: None,
             },
             direct_e2e_components_dir(),
-            WorkflowAbi::InvokeHostImports,
+            WorkflowRole::Root,
             false,
         )?
     } else {

@@ -1211,7 +1211,7 @@ impl CompilationService {
     }
 
     /// Publish a workflow version AS an agent: compile it with the
-    /// `AgentCapabilities` ABI (exports `runtara:agent-<slug>/capabilities`),
+    /// `PublishedAgent` ABI (exports `runtara:agent-<slug>/capabilities`),
     /// synthesize the catalog `AgentInfo` from its input/output schemas, and
     /// stage both into the tenant's workflow-agent dir — after which any
     /// parent workflow can target it as `agentId: <slug>, capabilityId: "run"`
@@ -1275,7 +1275,7 @@ impl CompilationService {
             runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
         }
 
-        // 2. Compile with the AgentCapabilities ABI + compose. Same catalog
+        // 2. Compile with the PublishedAgent ABI + compose. Same catalog
         //    overlay as a normal compile so a workflow-agent may itself invoke
         //    previously-published workflow-agents.
         let Some(components_dir) = self.direct_compilation.components_dir.clone() else {
@@ -1305,7 +1305,7 @@ impl CompilationService {
         let result = tokio::task::spawn_blocking(move || {
             let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
                 direct_input,
-                runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+                runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
                 // Static preflight excludes durable suspension. Callable Agent
                 // waits retain their guest stack and cooperate with parent cancellation.
                 true,

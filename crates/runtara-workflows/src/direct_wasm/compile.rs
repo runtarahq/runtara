@@ -527,7 +527,7 @@ pub struct DirectCompilationInput {
     /// `None` falls back to the statically linked registry, matching the Rust
     /// codegen compiler's transition behavior.
     pub agent_catalog: Option<std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>>,
-    /// The workflow's slug — the capability id an `AgentCapabilities` compile
+    /// The workflow's slug — the capability id an `PublishedAgent` compile
     /// exports as `runtara:agent-<slug>/capabilities`. Ignored for the other
     /// ABIs. `None` derives one from the graph name + workflow id (tests /
     /// legacy paths); production passes `workflows.slug`.
@@ -973,12 +973,12 @@ pub fn compile_direct_workflow_composed(
 }
 
 /// Fully-configured compile+compose: explicit
-/// [`super::component::WorkflowAbi`] — the entry the ABI-differential test
+/// [`super::component::WorkflowRole`] — the entry the ABI-differential test
 /// axis drives.
 pub fn compile_direct_workflow_composed_configured(
     input: DirectCompilationInput,
     components_dir: impl AsRef<Path>,
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     let mut result = compile_direct_workflow_with_abi(input, abi, omit_runtime)?;
@@ -1015,7 +1015,7 @@ pub fn compile_direct_workflow(
     ensure_supported_production_workflow_abi()?;
     compile_direct_workflow_with_abi(
         input,
-        super::component::WorkflowAbi::InvokeHostImports,
+        super::component::WorkflowRole::Root,
         omit_runtime_from_env(),
     )
 }
@@ -1047,7 +1047,7 @@ pub fn direct_lowering_tag() -> String {
     // success without rebuilding anything.
     format!(
         "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v24,agent-composition=standard-v1,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,trusted-artifacts=v1,on-signal-remap=v1,wide-result-errors=v1,omit_runtime={}",
-        workflow_abi_tag(super::component::WorkflowAbi::InvokeHostImports),
+        workflow_abi_tag(super::component::WorkflowRole::Root),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()
     )
@@ -1057,10 +1057,10 @@ pub fn direct_lowering_tag() -> String {
 ///
 /// Spelled out rather than derived from `Debug` so renaming a variant cannot
 /// silently invalidate every image in a deployment.
-fn workflow_abi_tag(abi: super::component::WorkflowAbi) -> &'static str {
+fn workflow_abi_tag(abi: super::component::WorkflowRole) -> &'static str {
     match abi {
-        super::component::WorkflowAbi::InvokeHostImports => "invoke",
-        super::component::WorkflowAbi::AgentCapabilities => "agent",
+        super::component::WorkflowRole::Root => "invoke",
+        super::component::WorkflowRole::PublishedAgent => "agent",
     }
 }
 
@@ -1108,14 +1108,14 @@ fn ensure_supported_production_workflow_abi_raw(
     }
 }
 
-/// [`compile_direct_workflow`] with an explicit [`super::component::WorkflowAbi`].
+/// [`compile_direct_workflow`] with an explicit [`super::component::WorkflowRole`].
 ///
 /// Production callers use [`compile_direct_workflow`], which always emits the
 /// lifecycle invoke ABI. This lower-level entry selects between the invoke
 /// and agent-capabilities shapes.
 pub fn compile_direct_workflow_with_abi(
     input: DirectCompilationInput,
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     compile_direct_workflow_selected(
@@ -1132,7 +1132,7 @@ pub fn compile_direct_workflow_with_abi(
 #[cfg(any(test, feature = "direct-wasm-integration-tests"))]
 pub fn compile_direct_workflow_with_scoped_agents(
     input: DirectCompilationInput,
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
     scoped_agents: std::collections::BTreeSet<String>,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
@@ -1146,7 +1146,7 @@ pub fn compile_direct_workflow_with_scoped_agents(
 
 fn compile_direct_workflow_selected(
     input: DirectCompilationInput,
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
     selection: AgentLoweringSelection,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
@@ -1167,7 +1167,7 @@ fn compile_direct_workflow_selected(
 
 fn compile_direct_workflow_inner(
     input: DirectCompilationInput,
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime_requested: bool,
     selection: AgentLoweringSelection,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
@@ -1214,7 +1214,7 @@ fn compile_direct_workflow_inner(
     // Production publishing additionally requires the static safety report.
     let needs_runtime = manifest.feature_summary.needs_runtime(input.track_events);
     let omit_runtime = match abi {
-        super::component::WorkflowAbi::AgentCapabilities => {
+        super::component::WorkflowRole::PublishedAgent => {
             !needs_runtime
                 || (!workflow_agent_safety.may_suspend_or_sleep
                     && !workflow_agent_requires_runtime(
@@ -1223,17 +1223,15 @@ fn compile_direct_workflow_inner(
                         input.track_events,
                     ))
         }
-        super::component::WorkflowAbi::InvokeHostImports => {
-            omit_runtime_requested && !needs_runtime
-        }
+        super::component::WorkflowRole::Root => omit_runtime_requested && !needs_runtime,
     };
 
-    // The export id an AgentCapabilities compile publishes under. A supplied
+    // The export id an PublishedAgent compile publishes under. A supplied
     // slug is re-validated defensively (a corrupt/legacy row would otherwise
     // surface as an opaque wit-parser lexer error that bricks the compile);
     // absent one, derive from the graph name — same transform the server uses.
     let export_agent_id = match abi {
-        super::component::WorkflowAbi::AgentCapabilities => {
+        super::component::WorkflowRole::PublishedAgent => {
             let slug = match input.agent_slug.as_deref() {
                 Some(slug) => {
                     runtara_dsl::agent_meta::validate_workflow_slug(slug).map_err(|e| {
@@ -1253,8 +1251,7 @@ fn compile_direct_workflow_inner(
         _ => None,
     };
 
-    let root_supports_isolation =
-        abi == super::component::WorkflowAbi::InvokeHostImports && !omit_runtime;
+    let root_supports_isolation = abi == super::component::WorkflowRole::Root && !omit_runtime;
     let (scoped_agents, selection_report) =
         selection.resolve(&manifest, &input.workflow_id, root_supports_isolation)?;
     for agent in &scoped_agents {
@@ -1382,10 +1379,11 @@ fn compile_direct_workflow_inner(
     })
 }
 
-fn workflow_abi_version(abi: super::component::WorkflowAbi) -> u32 {
+fn workflow_abi_version(abi: super::component::WorkflowRole) -> u32 {
     match abi {
-        super::component::WorkflowAbi::InvokeHostImports
-        | super::component::WorkflowAbi::AgentCapabilities => DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
+        super::component::WorkflowRole::Root | super::component::WorkflowRole::PublishedAgent => {
+            DIRECT_WORKFLOW_INVOKE_ABI_VERSION
+        }
     }
 }
 
@@ -1396,41 +1394,37 @@ fn emit_direct_artifact(
     support_json: &[u8],
     track_events: bool,
     workflow_id: &str,
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
     scoped_agents: &std::collections::BTreeSet<String>,
 ) -> Result<(Vec<u8>, std::collections::BTreeMap<String, u32>), DirectCompileError> {
     let abi_json = match abi {
-        super::component::WorkflowAbi::InvokeHostImports => {
-            serde_json::to_vec(&serde_json::json!({
-                "abiVersion": DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
-                "artifactKind": "direct-invoke-component",
-                "componentRunExport": LIFECYCLE_INTERFACE_NAME,
-                "entryPointExecutable": true,
-                "runtimeExecutable": true,
-                "outputMode": "invoke-result-outcome",
-                "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
-                "stepCount": manifest.feature_summary.total_steps,
-                "note": "unified invoke export: input as the call argument, terminal result as result<outcome, error-info>; runtime interface host-satisfied; complete/fail still fire additively"
-            }))?
-        }
-        super::component::WorkflowAbi::AgentCapabilities => {
-            serde_json::to_vec(&serde_json::json!({
-                "abiVersion": DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
-                "artifactKind": "direct-agent-capability-component",
-                "componentRunExport": format!(
-                    "runtara:agent-{}/capabilities@{DIRECT_AGENT_WIT_VERSION}",
-                    export_agent_id.unwrap_or(super::component::CAPABILITIES_EXPORT_AGENT_ID)
-                ),
-                "entryPointExecutable": true,
-                "runtimeExecutable": true,
-                "outputMode": "capabilities-invoke-list",
-                "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
-                "stepCount": manifest.feature_summary.total_steps,
-                "note": "workflow-as-agent: exports runtara:agent-<slug>/capabilities.invoke(cap-id, input) -> result<list<u8>, error-info>; zero runtime imports; pure/non-suspending"
-            }))?
-        }
+        super::component::WorkflowRole::Root => serde_json::to_vec(&serde_json::json!({
+            "abiVersion": DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
+            "artifactKind": "direct-invoke-component",
+            "componentRunExport": LIFECYCLE_INTERFACE_NAME,
+            "entryPointExecutable": true,
+            "runtimeExecutable": true,
+            "outputMode": "invoke-result-outcome",
+            "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
+            "stepCount": manifest.feature_summary.total_steps,
+            "note": "unified invoke export: input as the call argument, terminal result as result<outcome, error-info>; runtime interface host-satisfied; complete/fail still fire additively"
+        }))?,
+        super::component::WorkflowRole::PublishedAgent => serde_json::to_vec(&serde_json::json!({
+            "abiVersion": DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
+            "artifactKind": "direct-agent-capability-component",
+            "componentRunExport": format!(
+                "runtara:agent-{}/capabilities@{DIRECT_AGENT_WIT_VERSION}",
+                export_agent_id.unwrap_or(super::component::CAPABILITIES_EXPORT_AGENT_ID)
+            ),
+            "entryPointExecutable": true,
+            "runtimeExecutable": true,
+            "outputMode": "capabilities-invoke-list",
+            "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
+            "stepCount": manifest.feature_summary.total_steps,
+            "note": "workflow-as-agent: exports runtara:agent-<slug>/capabilities.invoke(cap-id, input) -> result<list<u8>, error-info>; zero runtime imports; pure/non-suspending"
+        }))?,
     };
 
     let (mut component, parallel_pools) = emit_direct_component(
@@ -1464,7 +1458,7 @@ fn emit_direct_component(
     manifest_json: &[u8],
     track_events: bool,
     workflow_id: &str,
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
     scoped_agents: &std::collections::BTreeSet<String>,
@@ -1511,7 +1505,7 @@ fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileE
     // Pinned to the default (invoke) world to match DirectCoreConfig::new.
     build_direct_component_resolve_configured(
         &[],
-        super::component::WorkflowAbi::InvokeHostImports,
+        super::component::WorkflowRole::Root,
         false,
         None,
         &std::collections::BTreeMap::new(),
@@ -1526,7 +1520,7 @@ fn build_direct_component_resolve_with_agents(
     // See build_direct_component_resolve: pinned to the default world.
     build_direct_component_resolve_configured(
         agents,
-        super::component::WorkflowAbi::InvokeHostImports,
+        super::component::WorkflowRole::Root,
         false,
         None,
         &std::collections::BTreeMap::new(),
@@ -1537,7 +1531,7 @@ fn build_direct_component_resolve_with_agents(
 #[cfg(test)]
 fn build_direct_component_resolve_configured(
     agents: &[String],
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
     parallel_pools: &std::collections::BTreeMap<String, u32>,
@@ -1564,7 +1558,7 @@ fn build_direct_component_resolve_configured(
 #[allow(clippy::too_many_arguments)]
 fn build_direct_component_resolve_scoped(
     agents: &[String],
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
     parallel_pools: &std::collections::BTreeMap<String, u32>,
@@ -1596,7 +1590,7 @@ fn build_direct_component_resolve_scoped(
 #[allow(clippy::too_many_arguments)]
 fn build_direct_component_resolve_with_waits(
     agents: &[String],
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
     parallel_pools: &std::collections::BTreeMap<String, u32>,
@@ -1613,8 +1607,8 @@ fn build_direct_component_resolve_with_waits(
     // Every runtara package, once; the world below imports only what it names.
     let mut resolve = runtara_wit::resolve().map_err(component_error)?;
     match abi {
-        super::component::WorkflowAbi::InvokeHostImports => {}
-        super::component::WorkflowAbi::AgentCapabilities => {
+        super::component::WorkflowRole::Root => {}
+        super::component::WorkflowRole::PublishedAgent => {
             // Export the agent capability interface under the workflow's own
             // slug. The reserved-slug check at save time guarantees the export
             // package can never collide with an imported native agent's.
@@ -1714,10 +1708,10 @@ fn build_direct_component_resolve_with_waits(
         }
     }
     match abi {
-        super::component::WorkflowAbi::InvokeHostImports => {
+        super::component::WorkflowRole::Root => {
             workflow_wit.push_str(&format!("    export {LIFECYCLE_INTERFACE_NAME};\n"))
         }
-        super::component::WorkflowAbi::AgentCapabilities => {
+        super::component::WorkflowRole::PublishedAgent => {
             let id = export_agent_id.unwrap_or(super::component::CAPABILITIES_EXPORT_AGENT_ID);
             workflow_wit.push_str(&format!(
                 "    export runtara:agent-{id}/capabilities@{AGENT_WIT_VERSION};\n"
@@ -1757,7 +1751,7 @@ fn emit_runtime_fail_return(
 ) {
     // The additive `runtime.fail` records the terminal error host-side during
     // the migration. Suppressed when terminal status is suppressed
-    // (omit-runtime, or an AgentCapabilities child whose caller owns the
+    // (omit-runtime, or an PublishedAgent child whose caller owns the
     // instance) — the `Err(error-info)` return value is the sole terminal error.
     if indices.report_terminal_status() {
         body.instruction(&Instruction::LocalGet(error_ptr_local));

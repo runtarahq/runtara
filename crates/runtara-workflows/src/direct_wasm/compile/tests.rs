@@ -2163,7 +2163,7 @@ fn direct_core_emits_arena_reset_memory_copy_for_loops() {
             DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
         let (resolve, world) = build_direct_component_resolve_scoped(
             &[],
-            super::super::component::WorkflowAbi::InvokeHostImports,
+            super::super::component::WorkflowRole::Root,
             false,
             None,
             &Default::default(),
@@ -2221,7 +2221,7 @@ fn direct_core_emits_value_store_retain_for_loops() {
             DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
         let (resolve, world) = build_direct_component_resolve_scoped(
             &[],
-            super::super::component::WorkflowAbi::InvokeHostImports,
+            super::super::component::WorkflowRole::Root,
             false,
             None,
             &Default::default(),
@@ -6682,17 +6682,17 @@ fn direct_core_lowers_durable_agent_retry_loop() {
 
 #[test]
 fn direct_core_lifecycle_agent_retry_parks_without_sleeping() {
-    use super::super::component::WorkflowAbi;
+    use super::super::component::WorkflowRole;
 
     let graph = durable_agent_retry_graph();
     let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
     let manifest_json = manifest.to_canonical_json().expect("manifest json");
     let core_config = DirectCoreConfig::new(&manifest, &manifest_json, false)
         .expect("core config")
-        .with_abi(WorkflowAbi::InvokeHostImports);
+        .with_abi(WorkflowRole::Root);
     let (resolve, world) = build_direct_component_resolve_configured(
         &manifest.feature_summary.agent_ids,
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
         None,
         &std::collections::BTreeMap::new(),
@@ -10979,9 +10979,9 @@ fn direct_compile_sequential_split_uses_standard_cancellable_calls() {
 /// recompile returned success without rebuilding anything.
 #[test]
 fn abi_is_part_of_the_lowering_tag() {
-    use super::super::component::WorkflowAbi;
-    let invoke = super::workflow_abi_tag(WorkflowAbi::InvokeHostImports);
-    let agent = super::workflow_abi_tag(WorkflowAbi::AgentCapabilities);
+    use super::super::component::WorkflowRole;
+    let invoke = super::workflow_abi_tag(WorkflowRole::Root);
+    let agent = super::workflow_abi_tag(WorkflowRole::PublishedAgent);
     assert_ne!(
         invoke, agent,
         "invoke and agent artifacts are not interchangeable"
@@ -11031,8 +11031,8 @@ fn runtime_omit_stays_opt_in() {
 /// or machine timing. A hundred Agent sites must share cooperative machinery.
 #[test]
 fn cooperative_helpers_bound_per_step_code_growth() {
-    use super::super::component::WorkflowAbi;
-    fn emit(count: usize, abi: WorkflowAbi, omit_runtime: bool) -> Vec<u8> {
+    use super::super::component::WorkflowRole;
+    fn emit(count: usize, abi: WorkflowRole, omit_runtime: bool) -> Vec<u8> {
         let mut steps = serde_json::Map::new();
         let mut edges = Vec::new();
         for i in 0..count {
@@ -11077,9 +11077,9 @@ fn cooperative_helpers_bound_per_step_code_growth() {
         .stack_size(32 * 1024 * 1024)
         .spawn(|| {
     for (abi, omit_runtime) in [
-        (WorkflowAbi::InvokeHostImports, false),
-        (WorkflowAbi::AgentCapabilities, false),
-        (WorkflowAbi::AgentCapabilities, true),
+        (WorkflowRole::Root, false),
+        (WorkflowRole::PublishedAgent, false),
+        (WorkflowRole::PublishedAgent, true),
     ] {
         let one = emit(1, abi, omit_runtime);
         let hundred = emit(100, abi, omit_runtime);
@@ -11097,11 +11097,8 @@ fn cooperative_helpers_bound_per_step_code_growth() {
 
 #[test]
 fn split_timeout_keeps_required_runtime_import_in_both_invoke_abis() {
-    use super::super::component::WorkflowAbi;
-    for abi in [
-        WorkflowAbi::InvokeHostImports,
-        WorkflowAbi::AgentCapabilities,
-    ] {
+    use super::super::component::WorkflowRole;
+    for abi in [WorkflowRole::Root, WorkflowRole::PublishedAgent] {
         for timeout in [0, 1_000] {
             let dir = tempfile::tempdir().unwrap();
             let graph = serde_json::from_value(serde_json::json!({
@@ -11148,7 +11145,7 @@ fn split_timeout_keeps_required_runtime_import_in_both_invoke_abis() {
 
 #[test]
 fn callable_embed_omits_runtime_only_for_a_complete_runtime_free_child() {
-    use super::super::component::WorkflowAbi;
+    use super::super::component::WorkflowRole;
     for retries in [0, 2] {
         for (case, own_timeout) in [
             "pure",
@@ -11232,7 +11229,7 @@ fn callable_embed_omits_runtime_only_for_a_complete_runtime_free_child() {
                     agent_catalog: None,
                     agent_slug: None,
                 },
-                WorkflowAbi::AgentCapabilities,
+                WorkflowRole::PublishedAgent,
                 false,
             )
             .unwrap_or_else(|error| panic!("{case}/{retries}: {error}"));

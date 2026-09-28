@@ -37,9 +37,9 @@ fn emitted_helper(context: Context, scope_alarm: bool) -> Vec<u8> {
     .unwrap();
     let manifest = crate::direct_wasm::manifest::build_direct_workflow_manifest(&graph).unwrap();
     let abi = if matches!(context, Context::Callable) {
-        crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
+        crate::direct_wasm::component::WorkflowRole::PublishedAgent
     } else {
-        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports
+        crate::direct_wasm::component::WorkflowRole::Root
     };
     let config = DirectCoreConfig::new(&manifest, &manifest.to_canonical_json().unwrap(), false)
         .unwrap()

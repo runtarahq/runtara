@@ -70,7 +70,7 @@ async fn run(
                 agent_slug: None,
             },
             direct_e2e_components_dir(),
-            WorkflowAbi::InvokeHostImports,
+            WorkflowRole::Root,
             false,
         )?
     };

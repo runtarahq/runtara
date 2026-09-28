@@ -175,7 +175,7 @@ fn compile_children(
     if scoped {
         runtara_workflows::direct_wasm::compile_direct_workflow_with_scoped_agents(
             input,
-            runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+            runtara_workflows::direct_wasm::WorkflowRole::Root,
             false,
             ["utils".into()].into(),
         )
@@ -810,7 +810,7 @@ fn scoped_agent_ai_auxiliary_call_sites_validate_and_compose() {
                     agent_catalog: None,
                     agent_slug: None,
                 },
-                runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+                runtara_workflows::direct_wasm::WorkflowRole::Root,
                 false,
                 agents.clone(),
             )
@@ -926,7 +926,7 @@ fn scoped_shared_ai_tool_has_distinct_caller_tokens_stable_across_selection() {
                 agent_catalog: None,
                 agent_slug: None,
             },
-            runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+            runtara_workflows::direct_wasm::WorkflowRole::Root,
             false,
             agents,
         )
@@ -1039,7 +1039,7 @@ fn compiler_checkpoint_contracts_match_existing_workflow_agent_scope_helpers() {
             agent_catalog: Some(Arc::new(catalog)),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
         ["scoped-child".into()].into(),
     )
@@ -1130,7 +1130,7 @@ fn compiler_detects_workflow_agent_checkpoint_aliases_across_on_wait_graphs() {
                 agent_catalog: Some(catalog.clone()),
                 agent_slug: None,
             },
-            runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+            runtara_workflows::direct_wasm::WorkflowRole::Root,
             false,
             ["scoped-child".into()].into(),
         )

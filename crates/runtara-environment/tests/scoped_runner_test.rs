@@ -11,7 +11,7 @@ use runtara_invocation_contract::{PackageLimits, artifact_digest};
 use runtara_store_postgres::PostgresPersistence;
 use runtara_workflows::direct_wasm::{
     AgentIsolationPolicy, AgentIsolationReview, DirectCompilationInput, DirectCompilationResult,
-    WorkflowAbi, compile_direct_workflow, compile_direct_workflow_composed_with_isolation_policy,
+    WorkflowRole, compile_direct_workflow, compile_direct_workflow_composed_with_isolation_policy,
     compose_direct_workflow, compose_direct_workflow_with_isolated_agents,
 };
 use serde_json::{Value, json};
@@ -88,7 +88,7 @@ fn compile(graph: Value, dir: &Path, agent: &str, backend: &str) -> DirectCompil
         };
         let mut pure = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
             pure_input,
-            WorkflowAbi::InvokeHostImports,
+            WorkflowRole::Root,
             true,
         )
         .unwrap();
@@ -124,7 +124,7 @@ fn compile(graph: Value, dir: &Path, agent: &str, backend: &str) -> DirectCompil
     if backend == "scoped" {
         return compile_direct_workflow_composed_with_isolation_policy(
             input,
-            WorkflowAbi::InvokeHostImports,
+            WorkflowRole::Root,
             false,
             &components(),
             &[],
@@ -765,7 +765,7 @@ fn parking_child_parent(dir: &Path, timeout_ms: Option<u64>) -> DirectCompilatio
             agent_catalog: None,
             agent_slug: Some("parking-child".into()),
         },
-        WorkflowAbi::AgentCapabilities,
+        WorkflowRole::PublishedAgent,
         false,
     )
     .unwrap();
@@ -813,7 +813,7 @@ fn parking_child_parent(dir: &Path, timeout_ms: Option<u64>) -> DirectCompilatio
             )),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )
     .unwrap();

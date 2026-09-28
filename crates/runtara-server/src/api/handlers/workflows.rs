@@ -660,7 +660,7 @@ pub async fn update_workflow_slug_handler(
 }
 
 /// Publish a workflow AS an agent: compile the current (or latest) version
-/// with the AgentCapabilities ABI, synthesize catalog metadata from its
+/// with the PublishedAgent ABI, synthesize catalog metadata from its
 /// input/output schemas, and stage both into the tenant's workflow-agent dir.
 /// Any parent workflow can then target it as `agentId: <slug>,
 /// capabilityId: "run"`.

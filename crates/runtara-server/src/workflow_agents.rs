@@ -8,7 +8,7 @@
 //! $DATA_DIR/workflow-agents/<tenant>/runtara_agent_<slug snake>.meta.json
 //! ```
 //!
-//! - the `.wasm` is the composed `AgentCapabilities` artifact (exports
+//! - the `.wasm` is the composed `PublishedAgent` artifact (exports
 //!   `runtara:agent-<slug>/capabilities`), which a PARENT workflow composes in
 //!   like any native agent — the compile pipeline searches this dir after the
 //!   primary components dir (`extra_component_dirs`);

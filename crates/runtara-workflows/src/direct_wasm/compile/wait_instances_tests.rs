@@ -4,7 +4,7 @@
 //! the `runtara:workflow/waits` import only where a step needs it, the plan
 //! classification, and the result offsets the lowering reads.
 use super::*;
-use crate::direct_wasm::component::WorkflowAbi;
+use crate::direct_wasm::component::WorkflowRole;
 use crate::direct_wasm::plan::{plan_contains_operation_scoped, plan_contains_suspension};
 use serde_json::{Value, json};
 
@@ -20,7 +20,7 @@ fn single(step: Value) -> Value {
         "executionPlan": [{"fromStep": id, "toStep": "finish"}]})
 }
 
-fn compile(graph: Value, abi: WorkflowAbi) -> Result<DirectCompilationResult, DirectCompileError> {
+fn compile(graph: Value, abi: WorkflowRole) -> Result<DirectCompilationResult, DirectCompileError> {
     thread_local! {
         static DIRS: std::cell::RefCell<Vec<tempfile::TempDir>> = const {
             std::cell::RefCell::new(Vec::new())
@@ -46,7 +46,7 @@ fn compile(graph: Value, abi: WorkflowAbi) -> Result<DirectCompilationResult, Di
     result
 }
 
-fn refusal(graph: Value, abi: WorkflowAbi) -> String {
+fn refusal(graph: Value, abi: WorkflowRole) -> String {
     compile(graph, abi)
         .map(|_| ())
         .expect_err("refused")
@@ -61,8 +61,8 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 #[test]
 fn a_wait_imports_the_instance_waits_and_nothing_else_does() {
-    let result = compile(single(wait("wait")), WorkflowAbi::InvokeHostImports)
-        .expect("a top-level wait compiles");
+    let result =
+        compile(single(wait("wait")), WorkflowRole::Root).expect("a top-level wait compiles");
     let world = fs::read_to_string(&result.world_wit_path).unwrap();
     let logic = fs::read(&result.workflow_logic_wasm_path).unwrap();
     assert!(world.contains(runtara_wit::workflow::WAITS), "{world}");
@@ -73,7 +73,7 @@ fn a_wait_imports_the_instance_waits_and_nothing_else_does() {
 
     let result = compile(
         single(json!({"id": "log", "stepType": "Log", "message": "hi"})),
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
     )
     .expect("compiles");
     let world = fs::read_to_string(&result.world_wit_path).unwrap();
@@ -85,7 +85,7 @@ fn a_wait_imports_the_instance_waits_and_nothing_else_does() {
 
 #[test]
 fn the_backstops_refuse_what_validation_reports() {
-    let text = refusal(single(wait("wait")), WorkflowAbi::AgentCapabilities);
+    let text = refusal(single(wait("wait")), WorkflowRole::PublishedAgent);
     assert!(
         text.contains("cannot be published as a workflow-agent"),
         "{text}"
@@ -93,7 +93,7 @@ fn the_backstops_refuse_what_validation_reports() {
 
     let mut graph = single(wait("wait"));
     graph["durable"] = json!(false);
-    let text = refusal(graph, WorkflowAbi::InvokeHostImports);
+    let text = refusal(graph, WorkflowRole::Root);
     assert!(text.contains("durable"), "{text}");
 
     let on_error = json!({"entryPoint": "wait", "steps": {
@@ -102,12 +102,12 @@ fn the_backstops_refuse_what_validation_reports() {
         "executionPlan": [{"fromStep": "wait", "toStep": "finish"},
             {"fromStep": "wait", "toStep": "handler", "label": "onError"},
             {"fromStep": "handler", "toStep": "finish"}]});
-    let text = refusal(on_error, WorkflowAbi::InvokeHostImports);
+    let text = refusal(on_error, WorkflowRole::Root);
     assert!(text.contains("onError handler"), "{text}");
 
     let on_wait = single(json!({"id": "signal", "stepType": "WaitForSignal",
         "onWait": single(wait("inner"))}));
-    let text = refusal(on_wait, WorkflowAbi::InvokeHostImports);
+    let text = refusal(on_wait, WorkflowRole::Root);
     assert!(text.contains("onWait"), "{text}");
 }
 

@@ -590,9 +590,9 @@ fn compile_shaped(
     let published = matches!(shape, Shape::Published(_));
     assert!(!published || !durable);
     let abi = if published {
-        super::super::component::WorkflowAbi::AgentCapabilities
+        super::super::component::WorkflowRole::PublishedAgent
     } else {
-        super::super::component::WorkflowAbi::InvokeHostImports
+        super::super::component::WorkflowRole::Root
     };
     let slug = published.then_some("timed-child");
     let mut scope = &mut graph;
@@ -686,7 +686,7 @@ fn wrap_published(
     dir: &Path,
     components: &str,
 ) -> anyhow::Result<DirectCompilationResult> {
-    use super::super::component::WorkflowAbi;
+    use super::super::component::WorkflowRole;
     assert!(depth > 0);
     let staging = dir.join("published");
     fs::create_dir(&staging)?;
@@ -733,9 +733,9 @@ fn wrap_published(
                 agent_slug: (!root).then(|| slug.clone()),
             },
             if root {
-                WorkflowAbi::InvokeHostImports
+                WorkflowRole::Root
             } else {
-                WorkflowAbi::AgentCapabilities
+                WorkflowRole::PublishedAgent
             },
             false,
         )?;
@@ -1470,7 +1470,7 @@ async fn agent_deadline_inherited_budget_interrupts_untimed_cpu_loop_with_frozen
             agent_catalog: None,
             agent_slug: None,
         },
-        super::super::component::WorkflowAbi::InvokeHostImports,
+        super::super::component::WorkflowRole::Root,
         false,
     )?;
     let components = std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")?;

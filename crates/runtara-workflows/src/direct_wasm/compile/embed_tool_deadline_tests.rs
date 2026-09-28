@@ -1,6 +1,6 @@
 //! Real composed AI-loop dispatch with scoped inline Embed tools.
 use super::*;
-use crate::direct_wasm::WorkflowAbi;
+use crate::direct_wasm::WorkflowRole;
 use runtara_database_contract::*;
 #[path = "../../../../runtara-component-host/tests/support/object_model.rs"]
 pub(super) mod sql_fixture;
@@ -834,7 +834,7 @@ async fn ai_response_preserves_agent_and_signal_tool_decisions_across_resume() -
             agent_catalog: None,
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )?;
     compose_direct_workflow(

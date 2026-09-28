@@ -9,7 +9,7 @@ use runtara_dsl::{ExecutionGraph, agent_meta::AgentCatalog};
 use runtara_workflows::{
     compile::ChildWorkflowInput,
     direct_wasm::{
-        DirectCompilationInput, DirectCompilationResult, WorkflowAbi,
+        DirectCompilationInput, DirectCompilationResult, WorkflowRole,
         compile_direct_workflow_composed_configured,
     },
     validation::validate_workflow,
@@ -84,7 +84,7 @@ fn compile_configured_tracking(
             agent_slug: None,
         },
         direct_e2e_components_dir(),
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )
     .expect("audit graph compiles and composes");

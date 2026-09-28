@@ -13,7 +13,7 @@ use runtara_core::{
 };
 use runtara_environment::runtime_host::PersistenceRuntimeHost;
 use runtara_workflows::direct_wasm::{
-    DirectCompilationInput, WorkflowAbi, compile_direct_workflow_with_abi, compose_direct_workflow,
+    DirectCompilationInput, WorkflowRole, compile_direct_workflow_with_abi, compose_direct_workflow,
 };
 use serde_json::{Value, json};
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
@@ -43,7 +43,7 @@ impl CompiledWait {
                 agent_catalog: None,
                 agent_slug: None,
             },
-            WorkflowAbi::InvokeHostImports,
+            WorkflowRole::Root,
             false,
         )
         .unwrap();
@@ -466,7 +466,7 @@ async fn compiled_wait_without_debug_tracking_registers_accepts_and_replays() {
             agent_catalog: None,
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )
     .unwrap();

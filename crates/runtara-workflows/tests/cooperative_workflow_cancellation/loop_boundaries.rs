@@ -101,7 +101,7 @@ async fn run_loop_with_scenario(
                 agent_slug: None,
             },
             direct_e2e_components_dir(),
-            WorkflowAbi::InvokeHostImports,
+            WorkflowRole::Root,
             scenario == Scenario::HostlessLoop,
         )?
     };

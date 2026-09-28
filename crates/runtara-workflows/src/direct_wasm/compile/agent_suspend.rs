@@ -54,7 +54,7 @@ use super::{
     DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DirectCompileError, DirectCoreFunctionIndices,
     DirectCoreStaticData, DirectWorkflowManifest,
 };
-use crate::direct_wasm::component::WorkflowAbi;
+use crate::direct_wasm::component::WorkflowRole;
 use crate::direct_wasm::manifest::{DirectAgentManifest, DirectEdgeManifest, DirectGraphManifest};
 
 // Canonical layout of `result<outcome, error-info>` in the retptr area, where
@@ -106,7 +106,7 @@ const PARK_AT: u32 = DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL;
 ///
 /// - any operation-scoped site: an AiAgent tool, memory provider or synthetic
 ///   AiAgent call, a workflow embedded as an AiAgent tool, the
-///   `AgentCapabilities` ABI (a published workflow-agent), an omitted runtime, scoped isolation, and a
+///   `PublishedAgent` ABI (a published workflow-agent), an omitted runtime, scoped isolation, and a
 ///   control call compiled without the agent catalog (it could not be
 ///   classified);
 /// - any operation-scoped site in a `WaitForSignal.onWait` graph, directly or
@@ -118,7 +118,7 @@ const PARK_AT: u32 = DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL;
 ///   with the runtime imported, a non-durable graph, or an onError handler.
 pub(super) fn check_sites(
     manifest: &DirectWorkflowManifest,
-    abi: WorkflowAbi,
+    abi: WorkflowRole,
     omit_runtime: bool,
     scoped_agents: &BTreeSet<String>,
     has_catalog: bool,
@@ -177,7 +177,7 @@ pub(super) fn check_sites(
 
 /// The compile target every operation-scoped site must support.
 struct SiteTarget<'a> {
-    abi: WorkflowAbi,
+    abi: WorkflowRole,
     omit_runtime: bool,
     scoped_agents: &'a BTreeSet<String>,
 }
@@ -295,8 +295,8 @@ fn check_graph(
             return refuse(step, kind, "cannot run in a WaitForSignal onWait graph");
         }
         match target.abi {
-            WorkflowAbi::InvokeHostImports => {}
-            WorkflowAbi::AgentCapabilities => {
+            WorkflowRole::Root => {}
+            WorkflowRole::PublishedAgent => {
                 return refuse(step, kind, "cannot be published as a workflow-agent");
             }
         }
@@ -364,8 +364,8 @@ fn check_wait_for_instances(
         return refuse_wait(step, "cannot run in a WaitForSignal onWait graph");
     }
     match target.abi {
-        WorkflowAbi::InvokeHostImports => {}
-        WorkflowAbi::AgentCapabilities => {
+        WorkflowRole::Root => {}
+        WorkflowRole::PublishedAgent => {
             return refuse_wait(step, "cannot be published as a workflow-agent");
         }
     }

@@ -8,7 +8,7 @@
 //! the child applies. Whatever its catalog entry claims, it must never park or
 //! suspend its parent.
 use super::*;
-use crate::direct_wasm::WorkflowAbi;
+use crate::direct_wasm::WorkflowRole;
 
 const AGENT_ID: &str = "reserved-code";
 const RESERVED_CODES: [&str; 2] = ["__rt_on_signal__", "__rt_suspended__"];
@@ -150,7 +150,7 @@ fn compile_parent_at(
             }),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )?)
 }

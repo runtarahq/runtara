@@ -2,7 +2,7 @@
 //! These imports return Err in linear memory, unlike the native close import
 //! which traps itself. This covers the composed SDK runtime boundary.
 use super::*;
-use crate::direct_wasm::component::WorkflowAbi;
+use crate::direct_wasm::component::WorkflowRole;
 use wasmtime::{ExternType, Linker, Val};
 
 #[derive(Default)]
@@ -16,10 +16,7 @@ const ORIGINAL_ERROR: &[u8] = b"wait interval failed";
 
 #[test]
 fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
-    for abi in [
-        WorkflowAbi::InvokeHostImports,
-        WorkflowAbi::AgentCapabilities,
-    ] {
+    for abi in [WorkflowRole::Root, WorkflowRole::PublishedAgent] {
         let graph = serde_json::from_value(serde_json::json!({
             "durable": true, "entryPoint": "wait", "steps": {
                 "wait": {"id": "wait", "stepType": "WaitForSignal"},
@@ -153,7 +150,7 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
                 outcome.unwrap();
                 assert_eq!(
                     store.data().failed,
-                    usize::from(!matches!(abi, WorkflowAbi::AgentCapabilities))
+                    usize::from(!matches!(abi, WorkflowRole::PublishedAgent))
                 );
             }
         }

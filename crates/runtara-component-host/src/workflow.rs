@@ -1573,7 +1573,7 @@ impl WorkflowExecutor {
 
     /// Invoke a workflow-as-agent's `capabilities.invoke(capability-id, input,
     /// connection) -> result<list<u8>, error-info>` export directly, without a
-    /// catalog entry — for verifying the `AgentCapabilities` ABI. A pure,
+    /// catalog entry — for verifying the `PublishedAgent` ABI. A pure,
     /// agent-shaped workflow imports no runtime, so a runtime-less state
     /// suffices; `iface_name` is the fully-qualified capabilities interface
     /// export (e.g. `runtara:agent-<id>/capabilities@1.0.0`).

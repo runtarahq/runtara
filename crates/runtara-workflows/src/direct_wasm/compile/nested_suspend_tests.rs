@@ -34,7 +34,7 @@
 //! `delay.rs` to `emit_suspend_at_return` makes those four fail first, which is
 //! the guard: the wake channel is ready if that trade is ever worth making.
 use super::*;
-use crate::direct_wasm::WorkflowAbi;
+use crate::direct_wasm::WorkflowRole;
 
 /// A child that waits on a signal that never arrives, published as an agent.
 ///
@@ -72,7 +72,7 @@ fn suspending_child_with_timeout(
             agent_catalog: None,
             agent_slug: Some("waiting-child".into()),
         },
-        WorkflowAbi::AgentCapabilities,
+        WorkflowRole::PublishedAgent,
         false,
     )?;
     // A waiting child needs the parent's runtime; that is precisely why the
@@ -143,7 +143,7 @@ fn parent_of(
             )),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )?;
     compose_direct_workflow_with_extra_dirs(&mut parent, components, &[staging.to_path_buf()])?;
@@ -538,7 +538,7 @@ async fn a_published_agent_carries_no_breakpoint() -> anyhow::Result<()> {
             agent_catalog: None,
             agent_slug: Some("breakpointed-child".into()),
         },
-        WorkflowAbi::AgentCapabilities,
+        WorkflowRole::PublishedAgent,
         false,
     )?;
     compose_direct_workflow(&mut published, &components)?;
@@ -581,7 +581,7 @@ async fn a_published_agent_carries_no_breakpoint() -> anyhow::Result<()> {
             agent_catalog: None,
             agent_slug: Some("breakpointed-child".into()),
         },
-        WorkflowAbi::AgentCapabilities,
+        WorkflowRole::PublishedAgent,
         false,
     )?;
     compose_direct_workflow(&mut eventless, &components)?;

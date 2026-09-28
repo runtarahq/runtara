@@ -95,7 +95,7 @@ pub struct AgentIsolationReport {
 #[cfg(any(test, feature = "direct-wasm-integration-tests"))]
 pub fn compile_direct_workflow_composed_with_isolation_policy(
     input: DirectCompilationInput,
-    abi: super::super::component::WorkflowAbi,
+    abi: super::super::component::WorkflowRole,
     omit_runtime: bool,
     components_dir: &Path,
     extra_component_dirs: &[PathBuf],

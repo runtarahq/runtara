@@ -24,36 +24,23 @@ pub const DIRECT_WORKFLOW_LOGIC_PACKAGE: &str = "runtara:workflow-logic@1.0.0";
 /// Version used by generated per-agent component imports.
 pub const DIRECT_AGENT_WIT_VERSION: &str = runtara_wit::VERSION;
 
-/// The workflow's top-level export shape (Phase 3 of the agent/workflow
-/// unification).
+/// Who owns the compiled workflow's instance.
 ///
-/// - [`InvokeHostImports`](Self::InvokeHostImports): the unified agent shape —
-///   export `runtara:workflow/lifecycle.invoke(input) ->
-///   result<outcome, error-info>`: input is the call argument, the terminal
-///   result is the return value. The runtime interface stays imported (and
-///   `complete`/`fail` still fire for host-side status recording — the return
-///   value is additive during the migration; the imports are retired in a
-///   later phase).
+/// - [`Root`](Self::Root): a top-level run. It exports
+///   `runtara:workflow/lifecycle.invoke(input) -> result<outcome, error-info>`
+///   and also reports its terminal status through `runtime.complete`/`fail`.
+/// - [`PublishedAgent`](Self::PublishedAgent): a workflow published as an
+///   agent. It exports `runtara:agent-<slug>/capabilities.invoke(capability-id,
+///   input) -> result<list<u8>, error-info>` and is composed into a parent,
+///   whose instance it runs in, so it never reports terminal status itself.
+///   Its connection rides inside `input` like any agent's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WorkflowAbi {
-    /// Unified: export `lifecycle.invoke`, input/result at the call boundary.
-    /// The production default since Phase 5 of the agent/workflow
-    /// unification.
+pub enum WorkflowRole {
+    /// A top-level run: exports `lifecycle.invoke`.
     #[default]
-    InvokeHostImports,
-    /// Workflow-as-agent: export `runtara:agent-<slug>/capabilities.invoke(
-    /// capability-id, input) -> result<list<u8>, error-info>` — the exact
-    /// agent capability shape, so a compiled workflow drops into the existing
-    /// agent-composition path and is invocable AS an agent. A connection is
-    /// never an out-of-band argument: it rides inside `input` (under
-    /// `_connection`, or as an ordinary connection-typed input field).
-    /// Production publication proves the full graph closure is
-    /// free of durable suspension before selecting this ABI. Non-durable
-    /// Agent waits use cancellable waitable sets without a root runtime import.
-    /// The lower-level compiler retains the historic
-    /// runtime-importing shape only for differential tests and migration
-    /// tooling; it is never authorized by the production publisher.
-    AgentCapabilities,
+    Root,
+    /// A published workflow-agent: exports `runtara:agent-<slug>/capabilities`.
+    PublishedAgent,
 }
 
 /// One prebuilt shared component needed by direct workflow composition.
@@ -156,17 +143,17 @@ impl DirectComponentArtifacts {
 /// composed artifact (surfaced by the trailing `...` in the `wf`
 /// instantiation) for the embedding host to satisfy natively.
 pub fn emit_direct_component_artifacts(agents: &[String]) -> DirectComponentArtifacts {
-    emit_direct_component_artifacts_configured(agents, WorkflowAbi::default(), false, None)
+    emit_direct_component_artifacts_configured(agents, WorkflowRole::default(), false, None)
 }
 
-/// Fully-configured scaffolding emission: explicit [`WorkflowAbi`]. The ABI changes only the world's export line; the wac is
+/// Fully-configured scaffolding emission: explicit [`WorkflowRole`]. The ABI changes only the world's export line; the wac is
 /// export-agnostic (`export wf...;` re-exports whatever the logic component
 /// exports). `export_agent_id` is the workflow's slug — the package id an
-/// `AgentCapabilities` export uses (`runtara:agent-<slug>`); ignored for the
+/// `PublishedAgent` export uses (`runtara:agent-<slug>`); ignored for the
 /// other ABIs, falls back to [`CAPABILITIES_EXPORT_AGENT_ID`] when `None`.
 pub fn emit_direct_component_artifacts_configured(
     agents: &[String],
-    abi: WorkflowAbi,
+    abi: WorkflowRole,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
 ) -> DirectComponentArtifacts {
@@ -185,7 +172,7 @@ pub fn emit_direct_component_artifacts_configured(
 /// package, wired by explicit argument name.
 pub fn emit_direct_component_artifacts_with_pools(
     agents: &[String],
-    abi: WorkflowAbi,
+    abi: WorkflowRole,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
     parallel_pools: &std::collections::BTreeMap<String, u32>,
@@ -202,7 +189,7 @@ pub fn emit_direct_component_artifacts_with_pools(
 
 pub(super) fn emit_direct_component_artifacts_with_pools_and_connections(
     agents: &[String],
-    abi: WorkflowAbi,
+    abi: WorkflowRole,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
     parallel_pools: &std::collections::BTreeMap<String, u32>,
@@ -226,7 +213,7 @@ pub(super) fn emit_direct_component_artifacts_with_pools_and_connections(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_direct_component_artifacts_scoped(
     agents: &[String],
-    abi: WorkflowAbi,
+    abi: WorkflowRole,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
     parallel_pools: &std::collections::BTreeMap<String, u32>,
@@ -288,7 +275,7 @@ pub const CAPABILITIES_EXPORT_AGENT_ID: &str = "workflow-agent";
 #[allow(clippy::too_many_arguments)]
 fn emit_world_wit(
     agents: &[String],
-    abi: WorkflowAbi,
+    abi: WorkflowRole,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
     parallel_pools: &std::collections::BTreeMap<String, u32>,
@@ -356,10 +343,8 @@ fn emit_world_wit(
         }
     }
     match abi {
-        WorkflowAbi::InvokeHostImports => {
-            out.push_str(&format!("    export {LIFECYCLE_INTERFACE_NAME};\n"))
-        }
-        WorkflowAbi::AgentCapabilities => {
+        WorkflowRole::Root => out.push_str(&format!("    export {LIFECYCLE_INTERFACE_NAME};\n")),
+        WorkflowRole::PublishedAgent => {
             let id = export_agent_id.unwrap_or(CAPABILITIES_EXPORT_AGENT_ID);
             out.push_str(&format!(
                 "    export runtara:agent-{id}/capabilities@{DIRECT_AGENT_WIT_VERSION};\n"
@@ -472,7 +457,7 @@ mod tests {
 
         let with = emit_direct_component_artifacts_with_pools_and_connections(
             &["ai-tools".to_string()],
-            WorkflowAbi::InvokeHostImports,
+            WorkflowRole::Root,
             false,
             None,
             &std::collections::BTreeMap::new(),
@@ -498,7 +483,7 @@ mod tests {
     fn invoke_world_wit_matches_golden_snapshot() {
         let artifacts = emit_direct_component_artifacts_configured(
             &["crypto".to_string(), "object-model".to_string()],
-            WorkflowAbi::InvokeHostImports,
+            WorkflowRole::Root,
             false,
             None,
         );
@@ -533,7 +518,7 @@ world workflow {
         // fixed placeholder would collide when composed into one parent).
         let artifacts = emit_direct_component_artifacts_configured(
             &[],
-            WorkflowAbi::AgentCapabilities,
+            WorkflowRole::PublishedAgent,
             true,
             Some("order-sync"),
         );
@@ -547,7 +532,7 @@ world workflow {
         // No slug → the legacy placeholder keeps tests/back-compat working.
         let fallback = emit_direct_component_artifacts_configured(
             &[],
-            WorkflowAbi::AgentCapabilities,
+            WorkflowRole::PublishedAgent,
             true,
             None,
         );

@@ -583,14 +583,14 @@ fn emit_terminal_run_plan_mapping(
     } else {
         // Terminal completion from an onError handler — same per-ABI exit
         // shape as the entry function's own tail, including the terminal-status
-        // suppression (omit-runtime, and AgentCapabilities where the caller
+        // suppression (omit-runtime, and PublishedAgent where the caller
         // owns instance lifecycle).
         if indices.report_terminal_status() {
             super::core_module::emit_complete(body, indices, output_ptr_local, output_len_local);
         }
         super::deadline_scope::close_alarm(body, indices);
         match indices.abi {
-            crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
+            crate::direct_wasm::component::WorkflowRole::Root => {
                 super::core_module::emit_invoke_ok_completed_return(
                     body,
                     output_ptr_local,
@@ -598,7 +598,7 @@ fn emit_terminal_run_plan_mapping(
                 );
                 body.instruction(&Instruction::Return);
             }
-            crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
+            crate::direct_wasm::component::WorkflowRole::PublishedAgent => {
                 super::core_module::emit_capabilities_ok_return(
                     body,
                     output_ptr_local,

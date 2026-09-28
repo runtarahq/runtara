@@ -360,7 +360,7 @@ pub(super) fn emit_entry_suspend_return(
 ) {
     super::deadline_scope::close_alarm(function, indices);
     match indices.abi {
-        crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
+        crate::direct_wasm::component::WorkflowRole::PublishedAgent => {
             emit_agent_control_return(
                 function,
                 AGENT_SUSPEND_SENTINEL_CODE,
@@ -371,7 +371,7 @@ pub(super) fn emit_entry_suspend_return(
                 None,
             );
         }
-        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
+        crate::direct_wasm::component::WorkflowRole::Root => {
             // Zero result area + wake element (0..120).
             function.instruction(&Instruction::I32Const(0));
             function.instruction(&Instruction::I32Const(0));
@@ -565,10 +565,10 @@ pub(super) fn emit_suspend_at_return(
 ) {
     match indices.abi {
         // This arm closes the alarm itself.
-        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
+        crate::direct_wasm::component::WorkflowRole::Root => {
             emit_entry_suspend_at(function, indices, deadline_local);
         }
-        crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
+        crate::direct_wasm::component::WorkflowRole::PublishedAgent => {
             super::deadline_scope::close_alarm(function, indices);
             emit_agent_control_return(
                 function,
@@ -597,7 +597,7 @@ pub(super) fn emit_suspend_on_signal_return(
 ) {
     match indices.abi {
         // This arm closes the alarm itself.
-        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
+        crate::direct_wasm::component::WorkflowRole::Root => {
             emit_entry_suspend_on_signal(
                 function,
                 indices,
@@ -606,7 +606,7 @@ pub(super) fn emit_suspend_on_signal_return(
                 deadline,
             );
         }
-        crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
+        crate::direct_wasm::component::WorkflowRole::PublishedAgent => {
             super::deadline_scope::close_alarm(function, indices);
             emit_agent_control_return(
                 function,
@@ -758,7 +758,7 @@ pub(super) fn emit_agent_suspend_sentinel_check(
 /// The host tears down the Store and schedules a relaunch at `deadline_local`
 /// (ms since epoch) via `sleep_until`; on relaunch the replay re-reaches the
 /// delay, whose sleep checkpoint now HITS and skips. The caller only invokes
-/// this on the InvokeHostImports arm.
+/// this on the Root arm.
 ///
 /// wake element layout (8-aligned, past the 80-byte result area): disc u8 @88
 /// = 0 (at), payload u64 @96 = deadline.
@@ -817,7 +817,7 @@ pub(super) fn emit_entry_suspend_at(
 /// deadline (or NULL when `deadline_local` is `None`); the custom-signal waker
 /// relaunches it when the signal arrives, and the replay re-polls the
 /// (non-destructively read) signal and proceeds. The caller only invokes this
-/// on the InvokeHostImports arm.
+/// on the Root arm.
 ///
 /// `signal_id_ptr_local`/`len` must reference the deterministic wait signal id
 /// — a heap-allocated string well above the 0..120 result scratch, so the
@@ -940,7 +940,7 @@ pub(super) fn emit_fail_if_retptr_error_inplace(
     load_retptr_tag(function);
     function.instruction(&Instruction::If(BlockType::Empty));
     // Additive host-side `runtime.fail` unless terminal status is
-    // suppressed (omit-runtime, or an AgentCapabilities child whose
+    // suppressed (omit-runtime, or an PublishedAgent child whose
     // caller owns the instance) — the Err return value is authoritative.
     let fail_index = if indices.report_terminal_status() {
         Some(indices.runtime_fail)

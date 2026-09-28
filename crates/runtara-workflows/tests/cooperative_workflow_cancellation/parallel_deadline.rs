@@ -35,7 +35,7 @@ async fn run_result_control(durable: bool, fail: bool) -> anyhow::Result<()> {
             agent_slug: None,
         },
         direct_e2e_components_dir(),
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )?;
 

@@ -413,7 +413,7 @@ fn compile_nested_agents_with_parent(
                 }),
                 agent_slug: Some(slug.clone()),
             },
-            WorkflowAbi::AgentCapabilities,
+            WorkflowRole::PublishedAgent,
             false,
         )?;
         anyhow::ensure!(
@@ -480,7 +480,7 @@ fn compile_nested_agents_with_parent(
             )),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )?;
     compose_direct_workflow_with_extra_dirs(&mut parent, &components, &[staging])?;
@@ -866,7 +866,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                 agent_slug: None,
             },
             direct_e2e_components_dir(),
-            WorkflowAbi::InvokeHostImports,
+            WorkflowRole::Root,
             false,
         )?
     };

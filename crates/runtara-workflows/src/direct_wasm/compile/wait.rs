@@ -533,7 +533,7 @@ pub(super) fn emit_wait_for_signal_plan(
     // construction — what would be blocked for is the poll interval, not a
     // known wait — so parking is right however short that interval is.
     match indices.abi {
-        crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
+        crate::direct_wasm::component::WorkflowRole::Root => {
             // `suspended(on-signal{signal-id, deadline})`: the host parks the
             // instance (sleep_until = timeout deadline, or NULL when there is
             // none) and the custom-signal waker relaunches it when the signal
@@ -549,7 +549,7 @@ pub(super) fn emit_wait_for_signal_plan(
                 )),
             );
         }
-        crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
+        crate::direct_wasm::component::WorkflowRole::PublishedAgent => {
             // A workflow-agent child cannot emit the suspended arm — its result
             // type has none — but it can still stop holding the parent's
             // runner. Raise the suspend sentinel instead: the parent re-raises
