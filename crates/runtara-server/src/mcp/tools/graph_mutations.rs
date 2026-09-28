@@ -3843,10 +3843,10 @@ mod add_agent_step_tests {
     fn params(timeout: Option<u64>, durable: Option<bool>) -> AddAgentStepParams {
         serde_json::from_value(serde_json::json!({
             "workflow_id": "wf",
-            "step_id": "wait",
-            "step_name": "Wait for approvals",
-            "agent_id": "control",
-            "capability_id": "wait",
+            "step_id": "park",
+            "step_name": "Park until woken",
+            "agent_id": "waiter",
+            "capability_id": "pause",
             "timeout": timeout,
             "durable": durable,
         }))
@@ -3872,7 +3872,7 @@ mod add_agent_step_tests {
 
     #[test]
     fn a_suspending_capability_hints_what_validation_demands() {
-        let suspends = serde_json::json!({"id": "wait", "suspends": true});
+        let suspends = serde_json::json!({"id": "pause", "suspends": true});
         let (_, hint) = agent_step_and_hint(&params(None, Some(false)), &suspends);
         assert!(hint.contains("suspends"), "{hint}");
         assert!(hint.contains("E028") && hint.contains("E029"), "{hint}");

@@ -555,6 +555,61 @@ pub(crate) fn control_agent_reference() -> serde_json::Value {
     })
 }
 
+/// The WaitForInstances step as authors write it: fields, edges, placement,
+/// output and failures. The limits come from the instance wait service.
+pub(crate) fn wait_for_instances_step_shape() -> serde_json::Value {
+    use crate::api::services::instance_waits as waits;
+    serde_json::json!({
+        "purpose": "Park the run, without holding a runner or a concurrency slot, until direct child runs it started with control start have finished.",
+        "required": ["id", "stepType", "instanceIds"],
+        "optionalFields": ["name", "mode", "timeoutMs", "breakpoint"],
+        "doesNotAccept": ["inputMapping", "durable", "maxRetries", "retryDelay", "timeout"],
+        "fields": {
+            "instanceIds": format!("MappingValue resolving to an array of 1 to {} distinct, non-empty instance ids, each a direct child of this run: a composite array of control start outputs (steps.<start>.outputs.instanceId) or a reference to an array of ids. An empty array settles at once with resolution empty.", waits::MAX_WAIT_TARGETS),
+            "mode": "all (default): settle when every run has finished. any: settle when the first has; wait again on remaining to handle the rest.",
+            "timeoutMs": "Optional MappingValue resolving to a positive integer: a business deadline from the first time the step runs. When it passes the step settles with resolution deadline and what finished; it never cancels children and is not an error. The first deadline stands on replay.",
+            "breakpoint": "Pause before the step in debug mode."
+        },
+        "edges": "Normal next and condition edges, and onError edges for its failures. It cannot be an AiAgent tool.",
+        "placement": "The workflow must be durable (E028). The step may not sit in an onError region, a WaitForSignal onWait, or an AiAgent tool or memory target (E131). In a parallel Split or unconditioned branch group the region runs serialized (W075); under a retrying Split or EmbedWorkflow a region retry replays the first outcome (W076).",
+        "literalChecks": format!("E133 rejects a literal instanceIds that is not a non-empty array of at most {} distinct non-empty strings, and a literal timeoutMs that is not a positive integer.", waits::MAX_WAIT_TARGETS),
+        "output": {
+            "reference": "steps.<id>.outputs",
+            "shape": "{mode, resolution: satisfied | deadline | empty, finished: [{instanceId, status, finishedAtMs, output, outputBytes, outputOmitted, error, errorOmitted}], remaining: [ids], deadlineMs}",
+            "inline": format!("Each finished run's output is inlined up to {} KiB and its error up to {} KiB, {} MiB per wait; larger values are omitted and flagged with outputOmitted or errorOmitted.", waits::WAIT_OUTPUT_INLINE_BYTES / 1024, waits::WAIT_ERROR_INLINE_BYTES / 1024, waits::WAIT_TOTAL_INLINE_BYTES / (1024 * 1024))
+        },
+        "errors": {
+            "codes": [
+                "INSTANCE_WAIT_INVALID",
+                "INSTANCE_WAIT_DENIED",
+                "INSTANCE_WAIT_NOT_CHILD",
+                "INSTANCE_WAIT_NOT_FOUND",
+                "INSTANCE_WAIT_TOO_LARGE",
+                "INSTANCE_WAIT_REPLAY_CONFLICT",
+                "INSTANCE_WAIT_CLOSED",
+                "INSTANCE_WAIT_UNAVAILABLE",
+                "INSTANCE_WAIT_FAILED"
+            ],
+            "meaning": "A target that is the run itself is INVALID, an ancestor DENIED, any other non-child NOT_CHILD, an unknown one NOT_FOUND, too many TOO_LARGE; a refused registration registers nothing. UNAVAILABLE is transient. Route failures with an onError edge."
+        },
+        "suspension": "A run parked on the step is suspended with suspensionReason waiting_instances; pausing it pauses it at once, and finished children are seen after the resume.",
+        "example": {
+            "id": "waitApprovals",
+            "stepType": "WaitForInstances",
+            "name": "Wait for approvals",
+            "instanceIds": {
+                "valueType": "composite",
+                "value": [
+                    {"valueType": "reference", "value": "steps.startLegal.outputs.instanceId"},
+                    {"valueType": "reference", "value": "steps.startFinance.outputs.instanceId"}
+                ]
+            },
+            "mode": "all",
+            "timeoutMs": {"valueType": "immediate", "value": 86400000}
+        }
+    })
+}
+
 /// Build the canonical workflow-authoring schema returned by
 /// `get_workflow_authoring_schema`. Extracted as a pure function so the advertised
 /// condition-operator enum can be drift-tested against `ConditionOperator`
@@ -573,7 +628,7 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                 "steps": {
                     "stepId": {
                         "id": "stepId",
-                        "stepType": "Agent | Conditional | Finish | Split | Switch | EmbedWorkflow | While | Log | Connection | Error | Filter | GroupBy | Delay | WaitForSignal",
+                        "stepType": "Agent | Conditional | Finish | Split | Switch | EmbedWorkflow | While | Log | Connection | Error | Filter | GroupBy | Delay | WaitForSignal | WaitForInstances",
                         "name": "Human label",
                         "stepSpecificFields": "Use stepShapes below or get_step_type_schema. inputMapping is not a universal step field."
                     }
@@ -634,7 +689,8 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                     "lifetime": "The captured envelope remains available through successful handler steps. If a later handled step fails, steps.__error is replaced by that newer error; persist or snapshot the original first when it must survive cleanup failures.",
                     "rethrowSemantics": "An Error step emits a new error envelope. Referencing steps.__error from context preserves the original as metadata; it does not replace the new error's top-level static code or message."
                 }
-            }
+            },
+            "WaitForInstances": wait_for_instances_step_shape()
         },
         "mappingValue": {
             "reference": {"valueType": "reference", "value": "data.foo"},
@@ -1966,6 +2022,99 @@ mod tests {
                     .as_str()
                     .unwrap()
                     .contains(reason)
+            );
+        }
+    }
+
+    #[test]
+    fn authoring_schema_documents_the_wait_for_instances_step() {
+        use crate::api::services::instance_waits as waits;
+        let schema = workflow_authoring_schema("object_model", "bulk-update-instances");
+        let step_types = schema["graphShape"]["shape"]["steps"]["stepId"]["stepType"]
+            .as_str()
+            .unwrap();
+        assert!(
+            step_types.split(" | ").any(|t| t == "WaitForInstances"),
+            "{step_types}"
+        );
+
+        let shape = &schema["stepShapes"]["WaitForInstances"];
+        assert_eq!(shape, &wait_for_instances_step_shape());
+        assert_eq!(
+            shape["required"],
+            serde_json::json!(["id", "stepType", "instanceIds"])
+        );
+        let parsed: runtara_dsl::Step = serde_json::from_value(shape["example"].clone())
+            .expect("advertised WaitForInstances example must parse as a real step");
+        let runtara_dsl::Step::WaitForInstances(step) = parsed else {
+            panic!("a WaitForInstances step");
+        };
+        assert_eq!(step.mode, runtara_dsl::WaitForInstancesMode::All);
+        assert!(step.timeout_ms.is_some());
+
+        // Every optional field is a real field and every refused one is
+        // refused by the step's deny_unknown_fields.
+        let mut full = shape["example"].clone();
+        full["breakpoint"] = serde_json::json!(true);
+        serde_json::from_value::<runtara_dsl::Step>(full.clone()).unwrap();
+        for refused in shape["doesNotAccept"].as_array().unwrap() {
+            let mut bad = full.clone();
+            bad[refused.as_str().unwrap()] = serde_json::json!(1);
+            assert!(
+                serde_json::from_value::<runtara_dsl::Step>(bad).is_err(),
+                "{refused} must be rejected"
+            );
+        }
+
+        let text = shape.to_string();
+        assert!(text.contains(&format!("1 to {} distinct", waits::MAX_WAIT_TARGETS)));
+        for needle in ["E028", "E131", "E133", "W075", "W076", "waiting_instances"] {
+            assert!(text.contains(needle), "{needle} missing from {text}");
+        }
+        let codes: Vec<_> = shape["errors"]["codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|code| code.as_str().unwrap())
+            .collect();
+        assert_eq!(codes.len(), 9);
+        assert!(codes.iter().all(|code| code.starts_with("INSTANCE_WAIT_")));
+        for field in ["resolution", "finished", "remaining", "deadlineMs"] {
+            assert!(
+                shape["output"]["shape"].as_str().unwrap().contains(field),
+                "{field} missing from the output shape"
+            );
+        }
+    }
+
+    /// list_step_types and get_step_type_schema serve the DSL registry; the
+    /// step is there under its display name, with its output shape.
+    #[test]
+    fn step_type_catalog_exposes_wait_for_instances() {
+        let meta = runtara_dsl::agent_meta::get_all_step_types()
+            .find(|meta| meta.id == "WaitForInstances")
+            .expect("WaitForInstances is a registered step type");
+        assert_eq!(meta.display_name, "Wait for Instances");
+        assert_eq!(meta.category, "control");
+
+        let schema = runtara_dsl::spec::dsl_schema::get_step_type_schema("WaitForInstances")
+            .expect("get_step_type_schema serves WaitForInstances");
+        assert_eq!(schema["displayName"], "Wait for Instances");
+        let fields: Vec<_> = schema["outputShape"]["outputs"]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|field| field["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            fields,
+            ["mode", "resolution", "finished", "remaining", "deadlineMs"]
+        );
+        let properties = schema["schema"].to_string();
+        for field in ["instanceIds", "mode", "timeoutMs", "breakpoint"] {
+            assert!(
+                properties.contains(field),
+                "{field} missing from the schema"
             );
         }
     }

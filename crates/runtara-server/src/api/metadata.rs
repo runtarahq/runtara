@@ -112,6 +112,7 @@ mod tests {
         assert_eq!(ids, expected_ids);
         assert!(ids.contains("Delay"));
         assert!(ids.contains("WaitForSignal"));
+        assert!(ids.contains("WaitForInstances"));
         assert_eq!(body["count"].as_u64(), Some(step_types.len() as u64));
     }
 }
