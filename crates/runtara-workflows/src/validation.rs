@@ -93,6 +93,9 @@ use std::collections::{HashMap, HashSet};
 #[path = "validation_operation_scoped.rs"]
 mod operation_scoped;
 
+#[path = "validation_state_schema.rs"]
+mod state_schema;
+
 // ============================================================================
 // Validation Result Types
 // ============================================================================
@@ -1489,6 +1492,14 @@ pub enum ValidationWarning {
         timeout_ms: u64,
         margin_ms: u64,
     },
+    /// A `stateSchema` field sets `required`, `default` or `visibleWhen`.
+    /// State starts empty and is written by steps, so these settings have
+    /// no effect.
+    IneffectiveStateSchemaSetting {
+        field_name: String,
+        /// The ineffective settings, in DSL spelling.
+        settings: Vec<String>,
+    },
 }
 
 impl ValidationWarning {
@@ -1515,6 +1526,7 @@ impl ValidationWarning {
             Self::OperationScopedStepUnderEnclosingRetry { .. } => "W076",
             Self::DynamicControlStartTarget { .. } => "W077",
             Self::WaitTimeoutBelowDeadlineMargin { .. } => "W078",
+            Self::IneffectiveStateSchemaSetting { .. } => "W081",
         }
     }
 }
@@ -1740,6 +1752,15 @@ impl std::fmt::Display for ValidationWarning {
                 "[W078] Step '{}' calls a suspending capability with timeout={}ms, at most the {}ms deadline margin: it times out instead of parking. Raise the timeout.",
                 step_id, timeout_ms, margin_ms
             ),
+            ValidationWarning::IneffectiveStateSchemaSetting {
+                field_name,
+                settings,
+            } => write!(
+                f,
+                "[W081] State schema field '{}' sets {}, which has no effect: state starts empty and is written by steps. Remove the setting.",
+                field_name,
+                settings.join(", ")
+            ),
         }
     }
 }
@@ -1806,6 +1827,9 @@ pub fn validate_workflow(
 
     // Phase 4: Configuration warnings
     validate_configuration(graph, &mut result);
+
+    // Phase 4.1: stateSchema settings that have no effect for state (W081)
+    state_schema::validate_state_schema(graph, &mut result);
 
     // Phase 5: Child workflow validation
     validate_child_workflows(graph, &mut result);
