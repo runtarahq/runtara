@@ -4,16 +4,9 @@ export type InputIntentRequest = {
   instanceId: string;
   requestId: string;
   payload: Record<string, unknown>;
-} & (
-  | { kind: 'execution'; workflowId: string }
-  | {
-      kind: 'report';
-      reportId: string;
-      blockId: string;
-      filters: Record<string, unknown>;
-      blockFilters: Record<string, unknown>;
-    }
-);
+  kind: 'execution';
+  workflowId: string;
+};
 
 export type RetainedInput = {
   operationId: string;

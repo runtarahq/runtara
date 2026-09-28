@@ -58,11 +58,6 @@ path = "tests/managed_actions.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
-name = "report_input_retries"
-path = "tests/report_input_retries.rs"
-required-features = ["db-integration-tests"]
-
-[[test]]
 name = "session_delivery"
 path = "tests/session_delivery.rs"
 required-features = ["db-integration-tests", "valkey-integration-tests"]
@@ -90,16 +85,6 @@ required-features = ["db-integration-tests"]
 [[test]]
 name = "outbound_http"
 path = "tests/outbound_http.rs"
-required-features = ["db-integration-tests"]
-
-[[test]]
-name = "reports_runtime_corpus"
-path = "tests/reports_runtime_corpus.rs"
-required-features = ["db-integration-tests"]
-
-[[test]]
-name = "reports_render_corpus"
-path = "tests/reports_render_corpus.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
@@ -132,7 +117,6 @@ runtara-object-store = { path = "../runtara-object-store" }
 runtara-text-parser = { path = "../runtara-text-parser" }
 runtara-connections = { path = "../runtara-connections", features = ["utoipa"] }
 runtara-ai = { path = "../runtara-ai" }
-runtara-report-dsl = { path = "../runtara-report-dsl", features = ["utoipa"] }
 runtara-component-host = { path = "../runtara-component-host" }
 
 # Database

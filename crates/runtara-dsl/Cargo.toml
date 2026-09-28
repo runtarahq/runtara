@@ -13,9 +13,8 @@ categories = ["development-tools"]
 default = ["json-schema"]
 # `JsonSchema` derives drive the JSON Schema export pipeline at
 # `crates/runtara-server/build.rs`. Default-on so all current consumers
-# keep working; optional so the WASM build for `runtara-report-dsl` can
-# drop the `spec` + `step_registration` schema-generation surface from
-# its tree.
+# keep working; optional so WASM builds can drop the `spec` +
+# `step_registration` schema-generation surface from their tree.
 json-schema = ["dep:schemars"]
 utoipa = ["dep:utoipa"]
 # Server-side AgentCatalog loader (walks $RUNTARA_AGENT_COMPONENTS_DIR for

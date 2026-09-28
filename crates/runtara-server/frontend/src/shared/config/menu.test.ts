@@ -22,46 +22,28 @@ describe('filterMenu — entitlement gate', () => {
       'workflows',
       'invocation-history',
       'objects',
-      'reports',
       'triggers',
       'connections',
       'analytics',
     ]);
   });
 
-  it('hides Reports when reports is disabled', () => {
-    const out = filterMenu(menu, [], snapshot({ reports: false }));
-    expect(keys(out)).not.toContain('reports');
-    // Other entries unaffected.
-    expect(keys(out)).toContain('workflows');
-    expect(keys(out)).toContain('objects');
-  });
-
   it('hides Database when database is disabled', () => {
     const out = filterMenu(menu, [], snapshot({ database: false }));
     expect(keys(out)).not.toContain('objects');
+    // Other entries unaffected.
     expect(keys(out)).toContain('workflows');
-    expect(keys(out)).toContain('reports');
-  });
-
-  it('hides both Reports and Database when both are disabled', () => {
-    const out = filterMenu(
-      menu,
-      [],
-      snapshot({ reports: false, database: false })
-    );
-    expect(keys(out)).not.toContain('reports');
-    expect(keys(out)).not.toContain('objects');
+    expect(keys(out)).toContain('triggers');
   });
 
   it('always-on entries stay visible regardless of feature flags', () => {
-    // Disabling reports + database must not hide workflows / triggers /
+    // Disabling every feature must not hide workflows / triggers /
     // connections / analytics / invocation-history — those are tier-independent
     // by design.
     const out = filterMenu(
       menu,
       [],
-      snapshot({ reports: false, database: false, api: false, mcp: false })
+      snapshot({ database: false, api: false, mcp: false })
     );
     expect(keys(out)).toEqual([
       'workflows',
@@ -90,10 +72,10 @@ describe('filterMenu — group ACL preserved', () => {
   });
 
   it('keeps gated entries the user is allowed to see only when the feature is on', () => {
-    const out = filterMenu(menu, [], snapshot({ reports: false }));
-    expect(keys(out)).not.toContain('reports');
+    const out = filterMenu(menu, [], snapshot({ database: false }));
+    expect(keys(out)).not.toContain('objects');
 
-    const out2 = filterMenu(menu, [], snapshot({ reports: true }));
-    expect(keys(out2)).toContain('reports');
+    const out2 = filterMenu(menu, [], snapshot({ database: true }));
+    expect(keys(out2)).toContain('objects');
   });
 });

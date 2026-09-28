@@ -3,7 +3,6 @@ import {
   Database,
   History,
   Link,
-  LineChart,
   Workflow,
   Zap,
 } from 'lucide-react';
@@ -82,14 +81,6 @@ export const menu: MenuItem[] = [
     icon: <Database size={16} />,
     allowedGroups: [],
     requiresFeature: 'database',
-  },
-  {
-    key: 'reports',
-    title: 'Reports',
-    to: '/reports',
-    icon: <LineChart size={16} />,
-    allowedGroups: [],
-    requiresFeature: 'reports',
   },
   {
     key: 'triggers',

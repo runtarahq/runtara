@@ -198,42 +198,6 @@ export const queryKeys = {
     },
   },
 
-  // Reports domain
-  reports: {
-    all: ['reports'] as const,
-    lists: () => [...queryKeys.reports.all, 'list'] as const,
-    details: () => [...queryKeys.reports.all, 'detail'] as const,
-    byId: (id: string) => [...queryKeys.reports.details(), id] as const,
-    preview: (request: unknown) =>
-      [...queryKeys.reports.all, 'preview', request] as const,
-    render: (id: string, request: unknown) =>
-      [...queryKeys.reports.byId(id), 'render', request] as const,
-    block: (id: string, blockId: string, request: unknown) =>
-      [...queryKeys.reports.byId(id), 'block', blockId, request] as const,
-    filterOptions: (id: string, filterId: string, request: unknown) =>
-      [
-        ...queryKeys.reports.byId(id),
-        'filterOptions',
-        filterId,
-        request,
-      ] as const,
-    lookupOptions: (
-      id: string,
-      blockId: string,
-      field: string,
-      request: unknown
-    ) =>
-      [
-        ...queryKeys.reports.byId(id),
-        'lookupOptions',
-        blockId,
-        field,
-        request,
-      ] as const,
-    dataset: (id: string, datasetId: string, request: unknown) =>
-      [...queryKeys.reports.byId(id), 'dataset', datasetId, request] as const,
-  },
-
   // Agents domain
   agents: {
     all: ['agents'] as const,

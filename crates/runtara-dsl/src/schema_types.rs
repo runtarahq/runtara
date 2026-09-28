@@ -1149,7 +1149,7 @@ pub struct WaitForSignalStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_schema: Option<HashMap<String, SchemaField>>,
 
-    /// Optional platform action metadata exposed to reports and other runtime
+    /// Optional platform action metadata exposed to runtime
     /// action consumers. Correlation and context values are evaluated when the
     /// workflow reaches the wait step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1165,12 +1165,12 @@ pub struct WaitForSignalStep {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WaitForSignalActionConfig {
-    /// Stable action key for report filtering, e.g. case_review_decision.
+    /// Stable action key for filtering open actions, e.g. case_review_decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
 
-    /// Platform-level correlation fields used by virtual workflow_runtime
-    /// report sources, e.g. {"case_id": {"valueType": "reference", "value": "data.case_id"}}.
+    /// Platform-level correlation fields carried with the open action,
+    /// e.g. {"case_id": {"valueType": "reference", "value": "data.case_id"}}.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub correlation: HashMap<String, MappingValue>,
 

@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components */
 // Router config files naturally export route configurations that reference components.
 // Separating would require splitting the routing logic from its component references.
-import { createBrowserRouter, Navigate, useParams } from 'react-router';
+import { createBrowserRouter, Navigate } from 'react-router';
 import { lazy, Suspense } from 'react';
 import { PrivateRoute } from '@/router/PrivateRoute';
 import { EntitlementRoute } from '@/router/EntitlementRoute';
@@ -120,26 +120,6 @@ const AnalyticsRateLimits = lazy(() =>
 const InvocationHistory = lazy(() =>
   import('@/features/invocation-history/pages/InvocationHistory').then((m) => ({
     default: m.InvocationHistory,
-  }))
-);
-const ReportsListPage = lazy(() =>
-  import('@/features/reports/pages/ReportsListPage').then((m) => ({
-    default: m.ReportsListPage,
-  }))
-);
-const ReportPage = lazy(() =>
-  import('@/features/reports/pages/ReportPage').then((m) => ({
-    default: m.ReportPage,
-  }))
-);
-
-function ReportEditRedirect() {
-  const { reportId } = useParams();
-  return <Navigate to={`/reports/${reportId}?edit=1`} replace />;
-}
-const ReportExplorePage = lazy(() =>
-  import('@/features/reports/pages/ReportExplorePage').then((m) => ({
-    default: m.ReportExplorePage,
   }))
 );
 const Settings = lazy(() =>
@@ -431,63 +411,6 @@ export const router = createBrowserRouter(
               </Suspense>
             </PrivateRoute>
           ),
-        },
-        {
-          path: '/reports',
-          element: (
-            <PrivateRoute>
-              <EntitlementRoute feature="reports">
-                <Suspense fallback={<PageLoader />}>
-                  <ReportsListPage />
-                </Suspense>
-              </EntitlementRoute>
-            </PrivateRoute>
-          ),
-        },
-        {
-          path: '/reports/new',
-          element: (
-            <PrivateRoute>
-              <EntitlementRoute feature="reports">
-                <Suspense fallback={<PageLoader />}>
-                  <ReportPage />
-                </Suspense>
-              </EntitlementRoute>
-            </PrivateRoute>
-          ),
-        },
-        {
-          path: '/reports/:reportId',
-          element: (
-            <PrivateRoute>
-              <EntitlementRoute feature="reports">
-                <Suspense fallback={<PageLoader />}>
-                  <ReportPage />
-                </Suspense>
-              </EntitlementRoute>
-            </PrivateRoute>
-          ),
-        },
-        {
-          path: '/reports/:reportId/explore',
-          element: (
-            <PrivateRoute>
-              <EntitlementRoute feature="reports">
-                <Suspense fallback={<PageLoader />}>
-                  <ReportExplorePage />
-                </Suspense>
-              </EntitlementRoute>
-            </PrivateRoute>
-          ),
-        },
-        {
-          // Legacy /edit route — keep it working but redirect to the
-          // unified ReportPage with ?edit=1 so URL is the only mode toggle.
-          // The redirect target (/reports/:reportId) is itself gated, so we
-          // don't need to gate the redirect path — `reports=false` will block
-          // the redirected URL.
-          path: '/reports/:reportId/edit',
-          element: <ReportEditRedirect />,
         },
         {
           path: '/settings',

@@ -398,7 +398,6 @@ jobs:
           # only safe for a consumer that runs no migrations of its own, which
           # is why object-store can reuse runtara_test below and this cannot.
           TEST_RUNTARA_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_runtime_test
-          TEST_REPORTS_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
           VALKEY_HOST: localhost
           VALKEY_PORT: "6379"
         run: cargo test -p runtara-server --features db-integration-tests,valkey-integration-tests -- --test-threads=1
@@ -467,9 +466,9 @@ jobs:
   #
   # `--workspace --lib` needs no Postgres, Valkey or Docker (verified: 3,508
   # tests, 0 failures on a bare machine), so it is the cheap gate that covers
-  # the whole workspace — including the 14 crates that the other, -p-enumerated
+  # the whole workspace — including the crates that the other, -p-enumerated
   # jobs never named and therefore never tested: runtara-dsl (253 test fns),
-  # runtara-workflow-stdlib (190), runtara-report-dsl,
+  # runtara-workflow-stdlib (190),
   # runtara-text-parser, runtara-sdk-macros, runtara-ai, runtara-validation-wasm,
   # runtara-http, runtara-agent-encoding, runtara-workflow-runtime,
   # runtara-workflow-wit and both partially-skipped crates.

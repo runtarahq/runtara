@@ -183,63 +183,6 @@ impl EnvironmentClient {
         .await
     }
 
-    /// Replay a trusted adapter's original caller intent after current authorization.
-    pub(crate) async fn replay_contextual_input_response(
-        &self,
-        tenant: &str,
-        instance: &str,
-        request: &str,
-        operation: &str,
-        context: &runtara_core::persistence::inputs::InputAcceptanceContext,
-    ) -> runtara_core::persistence::inputs::InputResult<
-        Option<runtara_core::persistence::inputs::InputReceipt>,
-    > {
-        let inputs = self.state.persistence.input_requests().ok_or_else(|| {
-            runtara_core::persistence::inputs::InputError::Storage(
-                "managed inputs unavailable".into(),
-            )
-        })?;
-        inputs
-            .replay_input(
-                tenant,
-                instance,
-                request,
-                operation,
-                runtara_core::persistence::inputs::InputReplayIdentity::Context(context.as_bytes()),
-            )
-            .await
-    }
-
-    /// Commit trusted retry context with the validated effective response.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn submit_contextual_input_response(
-        &self,
-        tenant: &str,
-        instance: &str,
-        request: &str,
-        operation: &str,
-        payload: &serde_json::Value,
-        context: &runtara_core::persistence::inputs::InputAcceptanceContext,
-    ) -> runtara_core::persistence::inputs::InputResult<
-        runtara_core::persistence::inputs::InputReceipt,
-    > {
-        let inputs = self.state.persistence.input_requests().ok_or_else(|| {
-            runtara_core::persistence::inputs::InputError::Storage(
-                "managed inputs unavailable".into(),
-            )
-        })?;
-        runtara_core::persistence::inputs::submit_input_with_context(
-            inputs,
-            tenant,
-            instance,
-            request,
-            operation,
-            payload,
-            Some(context),
-        )
-        .await
-    }
-
     /// Wrap the running environment's shared handler state.
     pub fn new(state: Arc<EnvironmentHandlerState>) -> Self {
         Self { state }
