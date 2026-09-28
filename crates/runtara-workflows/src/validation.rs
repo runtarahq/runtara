@@ -80,7 +80,7 @@ use runtara_dsl::{
 // exactly the segments a lookup will walk — in particular treating a
 // bracket-quoted body like `data["a.b"]` as one opaque key, not a nested path.
 use runtara_workflow_stdlib::reference_path::{
-    array_index, is_array_index_token, reference_segments,
+    array_index, has_consecutive_dots, is_array_index_token, reference_segments,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -2658,8 +2658,10 @@ fn validate_reference(
     valid_variable_names: &HashSet<String>,
     result: &mut ValidationResult,
 ) {
-    // Check for empty path segments
-    if ref_path.contains("..") {
+    // Reject consecutive dots outside a closed `[..]` body. Dots inside one
+    // belong to the key (`data["a..b"]`). Leading/trailing dots and empty
+    // bracket keys are not caught here.
+    if has_consecutive_dots(ref_path) {
         result.errors.push(ValidationError::InvalidReferencePath {
             step_id: step_id.to_string(),
             reference_path: ref_path.to_string(),
@@ -3247,7 +3249,7 @@ fn validate_template_static_reference(
     context: &TemplateStaticReferenceContext<'_>,
     result: &mut ValidationResult,
 ) {
-    if reference.contains("..") {
+    if has_consecutive_dots(reference) {
         push_template_reference_issue(
             result,
             step_id,
@@ -7271,6 +7273,135 @@ mod tests {
                 .errors
                 .iter()
                 .any(|e| matches!(e, ValidationError::InvalidReferencePath { .. }))
+        );
+    }
+
+    fn validate_data_reference_with_schema_key(reference: &str, key: &str) -> ValidationResult {
+        let mut mapping = HashMap::new();
+        mapping.insert("value".to_string(), ref_value(reference));
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "agent".to_string(),
+            create_agent_step("agent", "transform", Some(mapping)),
+        );
+
+        let mut graph = create_basic_graph(steps, "agent");
+        graph
+            .input_schema
+            .insert(key.to_string(), schema_field(SchemaFieldType::String));
+
+        validate_workflow(&graph, &test_catalog())
+    }
+
+    /// A bracket body is one opaque key, so `data["a..b"]` names the literal
+    /// key `a..b` — the runtime resolves it, and the validator must not reject
+    /// it for the dots in its spelling.
+    #[test]
+    fn test_consecutive_dots_inside_bracket_key_are_part_of_the_key() {
+        let declared = validate_data_reference_with_schema_key(r#"data["a..b"]"#, "a..b");
+        assert!(
+            !declared.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::InvalidReferencePath { .. }
+                    | ValidationError::UndefinedDataReference { .. }
+            )),
+            "declared key `a..b` must validate: {:?}",
+            declared.errors
+        );
+
+        // No longer short-circuited: an undeclared dotted key now reaches the
+        // schema walk and is rejected there, by name.
+        let undeclared = validate_data_reference_with_schema_key(r#"data["x..y"]"#, "a..b");
+        assert!(
+            !undeclared
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::InvalidReferencePath { .. })),
+            "`x..y` is a well-formed key: {:?}",
+            undeclared.errors
+        );
+        assert!(
+            undeclared.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedDataReference { field_name, .. }
+                    if field_name == "x..y"
+            )),
+            "undeclared key `x..y` must be rejected by the schema walk: {:?}",
+            undeclared.errors
+        );
+    }
+
+    #[test]
+    fn test_consecutive_dots_outside_bracket_key_stay_rejected() {
+        for reference in [
+            r#"data["a..b"]..c"#,
+            "data..a",
+            r#"data.a..b["c"]"#,
+            "data[a..b",
+        ] {
+            let result = validate_data_reference_with_schema_key(reference, "a..b");
+            assert!(
+                result.errors.iter().any(|error| matches!(
+                    error,
+                    ValidationError::InvalidReferencePath { reference_path, reason, .. }
+                        if reference_path == reference && reason.contains("consecutive dots")
+                )),
+                "`{reference}` must stay rejected: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    /// Same rule on the template path. Templates only surface dotted attribute
+    /// access today, so the guard is exercised directly.
+    #[test]
+    fn test_template_consecutive_dots_guard_ignores_bracket_keys() {
+        let mut graph = create_basic_graph(HashMap::new(), "agent");
+        graph
+            .input_schema
+            .insert("a..b".to_string(), schema_field(SchemaFieldType::String));
+        let step_ids = HashSet::new();
+        let variable_names = HashSet::new();
+        let adjacency = HashMap::new();
+        let context = TemplateStaticReferenceContext {
+            graph: &graph,
+            step_ids: &step_ids,
+            variable_names: &variable_names,
+            available_variables: &[],
+            data_scope: DataScope::RequireSchema,
+            adjacency: &adjacency,
+        };
+        let check = |reference: &str| {
+            let mut result = ValidationResult::default();
+            validate_template_static_reference("agent", reference, true, &context, &mut result);
+            result
+                .warnings
+                .into_iter()
+                .filter_map(|warning| match warning {
+                    ValidationWarning::TemplateReferenceIssue { reason, .. } => Some(reason),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(check(r#"data["a..b"]"#), Vec::<String>::new());
+
+        let undeclared = check(r#"data["x..y"]"#);
+        assert!(
+            !undeclared.is_empty()
+                && undeclared
+                    .iter()
+                    .all(|reason| !reason.contains("consecutive dots")),
+            "`x..y` must reach the schema check: {undeclared:?}"
+        );
+
+        let dotted = check("data..a");
+        assert!(
+            dotted
+                .iter()
+                .any(|reason| reason.contains("consecutive dots")),
+            "{dotted:?}"
         );
     }
 
