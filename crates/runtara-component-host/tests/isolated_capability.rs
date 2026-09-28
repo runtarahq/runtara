@@ -101,7 +101,7 @@ async fn real_random_agent_completes_while_hung_http_agent_is_cancelled() {
                 &http,
                 spec(),
                 CapabilityInvocation {
-                    interface: "runtara:agent-http/capabilities@0.4.0",
+                    interface: "runtara:agent-http/capabilities@1.0.0",
                     capability: "http-request",
                     input: serde_json::to_vec(
                         &serde_json::json!({"url":url,"method":"GET","timeout_ms":120000}),
@@ -132,7 +132,7 @@ async fn real_random_agent_completes_while_hung_http_agent_is_cancelled() {
                 &utils,
                 spec(),
                 CapabilityInvocation {
-                    interface: "runtara:agent-utils/capabilities@0.4.0",
+                    interface: "runtara:agent-utils/capabilities@1.0.0",
                     capability: "random-double",
                     input: b"{}".to_vec(),
                 },
@@ -239,7 +239,7 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
         vec![Binding {
             id: "agent:utils".into(),
             artifact: artifact_digest(&child),
-            interface: "runtara:agent-utils/capabilities@0.4.0".into(),
+            interface: "runtara:agent-utils/capabilities@1.0.0".into(),
         }],
         invocations.clone(),
         PackageLimits {

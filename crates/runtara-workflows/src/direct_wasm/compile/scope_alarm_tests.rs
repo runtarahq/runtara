@@ -51,7 +51,7 @@ fn disabled_loop_budgets_do_not_add_alarm_imports() -> anyhow::Result<()> {
             !compiled
                 .component_artifacts
                 .world_wit
-                .contains("runtara:host-io/timers")
+                .contains("runtara:host/timers")
         );
         assert!(
             !compiled

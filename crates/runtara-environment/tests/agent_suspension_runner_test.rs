@@ -1,6 +1,6 @@
 //! A suspending agent parks a real run and a restarted runner resumes it with
 //! its continuation: DSL -> composed WASM -> EmbeddedWasmRunner ->
-//! `runtara:workflow-operation/scope` and `runtara:agent-suspension/context`
+//! `runtara:workflow/operation` and `runtara:agent/continuation`
 //! -> operation continuations on PostgreSQL.
 //!
 //! The agent is a fixture component: its `suspendable.invoke` suspends on an
@@ -39,7 +39,7 @@ fn components() -> PathBuf {
 fn fixture_component() -> Vec<u8> {
     wat::parse_str(format!(
         r#"(component
-  (import "runtara:agent-suspension/context@0.1.0" (instance $context
+  (import "runtara:agent/continuation@1.0.0" (instance $context
     (export "continuation" (func (result (option (list u8)))))))
   (core module $memory
     (memory (export "memory") 1)
@@ -97,8 +97,8 @@ fn fixture_component() -> Vec<u8> {
   (instance $suspendable (export "error-info" (type $error)) (export "wake" (type $wake))
     (export "suspension" (type $suspension)) (export "outcome" (type $outcome))
     (export "invoke" (func $suspendable)))
-  (export "runtara:agent-suspend-fixture/capabilities@0.4.0" (instance $capabilities))
-  (export "runtara:agent-suspend-fixture/suspendable@0.4.0" (instance $suspendable)))"#,
+  (export "runtara:agent-suspend-fixture/capabilities@1.0.0" (instance $capabilities))
+  (export "runtara:agent-suspend-fixture/suspendable@1.0.0" (instance $suspendable)))"#,
         state_len = STATE.len(),
     ))
     .expect("the fixture agent parses")

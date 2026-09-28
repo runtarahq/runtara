@@ -1,5 +1,5 @@
 (component
-  (import "runtara:agent-{{AGENT}}/capabilities@0.4.0" (instance $http
+  (import "runtara:agent-{{AGENT}}/capabilities@1.0.0" (instance $http
     (type $error-def (record (field "code" string) (field "message" string)
       (field "category" string) (field "severity" string) (field "retryable" bool)
       (field "retry-after-ms" (option u64)) (field "attributes" (option string))))

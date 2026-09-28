@@ -4,10 +4,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const EXECUTOR_INTERFACE: &str = "runtara:trusted/executor@0.1.0";
-pub const EXECUTION_INTERFACE: &str = "runtara:trusted/execution@0.1.0";
-pub const WIT: &str = include_str!("../wit/trusted.wit");
-
 /// Pin to the configured endpoint and base path before signing.
 pub fn object_url(base: &str, path: &str) -> Result<url::Url, String> {
     let invalid = || {
@@ -87,7 +83,7 @@ pub fn error(code: &str, message: &str) -> String {
 
 #[cfg(target_arch = "wasm32")]
 mod bindings {
-    wit_bindgen::generate!({path: "wit", world: "client", async: true});
+    wit_bindgen::generate!({path: "../runtara-wit/wit/trusted", world: "client", async: true});
 }
 
 /// Generated ordinary capability wrappers use this path, never the privileged

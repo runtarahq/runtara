@@ -112,13 +112,13 @@ async fn run_loop_with_scenario(
             !compiled
                 .component_artifacts
                 .world_wit
-                .contains("host-io/timers")
+                .contains("runtara:host/timers")
         );
         anyhow::ensure!(
             !compiled
                 .component_artifacts
                 .world_wit
-                .contains("workflow-runtime/runtime")
+                .contains("runtara:workflow/runtime")
         );
     }
     let controller = listener.map(|listener| {

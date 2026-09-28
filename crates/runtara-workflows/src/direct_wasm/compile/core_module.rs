@@ -46,7 +46,7 @@ pub(super) struct DirectCoreConfig {
     /// Top-level export shape (see `component::WorkflowAbi`). Defaults to the
     /// legacy `wasi:cli/run`; set via [`Self::with_abi`].
     pub(super) abi: crate::direct_wasm::component::WorkflowAbi,
-    /// When true, the component imports no `runtara:workflow-runtime/runtime`,
+    /// When true, the component imports no `runtara:workflow/runtime`,
     /// so the emitter must NOT lower any `runtime.*` call — the terminal
     /// `complete`/`fail` are dropped and the result travels solely in-band via
     /// the invoke return value. Only valid for a pure workflow under the invoke
@@ -161,8 +161,7 @@ pub(super) fn emit_direct_core_module(
             }
             WorldItem::Interface { id, .. } => {
                 for function in resolve.interfaces[*id].functions.values() {
-                    if resolve.name_world_key(name)
-                        == runtara_agent_wit::WASI_MONOTONIC_CLOCK_INTERFACE
+                    if resolve.name_world_key(name) == runtara_wit::wasi::MONOTONIC_CLOCK
                         && function.name != "now"
                     {
                         continue;
@@ -211,7 +210,7 @@ pub(super) fn emit_direct_core_module(
         || world
             .imports
             .keys()
-            .any(|name| resolve.name_world_key(name) == "runtara:host-io/timers@0.1.0");
+            .any(|name| resolve.name_world_key(name) == "runtara:host/timers@1.0.0");
     if has_async_calls {
         let builtin = |field: &str,
                        params: &[ValType],
@@ -315,7 +314,7 @@ pub(super) fn emit_direct_core_module(
         if world
             .imports
             .keys()
-            .any(|name| resolve.name_world_key(name) == "runtara:host-io/timers@0.1.0")
+            .any(|name| resolve.name_world_key(name) == "runtara:host/timers@1.0.0")
         {
             let type_index = {
                 let index = type_count;
@@ -324,14 +323,14 @@ pub(super) fn emit_direct_core_module(
                 index
             };
             imports.import(
-                "runtara:host-io/timers@0.1.0",
+                "runtara:host/timers@1.0.0",
                 "[async-lower]sleep",
                 wasm_encoder::EntityType::Function(type_index),
             );
             import_indices.timer_sleep_async = Some(imported_function_count);
             imported_function_count += 1;
             imports.import(
-                "runtara:host-io/timers@0.1.0",
+                "runtara:host/timers@1.0.0",
                 "[async-lower]abort-after",
                 wasm_encoder::EntityType::Function(type_index),
             );

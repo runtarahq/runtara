@@ -48,4 +48,4 @@
   (instance $capabilities
     (export "error-info" (type $error))
     (export "invoke" (func $invoke)))
-  (export "runtara:agent-reserved-code/capabilities@0.4.0" (instance $capabilities)))
+  (export "runtara:agent-reserved-code/capabilities@1.0.0" (instance $capabilities)))

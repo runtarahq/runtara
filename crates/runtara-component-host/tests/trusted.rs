@@ -308,7 +308,7 @@ async fn scoped_child_presigning_keeps_root_authority_and_exact_artifact_version
                 bindings: vec![runtara_invocation_contract::Binding {
                     id: "s3".into(),
                     artifact: child_digest,
-                    interface: "runtara:agent-s3-storage/capabilities@0.4.0".into(),
+                    interface: "runtara:agent-s3-storage/capabilities@1.0.0".into(),
                 }],
                 invocations: None,
             },
@@ -357,7 +357,7 @@ async fn scoped_child_presigning_keeps_root_authority_and_exact_artifact_version
         &engine,
         format!(
             r#"(component (import "{}" (instance)))"#,
-            runtara_agent_trusted::EXECUTOR_INTERFACE
+            runtara_wit::trusted::EXECUTOR
         ),
     )?;
     let error = rejection(executor.prepare_precompiled(unpinned_root).await);
@@ -531,7 +531,7 @@ async fn one_stale_trusted_pin_fails_only_its_own_agent_calls() -> anyhow::Resul
                     |(agent, binding, _, digest, _, _, _)| runtara_invocation_contract::Binding {
                         id: (*binding).into(),
                         artifact: digest.clone(),
-                        interface: format!("runtara:agent-{agent}/capabilities@0.4.0"),
+                        interface: format!("runtara:agent-{agent}/capabilities@1.0.0"),
                     },
                 )
                 .collect(),
@@ -771,7 +771,7 @@ async fn approved_earlier_pin_presigns_only_when_a_parked_run_continues() -> any
                         bindings: vec![runtara_invocation_contract::Binding {
                             id: "s3".into(),
                             artifact: digest,
-                            interface: "runtara:agent-s3-storage/capabilities@0.4.0".into(),
+                            interface: "runtara:agent-s3-storage/capabilities@1.0.0".into(),
                         }],
                         invocations: None,
                     },

@@ -538,7 +538,7 @@ impl DirectCoreStaticData {
     }
 
     /// True when the Agent's site is operation-scoped (suspending or
-    /// control): it runs inside `runtara:workflow-operation/scope`.
+    /// control): it runs inside `runtara:workflow/operation`.
     pub(super) fn agent_operation_scoped(&self, agent_id: u32) -> bool {
         self.agent_operation_scoped.contains(&agent_id)
     }

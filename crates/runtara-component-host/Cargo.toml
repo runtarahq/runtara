@@ -69,14 +69,13 @@ runtara-database-contract = { path = "../runtara-database-contract" }
 runtara-agent-trusted = { path = "../runtara-agent-trusted" }
 runtara-agent-suspension = { path = "../runtara-agent-suspension" }
 runtara-control-contract = { path = "../runtara-control-contract" }
-runtara-agent-wit = { path = "../runtara-agent-wit" }
 # Used as the canonical AgentInfo shape for sidecar meta.json files. The host
 # parses each agent's meta.json into AgentInfo and serves it back to the
 # server unchanged.
 runtara-dsl = { path = "../runtara-dsl" }
 # Canonical LIFECYCLE_INTERFACE_NAME — one source of truth for the invoke
 # export name shared with the compiler.
-runtara-workflow-wit = { path = "../runtara-workflow-wit" }
+runtara-wit = { path = "../runtara-wit" }
 runtara-invocation-contract = { path = "../runtara-invocation-contract" }
 
 # Embedded wasmtime engine + WASI Preview 2 support.

@@ -128,4 +128,4 @@
   (instance $lifecycle
     (export "error-info" (type $error)) (export "signal-wait" (type $signal)) (export "wake" (type $wake))
     (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
-  (export "runtara:workflow-lifecycle/lifecycle@0.2.0" (instance $lifecycle)))
+  (export "runtara:workflow/lifecycle@1.0.0" (instance $lifecycle)))

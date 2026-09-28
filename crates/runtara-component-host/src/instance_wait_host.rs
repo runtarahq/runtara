@@ -343,7 +343,7 @@ fn poll_json(poll: &InstanceWaitPoll) -> Result<Vec<u8>, String> {
     })
 }
 
-/// Bind `runtara:workflow-wait/instances` for workflow stores. The tenant and
+/// Bind `runtara:workflow/waits` for workflow stores. The tenant and
 /// the waiting run come from the store, never from the guest; without an
 /// installed service every call fails closed with `unavailable`.
 pub(crate) fn add_instance_waits_to_linker(
@@ -352,7 +352,7 @@ pub(crate) fn add_instance_waits_to_linker(
     use crate::workflow::WorkflowState;
     use wasmtime::StoreContextMut;
 
-    let mut instances = linker.instance(runtara_workflow_wit::WAIT_INSTANCES_INTERFACE_NAME)?;
+    let mut instances = linker.instance(runtara_wit::workflow::WAITS)?;
     instances.func_wrap_async(
         "register",
         |mut store: StoreContextMut<'_, WorkflowState>, (key, request): (String, Vec<u8>)| {

@@ -118,11 +118,8 @@ impl ControlExecutor {
     pub fn new(engine: Arc<Engine>, wasm: &[u8], meta: &[u8]) -> Result<Self> {
         let component = Component::new(&engine, wasm)?;
         let ty = component.component_type();
-        ty.get_export(
-            &engine,
-            runtara_workflow_wit::CONTROL_EXECUTION_INTERFACE_NAME,
-        )
-        .context("the control agent lacks the runtara:control/execution export")?;
+        ty.get_export(&engine, runtara_wit::control::EXECUTION)
+            .context("the control agent lacks the runtara:control/execution export")?;
         let pre = control_linker(&engine)?.instantiate_pre(&component)?;
         let mut hash = Sha256::new();
         hash.update(wasm);
@@ -350,11 +347,7 @@ impl ControlExecutor {
         let run = async {
             let instance = pre.instantiate_async(&mut store).await?;
             let interface = instance
-                .get_export_index(
-                    &mut store,
-                    None,
-                    runtara_workflow_wit::CONTROL_EXECUTION_INTERFACE_NAME,
-                )
+                .get_export_index(&mut store, None, runtara_wit::control::EXECUTION)
                 .context("control execution export")?;
             let export = instance
                 .get_export_index(&mut store, Some(&interface), "invoke")
@@ -449,7 +442,7 @@ pub(crate) fn add_control_executor_to_linker(
     linker: &mut Linker<crate::workflow::WorkflowState>,
 ) -> Result<()> {
     linker
-        .instance(runtara_workflow_wit::CONTROL_EXECUTOR_INTERFACE_NAME)?
+        .instance(runtara_wit::control::EXECUTOR)?
         .func_wrap_concurrent(
             "invoke",
             |accessor, (capability, input): (String, Vec<u8>)| {

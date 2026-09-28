@@ -6,7 +6,7 @@ use wasmtime::{
     component::{Linker, WasmList},
 };
 
-pub const DATABASE_INTERFACE_NAME: &str = runtara_workflow_wit::DATABASE_INTERFACE_NAME;
+pub const DATABASE_INTERFACE_NAME: &str = runtara_wit::host::SQL;
 
 #[async_trait::async_trait]
 pub trait DatabaseHost: Send + Sync {

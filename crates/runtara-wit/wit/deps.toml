@@ -1,4 +1,4 @@
-# WASI dependency pins for the runtara:agent WIT world.
+# WASI dependency pins used by the workflow compiler (wasi:io/poll, wasi:clocks).
 # Managed by `wit-deps` — run `wit-deps lock` in this directory to fetch.
 
 cli = "https://github.com/WebAssembly/wasi-cli/archive/v0.2.3.tar.gz"

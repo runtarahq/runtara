@@ -71,27 +71,30 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     let agent = &args.agent;
     let interface = format_ident!("agent_{}", agent.replace('-', "_"));
     let world = format!("runtara:agent-{agent}/agent");
-    let export = format!("export:runtara:agent-{agent}/capabilities@0.4.0#invoke");
-    let wit_paths = if args.trusted {
-        quote! { ["../../runtara-agent-wit/wit", "../../runtara-agent-trusted/wit", "wit"] }
-    } else if args.control_executor {
-        quote! { [
-            "../../runtara-agent-wit/wit",
-            "../../runtara-workflow-wit/wit/control",
-            "wit",
-        ] }
-    } else if args.suspending.is_some() {
-        quote! { [
-            "../../runtara-agent-wit/wit",
-            "../../runtara-agent-suspension/wit",
-            "wit",
-        ] }
-    } else {
-        quote! { ["../../runtara-agent-wit/wit", "wit"] }
+    let version = runtara_wit::VERSION;
+    let export = format!("export:runtara:agent-{agent}/capabilities@{version}#invoke");
+    // The per-agent package is generated inline from the one generator the
+    // compiler also uses; `path` only supplies the shared packages it names,
+    // as absolute directories inside `runtara-wit`.
+    let shape = runtara_wit::AgentShape {
+        suspendable: args.suspending.is_some(),
+        trusted: args.trusted,
+        control: args.control_executor,
+        ..Default::default()
     };
-    let suspendable_export = format!("export:runtara:agent-{agent}/suspendable@0.4.0#invoke");
+    let package = runtara_wit::agent_package(agent, shape);
+    let mut dirs = vec![format!("{}/agent", runtara_wit::WIT_DIR)];
+    if args.trusted {
+        dirs.push(format!("{}/trusted", runtara_wit::WIT_DIR));
+    }
+    if args.control_executor {
+        dirs.push(format!("{}/control", runtara_wit::WIT_DIR));
+    }
+    let wit_paths = quote! { path: [#(#dirs),*], inline: #package };
+    let suspendable_export = format!("export:runtara:agent-{agent}/suspendable@{version}#invoke");
+    let trusted_export = format!("export:{}#invoke", runtara_wit::trusted::EXECUTION);
     let async_exports = if args.trusted {
-        quote! { [#export, "export:runtara:trusted/execution@0.1.0#invoke"] }
+        quote! { [#export, #trusted_export] }
     } else if args.suspending.is_some() {
         quote! { [#export, #suspendable_export] }
     } else if args.control_executor {
@@ -153,7 +156,7 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
         #[allow(warnings)]
         mod bindings {
             wit_bindgen::generate!({
-                path: #wit_paths,
+                #wit_paths,
                 world: #world,
                 async: #async_exports,
                 generate_all,
@@ -313,7 +316,7 @@ fn suspension_assertions(
 
 /// Glue for an ordinary agent that declares suspending capabilities: it
 /// exports `suspendable` beside `capabilities` and reads the continuation of
-/// the operation it runs in through `runtara:agent-suspension/context`, which
+/// the operation it runs in through `runtara:agent/continuation`, which
 /// the host answers from its own execution state. Plain `capabilities.invoke`
 /// refuses a suspending capability (`SUSPENSION_UNSUPPORTED`, from the
 /// per-capability adapter). Empty for an agent without `suspending`.
@@ -350,7 +353,7 @@ fn ordinary_suspension(
 
         // Aliased: the agent crate may import the Rust-side `Wake` / `Suspendable`.
         #[cfg(target_arch = "wasm32")]
-        use bindings::runtara::agent_suspension::types::{
+        use bindings::runtara::agent::suspension::{
             Outcome as __Outcome, Suspension as __Suspension, Wake as __Wake,
         };
 
@@ -361,7 +364,7 @@ fn ordinary_suspension(
                 // The host derives the operation from its own state, never
                 // from this call's arguments.
                 let context = runtara_agent_suspension::SuspendContext::new(
-                    bindings::runtara::agent_suspension::context::continuation(),
+                    bindings::runtara::agent::continuation::continuation(),
                 );
                 let result = match capability_id.as_str() {
                     #(#arms)*
@@ -449,7 +452,7 @@ fn control_executor(
         #[allow(warnings)]
         mod bindings {
             wit_bindgen::generate!({
-                path: #wit_paths,
+                #wit_paths,
                 world: #world,
                 async: true,
                 generate_all,
@@ -570,10 +573,14 @@ mod tests {
         assert!(glue.contains("const_:()=assert!(!__CAPABILITY_SUSPENDS_GET,"));
         assert!(glue.contains("const_:()=assert!(!commands::__CAPABILITY_SUSPENDS_CANCEL,"));
         assert!(glue.contains(r#"world:"runtara:agent-control/agent""#));
+        let agent_dir = format!("{}/agent", runtara_wit::WIT_DIR);
+        let control_dir = format!("{}/control", runtara_wit::WIT_DIR);
         assert!(
-            glue.contains(
-                r#"path:["../../runtara-agent-wit/wit","../../runtara-workflow-wit/wit/control","wit",]"#
-            ),
+            glue.contains(&format!(r#"path:["{agent_dir}","{control_dir}"]"#)),
+            "{glue}"
+        );
+        assert!(
+            glue.contains("inline:\"packageruntara:agent-control@"),
             "{glue}"
         );
     }
@@ -587,15 +594,18 @@ mod tests {
         });
         // Both exports are async; the suspension WIT is on the path.
         assert!(glue.contains(
-            r#"async:["export:runtara:agent-suspend-probe/capabilities@0.4.0#invoke","export:runtara:agent-suspend-probe/suspendable@0.4.0#invoke"]"#
+            &format!(
+                r#"async:["export:runtara:agent-suspend-probe/capabilities@{v}#invoke","export:runtara:agent-suspend-probe/suspendable@{v}#invoke"]"#,
+                v = runtara_wit::VERSION
+            )
         ), "{glue}");
-        assert!(glue.contains(r#""../../runtara-agent-suspension/wit""#));
+        assert!(glue.contains("interfacesuspendable"), "{glue}");
         assert!(glue.contains(
             "implbindings::exports::runtara::agent_suspend_probe::suspendable::GuestforComponent"
         ));
         // The continuation comes from the host context, never from arguments.
         assert!(glue.contains(
-            "runtara_agent_suspension::SuspendContext::new(bindings::runtara::agent_suspension::context::continuation(),)"
+            "runtara_agent_suspension::SuspendContext::new(bindings::runtara::agent::continuation::continuation(),)"
         ), "{glue}");
         assert!(glue.contains("waits::__suspend_pause(value,&context)"));
         // Plain `capabilities.invoke` keeps every capability's adapter, whose
@@ -614,7 +624,7 @@ mod tests {
         let glue = expand(quote! { agent = "plain", capabilities = [get] });
         assert!(!glue.contains("suspendable"));
         assert!(!glue.contains("agent_suspension"));
-        assert!(glue.contains(r#"path:["../../runtara-agent-wit/wit","wit"]"#));
+        assert!(glue.contains(&format!(r#"path:["{}/agent"]"#, runtara_wit::WIT_DIR)));
     }
 
     #[test]

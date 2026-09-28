@@ -58,4 +58,4 @@ pub use workflow::{
 pub use runtara_dsl::agent_meta::AgentInfo;
 
 /// The canonical WIT source this host is designed against.
-pub const AGENT_WIT: &str = runtara_agent_wit::RUNTARA_AGENT_WIT;
+pub const AGENT_WIT: &str = runtara_wit::agent::WIT;

@@ -54,15 +54,15 @@ workspace="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$workspace"
 
 # wit-deps resolves the wasi:* dependencies pinned by
-# crates/runtara-agent-wit/wit/deps.toml. The resolved deps directory and
+# crates/runtara-wit/wit/deps.toml. The resolved deps directory and
 # lockfile are committed, so normal CI/release builds do not need the tool.
-if [ ! -f "crates/runtara-agent-wit/wit/deps.lock" ] || [ ! -d "crates/runtara-agent-wit/wit/deps" ]; then
+if [ ! -f "crates/runtara-wit/wit/deps.lock" ] || [ ! -d "crates/runtara-wit/wit/deps" ]; then
     ensure_tool wit-deps wit-deps-cli
-    (cd crates/runtara-agent-wit && wit-deps lock)
+    (cd crates/runtara-wit && wit-deps lock)
 fi
 
 # Discover every workspace member under crates/agents/. Component agents
-# live there as a self-contained subsystem; runtara-agent-wit, -macro,
+# live there as a self-contained subsystem; runtara-wit, runtara-agent-macro,
 # -bundle-emit stay at crates/ root because they're infrastructure shared
 # with the host crates, not components themselves.
 agents=$(grep -E '^\s*"crates/agents/runtara-agent-' Cargo.toml \
@@ -147,7 +147,7 @@ emit_workflow_component_meta \
     "runtara-workflow-stdlib" \
     "runtara:workflow-stdlib" \
     "workflow-stdlib" \
-    "runtara:workflow-stdlib/json@0.1.0" \
+    "runtara:workflow-stdlib/json@1.0.0" \
     "$out_dir/runtara_workflow_stdlib.wasm" \
     "$out_dir/runtara_workflow_stdlib.meta.json"
 

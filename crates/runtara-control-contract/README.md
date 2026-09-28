@@ -3,7 +3,7 @@
 The numbers and names every side of the control service agrees on:
 `runtara-agent-control` (the guest), `runtara-component-host` (the executor)
 and `runtara-server` (the `NativeControl` service). The ABI itself is the WIT
-in `runtara-workflow-wit/wit/control` (`runtara:control@0.1.0`); this crate is
+in `runtara-wit/wit/control` (`runtara:control@1.0.0`); this crate is
 serde-only so all three can depend on it.
 
 ## What it fixes

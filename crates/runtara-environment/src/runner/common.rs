@@ -102,7 +102,7 @@ impl WorkflowRunnerConfig {
 }
 
 /// The runtime API address the legacy SDK HTTP backend reads. No guest ever
-/// receives it: composed artifacts import `runtara:workflow-runtime/runtime`
+/// receives it: composed artifacts import `runtara:workflow/runtime`
 /// as a host import, satisfied in-process by [`crate::runtime_host`].
 pub(crate) const RUNTIME_URL_ENV: &str = "RUNTARA_HTTP_URL";
 

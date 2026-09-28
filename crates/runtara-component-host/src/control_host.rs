@@ -23,8 +23,8 @@ mod bindings {
     // itself and cannot drift from it.
     wasmtime::component::bindgen!({
         path: [
-            "../runtara-agent-wit/wit",
-            "../runtara-workflow-wit/wit/control",
+            "../runtara-wit/wit/agent",
+            "../runtara-wit/wit/control",
         ],
         world: "runtara:control/control-agent-host",
         imports: { default: async | trappable },
@@ -77,7 +77,7 @@ pub struct ControlAuthority {
 }
 
 /// The native control service behind `runtara:control/api`. Every operation
-/// defaults to `unsupported` until its slice lands, so `runtara:control@0.1.0`
+/// defaults to `unsupported` until its slice lands, so `runtara:control@1.0.0`
 /// never needs a new version for it. The rules each operation enforces are
 /// pinned in the WIT's doc comments.
 #[async_trait::async_trait]
@@ -207,7 +207,7 @@ pub(crate) const LINKED_API_FUNCTIONS: [&str; 8] = with_control_api!(api_names!(
 pub(crate) fn add_control_api_to_linker<T: ControlApiView + Send + 'static>(
     linker: &mut Linker<T>,
 ) -> anyhow::Result<()> {
-    let mut api = linker.instance(runtara_workflow_wit::CONTROL_API_INTERFACE_NAME)?;
+    let mut api = linker.instance(runtara_wit::control::API)?;
     macro_rules! link_real {
         ($api:ident; $($name:literal => $method:ident($param:ty) -> $ok:ty,)*) => {$(
             $api.func_wrap_concurrent($name, |accessor, (param,): ($param,)| {
@@ -231,7 +231,7 @@ pub(crate) fn add_control_api_to_linker<T: ControlApiView + Send + 'static>(
 pub(crate) fn add_denied_control_api_to_linker<T: Send + 'static>(
     linker: &mut Linker<T>,
 ) -> anyhow::Result<()> {
-    let mut api = linker.instance(runtara_workflow_wit::CONTROL_API_INTERFACE_NAME)?;
+    let mut api = linker.instance(runtara_wit::control::API)?;
     macro_rules! link_denied {
         ($api:ident; $($name:literal => $method:ident($param:ty) -> $ok:ty,)*) => {$(
             $api.func_wrap_concurrent($name, |_, (_,): ($param,)| {
@@ -267,7 +267,7 @@ pub(crate) fn add_denied_control_executor_to_linker<T: Send + 'static>(
     linker: &mut Linker<T>,
 ) -> anyhow::Result<()> {
     linker
-        .instance(runtara_workflow_wit::CONTROL_EXECUTOR_INTERFACE_NAME)?
+        .instance(runtara_wit::control::EXECUTOR)?
         .func_wrap_concurrent("invoke", |_, (_, _): (String, Vec<u8>)| {
             Box::pin(async {
                 Ok((Err::<Vec<u8>, _>(denied_error_info(
@@ -285,7 +285,7 @@ mod tests {
     /// The host links exactly the functions the frozen WIT declares.
     #[test]
     fn every_api_function_is_linked() {
-        let wit = runtara_workflow_wit::CONTROL_WIT;
+        let wit = runtara_wit::control::WIT;
         let api = &wit[wit.find("interface api {").expect("api interface")..];
         let api = &api[..api.find("\n}").expect("end of api")];
         let declared: Vec<&str> = api

@@ -3,10 +3,10 @@
 ;; within the test; the second invocation traps unless cleanup ran exactly once.
 ;; Built HTTP Agents have separate real-network interruption coverage.
 (component
-  (import "runtara:workflow-runtime/runtime@0.4.0" (instance $runtime
+  (import "runtara:workflow/runtime@1.0.0" (instance $runtime
     (export "custom-event" (func (param "kind" string) (param "payload" (list u8))
       (result (result (error string)))))))
-  (import "runtara:host-io/timers@0.1.0" (instance $timers
+  (import "runtara:host/timers@1.0.0" (instance $timers
     (export "sleep" (func async (param "ms" u64)))))
   (type $error (record (field "code" string) (field "message" string)
     (field "category" string) (field "severity" string) (field "retryable" bool)
@@ -102,4 +102,4 @@
   (instance $capabilities
     (export "error-info" (type $error))
     (export "invoke" (func $invoke)))
-  (export "runtara:agent-http/capabilities@0.4.0" (instance $capabilities)))
+  (export "runtara:agent-http/capabilities@1.0.0" (instance $capabilities)))

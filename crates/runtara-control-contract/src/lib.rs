@@ -1,8 +1,8 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Contract of the control service (`runtara:control@0.1.0`).
+//! Contract of the control service (`runtara:control@1.0.0`).
 //!
-//! The WIT in `runtara-workflow-wit/wit/control` fixes the ABI; this crate
+//! The WIT in `runtara-wit/wit/control` fixes the ABI; this crate
 //! fixes the numbers and names every side agrees on: size and paging caps,
 //! lineage depth, the control share of the concurrency limit, retry hints,
 //! cancel bounds, the agent-facing `CONTROL_<CODE>` error codes and the

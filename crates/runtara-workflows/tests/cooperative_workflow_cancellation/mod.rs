@@ -881,8 +881,8 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
     let bytes = fs::read(&compiled.wasm_path)?;
     anyhow::ensure!(
         !bytes
-            .windows(b"runtara:workflow-execution/tasks".len())
-            .any(|bytes| bytes == b"runtara:workflow-execution/tasks"),
+            .windows(b"runtara:workflow/tasks".len())
+            .any(|bytes| bytes == b"runtara:workflow/tasks"),
         "fixture contains the superseded task interface"
     );
     let server_host = host.clone();

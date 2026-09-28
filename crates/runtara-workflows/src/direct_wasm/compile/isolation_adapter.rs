@@ -56,18 +56,14 @@ pub(super) fn emit_adapter_configured(
     binding: &str,
     scoped: bool,
 ) -> Result<Vec<u8>, DirectCompileError> {
-    use runtara_workflow_wit::{EXECUTION_INTERFACE_NAME, EXECUTION_WIT};
-    let mut resolve = Resolve::default();
-    for (name, source) in [
-        ("abi.wit", ABI_WIT),
-        ("lifecycle.wit", LIFECYCLE_WIT),
-        ("execution.wit", EXECUTION_WIT),
-        ("agent-types.wit", AGENT_TYPES_WIT),
-    ] {
-        resolve.push_str(name, source).map_err(component_error)?;
-    }
+    let execution = runtara_wit::workflow::TASKS;
+    let mut resolve = runtara_wit::resolve().map_err(component_error)?;
+    let shape = runtara_wit::AgentShape {
+        scoped,
+        ..Default::default()
+    };
     resolve
-        .push_str("agent.wit", &agent_wit_package_configured(agent, scoped))
+        .push_str("agent.wit", &runtara_wit::agent_package(agent, shape))
         .map_err(component_error)?;
     let interface = if scoped {
         "scoped-capabilities-v3"
@@ -75,7 +71,7 @@ pub(super) fn emit_adapter_configured(
         "capabilities"
     };
     let package = resolve.push_str("adapter.wit", &format!(
-        "package runtara:isolated-adapter; world adapter {{ import {EXECUTION_INTERFACE_NAME}; export runtara:agent-{agent}/{interface}@{AGENT_WIT_VERSION}; }}"
+        "package runtara:isolated-adapter; world adapter {{ import {execution}; export runtara:agent-{agent}/{interface}@{AGENT_WIT_VERSION}; }}"
     )).map_err(component_error)?;
     let world = resolve
         .select_world(&[package], Some("adapter"))

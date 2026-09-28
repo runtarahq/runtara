@@ -443,35 +443,24 @@ fn lifecycle() -> String {
       (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
       (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")))
       (type $outcome (variant (case "completed" (list u8)) (case "suspended" (list $wake))))
-      (func $v1 (param "input" (list u8)) (result (result $outcome (error $error)))
-        (canon lift (core func $m "v1") (memory $m "memory") (realloc (func $m "realloc"))))
       (func $v2 async (param "input" (list u8)) (result (result $outcome (error $error)))
         (canon lift (core func $m "v2") (memory $m "memory") (realloc (func $m "realloc"))))
-      (instance $a (export "error-info" (type $error)) (export "signal-wait" (type $signal)) (export "wake" (type $wake))
-        (export "outcome" (type $outcome)) (export "invoke" (func $v1)))
       (instance $b (export "error-info" (type $error)) (export "signal-wait" (type $signal)) (export "wake" (type $wake))
         (export "outcome" (type $outcome)) (export "invoke" (func $v2)))
-      (export "runtara:workflow-lifecycle/lifecycle@0.1.0" (instance $a))
-      (export "runtara:workflow-lifecycle/lifecycle@0.2.0" (instance $b)))"#
+      (export "runtara:workflow/lifecycle@1.0.0" (instance $b)))"#
     )
 }
 
 #[tokio::test]
 async fn workflow_entries_use_the_bound_version_and_preserve_all_outcome_kinds() {
     let fx = Fixture::new(false);
-    let launcher = fx.launcher(fx.catalog(
-        &lifecycle(),
-        &[
-            ("v1", runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME_V1),
-            ("v2", runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME),
-        ],
-    ));
+    let launcher =
+        fx.launcher(fx.catalog(&lifecycle(), &[("v2", runtara_wit::workflow::LIFECYCLE)]));
     assert!(matches!(
         launcher.prepare(request("v2", Entry::Capability("invoke".into()), vec![])),
         Err(ExecutionError::InvalidBinding)
     ));
     for (binding, input) in [
-        ("v1", vec![]),
         ("v2", vec![]),
         ("v2", b"suspend".to_vec()),
         ("v2", b"fail".to_vec()),
@@ -482,9 +471,6 @@ async fn workflow_entries_use_the_bound_version_and_preserve_all_outcome_kinds()
         );
         let result = bounded(fx.tasks.join(id)).await.unwrap();
         match (binding, input.as_slice()) {
-            ("v1", _) => {
-                assert!(matches!(result.outcome(), InvokeExit::Completed(bytes) if bytes == b"1"))
-            }
             (_, b"") => {
                 assert!(matches!(result.outcome(), InvokeExit::Completed(bytes) if bytes == b"2"))
             }
@@ -598,7 +584,7 @@ fn malformed_child_signatures_are_rejected_before_any_initializer() {
         ),
         (
             "lifecycle outcome order",
-            runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME,
+            runtara_wit::workflow::LIFECYCLE,
             flow.replace(
                 "(case \"completed\" (list u8)) (case \"suspended\" (list $wake))",
                 "(case \"suspended\" (list $wake)) (case \"completed\" (list u8))",
@@ -606,7 +592,7 @@ fn malformed_child_signatures_are_rejected_before_any_initializer() {
         ),
         (
             "wake deadline type",
-            runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME,
+            runtara_wit::workflow::LIFECYCLE,
             flow.replace(
                 "(field \"deadline-ms\" (option u64))",
                 "(field \"deadline-ms\" (option u32))",
@@ -702,7 +688,7 @@ async fn a_four_case_lifecycle_wake_cannot_bind_the_three_case_host_type() {
       (instance $lifecycle (export "error-info" (type $error)) (export "signal-wait" (type $signal))
         (export "wake" (type $wake)) (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
       (export "{}" (instance $lifecycle)))"#,
-        runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME
+        runtara_wit::workflow::LIFECYCLE
     );
     let engine = crate::engine::build_engine(&Default::default()).unwrap();
     let component = Component::new(&engine, source).expect("a valid four-case component");
@@ -714,11 +700,7 @@ async fn a_four_case_lifecycle_wake_cannot_bind_the_three_case_host_type() {
         .await
         .unwrap();
     let interface = instance
-        .get_export_index(
-            &mut store,
-            None,
-            runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME,
-        )
+        .get_export_index(&mut store, None, runtara_wit::workflow::LIFECYCLE)
         .unwrap();
     let invoke = instance
         .get_export_index(&mut store, Some(&interface), "invoke")

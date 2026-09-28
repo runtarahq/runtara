@@ -5,16 +5,16 @@ use runtara_object_model_core::config::ObjectModelLayout;
 #[cfg(target_family = "wasm")]
 mod sql_bindings {
     wit_bindgen::generate!({
-        path: "../../runtara-workflow-wit/wit/database",
-        world: "database-client",
+        path: "../../runtara-wit/wit/host",
+        world: "sql-client",
         async: true,
     });
 }
 #[cfg(target_family = "wasm")]
 mod connection_bindings {
     wit_bindgen::generate!({
-        path: "../../runtara-workflow-wit/wit/connection-resolver",
-        world: "connection-client",
+        path: "../../runtara-wit/wit/host",
+        world: "connections-client",
         async: true,
     });
 }
@@ -81,13 +81,12 @@ impl SqlClient for HostSqlClient {
     async fn layout(&self, connection: &str) -> Result<ObjectModelLayout, DatabaseError> {
         #[cfg(target_family = "wasm")]
         {
-            let bytes = connection_bindings::runtara::connection_resolver::resolver::describe(
-                connection.to_owned(),
-            )
-            .await
-            .map_err(|_| {
-                DatabaseError::invalid("Cannot resolve Object Model connection metadata")
-            })?;
+            let bytes =
+                connection_bindings::runtara::host::connections::describe(connection.to_owned())
+                    .await
+                    .map_err(|_| {
+                        DatabaseError::invalid("Cannot resolve Object Model connection metadata")
+                    })?;
             let descriptor: serde_json::Value = serde_json::from_slice(&bytes)
                 .map_err(|_| DatabaseError::invalid("Invalid connection descriptor"))?;
             if descriptor["integrationId"] != "postgres" {
@@ -115,7 +114,7 @@ impl SqlClient for HostSqlClient {
         #[cfg(target_family = "wasm")]
         {
             response(
-                sql_bindings::runtara::database::sql::query(
+                sql_bindings::runtara::host::sql::query(
                     connection.to_owned(),
                     request_bytes(&request)?,
                 )
@@ -139,7 +138,7 @@ impl SqlClient for HostSqlClient {
         #[cfg(target_family = "wasm")]
         {
             response(
-                sql_bindings::runtara::database::sql::execute(
+                sql_bindings::runtara::host::sql::execute(
                     connection.to_owned(),
                     request_bytes(&request)?,
                 )
@@ -163,7 +162,7 @@ impl SqlClient for HostSqlClient {
         #[cfg(target_family = "wasm")]
         {
             response(
-                sql_bindings::runtara::database::sql::execute_batch(
+                sql_bindings::runtara::host::sql::execute_batch(
                     connection.to_owned(),
                     request_bytes(&request)?,
                 )

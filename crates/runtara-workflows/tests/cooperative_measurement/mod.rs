@@ -324,7 +324,7 @@ fn measure(smoke: bool) -> Value {
             assert!(
                 !imports
                     .iter()
-                    .any(|name| name.starts_with("runtara:workflow-execution/")),
+                    .any(|name| name.starts_with("runtara:workflow/tasks@")),
                 "custom task service must not participate in this comparison"
             );
             let start = Instant::now();

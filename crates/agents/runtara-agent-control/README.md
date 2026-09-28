@@ -28,7 +28,7 @@ The copy composed into a workflow only forwards to
 bytes of this crate in a fresh store per call, where `runtara:control/api` is
 real, and checks the workflow's control pin against the approved history
 (`approved_builtin_artifacts`) on every call. Mutations run in a
-compiler-emitted `runtara:workflow-operation` scope, so a replayed step never
+compiler-emitted `runtara:workflow/operation` scope, so a replayed step never
 applies twice.
 
 ## Building
@@ -37,11 +37,11 @@ applies twice.
 ./scripts/build-agent-components.sh
 ```
 
-`build.rs` generates `wit/agent.wit` (package `runtara:agent-control@0.4.0`)
-from `runtara-agent-wit/templates/control-agent.wit.in`; do not edit it. The
-component imports `runtara:control/executor@0.1.0` and
-`runtara:control/api@0.1.0`, and exports `capabilities` and
-`runtara:control/execution@0.1.0`. Output:
+The `agent_component!` macro generates its `runtara:agent-control@1.0.0`
+package from `runtara_wit::agent_package`; there is no WIT file to edit. The
+component imports `runtara:control/executor@1.0.0` and
+`runtara:control/api@1.0.0`, and exports `capabilities` and
+`runtara:control/execution@1.0.0`. Output:
 `target/wasm32-wasip2/release/runtara_agent_control.wasm` and its
 `.meta.json` sidecar.
 

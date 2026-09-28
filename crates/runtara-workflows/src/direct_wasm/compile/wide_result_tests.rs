@@ -126,13 +126,9 @@ fn a_wide_result_ok_value_is_untouched() {
 #[test]
 fn wide_result_offsets_match_the_wit_layout() {
     use wit_parser::{Int, Resolve, SizeAlign, Type, TypeDefKind};
-    let mut resolve = Resolve::default();
-    let runtime = resolve
-        .push_str("runtime.wit", runtara_workflow_wit::RUNTIME_WIT)
-        .unwrap();
-    let stdlib = resolve
-        .push_str("stdlib.wit", runtara_workflow_wit::STDLIB_WIT)
-        .unwrap();
+    let resolve: Resolve = runtara_wit::resolve().unwrap();
+    let runtime = runtara_package(&resolve, runtara_wit::workflow::PACKAGE);
+    let stdlib = runtara_package(&resolve, runtara_wit::stdlib::PACKAGE);
     let mut sizes = SizeAlign::default();
     sizes.fill(&resolve);
     let err_offset = |package, interface: &str, function: &str| {
@@ -163,4 +159,13 @@ fn wide_result_offsets_match_the_wit_layout() {
         );
     }
     assert_eq!(err_offset(runtime, "runtime", "load-input"), 4);
+}
+
+fn runtara_package(resolve: &wit_parser::Resolve, name: &str) -> wit_parser::PackageId {
+    resolve
+        .packages
+        .iter()
+        .find(|(_, package)| package.name.to_string() == name)
+        .map(|(id, _)| id)
+        .unwrap_or_else(|| panic!("{name} is in the resolve"))
 }

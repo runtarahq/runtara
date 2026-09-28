@@ -307,11 +307,8 @@ impl AgentLoweringSelection {
             .iter()
             .any(|a| a.reason == AgentIsolationReason::Isolated)
         {
-            let requirements = super::super::component::DIRECT_SHARED_COMPONENT_REQUIREMENTS
-                .iter()
-                .filter(|c| c.package != "runtara:workflow-runtime")
-                .copied()
-                .collect::<Vec<_>>();
+            let requirements =
+                super::super::component::DIRECT_SHARED_COMPONENT_REQUIREMENTS.to_vec();
             let shared = resolve_shared_component_dependencies(&components_dir, &requirements)?;
             let mut unsupported = false;
             for dep in &shared {

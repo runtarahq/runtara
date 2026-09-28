@@ -80,7 +80,7 @@ pub(super) fn parent_wat(root_exit: &str) -> String {
   (export "wake" (type $wake))
   (export "outcome" (type $outcome))
   (export "invoke" (func $invoke)))
-(export "runtara:workflow-lifecycle/lifecycle@0.2.0" (instance $lifecycle)))"#,
+(export "runtara:workflow/lifecycle@1.0.0" (instance $lifecycle)))"#,
     );
     wat
 }

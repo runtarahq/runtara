@@ -1,6 +1,6 @@
 //! A compiled `WaitForInstances` step against the real `InstanceWaits`
 //! service end to end: DSL -> composed WASM -> environment runner ->
-//! `runtara:workflow-wait` -> `InstanceWaits` -> runtime persistence.
+//! `runtara:workflow/waits` -> `InstanceWaits` -> runtime persistence.
 //!
 //! The parent parks on its children without holding a runner slot, both
 //! answers wake it, a runner started after the park resumes it to the

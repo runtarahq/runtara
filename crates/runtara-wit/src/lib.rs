@@ -123,6 +123,14 @@ pub mod control {
     pub const WIT: &str = include_str!("../wit/control/runtara-control.wit");
 }
 
+/// The resolved WASI inputs the workflow compiler imports (managed by
+/// `wit-deps` under `wit/deps`).
+pub mod wasi {
+    pub const IO_POLL_WIT: &str = include_str!("../wit/deps/io/poll.wit");
+    pub const MONOTONIC_CLOCK_WIT: &str = include_str!("../wit/deps/clocks/monotonic-clock.wit");
+    pub const MONOTONIC_CLOCK: &str = "wasi:clocks/monotonic-clock@0.2.3";
+}
+
 /// Every package as `(file name, WIT text)`, in dependency order: a package
 /// comes after every package it `use`s. This is the only place that knows the
 /// order.
@@ -135,13 +143,18 @@ pub const PACKAGES: &[(&str, &str)] = &[
     ("runtara-control.wit", control::WIT),
 ];
 
-/// A `wit_parser` resolve holding every runtara package once. Callers add
+/// A `wit_parser` resolve holding every runtara package once, after the WASI
+/// clock and poll interfaces the workflow compiler imports. Callers add
 /// their own packages (per-agent packages, a workflow world) on top; a world
 /// imports only what it names, so the unused packages are harmless.
-#[cfg(feature = "resolve")]
+#[cfg(any(test, feature = "resolve"))]
 pub fn resolve() -> Result<wit_parser::Resolve, String> {
     let mut resolve = wit_parser::Resolve::default();
-    for (name, wit) in PACKAGES {
+    let wasi = [
+        ("wasi-io-poll.wit", wasi::IO_POLL_WIT),
+        ("wasi-monotonic-clock.wit", wasi::MONOTONIC_CLOCK_WIT),
+    ];
+    for (name, wit) in wasi.iter().chain(PACKAGES) {
         resolve
             .push_str(name, wit)
             .map_err(|error| format!("{name}: {error:#}"))?;
@@ -226,5 +239,5 @@ pub fn agent_package(id: &str, shape: AgentShape) -> String {
     wit
 }
 
-#[cfg(all(test, feature = "resolve"))]
+#[cfg(test)]
 mod tests;

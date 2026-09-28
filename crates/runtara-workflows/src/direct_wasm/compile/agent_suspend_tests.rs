@@ -140,7 +140,7 @@ fn suspendable_body(behaviour: Behaviour) -> String {
 fn probe_component(agent: &str, behaviour: Behaviour) -> Vec<u8> {
     wat::parse_str(format!(
         r#"(component
-  (import "runtara:agent-suspension/context@0.1.0" (instance $context
+  (import "runtara:agent/continuation@1.0.0" (instance $context
     (export "continuation" (func (result (option (list u8)))))))
   {MEMORY}
   (core func $continuation (canon lower (func $context "continuation")
@@ -178,8 +178,8 @@ fn probe_component(agent: &str, behaviour: Behaviour) -> Vec<u8> {
   (instance $suspendable (export "error-info" (type $error)) (export "wake" (type $wake))
     (export "suspension" (type $suspension)) (export "outcome" (type $outcome))
     (export "invoke" (func $suspendable)))
-  (export "runtara:agent-{agent}/capabilities@0.4.0" (instance $capabilities))
-  (export "runtara:agent-{agent}/suspendable@0.4.0" (instance $suspendable)))"#,
+  (export "runtara:agent-{agent}/capabilities@1.0.0" (instance $capabilities))
+  (export "runtara:agent-{agent}/suspendable@1.0.0" (instance $suspendable)))"#,
         body = suspendable_body(behaviour),
     ))
     .expect("suspend probe parses")
@@ -191,7 +191,7 @@ fn probe_component(agent: &str, behaviour: Behaviour) -> Vec<u8> {
 fn control_api_probe() -> Vec<u8> {
     wat::parse_str(format!(
         r#"(component
-  (import "runtara:control/api@0.1.0" (instance $api
+  (import "runtara:control/api@1.0.0" (instance $api
     (type $outcome-def (enum "requested" "applied" "unchanged" "already-terminal"))
     (export "command-outcome" (type $outcome (eq $outcome-def)))
     (type $result-def (record (field "instance-id" string) (field "outcome" $outcome)
@@ -235,7 +235,7 @@ fn control_api_probe() -> Vec<u8> {
     (result (result (list u8) (error $error)))
     (canon lift (core func $code "invoke") (memory $memory "memory") (realloc (func $memory "realloc"))))
   (instance $capabilities (export "error-info" (type $error)) (export "invoke" (func $invoke)))
-  (export "runtara:agent-api-probe/capabilities@0.4.0" (instance $capabilities)))"#
+  (export "runtara:agent-api-probe/capabilities@1.0.0" (instance $capabilities)))"#
     ))
     .expect("control API probe parses")
 }
@@ -421,9 +421,9 @@ fn one_agent_instance_satisfies_capabilities_and_suspendable() -> anyhow::Result
     let compiled = compile_graph(dir.path(), probe_graph(), vec![probe_info()], &[staging])?;
     let artifacts = &compiled.component_artifacts;
     for import in [
-        "import runtara:agent-suspend-probe/capabilities@0.4.0;",
-        "import runtara:agent-suspend-probe/suspendable@0.4.0;",
-        "import runtara:workflow-operation/scope@0.1.0;",
+        "import runtara:agent-suspend-probe/capabilities@1.0.0;",
+        "import runtara:agent-suspend-probe/suspendable@1.0.0;",
+        "import runtara:workflow/operation@1.0.0;",
     ] {
         assert!(
             artifacts.world_wit.contains(import),
@@ -448,8 +448,8 @@ fn one_agent_instance_satisfies_capabilities_and_suspendable() -> anyhow::Result
         "wac wires both agent interfaces internally: {imports:?}"
     );
     for bubbled in [
-        runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME,
-        runtara_agent_suspension::CONTEXT_INTERFACE,
+        runtara_wit::workflow::OPERATION,
+        runtara_wit::agent::CONTINUATION,
     ] {
         assert!(
             imports.iter().any(|name| name == bubbled),
@@ -475,8 +475,8 @@ fn a_control_step_binds_capabilities_and_pins_the_bundled_bytes() -> anyhow::Res
     let compiled = compile_graph(dir.path(), control_graph(), vec![control_info()?], &[])?;
     let artifacts = &compiled.component_artifacts;
     for import in [
-        "import runtara:agent-control/capabilities@0.4.0;",
-        "import runtara:workflow-operation/scope@0.1.0;",
+        "import runtara:agent-control/capabilities@1.0.0;",
+        "import runtara:workflow/operation@1.0.0;",
     ] {
         assert!(
             artifacts.world_wit.contains(import),
@@ -493,9 +493,9 @@ fn a_control_step_binds_capabilities_and_pins_the_bundled_bytes() -> anyhow::Res
     );
     let imports = root_imports(&compiled.wasm_path)?;
     for bubbled in [
-        runtara_workflow_wit::CONTROL_EXECUTOR_INTERFACE_NAME,
-        runtara_workflow_wit::CONTROL_API_INTERFACE_NAME,
-        runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME,
+        runtara_wit::control::EXECUTOR,
+        runtara_wit::control::API,
+        runtara_wit::workflow::OPERATION,
     ] {
         assert!(
             imports.iter().any(|name| name == bubbled),
@@ -505,7 +505,7 @@ fn a_control_step_binds_capabilities_and_pins_the_bundled_bytes() -> anyhow::Res
     assert!(
         !imports
             .iter()
-            .any(|name| name == runtara_agent_suspension::CONTEXT_INTERFACE),
+            .any(|name| name == runtara_wit::agent::CONTINUATION),
         "no continuation is delivered to control: {imports:?}"
     );
 
@@ -556,7 +556,7 @@ fn a_control_step_binds_capabilities_and_pins_the_bundled_bytes() -> anyhow::Res
     )?;
     assert_eq!(
         loaded.capabilities_iface,
-        "runtara:agent-control/capabilities@0.4.0"
+        "runtara:agent-control/capabilities@1.0.0"
     );
     Ok(())
 }
@@ -876,7 +876,7 @@ async fn a_direct_control_api_call_is_denied_outside_the_executor() -> anyhow::R
     let dir = tempfile::tempdir()?;
     let probe = dir.path().join("api-probe.wasm");
     fs::write(&probe, control_api_probe())?;
-    let interface = "runtara:agent-api-probe/capabilities@0.4.0";
+    let interface = "runtara:agent-api-probe/capabilities@1.0.0";
 
     let fake = Arc::new(FakeControl::default());
     let root = workflow_executor(Some(control_executor(fake.clone())?))?;

@@ -77,4 +77,4 @@
   (instance $capabilities
     (export "error-info" (type $error))
     (export "invoke" (func $invoke)))
-  (export "runtara:agent-http/capabilities@0.4.0" (instance $capabilities)))
+  (export "runtara:agent-http/capabilities@1.0.0" (instance $capabilities)))

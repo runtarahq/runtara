@@ -170,7 +170,7 @@ async fn native_root_pause_preserves_waiting_child_but_cancel_closes_it() {
 fn root_wat(exit: &str) -> String {
     format!(
         r#"(component
-      (import "runtara:workflow-runtime/runtime@0.3.0" (instance $runtime
+      (import "runtara:workflow/runtime@1.0.0" (instance $runtime
         (export "complete" (func (param "output" (list u8)) (result (result (error string)))))
         (export "check-signals" (func (result (result bool (error string)))))))
       (alias export $runtime "complete" (func $complete))
@@ -202,7 +202,7 @@ fn root_wat(exit: &str) -> String {
         (canon lift (core func $code "invoke") (memory $memory "memory") (realloc (func $memory "realloc"))))
       (instance $api (export "error-info" (type $error)) (export "signal-wait" (type $signal))
         (export "wake" (type $wake)) (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
-      (export "runtara:workflow-lifecycle/lifecycle@0.2.0" (instance $api)))"#
+      (export "runtara:workflow/lifecycle@1.0.0" (instance $api)))"#
     )
 }
 const COMPLETE: &str = r#"(call $complete (i32.const 4000) (i32.const 2) (i32.const 64))

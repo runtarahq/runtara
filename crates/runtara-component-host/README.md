@@ -44,7 +44,7 @@ println!("{}", result.output.unwrap());  // {"hash":"2cf24...","algorithm":"sha2
 ## Security posture
 
 Raw WASI HTTP is denied. Guest HTTP uses
-`runtara:outbound-http/client@0.1.0`, with explicit connection IDs or public URLs,
+`runtara:host/http@1.0.0`, with explicit connection IDs or public URLs,
 raw body bytes, bounded responses and the invocation's active deadline.
 `OutboundHttpHost` receives tenant and instance identity from host-owned context;
 guest headers and environment cannot override it. Missing services fail explicitly.
@@ -58,9 +58,8 @@ Inject an outbound service with `dispatcher.set_outbound_http(service)` or
 `executor.set_outbound_http(service)` before invoking network capabilities. Pure
 capabilities such as the example above need no outbound service.
 
-The old `runtara:host-io/http@0.1.0` import is removed; rebuild host, agent and
-workflow artifacts together. The separate `runtara:host-io/timers@0.1.0` contract
-is unchanged.
+Rebuild host, agent and workflow artifacts together: every runtara contract
+lives in `runtara-wit` and moves as one release.
 
 ## Trusted signing integration tests
 

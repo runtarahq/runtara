@@ -87,7 +87,7 @@ impl Agent {
             .get_export_index(
                 &mut store,
                 None,
-                "runtara:agent-object-model/capabilities@0.4.0",
+                "runtara:agent-object-model/capabilities@1.0.0",
             )
             .unwrap();
         let export = instance

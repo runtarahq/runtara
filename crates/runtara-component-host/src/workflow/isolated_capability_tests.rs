@@ -3,7 +3,7 @@ use crate::isolated_tasks::{IsolatedTasks, TaskId};
 use tokio::sync::Notify;
 use wasmtime::component::InstancePre;
 
-const INTERFACE: &str = "runtara:test-capability/capabilities@0.4.0";
+const INTERFACE: &str = "runtara:test-capability/capabilities@1.0.0";
 
 struct Ticker {
     stop: Arc<AtomicBool>,

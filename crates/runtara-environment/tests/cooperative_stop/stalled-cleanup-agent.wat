@@ -5,7 +5,7 @@
 ;; It deliberately never calls task.cancel/task.return. The parent must remain
 ;; blocked in subtask.cancel until the host aborts the entire execution.
 (component
-  (import "runtara:outbound-http/client@0.1.0" (instance $http
+  (import "runtara:host/http@1.0.0" (instance $http
                 (type $connection-def (record (field "connection-id" string) (field "url" string)
                     (field "endpoint" (option string)) (field "endpoint-ref" (option string))
                     (field "ai-provider" (option string)) (field "aws-service" (option string))))
@@ -90,4 +90,4 @@
   (instance $capabilities
     (export "error-info" (type $error))
     (export "invoke" (func $invoke)))
-  (export "runtara:agent-http/capabilities@0.4.0" (instance $capabilities)))
+  (export "runtara:agent-http/capabilities@1.0.0" (instance $capabilities)))

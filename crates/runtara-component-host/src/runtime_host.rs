@@ -1,9 +1,9 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Host-side surface for the `runtara:workflow-runtime/runtime` interface.
+//! Host-side surface for the `runtara:workflow/runtime` interface.
 //!
 //! Every composed workflow (see `runtara-workflows::direct_wasm`) lists
-//! `runtara:workflow-runtime/runtime` among its component-level imports; the
+//! `runtara:workflow/runtime` among its component-level imports; the
 //! host is its only implementation. This module provides it: a
 //! [`RuntimeHost`] trait carrying the interface's guest-visible semantics, and
 //! [`add_runtime_to_linker`] which binds every interface function to the trait
@@ -31,11 +31,11 @@ use crate::workflow::WorkflowState;
 
 /// Fully-qualified component import name of the runtime interface.
 ///
-/// Must match `runtara:workflow-runtime@0.4.0`'s `runtime` interface as
+/// Must match `runtara:workflow@1.0.0`'s `runtime` interface as
 /// emitted into the workflow world by `runtara-workflows::direct_wasm`
 /// (`emit_world_wit`) — the Spike-B integration test asserts a HostImport
 /// composition surfaces exactly this name.
-pub use runtara_workflow_wit::RUNTIME_INTERFACE_NAME;
+pub use runtara_wit::workflow::RUNTIME as RUNTIME_INTERFACE_NAME;
 
 /// Checkpoint id used for plain `durable-sleep`: the host glue aliases
 /// `durable-sleep` to `durable-sleep-checkpoint` under this key. The value is
@@ -305,33 +305,22 @@ fn require_host(
     })
 }
 
-/// Bind every `runtara:workflow-runtime/runtime` function to the store's
+/// Bind every `runtara:workflow/runtime` function to the store's
 /// [`RuntimeHost`].
 ///
 /// Registering these definitions is non-invasive for components that do not
 /// import the interface — wasmtime only consults linker definitions for
 /// imports a component actually declares (the same way the full WASI surface
-/// coexists with minimal components). Old composed artifacts therefore run
-/// unchanged through a linker that carries these bindings.
+/// coexists with minimal components).
 pub fn add_runtime_to_linker(linker: &mut Linker<WorkflowState>) -> anyhow::Result<()> {
-    add_runtime_version_to_linker(linker, runtara_workflow_wit::LEGACY_RUNTIME_INTERFACE_NAME)?;
-    add_runtime_version_to_linker(linker, RUNTIME_INTERFACE_NAME)
-}
-
-fn add_runtime_version_to_linker(
-    linker: &mut Linker<WorkflowState>,
-    interface: &str,
-) -> anyhow::Result<()> {
-    let mut inst = linker.instance(interface)?;
-    if interface == RUNTIME_INTERFACE_NAME {
-        inst.func_wrap_async(
-            "poll-signal",
-            |mut store: StoreContextMut<'_, WorkflowState>, (): ()| {
-                let host = require_host(&mut store);
-                Box::new(async move { Ok((host?.poll_signal().await,)) })
-            },
-        )?;
-    }
+    let mut inst = linker.instance(RUNTIME_INTERFACE_NAME)?;
+    inst.func_wrap_async(
+        "poll-signal",
+        |mut store: StoreContextMut<'_, WorkflowState>, (): ()| {
+            let host = require_host(&mut store);
+            Box::new(async move { Ok((host?.poll_signal().await,)) })
+        },
+    )?;
 
     inst.func_wrap_async(
         "load-input",
@@ -560,7 +549,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runtime_versions_link_with_distinct_signal_observation_contracts() {
+    fn the_runtime_links_with_its_signal_observation_contract() {
         let engine = crate::build_engine(&crate::EngineConfig {
             cache_dir: None,
             enable_epoch_interruption: false,
@@ -578,17 +567,8 @@ mod tests {
             (export "poll-signal" (func (result (result (option $exported-signal) (error string)))))
         "#;
         for (version, poll, expected) in [
-            (
-                runtara_workflow_wit::LEGACY_RUNTIME_INTERFACE_NAME,
-                "",
-                true,
-            ),
             (RUNTIME_INTERFACE_NAME, observation, true),
-            (
-                runtara_workflow_wit::LEGACY_RUNTIME_INTERFACE_NAME,
-                observation,
-                false,
-            ),
+            (RUNTIME_INTERFACE_NAME, "", true),
         ] {
             let component = wasmtime::component::Component::new(
                 &engine,

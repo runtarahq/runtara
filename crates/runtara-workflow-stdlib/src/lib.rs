@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Runtara Workflow Standard Library
 //!
-//! The manifest evaluator behind `runtara:workflow-stdlib/json@0.1.0`. A
+//! The manifest evaluator behind `runtara:workflow-stdlib/json@1.0.0`. A
 //! direct-emitted workflow carries its graph as a JSON manifest and calls
 //! into this component for every pure decision it has to make: resolving a
 //! reference path, applying an input mapping, rendering a template,
@@ -11,9 +11,9 @@
 //!
 //! Everything here is pure: JSON in, JSON out, plus an interning value
 //! store. Durability (registration, checkpointing, signals, heartbeats)
-//! is the host-implemented `runtara:workflow-runtime/runtime` interface, and
+//! is the host-implemented `runtara:workflow/runtime` interface, and
 //! agent calls go out over each
-//! agent's own WIT interface (`runtara:agent-<id>/capabilities@0.3.0`),
+//! agent's own WIT interface (`runtara:agent-<id>/capabilities@1.0.0`),
 //! bound at `wac compose` time. This crate therefore has no HTTP client,
 //! no SDK dependency, and no target-specific backends.
 //!
@@ -30,7 +30,7 @@ mod bindings {
     // Generated at compile time by the wit-bindgen macro (no committed
     // bindings.rs, no cargo-component).
     wit_bindgen::generate!({
-        path: "../runtara-workflow-wit/wit/stdlib",
+        path: "../runtara-wit/wit/workflow-stdlib",
         world: "workflow-stdlib",
         generate_all,
     });

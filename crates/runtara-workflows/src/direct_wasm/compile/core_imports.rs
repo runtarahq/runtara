@@ -906,7 +906,7 @@ impl DirectCoreFunctionIndices {
     pub(super) fn operation_scope(&self) -> &DirectOperationScopeImports {
         self.operation_scope
             .as_ref()
-            .expect("an operation-scoped site imports runtara:workflow-operation/scope")
+            .expect("an operation-scoped site imports runtara:workflow/operation")
     }
 
     /// The instance-wait imports, present only when a WaitForInstances step
@@ -914,7 +914,7 @@ impl DirectCoreFunctionIndices {
     pub(super) fn wait_instances(&self) -> &DirectWaitInstancesImports {
         self.wait_instances
             .as_ref()
-            .expect("a WaitForInstances step imports runtara:workflow-wait/instances")
+            .expect("a WaitForInstances step imports runtara:workflow/waits")
     }
 
     /// Whether the terminal `runtime.complete`/`runtime.fail` calls lower.
@@ -978,7 +978,7 @@ fn standard_agent_import<'a>(
         .find_map(|interface| imports.get(&(agent.to_string(), interface)))
 }
 
-/// Function indices of `runtara:workflow-operation/scope`.
+/// Function indices of `runtara:workflow/operation`.
 #[derive(Debug, Clone, Default)]
 pub(super) struct DirectOperationScopeImports {
     pub(super) enter: u32,
@@ -987,7 +987,7 @@ pub(super) struct DirectOperationScopeImports {
     pub(super) release: u32,
 }
 
-/// Function indices of `runtara:workflow-wait/instances`.
+/// Function indices of `runtara:workflow/waits`.
 #[derive(Debug, Clone, Default)]
 pub(super) struct DirectWaitInstancesImports {
     pub(super) register: u32,
@@ -1055,7 +1055,7 @@ fn is_runtime_import(
     function.name == function_name
         && interface
             .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name.starts_with("runtara:workflow-runtime/runtime"))
+            .is_some_and(|name| name.starts_with("runtara:workflow/runtime"))
 }
 
 fn is_stdlib_import(
@@ -1079,11 +1079,11 @@ pub(super) fn is_connection_resolver_import(
     function.name == function_name
         && interface
             .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name.starts_with("runtara:connection-resolver/resolver"))
+            .is_some_and(|name| name.starts_with("runtara:host/connections"))
 }
 
 /// The `(agent, interface)` of a per-agent import such as
-/// `runtara:agent-crypto/capabilities@0.4.0`; `None` for anything else.
+/// `runtara:agent-crypto/capabilities@1.0.0`; `None` for anything else.
 pub(super) fn agent_import_for(
     resolve: &Resolve,
     interface: Option<&WorldKey>,
@@ -1106,7 +1106,7 @@ fn is_operation_scope_import(
     function.name == function_name
         && interface
             .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name == runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME)
+            .is_some_and(|name| name == runtara_wit::workflow::OPERATION)
 }
 
 fn is_wait_instances_import(
@@ -1118,7 +1118,7 @@ fn is_wait_instances_import(
     function.name == function_name
         && interface
             .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name == runtara_workflow_wit::WAIT_INSTANCES_INTERFACE_NAME)
+            .is_some_and(|name| name == runtara_wit::workflow::WAITS)
 }
 
 pub(super) fn is_wasi_cli_run_export(
@@ -1132,7 +1132,7 @@ pub(super) fn is_wasi_cli_run_export(
             .is_some_and(|name| name.starts_with("wasi:cli/run"))
 }
 
-/// True for `runtara:workflow-lifecycle/lifecycle.invoke` — the entry export
+/// True for `runtara:workflow/lifecycle.invoke` — the entry export
 /// under [`WorkflowAbi::InvokeHostImports`].
 pub(super) fn is_lifecycle_invoke_export(
     resolve: &Resolve,
@@ -1142,7 +1142,7 @@ pub(super) fn is_lifecycle_invoke_export(
     function.name == "invoke"
         && interface
             .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name.starts_with("runtara:workflow-lifecycle/lifecycle"))
+            .is_some_and(|name| name.starts_with("runtara:workflow/lifecycle"))
 }
 
 /// True for the workflow-as-agent capability export: an `invoke` in a
@@ -1185,9 +1185,8 @@ pub(super) fn import_core_function(
     imports.import(&module, &name, EntityType::Function(type_index));
 
     if function.name == "now"
-        && interface.is_some_and(|key| {
-            resolve.name_world_key(key) == runtara_agent_wit::WASI_MONOTONIC_CLOCK_INTERFACE
-        })
+        && interface
+            .is_some_and(|key| resolve.name_world_key(key) == runtara_wit::wasi::MONOTONIC_CLOCK)
     {
         import_indices.monotonic_now = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "load-input") {

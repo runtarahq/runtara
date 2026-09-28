@@ -8,8 +8,8 @@ use crate::{Body, HttpError, HttpResponse, RequestBuilder};
 #[allow(warnings)]
 mod bindings {
     wit_bindgen::generate!({
-        path: "../runtara-workflow-wit/wit/outbound-http",
-        world: "outbound-http-client",
+        path: "../runtara-wit/wit/host",
+        world: "http-client",
         async: false,
     });
 }
@@ -17,8 +17,8 @@ mod bindings {
 #[allow(warnings)]
 mod async_bindings {
     wit_bindgen::generate!({
-        path: "../runtara-workflow-wit/wit/outbound-http",
-        world: "outbound-http-client",
+        path: "../runtara-wit/wit/host",
+        world: "http-client",
         async: true,
         type_section_suffix: "async",
     });
@@ -107,37 +107,37 @@ macro_rules! decode_response {
 }
 
 pub(crate) fn execute(request: RequestBuilder) -> Result<HttpResponse, HttpError> {
-    let input = encode_request!(request, bindings::runtara::outbound_http::client);
-    decode_response!(bindings::runtara::outbound_http::client::request(&input))
+    let input = encode_request!(request, bindings::runtara::host::http);
+    decode_response!(bindings::runtara::host::http::request(&input))
 }
 
 pub(crate) async fn execute_async(request: RequestBuilder) -> Result<HttpResponse, HttpError> {
-    let input = encode_request!(request, async_bindings::runtara::outbound_http::client);
-    decode_response!(async_bindings::runtara::outbound_http::client::request(input).await)
+    let input = encode_request!(request, async_bindings::runtara::host::http);
+    decode_response!(async_bindings::runtara::host::http::request(input).await)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bindings::runtara::outbound_http::client as contract;
+    use bindings::runtara::host::http as contract;
 
     #[test]
     fn public_signed_url_and_body_presence_are_preserved() -> Result<(), HttpError> {
         let url = "https://provider.invalid/file?sig=a%2Fb%2Bc&x=1&x=2";
         let empty = encode_request!(
             RequestBuilder::new("POST", url).body_bytes(&[]),
-            bindings::runtara::outbound_http::client
+            bindings::runtara::host::http
         );
         assert!(matches!(empty.destination, contract::Destination::Public(value) if value == url));
         assert_eq!(empty.body, Some(vec![]));
         let absent = encode_request!(
             RequestBuilder::new("GET", url),
-            bindings::runtara::outbound_http::client
+            bindings::runtara::host::http
         );
         assert_eq!(absent.body, None);
         let binary = encode_request!(
             RequestBuilder::new("PUT", url).body_bytes(&[0, 255, 128]),
-            bindings::runtara::outbound_http::client
+            bindings::runtara::host::http
         );
         assert_eq!(binary.body, Some(vec![0, 255, 128]));
         Ok(())
@@ -155,7 +155,7 @@ mod tests {
             .header("X-Runtara-Connection-Id", "forged-id")
             .body_json(&serde_json::json!({"text":"hi"}))
             .query("q", "a b");
-        let request = encode_request!(request, bindings::runtara::outbound_http::client);
+        let request = encode_request!(request, bindings::runtara::host::http);
         let contract::Destination::Connection(connection) = request.destination else {
             panic!("connection")
         };

@@ -8,7 +8,7 @@
 // Authority comes from the host store that runs the call, never from
 // arguments: no function takes a tenant, a caller instance or an operation.
 // The tenant is the calling run's; the caller is the calling instance; the
-// operation is the compiler-emitted `runtara:workflow-operation` scope of the
+// operation is the compiler-emitted `runtara:workflow/operation` scope of the
 // calling step, keyed by `op-hash` (sha256 of the step's checkpoint key), so a
 // replay of the same step is the same operation.
 //

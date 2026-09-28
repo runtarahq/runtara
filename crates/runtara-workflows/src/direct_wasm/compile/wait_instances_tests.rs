@@ -1,7 +1,7 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Hermetic compiler coverage of WaitForInstances: the placement backstops,
-//! the `runtara:workflow-wait` import only where a step needs it, the plan
+//! the `runtara:workflow/waits` import only where a step needs it, the plan
 //! classification, and the result offsets the lowering reads.
 use super::*;
 use crate::direct_wasm::component::WorkflowAbi;
@@ -65,15 +65,9 @@ fn a_wait_imports_the_instance_waits_and_nothing_else_does() {
         .expect("a top-level wait compiles");
     let world = fs::read_to_string(&result.world_wit_path).unwrap();
     let logic = fs::read(&result.workflow_logic_wasm_path).unwrap();
-    assert!(
-        world.contains(runtara_workflow_wit::WAIT_INSTANCES_INTERFACE_NAME),
-        "{world}"
-    );
+    assert!(world.contains(runtara_wit::workflow::WAITS), "{world}");
     assert!(result.component_artifacts.wait_instances);
-    assert!(contains(
-        &logic,
-        runtara_workflow_wit::WAIT_INSTANCES_INTERFACE_NAME.as_bytes()
-    ));
+    assert!(contains(&logic, runtara_wit::workflow::WAITS.as_bytes()));
     // It is not an Agent site: no operation scope.
     assert!(!world.contains("workflow-operation"), "{world}");
 
@@ -85,7 +79,7 @@ fn a_wait_imports_the_instance_waits_and_nothing_else_does() {
     let world = fs::read_to_string(&result.world_wit_path).unwrap();
     let logic = fs::read(&result.workflow_logic_wasm_path).unwrap();
     assert!(!world.contains("workflow-wait"), "{world}");
-    assert!(!contains(&logic, b"runtara:workflow-wait"));
+    assert!(!contains(&logic, b"runtara:workflow/waits"));
     assert!(!result.component_artifacts.wait_instances);
 }
 
@@ -137,10 +131,8 @@ fn the_plan_treats_a_wait_as_a_suspending_operation_scoped_step() {
 #[test]
 fn the_progress_offsets_match_the_wit_layout() {
     use wit_parser::{Int, Resolve, SizeAlign, Type, TypeDefKind};
-    let mut resolve = Resolve::default();
-    let stdlib = resolve
-        .push_str("stdlib.wit", runtara_workflow_wit::STDLIB_WIT)
-        .unwrap();
+    let resolve: Resolve = runtara_wit::resolve().unwrap();
+    let stdlib = runtara_package(&resolve, runtara_wit::stdlib::PACKAGE);
     let mut sizes = SizeAlign::default();
     sizes.fill(&resolve);
     let json = &resolve.interfaces[resolve.packages[stdlib].interfaces["json"]];
@@ -187,4 +179,13 @@ fn the_progress_offsets_match_the_wit_layout() {
         super::abi::RETPTR_WIDE_ERR_PTR_OFFSET,
         "an 8-aligned ok arm: the call site moves its error string"
     );
+}
+
+fn runtara_package(resolve: &wit_parser::Resolve, name: &str) -> wit_parser::PackageId {
+    resolve
+        .packages
+        .iter()
+        .find(|(_, package)| package.name.to_string() == name)
+        .map(|(id, _)| id)
+        .unwrap_or_else(|| panic!("{name} is in the resolve"))
 }

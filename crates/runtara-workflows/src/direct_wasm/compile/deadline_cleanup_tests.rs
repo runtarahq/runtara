@@ -17,7 +17,7 @@ fn agent(cpu_body: bool) -> anyhow::Result<Vec<u8>> {
     };
     Ok(wat::parse_str(format!(
         r#"(component
-      (import "runtara:host-io/timers@0.1.0" (instance $timers
+      (import "runtara:host/timers@1.0.0" (instance $timers
         (export "sleep" (func async (param "ms" u64)))))
       (core func $sleep (canon lower (func $timers "sleep") async))
       (core func $new (canon waitable-set.new))
@@ -39,7 +39,7 @@ fn agent(cpu_body: bool) -> anyhow::Result<Vec<u8>> {
         (canon lift (core func $code "invoke") (memory $code "memory")
           (realloc (func $code "realloc")) {}))
       (instance $agent (export "error-info" (type $error)) (export "invoke" (func $invoke)))
-      (export "runtara:agent-http/capabilities@0.4.0" (instance $agent)))"#,
+      (export "runtara:agent-http/capabilities@1.0.0" (instance $agent)))"#,
         if cpu_body {
             ""
         } else {

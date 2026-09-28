@@ -7,11 +7,7 @@ use wasmtime::component::types::{ComponentFunc, Type};
 type Check = fn(&Type) -> bool;
 
 pub(super) fn validate(invoke: &ComponentFunc, interface: &str) -> Result<()> {
-    let lifecycle = matches!(
-        interface,
-        runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME
-            | runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME_V1
-    );
+    let lifecycle = interface == runtara_wit::workflow::LIFECYCLE;
     let mut params = invoke.params();
     if !lifecycle {
         ensure!(

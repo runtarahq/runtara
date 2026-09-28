@@ -2034,9 +2034,6 @@ name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
-dependencies = [
- "foldhash 0.2.0",
-]
 
 [[package]]
 name = "hashbrown"
@@ -4451,6 +4448,7 @@ dependencies = [
  "quote",
  "runtara-agent-suspension",
  "runtara-dsl",
+ "runtara-wit",
  "serde",
  "serde_json",
  "syn 2.0.117",
@@ -4611,7 +4609,8 @@ dependencies = [
 name = "runtara-agent-suspension"
 version = "8.9.12"
 dependencies = [
- "wit-parser 0.246.2",
+ "runtara-wit",
+ "wit-parser 0.247.0",
 ]
 
 [[package]]
@@ -4681,10 +4680,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "runtara-agent-wit"
-version = "8.9.12"
-
-[[package]]
 name = "runtara-agent-xlsx"
 version = "8.9.12"
 dependencies = [
@@ -4751,7 +4746,6 @@ dependencies = [
  "runtara-agent-crypto",
  "runtara-agent-suspension",
  "runtara-agent-trusted",
- "runtara-agent-wit",
  "runtara-agent-xlsx",
  "runtara-connections",
  "runtara-control-contract",
@@ -4759,7 +4753,7 @@ dependencies = [
  "runtara-dsl",
  "runtara-invocation-contract",
  "runtara-object-store",
- "runtara-workflow-wit",
+ "runtara-wit",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4878,7 +4872,6 @@ dependencies = [
  "runtara-dsl",
  "runtara-invocation-contract",
  "runtara-store-postgres",
- "runtara-workflow-wit",
  "runtara-workflows",
  "serde",
  "serde_json",
@@ -4997,7 +4990,6 @@ dependencies = [
  "runtara-object-store",
  "runtara-store-postgres",
  "runtara-text-parser",
- "runtara-workflow-wit",
  "runtara-workflows",
  "rust-embed",
  "schemars 1.2.1",
@@ -5082,16 +5074,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "runtara-workflow-wit"
-version = "8.9.12"
-dependencies = [
- "runtara-agent-suspension",
- "runtara-agent-wit",
- "runtara-control-contract",
- "wit-parser 0.246.2",
-]
-
-[[package]]
 name = "runtara-workflows"
 version = "8.9.12"
 dependencies = [
@@ -5103,14 +5085,13 @@ dependencies = [
  "reqwest 0.12.28",
  "runtara-agent-suspension",
  "runtara-agent-trusted",
- "runtara-agent-wit",
  "runtara-component-host",
  "runtara-core",
  "runtara-database-contract",
  "runtara-dsl",
  "runtara-invocation-contract",
+ "runtara-wit",
  "runtara-workflow-stdlib",
- "runtara-workflow-wit",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -7196,17 +7177,6 @@ dependencies = [
 
 [[package]]
 name = "wasmparser"
-version = "0.246.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71cde4757396defafd25417cfb36aa3161027d06d865b0c24baaae229aac005d"
-dependencies = [
- "bitflags",
- "indexmap 2.14.0",
- "semver",
-]
-
-[[package]]
-name = "wasmparser"
 version = "0.247.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e6fb4c2bee46c5ea4d40f8cdb5c131725cd976718ec56f1c8e82fbde5fa2a80"
@@ -8249,25 +8219,6 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser 0.244.0",
-]
-
-[[package]]
-name = "wit-parser"
-version = "0.246.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd979042b5ff288607ccf3b314145435453f20fc67173195f91062d2289b204d"
-dependencies = [
- "anyhow",
- "hashbrown 0.16.1",
- "id-arena",
- "indexmap 2.14.0",
- "log",
- "semver",
- "serde",
- "serde_derive",
- "serde_json",
- "unicode-xid",
- "wasmparser 0.246.2",
 ]
 
 [[package]]

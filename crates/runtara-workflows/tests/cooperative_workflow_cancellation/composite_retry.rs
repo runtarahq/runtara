@@ -102,7 +102,7 @@ async fn run_nested(
         compiled
             .component_artifacts
             .world_wit
-            .contains("host-io/timers")
+            .contains("runtara:host/timers")
             == (retries > 0),
         "timer imports must follow the graph's retry requirement"
     );

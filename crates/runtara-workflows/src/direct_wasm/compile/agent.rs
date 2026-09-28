@@ -242,7 +242,7 @@ pub(super) fn emit_agent_plan(
     // same agent instance; every other site calls its standard interface.
     let suspends = static_data.agent_suspends(agent_id);
     // An operation-scoped site (suspending or control) runs its invoke inside
-    // `runtara:workflow-operation/scope`, entered with the site's checkpoint
+    // `runtara:workflow/operation`, entered with the site's checkpoint
     // key — durable or not — and left on every path.
     let scoped = suspends || static_data.agent_operation_scoped(agent_id);
     debug_assert!(

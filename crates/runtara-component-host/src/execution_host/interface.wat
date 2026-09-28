@@ -1,6 +1,6 @@
 ;; A component-level import of the canonical execution ABI. The test WIT parser
 ;; and Wasmtime linker both validate the resource/async/value signatures.
-(import "runtara:workflow-execution/tasks@0.1.0" (instance $tasks
+(import "runtara:workflow/tasks@1.0.0" (instance $tasks
   (export "task" (type $task (sub resource)))
   (type $error-info-def (record (field "code" string) (field "message" string)
     (field "category" string) (field "severity" string) (field "retryable" bool)

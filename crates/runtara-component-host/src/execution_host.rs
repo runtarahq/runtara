@@ -20,7 +20,7 @@ use crate::{
     },
 };
 
-pub use runtara_workflow_wit::EXECUTION_INTERFACE_NAME;
+pub use runtara_wit::workflow::TASKS as EXECUTION_INTERFACE_NAME;
 
 #[derive(
     Debug,

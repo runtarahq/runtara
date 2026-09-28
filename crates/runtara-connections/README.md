@@ -32,7 +32,7 @@ The host adds auth middleware and chooses the mount prefix.
 - The facade is pulled into server subsystems for runtime credential resolution: `channels/session.rs`, `api/services/webhook_verification.rs`, and `api/services/agent_testing.rs`.
 - Depends on `runtara-dsl` for connection-type metadata (integration ids, auth types, parameter schemas).
 - Uses `sqlx` against Postgres for storage, `redis` for rate-limit counters, and `aes-gcm` + `zeroize` for the envelope-encrypted parameter blobs defined in `crypto`.
-- Runs in-process inside the native server. WASM connection metadata and resource resolution use `runtara:connection-resolver/resolver` host functions backed directly by `ConnectionsFacade`. Tenant authority comes from the host; ordinary agents receive no raw credentials. MCP receives only tool hints and scope, with URLs and headers held by native egress. The retired internal connection HTTP routes and connection-service URL settings are no longer used.
+- Runs in-process inside the native server. WASM connection metadata and resource resolution use `runtara:host/connections` host functions backed directly by `ConnectionsFacade`. Tenant authority comes from the host; ordinary agents receive no raw credentials. MCP receives only tool hints and scope, with URLs and headers held by native egress. The retired internal connection HTTP routes and connection-service URL settings are no longer used.
 
 ## License
 

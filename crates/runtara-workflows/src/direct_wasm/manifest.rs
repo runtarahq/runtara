@@ -125,7 +125,7 @@ impl DirectWorkflowManifest {
 
     /// Whether an operation-scoped (suspending or control) call site exists
     /// anywhere in the root graph, its nested graphs or its embedded children.
-    /// Only then does the workflow import `runtara:workflow-operation/scope`,
+    /// Only then does the workflow import `runtara:workflow/operation`,
     /// so every other artifact keeps its exact bytes.
     pub fn has_operation_scoped_sites(&self) -> bool {
         fn any(graph: &DirectGraphManifest) -> bool {
@@ -140,7 +140,7 @@ impl DirectWorkflowManifest {
 
     /// Whether a WaitForInstances step sits anywhere in the root graph, its
     /// nested graphs or its embedded children. Only then does the workflow
-    /// import `runtara:workflow-wait/instances`.
+    /// import `runtara:workflow/waits`.
     pub fn has_wait_for_instances(&self) -> bool {
         fn any(graph: &DirectGraphManifest) -> bool {
             graph.steps.iter().any(|step| {

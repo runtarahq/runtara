@@ -662,7 +662,7 @@ pub struct ControlAudit {
 fn is_agent_export(name: &str) -> bool {
     name.contains("/capabilities@")
         || name.contains("/suspendable@")
-        || name.starts_with(runtara_workflow_wit::CONTROL_INTERFACE_PREFIX)
+        || name.starts_with(runtara_wit::control::PREFIX)
 }
 
 /// Audit which composed components can reach `runtara:control` (decision D2).
@@ -673,7 +673,7 @@ fn is_agent_export(name: &str) -> bool {
 /// load and on every call. Fails closed on what cannot be audited or trusted:
 /// a root that imports a component or core module (its bytes are not here),
 /// and an agent (a component exporting an agent interface) that imports
-/// `runtara:workflow-operation/` or `runtara:workflow-wait/`, which only
+/// `runtara:workflow/operation` or `runtara:workflow/waits`, which only
 /// compiled workflow logic may bind.
 pub fn audit_control_importers(component: &[u8]) -> Result<ControlAudit> {
     use wasmparser::{ComponentTypeRef, Encoding, Parser, Payload};
@@ -725,10 +725,9 @@ pub fn audit_control_importers(component: &[u8]) -> Result<ControlAudit> {
                         "workflow component imports `{name}` as a component or module, whose \
                          bytes cannot be audited"
                     );
-                    frame.control |=
-                        name.starts_with(runtara_workflow_wit::CONTROL_INTERFACE_PREFIX);
-                    frame.operation |= name.starts_with("runtara:workflow-operation/")
-                        || name.starts_with(runtara_workflow_wit::WAIT_INTERFACE_PREFIX);
+                    frame.control |= name.starts_with(runtara_wit::control::PREFIX);
+                    frame.operation |= name.starts_with(runtara_wit::workflow::OPERATION_PREFIX)
+                        || name.starts_with(runtara_wit::workflow::WAITS_PREFIX);
                 }
             }
             Payload::ComponentExportSection(exports) => {
@@ -744,8 +743,8 @@ pub fn audit_control_importers(component: &[u8]) -> Result<ControlAudit> {
                 } else if frame.component {
                     ensure!(
                         !(frame.agent && frame.operation),
-                        "a composed agent imports runtara:workflow-operation or \
-                         runtara:workflow-wait, which only compiled workflow logic may bind"
+                        "a composed agent imports runtara:workflow/operation or \
+                         runtara:workflow/waits, which only compiled workflow logic may bind"
                     );
                     if frame.control {
                         let bytes = component

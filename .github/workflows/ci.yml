@@ -440,7 +440,7 @@ jobs:
   # jobs never named and therefore never tested: runtara-dsl (253 test fns),
   # runtara-workflow-stdlib (190),
   # runtara-text-parser, runtara-ai, runtara-validation-wasm, runtara-http,
-  # runtara-agent-encoding, runtara-workflow-wit and both partially-skipped
+  # runtara-agent-encoding, runtara-wit and both partially-skipped
   # crates.
   #
   # Being workspace-wide rather than a list, a NEW crate is covered on the day
@@ -552,30 +552,18 @@ jobs:
           tool: wasm-tools@${{ env.WASM_TOOLS_VERSION }},wit-deps-cli@${{ env.WIT_DEPS_VERSION }}
 
       - name: Lock and resolve WIT dependencies
-        working-directory: crates/runtara-agent-wit
+        working-directory: crates/runtara-wit
         run: wit-deps lock
 
-      - name: Validate WIT package
-        run: wasm-tools component wit crates/runtara-agent-wit/wit > /dev/null
-
-      # The suspension, instance-wait, operation-scope and control packages.
-      # The last two `use` runtara:agent and runtara:agent-suspension, so each
-      # is parsed in a scratch dir with those packages as deps (nothing is
-      # committed).
-      - name: Validate suspension, wait, operation and control WIT packages
+      # The self-contained runtara packages parse on their own. `workflow` and
+      # `control` `use` runtara:agent; every package, together, is resolved by
+      # runtara-wit's unit tests in the workspace `--lib` job.
+      - name: Validate WIT packages
         run: |
           set -euo pipefail
-          wasm-tools component wit crates/runtara-agent-suspension/wit > /dev/null
-          wasm-tools component wit crates/runtara-workflow-wit/wit/wait > /dev/null
-          scratch="$(mktemp -d)"
-          for pkg in operation control; do
-            mkdir -p "$scratch/$pkg/deps"
-            cp crates/runtara-workflow-wit/wit/$pkg/*.wit "$scratch/$pkg/"
-            cp crates/runtara-agent-suspension/wit/runtara-agent-suspension.wit "$scratch/$pkg/deps/"
+          for pkg in agent host workflow-stdlib trusted; do
+            wasm-tools component wit "crates/runtara-wit/wit/$pkg" > /dev/null
           done
-          cp crates/runtara-agent-wit/wit/runtara-agent.wit "$scratch/control/deps/"
-          wasm-tools component wit "$scratch/operation" > /dev/null
-          wasm-tools component wit "$scratch/control" > /dev/null
 
   # Build every runtara-agent-* crate as a WASM component, emit each agent's
   # macro-derived meta.json sidecar, and run the dispatcher integration tests

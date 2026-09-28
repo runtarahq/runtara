@@ -327,7 +327,7 @@ mod db_tests {
         })
         .unwrap();
         let wasm = wat::parse_str(
-            "(component (instance $e) (export \"runtara:control/execution@0.1.0\" (instance $e)))",
+            "(component (instance $e) (export \"runtara:control/execution@1.0.0\" (instance $e)))",
         )
         .unwrap();
         // A fresh sidecar makes the pin unique in the shared test database.

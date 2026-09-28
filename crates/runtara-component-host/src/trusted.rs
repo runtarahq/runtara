@@ -7,8 +7,9 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use runtara_agent_trusted::{EXECUTION_INTERFACE, EXECUTOR_INTERFACE, TrustedContext, error};
+use runtara_agent_trusted::{TrustedContext, error};
 use runtara_dsl::agent_meta::{AgentInfo, canonical_agent_id};
+use runtara_wit::trusted::{EXECUTION as EXECUTION_INTERFACE, EXECUTOR as EXECUTOR_INTERFACE};
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use wasmtime::component::{Component, InstancePre, Linker};
@@ -612,7 +613,7 @@ mod tests {
     fn fixture(body: &str, pages: u32, start: &str, timer: bool) -> Vec<u8> {
         let import = if timer {
             r#"
-            (import "runtara:host-io/timers@0.1.0" (instance $timers
+            (import "runtara:host/timers@1.0.0" (instance $timers
                 (export "sleep" (func async (param "ms" u64)))))
             (alias export $timers "sleep" (func $sleep))
             (core func $sleep-lower (canon lower (func $sleep)))
@@ -649,7 +650,7 @@ mod tests {
                 (param "context" (list u8)) (result (result (list u8) (error string)))
                 (canon lift (core func $i "invoke") (memory $i "memory") (realloc (func $i "realloc"))))
             (instance $execution (export "invoke" (func $invoke)))
-            (export "runtara:trusted/execution@0.1.0" (instance $execution))
+            (export "runtara:trusted/execution@1.0.0" (instance $execution))
         )"#)).unwrap()
     }
 
@@ -661,7 +662,7 @@ mod tests {
         let start = if startup { check } else { "" };
         let body = if startup { "" } else { check };
         wat::parse_str(format!(r#"(component
-            (import "runtara:outbound-http/client@0.1.0" (instance $http
+            (import "runtara:host/http@1.0.0" (instance $http
                 (type $connection-def (record (field "connection-id" string) (field "url" string)
                     (field "endpoint" (option string)) (field "endpoint-ref" (option string))
                     (field "ai-provider" (option string)) (field "aws-service" (option string))))
@@ -704,7 +705,7 @@ mod tests {
                 (result (result (list u8) (error string)))
                 (canon lift (core func $i "invoke") (memory $memory "memory") (realloc (func $memory "realloc"))))
             (instance $execution (export "invoke" (func $invoke)))
-            (export "runtara:trusted/execution@0.1.0" (instance $execution)))"#)).unwrap()
+            (export "runtara:trusted/execution@1.0.0" (instance $execution)))"#)).unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread")]

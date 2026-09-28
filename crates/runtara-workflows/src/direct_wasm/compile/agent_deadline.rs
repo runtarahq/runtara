@@ -170,7 +170,7 @@ mod tests {
         module.section(&types);
         let mut imports = ImportSection::new();
         imports.import(
-            runtara_agent_wit::WASI_MONOTONIC_CLOCK_INTERFACE,
+            runtara_wit::wasi::MONOTONIC_CLOCK,
             "now",
             EntityType::Function(0),
         );
@@ -200,7 +200,7 @@ mod tests {
         let mut linker = wasmtime::Linker::new(&engine);
         linker
             .func_wrap(
-                runtara_agent_wit::WASI_MONOTONIC_CLOCK_INTERFACE,
+                runtara_wit::wasi::MONOTONIC_CLOCK,
                 "now",
                 |caller: wasmtime::Caller<'_, u64>| *caller.data(),
             )

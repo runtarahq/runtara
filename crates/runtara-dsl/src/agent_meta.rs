@@ -42,7 +42,7 @@ pub struct CapabilityMeta {
     /// Requires isolated, credential-bearing execution by an approved built-in.
     pub trusted: bool,
     /// May answer with a typed suspension instead of a result
-    /// (`runtara:agent-suspension`); invoked only through `suspendable.invoke`.
+    /// (`runtara:agent/suspension`); invoked only through `suspendable.invoke`.
     pub suspends: bool,
     /// Known errors this capability can return.
     /// Used for tooling hints, validation, and documentation generation.
@@ -1819,7 +1819,7 @@ pub fn validate_agent_metadata_or_panic() {
 pub const CONTROL_AGENT_ID: &str = "control";
 
 /// Whether a call to `capability` of `agent_id` is operation-scoped: the
-/// compiler wraps it in a `runtara:workflow-operation` scope, so the host
+/// compiler wraps it in a `runtara:workflow/operation` scope, so the host
 /// derives a replay-safe identity from the call site. That holds for every
 /// suspending capability and for every capability of the control agent
 /// (reads included, since caller-relative filters need the scope too).
@@ -3180,7 +3180,7 @@ mod tests {
             Some("fetch-http")
         );
         for name in [
-            "runtara:trusted/executor@0.1.0",
+            "runtara:trusted/executor@1.0.0",
             "runtara:trusted-artifacts/s3-storage-hab-hcd@0.1.0",
             &format!("runtara:trusted-artifacts/-h{wasm}-h{wasm}@0.1.0"),
             &format!("runtara:trusted-artifacts/x-h{wasm}-h{wasm}@0.2.0"),

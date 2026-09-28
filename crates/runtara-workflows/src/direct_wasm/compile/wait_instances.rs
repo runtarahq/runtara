@@ -3,7 +3,7 @@
 //! WaitForInstances lowering for the direct workflow core emitter.
 //!
 //! The step parks its run on a durable instance wait
-//! (`runtara:workflow-wait/instances`) until direct child runs finish:
+//! (`runtara:workflow/waits`) until direct child runs finish:
 //!
 //! 1. Breakpoint, then the step's canonical v2 `wait-instances` key
 //!    (`stdlib.wait-instances-key`). The host hashes it into the wait id; the

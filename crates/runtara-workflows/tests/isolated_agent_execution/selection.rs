@@ -568,7 +568,7 @@ fn production_compile_wrapper_uses_standard_composition_while_legacy_fixture_sta
         if let wit_parser::WorldItem::Interface { id, .. } = item {
             assert_ne!(
                 resolve.id_of(*id).as_deref(),
-                Some(runtara_workflow_wit::EXECUTION_INTERFACE_NAME)
+                Some(runtara_wit::workflow::TASKS)
             );
         }
     }

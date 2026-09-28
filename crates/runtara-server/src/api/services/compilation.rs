@@ -2253,7 +2253,7 @@ mod tests {
                 kind: "shared".to_string(),
                 agent_id: None,
                 package: "runtara:workflow-stdlib".to_string(),
-                package_with_version: "runtara:workflow-stdlib@0.1.0".to_string(),
+                package_with_version: "runtara:workflow-stdlib@1.0.0".to_string(),
                 wasm_filename: "runtara_workflow_stdlib.wasm".to_string(),
                 wasm: Some(wasm("runtara_workflow_stdlib.wasm", "stdlib-sha256")),
                 meta_filename: "runtara_workflow_stdlib.meta.json".to_string(),

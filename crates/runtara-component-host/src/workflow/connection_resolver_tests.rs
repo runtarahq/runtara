@@ -32,7 +32,7 @@ fn component(version: &str, asynchronous: &str) -> String {
 }
 
 #[tokio::test]
-async fn native_resolvers_preserve_both_abis_and_per_run_caches() -> anyhow::Result<()> {
+async fn native_resolvers_keep_per_run_caches() -> anyhow::Result<()> {
     let engine = crate::build_engine(&crate::EngineConfig {
         cache_dir: None,
         ..Default::default()
@@ -41,7 +41,7 @@ async fn native_resolvers_preserve_both_abis_and_per_run_caches() -> anyhow::Res
     let executor = WorkflowExecutor::new(engine.clone())?;
     let resolver = Arc::new(Resolver::default());
     executor.set_connection_resolver(resolver.clone())?;
-    for (version, asynchronous) in [("0.1.0", ""), ("0.2.0", "async")] {
+    for (version, asynchronous) in [(runtara_wit::VERSION, "async")] {
         let wasm = Component::new(&engine, component(version, asynchronous))?;
         let prepared = executor.prepare_precompiled(wasm).await?;
         for tenant in ["tenant-a", "tenant-b"] {
@@ -64,9 +64,9 @@ async fn native_resolvers_preserve_both_abis_and_per_run_caches() -> anyhow::Res
     // The guest calls each operation twice per run; only one of each reaches
     // the backend. Neither tenant nor subsequent runs reuse another run's cache.
     let calls = resolver.calls.lock().unwrap();
-    assert_eq!(calls.len(), 8);
+    assert_eq!(calls.len(), 4);
     for (i, (tenant, connection)) in calls.iter().enumerate() {
-        assert_eq!(tenant, if i % 4 < 2 { "tenant-a" } else { "tenant-b" });
+        assert_eq!(tenant, if i < 2 { "tenant-a" } else { "tenant-b" });
         assert_eq!(connection, "conn");
     }
     Ok(())
@@ -83,7 +83,10 @@ async fn guest_environment_cannot_enable_connection_resolution() -> anyhow::Resu
     let resolver = Arc::new(Resolver::default());
     executor.set_connection_resolver(resolver.clone())?;
     let prepared = executor
-        .prepare_precompiled(Component::new(&engine, component("0.2.0", "async"))?)
+        .prepare_precompiled(Component::new(
+            &engine,
+            component(runtara_wit::VERSION, "async"),
+        )?)
         .await?;
     let mut run = spec();
     run.env.insert("RUNTARA_TENANT_ID".into(), "spoofed".into());

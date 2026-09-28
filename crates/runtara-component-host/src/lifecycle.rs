@@ -1,6 +1,6 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Host-side mirror of `runtara:workflow-lifecycle/lifecycle` — the unified
+//! Host-side mirror of `runtara:workflow/lifecycle` — the unified
 //! invoke export a workflow compiled with the invoke ABI exposes instead of
 //! `wasi:cli/run` (Phase 3 of the agent/workflow unification).
 //!
@@ -13,7 +13,7 @@ use std::path::Path;
 /// Fully-qualified component export name of the lifecycle interface —
 /// re-exported from the canonical WIT crate so the host and the compiler
 /// cannot drift apart.
-pub use runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME;
+pub use runtara_wit::workflow::LIFECYCLE as LIFECYCLE_INTERFACE_NAME;
 
 /// WIT mirror of `lifecycle.error-info` (field-for-field the agent error).
 #[derive(
@@ -106,7 +106,7 @@ pub enum WorkflowOutcome {
 /// their image kind rather than treating all components as workflows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowEntrypoint {
-    /// The component exports `runtara:workflow-lifecycle/lifecycle.invoke`.
+    /// The component exports `runtara:workflow/lifecycle.invoke`.
     LifecycleInvoke,
     /// The component exports the retired direct-workflow `wasi:cli/run` entry.
     LegacyCliRun,
@@ -147,9 +147,7 @@ pub fn inspect_workflow_entrypoint(wasm: &[u8]) -> anyhow::Result<WorkflowEntryp
                 for export in reader {
                     let export = export?;
                     let name = export.name.0;
-                    if name == LIFECYCLE_INTERFACE_NAME
-                        || name == runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME_V1
-                    {
+                    if name == LIFECYCLE_INTERFACE_NAME {
                         lifecycle = true;
                     }
                     if name == "wasi:cli/run@0.2.3" || name.starts_with("wasi:cli/run@") {
@@ -197,10 +195,7 @@ pub fn exports_lifecycle_invoke(
     pre.component()
         .component_type()
         .exports(engine)
-        .any(|(name, _)| {
-            name == LIFECYCLE_INTERFACE_NAME
-                || name == runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME_V1
-        })
+        .any(|(name, _)| name == LIFECYCLE_INTERFACE_NAME)
 }
 
 #[cfg(test)]
@@ -213,7 +208,7 @@ mod tests {
             (core instance $i (instantiate $m))
             (func $invoke (canon lift (core func $i "invoke")))
             (instance $lifecycle (export "invoke" (func $invoke)))
-            (export "runtara:workflow-lifecycle/lifecycle@0.2.0" (instance $lifecycle))
+            (export "runtara:workflow/lifecycle@1.0.0" (instance $lifecycle))
         )
     "#;
 

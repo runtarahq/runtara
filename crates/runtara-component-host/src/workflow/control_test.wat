@@ -4,7 +4,7 @@
     (field "category" string) (field "severity" string) (field "retryable" bool)
     (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
 ;;-- EXECUTOR
-  (import "runtara:control/executor@0.1.0" (instance $exec
+  (import "runtara:control/executor@1.0.0" (instance $exec
     (type $error-def (record (field "code" string) (field "message" string)
       (field "category" string) (field "severity" string) (field "retryable" bool)
       (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
@@ -12,7 +12,7 @@
     (export "invoke" (func async (param "capability-id" string) (param "input" (list u8))
       (result (result (list u8) (error $e)))))))
 ;;-- API
-  (import "runtara:control/api@0.1.0" (instance $api
+  (import "runtara:control/api@1.0.0" (instance $api
     (type $outcome-def (enum "requested" "applied" "unchanged" "already-terminal"))
     (export "command-outcome" (type $outcome (eq $outcome-def)))
     (type $result-def (record (field "instance-id" string) (field "outcome" $outcome)
@@ -80,7 +80,7 @@
       (realloc (func $memory "realloc"))))
   (instance $execution (export "error-info" (type $error))
     (export "invoke" (func $execute)))
-  (export "runtara:control/execution@0.1.0" (instance $execution))
+  (export "runtara:control/execution@1.0.0" (instance $execution))
 ;;-- ROOT
   ;; A workflow root: pins, imports control, nests the agent, and forwards
   ;; its input as the capability id to the executor.
@@ -126,4 +126,4 @@
     (export "error-info" (type $lerror)) (export "signal-wait" (type $signal))
     (export "wake" (type $lwake)) (export "outcome" (type $loutcome))
     (export "invoke" (func $run)))
-  (export "runtara:workflow-lifecycle/lifecycle@0.2.0" (instance $lifecycle))
+  (export "runtara:workflow/lifecycle@1.0.0" (instance $lifecycle))

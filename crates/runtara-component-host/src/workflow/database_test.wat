@@ -1,5 +1,5 @@
 (component
-  (import "runtara:database/sql@0.1.0" (instance $database
+  (import "runtara:host/sql@1.0.0" (instance $database
     (export "query" (func async (param "connection-id" string) (param "request" (list u8)) (result (result (list u8) (error string)))))
     (export "execute" (func async (param "connection-id" string) (param "request" (list u8)) (result (result (list u8) (error string)))))
     (export "execute-batch" (func async (param "connection-id" string) (param "request" (list u8)) (result (result (list u8) (error string)))))))
@@ -48,4 +48,4 @@
   (instance $lifecycle
     (export "error-info" (type $error)) (export "signal-wait" (type $signal)) (export "wake" (type $wake))
     (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
-  (export "runtara:workflow-lifecycle/lifecycle@0.2.0" (instance $lifecycle)))
+  (export "runtara:workflow/lifecycle@1.0.0" (instance $lifecycle)))

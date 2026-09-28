@@ -1832,7 +1832,7 @@ fn top_level_component_imports(bytes: &[u8]) -> Vec<String> {
 }
 
 /// Spike B of the agent/workflow unification: wac-graph must compose a
-/// workflow whose directly-declared `runtara:workflow-runtime/runtime` import
+/// workflow whose directly-declared `runtara:workflow/runtime` import
 /// is left unsatisfied (no runtime component instantiated), surfacing it as a
 /// component-level import — the same path WASI interfaces already ride. This
 /// is the load-bearing assumption of the host-import migration: proven here
@@ -1874,7 +1874,7 @@ fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
     assert!(
         host_imports
             .iter()
-            .any(|name| name == "runtara:workflow-runtime/runtime@0.4.0"),
+            .any(|name| name == "runtara:workflow/runtime@1.0.0"),
         "host-import binding must surface the runtime interface; imports: {host_imports:?}"
     );
     assert!(
@@ -6440,7 +6440,7 @@ const PURE_PASSTHROUGH: &str = r#"{
 }"#;
 
 /// Workflow-as-agent slice d: a PURE, non-durable, invoke-ABI workflow compiled
-/// with the omit-runtime gate drops the `runtara:workflow-runtime/runtime`
+/// with the omit-runtime gate drops the `runtara:workflow/runtime`
 /// import entirely and executes with NO runtime host attached — its terminal
 /// result travels solely in-band. This is the composition-safe, agent-shaped
 /// artifact the workflow-as-agent path builds on.
@@ -6463,7 +6463,7 @@ fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_ho
         !compiled
             .component_artifacts
             .world_wit
-            .contains("workflow-runtime/runtime"),
+            .contains("runtara:workflow/runtime"),
         "world must not import the runtime:\n{}",
         compiled.component_artifacts.world_wit
     );
@@ -6518,7 +6518,7 @@ fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_ho
     assert!(
         kept.component_artifacts
             .world_wit
-            .contains("workflow-runtime/runtime"),
+            .contains("runtara:workflow/runtime"),
         "control artifact must keep the runtime import"
     );
 
@@ -6538,7 +6538,7 @@ fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_ho
         agentful
             .component_artifacts
             .world_wit
-            .contains("workflow-runtime/runtime")
+            .contains("runtara:workflow/runtime")
     );
 }
 
@@ -6591,11 +6591,11 @@ fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
     );
     let world = &compiled.component_artifacts.world_wit;
     assert!(
-        world.contains("export runtara:agent-pure-passthrough/capabilities@0.4.0"),
+        world.contains("export runtara:agent-pure-passthrough/capabilities@1.0.0"),
         "world must export the capabilities interface under the derived slug:\n{world}"
     );
     assert!(
-        !world.contains("workflow-runtime/runtime"),
+        !world.contains("runtara:workflow/runtime"),
         "agent-shaped workflow must import no runtime:\n{world}"
     );
 
@@ -6610,7 +6610,7 @@ fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
         executor
             .invoke_capability(
                 &pre,
-                "runtara:agent-pure-passthrough/capabilities@0.4.0",
+                "runtara:agent-pure-passthrough/capabilities@1.0.0",
                 "run",
                 br#"{"input":"as-agent"}"#.to_vec(),
             )
@@ -6658,7 +6658,7 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
         compiled
             .component_artifacts
             .world_wit
-            .contains("import runtara:workflow-runtime/runtime@0.4.0;"),
+            .contains("import runtara:workflow/runtime@1.0.0;"),
         "durable agent must keep the runtime import:\n{}",
         compiled.component_artifacts.world_wit
     );
@@ -6666,7 +6666,7 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
         compiled
             .component_artifacts
             .world_wit
-            .contains("export runtara:agent-delay-agent/capabilities@0.4.0;")
+            .contains("export runtara:agent-delay-agent/capabilities@1.0.0;")
     );
 
     // 4a off-switch: durability is the ONLY runtime need of a plain transform
@@ -8986,7 +8986,7 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
         child
             .component_artifacts
             .world_wit
-            .contains("export runtara:agent-shout-echo/capabilities@0.4.0;"),
+            .contains("export runtara:agent-shout-echo/capabilities@1.0.0;"),
         "child must export under its slug:\n{}",
         child.component_artifacts.world_wit
     );

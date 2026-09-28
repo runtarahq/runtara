@@ -1,14 +1,14 @@
 ;; Deadline-selection prototype using standard Component Model subtasks.
 ;; The fixture barrier only controls readiness; guest code selects the outcome.
 (component
-  (import "runtara:agent-{{AGENT}}/capabilities@0.4.0" (instance $http
+  (import "runtara:agent-{{AGENT}}/capabilities@1.0.0" (instance $http
     (type $error-def (record (field "code" string) (field "message" string)
       (field "category" string) (field "severity" string) (field "retryable" bool)
       (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
     (export "error-info" (type $error (eq $error-def)))
     (export "invoke" (func async (param "capability-id" string) (param "input" (list u8))
       (result (result (list u8) (error $error)))))))
-  (import "runtara:host-io/timers@0.1.0" (instance $timers
+  (import "runtara:host/timers@1.0.0" (instance $timers
     (export "sleep" (func async (param "ms" u64)))))
   (import "ready-barrier" (func $barrier async))
   (import "sibling" (func $sibling async (result u32)))

@@ -144,7 +144,7 @@ pub struct WorkflowRunSpec {
     pub timeout: Duration,
     pub cancel: Option<Arc<AtomicBool>>,
     pub limits: WorkflowLimits,
-    /// Native runtime host for the `runtara:workflow-runtime/runtime`
+    /// Native runtime host for the `runtara:workflow/runtime`
     /// interface every composed workflow imports. An artifact that imports
     /// it, run without a host, traps loudly on first use.
     pub runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
@@ -242,7 +242,7 @@ impl WasiHttpHooks for WorkflowHooks {
         request: http::Request<HyperOutgoingBody>,
         config: OutgoingRequestConfig,
     ) -> HttpResult<HostFutureIncomingResponse> {
-        // Generated workflow and agent HTTP goes through `runtara:host-io`,
+        // Generated workflow and agent HTTP goes through `runtara:host/http`,
         // where a single absolute deadline and response cap are enforced.
         // The legacy raw wasi:http route must not remain as an ungoverned
         // fallback: it would bypass both protections.
@@ -416,12 +416,7 @@ impl PreparedWorkflow {
         let ty = self.instance_pre.component().component_type();
         let imports: Vec<_> = ty.imports(engine).map(|(name, _)| name).collect();
         self.is_lifecycle_invoke(engine)
-            && [
-                runtara_workflow_wit::RUNTIME_INTERFACE_NAME,
-                runtara_workflow_wit::LEGACY_RUNTIME_INTERFACE_NAME,
-            ]
-            .iter()
-            .any(|name| imports.contains(name))
+            && imports.contains(&runtara_wit::workflow::RUNTIME)
             && !imports.iter().any(|name| name.starts_with("wasi:http/"))
     }
 
@@ -487,7 +482,7 @@ impl WorkflowExecutor {
         if component
             .component_type()
             .imports(&self.engine)
-            .any(|(name, _)| name == runtara_agent_trusted::EXECUTOR_INTERFACE)
+            .any(|(name, _)| name == runtara_wit::trusted::EXECUTOR)
         {
             anyhow::ensure!(
                 !pins.is_empty(),
@@ -724,7 +719,7 @@ impl WorkflowExecutor {
             .collect();
         if !imports
             .iter()
-            .any(|name| name == runtara_workflow_wit::CONTROL_EXECUTOR_INTERFACE_NAME)
+            .any(|name| name == runtara_wit::control::EXECUTOR)
         {
             return Ok(None);
         }
@@ -821,7 +816,7 @@ impl WorkflowExecutor {
             if component
                 .component_type()
                 .imports(&self.engine)
-                .any(|(name, _)| name == runtara_agent_trusted::EXECUTOR_INTERFACE)
+                .any(|(name, _)| name == runtara_wit::trusted::EXECUTOR)
             {
                 anyhow::ensure!(
                     !pins.is_empty(),
@@ -1467,8 +1462,6 @@ impl WorkflowExecutor {
                             .await?;
                         return Ok(result.map(crate::lifecycle::WorkflowOutcome::Completed));
                     }
-                    // v2 (0.2.0, async-typed invoke) is the current compile shape;
-                    // 0.1.0 (sync-typed) artifacts from before ABI v2 keep working.
                     let iface_idx = if let InvocationEntry::Lifecycle {
                         interface: Some(interface),
                     } = &entry
@@ -1480,9 +1473,8 @@ impl WorkflowExecutor {
                             })?
                     } else {
                         instance.get_export_index(&mut store, None, crate::lifecycle::LIFECYCLE_INTERFACE_NAME)
-                                .or_else(|| instance.get_export_index(&mut store, None, runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME_V1))
                                 .ok_or_else(|| anyhow::anyhow!(
-                                    "workflow component does not export {} (or the 0.1.0 variant) — \
+                                    "workflow component does not export {} — \
                                      not an invoke-shaped artifact (use execute() for wasi:cli/run artifacts)",
                                     crate::lifecycle::LIFECYCLE_INTERFACE_NAME
                                 ))?
@@ -1584,7 +1576,7 @@ impl WorkflowExecutor {
     /// catalog entry — for verifying the `AgentCapabilities` ABI. A pure,
     /// agent-shaped workflow imports no runtime, so a runtime-less state
     /// suffices; `iface_name` is the fully-qualified capabilities interface
-    /// export (e.g. `runtara:agent-<id>/capabilities@0.3.0`).
+    /// export (e.g. `runtara:agent-<id>/capabilities@1.0.0`).
     /// The connection (if any) must already be injected into `input` under
     /// `_connection` by the caller — the invoke ABI has no connection argument.
     pub async fn invoke_capability(

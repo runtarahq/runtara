@@ -195,7 +195,7 @@ async fn catalog(
 fn child_wat() -> String {
     format!(
         r#"(component
-      (import "runtara:workflow-runtime/runtime@0.3.0" (instance $runtime
+      (import "runtara:workflow/runtime@1.0.0" (instance $runtime
         (export "load-input" (func (result (result (list u8) (error string)))))
         (export "complete" (func (param "output" (list u8)) (result (result (error string)))))
         (export "heartbeat" (func (result (result (error string)))))

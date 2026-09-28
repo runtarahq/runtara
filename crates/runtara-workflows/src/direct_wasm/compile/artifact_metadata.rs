@@ -414,33 +414,38 @@ const AGENT_TYPES_INTERFACE_PREFIX: &str = "runtara:agent/types@";
 /// ones `runtara_component_host::registry::build_linker` links today. Kept
 /// explicit rather than derived from the linker, because the linker may also
 /// carry stubs that agents must not bind; new host services add entries here.
-/// `runtara:workflow-operation/` is never an agent import. The test
+/// `runtara:workflow/` is never an agent import. The test
 /// `every_allowlisted_import_links_against_the_agent_linker` links every entry
 /// against `build_linker`, so an entry needs its WIT pushed there too.
 pub const AGENT_IMPORT_ALLOWLIST: &[&str] = &[
-    runtara_workflow_wit::HOST_IO_TIMERS_INTERFACE_NAME,
-    runtara_workflow_wit::OUTBOUND_HTTP_INTERFACE_NAME,
-    runtara_agent_trusted::EXECUTOR_INTERFACE,
-    runtara_workflow_wit::CONNECTION_RESOLVER_INTERFACE_NAME,
-    runtara_workflow_wit::LEGACY_CONNECTION_RESOLVER_INTERFACE_NAME,
-    runtara_workflow_wit::DATABASE_INTERFACE_NAME,
+    runtara_wit::host::TIMERS,
+    runtara_wit::host::HTTP,
+    runtara_wit::trusted::EXECUTOR,
+    runtara_wit::host::CONNECTIONS,
+    runtara_wit::host::SQL,
 ];
 
 /// Interfaces no staged workflow-agent may import, although it skips the
 /// allowlist.
 pub const STAGED_WORKFLOW_AGENT_DENIED_PREFIXES: &[&str] = &[
-    "runtara:control/",
-    "runtara:workflow-operation/",
-    runtara_workflow_wit::WAIT_INTERFACE_PREFIX,
-    "runtara:agent-suspension/",
+    runtara_wit::control::PREFIX,
+    runtara_wit::workflow::OPERATION_PREFIX,
+    runtara_wit::workflow::WAITS_PREFIX,
+    SUSPENSION_INTERFACE_PREFIX,
+    CONTINUATION_INTERFACE_PREFIX,
 ];
+
+/// Any version of the agent suspension types.
+const SUSPENSION_INTERFACE_PREFIX: &str = "runtara:agent/suspension@";
+/// Any version of the continuation interface.
+const CONTINUATION_INTERFACE_PREFIX: &str = "runtara:agent/continuation@";
 
 /// Control interfaces the canonical `control` agent may import. Its own
 /// `runtara:control/execution` is an export, never an import.
 pub const CONTROL_AGENT_IMPORTS: &[&str] = &[
-    runtara_workflow_wit::CONTROL_TYPES_INTERFACE_NAME,
-    runtara_workflow_wit::CONTROL_API_INTERFACE_NAME,
-    runtara_workflow_wit::CONTROL_EXECUTOR_INTERFACE_NAME,
+    runtara_wit::control::TYPES,
+    runtara_wit::control::API,
+    runtara_wit::control::EXECUTOR,
 ];
 
 /// What an ordinary agent's metadata and location entitle it to import beyond
@@ -475,9 +480,7 @@ fn agent_import_allowed(import: &str) -> bool {
 }
 
 fn agent_import_granted(import: &str, grants: AgentImportGrants) -> bool {
-    if import == runtara_agent_suspension::TYPES_INTERFACE
-        || import == runtara_agent_suspension::CONTEXT_INTERFACE
-    {
+    if import == runtara_wit::agent::SUSPENSION || import == runtara_wit::agent::CONTINUATION {
         grants.suspends
     } else {
         grants.control && CONTROL_AGENT_IMPORTS.contains(&import)
@@ -561,7 +564,7 @@ pub fn check_agent_component_imports(
                 DirectCompileError::Component(format!("agent component `{agent_id}`: {error}"))
             })?
             .iter()
-            .any(|export| export == runtara_workflow_wit::CONTROL_EXECUTION_INTERFACE_NAME);
+            .any(|export| export == runtara_wit::control::EXECUTION);
     }
     for import in imports {
         let allowed = match kind {
@@ -677,13 +680,13 @@ fn check_workflow_agent_checkpoint_scope(
 }
 
 /// True when the component's TOP-LEVEL imports include the workflow runtime
-/// (`runtara:workflow-runtime/runtime`) — the shape of a DURABLE published
+/// (`runtara:workflow/runtime`) — the shape of a DURABLE published
 /// workflow-agent, whose checkpoint/sleep calls bubble up to the composing
 /// parent's instance host. Imports of nested (already-linked) components
 /// don't count: only what the composed child still asks the outside world
 /// for matters.
 fn component_imports_workflow_runtime(wasm: &[u8]) -> Result<bool, DirectCompileError> {
-    component_imports_prefix(wasm, "runtara:workflow-runtime/runtime")
+    component_imports_prefix(wasm, "runtara:workflow/runtime")
 }
 
 pub(super) fn component_imports_prefix(
@@ -1075,23 +1078,23 @@ mod tests {
     #[test]
     fn an_agent_importing_an_unlisted_interface_is_rejected() {
         for forbidden in [
-            "runtara:workflow-runtime/runtime@0.4.0",
-            "runtara:workflow-operation/scope@0.1.0",
-            "runtara:control/api@0.1.0",
+            "runtara:workflow/runtime@1.0.0",
+            "runtara:workflow/operation@1.0.0",
+            "runtara:control/api@1.0.0",
             "runtara:trusted-artifacts/s3-storage@0.1.0",
-            "runtara:host-io/timers@9.9.9",
+            "runtara:host/timers@9.9.9",
             "plain-function-import",
             // Near misses of the agent types prefix: another interface of the
             // agent package, an unversioned name, and a longer interface name
             // that merely starts with `types`.
-            "runtara:agent/capabilities@0.4.0",
+            "runtara:agent/capabilities@1.0.0",
             "runtara:agent/types",
             "runtara:agent/typesx@0.4.0",
         ] {
             let error = resolve_fixture_agent(
                 &[
                     "wasi:cli/environment@0.2.6",
-                    "runtara:agent/types@0.4.0",
+                    "runtara:agent/types@1.0.0",
                     forbidden,
                 ],
                 &["memory:read"],
@@ -1110,7 +1113,7 @@ mod tests {
     #[test]
     fn a_core_module_agent_is_refused_whatever_it_imports() {
         let core_module =
-            wat::parse_str(r#"(module (import "runtara:control/api@0.1.0" "stop" (func)))"#)
+            wat::parse_str(r#"(module (import "runtara:control/api@1.0.0" "stop" (func)))"#)
                 .expect("fixture module parses");
         let error = check_agent_component_imports(
             "published-flow",
@@ -1158,7 +1161,7 @@ mod tests {
             &[
                 "wasi:cli/environment@0.2.6",
                 "wasi:io/streams@0.2.6",
-                "runtara:agent/types@0.4.0",
+                "runtara:agent/types@1.0.0",
             ],
             &["memory:read"],
         )
@@ -1176,7 +1179,7 @@ mod tests {
         let component = component_requirement();
         fs::write(
             dir.path().join(&component.bundle_wasm_filename),
-            component_importing(&["runtara:control/api@0.1.0"]),
+            component_importing(&["runtara:control/api@1.0.0"]),
         )
         .expect("write component");
         let error = resolve_agent_component_dependencies(
@@ -1188,7 +1191,7 @@ mod tests {
         )
         .map(|_| ())
         .expect_err("a sidecar-less component is an ordinary agent");
-        assert!(error.to_string().contains("runtara:control/api@0.1.0"));
+        assert!(error.to_string().contains("runtara:control/api@1.0.0"));
     }
 
     #[test]
@@ -1197,20 +1200,20 @@ mod tests {
             FixtureDir::Staging,
             &[
                 "wasi:cli/environment@0.2.6",
-                "runtara:workflow-runtime/runtime@0.4.0",
-                "runtara:workflow-stdlib/json@0.1.0",
+                "runtara:workflow/runtime@1.0.0",
+                "runtara:workflow-stdlib/json@1.0.0",
             ],
             STAGED_TAGS,
         )
         .expect("a staged workflow-agent imports the runtime");
 
         for denied in [
-            "runtara:control/api@0.1.0",
-            "runtara:workflow-operation/scope@0.1.0",
+            "runtara:control/api@1.0.0",
+            "runtara:workflow/operation@1.0.0",
         ] {
             let error = resolve_fixture_agent_in(
                 FixtureDir::Staging,
-                &["runtara:workflow-runtime/runtime@0.4.0", denied],
+                &["runtara:workflow/runtime@1.0.0", denied],
                 STAGED_TAGS,
             )
             .expect_err("staged workflow-agents never bind control or the operation scope");
@@ -1227,7 +1230,7 @@ mod tests {
         suspends: bool,
     ) -> Result<(), DirectCompileError> {
         let exports: &[&str] = if agent_id == "control" {
-            &[runtara_workflow_wit::CONTROL_EXECUTION_INTERFACE_NAME]
+            &[runtara_wit::control::EXECUTION]
         } else {
             &[]
         };
@@ -1323,8 +1326,8 @@ mod tests {
     #[test]
     fn the_suspension_context_is_admitted_only_for_agents_declaring_suspends() {
         let imports = [
-            runtara_agent_suspension::TYPES_INTERFACE,
-            runtara_agent_suspension::CONTEXT_INTERFACE,
+            runtara_wit::agent::SUSPENSION,
+            runtara_wit::agent::CONTINUATION,
         ];
         resolve_declared_agent("pauser", FixtureDir::Primary, &imports, true)
             .expect("a suspending agent reads its continuation");
@@ -1343,8 +1346,8 @@ mod tests {
             .expect("the bundled control agent forwards to the executor");
         // Control no longer suspends, so it gets no suspension interface.
         for import in [
-            runtara_agent_suspension::TYPES_INTERFACE,
-            runtara_agent_suspension::CONTEXT_INTERFACE,
+            runtara_wit::agent::SUSPENSION,
+            runtara_wit::agent::CONTINUATION,
         ] {
             let error = resolve_declared_agent("control", FixtureDir::Primary, &[import], false)
                 .expect_err("control never suspends");
@@ -1365,9 +1368,9 @@ mod tests {
         // The control agent exports `execution`; importing it (or any other
         // control interface) is refused even for the control agent.
         for import in [
-            runtara_workflow_wit::CONTROL_EXECUTION_INTERFACE_NAME,
+            runtara_wit::control::EXECUTION,
             "runtara:control/api@0.2.0",
-            runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME,
+            runtara_wit::workflow::OPERATION,
         ] {
             assert!(
                 resolve_declared_agent("control", FixtureDir::Primary, &[import], true).is_err(),
@@ -1379,15 +1382,13 @@ mod tests {
         let error = resolve_declared_agent_exporting(
             "control",
             FixtureDir::Primary,
-            &[runtara_workflow_wit::CONTROL_API_INTERFACE_NAME],
+            &[runtara_wit::control::API],
             &[],
             true,
         )
         .expect_err("a control agent without the execution export gets no control");
         assert!(
-            error
-                .to_string()
-                .contains(runtara_workflow_wit::CONTROL_API_INTERFACE_NAME),
+            error.to_string().contains(runtara_wit::control::API),
             "{error}"
         );
     }
@@ -1395,7 +1396,7 @@ mod tests {
     #[test]
     fn a_workflow_agent_tag_outside_the_staging_dirs_does_not_skip_the_allowlist() {
         for import in [
-            "runtara:workflow-runtime/runtime@0.4.0",
+            "runtara:workflow/runtime@1.0.0",
             "runtara:trusted-artifacts/s3-storage@0.1.0",
         ] {
             let imports = ["wasi:cli/environment@0.2.6", import];
@@ -1415,18 +1416,18 @@ mod tests {
     fn an_untagged_agent_in_a_staging_dir_stays_on_the_allowlist() {
         resolve_fixture_agent_in(
             FixtureDir::Staging,
-            &["wasi:cli/environment@0.2.6", "runtara:agent/types@0.4.0"],
+            &["wasi:cli/environment@0.2.6", "runtara:agent/types@1.0.0"],
             &["memory:read"],
         )
         .expect("an ordinary agent with listed imports resolves from a staging dir");
 
         for forbidden in [
-            "runtara:workflow-runtime/runtime@0.4.0",
+            "runtara:workflow/runtime@1.0.0",
             "runtara:trusted-artifacts/s3-storage@0.1.0",
         ] {
             let error = resolve_fixture_agent_in(
                 FixtureDir::Staging,
-                &["runtara:agent/types@0.4.0", forbidden],
+                &["runtara:agent/types@1.0.0", forbidden],
                 &["memory:read"],
             )
             .expect_err("only the workflow-agent tag lifts the list, even in staging");
@@ -1436,7 +1437,7 @@ mod tests {
 
     #[test]
     fn a_re_raised_workflow_agent_must_resolve_as_a_staged_one() {
-        let imports = ["wasi:cli/environment@0.2.6", "runtara:agent/types@0.4.0"];
+        let imports = ["wasi:cli/environment@0.2.6", "runtara:agent/types@1.0.0"];
         resolve_fixture_agent_re_raised(FixtureDir::Staging, &imports, STAGED_TAGS, true)
             .expect("a staged workflow-agent may park its caller");
 
@@ -1502,12 +1503,12 @@ mod tests {
             })
         };
 
-        let runtime = "runtara:workflow-runtime/runtime@0.4.0";
+        let runtime = "runtara:workflow/runtime@1.0.0";
         let error = resolve(&["wasi:cli/environment@0.2.6", runtime], false)
             .expect_err("the primary copy is an ordinary agent, held to the allowlist");
         assert!(error.to_string().contains(runtime), "{error}");
 
-        let listed = ["wasi:cli/environment@0.2.6", "runtara:agent/types@0.4.0"];
+        let listed = ["wasi:cli/environment@0.2.6", "runtara:agent/types@1.0.0"];
         let error = resolve(&listed, true)
             .expect_err("the primary copy is not a staged workflow-agent, even with a staged twin");
         assert!(error.to_string().contains("staging"), "{error}");
@@ -1519,10 +1520,8 @@ mod tests {
     fn the_agent_import_allowlist_never_admits_workflow_or_control_interfaces() {
         for entry in AGENT_IMPORT_ALLOWLIST {
             for forbidden in [
-                "runtara:workflow-operation/",
-                runtara_workflow_wit::WAIT_INTERFACE_PREFIX,
-                "runtara:control/",
-                "runtara:workflow-runtime/",
+                runtara_wit::workflow::PREFIX,
+                runtara_wit::control::PREFIX,
                 "wasi:",
             ] {
                 assert!(
@@ -1618,28 +1617,12 @@ mod tests {
     /// fails here rather than when a real agent fails to instantiate.
     #[test]
     fn every_allowlisted_import_links_against_the_agent_linker() {
-        let mut resolve = wit_parser::Resolve::default();
-        let legacy_resolver = runtara_workflow_wit::CONNECTION_RESOLVER_WIT
-            .replace("@0.2.0", "@0.1.0")
-            .replace("async func", "func");
-        let bumped_timers = super::super::HOST_IO_TIMERS_WIT.replace("@0.1.0", "@0.2.0");
-        for (path, wit) in [
-            ("timers.wit", super::super::HOST_IO_TIMERS_WIT),
-            ("timers-bumped.wit", bumped_timers.as_str()),
-            ("outbound.wit", runtara_workflow_wit::OUTBOUND_HTTP_WIT),
-            ("trusted.wit", runtara_agent_trusted::WIT),
-            (
-                "resolver.wit",
-                runtara_workflow_wit::CONNECTION_RESOLVER_WIT,
-            ),
-            ("resolver-legacy.wit", legacy_resolver.as_str()),
-            ("database.wit", runtara_workflow_wit::DATABASE_WIT),
-            ("agent.wit", runtara_agent_wit::RUNTARA_AGENT_WIT),
-            ("agent-suspension.wit", runtara_agent_suspension::WIT),
-            ("control.wit", runtara_workflow_wit::CONTROL_WIT),
-        ] {
-            resolve.push_str(path, wit).expect("interface WIT parses");
-        }
+        let mut resolve = runtara_wit::resolve().expect("runtara WIT resolves");
+        // A next major of the host package, which the linker does not define.
+        let bumped_host = runtara_wit::host::WIT.replace("@1.0.0", "@2.0.0");
+        resolve
+            .push_str("host-bumped.wit", &bumped_host)
+            .expect("bumped host WIT parses");
         let engine = runtara_component_host::build_engine(&Default::default()).expect("engine");
         let linker = runtara_component_host::build_linker(&engine).expect("agent linker");
         let links = |interface: &str| {
@@ -1659,8 +1642,8 @@ mod tests {
         // Granted imports link too: `denied` control stubs and a context
         // without a continuation, so the full bundle loads in the dispatcher.
         for entry in CONTROL_AGENT_IMPORTS.iter().chain(&[
-            runtara_agent_suspension::TYPES_INTERFACE,
-            runtara_agent_suspension::CONTEXT_INTERFACE,
+            runtara_wit::agent::SUSPENSION,
+            runtara_wit::agent::CONTINUATION,
         ]) {
             if let Err(error) = links(entry) {
                 panic!("granted `{entry}` does not link against build_linker: {error:#}");
@@ -1669,7 +1652,7 @@ mod tests {
         // The probe checks definitions, not just names: an interface the
         // linker does not define is refused.
         assert!(
-            links("runtara:host-io/timers@0.2.0").is_err(),
+            links("runtara:host/timers@2.0.0").is_err(),
             "an undefined interface version must not link"
         );
     }

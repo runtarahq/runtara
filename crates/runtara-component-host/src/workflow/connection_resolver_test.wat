@@ -1,5 +1,5 @@
 (component
-  (import "runtara:connection-resolver/resolver@{{VERSION}}" (instance $resolver
+  (import "runtara:host/connections@{{VERSION}}" (instance $resolver
     (export "describe" (func {{ASYNC}} (param "connection-id" string) (result (result (list u8) (error string)))))
     (export "resolve-resource" (func {{ASYNC}} (param "connection-id" string) (param "request" (list u8)) (result (result (list u8) (error string)))))))
   (core module $memory
@@ -44,4 +44,4 @@
   (instance $lifecycle
     (export "error-info" (type $error)) (export "signal-wait" (type $signal)) (export "wake" (type $wake))
     (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
-  (export "runtara:workflow-lifecycle/lifecycle@0.2.0" (instance $lifecycle)))
+  (export "runtara:workflow/lifecycle@1.0.0" (instance $lifecycle)))

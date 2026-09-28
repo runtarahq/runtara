@@ -172,7 +172,7 @@ async fn latched_cleanup_abort_rejects_a_late_successful_return() -> Result<()> 
 }
 
 const ALARM_LOOP: &str = r#"(component
-  (import "runtara:host-io/timers@0.1.0" (instance $timers
+  (import "runtara:host/timers@1.0.0" (instance $timers
     (export "abort-after" (func async (param "ms" u64)))))
   (core func $alarm (canon lower (func $timers "abort-after") async))
   (core module $m

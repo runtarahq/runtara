@@ -335,7 +335,7 @@ pub(super) async fn invoke_named_agent_with_state(
         .get_export_index(
             &mut store,
             None,
-            &format!("runtara:agent-{agent_id}/capabilities@0.4.0"),
+            &format!("runtara:agent-{agent_id}/capabilities@1.0.0"),
         )
         .unwrap();
     let export = instance

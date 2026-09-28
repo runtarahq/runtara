@@ -167,7 +167,7 @@ impl WorkflowFeatureSummary {
         })
     }
 
-    /// Whether the emitted component must import `runtara:workflow-runtime/runtime`
+    /// Whether the emitted component must import `runtara:workflow/runtime`
     /// — i.e. any lowered step would call a `runtime.*` host function beyond the
     /// terminal `complete`/`fail` (which the omit path suppresses in favor of the
     /// in-band invoke return value).

@@ -825,7 +825,7 @@ fn assert_direct_breakpoint_before_import(core: &[u8], module: &str, name: &str)
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.4",
+            "cm32p2|runtara:workflow/runtime@1",
             "debug-mode-enabled",
         ),
     );
@@ -833,24 +833,20 @@ fn assert_direct_breakpoint_before_import(core: &[u8], module: &str, name: &str)
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "breakpoint-key",
         ),
     );
     let checkpoint_position = direct_core_call_position_after(
         &run_calls,
-        direct_core_import(
-            &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.4",
-            "checkpoint",
-        ),
+        direct_core_import(&imports, "cm32p2|runtara:workflow/runtime@1", "checkpoint"),
         breakpoint_key_position,
     );
     let breakpoint_event_position = direct_core_call_position_after(
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "breakpoint-event",
         ),
         checkpoint_position,
@@ -859,7 +855,7 @@ fn assert_direct_breakpoint_before_import(core: &[u8], module: &str, name: &str)
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.4",
+            "cm32p2|runtara:workflow/runtime@1",
             "custom-event",
         ),
         breakpoint_event_position,
@@ -868,7 +864,7 @@ fn assert_direct_breakpoint_before_import(core: &[u8], module: &str, name: &str)
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.4",
+            "cm32p2|runtara:workflow/runtime@1",
             "breakpoint-pause",
         ),
         custom_event_position,
@@ -1199,7 +1195,7 @@ fn direct_compile_embeds_manifest_and_support_sections() {
                 assert_eq!(abi["artifactKind"], "direct-invoke-component");
                 assert_eq!(
                     abi["componentRunExport"],
-                    "runtara:workflow-lifecycle/lifecycle@0.2.0"
+                    "runtara:workflow/lifecycle@1.0.0"
                 );
                 assert_eq!(abi["entryPointExecutable"].as_bool(), Some(true));
                 assert_eq!(abi["runtimeExecutable"].as_bool(), Some(true));
@@ -1266,17 +1262,14 @@ fn direct_compile_exports_wasi_cli_run_and_imports_components() {
                 for import in reader {
                     let import = import.expect("component import");
                     saw_stdlib_import |=
-                        import.name.0.contains("runtara:workflow-stdlib/json@0.1.0");
-                    saw_runtime_import |= import
-                        .name
-                        .0
-                        .contains("runtara:workflow-runtime/runtime@0.4.0");
+                        import.name.0.contains("runtara:workflow-stdlib/json@1.0.0");
+                    saw_runtime_import |= import.name.0.contains("runtara:workflow/runtime@1.0.0");
                 }
             }
             Payload::ComponentExportSection(reader) => {
                 for export in reader {
                     let export = export.expect("component export");
-                    if export.name.0 == "runtara:workflow-lifecycle/lifecycle@0.2.0" {
+                    if export.name.0 == "runtara:workflow/lifecycle@1.0.0" {
                         assert_eq!(export.kind, ComponentExternalKind::Instance);
                         saw_run_export = true;
                     }
@@ -1494,33 +1487,32 @@ fn direct_core_run_lowers_embed_workflow_breakpoint_after_child_input_mapping() 
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
                                 stdlib_apply_mapping_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
                                 stdlib_build_source_index = Some(next_function_index)
                             }
-                            (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.4",
-                                "debug-mode-enabled",
-                            ) => runtime_debug_mode_enabled_index = Some(next_function_index),
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-key") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "debug-mode-enabled") => {
+                                runtime_debug_mode_enabled_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-key") => {
                                 stdlib_breakpoint_key_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "checkpoint") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "checkpoint") => {
                                 runtime_checkpoint_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-event") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-event") => {
                                 stdlib_breakpoint_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "breakpoint-pause") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "breakpoint-pause") => {
                                 runtime_breakpoint_pause_index = Some(next_function_index)
                             }
                             (
-                                "cm32p2|runtara:workflow-stdlib/json@0.1",
+                                "cm32p2|runtara:workflow-stdlib/json@1",
                                 "embed-workflow-cache-key",
                             ) => stdlib_embed_workflow_cache_key_index = Some(next_function_index),
                             _ => {}
@@ -2220,7 +2212,7 @@ fn direct_core_emits_arena_reset_memory_copy_for_loops() {
 /// pins the GC wiring without depending on the flaky execute harness.
 #[test]
 fn direct_core_emits_value_store_retain_for_loops() {
-    const STDLIB_MODULE: &str = "cm32p2|runtara:workflow-stdlib/json@0.1";
+    const STDLIB_MODULE: &str = "cm32p2|runtara:workflow-stdlib/json@1";
 
     fn core_calls_retain(graph: ExecutionGraph) -> bool {
         let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
@@ -4534,22 +4526,22 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
     let expected_imports = [
         (
             "runtime.load-input",
-            "runtara:workflow-runtime/runtime",
-            "cm32p2|runtara:workflow-runtime/runtime@0.4",
+            "runtara:workflow/runtime",
+            "cm32p2|runtara:workflow/runtime@1",
             "load-input",
             vec![WasmType::Pointer],
         ),
         (
             "stdlib.init-manifest",
             "runtara:workflow-stdlib/json",
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "init-manifest",
             vec![WasmType::Pointer, WasmType::Length, WasmType::Pointer],
         ),
         (
             "stdlib.build-source",
             "runtara:workflow-stdlib/json",
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "build-source",
             vec![
                 WasmType::Pointer,
@@ -4564,7 +4556,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "stdlib.apply-mapping",
             "runtara:workflow-stdlib/json",
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "apply-mapping",
             vec![
                 WasmType::I32,
@@ -4576,7 +4568,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "stdlib.eval-condition",
             "runtara:workflow-stdlib/json",
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "eval-condition",
             vec![
                 WasmType::I32,
@@ -4588,7 +4580,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "stdlib.filter",
             "runtara:workflow-stdlib/json",
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "filter",
             vec![
                 WasmType::I32,
@@ -4600,7 +4592,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "stdlib.log-event",
             "runtara:workflow-stdlib/json",
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "log-event",
             vec![
                 WasmType::I32,
@@ -4612,7 +4604,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "stdlib.log",
             "runtara:workflow-stdlib/json",
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "log",
             vec![
                 WasmType::I32,
@@ -4624,7 +4616,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "stdlib.process-switch",
             "runtara:workflow-stdlib/json",
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "process-switch",
             vec![
                 WasmType::I32,
@@ -4636,7 +4628,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "stdlib.value-switch",
             "runtara:workflow-stdlib/json",
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "value-switch",
             vec![
                 WasmType::I32,
@@ -4648,7 +4640,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "stdlib.group-by",
             "runtara:workflow-stdlib/json",
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "group-by",
             vec![
                 WasmType::I32,
@@ -4660,7 +4652,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "stdlib.delay-duration-ms",
             "runtara:workflow-stdlib/json",
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "delay-duration-ms",
             vec![
                 WasmType::I32,
@@ -4672,7 +4664,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "stdlib.delay",
             "runtara:workflow-stdlib/json",
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "delay",
             vec![
                 WasmType::I32,
@@ -4685,7 +4677,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "stdlib.agent-output",
             "runtara:workflow-stdlib/json",
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "agent-output",
             vec![
                 WasmType::I32,
@@ -4699,7 +4691,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "stdlib.step-debug-start",
             "runtara:workflow-stdlib/json",
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "step-debug-start",
             vec![
                 WasmType::Pointer,
@@ -4712,7 +4704,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "stdlib.step-debug-end",
             "runtara:workflow-stdlib/json",
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "step-debug-end",
             // step-id (ptr,len), source (ptr,len), launched-at-ms (i64),
             // settled-at-ms (i64), retptr — the two u64 timestamps carry the real
@@ -4729,22 +4721,22 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         ),
         (
             "runtime.complete",
-            "runtara:workflow-runtime/runtime",
-            "cm32p2|runtara:workflow-runtime/runtime@0.4",
+            "runtara:workflow/runtime",
+            "cm32p2|runtara:workflow/runtime@1",
             "complete",
             vec![WasmType::Pointer, WasmType::Length, WasmType::Pointer],
         ),
         (
             "runtime.fail",
-            "runtara:workflow-runtime/runtime",
-            "cm32p2|runtara:workflow-runtime/runtime@0.4",
+            "runtara:workflow/runtime",
+            "cm32p2|runtara:workflow/runtime@1",
             "fail",
             vec![WasmType::Pointer, WasmType::Length, WasmType::Pointer],
         ),
         (
             "runtime.custom-event",
-            "runtara:workflow-runtime/runtime",
-            "cm32p2|runtara:workflow-runtime/runtime@0.4",
+            "runtara:workflow/runtime",
+            "cm32p2|runtara:workflow/runtime@1",
             "custom-event",
             vec![
                 WasmType::Pointer,
@@ -4757,7 +4749,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "stdlib.error-event",
             "runtara:workflow-stdlib/json",
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "error-event",
             vec![
                 WasmType::I32,
@@ -4769,7 +4761,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         (
             "stdlib.error",
             "runtara:workflow-stdlib/json",
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "error",
             vec![
                 WasmType::I32,
@@ -4834,43 +4826,43 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "init-manifest") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "init-manifest") => {
                                 init_manifest_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "load-input") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "load-input") => {
                                 load_input_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
                                 build_source_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "eval-condition") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "eval-condition") => {
                                 eval_condition_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "process-switch") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "process-switch") => {
                                 process_switch_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "log-event") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "log-event") => {
                                 log_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "log") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "log") => {
                                 log_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "error-event") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "error-event") => {
                                 error_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "error") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "error") => {
                                 error_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "complete") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "complete") => {
                                 complete_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "fail") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "fail") => {
                                 fail_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
                                 custom_event_index = Some(next_function_index)
                             }
                             _ => {}
@@ -5024,29 +5016,28 @@ fn direct_core_run_lowers_finish_breakpoint_after_output_mapping() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
                                 stdlib_apply_mapping_index = Some(next_function_index)
                             }
-                            (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.4",
-                                "debug-mode-enabled",
-                            ) => runtime_debug_mode_enabled_index = Some(next_function_index),
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-key") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "debug-mode-enabled") => {
+                                runtime_debug_mode_enabled_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-key") => {
                                 stdlib_breakpoint_key_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "checkpoint") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "checkpoint") => {
                                 runtime_checkpoint_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-event") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-event") => {
                                 stdlib_breakpoint_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "breakpoint-pause") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "breakpoint-pause") => {
                                 runtime_breakpoint_pause_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "complete") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "complete") => {
                                 runtime_complete_index = Some(next_function_index)
                             }
                             _ => {}
@@ -5139,7 +5130,7 @@ fn direct_core_run_lowers_conditional_breakpoint_before_condition_eval() {
 
     assert_direct_breakpoint_before_import(
         &core,
-        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "cm32p2|runtara:workflow-stdlib/json@1",
         "eval-condition",
     );
 }
@@ -5174,7 +5165,7 @@ fn direct_core_run_lowers_step_context_breakpoints_before_step_helpers() {
 
         assert_direct_breakpoint_before_import(
             &core,
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             helper_name,
         );
     }
@@ -5208,7 +5199,7 @@ fn direct_core_run_lowers_log_and_error_breakpoints_before_side_effects() {
 
         assert_direct_breakpoint_before_import(
             &core,
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             helper_name,
         );
     }
@@ -5246,7 +5237,7 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "apply-mapping",
         ),
     );
@@ -5254,7 +5245,7 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.4",
+            "cm32p2|runtara:workflow/runtime@1",
             "debug-mode-enabled",
         ),
     );
@@ -5262,23 +5253,19 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "breakpoint-key",
         ),
     );
     let checkpoint_position = direct_core_call_position(
         &run_calls,
-        direct_core_import(
-            &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.4",
-            "checkpoint",
-        ),
+        direct_core_import(&imports, "cm32p2|runtara:workflow/runtime@1", "checkpoint"),
     );
     let breakpoint_event_position = direct_core_call_position(
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "breakpoint-event",
         ),
     );
@@ -5290,7 +5277,7 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
     // static occurrence.
     let custom_event_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-runtime/runtime@0.4",
+        "cm32p2|runtara:workflow/runtime@1",
         "custom-event",
     );
     let custom_event_position =
@@ -5299,13 +5286,13 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-runtime/runtime@0.4",
+            "cm32p2|runtara:workflow/runtime@1",
             "breakpoint-pause",
         ),
     );
     let step_debug_start_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "cm32p2|runtara:workflow-stdlib/json@1",
         "step-debug-start",
     );
     let step_debug_start_position = direct_core_call_position_after(
@@ -5317,7 +5304,7 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
         &run_calls,
         direct_core_import(
             &imports,
-            "cm32p2|runtara:workflow-stdlib/json@0.1",
+            "cm32p2|runtara:workflow-stdlib/json@1",
             "agent-validate-input",
         ),
     );
@@ -5525,8 +5512,8 @@ fn direct_core_lowers_non_durable_agent_call() {
                         && import.name == "agent-error";
                     saw_agent_debug_error |= import.module.contains("runtara:workflow-stdlib/json")
                         && import.name == "agent-debug-error";
-                    saw_runtime_fail |= import.module.contains("runtara:workflow-runtime/runtime")
-                        && import.name == "fail";
+                    saw_runtime_fail |=
+                        import.module.contains("runtara:workflow/runtime") && import.name == "fail";
                     if matches!(import.ty, TypeRef::Func(_)) {
                         next_function_index += 1;
                     }
@@ -5687,30 +5674,30 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
                             (module, "get-checkpoint")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 get_checkpoint_index = Some(next_function_index);
                             }
                             (module, "checkpoint")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 checkpoint_index = Some(next_function_index);
                             }
                             (module, "durable-sleep")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 durable_sleep_index = Some(next_function_index);
                             }
                             (module, "durable-sleep-checkpoint")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 durable_sleep_checkpoint_index = Some(next_function_index);
                             }
-                            ("runtara:host-io/timers@0.1.0", "[async-lower]sleep") => {
+                            ("runtara:host/timers@1.0.0", "[async-lower]sleep") => {
                                 timer_sleep_index = Some(next_function_index);
                             }
                             (module, "blocking-sleep")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 saw_blocking_sleep_import = true;
                                 blocking_sleep_index = Some(next_function_index);
@@ -5739,7 +5726,7 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
                                 agent_error_from_info_index = Some(next_function_index);
                             }
                             (module, "record-retry-attempt")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 record_retry_attempt_index = Some(next_function_index);
                             }
@@ -6008,19 +5995,19 @@ fn direct_core_lowers_durable_agent_no_retry_checkpoint_path() {
                                 agent_cache_key_index = Some(next_function_index);
                             }
                             (module, "get-checkpoint")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 saw_get_checkpoint_import = true;
                                 get_checkpoint_index = Some(next_function_index);
                             }
                             (module, "checkpoint")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 saw_checkpoint_import = true;
                                 checkpoint_index = Some(next_function_index);
                             }
                             (module, "handle-checkpoint-signal")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 saw_handle_checkpoint_signal_import = true;
                                 handle_checkpoint_signal_index = Some(next_function_index);
@@ -6243,12 +6230,12 @@ fn direct_core_checkpoint_replay_skips_agent_invoke_and_checkpoint_save() {
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
                             (module, "get-checkpoint")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 get_checkpoint_index = Some(next_function_index);
                             }
                             (module, "checkpoint")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 checkpoint_index = Some(next_function_index);
                             }
@@ -6432,29 +6419,29 @@ fn direct_core_lowers_durable_agent_retry_loop() {
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
                             (module, "get-checkpoint")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 get_checkpoint_index = Some(next_function_index);
                             }
                             (module, "checkpoint")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 checkpoint_index = Some(next_function_index);
                             }
                             (module, "handle-checkpoint-signal")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 saw_handle_checkpoint_signal_import = true;
                                 handle_checkpoint_signal_index = Some(next_function_index);
                             }
                             (module, "durable-sleep")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 saw_durable_sleep_import = true;
                                 durable_sleep_index = Some(next_function_index);
                             }
                             (module, "durable-sleep-checkpoint")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 saw_durable_sleep_checkpoint_import = true;
                                 durable_sleep_checkpoint_index = Some(next_function_index);
@@ -6484,7 +6471,7 @@ fn direct_core_lowers_durable_agent_retry_loop() {
                                 agent_error_from_info_index = Some(next_function_index);
                             }
                             (module, "record-retry-attempt")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 saw_record_retry_attempt_import = true;
                                 record_retry_attempt_index = Some(next_function_index);
@@ -6793,31 +6780,23 @@ fn direct_core_lifecycle_agent_retry_parks_without_sleeping() {
                     continue;
                 }
                 match (import.module, import.name) {
-                    (module, "get-checkpoint")
-                        if module.contains("runtara:workflow-runtime/runtime") =>
-                    {
+                    (module, "get-checkpoint") if module.contains("runtara:workflow/runtime") => {
                         get_checkpoint_index = Some(next_function_index);
                     }
-                    (module, "checkpoint")
-                        if module.contains("runtara:workflow-runtime/runtime") =>
-                    {
+                    (module, "checkpoint") if module.contains("runtara:workflow/runtime") => {
                         checkpoint_index = Some(next_function_index);
                     }
-                    (module, "now-ms") if module.contains("runtara:workflow-runtime/runtime") => {
+                    (module, "now-ms") if module.contains("runtara:workflow/runtime") => {
                         now_ms_index = Some(next_function_index);
                     }
-                    (module, "blocking-sleep")
-                        if module.contains("runtara:workflow-runtime/runtime") =>
-                    {
+                    (module, "blocking-sleep") if module.contains("runtara:workflow/runtime") => {
                         blocking_sleep_index = Some(next_function_index);
                     }
-                    (module, "durable-sleep")
-                        if module.contains("runtara:workflow-runtime/runtime") =>
-                    {
+                    (module, "durable-sleep") if module.contains("runtara:workflow/runtime") => {
                         durable_sleep_index = Some(next_function_index);
                     }
                     (module, "durable-sleep-checkpoint")
-                        if module.contains("runtara:workflow-runtime/runtime") =>
+                        if module.contains("runtara:workflow/runtime") =>
                     {
                         durable_sleep_checkpoint_index = Some(next_function_index);
                     }
@@ -6931,12 +6910,8 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
             func: function,
         },
     );
-    let (resolver_interface, describe) = imported_wit_function(
-        &resolve,
-        world,
-        "runtara:connection-resolver/resolver",
-        "describe",
-    );
+    let (resolver_interface, describe) =
+        imported_wit_function(&resolve, world, "runtara:host/connections", "describe");
     let (resolver_module, resolver_name) = resolve.wasm_import_name(
         ManglingAndAbi::Legacy(wit_parser::LiftLowerAbi::AsyncCallback),
         WasmImport::Func {
@@ -7079,14 +7054,12 @@ fn direct_core_lowers_non_durable_agent_on_error_route() {
                     {
                         eval_condition_index = Some(next_function_index);
                     }
-                    if import.module.contains("runtara:workflow-runtime/runtime")
+                    if import.module.contains("runtara:workflow/runtime")
                         && import.name == "complete"
                     {
                         complete_index = Some(next_function_index);
                     }
-                    if import.module.contains("runtara:workflow-runtime/runtime")
-                        && import.name == "fail"
-                    {
+                    if import.module.contains("runtara:workflow/runtime") && import.name == "fail" {
                         fail_index = Some(next_function_index);
                     }
                     if matches!(import.ty, TypeRef::Func(_)) {
@@ -7176,34 +7149,34 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "init-manifest") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "init-manifest") => {
                                 init_manifest_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "load-input") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "load-input") => {
                                 load_input_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
                                 build_source_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "complete") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "complete") => {
                                 complete_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
                                 custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "fail") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "fail") => {
                                 fail_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "step-debug-start") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "step-debug-start") => {
                                 step_debug_start_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "step-debug-end") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "step-debug-end") => {
                                 step_debug_end_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "step-debug-error") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "step-debug-error") => {
                                 step_debug_error_index = Some(next_function_index)
                             }
                             _ => {}
@@ -7338,10 +7311,10 @@ fn direct_core_run_lowers_conditional_finish_branches_through_stdlib() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "eval-condition") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "eval-condition") => {
                                 eval_condition_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
                             _ => {}
@@ -7444,10 +7417,10 @@ fn direct_core_run_lowers_nested_conditional_tree_through_stdlib() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "eval-condition") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "eval-condition") => {
                                 eval_condition_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
                             _ => {}
@@ -7552,13 +7525,13 @@ fn direct_core_run_lowers_group_by_finish_through_stdlib() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
                                 build_source_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "group-by") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "group-by") => {
                                 group_by_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
                             _ => {}
@@ -7806,7 +7779,7 @@ fn direct_core_run_lowers_split_breakpoint_before_split_execution() {
 
     assert_direct_breakpoint_before_import(
         &core,
-        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "cm32p2|runtara:workflow-stdlib/json@1",
         "split-cache-key",
     );
 }
@@ -7850,42 +7823,42 @@ fn direct_core_run_lowers_split_retry_helpers() {
     let (imports, run_calls) = direct_core_imports_and_run_calls(&core);
     let retry_delay_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "cm32p2|runtara:workflow-stdlib/json@1",
         "retry-delay-ms",
     );
     let retry_sleep_key_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "cm32p2|runtara:workflow-stdlib/json@1",
         "retry-sleep-key",
     );
     let workflow_retryable_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "cm32p2|runtara:workflow-stdlib/json@1",
         "workflow-error-retryable",
     );
     let workflow_rate_limited_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "cm32p2|runtara:workflow-stdlib/json@1",
         "workflow-error-rate-limited",
     );
     let workflow_retry_after_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "cm32p2|runtara:workflow-stdlib/json@1",
         "workflow-error-retry-after-ms",
     );
     let blocking_sleep_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-runtime/runtime@0.4",
+        "cm32p2|runtara:workflow/runtime@1",
         "blocking-sleep",
     );
     let durable_sleep_checkpoint_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-runtime/runtime@0.4",
+        "cm32p2|runtara:workflow/runtime@1",
         "durable-sleep-checkpoint",
     );
     let record_retry_index = direct_core_import(
         &imports,
-        "cm32p2|runtara:workflow-runtime/runtime@0.4",
+        "cm32p2|runtara:workflow/runtime@1",
         "record-retry-attempt",
     );
 
@@ -7999,7 +7972,7 @@ fn direct_core_lowers_durable_split_checkpoint_path() {
                                 split_cache_key_index = Some(next_function_index);
                             }
                             (module, "get-checkpoint")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 get_checkpoint_index = Some(next_function_index);
                             }
@@ -8014,7 +7987,7 @@ fn direct_core_lowers_durable_split_checkpoint_path() {
                                 split_result_index = Some(next_function_index);
                             }
                             (module, "checkpoint")
-                                if module.contains("runtara:workflow-runtime/runtime") =>
+                                if module.contains("runtara:workflow/runtime") =>
                             {
                                 checkpoint_index = Some(next_function_index);
                             }
@@ -8238,7 +8211,7 @@ fn direct_core_run_lowers_while_loop_through_stdlib() {
                                 _ => {}
                             }
                         }
-                        module if module.contains("runtara:workflow-runtime/runtime") => {
+                        module if module.contains("runtara:workflow/runtime") => {
                             match import.name {
                                 "heartbeat" => runtime_heartbeat_index = Some(next_function_index),
                                 "is-cancelled" => {
@@ -8379,7 +8352,7 @@ fn direct_core_run_lowers_while_breakpoint_before_loop_execution() {
 
     assert_direct_breakpoint_before_import(
         &core,
-        "cm32p2|runtara:workflow-stdlib/json@0.1",
+        "cm32p2|runtara:workflow-stdlib/json@1",
         "while-max-iterations",
     );
 }
@@ -8642,20 +8615,19 @@ fn direct_core_run_lowers_durable_delay_finish_through_stdlib_and_runtime() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
                                 build_source_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "delay-duration-ms") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "delay-duration-ms") => {
                                 delay_duration_index = Some(next_function_index)
                             }
-                            (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.4",
-                                "durable-sleep-checkpoint",
-                            ) => durable_sleep_checkpoint_index = Some(next_function_index),
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "delay") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "durable-sleep-checkpoint") => {
+                                durable_sleep_checkpoint_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "delay") => {
                                 delay_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
                             _ => {}
@@ -8786,35 +8758,33 @@ fn direct_core_run_lowers_delay_breakpoint_pause_before_sleep() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
                                 stdlib_build_source_index = Some(next_function_index)
                             }
-                            (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.4",
-                                "debug-mode-enabled",
-                            ) => runtime_debug_mode_enabled_index = Some(next_function_index),
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-key") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "debug-mode-enabled") => {
+                                runtime_debug_mode_enabled_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-key") => {
                                 stdlib_breakpoint_key_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "checkpoint") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "checkpoint") => {
                                 runtime_checkpoint_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-event") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-event") => {
                                 stdlib_breakpoint_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "breakpoint-pause") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "breakpoint-pause") => {
                                 runtime_breakpoint_pause_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "delay-duration-ms") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "delay-duration-ms") => {
                                 stdlib_delay_duration_index = Some(next_function_index)
                             }
-                            (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.4",
-                                "durable-sleep-checkpoint",
-                            ) => runtime_durable_sleep_checkpoint_index = Some(next_function_index),
+                            ("cm32p2|runtara:workflow/runtime@1", "durable-sleep-checkpoint") => {
+                                runtime_durable_sleep_checkpoint_index = Some(next_function_index)
+                            }
                             _ => {}
                         }
                         next_function_index += 1;
@@ -8926,23 +8896,22 @@ fn direct_core_run_lowers_non_durable_delay_finish_through_blocking_sleep() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
                                 build_source_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "delay-duration-ms") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "delay-duration-ms") => {
                                 delay_duration_index = Some(next_function_index)
                             }
-                            (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.4",
-                                "durable-sleep-checkpoint",
-                            ) => durable_sleep_checkpoint_index = Some(next_function_index),
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "blocking-sleep") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "durable-sleep-checkpoint") => {
+                                durable_sleep_checkpoint_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow/runtime@1", "blocking-sleep") => {
                                 blocking_sleep_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "delay") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "delay") => {
                                 delay_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
                             _ => {}
@@ -9081,56 +9050,56 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
                                 build_source_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-signal-id") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-signal-id") => {
                                 wait_signal_id_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-timeout-ms") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-timeout-ms") => {
                                 wait_timeout_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-closed-error") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-closed-error") => {
                                 wait_closed_error_index = Some(next_function_index)
                             }
                             (
-                                "cm32p2|runtara:workflow-stdlib/json@0.1",
+                                "cm32p2|runtara:workflow-stdlib/json@1",
                                 "wait-poll-interval-ms-scoped",
                             ) => wait_poll_interval_index = Some(next_function_index),
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-event") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-event") => {
                                 wait_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-output") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-output") => {
                                 wait_output_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "instance-id") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "instance-id") => {
                                 runtime_instance_id_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "now-ms") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "now-ms") => {
                                 runtime_now_ms_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "fail") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "fail") => {
                                 runtime_fail_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "check-signals") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "check-signals") => {
                                 runtime_check_signals_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "poll-input") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "poll-input") => {
                                 runtime_poll_input_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "register-input") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "register-input") => {
                                 runtime_register_input_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "heartbeat") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "heartbeat") => {
                                 runtime_heartbeat_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "blocking-sleep") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "blocking-sleep") => {
                                 runtime_blocking_sleep_index = Some(next_function_index)
                             }
                             _ => {}
@@ -9237,28 +9206,28 @@ fn direct_core_run_lowers_wait_for_signal_debug_events_with_tracking() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-signal-id") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-signal-id") => {
                                 wait_signal_id_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-timeout-ms") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-timeout-ms") => {
                                 wait_timeout_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-debug-start") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-debug-start") => {
                                 wait_debug_start_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-event") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-event") => {
                                 wait_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-output") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-output") => {
                                 wait_output_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "step-debug-end") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "step-debug-end") => {
                                 step_debug_end_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
                             _ => {}
@@ -9374,26 +9343,25 @@ fn direct_core_run_lowers_wait_for_signal_breakpoint_pause() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            (
-                                "cm32p2|runtara:workflow-runtime/runtime@0.4",
-                                "debug-mode-enabled",
-                            ) => runtime_debug_mode_enabled_index = Some(next_function_index),
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-key") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "debug-mode-enabled") => {
+                                runtime_debug_mode_enabled_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-key") => {
                                 stdlib_breakpoint_key_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "checkpoint") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "checkpoint") => {
                                 runtime_checkpoint_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "breakpoint-event") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-event") => {
                                 stdlib_breakpoint_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "breakpoint-pause") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "breakpoint-pause") => {
                                 runtime_breakpoint_pause_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "instance-id") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "instance-id") => {
                                 runtime_instance_id_index = Some(next_function_index)
                             }
                             _ => {}
@@ -9507,20 +9475,19 @@ fn direct_core_run_executes_wait_on_wait_callback_before_wait_event() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
                                 build_source_index = Some(next_function_index)
                             }
-                            (
-                                "cm32p2|runtara:workflow-stdlib/json@0.1",
-                                "wait-on-wait-variables",
-                            ) => wait_on_wait_variables_index = Some(next_function_index),
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "log-event") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-on-wait-variables") => {
+                                wait_on_wait_variables_index = Some(next_function_index)
+                            }
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "log-event") => {
                                 log_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "log") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "log") => {
                                 log_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-event") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-event") => {
                                 wait_event_index = Some(next_function_index)
                             }
                             _ => {}
@@ -9626,13 +9593,13 @@ fn direct_core_run_wraps_wait_on_wait_error_before_runtime_fail() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "error") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "error") => {
                                 error_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "wait-on-wait-error") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-on-wait-error") => {
                                 wait_on_wait_error_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "fail") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "fail") => {
                                 runtime_fail_index = Some(next_function_index)
                             }
                             _ => {}
@@ -9726,13 +9693,13 @@ fn direct_core_run_lowers_filter_finish_through_stdlib() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
                                 build_source_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "filter") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "filter") => {
                                 filter_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
                             _ => {}
@@ -9838,13 +9805,13 @@ fn direct_core_run_lowers_value_switch_finish_through_stdlib() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
                                 build_source_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "value-switch") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "value-switch") => {
                                 value_switch_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
                             _ => {}
@@ -9973,16 +9940,16 @@ fn direct_core_run_lowers_routing_switch_finish_through_stdlib() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
                                 build_source_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "process-switch") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "process-switch") => {
                                 process_switch_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "value-switch") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "value-switch") => {
                                 value_switch_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
                             _ => {}
@@ -10119,19 +10086,19 @@ fn direct_core_run_lowers_log_finish_through_stdlib_and_runtime() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
                                 build_source_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "log-event") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "log-event") => {
                                 log_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "log") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "log") => {
                                 log_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
                                 custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
                             _ => {}
@@ -10268,22 +10235,22 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
                                 build_source_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "error-event") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "error-event") => {
                                 error_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "error") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "error") => {
                                 error_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "custom-event") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
                                 custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "fail") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "fail") => {
                                 fail_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-runtime/runtime@0.4", "complete") => {
+                            ("cm32p2|runtara:workflow/runtime@1", "complete") => {
                                 complete_index = Some(next_function_index)
                             }
                             _ => {}
@@ -10459,13 +10426,13 @@ fn direct_core_run_lowers_edge_conditions_through_stdlib() {
                     let import = import.expect("core import");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "build-source") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
                                 build_source_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "eval-condition") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "eval-condition") => {
                                 eval_condition_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow-stdlib/json@0.1", "apply-mapping") => {
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
                             _ => {}
@@ -10550,13 +10517,12 @@ fn direct_compile_writes_component_scaffold_sidecars() {
 
     assert_eq!(world_wit, result.component_artifacts.world_wit);
     assert_eq!(wac, result.component_artifacts.wac_source);
-    assert!(world_wit.contains("import runtara:workflow-stdlib/json@0.1.0;"));
-    assert!(world_wit.contains("import runtara:workflow-runtime/runtime@0.4.0;"));
-    assert!(world_wit.contains("export runtara:workflow-lifecycle/lifecycle@0.2.0;"));
+    assert!(world_wit.contains("import runtara:workflow-stdlib/json@1.0.0;"));
+    assert!(world_wit.contains("import runtara:workflow/runtime@1.0.0;"));
+    assert!(world_wit.contains("export runtara:workflow/lifecycle@1.0.0;"));
     assert!(wac.contains("new runtara:workflow-stdlib"));
     // HostImport default: the runtime component is neither instantiated nor
     // spread — its interface bubbles to the composed artifact's imports.
-    assert!(!wac.contains("new runtara:workflow-runtime"));
     assert!(wac.contains("new runtara:workflow-logic"));
     assert!(wac.contains("export wf...;"));
 }
@@ -10983,7 +10949,7 @@ fn generated_workflow_slugs_are_wit_valid_packages() {
     // The slug plan allows leading digits (decision 3) on the premise that
     // wit-parser accepts digit-led words in
     // package names. This asserts that premise against the REAL parser via
-    // the same `agent_wit_package` template the composition path uses — if a
+    // the same `runtara_wit::agent_package` generator the composition path uses — if a
     // wit-parser upgrade tightens the grammar, this fails here instead of as
     // an opaque compile error on a user's workflow.
     for name in ["2FA Sync", "My 2nd Flow", "Order Sync", "", "123 steps"] {
@@ -10993,11 +10959,8 @@ fn generated_workflow_slugs_are_wit_valid_packages() {
         );
         runtara_dsl::agent_meta::validate_workflow_slug(&slug)
             .unwrap_or_else(|e| panic!("slug {slug:?} from {name:?} invalid: {e}"));
-        let wit = super::agent_wit_package(&slug);
-        let mut resolve = Resolve::default();
-        resolve
-            .push_str("runtara-agent-types.wit", super::AGENT_TYPES_WIT)
-            .expect("agent types WIT parses");
+        let wit = runtara_wit::agent_package(&slug, runtara_wit::AgentShape::default());
+        let mut resolve: Resolve = runtara_wit::resolve().expect("runtara WIT resolves");
         resolve
             .push_str(format!("runtara-agent-{slug}.wit"), &wit)
             .unwrap_or_else(|e| panic!("slug {slug:?} (from name {name:?}) is not WIT-valid: {e}"));
@@ -11251,7 +11214,7 @@ fn split_timeout_keeps_required_runtime_import_in_both_invoke_abis() {
                 compiled
                     .component_artifacts
                     .world_wit
-                    .contains("workflow-runtime/runtime")
+                    .contains("runtara:workflow/runtime")
             );
             Validator::new_with_features(wasmparser::WasmFeatures::all())
                 .validate_all(&fs::read(compiled.wasm_path).unwrap())
@@ -11359,7 +11322,7 @@ fn callable_embed_omits_runtime_only_for_a_complete_runtime_free_child() {
                 compiled
                     .component_artifacts
                     .world_wit
-                    .contains("workflow-runtime/runtime"),
+                    .contains("runtara:workflow/runtime"),
                 !runtime_free,
                 "{case}/{retries}"
             );

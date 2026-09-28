@@ -68,10 +68,10 @@
     (instance $lifecycle
       (export "error-info" (type $error)) (export "signal-wait" (type $signal))
       (export "wake" (type $wake)) (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
-    (export "runtara:workflow-lifecycle/lifecycle@0.2.0" (instance $lifecycle)))
+    (export "runtara:workflow/lifecycle@1.0.0" (instance $lifecycle)))
   (instance $workflow (instantiate $workflow
     (with "target" (func $agent "run")) (with "ready" (func $ready))
     (with "alarm" (func $timers "abort-after")) (with "sleep" (func $timers "sleep"))
     (with "trace" (func $trace))))
-  (alias export $workflow "runtara:workflow-lifecycle/lifecycle@0.2.0" (instance $lifecycle))
-  (export "runtara:workflow-lifecycle/lifecycle@0.2.0" (instance $lifecycle)))
+  (alias export $workflow "runtara:workflow/lifecycle@1.0.0" (instance $lifecycle))
+  (export "runtara:workflow/lifecycle@1.0.0" (instance $lifecycle)))

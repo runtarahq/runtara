@@ -285,7 +285,7 @@ fn per_site_imports_and_the_suspension_error_follow_the_sites() {
     let (world, logic) = world_and_logic(&result);
     for interface in ["capabilities", "suspendable"] {
         assert!(
-            world.contains(&format!("import runtara:agent-waiter/{interface}@0.4.0;")),
+            world.contains(&format!("import runtara:agent-waiter/{interface}@1.0.0;")),
             "{interface}: {world}"
         );
     }
@@ -397,10 +397,7 @@ fn control_sites_import_the_operation_scope_even_when_not_durable() {
         let result = compile(graph, WorkflowAbi::InvokeHostImports).expect("compiles");
         let (world, logic) = world_and_logic(&result);
         assert!(
-            world.contains(&format!(
-                "import {};",
-                runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME
-            )),
+            world.contains(&format!("import {};", runtara_wit::workflow::OPERATION)),
             "durable={durable}: {world}"
         );
         assert!(
@@ -413,7 +410,7 @@ fn control_sites_import_the_operation_scope_even_when_not_durable() {
         );
         assert!(contains(
             &logic,
-            runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME.as_bytes()
+            runtara_wit::workflow::OPERATION.as_bytes()
         ));
     }
 }
@@ -456,17 +453,15 @@ fn unscoped_workflows_carry_nothing_of_the_operation_scope() {
 #[test]
 fn the_emitted_result_offsets_match_the_wit_layout() {
     use wit_parser::{Int, Resolve, SizeAlign, Type, TypeDefKind};
-    let mut resolve = Resolve::default();
-    resolve
-        .push_str("agent.wit", runtara_agent_wit::RUNTARA_AGENT_WIT)
-        .unwrap();
-    resolve
-        .push_str("agent-suspension.wit", runtara_agent_suspension::WIT)
-        .unwrap();
+    let mut resolve: Resolve = runtara_wit::resolve().unwrap();
+    let shape = runtara_wit::AgentShape {
+        suspendable: true,
+        ..Default::default()
+    };
     let package = resolve
         .push_str(
             "probe.wit",
-            &agent_wit_package_with_interfaces("suspend-probe", false, true),
+            &runtara_wit::agent_package("suspend-probe", shape),
         )
         .unwrap();
     let mut sizes = SizeAlign::default();

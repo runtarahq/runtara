@@ -78,8 +78,10 @@ fn every_name_constant_names_a_real_interface() {
         .packages
         .iter()
         .map(|(_, package)| package.name.to_string())
+        .filter(|name| name.starts_with("runtara:"))
         .collect();
     assert_eq!(packages.len(), PACKAGES.len());
+    assert!(names.contains(crate::wasi::MONOTONIC_CLOCK));
     for name in [
         crate::agent::PACKAGE,
         crate::host::PACKAGE,

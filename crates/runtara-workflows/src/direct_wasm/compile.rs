@@ -79,9 +79,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use runtara_dsl::ExecutionGraph;
-use runtara_workflow_wit::{
-    ABI_WIT, CONNECTION_RESOLVER_WIT, LIFECYCLE_INTERFACE_NAME, LIFECYCLE_WIT,
-    RUNTIME_INTERFACE_NAME, RUNTIME_WIT, STDLIB_WIT, WORKFLOW_WIT_VERSION,
+use runtara_wit::workflow::{
+    LIFECYCLE as LIFECYCLE_INTERFACE_NAME, RUNTIME as RUNTIME_INTERFACE_NAME,
 };
 use sha2::{Digest, Sha256};
 use wasm_encoder::{CustomSection, Encode, Function as WasmFunction, Instruction, Section};
@@ -112,7 +111,9 @@ pub use isolation_selection::{
     compile_direct_workflow_composed_with_isolation_policy,
 };
 
-use super::component::{DIRECT_AGENT_WIT_VERSION, DirectComponentArtifacts};
+use super::component::{
+    DIRECT_AGENT_WIT_VERSION, DIRECT_WORKFLOW_LOGIC_PACKAGE, DirectComponentArtifacts,
+};
 use super::error::DirectCompileError;
 use super::manifest::{
     DIRECT_WORKFLOW_MANIFEST_VERSION, DirectManifestChildWorkflowInput, DirectWorkflowManifest,
@@ -139,7 +140,7 @@ use super::support::{
 /// Direct workflow artifact ABI version (`wasi:cli/run` export shape).
 pub const DIRECT_WORKFLOW_ABI_VERSION: u32 = 1;
 /// Direct workflow artifact ABI version for the unified invoke export
-/// (`runtara:workflow-lifecycle/lifecycle.invoke`).
+/// (`runtara:workflow/lifecycle.invoke`).
 pub const DIRECT_WORKFLOW_INVOKE_ABI_VERSION: u32 = 2;
 /// Custom section containing [`DirectWorkflowManifest`] JSON.
 pub const DIRECT_WORKFLOW_MANIFEST_SECTION: &str = "runtara.direct_workflow.manifest";
@@ -163,22 +164,6 @@ world command {
     export run;
 }
 "#;
-const AGENT_TYPES_WIT: &str = include_str!("../../../runtara-agent-wit/wit/runtara-agent.wit");
-/// Host-satisfied concurrent timer for retry backoff and lifecycle polling.
-/// Imported for parallel windows and runtime-backed Agent waits;
-/// the wac trailing `...` bubbles it to
-/// the composed component where the executor binds it func_wrap_concurrent.
-const HOST_IO_TIMERS_WIT: &str = "\
-package runtara:host-io@0.1.0;
-
-interface timers {
-    /// Async-TYPED so the emitter may async-lower it into a waitable; the
-    /// world-level sync lowering is never called.
-    sleep: async func(ms: u64);
-    /// Emergency whole-execution alarm; dispose through standard cancellation.
-    abort-after: async func(ms: u64);
-}
-";
 const AGENT_WIT_VERSION: &str = DIRECT_AGENT_WIT_VERSION;
 
 const DIRECT_RUN_RETPTR_OFFSET: i32 = 0;
@@ -622,7 +607,7 @@ pub struct DirectCompilationResult {
     pub component_artifacts: DirectComponentArtifacts,
     /// Dependency/provenance metadata emitted beside the direct artifact.
     pub artifact_metadata: DirectArtifactMetadata,
-    /// Whether this compile dropped the `runtara:workflow-runtime/runtime`
+    /// Whether this compile dropped the `runtara:workflow/runtime`
     /// import (a pure, non-durable, invoke-ABI workflow compiled agent-shaped).
     /// Re-emit paths (e.g. the composed axis) must honor this to keep the
     /// on-disk world/wac consistent with the emitted module.
@@ -1093,7 +1078,7 @@ fn workflow_abi_tag(abi: super::component::WorkflowAbi) -> &'static str {
     }
 }
 
-/// Opt-in to dropping the `runtara:workflow-runtime/runtime` import for a PURE,
+/// Opt-in to dropping the `runtara:workflow/runtime` import for a PURE,
 /// non-durable, invoke-ABI workflow (see `WorkflowFeatureSummary::needs_runtime`
 /// and the omit path in the emitter). Default OFF — the runtime import is kept
 /// and the additive `runtime.complete`/`fail` fire as today. Set to `1`/`true`
@@ -1639,7 +1624,7 @@ fn build_direct_component_resolve_scoped(
 }
 
 /// [`build_direct_component_resolve_scoped`], also importing
-/// `runtara:workflow-wait/instances` when a WaitForInstances step needs it.
+/// `runtara:workflow/waits` when a WaitForInstances step needs it.
 #[allow(clippy::too_many_arguments)]
 fn build_direct_component_resolve_with_waits(
     agents: &[String],
@@ -1657,152 +1642,89 @@ fn build_direct_component_resolve_with_waits(
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
     // Control sites need the scope without any suspending agent.
     let operation_scope = operation_scope || !suspending_agents.is_empty();
-    let mut resolve = Resolve::default();
-    if needs_monotonic_clock {
-        resolve
-            .push_str("wasi-io-poll.wit", runtara_agent_wit::WASI_IO_POLL_WIT)
-            .map_err(component_error)?;
-        resolve
-            .push_str(
-                "wasi-monotonic-clock.wit",
-                runtara_agent_wit::WASI_MONOTONIC_CLOCK_WIT,
-            )
-            .map_err(component_error)?;
-    }
-    resolve
-        .push_str("runtara-database.wit", runtara_workflow_wit::DATABASE_WIT)
-        .map_err(component_error)?;
-    resolve
-        .push_str("runtara-connection-resolver.wit", CONNECTION_RESOLVER_WIT)
-        .map_err(component_error)?;
-    resolve
-        .push_str("runtara-workflow-stdlib.wit", STDLIB_WIT)
-        .map_err(component_error)?;
-    if !omit_runtime {
-        resolve
-            .push_str("runtara-workflow-runtime.wit", RUNTIME_WIT)
-            .map_err(component_error)?;
-    }
-    if wait_instances {
-        resolve
-            .push_str("runtara-workflow-wait.wit", runtara_workflow_wit::WAIT_WIT)
-            .map_err(component_error)?;
-    }
+    // Every runtara package, once; the world below imports only what it names.
+    let mut resolve = runtara_wit::resolve().map_err(component_error)?;
     match abi {
         super::component::WorkflowAbi::CliRunHttp => {
             resolve
                 .push_str("wasi-cli-run.wit", WASI_CLI_RUN_WIT)
                 .map_err(component_error)?;
         }
-        super::component::WorkflowAbi::InvokeHostImports => {
-            // The lifecycle package `use`s runtara:abi — push it first.
-            resolve
-                .push_str("runtara-abi.wit", ABI_WIT)
-                .map_err(component_error)?;
-            resolve
-                .push_str("runtara-workflow-lifecycle.wit", LIFECYCLE_WIT)
-                .map_err(component_error)?;
-        }
+        super::component::WorkflowAbi::InvokeHostImports => {}
         super::component::WorkflowAbi::AgentCapabilities => {
             // Export the agent capability interface under the workflow's own
             // slug. The reserved-slug check at save time guarantees the export
             // package can never collide with an imported native agent's.
-            resolve
-                .push_str("runtara-agent-types.wit", AGENT_TYPES_WIT)
-                .map_err(component_error)?;
             let id = export_agent_id.unwrap_or(super::component::CAPABILITIES_EXPORT_AGENT_ID);
             resolve
-                .push_str(format!("runtara-agent-{id}.wit"), &agent_wit_package(id))
+                .push_str(
+                    format!("runtara-agent-{id}.wit"),
+                    &runtara_wit::agent_package(id, runtara_wit::AgentShape::default()),
+                )
                 .map_err(component_error)?;
         }
     }
-    if needs_timers || !parallel_pools.is_empty() || !agents.is_empty() {
+    for agent in agents {
+        let shape = runtara_wit::AgentShape {
+            scoped: scoped_agents.contains(agent),
+            suspendable: suspending_agents.contains(agent),
+            ..Default::default()
+        };
         resolve
-            .push_str("runtara-host-io-timers.wit", HOST_IO_TIMERS_WIT)
+            .push_str(
+                format!("runtara-agent-{agent}.wit"),
+                &runtara_wit::agent_package(agent, shape),
+            )
             .map_err(component_error)?;
-    }
-    if !agents.is_empty() {
-        // Under AgentCapabilities the types package was already pushed above;
-        // pushing the same content twice is a wit-parser error.
-        if !matches!(abi, super::component::WorkflowAbi::AgentCapabilities) {
-            resolve
-                .push_str("runtara-agent-types.wit", AGENT_TYPES_WIT)
-                .map_err(component_error)?;
-        }
-        if operation_scope {
-            // The suspension types, then the operation scope that `use`s them.
-            resolve
-                .push_str(
-                    "runtara-agent-suspension.wit",
-                    runtara_agent_suspension::WIT,
-                )
-                .map_err(component_error)?;
-            resolve
-                .push_str(
-                    "runtara-workflow-operation.wit",
-                    runtara_workflow_wit::OPERATION_WIT,
-                )
-                .map_err(component_error)?;
-        }
-        for agent in agents {
-            resolve
-                .push_str(
-                    format!("runtara-agent-{agent}.wit"),
-                    &agent_wit_package_with_interfaces(
-                        agent,
-                        scoped_agents.contains(agent),
-                        suspending_agents.contains(agent),
-                    ),
-                )
-                .map_err(component_error)?;
-            // Phantom pool-member packages (structurally identical interface
-            // under a distinct package id).
-            if let Some(pool) = parallel_pools.get(agent) {
-                for member in 1..*pool {
-                    let phantom = split_parallel::pool_member_component_id(agent, member);
-                    resolve
-                        .push_str(
-                            format!("runtara-agent-{phantom}.wit"),
-                            &agent_wit_package_configured(&phantom, scoped_agents.contains(agent)),
-                        )
-                        .map_err(component_error)?;
-                }
+        // Phantom pool-member packages (structurally identical interface
+        // under a distinct package id).
+        if let Some(pool) = parallel_pools.get(agent) {
+            for member in 1..*pool {
+                let phantom = split_parallel::pool_member_component_id(agent, member);
+                let shape = runtara_wit::AgentShape {
+                    scoped: shape.scoped,
+                    ..Default::default()
+                };
+                resolve
+                    .push_str(
+                        format!("runtara-agent-{phantom}.wit"),
+                        &runtara_wit::agent_package(&phantom, shape),
+                    )
+                    .map_err(component_error)?;
             }
         }
     }
 
     let mut workflow_wit = format!(
-        "package runtara:workflow@{WORKFLOW_WIT_VERSION};\n\
+        "package {DIRECT_WORKFLOW_LOGIC_PACKAGE};\n\
          \n\
          world workflow {{\n\
-             import runtara:workflow-stdlib/json@{WORKFLOW_WIT_VERSION};\n"
+             import {};\n",
+        runtara_wit::stdlib::JSON
     );
     if !omit_runtime {
         workflow_wit.push_str(&format!("    import {RUNTIME_INTERFACE_NAME};\n"));
     }
     if has_connections {
-        workflow_wit.push_str("    import runtara:connection-resolver/resolver@0.2.0;\n");
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::host::CONNECTIONS));
     }
     if needs_timers || !parallel_pools.is_empty() || !agents.is_empty() {
-        workflow_wit.push_str("    import runtara:host-io/timers@0.1.0;\n");
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::host::TIMERS));
     }
     if needs_monotonic_clock {
         workflow_wit.push_str(&format!(
             "    import {};\n",
-            runtara_agent_wit::WASI_MONOTONIC_CLOCK_INTERFACE
+            runtara_wit::wasi::MONOTONIC_CLOCK
         ));
     }
     if operation_scope {
         workflow_wit.push_str(&format!(
             "    import {};\n",
-            runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME
+            runtara_wit::workflow::OPERATION
         ));
     }
     if wait_instances {
-        workflow_wit.push_str(&format!(
-            "    import {};\n",
-            runtara_workflow_wit::WAIT_INSTANCES_INTERFACE_NAME
-        ));
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::workflow::WAITS));
     }
     for agent in agents {
         let interface = if scoped_agents.contains(agent) {
@@ -1851,59 +1773,6 @@ fn build_direct_component_resolve_with_waits(
         .map_err(component_error)?;
 
     Ok((resolve, world))
-}
-
-fn agent_wit_package(agent: &str) -> String {
-    agent_wit_package_configured(agent, false)
-}
-
-fn agent_wit_package_configured(agent: &str, scoped: bool) -> String {
-    agent_wit_package_with_interfaces(agent, scoped, false)
-}
-
-/// The per-agent package the workflow logic is encoded against. A suspending
-/// agent's package also declares `suspendable`, so the world can import both
-/// of its type-identical invoke interfaces.
-fn agent_wit_package_with_interfaces(agent: &str, scoped: bool, suspendable: bool) -> String {
-    let (suspendable_interface, suspendable_export) = if suspendable {
-        (
-            runtara_agent_suspension::SUSPENDABLE_INTERFACE_WIT,
-            format!(
-                "    export {};\n",
-                runtara_agent_suspension::SUSPENDABLE_INTERFACE
-            ),
-        )
-    } else {
-        ("", String::new())
-    };
-    let interface = if scoped {
-        "scoped-capabilities-v3"
-    } else {
-        "capabilities"
-    };
-    let context = if scoped {
-        "path: string, call-site: u32, activation: u32, attempt: u64,"
-    } else {
-        ""
-    };
-    format!(
-        "package runtara:agent-{agent}@{AGENT_WIT_VERSION};\n\
-         \n\
-         interface {interface} {{\n\
-             use runtara:agent/types@{AGENT_WIT_VERSION}.{{error-info}};\n\
-             invoke: async func(\n\
-                 capability-id: string,\n\
-                 input: list<u8>,\n\
-                 {context}\n\
-             ) -> result<list<u8>, error-info>;\n\
-         }}\n\
-         {suspendable_interface}\
-         \n\
-         world agent {{\n\
-             export {interface};\n\
-         {suspendable_export}\
-         }}\n"
-    )
 }
 
 /// Terminal-failure return — the ONE place that owns the per-ABI exit shape.

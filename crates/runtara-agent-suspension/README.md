@@ -1,7 +1,7 @@
 # runtara-agent-suspension
 
-Typed agent suspension: the `runtara:agent-suspension@0.1.0` WIT package and
-the vocabulary guest agents, the compiler and the host share. A capability
+Typed agent suspension: the Rust side of `runtara:agent/suspension` (the WIT
+lives in `runtara-wit`) and the vocabulary guest agents, the compiler and the host share. A capability
 declared `suspends` may answer an invocation with `suspended { wakes, state }`
 instead of a result; the host keeps `state`, parks the calling workflow
 without holding a runner, and re-invokes the capability with that state when

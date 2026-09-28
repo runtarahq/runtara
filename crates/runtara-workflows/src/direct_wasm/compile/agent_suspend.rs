@@ -4,11 +4,11 @@
 //!
 //! A capability the catalog declares `suspends` is invoked through its
 //! agent's `suspendable` interface instead of `capabilities`, inside the
-//! compiler-emitted `runtara:workflow-operation/scope`:
+//! compiler-emitted `runtara:workflow/operation`:
 //!
 //! 1. `scope.enter(checkpoint-key, attempt, load)` names the operation. The
 //!    host derives `op_hash = sha256(checkpoint-key)` and hands the saved
-//!    continuation to the capability itself (`runtara:agent-suspension/context`).
+//!    continuation to the capability itself (`runtara:agent/continuation`).
 //!    `suspendable.invoke` never carries one, so this module passes none.
 //! 2. `suspended { wakes, state }`: `scope.suspend(state, wakes)` persists the
 //!    continuation for the entered attempt, then the workflow returns the
@@ -62,7 +62,7 @@ use crate::direct_wasm::manifest::{DirectAgentManifest, DirectEdgeManifest, Dire
 // `suspension = record { wakes: list<wake>, state: list<u8> }` and
 // `wake = variant { at(u64), instances(string) }`. The error arm is the same
 // `error-info` at +8 as `capabilities.invoke`'s. Every offset comes from
-// `runtara_agent_suspension::layout`, which `runtara-workflow-wit` pins against
+// `runtara_agent_suspension::layout`, which `runtara-agent-suspension`'s tests pin against
 // the WIT's `SizeAlign`; `agent_suspend_tests` re-derives them here.
 
 /// Discriminant of `outcome` (0 = completed, 1 = suspended).

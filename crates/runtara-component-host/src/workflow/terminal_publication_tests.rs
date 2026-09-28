@@ -121,7 +121,7 @@ fn run_publishing_coordinated(
     coordinator: Option<Arc<dyn RootExecutionCoordinator>>,
 ) -> tokio::task::JoinHandle<InvokeRunResult> {
     let terminal = r#"
-    (import "runtara:workflow-runtime/runtime@0.3.0" (instance $runtime
+    (import "runtara:workflow/runtime@1.0.0" (instance $runtime
       (export "complete" (func (param "output" (list u8)) (result (result (error string)))))
       (export "fail" (func (param "error" (list u8)) (result (result (error string)))))))
     (alias export $runtime "complete" (func $complete))
@@ -165,10 +165,10 @@ const COMPLETE: &str =
     "(call $complete (i32.const 3500) (i32.const 2) (i32.const 3000)) i32.const 42 return";
 
 #[tokio::test]
-async fn expired_cleanup_alarm_rejects_new_runtime_publication_in_both_versions() {
+async fn expired_cleanup_alarm_rejects_new_runtime_publication() {
     // Use the ordinary executor, without the legacy child registry or its
     // deferred-publication wrapper: the runtime import itself must reject this.
-    for version in ["0.3.0", "0.4.0"] {
+    for version in [runtara_wit::VERSION] {
         for callback in ["complete", "fail"] {
             for expired in [false, true] {
                 let engine = crate::build_engine(&crate::EngineConfig {
@@ -191,7 +191,7 @@ async fn expired_cleanup_alarm_rejects_new_runtime_publication_in_both_versions(
                 let wat = format!(
                     r#"(component
                   (import "expire" (func $expire))
-                  (import "runtara:workflow-runtime/runtime@{version}" (instance $runtime
+                  (import "runtara:workflow/runtime@{version}" (instance $runtime
                     (export "{callback}" (func (param "{}" (list u8)) (result (result (error string)))))))
                   (core module $mem
                     (memory (export "memory") 1)

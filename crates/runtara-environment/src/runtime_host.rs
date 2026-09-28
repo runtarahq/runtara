@@ -1,9 +1,9 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Persistence-backed [`RuntimeHost`]: the production implementation of the
-//! `runtara:workflow-runtime/runtime` interface.
+//! `runtara:workflow/runtime` interface.
 //!
-//! Every composed workflow imports `runtara:workflow-runtime/runtime`; the
+//! Every composed workflow imports `runtara:workflow/runtime`; the
 //! component host binds each function to this implementation, which delegates
 //! straight to `runtara_core::instance_handlers` over the environment's shared
 //! `Arc<dyn Persistence>` — no HTTP loopback.
