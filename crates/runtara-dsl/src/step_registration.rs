@@ -182,7 +182,7 @@ static WAIT_FOR_SIGNAL_STEP_META: StepTypeMeta = StepTypeMeta {
 
 static WAIT_FOR_INSTANCES_STEP_META: StepTypeMeta = StepTypeMeta {
     id: "WaitForInstances",
-    display_name: "Wait for Runs",
+    display_name: "Wait for Instances",
     description: "Park the run until direct child runs finish (all or any), or an optional deadline passes",
     category: "control",
     schema_fn: schema_wait_for_instances_step,

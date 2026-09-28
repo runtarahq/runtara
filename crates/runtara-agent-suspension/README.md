@@ -5,7 +5,10 @@ the vocabulary guest agents, the compiler and the host share. A capability
 declared `suspends` may answer an invocation with `suspended { wakes, state }`
 instead of a result; the host keeps `state`, parks the calling workflow
 without holding a runner, and re-invokes the capability with that state when
-any wake fires. The control agent's `wait` is the first user.
+any wake fires. No built-in agent suspends: it is the extension point for
+long-polling agents. A run that waits on other runs uses the
+`WaitForInstances` step instead, and an agent suspension may not name an
+instance wait (`AGENT_INVALID_SUSPENSION`).
 
 ## Contract
 

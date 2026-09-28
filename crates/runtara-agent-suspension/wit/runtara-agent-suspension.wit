@@ -15,9 +15,8 @@
 //
 // beside its ordinary `capabilities` export, whose `invoke` refuses a
 // suspending capability. `suspendable.invoke` deliberately takes no
-// continuation argument: the workflow logic that calls it never sees one. An
-// ordinary suspending agent reads it through `context`; the control agent
-// receives it as an argument of the host-called `runtara:control/execution`.
+// continuation argument: the workflow logic that calls it never sees one. The
+// agent reads it through `context`.
 //
 // Released WIT is never edited, only versioned.
 package runtara:agent-suspension@0.1.0;

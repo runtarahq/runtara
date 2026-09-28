@@ -20,17 +20,14 @@ const capability = (id: string, extra: Record<string, unknown> = {}) => ({
 
 const AGENTS = [
   {
-    id: 'control',
-    name: 'Control',
+    id: 'waiter',
+    name: 'Waiter',
     description: '',
     supportsConnections: false,
     integrationIds: [],
     supportedCapabilities: {
-      wait: capability('wait', {
-        suspends: true,
-        tags: ['runtime:requires-run'],
-      }),
-      cancel: capability('cancel', { tags: ['runtime:requires-run'] }),
+      pause: capability('pause', { suspends: true }),
+      plain: capability('plain'),
     },
   },
 ] as unknown as ExtendedAgent[];
@@ -38,7 +35,7 @@ const AGENTS = [
 function renderHint(values: Record<string, unknown>) {
   function Harness() {
     const form = useForm({
-      defaultValues: { stepType: 'Agent', agentId: 'control', ...values },
+      defaultValues: { stepType: 'Agent', agentId: 'waiter', ...values },
     });
     return (
       <NodeFormContext.Provider
@@ -64,14 +61,14 @@ function renderHint(values: Record<string, unknown>) {
 
 describe('suspending capability hint', () => {
   it('stays quiet for a capability that does not suspend', () => {
-    renderHint({ capabilityId: 'cancel' });
+    renderHint({ capabilityId: 'plain' });
     expect(
       screen.queryByTestId('suspending-step-hint')
     ).not.toBeInTheDocument();
   });
 
   it('explains the requirements as a note when durable and timed out', () => {
-    renderHint({ capabilityId: 'wait', durable: true, timeout: 60000 });
+    renderHint({ capabilityId: 'pause', durable: true, timeout: 60000 });
     const hint = screen.getByTestId('suspending-step-hint');
     expect(hint).toHaveAttribute('role', 'note');
     expect(hint).toHaveTextContent('durable');
@@ -80,7 +77,7 @@ describe('suspending capability hint', () => {
   });
 
   it('highlights a missing timeout and durable off', () => {
-    renderHint({ capabilityId: 'wait', durable: false, timeout: 0 });
+    renderHint({ capabilityId: 'pause', durable: false, timeout: 0 });
     const hint = screen.getByTestId('suspending-step-hint');
     expect(hint).toHaveAttribute('role', 'alert');
     expect(screen.getByText(/Durable is off/)).toBeInTheDocument();

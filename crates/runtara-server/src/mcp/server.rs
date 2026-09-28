@@ -784,7 +784,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Add an Agent step from a capability. Validates the agent/capability exist, creates the step with correct fields (optional timeout in ms and durable), and optionally connects it. Returns the step's expected inputs for mapping, whether the capability suspends, and a hint; a suspending capability (control wait) needs a durable step with timeout > 0 (E028/E029)."
+        description = "Add an Agent step from a capability. Validates the agent/capability exist, creates the step with correct fields (optional timeout in ms and durable), and optionally connects it. Returns the step's expected inputs for mapping, whether the capability suspends, and a hint; a suspending capability needs a durable step with timeout > 0 (E028/E029)."
     )]
     async fn add_agent_step(
         &self,

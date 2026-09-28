@@ -1,12 +1,12 @@
 //! Durable instance waits: a run (the waiter) waits for a fixed set of other
 //! runs of its tenant (the targets) to finish.
 //!
-//! A wait is keyed by the waiter and its operation (`wait_id`, the calling
-//! step's `op_hash`), so every replay of the step finds the same wait. Its
-//! identity is the sorted, distinct target set and the mode
-//! ([`WaitSpec::fingerprint`]); registering the same operation with another
-//! identity is a [`WaitError::Conflict`], and the first registration's
-//! deadline stands.
+//! A wait is keyed by the waiter and a `wait_id` the host derives from the
+//! waiting step's identity (a sha256 hex, like an `op_hash`), so every replay
+//! of the step finds the same wait. Its identity is the sorted, distinct
+//! target set and the mode ([`WaitSpec::fingerprint`]); registering the same
+//! wait id with another identity is a [`WaitError::Conflict`], and the first
+//! registration's deadline stands.
 //!
 //! One rule decides a wait, on the store's clock, in this order
 //! ([`resolve`]):
@@ -44,7 +44,7 @@ use crate::persistence::ExternalOutcomeKind;
 /// Most targets one wait may name.
 pub const MAX_WAIT_TARGETS: usize = 1000;
 
-/// Longest wait id (an `op_hash`) a store accepts.
+/// Longest wait id (a sha256 hex) a store accepts.
 pub const MAX_WAIT_ID_BYTES: usize = 128;
 
 /// Longest target instance id a store accepts.
@@ -323,7 +323,7 @@ pub enum WaitState {
 pub struct WaitRecord {
     /// The waiting run.
     pub waiter_instance_id: String,
-    /// Its operation (`op_hash`).
+    /// The host-derived id of the waiting step.
     pub wait_id: String,
     /// The waiter's tenant.
     pub tenant_id: String,

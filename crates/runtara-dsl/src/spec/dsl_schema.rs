@@ -142,7 +142,7 @@ pub fn get_dsl_changelog() -> Value {
                     {
                         "type": "added",
                         "component": "capability-metadata",
-                        "description": "Capabilities may declare suspends (they park the run without a runner, like control wait) and the runtime:requires-run tag (they only run as steps of a workflow run)."
+                        "description": "Capabilities may declare suspends (they park the run without a runner, like a WaitForInstances step) and the runtime:requires-run tag (they only run as steps of a workflow run)."
                     },
                     {
                         "type": "added",

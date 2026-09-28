@@ -522,7 +522,7 @@ impl InstanceRepository {
         rows.into_iter().map(decode).collect()
     }
 
-    /// The narrow status read a control `wait` authorizes its targets with:
+    /// The narrow status read an instance wait authorizes its targets with:
     /// for each of `instance_ids` that is a run of `tenant` or a published
     /// never-launched outcome of it, its parent and what it is. Ids with
     /// neither are absent. An instance row wins over an outcome.

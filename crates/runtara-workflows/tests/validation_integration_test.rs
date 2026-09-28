@@ -486,7 +486,7 @@ mod operation_scoped_closure {
     };
     use serde_json::{Value, json};
 
-    /// `control` (get; wait suspends) and `waiter` (pause suspends).
+    /// `control` (get) and `waiter` (pause suspends).
     fn catalog() -> AgentCatalog {
         let capability = |id: &str, suspends: bool| {
             json!({"id": id, "name": id, "inputType": "Input", "inputs": [],
@@ -499,10 +499,7 @@ mod operation_scoped_closure {
         };
         AgentCatalog::from_json(
             &json!([
-                agent(
-                    "control",
-                    vec![capability("get", false), capability("wait", true)]
-                ),
+                agent("control", vec![capability("get", false)]),
                 agent("waiter", vec![capability("pause", true)]),
             ])
             .to_string(),

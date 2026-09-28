@@ -1,7 +1,7 @@
 /**
  * Display mapping for a step summary status (`StepSummaryResponse.status`):
  * "running", "suspended" (unfinished while its run is suspended — a parked
- * control `wait`, a durable Delay, a WaitForSignal), "completed", "failed",
+ * WaitForInstances, a durable Delay, a WaitForSignal), "completed", "failed",
  * or the run's terminal status for a step that never finished.
  */
 export interface StepStatusDisplay {
@@ -18,7 +18,7 @@ export interface StepStatusDisplay {
 
 /** Hover text for a parked step. */
 export const SUSPENDED_STEP_TITLE =
-  'Parked until its run resumes (a control wait, a durable Delay or a signal wait)';
+  'Parked until its run resumes (a wait for instances, a durable Delay or a signal wait)';
 
 export function stepStatusDisplay(
   status: string | null | undefined

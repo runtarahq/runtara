@@ -912,7 +912,7 @@ pub struct AddAgentStepParams {
     )]
     pub connection_id: Option<String>,
     #[schemars(
-        description = "Step timeout in milliseconds: the step's hard deadline, retries and parked time included. Required (> 0) when the capability suspends (E029), e.g. control `wait`."
+        description = "Step timeout in milliseconds: the step's hard deadline, retries and parked time included. Required (> 0) when the capability suspends (E029)."
     )]
     pub timeout: Option<u64>,
     #[schemars(

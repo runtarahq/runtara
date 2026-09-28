@@ -682,8 +682,8 @@ pub trait Persistence: Send + Sync {
         None
     }
 
-    /// Optional durable instance waits. Control's `wait` fails closed
-    /// without them.
+    /// Optional durable instance waits. A `WaitForInstances` step fails
+    /// closed without them.
     fn instance_waits(&self) -> Option<&dyn waits::InstanceWaits> {
         None
     }

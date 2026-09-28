@@ -8,20 +8,19 @@
 //!
 //! 1. `scope.enter(checkpoint-key, attempt, load)` names the operation. The
 //!    host derives `op_hash = sha256(checkpoint-key)` and hands the saved
-//!    continuation to the capability itself (`runtara:agent-suspension/context`
-//!    or the control executor's argument). `suspendable.invoke` never carries
-//!    one, so this module passes none.
+//!    continuation to the capability itself (`runtara:agent-suspension/context`).
+//!    `suspendable.invoke` never carries one, so this module passes none.
 //! 2. `suspended { wakes, state }`: `scope.suspend(state, wakes)` persists the
-//!    continuation for the entered attempt and attaches the instance waits the
-//!    operation registered, then the workflow returns the unchanged lifecycle
+//!    continuation for the entered attempt, then the workflow returns the
+//!    unchanged lifecycle
 //!    `suspended(at(min(earliest at-wake, step deadline)))`, clamped by any
 //!    enclosing loop deadline. Nothing is checkpointed for the attempt (no
 //!    `::attempt::` key): a suspension is not a failure. A relaunch replays to
 //!    this site, re-enters the same attempt with the saved continuation and
 //!    invokes again. A suspension within one second of the step deadline would
 //!    only wake to time out, so it fails the step with `AGENT_TIMEOUT` instead;
-//!    one the host refuses (caps, a wait the operation did not register) fails
-//!    it with `AGENT_INVALID_SUSPENSION`. Either failure leaves the operation
+//!    one the host refuses (caps, an instance wait, which no agent can
+//!    register) fails it with `AGENT_INVALID_SUSPENSION`. Either failure leaves the operation
 //!    through `scope.exit(true)`.
 //! 3. `completed(bytes)`: the payload is moved to where a `capabilities` result
 //!    keeps its list, so the ordinary output, checkpoint, retry and error paths

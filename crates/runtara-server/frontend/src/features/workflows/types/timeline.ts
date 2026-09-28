@@ -92,7 +92,7 @@ const OPEN_ENDED_STATUSES = new Set(['running', 'suspended']);
 
 /**
  * A step that has not finished yet: running, or suspended while its run is
- * parked (a control `wait`, a durable Delay, a WaitForSignal). It has no
+ * parked (a WaitForInstances, a durable Delay, a WaitForSignal). It has no
  * duration, so its bar runs from its start to now.
  */
 export function isOpenEndedStep(step: StepSummaryResponse): boolean {

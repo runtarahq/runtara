@@ -94,7 +94,7 @@ pub enum SuspensionReason {
     Paused,
     /// Parked on a WaitForSignal request.
     WaitingSignal,
-    /// Parked until other runs finish (control `wait`).
+    /// Parked until other runs finish (a `WaitForInstances` step).
     WaitingInstances,
     /// Parked on a durable timer (Delay, retry backoff).
     Sleeping,

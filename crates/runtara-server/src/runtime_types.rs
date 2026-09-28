@@ -128,7 +128,7 @@ pub enum TerminationReason {
     Orphaned,
     /// Suspended while parked on a signal (`WaitForSignal`).
     WaitingSignal,
-    /// Suspended while parked on durable instance waits (control `wait`).
+    /// Suspended while parked on durable instance waits (`WaitForInstances`).
     WaitingInstances,
     /// Suspended after acknowledging a shutdown request.
     ShutdownRequested,

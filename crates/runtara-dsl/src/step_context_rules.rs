@@ -21,7 +21,7 @@ use crate::agent_meta::AgentCatalog;
 /// The kinds of operation-scoped call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OperationScopedKind {
-    /// A capability declaring `suspends` (including control's `wait`).
+    /// A capability declaring `suspends`.
     Suspending,
     /// A non-suspending capability of the control agent.
     Control,
@@ -31,8 +31,8 @@ pub enum OperationScopedKind {
 
 impl OperationScopedKind {
     /// Classify a call to `capability_id` of `agent_id`; `None` when the call
-    /// is not operation-scoped or the capability is unknown. Suspension wins,
-    /// so control's `wait` follows the stricter suspending rules.
+    /// is not operation-scoped or the capability is unknown. Suspension wins
+    /// over control, so a suspending capability follows the stricter rules.
     pub fn classify(catalog: &AgentCatalog, agent_id: &str, capability_id: &str) -> Option<Self> {
         if catalog.capability_suspends(agent_id, capability_id) {
             Some(Self::Suspending)

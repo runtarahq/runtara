@@ -511,8 +511,8 @@ mod tests {
     }
 
     /// The JSON shape a host interface carries: the settled read is the
-    /// control `wait` output (mode, resolution, finished, remaining) plus
-    /// the persisted deadline, with results as inline JSON values.
+    /// WaitForInstances output (mode, resolution, finished, remaining, and
+    /// the persisted deadline), with results as inline JSON values.
     #[test]
     fn a_poll_serializes_to_the_wait_output_shape() {
         let poll = settled();
@@ -575,7 +575,7 @@ mod tests {
         for refused in [
             String::new(),
             "wait-instances::approvals".to_string(),
-            wait_key("agent", json!([]), json!(["control", "wait", "approvals"])),
+            wait_key("agent", json!([]), json!(["waiter", "pause", "approvals"])),
             wait_key("wait-instances", json!([]), json!([])),
             wait_key("wait-instances", json!([]), json!([""])),
             wait_key("wait-instances", json!([]), json!(["a", "b"])),

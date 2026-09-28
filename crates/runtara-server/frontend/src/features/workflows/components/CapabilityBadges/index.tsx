@@ -6,8 +6,8 @@ export const SUSPENDS_BADGE_HINT =
   'Long-running: this capability can park the run until it wakes up. The step must stay durable and set a timeout (ms) above 0 — its hard deadline, parked time included.';
 
 /**
- * "Long-running" chip for a capability that suspends the run (today control
- * `wait`). Renders nothing for any other capability.
+ * "Long-running" chip for a capability that suspends the run (a long-polling
+ * agent). Renders nothing for any other capability.
  */
 export function SuspendsBadge({
   capability,

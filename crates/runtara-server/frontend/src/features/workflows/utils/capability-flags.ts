@@ -2,15 +2,15 @@ import type { CapabilityInfo } from '@/generated/RuntaraRuntimeApi';
 
 /**
  * Tag on a capability that only works as a step of a workflow run (control
- * `start`, `send-signal`, `cancel`, `pause`, `resume`, `wait`). A playground
- * Test call answers `CONTROL_REQUIRES_INSTANCE`.
+ * `start`, `send-signal`, `cancel`, `pause`, `resume`). A playground Test
+ * call answers `CONTROL_REQUIRES_INSTANCE`.
  */
 export const REQUIRES_RUN_TAG = 'runtime:requires-run';
 
 type CapabilityFlags =
   Pick<CapabilityInfo, 'suspends' | 'tags'> | null | undefined;
 
-/** The capability may park the run (e.g. control `wait`). */
+/** The capability may park the run (a long-polling agent). */
 export function capabilitySuspends(capability: CapabilityFlags): boolean {
   return capability?.suspends === true;
 }
