@@ -137,7 +137,6 @@ async fn run(shape: Shape, deadline: bool) -> anyhow::Result<()> {
                 agent_slug: None,
             },
             direct_e2e_components_dir(),
-            RuntimeBinding::HostImport,
             WorkflowAbi::InvokeHostImports,
             false,
         )?

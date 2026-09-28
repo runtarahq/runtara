@@ -91,7 +91,7 @@ At a high level, the Rust workspace is organized into three layers:
 │  │  Management plane: image registry, instance lifecycle,     │  │
 │  │  embedded WASM runner, wake scheduling                     │  │
 │  │  ┌──────────────────────────────────────────────────────┐  │  │
-│  │  │  runtara-core + runtara-sdk                          │  │  │
+│  │  │  runtara-core                                        │  │  │
 │  │  │  Durable execution: checkpoints, signals, events,    │  │  │
 │  │  │  durable sleep                                       │  │  │
 │  │  └──────────────────────────────────────────────────────┘  │  │
@@ -106,7 +106,6 @@ This repository contains the Rust implementation of the Runtara platform:
 - `crates/runtara-server`: application HTTP API, auth, workflows, connections, channels, MCP integration, file storage, object model, and background workers.
 - `crates/runtara-environment`: image registry, instance lifecycle, runners, and wake scheduling. A library — its management API is served over HTTP by `runtara-server`.
 - `crates/runtara-core`: durable runtime persistence for checkpoints, signals, events, and sleep. A library — its instance protocol is served over HTTP by `runtara-server` and called in-process by `runtara-environment`.
-- `crates/runtara-sdk`: instance-side SDK used by compiled workflows.
 - `crates/runtara-workflows`: workflow compiler and validation pipeline.
 - `crates/runtara-dsl`: workflow and agent metadata types.
 - `crates/runtara-connections`: connection management, OAuth2, and rate limiting.

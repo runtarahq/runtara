@@ -89,7 +89,6 @@ async fn run_nested(
             agent_slug: None,
         },
         direct_e2e_components_dir(),
-        RuntimeBinding::HostImport,
         WorkflowAbi::InvokeHostImports,
         false,
     )?;

@@ -16,8 +16,8 @@ scoped README files, examples.
   wake scheduling. It is embedded by the server.
 - `crates/runtara-dsl` defines workflow schemas and static step metadata.
 - `crates/runtara-workflows` validates and compiles workflow graphs.
-- `crates/runtara-workflow-stdlib`, `runtara-workflow-runtime`, and the WIT
-  crates provide guest-side workflow execution and component interfaces.
+- `crates/runtara-workflow-stdlib` and the WIT crates provide guest-side
+  workflow execution and component interfaces.
 - `crates/runtara-component-host` loads and invokes WASM components.
 - Workflow agents are standalone component crates under
   `crates/agents/runtara-agent-*`.

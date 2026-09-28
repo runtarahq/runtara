@@ -54,7 +54,7 @@ use super::{
     DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DirectCompileError, DirectCoreFunctionIndices,
     DirectCoreStaticData, DirectWorkflowManifest,
 };
-use crate::direct_wasm::component::{RuntimeBinding, WorkflowAbi};
+use crate::direct_wasm::component::WorkflowAbi;
 use crate::direct_wasm::manifest::{DirectAgentManifest, DirectEdgeManifest, DirectGraphManifest};
 
 // Canonical layout of `result<outcome, error-info>` in the retptr area, where
@@ -107,29 +107,26 @@ const PARK_AT: u32 = DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL;
 /// - any operation-scoped site: an AiAgent tool, memory provider or synthetic
 ///   AiAgent call, a workflow embedded as an AiAgent tool, the `CliRunHttp`
 ///   ABI (it blocks instead of parking), the `AgentCapabilities` ABI (a
-///   published workflow-agent), the composed runtime binding, an omitted
-///   runtime, scoped isolation, and a control call compiled without the agent
-///   catalog (it could not be classified);
+///   published workflow-agent), an omitted runtime, scoped isolation, and a
+///   control call compiled without the agent catalog (it could not be
+///   classified);
 /// - any operation-scoped site in a `WaitForSignal.onWait` graph, directly or
 ///   through an embedded workflow;
 /// - a suspending site: non-durable, untimed, or an onError handler;
 /// - a WaitForInstances step wherever a suspending site is refused, except
 ///   that it has no step timeout: an AiAgent tool or memory target, a tool
 ///   workflow, an onWait graph, a target other than the lifecycle invoke ABI
-///   with the host-imported runtime, a non-durable graph, or an onError
-///   handler.
+///   with the runtime imported, a non-durable graph, or an onError handler.
 pub(super) fn check_sites(
     manifest: &DirectWorkflowManifest,
     abi: WorkflowAbi,
     omit_runtime: bool,
-    runtime_binding: RuntimeBinding,
     scoped_agents: &BTreeSet<String>,
     has_catalog: bool,
 ) -> Result<(), DirectCompileError> {
     let target = SiteTarget {
         abi,
         omit_runtime,
-        runtime_binding,
         scoped_agents,
     };
     if !has_catalog {
@@ -183,7 +180,6 @@ pub(super) fn check_sites(
 struct SiteTarget<'a> {
     abi: WorkflowAbi,
     omit_runtime: bool,
-    runtime_binding: RuntimeBinding,
     scoped_agents: &'a BTreeSet<String>,
 }
 
@@ -312,13 +308,6 @@ fn check_graph(
                 return refuse(step, kind, "cannot be published as a workflow-agent");
             }
         }
-        if target.runtime_binding != RuntimeBinding::HostImport {
-            return refuse(
-                step,
-                kind,
-                "cannot compile under the composed runtime binding; use the host-imported runtime",
-            );
-        }
         if target.omit_runtime {
             return refuse(step, kind, "needs the host-imported workflow runtime");
         }
@@ -393,12 +382,6 @@ fn check_wait_for_instances(
         WorkflowAbi::AgentCapabilities => {
             return refuse_wait(step, "cannot be published as a workflow-agent");
         }
-    }
-    if target.runtime_binding != RuntimeBinding::HostImport {
-        return refuse_wait(
-            step,
-            "cannot compile under the composed runtime binding; use the host-imported runtime",
-        );
     }
     if target.omit_runtime {
         return refuse_wait(step, "needs the host-imported workflow runtime");

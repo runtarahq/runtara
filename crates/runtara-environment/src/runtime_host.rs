@@ -1,34 +1,24 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Persistence-backed [`RuntimeHost`]: the native replacement for the guest
-//! runtime component + HTTP SDK backend + core guest-protocol HTTP chain.
+//! Persistence-backed [`RuntimeHost`]: the production implementation of the
+//! `runtara:workflow-runtime/runtime` interface.
 //!
-//! A workflow composed with `RuntimeBinding::HostImport` imports
-//! `runtara:workflow-runtime/runtime`; the component host binds each function
-//! to this implementation, which delegates straight to
-//! `runtara_core::instance_handlers` over the environment's shared
-//! `Arc<dyn Persistence>` — no HTTP loopback, no `EmbeddedBackend` (whose
-//! per-call `block_on` would nest tokio runtimes).
+//! Every composed workflow imports `runtara:workflow-runtime/runtime`; the
+//! component host binds each function to this implementation, which delegates
+//! straight to `runtara_core::instance_handlers` over the environment's shared
+//! `Arc<dyn Persistence>` — no HTTP loopback.
 //!
-//! Semantics parity is the load-bearing property here. Each method reproduces,
-//! observably, what the composed guest runtime did end-to-end:
-//!
-//! - Signal polling is rate-limited like the SDK (default 1s), non-destructive
-//!   until acknowledged, and consumed lifecycle signals trigger the same
-//!   server-side acknowledgement + status transitions (`handle_signal_ack`)
-//!   the SDK's `acknowledge_cancellation`/`acknowledge_pause`/
-//!   `acknowledge_shutdown` free functions performed, plus the same
-//!   `suspended` instance event where the guest called `sdk.suspended()`.
+//! - Signal polling is rate-limited (default 1s) and non-destructive until
+//!   acknowledged; consumed lifecycle signals trigger server-side
+//!   acknowledgement + status transitions (`handle_signal_ack`), plus a
+//!   `suspended` instance event where a pause is honoured.
 //! - `durable_sleep_checkpoint` delegates to core `handle_sleep`: persist the
 //!   checkpoint, then sleep in-process — for the full duration unless a cancel
 //!   or shutdown arrives, which cuts the sleep short so the guest's next
-//!   `check-signals` can act on it. The embedded SDK backend's resume-remaining
-//!   math is deliberately NOT ported — the guest's HTTP backend never had it,
-//!   and differential parity with the composed artifact is the acceptance gate
+//!   `check-signals` can act on it. There is no resume-remaining math
 //!   (absolute-deadline wake supersedes this in a later phase).
-//! - A local cancelled flag mirrors `runtara_sdk::inst_id.as_str()_CANCELLED` so
-//!   `is_cancelled` short-circuits after a consumed cancel/shutdown, exactly
-//!   like `runtara_sdk::is_cancelled()`.
+//! - A per-run cancelled flag makes `is_cancelled` short-circuit after a
+//!   consumed cancel/shutdown.
 
 mod inputs;
 pub mod scoped;
@@ -53,11 +43,9 @@ use runtara_core::instance_handlers::{
 };
 use runtara_core::persistence::Persistence;
 
-/// Default minimum interval between signal polls, mirroring the SDK's
-/// `RUNTARA_SIGNAL_POLL_INTERVAL_MS` default. Tight guest loops (While, wait
-/// polls) call `is-cancelled`/`check-signals` every iteration; the limiter
-/// keeps that from hammering persistence, exactly as it kept the guest from
-/// hammering the HTTP API.
+/// Default minimum interval between signal polls. Tight guest loops (While,
+/// wait polls) call `is-cancelled`/`check-signals` every iteration; the
+/// limiter keeps that from hammering persistence.
 const DEFAULT_SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// Persistence-backed runtime host for one workflow instance run.
@@ -71,9 +59,9 @@ pub struct PersistenceRuntimeHost {
     /// what a wake or resume must do — see
     /// [`crate::runner::traits::LaunchOptions::prepersisted_input`].
     prepersisted_input: Option<Vec<u8>>,
-    /// Mirrors `runtara_sdk::inst_id.as_str()_CANCELLED` (per-run, not process-global).
+    /// Set once a cancel/shutdown is consumed (per-run, not process-global).
     cancelled: AtomicBool,
-    /// Signal-poll rate limiter state (mirrors the SDK's `last_signal_poll`).
+    /// Signal-poll rate limiter state.
     last_signal_poll: std::sync::Mutex<Option<Instant>>,
     signal_poll_interval: Duration,
     /// Set when a durable sleep was cut short by a pending cancel/shutdown and
@@ -343,7 +331,7 @@ impl PersistenceRuntimeHost {
         .map_err(Self::err)
     }
 
-    /// The `sdk.suspended()` equivalent: record a suspended instance event
+    /// Record a suspended instance event
     /// (status transition guarded by `if_running` inside the handler).
     async fn suspended_event(&self) -> Result<(), String> {
         self.event(InstanceEventType::EventSuspended, None, Vec::new(), None)
@@ -400,8 +388,7 @@ impl PersistenceRuntimeHost {
         }
     }
 
-    /// Map a handler signal to its wire name, mirroring the guest runtime's
-    /// `signal_type_name`.
+    /// Map a handler signal to its wire name.
     fn signal_type_name(signal_type: i32) -> &'static str {
         match Self::signal_type_of(signal_type) {
             Some(SignalType::SignalCancel) => "cancel",
@@ -419,7 +406,7 @@ impl PersistenceRuntimeHost {
             command_id: signal.command_id,
             payload: signal.payload,
             // The guest-protocol handlers never scope lifecycle signals to a
-            // checkpoint; the composed runtime forwarded `None` here too.
+            // checkpoint.
             checkpoint_id: None,
         }
     }
@@ -464,7 +451,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
 
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
         self.escalate_if_cancel_ignored().await;
-        // SDK wire shape: event_type "custom", subtype = kind.
+        // Wire shape: event_type "custom", subtype = kind.
         self.event(InstanceEventType::EventCustom, None, payload, Some(kind))
             .await
     }
@@ -1594,8 +1581,8 @@ mod tests {
         p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
             .await
             .unwrap();
-        // Within the interval the poll is suppressed — parity with the SDK's
-        // limiter; the signal stays pending and undetected for now.
+        // Within the interval the poll is suppressed by the limiter; the
+        // signal stays pending and undetected for now.
         assert!(!host.is_cancelled().await.unwrap());
         assert!(
             p.get_pending_signal(inst_id.as_str())

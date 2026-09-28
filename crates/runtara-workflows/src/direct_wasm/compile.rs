@@ -1000,124 +1000,16 @@ pub fn compile_direct_workflow_composed(
     Ok(result)
 }
 
-/// Runtime binding for production compiles, from
-/// `RUNTARA_DIRECT_RUNTIME_BINDING` — the operational rollback lever.
-///
-/// Default (unset or anything else): `HostImport`. `composed` reverts new
-/// compiles to the legacy composed-runtime shape (guest HTTP loopback). It is
-/// no longer an escape hatch: such an artifact cannot reach core under the
-/// production runner. Its runtime traps on the first call to core, and past
-/// that the outbound guard would refuse the loopback HTTP and guests receive
-/// no runtime address; the run ends promptly as `crashed` (pinned by
-/// `a_composed_runtime_artifact_crashes_promptly_under_the_production_runner`
-/// in runtara-environment). The lever is kept (not failed closed) until no
-/// deployment is confirmed to set it.
-fn runtime_binding_from_env() -> super::component::RuntimeBinding {
-    runtime_binding_from_raw(
-        std::env::var("RUNTARA_DIRECT_RUNTIME_BINDING")
-            .ok()
-            .as_deref(),
-    )
-}
-
-fn runtime_binding_from_raw(raw: Option<&str>) -> super::component::RuntimeBinding {
-    match raw {
-        Some("composed") => super::component::RuntimeBinding::Composed,
-        _ => super::component::RuntimeBinding::HostImport,
-    }
-}
-
-/// [`compile_direct_workflow_composed`] with an explicit [`RuntimeBinding`],
-/// re-emitting the component scaffolding under `binding` before composing.
-///
-/// Used where the default (HostImport) binding cannot run: the wasmtime-CLI
-/// A/B reference axis has no way to satisfy host imports, so it composes the
-/// legacy runtime component in — and by binding-differential tests comparing
-/// the two artifact shapes.
-pub fn compile_direct_workflow_composed_with_binding(
-    input: DirectCompilationInput,
-    components_dir: impl AsRef<Path>,
-    binding: super::component::RuntimeBinding,
-) -> Result<DirectCompilationResult, DirectCompileError> {
-    // This entry exists for the legacy axes (the wasmtime-CLI A/B and the
-    // composed-binding differential) — pin the legacy export shape; the
-    // invoke shape goes through compile_direct_workflow_composed_configured.
-    compile_direct_workflow_composed_configured(
-        input,
-        components_dir,
-        binding,
-        super::component::WorkflowAbi::CliRunHttp,
-        // Legacy axes keep the runtime import.
-        false,
-    )
-}
-
-/// Fully-configured compile+compose: explicit [`RuntimeBinding`] AND
+/// Fully-configured compile+compose: explicit
 /// [`super::component::WorkflowAbi`] — the entry the ABI-differential test
 /// axis drives.
 pub fn compile_direct_workflow_composed_configured(
     input: DirectCompilationInput,
     components_dir: impl AsRef<Path>,
-    binding: super::component::RuntimeBinding,
     abi: super::component::WorkflowAbi,
     omit_runtime: bool,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
-    // Mirror the inner path's export-id derivation so the re-emitted world
-    // names the same `runtara:agent-<slug>` package the module actually exports.
-    let export_agent_id = match abi {
-        super::component::WorkflowAbi::AgentCapabilities => {
-            Some(input.agent_slug.clone().unwrap_or_else(|| {
-                runtara_dsl::agent_meta::generate_workflow_slug(
-                    input.execution_graph.name.as_deref().unwrap_or(""),
-                    &input.workflow_id,
-                )
-            }))
-        }
-        _ => None,
-    };
     let mut result = compile_direct_workflow_with_abi(input, abi, omit_runtime)?;
-    // The inner compile checked its sites against the environment's binding;
-    // this entry re-emits under `binding`, so check them again.
-    let manifest: DirectWorkflowManifest =
-        serde_json::from_slice(&fs::read(&result.manifest_path)?)?;
-    agent_suspend::check_sites(
-        &manifest,
-        abi,
-        result.omit_runtime,
-        binding,
-        &result.scoped_agents,
-        true,
-    )?;
-    let agent_ids: Vec<String> = result
-        .component_artifacts
-        .agent_components
-        .iter()
-        .map(|component| component.agent_id.clone())
-        .collect();
-    // Re-emit with the EFFECTIVE omit decision (a runtime-needing workflow keeps
-    // the import even when omit was requested), so the on-disk world/wac match
-    // the module that was actually emitted.
-    result.component_artifacts = super::component::emit_direct_component_artifacts_scoped(
-        &agent_ids,
-        binding,
-        abi,
-        result.omit_runtime,
-        export_agent_id.as_deref(),
-        &result.parallel_pools,
-        result.component_artifacts.has_connections,
-        &Default::default(),
-        &result.component_artifacts.suspending_agents.clone(),
-        result.component_artifacts.operation_scope,
-        result.component_artifacts.has_timers,
-        result.component_artifacts.needs_monotonic_clock,
-    )
-    .with_wait_instances(result.component_artifacts.wait_instances);
-    // Keep the on-disk scaffolding consistent with what is composed.
-    fs::write(
-        &result.world_wit_path,
-        &result.component_artifacts.world_wit,
-    )?;
-    fs::write(&result.wac_path, &result.component_artifacts.wac_source)?;
     compose_direct_workflow(&mut result, components_dir)?;
     Ok(result)
 }
@@ -1395,10 +1287,8 @@ fn compile_direct_workflow_inner(
         _ => None,
     };
 
-    let runtime_binding = runtime_binding_from_env();
-    let root_supports_isolation = abi == super::component::WorkflowAbi::InvokeHostImports
-        && !omit_runtime
-        && runtime_binding == super::component::RuntimeBinding::HostImport;
+    let root_supports_isolation =
+        abi == super::component::WorkflowAbi::InvokeHostImports && !omit_runtime;
     let (scoped_agents, selection_report) =
         selection.resolve(&manifest, &input.workflow_id, root_supports_isolation)?;
     for agent in &scoped_agents {
@@ -1412,7 +1302,6 @@ fn compile_direct_workflow_inner(
         &manifest,
         abi,
         omit_runtime,
-        runtime_binding,
         &scoped_agents,
         agent_catalog.is_some(),
     )?;
@@ -1440,7 +1329,6 @@ fn compile_direct_workflow_inner(
     });
     let component_artifacts = super::component::emit_direct_component_artifacts_scoped(
         &manifest.feature_summary.agent_ids,
-        runtime_binding,
         abi,
         omit_runtime,
         export_agent_id.as_deref(),

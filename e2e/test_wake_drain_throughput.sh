@@ -168,7 +168,7 @@ echo "E2E: wake drain throughput (${INSTANCES} instances, budget ${DRAIN_BUDGET_
 echo "==============================================================="
 
 [ -x "${RUNTARA_SERVER_BIN}" ] || { print_error "Missing server bin ${RUNTARA_SERVER_BIN} (cargo build -p runtara-server --bin runtara-server)"; exit 1; }
-for f in runtara_workflow_stdlib.wasm runtara_workflow_runtime.wasm; do
+for f in runtara_workflow_stdlib.wasm; do
     [ -f "${COMPONENTS_DIR}/${f}" ] || { print_error "Missing component ${COMPONENTS_DIR}/${f} — run scripts/build-agent-components.sh"; exit 1; }
 done
 psql_quiet -d postgres -c "SELECT 1" >/dev/null 2>&1 || { print_error "Cannot reach Postgres"; exit 1; }

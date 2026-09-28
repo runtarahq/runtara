@@ -9,7 +9,7 @@ use runtara_dsl::{ExecutionGraph, agent_meta::AgentCatalog};
 use runtara_workflows::{
     compile::ChildWorkflowInput,
     direct_wasm::{
-        DirectCompilationInput, DirectCompilationResult, RuntimeBinding, WorkflowAbi,
+        DirectCompilationInput, DirectCompilationResult, WorkflowAbi,
         compile_direct_workflow_composed_configured,
     },
     validation::validate_workflow,
@@ -84,7 +84,6 @@ fn compile_configured_tracking(
             agent_slug: None,
         },
         direct_e2e_components_dir(),
-        RuntimeBinding::HostImport,
         WorkflowAbi::InvokeHostImports,
         false,
     )

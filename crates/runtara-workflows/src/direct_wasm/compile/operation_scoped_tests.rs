@@ -4,7 +4,7 @@
 //! control) Agent sites: the `check_sites` backstops, byte-identical
 //! manifests without such sites, and the serialized parallel windows.
 use super::*;
-use crate::direct_wasm::component::{RuntimeBinding, WorkflowAbi};
+use crate::direct_wasm::component::WorkflowAbi;
 use crate::direct_wasm::plan::plan_contains_operation_scoped;
 use runtara_dsl::agent_meta::AgentCatalog;
 use serde_json::{Value, json};
@@ -127,16 +127,6 @@ fn the_backstops_refuse_what_validation_reports() {
         false,
     ));
     assert!(text.contains("without the agent catalog"), "{text}");
-
-    let dir = tempfile::tempdir().unwrap();
-    let text = refusal(compile_direct_workflow_composed_configured(
-        input(control(), dir.path(), Some(catalog())),
-        dir.path(),
-        RuntimeBinding::Composed,
-        WorkflowAbi::InvokeHostImports,
-        false,
-    ));
-    assert!(text.contains("composed runtime binding"), "{text}");
 
     let dir = tempfile::tempdir().unwrap();
     let text = refusal(compile_direct_workflow_with_scoped_agents(
@@ -446,7 +436,6 @@ fn unscoped_workflows_carry_nothing_of_the_operation_scope() {
     // The same world as the unscoped emitter produces from its inputs alone.
     let artifacts = crate::direct_wasm::component::emit_direct_component_artifacts_scoped(
         &["utils".to_string()],
-        RuntimeBinding::HostImport,
         WorkflowAbi::InvokeHostImports,
         false,
         None,

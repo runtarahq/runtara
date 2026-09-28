@@ -14,42 +14,13 @@
 //! names imports it never defines, and `wac` resolves them.
 
 use runtara_workflow_wit::{
-    LIFECYCLE_INTERFACE_NAME, RUNTIME_INTERFACE_NAME, RUNTIME_PACKAGE, STDLIB_PACKAGE,
-    WORKFLOW_WIT_VERSION,
+    LIFECYCLE_INTERFACE_NAME, RUNTIME_INTERFACE_NAME, STDLIB_PACKAGE, WORKFLOW_WIT_VERSION,
 };
 
 /// Package name used by direct-emitted workflow logic components.
 pub const DIRECT_WORKFLOW_LOGIC_PACKAGE: &str = "runtara:workflow-logic@0.1.0";
 /// Version used by generated per-agent component imports.
 pub const DIRECT_AGENT_WIT_VERSION: &str = "0.4.0";
-
-/// How the `runtara:workflow-runtime/runtime` interface is satisfied in the
-/// composed `workflow.wasm`.
-///
-/// The workflow-logic module always *imports* the interface (see
-/// [`emit_world_wit`]); this only decides who provides it:
-///
-/// - [`Composed`](Self::Composed): the prebuilt `runtara-workflow-runtime`
-///   guest component is instantiated and spread into the workflow instance, so
-///   the composed artifact satisfies the interface internally and the guest
-///   reaches core over `wasi:http` (the legacy loopback). Retained only for
-///   the wasmtime-CLI A/B reference axis. The production runner does not run
-///   it: the composed runtime traps on its first call to core, its outbound
-///   guard denies raw `wasi:http`, and guests receive no runtime address
-///   (`RUNTARA_HTTP_URL`), so the run ends as `crashed` without reaching core.
-/// - [`HostImport`](Self::HostImport): the interface is left unbound and
-///   surfaces as a component-level import of the composed artifact — exactly
-///   like the WASI interfaces already do — for the embedding host to satisfy
-///   natively via `add_to_linker` (no HTTP loopback). The production default
-///   since Phase 2 of the agent/workflow unification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RuntimeBinding {
-    /// Compose the prebuilt runtime component in (guest does HTTP to core).
-    Composed,
-    /// Surface `runtara:workflow-runtime/runtime` as a host-satisfied import.
-    #[default]
-    HostImport,
-}
 
 /// The workflow's top-level export shape (Phase 3 of the agent/workflow
 /// unification).
@@ -136,22 +107,17 @@ pub struct DirectAgentComponentRequirement {
 }
 
 /// Shared components every direct workflow logic component imports.
-pub const DIRECT_SHARED_COMPONENT_REQUIREMENTS: &[DirectSharedComponentRequirement] = &[
-    DirectSharedComponentRequirement {
+///
+/// The `runtara:workflow-runtime/runtime` interface is not a shared component:
+/// it is always left unbound and satisfied natively by the embedding host.
+pub const DIRECT_SHARED_COMPONENT_REQUIREMENTS: &[DirectSharedComponentRequirement] =
+    &[DirectSharedComponentRequirement {
         package: "runtara:workflow-stdlib",
         package_with_version: STDLIB_PACKAGE,
         bundle_wasm_filename: "runtara_workflow_stdlib.wasm",
         bundle_meta_filename: "runtara_workflow_stdlib.meta.json",
         cas_wasm_filename: "runtara-workflow-stdlib.wasm",
-    },
-    DirectSharedComponentRequirement {
-        package: "runtara:workflow-runtime",
-        package_with_version: RUNTIME_PACKAGE,
-        bundle_wasm_filename: "runtara_workflow_runtime.wasm",
-        bundle_meta_filename: "runtara_workflow_runtime.meta.json",
-        cas_wasm_filename: "runtara-workflow-runtime.wasm",
-    },
-];
+    }];
 
 /// Direct component composition scaffolding emitted beside direct artifacts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,10 +128,6 @@ pub struct DirectComponentArtifacts {
     pub wac_source: String,
     /// Stdlib component package to bind during static composition.
     pub stdlib_package: String,
-    /// Runtime component package to bind during static composition.
-    pub runtime_package: String,
-    /// How the runtime interface is satisfied in the composed artifact.
-    pub runtime_binding: RuntimeBinding,
     /// Whether the workflow imports the host connection resolver.
     pub has_connections: bool,
     /// Whether emitted execution requires the host-I/O timer interface.
@@ -210,47 +172,28 @@ impl DirectComponentArtifacts {
 /// artifact and composes it to the runtime-facing `workflow.wasm`. These
 /// artifacts define the WIT/WAC contract the runtime completion dispatcher will
 /// continue to implement without changing the output directory contract.
-pub fn emit_direct_component_artifacts(agents: &[String]) -> DirectComponentArtifacts {
-    emit_direct_component_artifacts_with_binding(agents, RuntimeBinding::default())
-}
-
-/// Emit the direct workflow component scaffolding with an explicit
-/// [`RuntimeBinding`].
 ///
-/// Under [`RuntimeBinding::HostImport`] the emitted `workflow.wac` neither
-/// instantiates nor spreads the `runtara:workflow-runtime` component, and the
-/// shared-component requirements exclude it, so composition needs no runtime
-/// `.wasm` on disk and the interface bubbles up as an import of the composed
-/// artifact (surfaced by the trailing `...` in the `wf` instantiation).
-pub fn emit_direct_component_artifacts_with_binding(
-    agents: &[String],
-    runtime_binding: RuntimeBinding,
-) -> DirectComponentArtifacts {
-    emit_direct_component_artifacts_configured(
-        agents,
-        runtime_binding,
-        WorkflowAbi::default(),
-        false,
-        None,
-    )
+/// The emitted `workflow.wac` never instantiates a runtime component: the
+/// `runtara:workflow-runtime/runtime` interface bubbles up as an import of the
+/// composed artifact (surfaced by the trailing `...` in the `wf`
+/// instantiation) for the embedding host to satisfy natively.
+pub fn emit_direct_component_artifacts(agents: &[String]) -> DirectComponentArtifacts {
+    emit_direct_component_artifacts_configured(agents, WorkflowAbi::default(), false, None)
 }
 
-/// Fully-configured scaffolding emission: explicit [`RuntimeBinding`] and
-/// [`WorkflowAbi`]. The ABI changes only the world's export line; the wac is
+/// Fully-configured scaffolding emission: explicit [`WorkflowAbi`]. The ABI changes only the world's export line; the wac is
 /// export-agnostic (`export wf...;` re-exports whatever the logic component
 /// exports). `export_agent_id` is the workflow's slug — the package id an
 /// `AgentCapabilities` export uses (`runtara:agent-<slug>`); ignored for the
 /// other ABIs, falls back to [`CAPABILITIES_EXPORT_AGENT_ID`] when `None`.
 pub fn emit_direct_component_artifacts_configured(
     agents: &[String],
-    runtime_binding: RuntimeBinding,
     abi: WorkflowAbi,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
 ) -> DirectComponentArtifacts {
     emit_direct_component_artifacts_with_pools(
         agents,
-        runtime_binding,
         abi,
         omit_runtime,
         export_agent_id,
@@ -264,7 +207,6 @@ pub fn emit_direct_component_artifacts_configured(
 /// package, wired by explicit argument name.
 pub fn emit_direct_component_artifacts_with_pools(
     agents: &[String],
-    runtime_binding: RuntimeBinding,
     abi: WorkflowAbi,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
@@ -272,7 +214,6 @@ pub fn emit_direct_component_artifacts_with_pools(
 ) -> DirectComponentArtifacts {
     emit_direct_component_artifacts_with_pools_and_connections(
         agents,
-        runtime_binding,
         abi,
         omit_runtime,
         export_agent_id,
@@ -283,7 +224,6 @@ pub fn emit_direct_component_artifacts_with_pools(
 
 pub(super) fn emit_direct_component_artifacts_with_pools_and_connections(
     agents: &[String],
-    runtime_binding: RuntimeBinding,
     abi: WorkflowAbi,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
@@ -292,7 +232,6 @@ pub(super) fn emit_direct_component_artifacts_with_pools_and_connections(
 ) -> DirectComponentArtifacts {
     emit_direct_component_artifacts_scoped(
         agents,
-        runtime_binding,
         abi,
         omit_runtime,
         export_agent_id,
@@ -309,7 +248,6 @@ pub(super) fn emit_direct_component_artifacts_with_pools_and_connections(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_direct_component_artifacts_scoped(
     agents: &[String],
-    runtime_binding: RuntimeBinding,
     abi: WorkflowAbi,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
@@ -321,17 +259,7 @@ pub(super) fn emit_direct_component_artifacts_scoped(
     needs_timers: bool,
     needs_monotonic_clock: bool,
 ) -> DirectComponentArtifacts {
-    let shared_components = DIRECT_SHARED_COMPONENT_REQUIREMENTS
-        .iter()
-        .filter(|component| {
-            // The runtime component is composed only under the Composed binding
-            // AND when the runtime is not omitted (agent-shaped); every other
-            // shared component is always required.
-            component.package != "runtara:workflow-runtime"
-                || (runtime_binding == RuntimeBinding::Composed && !omit_runtime)
-        })
-        .copied()
-        .collect();
+    let shared_components = DIRECT_SHARED_COMPONENT_REQUIREMENTS.to_vec();
     DirectComponentArtifacts {
         world_wit: emit_world_wit(
             agents,
@@ -346,10 +274,8 @@ pub(super) fn emit_direct_component_artifacts_scoped(
             needs_timers,
             needs_monotonic_clock,
         ),
-        wac_source: emit_wac(agents, runtime_binding, parallel_pools, scoped_agents),
+        wac_source: emit_wac(agents, parallel_pools, scoped_agents),
         stdlib_package: STDLIB_PACKAGE.to_string(),
-        runtime_package: RUNTIME_PACKAGE.to_string(),
-        runtime_binding,
         has_connections,
         has_timers: needs_timers || !parallel_pools.is_empty() || !agents.is_empty(),
         needs_monotonic_clock,
@@ -469,7 +395,6 @@ fn emit_world_wit(
 
 fn emit_wac(
     agents: &[String],
-    runtime_binding: RuntimeBinding,
     parallel_pools: &std::collections::BTreeMap<String, u32>,
     scoped_agents: &std::collections::BTreeSet<String>,
 ) -> String {
@@ -479,9 +404,6 @@ fn emit_wac(
          \n\
          let workflow-stdlib = new runtara:workflow-stdlib {{ ... }};\n",
     );
-    if runtime_binding == RuntimeBinding::Composed {
-        out.push_str("let workflow-runtime = new runtara:workflow-runtime { ... };\n");
-    }
 
     for agent in agents {
         out.push_str(&format!(
@@ -505,9 +427,6 @@ fn emit_wac(
 
     out.push_str("\nlet wf = new runtara:workflow-logic {");
     out.push_str(" ...workflow-stdlib,");
-    if runtime_binding == RuntimeBinding::Composed {
-        out.push_str(" ...workflow-runtime,");
-    }
     for agent in agents {
         let interface = if scoped_agents.contains(agent) {
             "scoped-capabilities-v3"
@@ -529,8 +448,8 @@ fn emit_wac(
     }
     // The trailing bare `...` leaves every remaining workflow-logic import
     // unsatisfied so it bubbles to the composed component's imports. That is
-    // already how the WASI interfaces reach the host; under
-    // `RuntimeBinding::HostImport` the runtime interface rides the same path.
+    // already how the WASI interfaces reach the host; the runtime interface
+    // rides the same path.
     out.push_str(" ... };\n\n");
     out.push_str("export wf...;\n");
     out
@@ -566,13 +485,8 @@ mod tests {
                 .world_wit
                 .contains("export runtara:workflow-lifecycle/lifecycle@0.2.0;")
         );
-        let legacy = emit_direct_component_artifacts_configured(
-            &[],
-            RuntimeBinding::HostImport,
-            WorkflowAbi::CliRunHttp,
-            false,
-            None,
-        );
+        let legacy =
+            emit_direct_component_artifacts_configured(&[], WorkflowAbi::CliRunHttp, false, None);
         assert!(legacy.world_wit.contains("export wasi:cli/run@0.2.3;"));
     }
 
@@ -584,7 +498,6 @@ mod tests {
 
         let with = emit_direct_component_artifacts_with_pools_and_connections(
             &["ai-tools".to_string()],
-            RuntimeBinding::HostImport,
             WorkflowAbi::InvokeHostImports,
             false,
             None,
@@ -611,7 +524,6 @@ mod tests {
     fn invoke_world_wit_matches_golden_snapshot() {
         let artifacts = emit_direct_component_artifacts_configured(
             &["crypto".to_string(), "object-model".to_string()],
-            RuntimeBinding::HostImport,
             WorkflowAbi::InvokeHostImports,
             false,
             None,
@@ -647,7 +559,6 @@ world workflow {
         // fixed placeholder would collide when composed into one parent).
         let artifacts = emit_direct_component_artifacts_configured(
             &[],
-            RuntimeBinding::HostImport,
             WorkflowAbi::AgentCapabilities,
             true,
             Some("order-sync"),
@@ -662,7 +573,6 @@ world workflow {
         // No slug → the legacy placeholder keeps tests/back-compat working.
         let fallback = emit_direct_component_artifacts_configured(
             &[],
-            RuntimeBinding::HostImport,
             WorkflowAbi::AgentCapabilities,
             true,
             None,
@@ -677,13 +587,14 @@ world workflow {
     }
 
     #[test]
-    fn direct_wac_statically_composes_stdlib_runtime_and_agents() {
-        // The Composed (legacy) binding: runtime instantiated + spread.
-        let artifacts = emit_direct_component_artifacts_with_binding(
-            &["crypto".to_string(), "object-model".to_string()],
-            RuntimeBinding::Composed,
-        );
+    fn direct_wac_composes_stdlib_and_agents_leaving_runtime_to_host() {
+        let artifacts =
+            emit_direct_component_artifacts(&["crypto".to_string(), "object-model".to_string()]);
 
+        // The wac neither instantiates nor spreads the runtime component…
+        assert!(!artifacts.wac_source.contains("workflow-runtime"));
+        // …but still composes stdlib + agents and keeps the trailing `...`
+        // that bubbles unsatisfied imports (runtime + WASI) to the top level.
         assert!(
             artifacts
                 .wac_source
@@ -692,25 +603,11 @@ world workflow {
         assert!(
             artifacts
                 .wac_source
-                .contains("let workflow-runtime = new runtara:workflow-runtime")
-        );
-        assert!(
-            artifacts
-                .wac_source
-                .contains("let agent-crypto = new runtara:agent-crypto")
-        );
-        assert!(
-            artifacts
-                .wac_source
                 .contains("let agent-object-model = new runtara:agent-object-model")
-        );
-        assert!(
-            artifacts
-                .wac_source
-                .contains("...workflow-stdlib, ...workflow-runtime,")
         );
         assert!(artifacts.wac_source.contains("...agent-crypto,"));
         assert!(artifacts.wac_source.contains("...agent-object-model,"));
+        assert!(artifacts.wac_source.contains(" ... };"));
         assert!(artifacts.wac_source.contains("export wf...;"));
         assert_eq!(
             artifacts.agent_components,
@@ -733,27 +630,6 @@ world workflow {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn host_import_binding_omits_runtime_from_wac_and_requirements() {
-        let artifacts = emit_direct_component_artifacts_with_binding(
-            &["crypto".to_string()],
-            RuntimeBinding::HostImport,
-        );
-
-        // The wac neither instantiates nor spreads the runtime component…
-        assert!(!artifacts.wac_source.contains("workflow-runtime"));
-        // …but still composes stdlib + agents and keeps the trailing `...`
-        // that bubbles unsatisfied imports (runtime + WASI) to the top level.
-        assert!(
-            artifacts
-                .wac_source
-                .contains("let workflow-stdlib = new runtara:workflow-stdlib")
-        );
-        assert!(artifacts.wac_source.contains("...agent-crypto,"));
-        assert!(artifacts.wac_source.contains(" ... };"));
-        assert!(artifacts.wac_source.contains("export wf...;"));
 
         // Composition must not require the runtime .wasm on disk.
         assert_eq!(
@@ -764,10 +640,9 @@ world workflow {
                 .collect::<Vec<_>>(),
             vec!["runtara:workflow-stdlib"],
         );
-        assert_eq!(artifacts.runtime_binding, RuntimeBinding::HostImport);
 
-        // The world is binding-independent: the logic module always imports
-        // the runtime interface; the binding only decides who satisfies it.
+        // The logic module still imports the runtime interface; the host
+        // satisfies it.
         assert!(
             artifacts
                 .world_wit
@@ -776,25 +651,9 @@ world workflow {
     }
 
     #[test]
-    fn default_binding_is_host_import() {
-        // Phase 2 of the agent/workflow unification: new compiles
-        // surface the runtime interface as a host-satisfied import; the
-        // Composed binding stays available for the CLI A/B axis and old
-        // artifacts keep running unchanged (they carry their own runtime).
-        let with_default = emit_direct_component_artifacts(&["crypto".to_string()]);
-        let explicit = emit_direct_component_artifacts_with_binding(
-            &["crypto".to_string()],
-            RuntimeBinding::HostImport,
-        );
-        assert_eq!(with_default, explicit);
-        assert_eq!(with_default.runtime_binding, RuntimeBinding::HostImport);
-    }
-
-    #[test]
     fn direct_shared_component_requirements_match_bundle_outputs() {
-        // The Composed (legacy) binding needs both bundle components on disk;
-        // the HostImport default needs only the stdlib.
-        let artifacts = emit_direct_component_artifacts_with_binding(&[], RuntimeBinding::Composed);
+        // Only the stdlib is composed in; the runtime interface is host-bound.
+        let artifacts = emit_direct_component_artifacts(&[]);
 
         assert_eq!(
             artifacts.shared_components,
@@ -803,32 +662,13 @@ world workflow {
         assert!(artifacts.agent_components.is_empty());
         assert_eq!(
             artifacts.shared_components,
-            vec![
-                DirectSharedComponentRequirement {
-                    package: "runtara:workflow-stdlib",
-                    package_with_version: "runtara:workflow-stdlib@0.1.0",
-                    bundle_wasm_filename: "runtara_workflow_stdlib.wasm",
-                    bundle_meta_filename: "runtara_workflow_stdlib.meta.json",
-                    cas_wasm_filename: "runtara-workflow-stdlib.wasm",
-                },
-                DirectSharedComponentRequirement {
-                    package: "runtara:workflow-runtime",
-                    package_with_version: "runtara:workflow-runtime@0.4.0",
-                    bundle_wasm_filename: "runtara_workflow_runtime.wasm",
-                    bundle_meta_filename: "runtara_workflow_runtime.meta.json",
-                    cas_wasm_filename: "runtara-workflow-runtime.wasm",
-                },
-            ]
-        );
-
-        let host_import = emit_direct_component_artifacts(&[]);
-        assert_eq!(
-            host_import
-                .shared_components
-                .iter()
-                .map(|component| component.package)
-                .collect::<Vec<_>>(),
-            vec!["runtara:workflow-stdlib"],
+            vec![DirectSharedComponentRequirement {
+                package: "runtara:workflow-stdlib",
+                package_with_version: "runtara:workflow-stdlib@0.1.0",
+                bundle_wasm_filename: "runtara_workflow_stdlib.wasm",
+                bundle_meta_filename: "runtara_workflow_stdlib.meta.json",
+                cas_wasm_filename: "runtara-workflow-stdlib.wasm",
+            }]
         );
     }
 }

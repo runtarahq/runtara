@@ -385,17 +385,13 @@ fn compare(first: Backend, smoke: bool) -> Value {
     }
     let executable_sha256 = format!("{:x}", hasher.finalize());
     let components = shared_components_dir();
-    let dependencies: Vec<_> = [
-        "runtara_agent_utils.wasm",
-        "runtara_workflow_stdlib.wasm",
-        "runtara_workflow_runtime.wasm",
-    ]
-    .into_iter()
-    .map(|name| {
-        let bytes = fs::read(components.join(name)).unwrap();
-        json!({"name":name,"bytes":bytes.len(),"sha256":format!("{:x}",Sha256::digest(bytes))})
-    })
-    .collect();
+    let dependencies: Vec<_> = ["runtara_agent_utils.wasm", "runtara_workflow_stdlib.wasm"]
+        .into_iter()
+        .map(|name| {
+            let bytes = fs::read(components.join(name)).unwrap();
+            json!({"name":name,"bytes":bytes.len(),"sha256":format!("{:x}",Sha256::digest(bytes))})
+        })
+        .collect();
     let reviewed = BTreeMap::from([(
         "utils".into(),
         dependencies[0]["sha256"].as_str().unwrap().to_owned(),

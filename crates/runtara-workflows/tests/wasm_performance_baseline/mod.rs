@@ -195,17 +195,13 @@ async fn run(
 fn workflow_performance_baseline() {
     assert!(!cfg!(debug_assertions), "benchmark requires --release");
     let components = shared_components_dir();
-    let dependency_hashes: Vec<_> = [
-        "runtara_agent_utils.wasm",
-        "runtara_workflow_stdlib.wasm",
-        "runtara_workflow_runtime.wasm",
-    ]
-    .into_iter()
-    .map(|name| {
-        let bytes = fs::read(components.join(name)).unwrap();
-        json!({"name":name,"bytes":bytes.len(),"sha256":format!("{:x}",Sha256::digest(bytes))})
-    })
-    .collect();
+    let dependency_hashes: Vec<_> = ["runtara_agent_utils.wasm", "runtara_workflow_stdlib.wasm"]
+        .into_iter()
+        .map(|name| {
+            let bytes = fs::read(components.join(name)).unwrap();
+            json!({"name":name,"bytes":bytes.len(),"sha256":format!("{:x}",Sha256::digest(bytes))})
+        })
+        .collect();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()

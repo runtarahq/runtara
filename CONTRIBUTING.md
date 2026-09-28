@@ -74,7 +74,6 @@ cd runtara
 cargo build
 
 # Run tests (no database required)
-cargo test -p runtara-sdk
 cargo test -p runtara-workflows
 
 # Run tests with database

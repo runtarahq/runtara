@@ -167,7 +167,6 @@ async fn run_retry_in_scope(
                 agent_slug: None,
             },
             direct_e2e_components_dir(),
-            RuntimeBinding::HostImport,
             WorkflowAbi::InvokeHostImports,
             false,
         )?

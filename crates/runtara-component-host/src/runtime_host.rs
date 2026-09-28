@@ -2,26 +2,23 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Host-side surface for the `runtara:workflow-runtime/runtime` interface.
 //!
-//! A composed workflow whose `RuntimeBinding` is `HostImport` (see
-//! `runtara-workflows::direct_wasm`) lists `runtara:workflow-runtime/runtime`
-//! among its component-level imports instead of satisfying it internally with
-//! the composed guest runtime component (which loops back to core over
-//! `wasi:http`). This module provides the native replacement: a [`RuntimeHost`]
-//! trait mirroring the interface's guest-visible semantics, and
+//! Every composed workflow (see `runtara-workflows::direct_wasm`) lists
+//! `runtara:workflow-runtime/runtime` among its component-level imports; the
+//! host is its only implementation. This module provides it: a
+//! [`RuntimeHost`] trait carrying the interface's guest-visible semantics, and
 //! [`add_runtime_to_linker`] which binds every interface function to the trait
 //! via `func_wrap_async`.
 //!
 //! Layering: this crate stays persistence-agnostic. The trait is DEFINED here;
 //! the production implementation lives in `runtara-environment`, delegating to
-//! `runtara-core::instance_handlers` over `Arc<dyn Persistence>` (never the
-//! SDK's `EmbeddedBackend`, whose per-call `block_on` would nest runtimes).
+//! `runtara-core::instance_handlers` over `Arc<dyn Persistence>`.
 //!
 //! Three interface functions are handled locally in the glue and never reach
-//! the trait, mirroring the guest runtime component they replace:
+//! the trait:
 //! - `now-ms` — wall clock.
 //! - `blocking-sleep` — plain (non-durable) sleep for the requested duration.
 //! - `durable-sleep` — aliased to `durable-sleep-checkpoint` under
-//!   [`DURABLE_SLEEP_CHECKPOINT_ID`], exactly like the guest runtime does.
+//!   [`DURABLE_SLEEP_CHECKPOINT_ID`].
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -40,10 +37,9 @@ use crate::workflow::WorkflowState;
 /// composition surfaces exactly this name.
 pub use runtara_workflow_wit::RUNTIME_INTERFACE_NAME;
 
-/// Checkpoint id the guest runtime component uses for plain `durable-sleep`
-/// (see `runtara-workflow-runtime/src/lib.rs::durable_sleep`). The host glue
-/// aliases `durable-sleep` to `durable-sleep-checkpoint` under this key for
-/// byte-identical persistence behavior.
+/// Checkpoint id used for plain `durable-sleep`: the host glue aliases
+/// `durable-sleep` to `durable-sleep-checkpoint` under this key. The value is
+/// persisted in existing checkpoints, so it must not change.
 pub const DURABLE_SLEEP_CHECKPOINT_ID: &str = "__direct_workflow_runtime_durable_sleep";
 
 /// WIT mirror of the authoritative managed-input state.
@@ -121,14 +117,12 @@ pub struct RuntimeCheckpointResult {
 
 /// Native implementation surface for the runtime interface.
 ///
-/// Semantics contract: each method must be observably equivalent to the guest
-/// runtime component + HTTP SDK backend + core guest-protocol handler chain it
-/// replaces (see `runtara-workflow-runtime/src/lib.rs` for the guest side and
-/// `runtara-core::instance_handlers` for the server side). In particular:
+/// Semantics contract: each method follows the corresponding
+/// `runtara-core::instance_handlers` handler. In particular:
 ///
 /// - `is_cancelled`/`check_signals` acknowledge consumed lifecycle signals
-///   server-side (status transitions included) exactly like the SDK's
-///   `acknowledge_cancellation`/`acknowledge_pause`/`acknowledge_shutdown`.
+///   server-side (status transitions included) through core's signal
+///   acknowledgement.
 /// - `durable_sleep_checkpoint` mirrors core `handle_sleep`: persist the
 ///   checkpoint, then sleep the FULL duration in-process (no resume-remaining
 ///   math — parity with today's guest-visible behavior; the suspend/re-invoke
@@ -144,7 +138,7 @@ pub struct RuntimeCheckpointResult {
 #[async_trait::async_trait]
 pub trait RuntimeHost: Send + Sync {
     /// Persisted input for this instance; `None` when the record has no input
-    /// (the glue substitutes the `{}` envelope, matching the guest runtime).
+    /// (the glue substitutes the `{}` envelope).
     async fn load_input(&self) -> Result<Option<Vec<u8>>, String>;
     /// This run's instance id.
     fn instance_id(&self) -> Result<String, String>;
@@ -345,8 +339,8 @@ fn add_runtime_version_to_linker(
             let host = require_host(&mut store);
             Box::new(async move {
                 let host = host?;
-                // Mirror the guest runtime: absent input loads as the empty
-                // JSON envelope, never as an error.
+                // Absent input loads as the empty JSON envelope, never as an
+                // error.
                 let result = host
                     .load_input()
                     .await
@@ -477,8 +471,7 @@ fn add_runtime_version_to_linker(
         |mut store: StoreContextMut<'_, WorkflowState>, (ms,): (u64,)| {
             let host = require_host(&mut store);
             Box::new(async move {
-                // Alias to durable-sleep-checkpoint under the fixed key, as
-                // the guest runtime component does.
+                // Alias to durable-sleep-checkpoint under the fixed key.
                 let result = host?
                     .durable_sleep_checkpoint(
                         DURABLE_SLEEP_CHECKPOINT_ID.to_string(),
@@ -495,9 +488,8 @@ fn add_runtime_version_to_linker(
         "blocking-sleep",
         |_store: StoreContextMut<'_, WorkflowState>, (ms,): (u64,)| {
             Box::new(async move {
-                // The guest runtime blocks in std::thread::sleep; host-side an
-                // async sleep is observably identical to the guest (the call
-                // returns after `ms`) without pinning an executor thread.
+                // An async sleep returns after `ms`, like a blocking sleep,
+                // without pinning an executor thread.
                 tokio::time::sleep(Duration::from_millis(ms)).await;
                 Ok((Ok::<(), String>(()),))
             })

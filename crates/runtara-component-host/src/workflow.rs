@@ -144,11 +144,9 @@ pub struct WorkflowRunSpec {
     pub timeout: Duration,
     pub cancel: Option<Arc<AtomicBool>>,
     pub limits: WorkflowLimits,
-    /// Native runtime host for artifacts composed with
-    /// `RuntimeBinding::HostImport` (they import
-    /// `runtara:workflow-runtime/runtime` instead of carrying the composed
-    /// HTTP runtime component). `None` for legacy composed artifacts — a
-    /// HostImport artifact run without a host traps loudly on first use.
+    /// Native runtime host for the `runtara:workflow-runtime/runtime`
+    /// interface every composed workflow imports. An artifact that imports
+    /// it, run without a host, traps loudly on first use.
     pub runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
 }
 

@@ -43,9 +43,9 @@ pub use compile::{
     DirectComponentDependencyMetadata, DirectComponentSidecarMetadata, DirectIsolationMetadata,
     STAGED_WORKFLOW_AGENT_DENIED_PREFIXES, bundled_builtin_pin, bundled_trusted_pin,
     check_agent_component_imports, compile_direct_workflow, compile_direct_workflow_composed,
-    compile_direct_workflow_composed_configured, compile_direct_workflow_composed_with_binding,
-    compile_direct_workflow_with_abi, compose_direct_workflow,
-    compose_direct_workflow_with_extra_dirs, staged_dependency_is_stale, trusted_artifact_pins,
+    compile_direct_workflow_composed_configured, compile_direct_workflow_with_abi,
+    compose_direct_workflow, compose_direct_workflow_with_extra_dirs, staged_dependency_is_stale,
+    trusted_artifact_pins,
 };
 // Builders for old packages exist only in the existing integration-test surface.
 #[cfg(all(
@@ -61,8 +61,7 @@ pub use compile::{
 pub use component::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DIRECT_WORKFLOW_LOGIC_PACKAGE,
     DirectAgentComponentRequirement, DirectComponentArtifacts, DirectSharedComponentRequirement,
-    RuntimeBinding, WorkflowAbi, emit_direct_component_artifacts,
-    emit_direct_component_artifacts_configured, emit_direct_component_artifacts_with_binding,
+    WorkflowAbi, emit_direct_component_artifacts, emit_direct_component_artifacts_configured,
 };
 #[cfg(feature = "compiler")]
 pub use error::DirectCompileError;

@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,10 +17,9 @@ use base64::Engine;
 use runtara_database_contract::*;
 use runtara_workflows::direct_wasm::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DirectArtifactMetadata, DirectCompilationInput,
-    DirectCompileError, RuntimeBinding, WorkflowAbi, analyze_direct_wasm_support,
-    compile_direct_workflow, compile_direct_workflow_composed,
-    compile_direct_workflow_composed_configured, compose_direct_workflow,
-    emit_direct_component_artifacts_with_binding,
+    DirectCompileError, WorkflowAbi, analyze_direct_wasm_support, compile_direct_workflow,
+    compile_direct_workflow_composed, compile_direct_workflow_composed_configured,
+    compose_direct_workflow, emit_direct_component_artifacts,
 };
 use runtara_workflows::{
     CompilationInput, DirectWorkflowCompileOptions, ExecutionGraph, WorkflowCompilerMode,
@@ -639,138 +638,6 @@ fn certified_workflow_agent_info(
     info
 }
 
-/// Dev-tool lookup for the opt-in CLI reference mode: honor `WASMTIME_PATH`,
-/// then `~/.wasmtime/bin/wasmtime`, then PATH.
-fn wasmtime_binary() -> PathBuf {
-    if let Ok(path) = std::env::var("WASMTIME_PATH") {
-        return PathBuf::from(path);
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        let home_path = PathBuf::from(home)
-            .join(".wasmtime")
-            .join("bin")
-            .join("wasmtime");
-        if home_path.exists() {
-            return home_path;
-        }
-    }
-    PathBuf::from("wasmtime")
-}
-
-fn wasmtime_installed() -> bool {
-    Command::new(wasmtime_binary())
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-}
-
-// Serve one HTTP request from a *persistent* connection reader. The reader is
-// owned by the connection loop and reused across requests, NOT recreated here:
-// a `BufReader` reads ahead in blocks, so it routinely pulls the first bytes of
-// the *next* request past the current request's body. A per-request reader
-// (the previous design) discarded that read-ahead when it was dropped, so the
-// next request on a reused keep-alive connection began mid-stream — a desync the
-// client surfaced as `HttpProtocolError`. It only bit under load, when the SDK's
-// next request had already arrived by the time we read this one's body — i.e. on
-// long, many-request runs (AiAgent loops). Returns `Ok(true)` to keep the
-// connection, `Ok(false)`/`Err` to close it.
-fn handle_request(
-    reader: &mut BufReader<std::net::TcpStream>,
-    sink: &mpsc::Sender<CapturedMessage>,
-    server_state: &ServerState,
-    workflow_input: &[u8],
-) -> std::io::Result<bool> {
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line)? == 0 {
-        return Ok(false);
-    }
-    let parts: Vec<&str> = request_line.split_whitespace().collect();
-    if parts.len() < 3 {
-        return Ok(false);
-    }
-    let method = parts[0].to_string();
-    let path = parts[1].to_string();
-
-    let mut content_length = 0usize;
-    let mut chunked = false;
-    let mut connection_close = false;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
-            return Ok(false);
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            break;
-        }
-        let lower = trimmed.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("content-length:") {
-            content_length = rest.trim().parse().unwrap_or(0);
-        }
-        if let Some(rest) = lower.strip_prefix("transfer-encoding:")
-            && rest.trim() == "chunked"
-        {
-            chunked = true;
-        }
-        if lower.starts_with("connection:") && lower.contains("close") {
-            connection_close = true;
-        }
-    }
-
-    let body = if chunked {
-        read_chunked_body(reader)?
-    } else {
-        let mut buf = vec![0u8; content_length];
-        if content_length > 0 {
-            reader.read_exact(&mut buf)?;
-        }
-        buf
-    };
-
-    let (status, response_json) = route(&method, &path, &body, sink, server_state, workflow_input);
-    let response_bytes = response_json.to_string();
-    let response = format!(
-        "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nConnection: keep-alive\r\n\r\n{body}",
-        len = response_bytes.len(),
-        body = response_bytes,
-    );
-    // Write through the underlying stream. The BufReader only buffers reads, so
-    // its retained read-ahead survives across requests (full-duplex socket).
-    let stream = reader.get_mut();
-    stream.write_all(response.as_bytes())?;
-    stream.flush()?;
-
-    Ok(!connection_close)
-}
-
-fn read_chunked_body(reader: &mut BufReader<std::net::TcpStream>) -> std::io::Result<Vec<u8>> {
-    let mut out = Vec::new();
-    loop {
-        let mut size_line = String::new();
-        if reader.read_line(&mut size_line)? == 0 {
-            break;
-        }
-        let size_hex = size_line.trim().split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_hex, 16).unwrap_or(0);
-        if size == 0 {
-            let mut trailer = String::new();
-            while reader.read_line(&mut trailer)? > 0 {
-                if trailer.trim().is_empty() {
-                    break;
-                }
-                trailer.clear();
-            }
-            break;
-        }
-        let mut chunk = vec![0u8; size];
-        reader.read_exact(&mut chunk)?;
-        out.extend_from_slice(&chunk);
-        let mut crlf = [0u8; 2];
-        reader.read_exact(&mut crlf)?;
-    }
-    Ok(out)
-}
-
 struct FixtureConnectionResolver(Arc<ServerState>);
 
 #[async_trait::async_trait]
@@ -991,283 +858,12 @@ fn executor_with_connections(state: Arc<ServerState>) -> runtara_component_host:
     executor
 }
 
-fn route(
-    method: &str,
-    path: &str,
-    body: &[u8],
-    sink: &mpsc::Sender<CapturedMessage>,
-    server_state: &ServerState,
-    workflow_input: &[u8],
-) -> (u16, Value) {
-    let path = path.split('?').next().unwrap_or(path);
-
-    if method == "GET" && path == "/health" {
-        return (200, serde_json::json!({"ok": true}));
-    }
-
-    if let Some(rest) = path.strip_prefix("/api/v1/instances/") {
-        let mut iter = rest.splitn(2, '/');
-        let _instance_id = iter.next().unwrap_or("");
-        let endpoint = iter.next().unwrap_or("");
-
-        match (method, endpoint) {
-            ("POST", "register") => return (200, serde_json::json!({"success": true})),
-            ("GET", "input") => {
-                let input = base64::engine::general_purpose::STANDARD.encode(workflow_input);
-                return (200, serde_json::json!({ "input": input }));
-            }
-            ("POST", "completed") => {
-                capture_completed(body, sink);
-                return (200, serde_json::json!({"success": true}));
-            }
-            ("POST", "events") => {
-                capture_event(body, sink);
-                return (200, serde_json::json!({"success": true}));
-            }
-            ("POST", "checkpoint") => return checkpoint_response(body, sink, server_state),
-            // Lifecycle-signal poll (WaitForSignal loop's `check_signals`). No
-            // drain injected in these tests → no pending lifecycle signal.
-            ("GET", "signals") => {
-                return (
-                    200,
-                    serde_json::json!({"signal": null, "custom_signal": null}),
-                );
-            }
-            ("GET", ep) if ep.starts_with("signals/") => {
-                panic!("managed wait attempted raw HTTP signal polling: {ep}");
-            }
-            ("POST", ep @ ("inputs/register" | "inputs/poll" | "inputs/close")) => {
-                let request: Value = serde_json::from_slice(body).expect("managed request body");
-                let result = tokio::runtime::Runtime::new().unwrap().block_on(async {
-                    if ep == "inputs/register" {
-                        server_state
-                            .register_managed_input(
-                                serde_json::to_vec(&request["descriptor"]).unwrap(),
-                                request["deadline_ms"].as_u64(),
-                                request["requested_at_ms"].as_u64(),
-                            )
-                            .await?;
-                        return Ok(serde_json::json!({"success":true}));
-                    }
-                    let signal = request["signal_id"].as_str().ok_or("missing signal id")?;
-                    let state = if ep == "inputs/poll" {
-                        server_state.poll_managed_input(signal).await?
-                    } else {
-                        server_state.managed_inputs.close(signal).await?
-                    };
-                    use runtara_component_host::runtime_host::RuntimeInputState;
-                    Ok::<_, String>(match state {
-                        RuntimeInputState::Open => serde_json::json!({"state":"open"}),
-                        RuntimeInputState::Accepted(payload) => {
-                            serde_json::json!({"state":"accepted","value":payload})
-                        }
-                        RuntimeInputState::Closed(reason) => {
-                            serde_json::json!({"state":"closed","value":reason})
-                        }
-                    })
-                });
-                return match result {
-                    Ok(response) => (200, response),
-                    Err(error) => (409, serde_json::json!({"error":error})),
-                };
-            }
-            ("POST", "sleep") => {
-                capture_sleep(body, sink, server_state);
-                return (200, serde_json::json!({"success": true}));
-            }
-            ("POST", "failed") => {
-                capture_failed(body, sink);
-                return (200, serde_json::json!({"success": true}));
-            }
-            _ => {}
-        }
-    }
-
-    (200, serde_json::json!({"success": true}))
-}
-
-fn checkpoint_response(
-    body: &[u8],
-    sink: &mpsc::Sender<CapturedMessage>,
-    server_state: &ServerState,
-) -> (u16, Value) {
-    let Ok(parsed) = serde_json::from_slice::<Value>(body) else {
-        return (
-            400,
-            serde_json::json!({
-                "found": false,
-                "state": null,
-                "signal": null,
-                "custom_signal": null,
-            }),
-        );
-    };
-
-    let checkpoint_id = parsed
-        .get("checkpoint_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let state = parsed
-        .get("state")
-        .and_then(Value::as_str)
-        .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
-        .unwrap_or_default();
-    let _ = sink.send(CapturedMessage::Checkpoint(CheckpointRequest {
-        checkpoint_id: checkpoint_id.clone(),
-        state: state.clone(),
-    }));
-
-    let mut checkpoints = server_state
-        .checkpoints
-        .lock()
-        .expect("checkpoint state lock");
-    if let Some(existing) = checkpoints.get(&checkpoint_id) {
-        return (
-            200,
-            serde_json::json!({
-                "found": true,
-                "state": base64::engine::general_purpose::STANDARD.encode(existing),
-                "signal": null,
-                "custom_signal": null,
-            }),
-        );
-    }
-
-    if !state.is_empty() {
-        checkpoints.insert(checkpoint_id, state);
-    }
-
-    (
-        200,
-        serde_json::json!({
-            "found": false,
-            "state": null,
-            "signal": null,
-            "custom_signal": null,
-        }),
-    )
-}
-
-fn capture_completed(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
-    if let Ok(parsed) = serde_json::from_slice::<Value>(body)
-        && let Some(b64) = parsed.get("output").and_then(Value::as_str)
-        && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
-        && let Ok(output_json) = serde_json::from_slice::<Value>(&bytes)
-    {
-        let _ = sink.send(CapturedMessage::Completed(Completed { output_json }));
-    }
-}
-
-fn capture_failed(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
-    if let Ok(parsed) = serde_json::from_slice::<Value>(body)
-        && let Some(error) = parsed.get("error").and_then(Value::as_str)
-    {
-        let error_json =
-            serde_json::from_str::<Value>(error).unwrap_or_else(|_| Value::String(error.into()));
-        let _ = sink.send(CapturedMessage::Failed(Failed { error_json }));
-    }
-}
-
-fn capture_event(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
-    if let Ok(parsed) = serde_json::from_slice::<Value>(body)
-        && parsed.get("event_type").and_then(Value::as_str) == Some("custom")
-        && let Some(subtype) = parsed.get("subtype").and_then(Value::as_str)
-        && let Some(b64) = parsed.get("payload").and_then(Value::as_str)
-        && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
-        && let Ok(payload_json) = serde_json::from_slice::<Value>(&bytes)
-    {
-        let _ = sink.send(CapturedMessage::Event(RuntimeEvent {
-            subtype: subtype.to_string(),
-            payload_json,
-        }));
-    }
-}
-
-/// Mirror production `handle_sleep`: persist the checkpoint, then (here) skip
-/// the sleep itself. See [`CapturingRuntimeHost::durable_sleep_checkpoint`] for
-/// why the save has to happen even though the wait does not.
-fn capture_sleep(body: &[u8], sink: &mpsc::Sender<CapturedMessage>, server_state: &ServerState) {
-    if let Ok(parsed) = serde_json::from_slice::<Value>(body)
-        && let Some(checkpoint_id) = parsed.get("checkpoint_id").and_then(Value::as_str)
-    {
-        let duration_ms = parsed
-            .get("duration_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        let state = parsed
-            .get("state")
-            .and_then(Value::as_str)
-            .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
-            .unwrap_or_default();
-        server_state
-            .checkpoints
-            .lock()
-            .expect("checkpoint state lock")
-            .insert(checkpoint_id.to_string(), state.clone());
-        let _ = sink.send(CapturedMessage::Sleep(SleepRequest {
-            checkpoint_id: checkpoint_id.to_string(),
-            duration_ms,
-            state,
-        }));
-    }
-}
-
-fn serve(
-    listener: TcpListener,
-    sink: mpsc::Sender<CapturedMessage>,
-    server_state: Arc<ServerState>,
-    stop: mpsc::Receiver<()>,
-    workflow_input: Arc<Vec<u8>>,
-) {
-    listener
-        .set_nonblocking(true)
-        .expect("set_nonblocking on listener");
-    loop {
-        if stop.try_recv().is_ok() {
-            return;
-        }
-        match listener.accept() {
-            Ok((stream, _)) => {
-                let sink = sink.clone();
-                let server_state = server_state.clone();
-                let workflow_input = workflow_input.clone();
-                thread::spawn(move || {
-                    // Accepted sockets can inherit the listener's non-blocking flag
-                    // (macOS); force blocking + a timeout so request parsing blocks
-                    // for the next keep-alive request rather than erroring, and a
-                    // dead peer eventually frees the thread.
-                    stream.set_nonblocking(false).ok();
-                    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-                    stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
-                    // ONE reader for the whole connection: its read-ahead buffer
-                    // must persist across requests (see `handle_request`).
-                    let mut reader = BufReader::new(stream);
-                    while let Ok(true) =
-                        handle_request(&mut reader, &sink, &server_state, workflow_input.as_slice())
-                    {
-                        // Keep serving the same connection while the SDK reuses it.
-                    }
-                });
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(20));
-            }
-            Err(_) => return,
-        }
-    }
-}
-
 fn direct_e2e_components_dir() -> PathBuf {
     // Composition is in-process via the `wac-graph` crate (see
     // `direct_wasm/compile.rs`) — the `wac` CLI is never invoked, so it must
     // not be required here. A stale `tool_installed("wac")` guard made the
     // whole suite panic in CI environments that stage the components but don't
     // install the (unused) CLI.
-    assert!(
-        embedded_executor_mode() || wasmtime_installed(),
-        "direct-wasm-integration-tests in CLI mode requires wasmtime"
-    );
     shared_components_dir()
 }
 
@@ -1490,35 +1086,6 @@ fn run_direct_workflow_capture_full_sql(
     sql_script: Vec<Result<Value, DatabaseError>>,
     input_responses: Vec<Value>,
 ) -> CapturedRun {
-    let first = run_direct_workflow_capture_attempt(
-        components_dir,
-        workflow_id,
-        graph_json,
-        workflow_input,
-        track_events,
-        preloaded_checkpoints.clone(),
-        llm_script.clone(),
-        extra_env.clone(),
-        sql_script.clone(),
-        input_responses.clone(),
-        None,
-    );
-    // Under full-suite parallel load (16 threads × wasmtime spawns + ephemeral
-    // TCP listeners) a run occasionally dies before reaching the mock runtime
-    // at all: non-zero exit, EMPTY stderr, and zero captured traffic. That
-    // signature is infrastructure (spawn/connect), not workflow behavior —
-    // retry once so a 1-in-N-suites flake doesn't fail the suite. Real
-    // failures always leave stderr or a /failed capture and are NOT retried.
-    let infra_flake = !first.status_success
-        && first.stderr.trim().is_empty()
-        && first.output_json.is_none()
-        && first.error_json.is_none()
-        && first.events.is_empty()
-        && first.checkpoints.is_empty();
-    if !infra_flake {
-        return first;
-    }
-    eprintln!("retrying '{workflow_id}': wasmtime spawn/connect flake (empty stderr, no traffic)");
     run_direct_workflow_capture_attempt(
         components_dir,
         workflow_id,
@@ -1550,7 +1117,6 @@ fn run_direct_workflow_capture_attempt(
 ) -> CapturedRun {
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
-    let binding = runtime_binding_mode();
     let abi = workflow_abi_mode();
     let compiled = compile_direct_workflow_composed_configured(
         DirectCompilationInput {
@@ -1565,7 +1131,6 @@ fn run_direct_workflow_capture_attempt(
             agent_slug: None,
         },
         components_dir,
-        binding,
         abi,
         // Runtime import kept — omit-runtime has its own dedicated test.
         false,
@@ -1573,12 +1138,9 @@ fn run_direct_workflow_capture_attempt(
     .expect("direct composed compile");
     assert_eq!(compiled.wasm_path, compiled.build_dir.join("workflow.wasm"));
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local_addr");
     let (capture_tx, capture_rx) = mpsc::channel::<CapturedMessage>();
-    let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let workflow_input = Arc::new(workflow_input.to_vec());
-    let server_state = Arc::new(ServerState {
+    let server_state_for_assertions = Arc::new(ServerState {
         checkpoints: Mutex::new(preloaded_checkpoints.into_iter().collect()),
         llm_responses: Mutex::new(llm_script),
         llm_requests: Mutex::new(Vec::new()),
@@ -1591,60 +1153,46 @@ fn run_direct_workflow_capture_attempt(
         accepted_input_polls: Mutex::new(0),
         slow_item_arrivals: Mutex::new(Vec::new()),
     });
-    let server_state_for_assertions = server_state.clone();
-    let capture_tx_for_host = capture_tx.clone();
-    let workflow_input_for_host = Arc::clone(&workflow_input);
-    let server_handle =
-        thread::spawn(move || serve(listener, capture_tx, server_state, stop_rx, workflow_input));
 
-    // The optional legacy runtime binding still uses HTTP; agents use native fixtures.
+    // Agents use native fixtures; the runtime interface is served in-process.
     let mut env_pairs: Vec<(String, String)> = vec![
-        ("RUNTARA_HTTP_URL".into(), format!("http://{addr}")),
-        ("RUNTARA_SERVER_ADDR".into(), addr.to_string()),
         ("RUNTARA_INSTANCE_ID".into(), workflow_id.to_string()),
         ("RUNTARA_TENANT_ID".into(), "direct-wasm-execute".into()),
         ("RUST_LOG".into(), "warn".into()),
     ];
     env_pairs.extend(extra_env.iter().cloned());
 
-    // Under HostImport, the runtime interface is served by the capturing host
-    // (same ServerState + capture sink as the mock server, so assertions see
-    // one uniform CapturedRun shape). Outbound calls use FixtureOutbound.
-    let runtime_host: Option<Arc<dyn runtara_component_host::runtime_host::RuntimeHost>> =
-        (binding == RuntimeBinding::HostImport).then(|| {
-            let debug_mode = env_pairs
-                .iter()
-                .any(|(key, value)| key == "DEBUG_MODE" && value == "true");
-            Arc::new(CapturingRuntimeHost {
-                instance_id: workflow_id.to_string(),
-                debug_mode,
-                input: Arc::clone(&workflow_input_for_host),
-                sink: Mutex::new(capture_tx_for_host.clone()),
-                state: server_state_for_assertions.clone(),
-            }) as Arc<dyn runtara_component_host::runtime_host::RuntimeHost>
+    // The runtime interface is served by the capturing host (sharing
+    // ServerState + the capture sink, so assertions see one uniform
+    // CapturedRun shape). Outbound calls use FixtureOutbound.
+    let debug_mode = env_pairs
+        .iter()
+        .any(|(key, value)| key == "DEBUG_MODE" && value == "true");
+    let runtime_host: Arc<dyn runtara_component_host::runtime_host::RuntimeHost> =
+        Arc::new(CapturingRuntimeHost {
+            instance_id: workflow_id.to_string(),
+            debug_mode,
+            input: Arc::clone(&workflow_input),
+            sink: Mutex::new(capture_tx),
+            state: server_state_for_assertions.clone(),
         });
 
-    let (status_success, stderr, memory_peak_bytes) = if !embedded_executor_mode() {
-        let (ok, err) = execute_via_cli(&compiled.wasm_path, &env_pairs);
-        (ok, err, None)
-    } else if abi == WorkflowAbi::InvokeHostImports {
+    let (status_success, stderr, memory_peak_bytes) = if abi == WorkflowAbi::InvokeHostImports {
         execute_via_embedded_invoke(
             &compiled.wasm_path,
             &env_pairs,
-            runtime_host.expect("invoke ABI requires the capturing host"),
-            workflow_input_for_host.as_ref().clone(),
+            runtime_host,
+            workflow_input.as_ref().clone(),
             server_state_for_assertions.clone(),
         )
     } else {
         execute_via_embedded(
             &compiled.wasm_path,
             &env_pairs,
-            runtime_host,
+            Some(runtime_host),
             Some(server_state_for_assertions.clone()),
         )
     };
-    let _ = stop_tx.send(());
-    let _ = server_handle.join();
 
     let mut output_json = None;
     let mut error_json = None;
@@ -1705,49 +1253,20 @@ fn run_direct_workflow_capture_attempt(
     }
 }
 
-/// Battery-wide executor selection. The in-process WorkflowExecutor is the
-/// default (it is the only production runner); `RUNTARA_DIRECT_WASM_EXECUTOR=cli`
-/// opts into the reference wasmtime CLI for A/B cross-checks of the composed
-/// component against the upstream runtime.
-fn embedded_executor_mode() -> bool {
-    std::env::var("RUNTARA_DIRECT_WASM_EXECUTOR").as_deref() != Ok("cli")
-}
-
-/// Battery-wide runtime-binding selection. HostImport (the production
-/// default) satisfies the runtime interface natively via a capturing
-/// RuntimeHost; `RUNTARA_DIRECT_RUNTIME_BINDING=composed` re-runs the whole
-/// battery through the legacy composed runtime + mock HTTP core — the
-/// binding-differential axis. The CLI executor always forces Composed (the
-/// wasmtime CLI has no way to satisfy host imports).
-fn runtime_binding_mode() -> RuntimeBinding {
-    if !embedded_executor_mode() {
-        return RuntimeBinding::Composed;
-    }
-    match std::env::var("RUNTARA_DIRECT_RUNTIME_BINDING").as_deref() {
-        Ok("composed") => RuntimeBinding::Composed,
-        _ => RuntimeBinding::HostImport,
-    }
-}
-
 /// Battery-wide export-shape selection, mirroring the production default:
 /// the invoke export (input as the call argument, terminal result in-band).
 /// `RUNTARA_DIRECT_WORKFLOW_ABI=cli-run` re-runs the whole battery through
-/// the legacy shape — the ABI-differential axis. The CLI executor and the
-/// Composed binding force the legacy shape (neither can drive host imports).
+/// the legacy shape — the ABI-differential axis.
 fn workflow_abi_mode() -> WorkflowAbi {
-    if !embedded_executor_mode() || runtime_binding_mode() == RuntimeBinding::Composed {
-        return WorkflowAbi::CliRunHttp;
-    }
     match std::env::var("RUNTARA_DIRECT_WORKFLOW_ABI").as_deref() {
         Ok("cli-run") => WorkflowAbi::CliRunHttp,
         _ => WorkflowAbi::InvokeHostImports,
     }
 }
 
-/// RuntimeHost that mirrors the mock core server route-for-route, sharing the
-/// SAME `ServerState` and capture sink — so a HostImport run produces the
-/// exact `CapturedRun` shape a Composed run produces over HTTP, and every
-/// existing assertion applies unchanged to both bindings.
+/// RuntimeHost that stands in for core, recording every lifecycle call into
+/// the shared `ServerState` and capture sink so each run yields one uniform
+/// `CapturedRun` shape for the assertions.
 struct CapturingRuntimeHost {
     instance_id: String,
     debug_mode: bool,
@@ -1772,14 +1291,14 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         Ok(self.instance_id.clone())
     }
     async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
-        // Mirror capture_completed: only JSON outputs are recorded.
+        // Only JSON outputs are recorded.
         if let Ok(output_json) = serde_json::from_slice::<Value>(&output) {
             self.send(CapturedMessage::Completed(Completed { output_json }));
         }
         Ok(())
     }
     async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
-        // Mirror capture_failed: JSON errors parse, everything else is a string.
+        // JSON errors parse, everything else is a string.
         let error_str = String::from_utf8_lossy(&error);
         let error_json = serde_json::from_str::<Value>(&error_str)
             .unwrap_or_else(|_| Value::String(error_str.clone().into_owned()));
@@ -1787,8 +1306,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         Ok(())
     }
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
-        // Mirror capture_event: only custom events with JSON payloads are
-        // recorded (every guest custom-event is event_type=custom over HTTP).
+        // Only custom events with JSON payloads are recorded.
         if let Ok(payload_json) = serde_json::from_slice::<Value>(&payload) {
             self.send(CapturedMessage::Event(RuntimeEvent {
                 subtype: kind,
@@ -1805,7 +1323,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         Ok(())
     }
     async fn heartbeat(&self) -> Result<(), String> {
-        // Mirror: heartbeat events are filtered out by capture_event.
+        // Heartbeats are not recorded.
         Ok(())
     }
     async fn poll_signal(
@@ -1817,7 +1335,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         Ok(false)
     }
     async fn check_signals(&self) -> Result<bool, String> {
-        // Mirror GET /signals: no drain is injected in these tests.
+        // No drain is injected in these tests.
         Ok(false)
     }
     async fn poll_custom_signal(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
@@ -1846,9 +1364,8 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         self.state.managed_inputs.close(&signal).await
     }
     async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
-        // The HTTP SDK routes get_checkpoint through POST /checkpoint with
-        // empty state, so the mock records an empty-state Checkpoint capture;
-        // mirror both the capture and the read-only lookup.
+        // Recorded as an empty-state Checkpoint capture, then a read-only
+        // lookup.
         self.send(CapturedMessage::Checkpoint(CheckpointRequest {
             checkpoint_id: checkpoint_id.clone(),
             state: Vec::new(),
@@ -1866,8 +1383,8 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         checkpoint_id: String,
         state: Vec<u8>,
     ) -> Result<runtara_component_host::runtime_host::RuntimeCheckpointResult, String> {
-        // Mirror checkpoint_response: always capture, hit returns the stored
-        // state, miss saves only non-empty state (the read-only-probe rule).
+        // Always capture; a hit returns the stored state, a miss saves only
+        // non-empty state (the read-only-probe rule).
         self.send(CapturedMessage::Checkpoint(CheckpointRequest {
             checkpoint_id: checkpoint_id.clone(),
             state: state.clone(),
@@ -1912,7 +1429,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         _attempt_number: u32,
         _error_message: Option<String>,
     ) -> Result<(), String> {
-        // Mirror: POST /retry falls to the mock's generic success catch-all.
+        // Retry attempts are not recorded.
         Ok(())
     }
     async fn durable_sleep_checkpoint(
@@ -1921,7 +1438,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         state: Vec<u8>,
         ms: u64,
     ) -> Result<(), String> {
-        // Mirror POST /sleep, which mirrors production `handle_sleep`: SAVE the
+        // Mirror production `handle_sleep`: SAVE the
         // checkpoint, then sleep. The save is not optional the way it reads —
         // it moves the instance's current checkpoint — so a mock that skipped it
         // diverged from production on every durable Delay. The sleep itself is
@@ -1941,38 +1458,14 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
     }
 }
 
-/// CLI path: spawn `wasmtime run --wasi http` exactly as `WasmRunner` does.
-fn execute_via_cli(wasm_path: &Path, env_pairs: &[(String, String)]) -> (bool, String) {
-    let mut command = Command::new(wasmtime_binary());
-    command
-        .arg("run")
-        .arg("--wasi")
-        .arg("http")
-        .arg("--wasi")
-        .arg("inherit-network");
-    for (key, value) in env_pairs {
-        command.arg("--env").arg(format!("{key}={value}"));
-    }
-    let output = command
-        .arg(wasm_path)
-        .stderr(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .output()
-        .expect("spawn wasmtime");
-    (
-        output.status.success(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
-}
-
 /// Embedded path: same component, same env, executed in-process. Returns the
 /// status, the failure reason (empty on success/guest-error), and the exact guest
 /// linear-memory peak from the executor's limiter.
 /// Invoke-ABI path: same env and limits, but input travels as the call
 /// argument and the terminal result is the lifted return value. The captures
 /// keep flowing through the additive complete/fail recordings the
-/// CapturingRuntimeHost already mirrors — the CapturedRun shape is identical
-/// across all three execution paths.
+/// CapturingRuntimeHost already records — the CapturedRun shape is identical
+/// across both execution paths.
 /// Relaunch budget for a parked run on the invoke axis. A fixture parks at most
 /// once per durable step; four covers every fixture in the battery with room to
 /// spare, and bounds a lowering bug that parks in a loop.
@@ -2370,32 +1863,10 @@ fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
         .map(|component| component.agent_id.clone())
         .collect();
 
-    // Control: the legacy Composed binding satisfies the runtime interface
-    // internally — it must NOT appear among the composed artifact's imports.
-    result.component_artifacts =
-        emit_direct_component_artifacts_with_binding(&agent_ids, RuntimeBinding::Composed);
-    compose_direct_workflow(&mut result, &components_dir).expect("composed-binding compose");
-    let composed_bytes = fs::read(&result.wasm_path).expect("read composed artifact");
-    let composed_imports = top_level_component_imports(&composed_bytes);
-    assert!(
-        !composed_imports
-            .iter()
-            .any(|name| name.starts_with("runtara:workflow-runtime/runtime")),
-        "composed binding must satisfy runtime internally; imports: {composed_imports:?}"
-    );
-    assert!(
-        composed_imports
-            .iter()
-            .any(|name| name.starts_with("wasi:")),
-        "WASI must bubble as imports under both bindings; imports: {composed_imports:?}"
-    );
-
-    // Spike: re-emit the scaffolding under HostImport (the default) and
-    // recompose. wac must type-check + encode (validate: true inside compose)
+    // Spike: re-emit the scaffolding and recompose. wac must type-check + encode (validate: true inside compose)
     // with the runtime interface unbound, and the interface must surface as a
     // top-level import.
-    result.component_artifacts =
-        emit_direct_component_artifacts_with_binding(&agent_ids, RuntimeBinding::HostImport);
+    result.component_artifacts = emit_direct_component_artifacts(&agent_ids);
     compose_direct_workflow(&mut result, &components_dir).expect("host-import-binding compose");
 
     let host_import_bytes = fs::read(&result.wasm_path).expect("read host-import artifact");
@@ -2685,7 +2156,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
             .lock()
             .unwrap()
             .push(checkpoint_id.clone());
-        // Mirror the production semantics (see `checkpoint_response`): an
+        // Mirror the production semantics (core `handle_checkpoint`): an
         // existing id is a HIT returning the stored state; otherwise store.
         let mut checkpoints = self.checkpoints.lock().unwrap();
         if let Some(existing) = checkpoints.get(&checkpoint_id) {
@@ -2773,8 +2244,7 @@ fn direct_wasm_execute_host_import_runtime_runs_without_http() {
         false,
     )
     .expect("direct emit succeeds");
-    result.component_artifacts =
-        emit_direct_component_artifacts_with_binding(&[], RuntimeBinding::HostImport);
+    result.component_artifacts = emit_direct_component_artifacts(&[]);
     compose_direct_workflow(&mut result, &components_dir).expect("host-import compose");
 
     let host = Arc::new(RecordingRuntimeHost::new(br#"{"input":"host-import"}"#));
@@ -4466,8 +3936,7 @@ const AI_LEAK_MEM_CAP_BYTES: usize = 96 * 1024 * 1024;
 /// without it the O(N^2) per-turn scratch balloons past the cap. Asserts the
 /// FIXED behavior — the loop completes all turns (no state corruption over a long
 /// conversation) AND the guest peak stays well under a cap the un-reset O(N^2)
-/// would exceed. Relies on the keep-alive-fixed mock server to sustain the
-/// hundreds of HTTP round-trips a 50-turn loop makes.
+/// would exceed.
 #[test]
 fn ai_agent_loop_long_conversation_stays_bounded() {
     let components_dir = direct_e2e_components_dir();
@@ -5113,7 +4582,7 @@ fn direct_wasm_execute_agent_source_edge_conditions_route_on_agent_output() {
 fn direct_wasm_execute_wait_timeout_routes_to_on_error() {
     let components_dir = direct_e2e_components_dir();
 
-    // GAP-14: the 1ms wait deadline expires (the mock runtime never delivers
+    // GAP-14: the 1ms wait deadline expires (the capturing runtime host never delivers
     // a signal) and the WAIT_TIMEOUT envelope routes to the onError handler,
     // which completes the workflow reading steps.__error.*.
     let captured = run_direct_workflow_capture(
@@ -6658,11 +6127,10 @@ const WHILE_ACC_MEM_CAP_BYTES: usize = 96 * 1024 * 1024;
 ///
 /// Like the Split scope-leak tests, this asserts on `memory_peak_bytes`, NOT
 /// completion: a While issues a per-iteration `heartbeat`/`check-signals`/`now-ms`
-/// HTTP round-trip to the mock runtime, and that path carries the harness's
-/// documented load-sensitive HTTP flake — so requiring the run to finish would make
-/// the test flaky (under load even the index-only While fails to complete). The
-/// peak is flake-immune in the right direction: an early HTTP death only *lowers*
-/// the peak (test still passes), while a GC regression (linear → O(N²)) drives the
+/// runtime call, and requiring the run to finish would couple this test to that
+/// path's load sensitivity (under load even the index-only While once failed to
+/// complete). The peak is flake-immune in the right direction: an early death
+/// only *lowers* the peak (test still passes), while a GC regression (linear → O(N²)) drives the
 /// peak past the cap and OOMs. The deterministic proof that the GC call is wired
 /// lives in `direct_core_emits_value_store_retain_for_loops`, the intern/materialize
 /// round-trip is covered by the stdlib `value_store_retain_*` and `lookup_resolves_*`
@@ -6913,7 +6381,6 @@ fn compile_invoke_abi_artifact_full(
             agent_slug: None,
         },
         components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
         omit_runtime,
     )
@@ -6945,7 +6412,6 @@ fn compile_invoke_abi_artifact_with_children(
             agent_slug: None,
         },
         components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
         false,
     )
@@ -7096,7 +6562,6 @@ fn compile_agent_capabilities_artifact(
             agent_slug: None,
         },
         components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         // omit_runtime is forced true for AgentCapabilities by the compiler.
         false,
@@ -7184,7 +6649,6 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
             agent_slug: Some("delay-agent".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
     )
@@ -7240,7 +6704,6 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
                 agent_slug: Some(id.to_string()),
             },
             &components_dir,
-            RuntimeBinding::HostImport,
             runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
             false,
         )
@@ -7885,8 +7348,8 @@ impl CheckpointingRuntimeHost {
     }
 
     /// Arm every `durable-sleep-checkpoint` to fail with `message`, standing in
-    /// for the composed binding's sleep request being aborted by the client's
-    /// own request deadline before core can answer it.
+    /// for a sleep request being aborted by its own request deadline before
+    /// core can answer it.
     fn fail_sleeps_with(&self, message: &str) {
         *self.sleep_error.lock().unwrap() = Some(message.to_string());
     }
@@ -8883,7 +8346,6 @@ fn direct_wasm_execute_cli_run_abi_blocks_a_long_delay() {
             agent_slug: None,
         },
         &components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::CliRunHttp,
         false,
     )
@@ -8951,7 +8413,6 @@ fn direct_wasm_execute_cli_run_reports_a_failed_durable_sleep() {
             agent_slug: None,
         },
         &components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::CliRunHttp,
         false,
     )
@@ -9262,7 +8723,6 @@ fn direct_wasm_execute_cli_run_wait_timeout_gets_no_skew_tolerance() {
             agent_slug: None,
         },
         &components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::CliRunHttp,
         false,
     )
@@ -9518,7 +8978,6 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
             agent_slug: Some("shout-echo".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
     )
@@ -9695,7 +9154,6 @@ fn workflow_agent_error_step_cannot_spoof_signal_park_or_suspend() {
                 agent_slug: Some(slug.clone()),
             },
             &components_dir,
-            RuntimeBinding::HostImport,
             runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
             false,
         )
@@ -10105,7 +9563,6 @@ fn a_reserved_code_bubbling_out_of_a_staged_workflow_agent_cannot_park_the_root(
                 agent_slug: Some(slug.clone()),
             },
             &components,
-            RuntimeBinding::HostImport,
             runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
             false,
         )
@@ -10301,7 +9758,6 @@ fn parent_workflow_invokes_published_durable_workflow_agent() {
             agent_slug: Some("durable-delay-echo".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
     )
@@ -10467,7 +9923,6 @@ fn composed_durable_child_checkpoints_are_namespaced_per_invocation_site() {
             agent_slug: Some("ns-delay-echo".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
     )
@@ -10692,7 +10147,6 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
             agent_slug: Some("ns-grandchild".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
     )
@@ -10927,7 +10381,6 @@ fn stale_durable_workflow_agent_artifact_fails_compose() {
             agent_slug: Some("stale-durable".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
     )
@@ -11077,7 +10530,6 @@ fn uncertified_pure_workflow_agent_artifact_fails_compose() {
             agent_slug: Some("stale-pure".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
     )
@@ -11215,7 +10667,6 @@ fn composed_children_waiting_on_same_step_get_per_site_signal_ids() {
             agent_slug: Some("sig-approve-echo".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
     )
@@ -11587,7 +11038,6 @@ fn scoped_signal_wait_survives_drain_and_resume() {
             agent_slug: Some("sig-drain-echo".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
     )
@@ -11773,7 +11223,6 @@ fn pause_during_composed_child_wait_suspends_and_resumes() {
             agent_slug: Some("pause-approve-echo".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
     )
@@ -12011,7 +11460,6 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
             agent_slug: Some("pause-grandchild".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
     )
@@ -12269,7 +11717,6 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
             agent_slug: Some("tool-delay-echo".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
         runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
         false,
     )
@@ -12347,9 +11794,6 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
     .expect("parent composes the workflow-agent tool");
 
     // Hermetic LLM stub: the model requests the tool twice, then completes.
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let (capture_tx, _capture_rx) = mpsc::channel::<CapturedMessage>();
-    let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let server_state = Arc::new(ServerState::default());
     *server_state
         .llm_responses
@@ -12359,10 +11803,7 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
         llm_tool_call("wf_echo", r#"{"value":"second"}"#),
         llm_ok("done"),
     ];
-    let server_state_for_assertions = server_state.clone();
-    let input_arc = Arc::new(b"{}".to_vec());
-    let server_handle =
-        thread::spawn(move || serve(listener, capture_tx, server_state, stop_rx, input_arc));
+    let server_state_for_assertions = server_state;
 
     let mut env = HashMap::new();
     env.insert(
@@ -12381,8 +11822,6 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
             .expect("load parent artifact");
         invoke_replaying_parks_with_env(&executor, &pre, host.clone(), env, b"{}".to_vec()).await
     });
-    let _ = stop_tx.send(());
-    let _ = server_handle.join();
 
     let output = match run.exit {
         runtara_component_host::InvokeExit::Completed(output) => output,
@@ -13934,8 +13373,7 @@ fn direct_wasm_execute_delay_observes_cancel_and_suspends() {
         false,
     )
     .expect("direct emit succeeds");
-    result.component_artifacts =
-        emit_direct_component_artifacts_with_binding(&[], RuntimeBinding::HostImport);
+    result.component_artifacts = emit_direct_component_artifacts(&[]);
     compose_direct_workflow(&mut result, &components_dir).expect("host-import compose");
 
     let host = Arc::new(CancelDuringDelayHost::new(b"{}"));
@@ -14376,7 +13814,6 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             agent_slug: Some("trusted-wrapper".into()),
         },
         &components,
-        RuntimeBinding::HostImport,
         WorkflowAbi::AgentCapabilities,
         false,
     )
@@ -14693,7 +14130,6 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             agent_slug: Some("trusted-wrapper".into()),
         },
         &upgraded_components,
-        RuntimeBinding::HostImport,
         WorkflowAbi::AgentCapabilities,
         false,
     )
@@ -15234,9 +14670,6 @@ async fn trusted_presigning_as_an_ai_tool_keeps_credentials_out_of_model_message
     )
     .unwrap();
     compose_direct_workflow(&mut compiled, &components).unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let (sink, _events) = mpsc::channel();
-    let (stop, stop_rx) = mpsc::channel();
     let state = Arc::new(ServerState {
         llm_responses: Mutex::new(vec![
             llm_tool_call(
@@ -15246,16 +14679,6 @@ async fn trusted_presigning_as_an_ai_tool_keeps_credentials_out_of_model_message
             llm_ok("signed"),
         ]),
         ..Default::default()
-    });
-    let state_for_server = state.clone();
-    let server = thread::spawn(move || {
-        serve(
-            listener,
-            sink,
-            state_for_server,
-            stop_rx,
-            Arc::new(b"{}".to_vec()),
-        )
     });
     let executor =
         runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))
@@ -15289,8 +14712,6 @@ async fn trusted_presigning_as_an_ai_tool_keeps_credentials_out_of_model_message
             b"{}".to_vec(),
         )
         .await;
-    let _ = stop.send(());
-    server.join().unwrap();
     let runtara_component_host::InvokeExit::Completed(output) = result.exit else {
         panic!("{:?}", result.exit)
     };

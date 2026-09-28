@@ -3,15 +3,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Build every runtara-agent-* crate as a WebAssembly Component, then build the
-# shared workflow stdlib/runtime components used by the direct workflow emitter.
+# shared workflow stdlib component used by the direct workflow emitter.
 # Each agent ships as a pair:
 #   target/wasm32-wasip2/release/runtara_agent_<id>.wasm
 #   target/wasm32-wasip2/release/runtara_agent_<id>.meta.json
-# The direct shared workflow components ship as:
+# The direct shared workflow component ships as:
 #   target/wasm32-wasip2/release/runtara_workflow_stdlib.wasm
 #   target/wasm32-wasip2/release/runtara_workflow_stdlib.meta.json
-#   target/wasm32-wasip2/release/runtara_workflow_runtime.wasm
-#   target/wasm32-wasip2/release/runtara_workflow_runtime.meta.json
 #
 # Components are built with plain `cargo build --target wasm32-wasip2`:
 # bindings come from each crate's in-source `wit_bindgen::generate!` macro and
@@ -153,16 +151,6 @@ emit_workflow_component_meta \
     "$out_dir/runtara_workflow_stdlib.wasm" \
     "$out_dir/runtara_workflow_stdlib.meta.json"
 
-echo "==> runtara-workflow-runtime"
-cargo build --release --target wasm32-wasip2 -p runtara-workflow-runtime --no-default-features --features wasi
-emit_workflow_component_meta \
-    "runtara-workflow-runtime" \
-    "runtara:workflow-runtime" \
-    "workflow-runtime" \
-    "runtara:workflow-runtime/runtime@0.1.0" \
-    "$out_dir/runtara_workflow_runtime.wasm" \
-    "$out_dir/runtara_workflow_runtime.meta.json"
-
 if [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" != "1" ]; then
     # Single host-native pass: walks every agent crate's `agent_info()` and writes
     # the JSON siblings into out_dir. Source-of-truth is each agent's Rust code
@@ -176,20 +164,20 @@ if [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" != "1" ]; then
     wasm_count=$count
     meta_count=$count
 fi
-workflow_wasm_count=$(find "$out_dir" -maxdepth 1 -name 'runtara_workflow_*.wasm' 2>/dev/null | wc -l | tr -d ' ')
-workflow_meta_count=$(find "$out_dir" -maxdepth 1 -name 'runtara_workflow_*.meta.json' 2>/dev/null | wc -l | tr -d ' ')
+workflow_wasm_count=$(find "$out_dir" -maxdepth 1 -name 'runtara_workflow_stdlib.wasm' 2>/dev/null | wc -l | tr -d ' ')
+workflow_meta_count=$(find "$out_dir" -maxdepth 1 -name 'runtara_workflow_stdlib.meta.json' 2>/dev/null | wc -l | tr -d ' ')
 
 echo
 if [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" != "1" ]; then
     echo "✓ Built $count agent component crate(s); $wasm_count .wasm + $meta_count .meta.json staged in $out_dir"
 fi
-echo "✓ Built shared workflow components; $workflow_wasm_count .wasm + $workflow_meta_count .meta.json staged in $out_dir"
+echo "✓ Built shared workflow stdlib component; $workflow_wasm_count .wasm + $workflow_meta_count .meta.json staged in $out_dir"
 if [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" != "1" ] && [ "$wasm_count" -ne "$meta_count" ]; then
     echo "✗ wasm/meta count mismatch — some agent must be added to runtara-agent-bundle-emit's agent list" >&2
     exit 1
 fi
-if [ "$workflow_wasm_count" -ne 2 ] || [ "$workflow_meta_count" -ne 2 ]; then
-    echo "✗ expected 2 shared workflow .wasm files and 2 shared workflow .meta.json files" >&2
+if [ "$workflow_wasm_count" -ne 1 ] || [ "$workflow_meta_count" -ne 1 ]; then
+    echo "✗ expected the shared workflow stdlib .wasm and .meta.json files" >&2
     exit 1
 fi
 

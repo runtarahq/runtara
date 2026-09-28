@@ -227,11 +227,7 @@ fn measure(smoke: bool) -> Value {
     let measured = if smoke { 2 } else { 1000 };
     let warmups = if smoke { 1 } else { 5 };
     let cold_samples = if smoke { 1 } else { 3 };
-    for name in [
-        "RUNTARA_DIRECT_OMIT_RUNTIME",
-        "RUNTARA_DIRECT_RUNTIME_BINDING",
-        "RUNTARA_DIRECT_WORKFLOW_ABI",
-    ] {
+    for name in ["RUNTARA_DIRECT_OMIT_RUNTIME", "RUNTARA_DIRECT_WORKFLOW_ABI"] {
         assert!(
             std::env::var_os(name).is_none(),
             "remove production override {name} before measurement"
@@ -241,7 +237,6 @@ fn measure(smoke: bool) -> Value {
     let dependency_hashes: Vec<_> = [
         "runtara_agent_utils.wasm",
         "runtara_workflow_stdlib.wasm",
-        "runtara_workflow_runtime.wasm",
     ]
     .into_iter()
     .map(|name| {

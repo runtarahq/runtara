@@ -10,7 +10,7 @@ The manifest evaluator every direct-emitted runtara workflow composes against.
 
 A direct-emitted workflow carries its graph as a JSON manifest and calls into this crate for every pure decision it has to make: resolving a reference path, applying an input mapping, rendering a `minijinja` template, evaluating a condition, processing Switch output, deriving Split/While iteration state and results, and validating agent and child-workflow inputs. `init_manifest` loads the graph once; the rest of the interface is JSON in, JSON out, over an interning value store that keeps large scope values out of the guest's bump allocator.
 
-Everything here is pure. Durability — registration, checkpointing, signals, heartbeats — lives in `runtara-workflow-runtime`, and agent calls go out over each agent's own WIT interface, bound at `wac compose` time. So this crate has no HTTP client, no SDK dependency, and no target-specific backends: `serde`, `serde_json`, and `minijinja` are the whole dependency set, and the same code builds for every target.
+Everything here is pure. Durability — registration, checkpointing, signals, heartbeats — is the host-implemented `runtara:workflow-runtime/runtime` interface, and agent calls go out over each agent's own WIT interface, bound at `wac compose` time. So this crate has no HTTP client, no SDK dependency, and no target-specific backends: `serde`, `serde_json`, and `minijinja` are the whole dependency set, and the same code builds for every target.
 
 ## Using it standalone
 

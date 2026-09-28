@@ -140,7 +140,7 @@ def main():
     binary = Path(os.environ.get("RUNTARA_SERVER_BIN", ROOT / "target/debug/runtara-server")).resolve()
     components = Path(os.environ.get("RUNTARA_AGENT_COMPONENTS_DIR", ROOT / "target/wasm32-wasip2/release")).resolve()
     check(binary.is_file(), "Build runtara-server first")
-    for name in ["runtara_agent_slack", "runtara_agent_mailgun", "runtara_agent_s3_storage", "runtara_workflow_stdlib", "runtara_workflow_runtime"]:
+    for name in ["runtara_agent_slack", "runtara_agent_mailgun", "runtara_agent_s3_storage", "runtara_workflow_stdlib"]:
         check((components / (name + ".wasm")).is_file(), "Build agent components first")
     work = Path(tempfile.mkdtemp(prefix="runtara-attachments-e2e-"))
     print(f"Test logs: {work}", flush=True)

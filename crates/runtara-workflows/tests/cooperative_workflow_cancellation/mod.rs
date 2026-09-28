@@ -866,7 +866,6 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                 agent_slug: None,
             },
             direct_e2e_components_dir(),
-            RuntimeBinding::HostImport,
             WorkflowAbi::InvokeHostImports,
             false,
         )?

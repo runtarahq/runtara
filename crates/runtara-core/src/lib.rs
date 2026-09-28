@@ -40,7 +40,7 @@
 //!           ▼                                              ▼
 //! ┌───────────────────────┐                    ┌─────────────────────────────┐
 //! │    runtara-core       │◄───────────────────│     Workflow Instances      │
-//! │  (This Crate)         │  Instance Protocol │   (using runtara-sdk)       │
+//! │  (This Crate)         │  Instance Protocol │   (via the runtime host)    │
 //! │  Checkpoints/Signals  │  (in-process, or   │                             │
 //! │  (library only)       │   HTTP via server) └─────────────────────────────┘
 //! └───────────────────────┘
@@ -55,7 +55,8 @@
 //! # Instance Protocol
 //!
 //! The instance protocol handles all communication between workflow instances and Core.
-//! Instances use `runtara-sdk`, which wraps this protocol.
+//! Instances reach it through the host-implemented
+//! `runtara:workflow-runtime/runtime` interface.
 //!
 //! `runtara-server` exposes it over HTTP on the instance port (8001 by
 //! default); environment's in-process runner calls the same handlers directly.
