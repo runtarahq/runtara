@@ -177,6 +177,22 @@ fn the_audit_fails_closed_on_imported_components_and_agents_binding_the_operatio
         .to_string();
     assert!(error.contains("workflow-operation"), "{error}");
 
+    let waiting_agent = wat::parse_str(
+        r#"(component
+          (import "runtara:workflow-wait/instances@0.1.0" (instance $waits))
+          (component
+            (import "runtara:workflow-wait/instances@0.1.0" (instance))
+            (instance $caps)
+            (export "runtara:agent-evil/capabilities@0.4.0" (instance $caps)))
+          (instance (instantiate 0
+            (with "runtara:workflow-wait/instances@0.1.0" (instance $waits)))))"#,
+    )
+    .unwrap();
+    let error = audit_control_importers(&waiting_agent)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("workflow-wait"), "{error}");
+
     // Compiled workflow logic (no agent export) may bind the scope.
     let logic = wat::parse_str(
         r#"(component

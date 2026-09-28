@@ -16,6 +16,8 @@
 //! bytes. An outcome's `output` and `error` hold JSON bytes and serialize as
 //! the JSON values they encode.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 /// Who waits. Only the host fills it in.
@@ -218,6 +220,251 @@ pub trait InstanceWaitHost: Send + Sync {
     ) -> Result<InstanceWaitPoll, InstanceWaitError>;
 }
 
+/// Prefix of a canonical v2 durable key.
+const DURABLE_KEY_V2_PREFIX: &str = "runtara:v2:";
+
+/// Key kind of a WaitForInstances step.
+pub const WAIT_INSTANCES_KEY_KIND: &str = "wait-instances";
+
+/// The wait id of a WaitForInstances step: the operation hash of its
+/// canonical v2 `wait-instances` key
+/// (`runtara:v2:["wait-instances", workflow, namespace, loop-path, [step]]`),
+/// so it differs per loop iteration and per embedding and is the same on
+/// every replay. Fails closed on any other key.
+pub fn wait_instances_id(key: &str) -> Result<String, String> {
+    let malformed = || "a wait key must be a canonical v2 wait-instances key".to_string();
+    if key.is_empty() || key.len() > crate::operation_scope_host::MAX_OPERATION_KEY_BYTES {
+        return Err(malformed());
+    }
+    let encoded = key
+        .strip_prefix(DURABLE_KEY_V2_PREFIX)
+        .ok_or_else(malformed)?;
+    let tuple: serde_json::Value = serde_json::from_str(encoded).map_err(|_| malformed())?;
+    // Canonical means the compiler's exact serialization: a key that parses
+    // but re-serializes differently would hash to a different wait.
+    if serde_json::to_string(&tuple).ok().as_deref() != Some(encoded) {
+        return Err(malformed());
+    }
+    let parts = tuple
+        .as_array()
+        .filter(|parts| parts.len() == 5)
+        .ok_or_else(malformed)?;
+    let step = parts[4].as_array().and_then(|site| match site.as_slice() {
+        [serde_json::Value::String(step)] if !step.is_empty() => Some(step),
+        _ => None,
+    });
+    if parts[0].as_str() != Some(WAIT_INSTANCES_KEY_KIND) || step.is_none() {
+        return Err(malformed());
+    }
+    Ok(crate::operation_scope_host::operation_hash(key))
+}
+
+/// Per-run access to the instance wait service: the host-installed service,
+/// the run's own authority, and the waits this invoke registered that were
+/// still pending at their last read.
+#[derive(Default)]
+pub(crate) struct RunInstanceWaits {
+    host: Option<Arc<dyn InstanceWaitHost>>,
+    authority: Option<InstanceWaitAuthority>,
+    pending: Vec<String>,
+}
+
+impl RunInstanceWaits {
+    /// Waits of the run `instance` of `tenant`, both host-supplied.
+    pub(crate) fn for_run(
+        host: Option<Arc<dyn InstanceWaitHost>>,
+        tenant: Option<&str>,
+        instance: Option<&str>,
+    ) -> Self {
+        let authority = match (tenant, instance) {
+            (Some(tenant), Some(caller)) if !tenant.is_empty() && !caller.is_empty() => {
+                Some(InstanceWaitAuthority {
+                    tenant: tenant.to_owned(),
+                    caller: caller.to_owned(),
+                })
+            }
+            _ => None,
+        };
+        Self {
+            host,
+            authority,
+            pending: Vec::new(),
+        }
+    }
+
+    /// Waits registered by this invoke and pending at their last read; a
+    /// suspended run parks on them.
+    pub(crate) fn pending(&self) -> &[String] {
+        &self.pending
+    }
+
+    fn note(&mut self, wait_id: &str, poll: &InstanceWaitPoll) {
+        self.pending.retain(|pending| pending != wait_id);
+        if !poll.is_settled() {
+            self.pending.push(wait_id.to_owned());
+        }
+    }
+
+    fn service(
+        &self,
+    ) -> Result<(Arc<dyn InstanceWaitHost>, InstanceWaitAuthority), InstanceWaitError> {
+        let host = self.host.clone().ok_or_else(|| {
+            InstanceWaitError::unavailable("no instance wait service is configured")
+        })?;
+        let authority = self.authority.clone().ok_or_else(|| {
+            InstanceWaitError::new(
+                InstanceWaitErrorCode::Invalid,
+                "only a workflow run of a tenant can wait on instances",
+            )
+        })?;
+        Ok((host, authority))
+    }
+}
+
+/// A wait call's error as the JSON string the guest receives.
+fn error_json(error: &InstanceWaitError) -> String {
+    serde_json::to_string(error).expect("a wait error always serializes")
+}
+
+fn invalid_json(message: impl Into<String>) -> String {
+    error_json(&InstanceWaitError::new(
+        InstanceWaitErrorCode::Invalid,
+        message,
+    ))
+}
+
+/// A read as JSON bytes; a finished run's result that is not JSON fails the
+/// read instead of reaching the guest.
+fn poll_json(poll: &InstanceWaitPoll) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(poll).map_err(|_| {
+        error_json(&InstanceWaitError::unavailable(
+            "a finished run's result could not be read",
+        ))
+    })
+}
+
+/// Bind `runtara:workflow-wait/instances` for workflow stores. The tenant and
+/// the waiting run come from the store, never from the guest; without an
+/// installed service every call fails closed with `unavailable`.
+pub(crate) fn add_instance_waits_to_linker(
+    linker: &mut wasmtime::component::Linker<crate::workflow::WorkflowState>,
+) -> anyhow::Result<()> {
+    use crate::workflow::WorkflowState;
+    use wasmtime::StoreContextMut;
+
+    let mut instances = linker.instance(runtara_workflow_wit::WAIT_INSTANCES_INTERFACE_NAME)?;
+    instances.func_wrap_async(
+        "register",
+        |mut store: StoreContextMut<'_, WorkflowState>, (key, request): (String, Vec<u8>)| {
+            Box::new(async move {
+                let wait_id = match wait_instances_id(&key) {
+                    Ok(wait_id) => wait_id,
+                    Err(error) => return Ok((Err(invalid_json(error)),)),
+                };
+                let request: InstanceWaitRequest = match serde_json::from_slice(&request) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        return Ok((Err(invalid_json(format!("malformed wait request: {error}"))),));
+                    }
+                };
+                // No targets settle at once, without a registration.
+                if request.instance_ids.is_empty() {
+                    let poll = InstanceWaitPoll {
+                        mode: request.mode,
+                        resolution: Some(InstanceWaitResolution::Empty),
+                        finished: Vec::new(),
+                        remaining: Vec::new(),
+                        deadline_ms: None,
+                    };
+                    store.data_mut().instance_waits.note(&wait_id, &poll);
+                    return Ok((poll_json(&poll),));
+                }
+                let (host, authority) = match store.data().instance_waits.service() {
+                    Ok(service) => service,
+                    Err(error) => return Ok((Err(error_json(&error)),)),
+                };
+                match host.register(&authority, &wait_id, request).await {
+                    Ok(poll) => {
+                        store.data_mut().instance_waits.note(&wait_id, &poll);
+                        Ok((poll_json(&poll),))
+                    }
+                    Err(error) => {
+                        // A failed step is not checkpointed, so a retry or a
+                        // replay registers again: close whatever this call
+                        // left, and confirm it before the step's error path
+                        // runs.
+                        store
+                            .data_mut()
+                            .instance_waits
+                            .pending
+                            .retain(|pending| pending != &wait_id);
+                        let runtime = store.data().runtime_host().cloned().ok_or_else(|| {
+                            wasmtime::format_err!(
+                                "instance waits need a runtime host (WorkflowRunSpec.runtime is None)"
+                            )
+                        })?;
+                        runtime
+                            .operation_wait_close(wait_id)
+                            .await
+                            .map_err(|close| {
+                                wasmtime::format_err!("closing the failed instance wait failed: {close}")
+                            })?;
+                        Ok((Err(error_json(&error)),))
+                    }
+                }
+            })
+        },
+    )?;
+    instances.func_wrap_async(
+        "poll",
+        |mut store: StoreContextMut<'_, WorkflowState>, (key,): (String,)| {
+            Box::new(async move {
+                let wait_id = match wait_instances_id(&key) {
+                    Ok(wait_id) => wait_id,
+                    Err(error) => return Ok((Err(invalid_json(error)),)),
+                };
+                let (host, authority) = match store.data().instance_waits.service() {
+                    Ok(service) => service,
+                    Err(error) => return Ok((Err(error_json(&error)),)),
+                };
+                Ok((match host.poll(&authority, &wait_id).await {
+                    Ok(poll) => {
+                        store.data_mut().instance_waits.note(&wait_id, &poll);
+                        poll_json(&poll)
+                    }
+                    Err(error) => Err(error_json(&error)),
+                },))
+            })
+        },
+    )?;
+    instances.func_wrap_async(
+        "release",
+        |mut store: StoreContextMut<'_, WorkflowState>, (key,): (String,)| {
+            Box::new(async move {
+                let Ok(wait_id) = wait_instances_id(&key) else {
+                    return Ok(());
+                };
+                store
+                    .data_mut()
+                    .instance_waits
+                    .pending
+                    .retain(|pending| pending != &wait_id);
+                // The result is already checkpointed, so a failed release
+                // only leaves a settled wait that instance cleanup removes.
+                let released = match store.data().runtime_host().cloned() {
+                    Some(runtime) => runtime.operation_release(wait_id).await,
+                    None => Err("no runtime host".to_string()),
+                };
+                if let Err(error) = released {
+                    tracing::warn!(%error, "instance wait release failed");
+                }
+                Ok(())
+            })
+        },
+    )?;
+    Ok(())
+}
+
 /// `Option<Vec<u8>>` of JSON bytes as the JSON value they encode.
 mod json_bytes {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -302,6 +549,61 @@ mod tests {
             serde_json::to_value(&pending).unwrap()["resolution"],
             json!(null)
         );
+    }
+
+    fn wait_key(kind: &str, loop_path: serde_json::Value, site: serde_json::Value) -> String {
+        format!("runtara:v2:{}", json!([kind, "wf", [], loop_path, site]))
+    }
+
+    #[test]
+    fn a_wait_id_is_the_hash_of_a_canonical_wait_instances_key() {
+        let root = wait_key("wait-instances", json!([]), json!(["approvals"]));
+        assert_eq!(
+            wait_instances_id(&root).unwrap(),
+            crate::operation_scope_host::operation_hash(&root)
+        );
+        // Each iteration is its own wait.
+        let iteration = wait_key(
+            "wait-instances",
+            json!([["split", "each", 1]]),
+            json!(["approvals"]),
+        );
+        assert_ne!(
+            wait_instances_id(&iteration).unwrap(),
+            wait_instances_id(&root).unwrap()
+        );
+        for refused in [
+            String::new(),
+            "wait-instances::approvals".to_string(),
+            wait_key("agent", json!([]), json!(["control", "wait", "approvals"])),
+            wait_key("wait-instances", json!([]), json!([])),
+            wait_key("wait-instances", json!([]), json!([""])),
+            wait_key("wait-instances", json!([]), json!(["a", "b"])),
+            root.replace(',', ", "),
+            format!("{root}::attempt::2"),
+        ] {
+            assert!(wait_instances_id(&refused).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_run_notes_only_waits_still_pending_at_their_last_read() {
+        let mut waits = RunInstanceWaits::for_run(None, Some("t"), Some("run"));
+        let pending = InstanceWaitPoll {
+            resolution: None,
+            ..settled()
+        };
+        waits.note("a", &pending);
+        waits.note("b", &pending);
+        waits.note("a", &pending);
+        assert_eq!(waits.pending(), ["b", "a"]);
+        waits.note("b", &settled());
+        assert_eq!(waits.pending(), ["a"]);
+        let error = waits.service().err().unwrap();
+        assert_eq!(error.code, InstanceWaitErrorCode::Unavailable);
+        // Without a host-supplied tenant and run there is no authority.
+        let unowned = RunInstanceWaits::for_run(None, None, Some("run"));
+        assert!(unowned.authority.is_none());
     }
 
     #[test]

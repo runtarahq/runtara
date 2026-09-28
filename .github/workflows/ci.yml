@@ -589,13 +589,15 @@ jobs:
       - name: Validate WIT package
         run: wasm-tools component wit crates/runtara-agent-wit/wit > /dev/null
 
-      # The suspension, operation-scope and control packages. The latter two
-      # `use` runtara:agent and runtara:agent-suspension, so each is parsed in
-      # a scratch dir with those packages as deps (nothing is committed).
-      - name: Validate suspension, operation and control WIT packages
+      # The suspension, instance-wait, operation-scope and control packages.
+      # The last two `use` runtara:agent and runtara:agent-suspension, so each
+      # is parsed in a scratch dir with those packages as deps (nothing is
+      # committed).
+      - name: Validate suspension, wait, operation and control WIT packages
         run: |
           set -euo pipefail
           wasm-tools component wit crates/runtara-agent-suspension/wit > /dev/null
+          wasm-tools component wit crates/runtara-workflow-wit/wit/wait > /dev/null
           scratch="$(mktemp -d)"
           for pkg in operation control; do
             mkdir -p "$scratch/$pkg/deps"

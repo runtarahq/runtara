@@ -118,6 +118,19 @@ pub const OPERATION_SCOPE_INTERFACE_NAME: &str = "runtara:workflow-operation/sco
 /// `runtara:agent-suspension@0.1.0`, which must be in the resolve first.
 pub const OPERATION_WIT: &str = include_str!("../wit/operation/runtara-workflow-operation.wit");
 
+/// WIT package of the durable instance waits of a WaitForInstances step.
+pub const WAIT_PACKAGE: &str = "runtara:workflow-wait@0.1.0";
+
+/// Interface-name prefix of the instance waits. Only compiled workflow logic
+/// imports it; no agent may.
+pub const WAIT_INTERFACE_PREFIX: &str = "runtara:workflow-wait/";
+
+/// Component import name of the instance waits.
+pub const WAIT_INSTANCES_INTERFACE_NAME: &str = "runtara:workflow-wait/instances@0.1.0";
+
+/// WIT text for `runtara:workflow-wait@0.1.0`. It has no dependencies.
+pub const WAIT_WIT: &str = include_str!("../wit/wait/runtara-workflow-wait.wit");
+
 /// WIT package of the control service.
 pub const CONTROL_PACKAGE: &str = "runtara:control@0.1.0";
 
@@ -565,6 +578,49 @@ mod control_tests {
             super::OPERATION_SCOPE_INTERFACE_NAME,
             format!(
                 "runtara:workflow-operation/scope@{}",
+                package.name.version.as_ref().unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn instance_waits_are_sync_json_calls_keyed_by_the_step() {
+        let mut resolve = Resolve::default();
+        let id = resolve.push_str("wait.wit", super::WAIT_WIT).unwrap();
+        let package = &resolve.packages[id];
+        assert_eq!(package.name.to_string(), super::WAIT_PACKAGE);
+        let instances = &resolve.interfaces[package.interfaces["instances"]];
+        assert_eq!(
+            instances
+                .functions
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["register", "poll", "release"]
+        );
+        assert!(
+            instances
+                .functions
+                .values()
+                .all(|function| matches!(function.kind, FunctionKind::Freestanding)),
+            "the waits are compiler-called and synchronous"
+        );
+        let params = |name: &str| {
+            instances.functions[name]
+                .params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(params("register"), ["key", "request"]);
+        assert_eq!(params("poll"), ["key"]);
+        assert_eq!(params("release"), ["key"]);
+        assert!(instances.functions["release"].result.is_none());
+        assert_eq!(
+            super::WAIT_INSTANCES_INTERFACE_NAME,
+            format!(
+                "{}instances@{}",
+                super::WAIT_INTERFACE_PREFIX,
                 package.name.version.as_ref().unwrap()
             )
         );

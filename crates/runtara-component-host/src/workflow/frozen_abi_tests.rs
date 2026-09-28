@@ -12,6 +12,7 @@ const CONTROL_API: &str = include_str!("frozen_abi/control-api.wat");
 const CONTROL_EXECUTOR: &str = include_str!("frozen_abi/control-executor.wat");
 const OPERATION_SCOPE: &str = include_str!("frozen_abi/operation-scope.wat");
 const SUSPENSION_CONTEXT: &str = include_str!("frozen_abi/suspension-context.wat");
+const WORKFLOW_WAIT: &str = include_str!("frozen_abi/workflow-wait.wat");
 
 fn engine() -> Arc<Engine> {
     crate::build_engine(&crate::EngineConfig {
@@ -35,6 +36,7 @@ fn fixtures_import_the_released_names() {
         (CONTROL_EXECUTOR, "runtara:control/executor@0.1.0"),
         (OPERATION_SCOPE, "runtara:workflow-operation/scope@0.1.0"),
         (SUSPENSION_CONTEXT, "runtara:agent-suspension/context@0.1.0"),
+        (WORKFLOW_WAIT, "runtara:workflow-wait/instances@0.1.0"),
     ] {
         let component = fixture(&engine, name, wat);
         assert!(
@@ -48,7 +50,8 @@ fn fixtures_import_the_released_names() {
 }
 
 /// Workflow roots: the operation scope, the suspension context, the control
-/// executor forwarder and the `denied` control API all bind 0.1.0.
+/// executor forwarder, the `denied` control API and the instance waits all
+/// bind 0.1.0.
 #[test]
 fn workflow_stores_link_every_frozen_0_1_0_guest() {
     let engine = engine();
@@ -58,6 +61,7 @@ fn workflow_stores_link_every_frozen_0_1_0_guest() {
         ("control/executor", CONTROL_EXECUTOR),
         ("workflow-operation/scope", OPERATION_SCOPE),
         ("agent-suspension/context", SUSPENSION_CONTEXT),
+        ("workflow-wait/instances", WORKFLOW_WAIT),
     ] {
         executor
             .linker
@@ -113,4 +117,15 @@ fn a_drifted_0_1_0_shape_does_not_link() {
     .expect("drifted guest compiles");
     let executor = WorkflowExecutor::new(engine.clone()).expect("workflow executor");
     assert!(executor.linker.instantiate_pre(&drifted).is_err());
+}
+
+/// Instance waits are workflow-only: no agent store links them.
+#[test]
+fn agent_stores_do_not_link_instance_waits() {
+    let engine = engine();
+    let wait = fixture(&engine, "workflow-wait/instances", WORKFLOW_WAIT);
+    let linker = crate::registry::build_linker(&engine).expect("agent linker");
+    assert!(linker.instantiate_pre(&wait).is_err());
+    let linker = crate::control_executor::control_linker(&engine).expect("control linker");
+    assert!(linker.instantiate_pre(&wait).is_err());
 }

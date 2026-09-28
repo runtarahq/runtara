@@ -431,6 +431,7 @@ pub const AGENT_IMPORT_ALLOWLIST: &[&str] = &[
 pub const STAGED_WORKFLOW_AGENT_DENIED_PREFIXES: &[&str] = &[
     "runtara:control/",
     "runtara:workflow-operation/",
+    runtara_workflow_wit::WAIT_INTERFACE_PREFIX,
     "runtara:agent-suspension/",
 ];
 
@@ -1512,6 +1513,7 @@ mod tests {
         for entry in AGENT_IMPORT_ALLOWLIST {
             for forbidden in [
                 "runtara:workflow-operation/",
+                runtara_workflow_wit::WAIT_INTERFACE_PREFIX,
                 "runtara:control/",
                 "runtara:workflow-runtime/",
                 "wasi:",
