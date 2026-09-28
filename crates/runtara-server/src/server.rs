@@ -2649,11 +2649,6 @@ async fn wait_for_shutdown_signal() -> std::io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
-/// Run server-specific database migrations (workflows, api_keys, triggers, connections).
-///
-/// These run against the main server pool (OBJECT_MODEL_DATABASE_URL) which holds
-/// all server-managed tables. Uses ignore_missing since this pool may share the
-/// _sqlx_migrations table with other migrators.
 /// Whether `SKIP_MIGRATIONS` asks this process to start without migrating.
 ///
 /// Anything that is not a parseable `true` means "migrate", so a typo cannot
@@ -2665,6 +2660,12 @@ pub fn skip_migrations() -> bool {
         .unwrap_or(false)
 }
 
+/// Run server-specific database migrations (workflows, api_keys, triggers, connections).
+///
+/// These run against the main server pool (`RUNTARA_SERVER_DATABASE_URL`, opened
+/// in `main`), which holds all server-managed tables — never the object-model
+/// pool. Uses ignore_missing since this pool may share the _sqlx_migrations
+/// table with other migrators.
 async fn run_server_migrations(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     #[derive(Debug)]
     struct Migrations(Vec<sqlx::migrate::Migration>);
