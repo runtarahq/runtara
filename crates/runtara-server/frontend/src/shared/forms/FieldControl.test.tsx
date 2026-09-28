@@ -223,8 +223,8 @@ describe('period ranges', () => {
   const period: FormField = {
     type: 'object',
     properties: {
-      from: { type: 'string', format: 'date-time' },
-      to: { type: 'string', format: 'date-time' },
+      from: { type: 'string', format: 'datetime' },
+      to: { type: 'string', format: 'datetime' },
     },
   };
 
@@ -281,12 +281,12 @@ describe('period ranges', () => {
     });
   });
 
-  it('stores a single date-time field in UTC', () => {
+  it('stores a single datetime field in UTC', () => {
     const onChange = vi.fn();
     render(
       <FieldControl
         id="at"
-        field={{ type: 'string', format: 'date-time' }}
+        field={{ type: 'string', format: 'datetime' }}
         value="2026-03-01T08:15:00.000Z"
         disabled={false}
         onChange={onChange}
