@@ -5,10 +5,17 @@
 //! The instance wait service is a minimal stand-in for the server's
 //! `InstanceWaits` over the store's own waits (register, then read), so the
 //! park, the finish trigger, the deadline and the relaunch are the
-//! production ones. Requires staged components and an isolated
+//! production ones. A parked parent also keeps its bound image across a
+//! recompile and cleanup, and a control call after the wake runs through the
+//! approved control history. Requires staged components and an isolated
 //! TEST_ENVIRONMENT_DATABASE_URL.
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
+use runtara_component_host::control_executor::ControlExecutor;
+use runtara_component_host::control_host::{
+    ControlAuthority, ControlError, ControlHost, InstanceDetail, InstanceStatus as ControlStatus,
+    InstanceSummary, TerminalResult,
+};
 use runtara_component_host::instance_wait_host::{
     InstanceWaitAuthority, InstanceWaitError, InstanceWaitErrorCode, InstanceWaitHost,
     InstanceWaitMode, InstanceWaitOutcome, InstanceWaitPoll, InstanceWaitRequest,
@@ -134,10 +141,114 @@ impl InstanceWaitHost for StoreWaits {
     }
 }
 
+/// The control service behind `runtara:control/api`: `get` answers every
+/// run as completed, which is all a control call after the wake needs.
+struct Reads;
+
+#[async_trait::async_trait]
+impl ControlHost for Reads {
+    async fn get(
+        &self,
+        _authority: &ControlAuthority,
+        instance_id: String,
+    ) -> Result<InstanceDetail, ControlError> {
+        Ok(InstanceDetail {
+            instance: InstanceSummary {
+                instance_id,
+                workflow_id: "child".into(),
+                version: None,
+                run_label: None,
+                parent_instance_id: None,
+                status: ControlStatus::Completed,
+                suspension_reason: None,
+                termination_reason: None,
+                created_at_ms: 0,
+                started_at_ms: None,
+                finished_at_ms: None,
+            },
+            terminal: TerminalResult {
+                output: None,
+                output_bytes: None,
+                output_omitted: false,
+                error: None,
+                error_omitted: false,
+            },
+        })
+    }
+}
+
+/// The installed control bytes, or (with `marker`) those bytes with an extra
+/// custom section, as a later release whose wasm digest and pin differ.
+fn control_executor(marker: Option<&[u8]>) -> ControlExecutor {
+    let dir = components();
+    let mut wasm = std::fs::read(dir.join("runtara_agent_control.wasm")).unwrap();
+    if let Some(marker) = marker {
+        let name = b"runtara-upgrade-test";
+        let mut body = leb128(name.len());
+        body.extend_from_slice(name);
+        body.extend_from_slice(marker);
+        wasm.push(0);
+        wasm.extend(leb128(body.len()));
+        wasm.extend(body);
+    }
+    let control = ControlExecutor::new(
+        runtara_component_host::build_engine(&Default::default()).unwrap(),
+        &wasm,
+        &std::fs::read(dir.join("runtara_agent_control.meta.json")).unwrap(),
+    )
+    .unwrap();
+    control.set_host(Arc::new(Reads)).unwrap();
+    control
+}
+
+fn leb128(mut value: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(byte);
+            return out;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// A durable workflow waiting on `data.children` in `mode` (with an optional
+/// `timeoutMs`), then Finish with the wait's output as `result`.
+fn wait_graph(mode: &str, timeout_ms: Option<u64>) -> Value {
+    let mut wait = json!({"id": "wait", "stepType": "WaitForInstances",
+        "instanceIds": {"valueType": "reference", "value": "data.children"},
+        "mode": mode});
+    if let Some(timeout) = timeout_ms {
+        wait["timeoutMs"] = json!({"valueType": "immediate", "value": timeout});
+    }
+    json!({"durable": true, "entryPoint": "wait", "steps": {
+        "wait": wait,
+        "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
+            "result": {"valueType": "reference", "value": "steps.wait.outputs"}}}},
+        "executionPlan": [{"fromStep": "wait", "toStep": "finish"}]})
+}
+
+/// [`wait_graph`] with a `control:get` of the first child after the wake,
+/// whose output Finish returns as `read`.
+fn wait_then_control_graph() -> Value {
+    let mut graph = wait_graph("all", None);
+    graph["steps"]["read"] = json!({"id": "read", "stepType": "Agent", "agentId": "control",
+        "capabilityId": "get", "maxRetries": 0, "inputMapping": {
+            "instanceId": {"valueType": "reference", "value": "data.children.0"}}});
+    graph["steps"]["finish"]["inputMapping"]["read"] =
+        json!({"valueType": "reference", "value": "steps.read.outputs"});
+    graph["executionPlan"] = json!([{"fromStep": "wait", "toStep": "read"},
+        {"fromStep": "read", "toStep": "finish"}]);
+    graph
+}
+
 struct Harness {
     pool: sqlx::PgPool,
     dir: tempfile::TempDir,
     persistence: Arc<PostgresPersistence>,
+    control: Arc<ControlExecutor>,
     tenant: String,
 }
 
@@ -148,16 +259,25 @@ impl Harness {
         let pool = sqlx::PgPool::connect(&url).await.unwrap();
         runtara_environment::migrations::run(&pool).await.unwrap();
         let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+        let control = control_executor(None);
+        control.set_approved_pins([control.pin().to_owned()]);
         Self {
             pool,
             dir: tempfile::tempdir().unwrap(),
             persistence,
+            control: Arc::new(control),
             tenant: format!("wait-for-instances-{}", uuid::Uuid::new_v4()),
         }
     }
 
     /// A fresh runner, as after a restart.
     fn runner(&self) -> EmbeddedWasmRunner {
+        self.runner_with(self.control.clone())
+    }
+
+    /// A fresh runner whose host runs `control`, as after a restart onto
+    /// another control bundle.
+    fn runner_with(&self, control: Arc<ControlExecutor>) -> EmbeddedWasmRunner {
         EmbeddedWasmRunner::new(
             WorkflowRunnerConfig {
                 data_dir: self.dir.path().join("data"),
@@ -172,22 +292,24 @@ impl Harness {
             persistence: self.persistence.clone(),
         }))
         .unwrap()
+        .with_control_executor(control)
+        .unwrap()
     }
 
     /// Compile a workflow waiting on `data.children` in `mode`, with an
     /// optional `timeoutMs`.
     fn compile(&self, out: &str, mode: &str, timeout_ms: Option<u64>) -> PathBuf {
-        let mut wait = json!({"id": "wait", "stepType": "WaitForInstances",
-            "instanceIds": {"valueType": "reference", "value": "data.children"},
-            "mode": mode});
-        if let Some(timeout) = timeout_ms {
-            wait["timeoutMs"] = json!({"valueType": "immediate", "value": timeout});
-        }
-        let graph = json!({"durable": true, "entryPoint": "wait", "steps": {
-            "wait": wait,
-            "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
-                "result": {"valueType": "reference", "value": "steps.wait.outputs"}}}},
-            "executionPlan": [{"fromStep": "wait", "toStep": "finish"}]});
+        self.compile_graph(out, wait_graph(mode, timeout_ms))
+    }
+
+    /// Compile `graph` into `out`, with the control agent in the catalog.
+    fn compile_graph(&self, out: &str, graph: Value) -> PathBuf {
+        let catalog = runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+            serde_json::from_slice(
+                &std::fs::read(components().join("runtara_agent_control.meta.json")).unwrap(),
+            )
+            .unwrap(),
+        ]);
         compile_direct_workflow_composed(
             DirectCompilationInput {
                 workflow_id: "wait-for-instances-runner".into(),
@@ -197,7 +319,7 @@ impl Harness {
                 child_workflows: vec![],
                 output_dir: self.dir.path().join(out),
                 track_events: false,
-                agent_catalog: None,
+                agent_catalog: Some(Arc::new(catalog)),
                 agent_slug: None,
             },
             components(),
@@ -291,6 +413,45 @@ impl Harness {
             Some("waiting_instances")
         );
         (parent, children)
+    }
+
+    /// Finish every child, which wakes the parked parent.
+    async fn finish(&self, children: &[String]) {
+        for child in children {
+            self.persistence
+                .complete_instance(CompleteInstanceParams::new(
+                    child,
+                    InstanceStatus::Completed,
+                ))
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Register `wasm` as an image in `images_dir`, the way Environment keeps
+    /// packages, last updated long past any cleanup age.
+    async fn register_image(
+        &self,
+        images_dir: &std::path::Path,
+        name: &str,
+        wasm: &std::path::Path,
+    ) -> String {
+        let image_id = uuid::Uuid::new_v4().to_string();
+        let dir = images_dir.join("images").join(&image_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(wasm, dir.join("binary")).unwrap();
+        sqlx::query(
+            "INSERT INTO images (image_id, tenant_id, name, binary_path, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, TIMESTAMPTZ '2000-01-01', TIMESTAMPTZ '2000-01-01')",
+        )
+        .bind(&image_id)
+        .bind(&self.tenant)
+        .bind(format!("{name}@{image_id}"))
+        .bind(dir.join("binary").to_string_lossy().as_ref())
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        image_id
     }
 
     async fn waits_of(&self, parent: &str) -> i64 {
@@ -417,4 +578,160 @@ async fn a_timed_wait_for_instances_settles_at_its_deadline() {
         InstanceStatus::Running,
         "the deadline cancels nothing"
     );
+}
+
+/// The package a parked parent was launched from survives a recompile of its
+/// workflow and an image cleanup pass, and the parent resumes on it (not on
+/// the recompiled artifact) once its children finish.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parked_parent_resumes_on_its_bound_image_after_recompile_and_cleanup() {
+    use runtara_environment::image_cleanup_worker::{ImageCleanupWorker, ImageCleanupWorkerConfig};
+    let h = Harness::new().await;
+    let env_dir = h.dir.path().join("environment");
+    let compiled = h.compile("compiled", "all", None);
+    let bound = h
+        .register_image(&env_dir, "wait-for-instances-runner:1", &compiled)
+        .await;
+    let bound_path: String =
+        sqlx::query_scalar("SELECT binary_path FROM images WHERE image_id = $1")
+            .bind(&bound)
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    let (parent, children) = h
+        .park(&h.runner(), std::path::Path::new(&bound_path), "bound")
+        .await;
+    sqlx::query(
+        "INSERT INTO instance_images (instance_id, image_id, tenant_id, created_at) \
+         VALUES ($1, $2, $3, NOW() - INTERVAL '40 days')",
+    )
+    .bind(&parent)
+    .bind(&bound)
+    .bind(&h.tenant)
+    .execute(&h.pool)
+    .await
+    .unwrap();
+
+    // The workflow is edited and recompiled while the parent is parked: a
+    // distinct artifact, registered as its own image.
+    let mut graph = wait_graph("all", None);
+    graph["steps"]["finish"]["inputMapping"]["recompiled"] =
+        json!({"valueType": "immediate", "value": true});
+    let edited = h.compile_graph("recompiled", graph);
+    assert_ne!(
+        std::fs::read(&compiled).unwrap(),
+        std::fs::read(&edited).unwrap(),
+        "the recompile changed the artifact"
+    );
+    let recompiled = h
+        .register_image(&env_dir, "wait-for-instances-runner:1", &edited)
+        .await;
+
+    ImageCleanupWorker::new(
+        h.pool.clone(),
+        ImageCleanupWorkerConfig {
+            data_dir: env_dir.clone(),
+            ..Default::default()
+        },
+    )
+    .run_once()
+    .await
+    .unwrap();
+    let kept: Vec<String> =
+        sqlx::query_scalar("SELECT image_id FROM images WHERE tenant_id = $1 ORDER BY image_id")
+            .bind(&h.tenant)
+            .fetch_all(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        kept,
+        std::slice::from_ref(&bound),
+        "only the parked parent's image stays"
+    );
+    assert!(
+        std::path::Path::new(&bound_path).exists(),
+        "with its package"
+    );
+    assert!(!env_dir.join("images").join(&recompiled).exists());
+
+    // Wake: the relaunch resolves the parent's binding, as Environment does.
+    h.finish(&children).await;
+    let wake_path: String = sqlx::query_scalar(
+        "SELECT img.binary_path FROM instance_images ii JOIN images img USING (image_id) \
+         WHERE ii.instance_id = $1",
+    )
+    .bind(&parent)
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    h.run_to_exit(
+        &h.runner(),
+        &h.options(std::path::Path::new(&wake_path), &parent, None),
+    )
+    .await;
+    let done = h.persistence.get_instance(&parent).await.unwrap().unwrap();
+    assert_eq!(done.status, InstanceStatus::Completed, "{:?}", done.error);
+    let output: Value = serde_json::from_slice(done.output.as_deref().unwrap()).unwrap();
+    assert_eq!(output["result"]["resolution"], "satisfied");
+    assert!(
+        output.get("recompiled").is_none(),
+        "resumed on the bound image, not the recompile: {output}"
+    );
+    sqlx::query("DELETE FROM images WHERE tenant_id = $1")
+        .bind(&h.tenant)
+        .execute(&h.pool)
+        .await
+        .unwrap();
+}
+
+/// A control upgrade while parents are parked: after the wake, a parent
+/// pinned to the older, still approved control digest makes its control call
+/// through the approved history on the installed (upgraded) bytes. Once its
+/// digest is revoked, a parked parent still loads, and its control call
+/// fails with `denied`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_control_upgrade_resumes_via_the_history_and_a_revocation_fails_the_call() {
+    let h = Harness::new().await;
+    let wasm = h.compile_graph("control", wait_then_control_graph());
+    let (kept, kept_children) = h.park(&h.runner(), &wasm, "history").await;
+    let (revoked, revoked_children) = h.park(&h.runner(), &wasm, "revoked").await;
+
+    let upgraded = Arc::new(control_executor(Some(uuid::Uuid::new_v4().as_bytes())));
+    let old_pin = h.control.pin().to_owned();
+    assert_ne!(upgraded.pin(), old_pin, "the upgrade has its own digest");
+    assert_ne!(upgraded.digest(), h.control.digest());
+
+    // The next boot approves the new bytes; the old pin stays in the history.
+    upgraded.set_approved_pins([upgraded.pin().to_owned(), old_pin.clone()]);
+    h.finish(&kept_children).await;
+    h.run_to_exit(
+        &h.runner_with(upgraded.clone()),
+        &h.options(&wasm, &kept, None),
+    )
+    .await;
+    let done = h.persistence.get_instance(&kept).await.unwrap().unwrap();
+    assert_eq!(done.status, InstanceStatus::Completed, "{:?}", done.error);
+    let output: Value = serde_json::from_slice(done.output.as_deref().unwrap()).unwrap();
+    assert_eq!(output["result"]["resolution"], "satisfied");
+    assert_eq!(
+        output["read"]["instance"]["instanceId"],
+        json!(kept_children[0]),
+        "the control call after the wake ran: {output}"
+    );
+
+    // A later boot after the old digest was revoked: the parked parent loads
+    // (the launch succeeds), and its control call after the wake is denied.
+    upgraded.set_approved_pins([upgraded.pin().to_owned()]);
+    upgraded.set_revoked_pins([old_pin]);
+    h.finish(&revoked_children).await;
+    h.run_to_exit(
+        &h.runner_with(upgraded.clone()),
+        &h.options(&wasm, &revoked, None),
+    )
+    .await;
+    let failed = h.persistence.get_instance(&revoked).await.unwrap().unwrap();
+    assert_eq!(failed.status, InstanceStatus::Failed);
+    let error = failed.error.unwrap_or_default();
+    assert!(error.contains("CONTROL_DENIED"), "{error}");
+    assert!(!error.contains("refused"), "not a load failure: {error}");
 }

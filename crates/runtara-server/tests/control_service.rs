@@ -2258,22 +2258,29 @@ async fn children_that_never_launch_get_one_fenced_outcome() {
 // Durable instance waits
 // ---------------------------------------------------------------------------
 
-use runtara_component_host::control_host::{
-    WaitMode, WaitPoll, WaitProgress, WaitRequest, WaitResolution,
+use runtara_component_host::control_host::{WaitPoll, WaitResolution};
+use runtara_component_host::instance_wait_host::{
+    InstanceWaitAuthority, InstanceWaitErrorCode, InstanceWaitHost, InstanceWaitMode,
+    InstanceWaitRequest, InstanceWaitResolution, InstanceWaitStatus,
 };
 
-fn wait_request(ids: &[&String], mode: WaitMode) -> WaitRequest {
-    WaitRequest {
-        instance_ids: ids.iter().map(|id| (*id).clone()).collect(),
-        mode,
-        deadline_ms: None,
+fn waiter(tenant: &str, caller: &str) -> InstanceWaitAuthority {
+    InstanceWaitAuthority {
+        tenant: tenant.into(),
+        caller: caller.into(),
     }
 }
 
-fn progress(poll: &WaitPoll) -> &WaitProgress {
-    match poll {
-        WaitPoll::Pending(progress) => progress,
-        WaitPoll::Settled(settled) => &settled.progress,
+/// A host-derived wait id, as the workflow host passes it.
+fn wait_id(name: &str) -> String {
+    format!("{name:0>64}")
+}
+
+fn wait_request(ids: &[&String], mode: InstanceWaitMode) -> InstanceWaitRequest {
+    InstanceWaitRequest {
+        instance_ids: ids.iter().map(|id| (*id).clone()).collect(),
+        mode,
+        deadline_ms: None,
     }
 }
 
@@ -2307,11 +2314,11 @@ impl Children {
     }
 }
 
-/// `wait` checks, in order: a calling run, an operation, the target cap, then
-/// every target (unknown `not-found`, ancestor `denied`, other runs
-/// `not-child`, the caller itself `invalid`); nothing registers on a refusal.
-/// A replay returns the same wait, other arguments conflict, and another
-/// operation's wait id is `denied`.
+/// Registering a wait checks, in order: the target cap, then every target
+/// (unknown `not-found`, ancestor `denied`, other runs `not-child`, the
+/// caller itself `invalid`); nothing registers on a refusal. A replay finds
+/// the same wait and keeps its first deadline, other arguments conflict, and
+/// a wait id is scoped to its caller.
 #[tokio::test]
 async fn wait_checks_run_in_order_and_refusals_register_nothing() {
     let cx = Children::new().await;
@@ -2320,71 +2327,47 @@ async fn wait_checks_run_in_order_and_refusals_register_nothing() {
     let parent = cx.launched_child(&grandparent, "parent").await;
     let child = cx.launched_child(&parent, "child").await;
     let stranger = cx.fx.run("stranger", &tenant).await;
-    let op = |n: &str| scoped(&tenant, &parent, n);
-
-    let plain = wait_request(&[&child], WaitMode::All);
-    for (authority, code) in [
-        (authority(&tenant, None), ControlErrorCode::RequiresInstance),
-        (
-            authority(&tenant, Some(&parent)),
-            ControlErrorCode::RequiresOperation,
-        ),
-    ] {
-        assert_eq!(
-            cx.control
-                .wait(&authority, plain.clone())
-                .await
-                .unwrap_err()
-                .code,
-            code
-        );
-        assert_eq!(
-            cx.control
-                .poll_wait(&authority, "x".into())
-                .await
-                .unwrap_err()
-                .code,
-            code
-        );
-    }
+    let waits = cx.control.instance_waits();
+    let me = waiter(&tenant, &parent);
+    let plain = wait_request(&[&child], InstanceWaitMode::All);
 
     let too_many: Vec<String> = (0..=1000).map(|i| format!("{tenant}-n{i}")).collect();
     let too_many: Vec<&String> = too_many.iter().collect();
     let missing = format!("{tenant}-missing");
     for (request, code) in [
         (
-            wait_request(&too_many, WaitMode::All),
-            ControlErrorCode::TooLarge,
+            wait_request(&too_many, InstanceWaitMode::All),
+            InstanceWaitErrorCode::TooLarge,
         ),
         (
-            wait_request(&[&child, &missing], WaitMode::All),
-            ControlErrorCode::NotFound,
+            wait_request(&[&child, &missing], InstanceWaitMode::All),
+            InstanceWaitErrorCode::NotFound,
         ),
         (
-            wait_request(&[&child, &grandparent], WaitMode::All),
-            ControlErrorCode::Denied,
+            wait_request(&[&child, &grandparent], InstanceWaitMode::All),
+            InstanceWaitErrorCode::Denied,
         ),
         (
-            wait_request(&[&child, &stranger], WaitMode::Any),
-            ControlErrorCode::NotChild,
+            wait_request(&[&child, &stranger], InstanceWaitMode::Any),
+            InstanceWaitErrorCode::NotChild,
         ),
         (
-            wait_request(&[&child, &parent], WaitMode::Any),
-            ControlErrorCode::Invalid,
+            wait_request(&[&child, &parent], InstanceWaitMode::Any),
+            InstanceWaitErrorCode::Invalid,
         ),
     ] {
-        let refused = op("refused");
+        let refused = wait_id("refused");
         assert_eq!(
-            cx.control.wait(&refused, request).await.unwrap_err().code,
-            code
-        );
-        assert_eq!(
-            cx.control
-                .poll_wait(&refused, refused.operation.clone().unwrap())
+            waits
+                .register(&me, &refused, request)
                 .await
                 .unwrap_err()
                 .code,
-            ControlErrorCode::NotFound,
+            code
+        );
+        assert_eq!(
+            waits.poll(&me, &refused).await.unwrap_err().code,
+            InstanceWaitErrorCode::NotFound,
             "a refused wait registers nothing"
         );
     }
@@ -2393,50 +2376,65 @@ async fn wait_checks_run_in_order_and_refusals_register_nothing() {
     let mut at_cap: Vec<&String> = at_cap.iter().collect();
     at_cap.push(at_cap[0]);
     assert_eq!(
-        cx.control
-            .wait(&op("cap"), wait_request(&at_cap, WaitMode::All))
+        waits
+            .register(
+                &me,
+                &wait_id("cap"),
+                wait_request(&at_cap, InstanceWaitMode::All)
+            )
             .await
             .unwrap_err()
             .code,
-        ControlErrorCode::NotFound,
+        InstanceWaitErrorCode::NotFound,
         "duplicates count once"
     );
 
-    let registered = op("w");
-    let wait_id = cx.control.wait(&registered, plain.clone()).await.unwrap();
-    assert_eq!(Some(wait_id.clone()), registered.operation);
+    let registered = wait_id("w");
+    let pending = waits
+        .register(&me, &registered, plain.clone())
+        .await
+        .unwrap();
+    assert!(!pending.is_settled());
+    assert_eq!(pending.remaining, std::slice::from_ref(&child));
     assert_eq!(
-        cx.control.wait(&registered, plain.clone()).await.unwrap(),
-        wait_id,
-        "a replay returns the same wait"
+        waits
+            .register(&me, &registered, plain.clone())
+            .await
+            .unwrap(),
+        pending,
+        "a replay finds the same wait"
     );
     let mut later = plain.clone();
     later.deadline_ms = Some(4_102_444_800_000);
-    assert_eq!(cx.control.wait(&registered, later).await.unwrap(), wait_id);
     assert_eq!(
-        cx.control
-            .wait(&registered, wait_request(&[&child], WaitMode::Any))
+        waits
+            .register(&me, &registered, later)
             .await
-            .unwrap_err()
-            .code,
-        ControlErrorCode::ReplayConflict
-    );
-    assert_eq!(
-        cx.control
-            .poll_wait(&op("other"), wait_id.clone())
-            .await
-            .unwrap_err()
-            .code,
-        ControlErrorCode::Denied,
-        "another operation's wait id is denied"
-    );
-    let poll = cx.control.poll_wait(&registered, wait_id).await.unwrap();
-    assert!(matches!(poll, WaitPoll::Pending(_)));
-    assert_eq!(progress(&poll).remaining, std::slice::from_ref(&child));
-    assert_eq!(
-        progress(&poll).deadline_ms,
+            .unwrap()
+            .deadline_ms,
         None,
         "the first deadline stands"
+    );
+    assert_eq!(
+        waits
+            .register(
+                &me,
+                &registered,
+                wait_request(&[&child], InstanceWaitMode::Any)
+            )
+            .await
+            .unwrap_err()
+            .code,
+        InstanceWaitErrorCode::ReplayConflict
+    );
+    assert_eq!(
+        waits
+            .poll(&waiter(&tenant, &grandparent), &registered)
+            .await
+            .unwrap_err()
+            .code,
+        InstanceWaitErrorCode::NotFound,
+        "another run's wait under the same id is another wait"
     );
     cx.cleanup().await;
 }
@@ -2444,7 +2442,7 @@ async fn wait_checks_run_in_order_and_refusals_register_nothing() {
 /// A wait over children in every state: a never-launched child reads
 /// `not-started` (its outcome is published first), a child still in
 /// admission stays remaining, launched ones finish with their results under
-/// the per-target and 3 MiB caps, the same values on every poll; and a
+/// the per-target and 3 MiB caps, the same values on every read; and a
 /// target whose rows disappear is an explicit `not-found`.
 #[tokio::test]
 async fn wait_reports_children_in_every_state_under_stable_caps() {
@@ -2459,6 +2457,8 @@ async fn wait_reports_children_in_every_state_under_stable_caps() {
         .unwrap();
     let op = |n: &str| scoped(&tenant, &parent, n);
     let control = cx.fresh_control();
+    let waits = control.instance_waits();
+    let me = waiter(&tenant, &parent);
     let expired = control
         .start(&op("s1"), start_request(&workflow, 1, Some("expired")))
         .await
@@ -2482,22 +2482,19 @@ async fn wait_reports_children_in_every_state_under_stable_caps() {
     let mut targets: Vec<&String> = launched.iter().collect();
     targets.extend([&huge, &failed, &expired, &queued]);
 
-    let waiting = op("wait");
-    let wait_id = control
-        .wait(&waiting, wait_request(&targets, WaitMode::All))
+    let id = wait_id("wait");
+    let pending = waits
+        .register(&me, &id, wait_request(&targets, InstanceWaitMode::All))
         .await
         .unwrap();
     assert!(
         cx.published_at(&expired).await.is_some(),
         "the ended admission is published under the fence first"
     );
-    let poll = control.poll_wait(&waiting, wait_id.clone()).await.unwrap();
-    let WaitPoll::Pending(pending) = &poll else {
-        panic!("{poll:?}")
-    };
+    assert!(!pending.is_settled(), "{pending:?}");
     assert_eq!(pending.finished.len(), 1);
     assert_eq!(pending.finished[0].instance_id, expired);
-    assert_eq!(pending.finished[0].status, InstanceStatus::NotStarted);
+    assert_eq!(pending.finished[0].status, InstanceWaitStatus::NotStarted);
     assert!(pending.remaining.contains(&queued));
 
     let output = |i: usize| {
@@ -2509,62 +2506,54 @@ async fn wait_reports_children_in_every_state_under_stable_caps() {
     cx.fx
         .complete(&failed, Core::Failed, None, Some("boom"))
         .await;
-    for (i, id) in launched.iter().enumerate() {
+    for (i, child) in launched.iter().enumerate() {
         cx.fx
-            .complete(id, Core::Completed, Some(&output(i)), None)
+            .complete(child, Core::Completed, Some(&output(i)), None)
             .await;
     }
     let huge_output = format!("\"{}\"", "h".repeat(256 * 1024));
     cx.fx
         .complete(&huge, Core::Completed, Some(huge_output.as_bytes()), None)
         .await;
-    // The queued child ends too: its admission expires, and the poll
+    // The queued child ends too: its admission expires, and the read
     // publishes its outcome.
     cx.expire(&queued).await;
-    let first = control.poll_wait(&waiting, wait_id.clone()).await.unwrap();
-    let WaitPoll::Settled(settled) = &first else {
-        panic!("{first:?}")
-    };
-    assert_eq!(settled.resolution, WaitResolution::Satisfied);
-    assert_eq!(settled.progress.finished.len(), targets.len());
-    assert!(settled.progress.remaining.is_empty());
-    let by_id = |id: &String| {
-        settled
-            .progress
+    let first = waits.poll(&me, &id).await.unwrap();
+    assert_eq!(first.resolution, Some(InstanceWaitResolution::Satisfied));
+    assert_eq!(first.finished.len(), targets.len());
+    assert!(first.remaining.is_empty());
+    let by_id = |target_id: &String| {
+        first
             .finished
             .iter()
-            .find(|target| &target.instance_id == id)
+            .find(|target| &target.instance_id == target_id)
             .unwrap()
     };
-    assert_eq!(by_id(&queued).status, InstanceStatus::NotStarted);
+    assert_eq!(by_id(&queued).status, InstanceWaitStatus::NotStarted);
     let huge_read = by_id(&huge);
-    assert!(huge_read.terminal.output.is_none() && huge_read.terminal.output_omitted);
+    assert!(huge_read.output.is_none() && huge_read.output_omitted);
+    assert_eq!(huge_read.output_bytes, Some(huge_output.len() as u64));
     assert_eq!(
-        huge_read.terminal.output_bytes,
-        Some(huge_output.len() as u64)
-    );
-    assert_eq!(
-        by_id(&failed).terminal.error.as_deref(),
+        by_id(&failed).error.as_deref(),
         Some(br#""boom""#.as_slice())
     );
-    let inlined: usize = settled
-        .progress
+    let inlined: usize = first
         .finished
         .iter()
-        .filter_map(|t| t.terminal.output.as_ref().map(Vec::len))
+        .filter_map(|target| target.output.as_ref().map(Vec::len))
         .sum();
     assert!(inlined <= 3 * 1024 * 1024, "the 3 MiB budget holds");
     let omitted = launched
         .iter()
-        .filter(|id| by_id(id).terminal.output_omitted)
+        .filter(|child| by_id(child).output_omitted)
         .count();
     assert_eq!(
         omitted, 1,
         "the error and 11 x 256 KiB fill the budget in finish order; the 12th is omitted"
     );
-    // Polls are stable: the same selection, the same inlined values.
-    let second = control.poll_wait(&waiting, wait_id.clone()).await.unwrap();
-    assert_eq!(first, second, "the budget is spent the same way every poll");
+    // Reads are stable: the same selection, the same inlined values.
+    let second = waits.poll(&me, &id).await.unwrap();
+    assert_eq!(first, second, "the budget is spent the same way every read");
 
     // A finished target whose rows disappear is an explicit error.
     sqlx::query("DELETE FROM instances WHERE instance_id = $1")
@@ -2572,8 +2561,8 @@ async fn wait_reports_children_in_every_state_under_stable_caps() {
         .execute(&cx.fx.pool)
         .await
         .unwrap();
-    let gone = control.poll_wait(&waiting, wait_id).await.unwrap_err();
-    assert_eq!(gone.code, ControlErrorCode::NotFound);
+    let gone = waits.poll(&me, &id).await.unwrap_err();
+    assert_eq!(gone.code, InstanceWaitErrorCode::NotFound);
     assert!(gone.message.contains(&failed), "{}", gone.message);
     cx.cleanup().await;
 }
@@ -2584,10 +2573,6 @@ async fn wait_reports_children_in_every_state_under_stable_caps() {
 /// caller; and the control adapter reads the very same wait.
 #[tokio::test]
 async fn instance_waits_register_and_evaluate_through_the_host_trait() {
-    use runtara_component_host::instance_wait_host::{
-        InstanceWaitAuthority, InstanceWaitErrorCode, InstanceWaitHost, InstanceWaitMode,
-        InstanceWaitRequest, InstanceWaitResolution, InstanceWaitStatus,
-    };
     let cx = Children::new().await;
     let tenant = cx.fx.tenant.clone();
     let grandparent = cx.fx.run("grandparent", &tenant).await;
