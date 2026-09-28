@@ -567,8 +567,8 @@ mod tests {
         let body = json!({
             "error": "Entitlement required",
             "code": "ENTITLEMENT_REQUIRED",
-            "feature": "reports",
-            "message": "Reports is not enabled for this tenant."
+            "feature": "database",
+            "message": "Database is not enabled for this tenant."
         });
         let err = translate_api_error_response(StatusCode::FORBIDDEN, body.clone());
 
@@ -578,7 +578,7 @@ mod tests {
         assert_eq!(err.message.as_ref(), body["message"].as_str().unwrap());
         let data = err.data.expect("data populated");
         assert_eq!(data["code"], json!("ENTITLEMENT_REQUIRED"));
-        assert_eq!(data["feature"], json!("reports"));
+        assert_eq!(data["feature"], json!("database"));
     }
 
     #[test]
@@ -631,7 +631,7 @@ mod tests {
         // shouldn't panic. Default to a generic fallback string.
         let body = json!({
             "code": "ENTITLEMENT_REQUIRED",
-            "feature": "reports"
+            "feature": "database"
         });
         let err = translate_api_error_response(StatusCode::FORBIDDEN, body);
         assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_REQUEST);

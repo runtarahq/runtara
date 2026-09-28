@@ -824,7 +824,7 @@ mod tests {
         }
         // Sanity-check nested camelCase from EntitlementsDto.
         assert_eq!(obj["tenantId"], serde_json::json!("tenant-abc"));
-        assert_eq!(obj["features"]["reports"], serde_json::json!(true));
+        assert_eq!(obj["features"]["database"], serde_json::json!(true));
     }
 
     #[test]
@@ -850,7 +850,7 @@ mod tests {
 
     #[test]
     fn runtime_config_json_embeds_entitlements_as_nested_object() {
-        let snap = fixture_snapshot("tenant-xyz", Some(r#"{"features":{"reports":false}}"#));
+        let snap = fixture_snapshot("tenant-xyz", Some(r#"{"features":{"mcp":false}}"#));
         let raw = runtime_config_json(&snap);
 
         let value: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON object");
@@ -862,7 +862,7 @@ mod tests {
             "entitlements must be an object, not a string"
         );
         assert_eq!(ents["tenantId"], serde_json::json!("tenant-xyz"));
-        assert_eq!(ents["features"]["reports"], serde_json::json!(false));
+        assert_eq!(ents["features"]["mcp"], serde_json::json!(false));
         assert_eq!(ents["features"]["database"], serde_json::json!(true));
     }
 

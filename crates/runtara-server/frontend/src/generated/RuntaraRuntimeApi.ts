@@ -139,7 +139,7 @@ export type InputSubmissionCode =
 
 export type FieldAccessMode = "read_write" | "read" | "write";
 
-export type FeatureKey = "reports" | "database" | "api" | "mcp";
+export type FeatureKey = "database" | "api" | "mcp";
 
 /** Execution status representing the current state of a workflow execution */
 export type ExecutionStatus =
@@ -2021,7 +2021,7 @@ export interface EntitlementLimits {
 
 export interface EntitlementsDto {
   agents: string[];
-  features: Partial<Record<"reports" | "database" | "api" | "mcp", boolean>>;
+  features: Partial<Record<"database" | "api" | "mcp", boolean>>;
   limits: EntitlementLimits;
   pricingTier: Tier;
   tenantId: string;

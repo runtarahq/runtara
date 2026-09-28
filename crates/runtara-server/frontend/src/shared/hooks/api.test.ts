@@ -702,16 +702,16 @@ describe('handleEntitlementDenial — 403 toast mapping', () => {
     const handled = handleEntitlementDenial(
       entitlementError({
         code: 'ENTITLEMENT_REQUIRED',
-        feature: 'reports',
-        message: 'Reports are not enabled for this tenant.',
+        feature: 'database',
+        message: 'Database is not enabled for this tenant.',
       })
     );
 
     expect(handled).toBe(true);
     expect(mockToastError).toHaveBeenCalledTimes(1);
     const [title, opts] = mockToastError.mock.calls[0];
-    expect(title).toBe('Reports not enabled');
-    expect(opts?.description).toBe('Reports are not enabled for this tenant.');
+    expect(title).toBe('Database not enabled');
+    expect(opts?.description).toBe('Database is not enabled for this tenant.');
   });
 
   it('falls back to the raw feature string when it is not a known FeatureKey', () => {
@@ -831,8 +831,8 @@ describe('useCustomMutation — 403 entitlement integration', () => {
         status: 403,
         data: {
           code: 'ENTITLEMENT_REQUIRED',
-          feature: 'reports',
-          message: 'Reports are not enabled for this tenant.',
+          feature: 'database',
+          message: 'Database is not enabled for this tenant.',
         },
       },
     };
@@ -852,9 +852,9 @@ describe('useCustomMutation — 403 entitlement integration', () => {
     // Exactly one toast — the entitlement-specific one. No generic fallback.
     expect(mockToastError).toHaveBeenCalledTimes(1);
     expect(mockToastError).toHaveBeenCalledWith(
-      'Reports not enabled',
+      'Database not enabled',
       expect.objectContaining({
-        description: 'Reports are not enabled for this tenant.',
+        description: 'Database is not enabled for this tenant.',
       })
     );
   });

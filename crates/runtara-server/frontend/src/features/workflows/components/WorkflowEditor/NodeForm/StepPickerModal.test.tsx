@@ -35,7 +35,7 @@ function snapshot(agents: string[]): EntitlementsSnapshot {
   return {
     tenantId: 'tenant-test',
     pricingTier: 'default',
-    features: { reports: true, database: true, api: true, mcp: true },
+    features: { database: true, api: true, mcp: true },
     agents,
     limits: {},
   };

@@ -192,14 +192,6 @@ then compares the resource's `created_by` against the caller
 (`ownership_decision_for` / `require_ownership` in
 `crates/runtara-server/src/middleware/authorization.rs`).
 
-> **Known deviation — `report:update` via `/edit`.** `POST /reports/{id}/edit`
-> maps to `ReportUpdate` and so clears the route gate under `Own`, but its
-> handler (`api/handlers/reports.rs:603`) never calls `require_ownership` — the
-> way `update_report` and `delete_report` do. Under `required`, a Member can
-> edit any report in the tenant through that route and through the MCP
-> `edit_report` tool. The contract below is the intended behavior; the code is
-> wrong and needs fixing.
-
 **Legacy ownership.** Rows created before per-user ownership was captured carry a
 placeholder `created_by` — either `NULL` or the literal `"jwt-user"` (the old
 hard-coded value, now replaced by the real caller on create). These never match a
@@ -229,10 +221,6 @@ tenant requires it.
 | `database:create` | Allow | Allow | Allow | Deny |
 | `database:update` | Allow | Allow | Allow | Deny |
 | `database:delete` | Allow | Allow | Allow | Deny |
-| `report:read` | Allow | Allow | Allow | Allow |
-| `report:create` | Allow | Allow | Allow | Deny |
-| `report:update` | Allow | Allow | Own | Deny |
-| `report:delete` | Allow | Allow | Own | Deny |
 | `trigger:read` | Allow | Allow | Allow | Allow |
 | `trigger:create` | Allow | Allow | Allow | Deny |
 | `trigger:update` | Allow | Allow | Own | Deny |
@@ -256,7 +244,7 @@ Notes:
   open to every role, Viewer included.
 - Create and `workflow:execute` require Member or above.
 - Update/delete are `Own` for Member (own resources only; Owner/Admin bypass the
-  ownership check) and denied for Viewer — for **trigger and report**, plus
+  ownership check) and denied for Viewer — for **trigger**, plus
   `workflow:delete`. **`workflow:update` is the exception: it is tenant-wide `Allow`
   for Member**, not `Own`. Workflows are versioned (`update` creates a new version,
   `set_current_version` rolls back), so editing another member's workflow is
@@ -265,8 +253,8 @@ Notes:
   version. `database:*` and `connection:*` have no enforceable per-row owner
   (object-model tracks no `created_by`; connections live in a crate that does not
   bridge the caller's identity), so their update/delete are full Allow for Member,
-  never `Own`. So the complete `Own` set is **five** cells: `workflow:delete` plus
-  trigger/report update/delete.
+  never `Own`. So the complete `Own` set is **three** cells: `workflow:delete` plus
+  trigger update/delete.
 - **`workflow:folder_rename`** is a dedicated **Owner/Admin-only** permission, not
   part of `workflow:update`. Renaming a folder is a tenant-wide **bulk** op — it
   rewrites the `path` prefix of *every* workflow under the folder, including other
