@@ -1,7 +1,20 @@
 # WaitForInstances: change plan for runtarahq/runtara#270
 
-Status: plan, 2026-09-28. Changes the unmerged control-agent branch before it
-merges.
+Status: implemented, 2026-09-28, on the unmerged control-agent branch.
+
+As built, where it differs from the plan below:
+
+- The host interface also has `release(key)`, which drops the settled wait
+  once the step's result is checkpointed.
+- The deadline is persisted by the store at first registration and wins on
+  every replay; it is not a guest checkpoint.
+- An empty `instanceIds` settles at once with resolution `empty`, without
+  registering a wait.
+- Literal `instanceIds` or `timeoutMs` out of range are E133
+  (`InvalidWaitForInstancesConfig`).
+- The step is displayed as "Wait for Instances".
+- Agent suspensions may wake only on `at`; an `instances` wake is refused with
+  `AGENT_INVALID_SUSPENSION`.
 
 ## Decisions
 

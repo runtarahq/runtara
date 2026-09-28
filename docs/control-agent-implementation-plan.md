@@ -2,6 +2,15 @@
 
 This plan delivers the `control` agent (nine capabilities, `start` through `wait`) and the typed agent suspension behind `wait`, so a workflow can start, signal and coordinate child runs and park runner-free (headline: parallel approvals). The brief is [control-agent.md](control-agent.md); owner decisions D1-D8 in [control-agent-decisions.md](control-agent-decisions.md) override it.
 
+**Changed after this plan (2026-09-28):** control `wait` and `poll-wait` were
+removed before merge. Waiting on children is now the `WaitForInstances` step
+([wait-for-instances-plan.md](wait-for-instances-plan.md)): it keeps the
+durable wait records, D1/D4/D7 and the caps of slice 9, but is compiled
+workflow code calling `runtara:workflow-wait@0.1.0` rather than a suspending
+agent. Control has eight capabilities and none suspends. Typed agent
+suspension (slice 10) stays as an extension point that no built-in agent uses,
+and an agent may only wake on `at`. Mentions of `wait` below are historical.
+
 ## Scope
 - **Typed suspension:** a `suspends: true` capability returns `completed` or `suspended { wakes, state }` via an additive `suspendable` interface; the host keeps the continuation (max 64 KiB) per operation; steps must be durable with a timeout.
 - **Control service:** `runtara:control` host service and `runtara-agent-control` crate; a compiler-emitted `runtara:workflow-operation` scope makes mutations replay-safe under `(caller, op_hash)`.
@@ -396,6 +405,8 @@ Slices land alone, V-fmt and V-gate green; 1-13 follow G0; if K1 is still open a
 ### Slice 10: Typed agent suspension and control `wait`
 
 **Goal.** A capability can return a typed suspension; workflow logic stores its continuation, attaches waits and parks without a runner, then re-invokes the agent with it on wake. `control:wait` delivers parallel approvals.
+
+*Since replaced: parallel approvals use the `WaitForInstances` step, control no longer suspends, and agent suspensions may only wake on `at`.*
 
 **Depends on.** Slices 6 and 9, and the S0.2 tracer code (no continuation argument on `suspendable.invoke`).
 
