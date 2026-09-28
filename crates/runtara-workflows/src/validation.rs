@@ -80,7 +80,7 @@ use runtara_dsl::{
 // exactly the segments a lookup will walk — in particular treating a
 // bracket-quoted body like `data["a.b"]` as one opaque key, not a nested path.
 use runtara_workflow_stdlib::reference_path::{
-    array_index, has_consecutive_dots, is_array_index_token, reference_segments,
+    PathDefect, array_index, is_array_index_token, reference_segments, tokenize_reference,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -2661,7 +2661,7 @@ fn validate_reference(
     // Reject consecutive dots outside a closed `[..]` body. Dots inside one
     // belong to the key (`data["a..b"]`). Leading/trailing dots and empty
     // bracket keys are not caught here.
-    if has_consecutive_dots(ref_path) {
+    if tokenize_reference(ref_path).has_defect(PathDefect::ConsecutiveDots) {
         result.errors.push(ValidationError::InvalidReferencePath {
             step_id: step_id.to_string(),
             reference_path: ref_path.to_string(),
@@ -3249,7 +3249,7 @@ fn validate_template_static_reference(
     context: &TemplateStaticReferenceContext<'_>,
     result: &mut ValidationResult,
 ) {
-    if has_consecutive_dots(reference) {
+    if tokenize_reference(reference).has_defect(PathDefect::ConsecutiveDots) {
         push_template_reference_issue(
             result,
             step_id,
