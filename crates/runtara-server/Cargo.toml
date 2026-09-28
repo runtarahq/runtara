@@ -105,6 +105,11 @@ path = "tests/object_model_connection_e2e.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
+name = "object_model_raw_sql"
+path = "tests/object_model_raw_sql.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
 name = "outbound_http"
 path = "tests/outbound_http.rs"
 required-features = ["db-integration-tests"]
