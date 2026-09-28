@@ -451,7 +451,7 @@ pub struct AgentImportGrants {
     /// the host `context` that delivers its continuation.
     pub suspends: bool,
     /// The canonical `control` agent resolved from the primary components
-    /// dir: [`CONTROL_AGENT_IMPORTS`] and the suspension types.
+    /// dir: [`CONTROL_AGENT_IMPORTS`].
     pub control: bool,
 }
 
@@ -475,9 +475,9 @@ fn agent_import_allowed(import: &str) -> bool {
 }
 
 fn agent_import_granted(import: &str, grants: AgentImportGrants) -> bool {
-    if import == runtara_agent_suspension::TYPES_INTERFACE {
-        grants.suspends || grants.control
-    } else if import == runtara_agent_suspension::CONTEXT_INTERFACE {
+    if import == runtara_agent_suspension::TYPES_INTERFACE
+        || import == runtara_agent_suspension::CONTEXT_INTERFACE
+    {
         grants.suspends
     } else {
         grants.control && CONTROL_AGENT_IMPORTS.contains(&import)
@@ -1339,10 +1339,17 @@ mod tests {
 
     #[test]
     fn control_interfaces_are_admitted_only_for_the_canonical_control_agent() {
-        let mut imports = CONTROL_AGENT_IMPORTS.to_vec();
-        imports.push(runtara_agent_suspension::TYPES_INTERFACE);
-        resolve_declared_agent("control", FixtureDir::Primary, &imports, true)
+        resolve_declared_agent("control", FixtureDir::Primary, CONTROL_AGENT_IMPORTS, false)
             .expect("the bundled control agent forwards to the executor");
+        // Control no longer suspends, so it gets no suspension interface.
+        for import in [
+            runtara_agent_suspension::TYPES_INTERFACE,
+            runtara_agent_suspension::CONTEXT_INTERFACE,
+        ] {
+            let error = resolve_declared_agent("control", FixtureDir::Primary, &[import], false)
+                .expect_err("control never suspends");
+            assert!(error.to_string().contains(import), "{error}");
+        }
         for (agent, location) in [
             ("controller", FixtureDir::Primary),
             ("pauser", FixtureDir::Primary),

@@ -2258,7 +2258,6 @@ async fn children_that_never_launch_get_one_fenced_outcome() {
 // Durable instance waits
 // ---------------------------------------------------------------------------
 
-use runtara_component_host::control_host::{WaitPoll, WaitResolution};
 use runtara_component_host::instance_wait_host::{
     InstanceWaitAuthority, InstanceWaitErrorCode, InstanceWaitHost, InstanceWaitMode,
     InstanceWaitRequest, InstanceWaitResolution, InstanceWaitStatus,
@@ -2569,8 +2568,8 @@ async fn wait_reports_children_in_every_state_under_stable_caps() {
 
 /// The `InstanceWaitHost` boundary the workflow host calls: `register`
 /// authorizes and registers, then returns the evaluated wait; a replay finds
-/// the same wait and keeps its first deadline; the wait id is scoped to the
-/// caller; and the control adapter reads the very same wait.
+/// the same wait and keeps its first deadline; and the wait id is scoped to
+/// the caller.
 #[tokio::test]
 async fn instance_waits_register_and_evaluate_through_the_host_trait() {
     let cx = Children::new().await;
@@ -2660,18 +2659,5 @@ async fn instance_waits_register_and_evaluate_through_the_host_trait() {
         .await
         .unwrap_err();
     assert_eq!(conflict.code, InstanceWaitErrorCode::ReplayConflict);
-
-    // Control's `poll-wait` is an adapter over the same wait.
-    let via_control = cx
-        .control
-        .poll_wait(&scoped(&tenant, &parent, "step"), wait_id.clone())
-        .await
-        .unwrap();
-    let WaitPoll::Settled(control_settled) = via_control else {
-        panic!("{via_control:?}")
-    };
-    assert_eq!(control_settled.resolution, WaitResolution::Satisfied);
-    assert_eq!(control_settled.progress.finished[0].instance_id, first);
-    assert_eq!(control_settled.progress.remaining, vec![second]);
     cx.cleanup().await;
 }

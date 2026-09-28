@@ -423,7 +423,7 @@ impl ComponentDispatcherService {
     /// executor, never on the plain agent instance (whose `api` is `denied`).
     /// It has the tenant but no calling instance or operation, so reads work
     /// tenant-wide while identity calls and caller-relative filters answer
-    /// `requires-instance`; a suspension cannot be kept here.
+    /// `requires-instance`.
     async fn test_control(
         &self,
         req: &TestCapabilityRequest,
@@ -441,7 +441,6 @@ impl ComponentDispatcherService {
                         },
                         &req.capability_id,
                         input,
-                        None,
                         tokio::time::Instant::now() + self.test_timeout,
                     )
                     .await
@@ -459,25 +458,10 @@ impl ComponentDispatcherService {
             retryable: e.retryable,
         };
         Ok(match result {
-            Ok(crate::operation_scope_host::SuspendableOutcome::Completed(output)) => TestResult {
+            Ok(output) => TestResult {
                 success: true,
                 output: serde_json::from_slice(&output).ok(),
                 error: None,
-                execution_time_ms,
-            },
-            Ok(crate::operation_scope_host::SuspendableOutcome::Suspended(_)) => TestResult {
-                success: false,
-                output: None,
-                error: Some(TestError {
-                    code: runtara_agent_suspension::SUSPENSION_UNSUPPORTED.into(),
-                    message: format!(
-                        "{} suspends and can only run as a durable workflow step",
-                        req.capability_id
-                    ),
-                    category: "permanent".into(),
-                    severity: "error".into(),
-                    retryable: false,
-                }),
                 execution_time_ms,
             },
             Err(e) => TestResult {

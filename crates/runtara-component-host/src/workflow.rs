@@ -1669,16 +1669,10 @@ pub enum InvokeExit {
     CleanupAborted,
 }
 
-/// The instance waits a suspended run parks on: those its agent suspensions
-/// attached and those its WaitForInstances steps left pending, once each.
+/// The instance waits a suspended run parks on: those its WaitForInstances
+/// steps left pending.
 fn parked_waits(state: &WorkflowState) -> Vec<String> {
-    let mut waits = state.operation.registered_waits().to_vec();
-    for wait in state.instance_waits.pending() {
-        if !waits.contains(wait) {
-            waits.push(wait.clone());
-        }
-    }
-    waits
+    state.instance_waits.pending().to_vec()
 }
 
 /// Result of one invoke-shaped workflow run.
@@ -1687,9 +1681,9 @@ pub struct InvokeRunResult {
     pub exit: InvokeExit,
     pub memory_peak_bytes: u64,
     pub duration: Duration,
-    /// Instance-wait ids the run's agent suspensions attached and its
-    /// WaitForInstances steps left pending. A suspended run is woken when any
-    /// of them settles, besides its lifecycle wakes.
+    /// Instance-wait ids the run's WaitForInstances steps left pending. A
+    /// suspended run is woken when any of them settles, besides its
+    /// lifecycle wakes.
     pub instance_waits: Vec<String>,
 }
 

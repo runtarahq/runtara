@@ -4351,7 +4351,6 @@ name = "runtara-agent-control"
 version = "8.9.12"
 dependencies = [
  "runtara-agent-macro",
- "runtara-agent-suspension",
  "runtara-control-contract",
  "runtara-dsl",
  "serde",

@@ -13,9 +13,9 @@ async fn wait(input: Input, _context: &SuspendContext) -> Result<Suspendable<Str
 }
 
 runtara_agent_macro::agent_component!(
-    agent = "probe",
+    agent = "control",
+    control_executor = true,
     capabilities = [wait],
-    suspending = [],
 );
 
 fn main() {}

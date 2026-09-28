@@ -6,9 +6,8 @@
 //! `runtara:control/executor`. The workflow linker binds that import to
 //! [`ControlExecutor::invoke`], which instantiates the host-loaded control
 //! bytes (never the composed copy, never tenant bytes) in a fresh restricted
-//! store where `runtara:control/api` is real, and passes the caller
-//! operation's continuation. The authority comes from the calling workflow's
-//! store.
+//! store where `runtara:control/api` is real. The authority, including the
+//! caller operation, comes from the calling workflow's store.
 //!
 //! Decision D2: the host checks the composed bytes at load and approval on
 //! every call. A workflow may forward only through a [`ControlBinding`] — its
@@ -38,11 +37,9 @@ use wasmtime::{Engine, Store, UpdateDeadline};
 
 use crate::control_host::{ControlApiCall, ControlAuthority, ControlHost, control_error_info};
 use crate::host_state::HostState;
-use crate::operation_scope_host::SuspendableOutcome;
 
 const MAX_INPUT: usize = runtara_control_contract::MAX_INPUT_BYTES;
 const MAX_OUTPUT: usize = runtara_control_contract::MAX_OUTCOME_BYTES;
-const MAX_STATE: usize = runtara_agent_suspension::MAX_CONTINUATION_BYTES;
 const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 const TIME_LIMIT: Duration =
     Duration::from_millis(runtara_control_contract::EXECUTION_TIME_LIMIT_MS);
@@ -238,8 +235,8 @@ impl ControlExecutor {
             .map_err(|_| anyhow::anyhow!("control host already configured"))
     }
 
-    /// Run `execution.invoke(capability, input, continuation)` in a fresh
-    /// store, bounded by `deadline` and 90 s.
+    /// Run `execution.invoke(capability, input)` in a fresh store, bounded
+    /// by `deadline` and 90 s.
     // The error is the guest-visible WIT `error-info`, returned unchanged.
     #[allow(clippy::result_large_err)]
     pub async fn invoke(
@@ -247,9 +244,8 @@ impl ControlExecutor {
         authority: ControlAuthority,
         capability: &str,
         input: Vec<u8>,
-        continuation: Option<Vec<u8>>,
         deadline: tokio::time::Instant,
-    ) -> Result<SuspendableOutcome, crate::ErrorInfo> {
+    ) -> Result<Vec<u8>, crate::ErrorInfo> {
         let tenant = authority.tenant.clone();
         let caller = authority.caller.clone();
         let mut audit = InvocationAudit {
@@ -307,7 +303,6 @@ impl ControlExecutor {
                     ControlApiCall { host, authority },
                     &capability,
                     input,
-                    continuation,
                     deadline,
                 )
                 .await
@@ -337,9 +332,8 @@ impl ControlExecutor {
         call: ControlApiCall,
         capability: &str,
         input: Vec<u8>,
-        continuation: Option<Vec<u8>>,
         deadline: tokio::time::Instant,
-    ) -> Result<SuspendableOutcome, crate::ErrorInfo> {
+    ) -> Result<Vec<u8>, crate::ErrorInfo> {
         let mut state = HostState::restricted();
         state.set_limits(MEMORY_LIMIT, 100_000);
         state.control_api = Some(call);
@@ -365,33 +359,21 @@ impl ControlExecutor {
             let export = instance
                 .get_export_index(&mut store, Some(&interface), "invoke")
                 .context("control execution invoke")?;
-            let func = instance.get_typed_func::<
-                (&str, &[u8], Option<&[u8]>),
-                (Result<SuspendableOutcome, crate::ErrorInfo>,),
-            >(&mut store, export)?;
-            let (result,) = func
-                .call_async(&mut store, (capability, &input, continuation.as_deref()))
-                .await?;
+            let func = instance
+                .get_typed_func::<(&str, &[u8]), (Result<Vec<u8>, crate::ErrorInfo>,)>(
+                    &mut store, export,
+                )?;
+            let (result,) = func.call_async(&mut store, (capability, &input)).await?;
             Ok::<_, anyhow::Error>(result)
         };
         let result = run.await;
         drop(store);
         match result {
-            Ok(Ok(outcome)) => {
-                let within = match &outcome {
-                    SuspendableOutcome::Completed(output) => output.len() <= MAX_OUTPUT,
-                    SuspendableOutcome::Suspended(suspension) => {
-                        suspension.state.len() <= MAX_STATE
-                    }
-                };
-                if !within {
-                    return Err(control_error_info(
-                        "CONTROL_TOO_LARGE",
-                        "control output or continuation exceeds its limit",
-                    ));
-                }
-                Ok(outcome)
-            }
+            Ok(Ok(output)) if output.len() > MAX_OUTPUT => Err(control_error_info(
+                "CONTROL_TOO_LARGE",
+                "control output exceeds its limit",
+            )),
+            Ok(Ok(output)) => Ok(output),
             Ok(Err(error)) => Err(error),
             Err(_) => Err(control_error_info(
                 "CONTROL_EXECUTION_FAILED",
@@ -435,11 +417,10 @@ pub(crate) struct ControlCall {
 async fn forward(
     call: ControlCall,
     operation: Option<String>,
-    continuation: Option<Vec<u8>>,
     deadline: tokio::time::Instant,
     capability: String,
     input: Vec<u8>,
-) -> Result<SuspendableOutcome, crate::ErrorInfo> {
+) -> Result<Vec<u8>, crate::ErrorInfo> {
     let Some(binding) = call.binding.as_ref() else {
         return Err(crate::control_host::denied_error_info(
             "this workflow artifact was not prepared with a control audit",
@@ -457,15 +438,13 @@ async fn forward(
             },
             &capability,
             input,
-            continuation,
             deadline,
         )
         .await
 }
 
 /// Bind `runtara:control/executor` for workflow stores: forward to the host
-/// executor with the store's authority and the entered operation's
-/// continuation.
+/// executor with the store's authority, including the entered operation.
 pub(crate) fn add_control_executor_to_linker(
     linker: &mut Linker<crate::workflow::WorkflowState>,
 ) -> Result<()> {
@@ -476,34 +455,25 @@ pub(crate) fn add_control_executor_to_linker(
             |accessor, (capability, input): (String, Vec<u8>)| {
                 let prepared = accessor.with(|mut access| {
                     let state = access.get();
-                    let operation = state.operation.current().cloned();
+                    let operation = state
+                        .operation
+                        .current()
+                        .map(|op| op.identity.op_hash.clone());
                     let deadline = state.database_deadline();
-                    state.control_executor.clone().map(|call| {
-                        (
-                            call,
-                            operation.as_ref().map(|op| op.identity.op_hash.clone()),
-                            operation.and_then(|op| op.continuation),
-                            deadline,
-                        )
-                    })
+                    state
+                        .control_executor
+                        .clone()
+                        .map(|call| (call, operation, deadline))
                 });
                 Box::pin(async move {
                     let result = match prepared {
-                        Some((call, operation, continuation, deadline)) => {
-                            forward(call, operation, continuation, deadline, capability, input)
-                                .await
+                        Some((call, operation, deadline)) => {
+                            forward(call, operation, deadline, capability, input).await
                         }
                         None => Err(crate::control_host::denied_error_info(
                             "no control executor is configured for this run",
                         )),
                     };
-                    // The host records the waits the approved executor
-                    // returned, so a park attaches exactly those.
-                    if let Ok(SuspendableOutcome::Suspended(suspension)) = &result {
-                        accessor.with(|mut access| {
-                            access.get().operation.record_waits(&suspension.wakes);
-                        });
-                    }
                     Ok((result,))
                 })
             },

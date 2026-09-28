@@ -5,18 +5,11 @@ package runtara:agent-{AGENT_ID}@0.4.0;
 
 interface capabilities {
     use runtara:agent/types@0.4.0.{error-info};
-    // Forwarded to the host executor; refuses a suspending capability.
+    // Forwarded to the host executor.
     invoke: async func(
         capability-id: string,
         input: list<u8>,
     ) -> result<list<u8>, error-info>;
-}
-
-// Must match runtara_agent_suspension::SUSPENDABLE_INTERFACE_WIT.
-interface suspendable {
-    use runtara:agent/types@0.4.0.{error-info};
-    use runtara:agent-suspension/types@0.1.0.{outcome};
-    invoke: async func(capability-id: string, input: list<u8>) -> result<outcome, error-info>;
 }
 
 world agent {
@@ -25,6 +18,5 @@ world agent {
     import runtara:control/executor@0.1.0;
     import runtara:control/api@0.1.0;
     export capabilities;
-    export suspendable;
     export runtara:control/execution@0.1.0;
 }

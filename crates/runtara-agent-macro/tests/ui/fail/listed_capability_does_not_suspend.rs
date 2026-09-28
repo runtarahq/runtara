@@ -12,8 +12,7 @@ fn get(input: Input) -> Result<String, String> {
 }
 
 runtara_agent_macro::agent_component!(
-    agent = "control",
-    control_executor = true,
+    agent = "probe",
     capabilities = [get],
     suspending = [get],
 );

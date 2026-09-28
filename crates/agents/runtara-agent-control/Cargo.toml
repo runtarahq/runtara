@@ -16,7 +16,6 @@ crate-type = ["cdylib", "rlib"]
 wit-bindgen = "0.58"
 serde = { workspace = true }
 serde_json = { workspace = true }
-runtara-agent-suspension = { path = "../../runtara-agent-suspension" }
 runtara-control-contract = { path = "../../runtara-control-contract" }
 # Capability metadata stays beside the code; `runtara-agent-bundle-emit`
 # serializes `agent_info()` to the sidecar meta.json.

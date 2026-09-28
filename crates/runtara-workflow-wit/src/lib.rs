@@ -150,8 +150,8 @@ pub const CONTROL_EXECUTOR_INTERFACE_NAME: &str = "runtara:control/executor@0.1.
 /// Exported by the control agent, called only by the host executor.
 pub const CONTROL_EXECUTION_INTERFACE_NAME: &str = "runtara:control/execution@0.1.0";
 
-/// WIT text for `runtara:control@0.1.0`. It `use`s `runtara:agent@0.4.0` and
-/// `runtara:agent-suspension@0.1.0`, which must be in the resolve first.
+/// WIT text for `runtara:control@0.1.0`. It `use`s `runtara:agent@0.4.0`,
+/// which must be in the resolve first.
 pub const CONTROL_WIT: &str = include_str!("../wit/control/runtara-control.wit");
 
 #[cfg(test)]
@@ -627,7 +627,7 @@ mod control_tests {
     }
 
     #[test]
-    fn only_host_called_execution_takes_a_continuation() {
+    fn control_forwarding_is_a_plain_call_and_takes_no_identity() {
         let mut resolve = resolve();
         let id = resolve.push_str("control.wit", super::CONTROL_WIT).unwrap();
         let package = &resolve.packages[id];
@@ -640,10 +640,22 @@ mod control_tests {
                 .collect()
         };
         assert_eq!(params("executor"), ["capability-id", "input"]);
-        assert_eq!(
-            params("execution"),
-            ["capability-id", "input", "continuation"]
-        );
+        assert_eq!(params("execution"), ["capability-id", "input"]);
+        for interface in ["executor", "execution"] {
+            let invoke = &resolve.interfaces[package.interfaces[interface]].functions["invoke"];
+            let Some(wit_parser::Type::Id(result)) = invoke.result else {
+                panic!("{interface}.invoke returns a result");
+            };
+            let TypeDefKind::Result(result) = &resolve.types[result].kind else {
+                panic!("{interface}.invoke returns a result");
+            };
+            assert!(
+                matches!(result.ok, Some(wit_parser::Type::Id(list))
+                    if matches!(resolve.types[list].kind,
+                        TypeDefKind::List(wit_parser::Type::U8))),
+                "{interface}.invoke answers the capability's JSON output"
+            );
+        }
         let api = &resolve.interfaces[package.interfaces["api"]];
         for function in api.functions.values() {
             assert!(matches!(function.kind, FunctionKind::AsyncFreestanding));
@@ -732,8 +744,6 @@ mod control_tests {
             ("cancel", "request"),
             ("pause", "instance-id"),
             ("resume", "instance-id"),
-            ("wait", "request"),
-            ("poll-wait", "wait-id"),
         ]
         .iter()
         .map(|(name, param)| (name.to_string(), vec![param.to_string()]))
@@ -750,7 +760,7 @@ mod control_tests {
             .iter()
             .map(|code| code.wit_name().to_string())
             .collect();
-        assert_eq!(codes.len(), 19);
+        assert_eq!(codes.len(), 18);
         assert_eq!(
             enum_cases(&resolve, types, "error-code"),
             codes,
@@ -791,15 +801,12 @@ mod control_tests {
                 "command-outcome",
                 &["requested", "applied", "unchanged", "already-terminal"],
             ),
-            ("wait-mode", &["all", "any"]),
-            ("wait-resolution", &["satisfied", "deadline", "empty"]),
         ] {
             assert_eq!(enum_cases(&resolve, types, name), cases, "{name}");
         }
         for (name, cases) in [
             ("parent-filter", &["caller", "instance"][..]),
             ("signal-scope", &["instance", "workflow", "children"]),
-            ("wait-poll", &["pending", "settled"]),
         ] {
             assert_eq!(variant_cases(&resolve, types, name), cases, "{name}");
         }
@@ -835,15 +842,6 @@ mod control_tests {
                     "replayed",
                 ],
             ),
-            ("wait-request", &["instance-ids", "mode", "deadline-ms"]),
-            (
-                "wait-progress",
-                &["mode", "finished", "remaining", "deadline-ms"],
-            ),
-            (
-                "target-outcome",
-                &["instance-id", "status", "finished-at-ms", "terminal"],
-            ),
             (
                 "send-signal-request",
                 &[
@@ -869,7 +867,19 @@ mod control_tests {
         use wit_parser::{Int, SizeAlign, Type};
 
         let mut resolve = resolve();
-        let id = resolve.push_str("control.wit", super::CONTROL_WIT).unwrap();
+        // `result<outcome, error-info>` as a suspendable agent's `invoke`
+        // returns it.
+        let id = resolve
+            .push_str(
+                "probe.wit",
+                "package runtara:layout-probe;\n\
+                 interface suspendable {\n\
+                 use runtara:agent/types@0.4.0.{error-info};\n\
+                 use runtara:agent-suspension/types@0.1.0.{outcome};\n\
+                 invoke: func(capability-id: string, input: list<u8>) -> result<outcome, error-info>;\n\
+                 }\n",
+            )
+            .unwrap();
         let mut sizes = SizeAlign::default();
         sizes.fill(&resolve);
         let bytes = |size: wit_parser::ArchitectureSize| size.size_wasm32() as u32;
@@ -924,14 +934,13 @@ mod control_tests {
         assert_eq!(alignment(&ty("outcome")), layout::OUTCOME_ALIGN);
         assert_eq!(payload_offset("outcome"), layout::OUTCOME_PAYLOAD_OFFSET);
 
-        // `result<outcome, error-info>` as `execution.invoke` returns it.
         let package = &resolve.packages[id];
-        let execution = &resolve.interfaces[package.interfaces["execution"]];
-        let Some(Type::Id(result)) = execution.functions["invoke"].result else {
-            panic!("execution.invoke returns a result");
+        let suspendable = &resolve.interfaces[package.interfaces["suspendable"]];
+        let Some(Type::Id(result)) = suspendable.functions["invoke"].result else {
+            panic!("suspendable.invoke returns a result");
         };
         let TypeDefKind::Result(result) = &resolve.types[result].kind else {
-            panic!("execution.invoke returns a result");
+            panic!("suspendable.invoke returns a result");
         };
         assert_eq!(
             bytes(sizes.payload_offset(Int::U8, [result.ok.as_ref(), result.err.as_ref()])),

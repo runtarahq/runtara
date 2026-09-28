@@ -10,10 +10,13 @@
 //!   run's own instance; nothing about the identity comes from agent input.
 //!   The entered `op_hash` is the `operation` of every control call the site
 //!   makes (`ControlAuthority`), and a second `enter` in one run fails closed.
-//! - `runtara:agent-suspension/context.continuation()` hands an ordinary
-//!   suspending agent the continuation of the entered operation. The control
-//!   agent receives the same continuation as an argument of the host-called
-//!   `runtara:control/execution` instead (see `control_executor`).
+//! - `runtara:agent-suspension/context.continuation()` hands a suspending
+//!   agent the continuation of the entered operation.
+//!
+//! An agent suspension may wake at a time (`at`). Nothing lets an agent
+//! register an instance wait, so an `instances` wake is refused as
+//! `AGENT_INVALID_SUSPENSION`; a run waits on other runs with the
+//! `WaitForInstances` step (`instance_wait_host`).
 //!
 //! Persistence goes through [`crate::runtime_host::RuntimeHost`]; hosts
 //! without typed suspension refuse, which fails the step instead of losing
@@ -183,9 +186,6 @@ pub fn parse_agent_operation_key(key: &str, attempt: u32) -> Result<OperationIde
 pub(crate) struct EnteredOperation {
     pub(crate) identity: OperationIdentity,
     pub(crate) continuation: Option<Vec<u8>>,
-    /// Instance waits the control executor returned for this operation. Only
-    /// these may be named by its suspension's `instances` wakes.
-    pub(crate) waits: Vec<String>,
 }
 
 const SECOND_ENTER: &str =
@@ -195,9 +195,6 @@ const SECOND_ENTER: &str =
 #[derive(Debug, Default)]
 pub(crate) struct OperationScopeState {
     current: Option<EnteredOperation>,
-    /// Instance waits the run's last suspension attached; the park waits on
-    /// exactly these (`InvokeRunResult::instance_waits`).
-    parked_waits: Vec<String>,
 }
 
 impl OperationScopeState {
@@ -227,7 +224,6 @@ impl OperationScopeState {
         self.current = Some(EnteredOperation {
             identity,
             continuation,
-            waits: Vec::new(),
         });
         Ok(())
     }
@@ -237,29 +233,9 @@ impl OperationScopeState {
         self.current.take()
     }
 
-    /// Instance-wait ids the run's last suspension attached.
-    pub(crate) fn registered_waits(&self) -> &[String] {
-        &self.parked_waits
-    }
-
-    /// Record the instance waits of `wakes` the control executor returned
-    /// for the entered operation, once each. Outside an operation there is
-    /// nothing to attach them to.
-    pub(crate) fn record_waits(&mut self, wakes: &[SuspensionWake]) {
-        let Some(current) = self.current.as_mut() else {
-            return;
-        };
-        for wake in wakes {
-            if let SuspensionWake::Instances(id) = wake
-                && !current.waits.contains(id)
-            {
-                current.waits.push(id.clone());
-            }
-        }
-    }
-
-    /// Check a suspension of the entered operation against the caps and the
-    /// waits it registered, and return its identity.
+    /// Check a suspension of the entered operation against the caps, and
+    /// return its identity. No operation registers instance waits, so an
+    /// `instances` wake is refused.
     pub(crate) fn check_suspension(
         &self,
         state: &[u8],
@@ -277,27 +253,19 @@ impl OperationScopeState {
         let contract: Vec<_> = wakes.iter().map(SuspensionWake::to_contract).collect();
         runtara_agent_suspension::validate_suspension(&contract, state).map_err(invalid)?;
         if let Some(foreign) = wakes.iter().find_map(|wake| match wake {
-            SuspensionWake::Instances(id) if !current.waits.contains(id) => Some(id),
-            _ => None,
+            SuspensionWake::Instances(id) => Some(id),
+            SuspensionWake::At(_) => None,
         }) {
             return Err(invalid(format!(
-                "`{foreign}` is not an instance wait this operation registered"
+                "`{foreign}` is not an instance wait this operation registered; agents cannot register one"
             )));
         }
         Ok(current.identity.clone())
     }
 
-    /// Leave the entered operation as suspended: the park waits on the
-    /// instance waits of `wakes`.
-    pub(crate) fn suspended(&mut self, wakes: &[SuspensionWake]) {
+    /// Leave the entered operation as suspended.
+    pub(crate) fn suspended(&mut self) {
         self.current = None;
-        self.parked_waits = wakes
-            .iter()
-            .filter_map(|wake| match wake {
-                SuspensionWake::Instances(id) => Some(id.clone()),
-                SuspensionWake::At(_) => None,
-            })
-            .collect();
     }
 }
 
@@ -403,7 +371,7 @@ pub(crate) fn add_operation_scope_to_linker(
                     .map_err(|error| {
                         wasmtime::format_err!("storing the operation continuation failed: {error}")
                     })?;
-                store.data_mut().operation.suspended(&wakes);
+                store.data_mut().operation.suspended();
                 Ok((Ok(()),))
             })
         },
@@ -533,19 +501,16 @@ mod tests {
     }
 
     #[test]
-    fn a_suspension_attaches_only_the_waits_its_operation_registered() {
+    fn a_suspension_is_checked_against_the_caps_and_names_no_instance_wait() {
         let mut state = OperationScopeState::default();
-        // Outside an operation there is nothing to attach waits to.
-        state.record_waits(&[SuspensionWake::Instances("stray".into())]);
-        let site = key("wf", serde_json::json!([]), "wait");
+        let wakes = [SuspensionWake::At(9)];
+        assert!(
+            state.check_suspension(b"s", &wakes).is_err(),
+            "outside an operation"
+        );
+        let site = key("wf", serde_json::json!([]), "pause");
         let identity = state.admit(&site, 2).unwrap();
         state.enter(identity.clone(), None).unwrap();
-        state.record_waits(&[
-            SuspensionWake::Instances("w1".into()),
-            SuspensionWake::At(5),
-            SuspensionWake::Instances("w1".into()),
-        ]);
-        assert_eq!(state.current().unwrap().waits, ["w1"]);
 
         let invalid = runtara_agent_suspension::AGENT_INVALID_SUSPENSION;
         for (wakes, bytes) in [
@@ -554,31 +519,45 @@ mod tests {
                 vec![SuspensionWake::At(1); runtara_agent_suspension::MAX_WAKES + 1],
                 0,
             ),
-            (vec![SuspensionWake::Instances("x".repeat(65))], 0),
             (
                 vec![SuspensionWake::At(1)],
                 runtara_agent_suspension::MAX_CONTINUATION_BYTES + 1,
             ),
-            // A wait another operation (or nobody) registered.
-            (vec![SuspensionWake::Instances("stray".into())], 0),
+            // No operation registers an instance wait.
+            (vec![SuspensionWake::Instances("w1".into())], 0),
+            (
+                vec![
+                    SuspensionWake::At(1),
+                    SuspensionWake::Instances("w1".into()),
+                ],
+                0,
+            ),
         ] {
             let error = state.check_suspension(&vec![0; bytes], &wakes).unwrap_err();
             assert!(error.starts_with(invalid), "{error}");
         }
-        let wakes = [
-            SuspensionWake::Instances("w1".into()),
-            SuspensionWake::At(9),
-        ];
         assert_eq!(state.check_suspension(b"s", &wakes).unwrap(), identity);
-        state.suspended(&wakes);
+        state.suspended();
         assert!(state.current().is_none());
-        assert_eq!(state.registered_waits(), ["w1"]);
+    }
 
-        // A later operation's suspension replaces what the park waits on.
-        let next = key("wf", serde_json::json!([]), "delay");
-        state.enter(state.admit(&next, 1).unwrap(), None).unwrap();
-        state.suspended(&[SuspensionWake::At(3)]);
-        assert!(state.registered_waits().is_empty());
+    /// The hand-written suspension mirrors have the canonical layout the
+    /// emitter reads (`runtara_agent_suspension::layout`, pinned against the
+    /// WIT by `runtara-workflow-wit`).
+    #[test]
+    fn suspension_mirrors_match_the_canonical_layout() {
+        use runtara_agent_suspension::layout;
+        use wasmtime::component::ComponentType;
+        assert_eq!(SuspensionWake::SIZE32, layout::WAKE_SIZE as usize);
+        assert_eq!(SuspensionWake::ALIGN32, layout::WAKE_ALIGN);
+        assert_eq!(Suspension::SIZE32, layout::SUSPENSION_SIZE as usize);
+        assert_eq!(Suspension::ALIGN32, layout::SUSPENSION_ALIGN);
+        assert_eq!(SuspendableOutcome::SIZE32, layout::OUTCOME_SIZE as usize);
+        assert_eq!(SuspendableOutcome::ALIGN32, layout::OUTCOME_ALIGN);
+        assert_eq!(
+            <Result<SuspendableOutcome, crate::ErrorInfo> as ComponentType>::ALIGN32,
+            layout::INVOKE_RESULT_PAYLOAD_OFFSET
+        );
     }
 
     #[test]

@@ -24,7 +24,6 @@ mod bindings {
     wasmtime::component::bindgen!({
         path: [
             "../runtara-agent-wit/wit",
-            "../runtara-agent-suspension/wit",
             "../runtara-workflow-wit/wit/control",
         ],
         world: "runtara:control/control-agent-host",
@@ -39,8 +38,7 @@ pub use bindings::runtara::control::types::{
     InstanceDetail, InstancePage, InstanceStatus, InstanceSummary, ParentClosePolicy, ParentFilter,
     PendingSignal, PendingSignalPage, PendingSignalsRequest, QueryRequest, SendSignalRequest,
     SendSignalResult, SignalScope, SortField, SortOrder, StartRequest, StartResult,
-    SuspensionReason, TargetOutcome, TerminalResult, WaitMode, WaitPoll, WaitProgress, WaitRequest,
-    WaitResolution, WaitSettled,
+    SuspensionReason, TerminalResult,
 };
 
 impl ControlError {
@@ -155,24 +153,6 @@ pub trait ControlHost: Send + Sync {
     ) -> Result<CommandResult, ControlError> {
         Err(ControlError::unsupported())
     }
-
-    /// Register the caller operation's wait; returns its id.
-    async fn wait(
-        &self,
-        _authority: &ControlAuthority,
-        _request: WaitRequest,
-    ) -> Result<String, ControlError> {
-        Err(ControlError::unsupported())
-    }
-
-    /// Read a registered wait without blocking.
-    async fn poll_wait(
-        &self,
-        _authority: &ControlAuthority,
-        _wait_id: String,
-    ) -> Result<WaitPoll, ControlError> {
-        Err(ControlError::unsupported())
-    }
 }
 
 /// The real control service for one executor store.
@@ -207,8 +187,6 @@ macro_rules! with_control_api {
             "cancel" => cancel(CancelRequest) -> CommandResult,
             "pause" => pause(String) -> CommandResult,
             "resume" => resume(String) -> CommandResult,
-            "wait" => wait(WaitRequest) -> String,
-            "poll-wait" => poll_wait(String) -> WaitPoll,
         )
     };
 }
@@ -222,7 +200,7 @@ macro_rules! api_names {
 }
 
 #[cfg(test)]
-pub(crate) const LINKED_API_FUNCTIONS: [&str; 10] = with_control_api!(api_names!(unused));
+pub(crate) const LINKED_API_FUNCTIONS: [&str; 8] = with_control_api!(api_names!(unused));
 
 /// Bind `runtara:control/api` to the store's [`ControlApiCall`]. Only the
 /// control executor's linker uses this; a store without one is `denied`.
@@ -292,9 +270,9 @@ pub(crate) fn add_denied_control_executor_to_linker<T: Send + 'static>(
         .instance(runtara_workflow_wit::CONTROL_EXECUTOR_INTERFACE_NAME)?
         .func_wrap_concurrent("invoke", |_, (_, _): (String, Vec<u8>)| {
             Box::pin(async {
-                Ok((Err::<crate::operation_scope_host::SuspendableOutcome, _>(
-                    denied_error_info("control executor calls are not available in this context"),
-                ),))
+                Ok((Err::<Vec<u8>, _>(denied_error_info(
+                    "control executor calls are not available in this context",
+                )),))
             })
         })?;
     Ok(())
@@ -303,9 +281,6 @@ pub(crate) fn add_denied_control_executor_to_linker<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operation_scope_host::{SuspendableOutcome, Suspension, SuspensionWake};
-    use runtara_agent_suspension::layout;
-    use wasmtime::component::ComponentType;
 
     /// The host links exactly the functions the frozen WIT declares.
     #[test]
@@ -319,22 +294,5 @@ mod tests {
             .map(|(name, _)| name)
             .collect();
         assert_eq!(declared, LINKED_API_FUNCTIONS);
-    }
-
-    /// The hand-written suspension mirrors have the canonical layout the
-    /// emitter reads (`runtara_agent_suspension::layout`, pinned against the
-    /// WIT by `runtara-workflow-wit`).
-    #[test]
-    fn suspension_mirrors_match_the_canonical_layout() {
-        assert_eq!(SuspensionWake::SIZE32, layout::WAKE_SIZE as usize);
-        assert_eq!(SuspensionWake::ALIGN32, layout::WAKE_ALIGN);
-        assert_eq!(Suspension::SIZE32, layout::SUSPENSION_SIZE as usize);
-        assert_eq!(Suspension::ALIGN32, layout::SUSPENSION_ALIGN);
-        assert_eq!(SuspendableOutcome::SIZE32, layout::OUTCOME_SIZE as usize);
-        assert_eq!(SuspendableOutcome::ALIGN32, layout::OUTCOME_ALIGN);
-        assert_eq!(
-            <Result<SuspendableOutcome, crate::ErrorInfo> as ComponentType>::ALIGN32,
-            layout::INVOKE_RESULT_PAYLOAD_OFFSET
-        );
     }
 }

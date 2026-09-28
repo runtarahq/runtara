@@ -446,8 +446,10 @@ pub async fn get_workflow_authoring_schema(
 
 /// The control agent's author reference, the same text as the "As built"
 /// section of `docs/control-agent.md`. Every number comes from
-/// `runtara-control-contract` or `runtara-agent-suspension`.
+/// `runtara-control-contract`, `runtara-agent-suspension` or the instance
+/// wait service.
 pub(crate) fn control_agent_reference() -> serde_json::Value {
+    use crate::api::services::instance_waits as waits;
     use runtara_agent_suspension::{
         AGENT_CONTINUATION_REJECTED, AGENT_INVALID_SUSPENSION, MAX_CONTINUATION_BYTES,
     };
@@ -456,7 +458,7 @@ pub(crate) fn control_agent_reference() -> serde_json::Value {
     let mib = |bytes: usize| bytes / (1024 * 1024);
     serde_json::json!({
         "agentId": runtara_dsl::agent_meta::CONTROL_AGENT_ID,
-        "availability": "Every pricing tier, whatever the agent allowlist says. Mutations and wait only run as steps of a workflow run: test_capability answers CONTROL_REQUIRES_INSTANCE for capabilities tagged runtime:requires-run.",
+        "availability": "Every pricing tier, whatever the agent allowlist says. Mutations only run as steps of a workflow run: test_capability answers CONTROL_REQUIRES_INSTANCE for capabilities tagged runtime:requires-run.",
         "capabilities": {
             "start": "Durably admit a child run of another workflow and return {instanceId, workflowId, version, runLabel, replayed} once it is accepted, without waiting for it.",
             "get": "Read one run of the tenant: status, suspensionReason, parentInstanceId, output or error.",
@@ -465,12 +467,11 @@ pub(crate) fn control_agent_reference() -> serde_json::Value {
             "send-signal": "Answer the one open request of a WaitForSignal step, validated against its response schema.",
             "cancel": "Cancel a direct child: cooperatively, forced after graceMs. A parked or queued child ends at once.",
             "pause": "Pause a direct child. A waiting child pauses at once, a running one at its next checkpoint.",
-            "resume": "Resume an explicitly paused direct child (CONTROL_NOT_PAUSED otherwise). It never answers a WaitForSignal request.",
-            "wait": "Park the calling run, without holding a runner, until direct children finish (all) or the first does (any), or the optional deadline passes."
+            "resume": "Resume an explicitly paused direct child (CONTROL_NOT_PAUSED otherwise). It never answers a WaitForSignal request."
         },
         "authorization": [
             "Reads (get, query, list-pending-signals) see every run of the tenant. The caller-relative filters (query callerChildren, list-pending-signals children) need a calling run.",
-            "wait, cancel, pause and resume reach direct children only: CONTROL_NOT_CHILD otherwise, CONTROL_DENIED for an ancestor.",
+            "cancel, pause and resume reach direct children only: CONTROL_NOT_CHILD otherwise, CONTROL_DENIED for an ancestor.",
             "send-signal answers a child, an ancestor, or any run whose WaitForSignal request opted in with action.key when the step passes the same actionKey; anything else is CONTROL_DENIED.",
             "No mutation may target the calling run (CONTROL_INVALID). Tenant, caller and operation come from the host, never from step inputs."
         ],
@@ -491,29 +492,29 @@ pub(crate) fn control_agent_reference() -> serde_json::Value {
             "values": ["queued", "pending", "running", "suspended", "completed", "failed", "cancelled", "not_started"],
             "queued": "A child still in admission: accepted by start, not launched yet. It can be cancelled but not paused or resumed.",
             "not_started": "A child that never launched: its one fenced outcome is not_started or cancelled. get and query report it; the public executions list does not.",
-            "suspensionReason": "For a suspended run: paused (explicitly paused, only a resume relaunches it), waiting_signal, waiting_instances (a control wait), sleeping or shutdown. The executions API reports the same as suspensionReason.",
+            "suspensionReason": "For a suspended run: paused (explicitly paused, only a resume relaunches it), waiting_signal, waiting_instances (a WaitForInstances step), sleeping or shutdown. The executions API reports the same as suspensionReason.",
             "terminal": "completed, failed and cancelled (including execution timeout). A child's failure is outcome data, never a retryable control error."
         },
-        "wait": {
-            "inputs": format!("instanceIds (direct children, at most {}), mode all (default) or any, optional deadline in epoch milliseconds.", c::MAX_WAIT_TARGETS),
-            "output": "{mode, resolution: satisfied | deadline | empty, finished: [{instanceId, status, output or error}], remaining: [ids]}.",
+        "waitForInstances": {
+            "step": "Waiting on children is the WaitForInstances step, not a control capability: start the children, then wait on their instanceIds.",
+            "fields": format!("instanceIds (distinct direct children, at most {}), mode all (default) or any, optional timeoutMs (a business deadline counted from the first registration).", waits::MAX_WAIT_TARGETS),
+            "output": "{mode, resolution: satisfied | deadline | empty, finished: [{instanceId, status, output or error}], remaining: [ids], deadlineMs}.",
             "semantics": [
                 "all settles when every target is terminal, any when at least one is; repeat any with remaining to process results as they arrive.",
                 "An empty instanceIds returns resolution empty at once. Already finished targets count at once.",
-                "Too many, missing, non-child or ancestor targets fail the step and register nothing.",
-                "The deadline is a business timeout: the wait returns resolution deadline with what finished; it never cancels children.",
-                "The step timeout is the hard cap: it fails the step with AGENT_TIMEOUT even while parked, and follows onError.",
+                "Too many, missing, non-child or ancestor targets fail the step (INSTANCE_WAIT_<CODE>) and register nothing.",
+                "timeoutMs is a business timeout: the wait returns resolution deadline with what finished; it never cancels children.",
                 "The run parks without holding a runner or a concurrency slot and survives restarts; the wake is recorded in the same commit as the child that satisfies it.",
-                "The wait registers once per step operation: a replayed any keeps its choice, and the first deadline stands."
+                "The wait registers once per step and loop position: a replayed any keeps its choice, and the first deadline stands."
             ],
-            "stepRequirements": format!("The step must be durable (E028) and set timeout > 0 ms (E029); a timeout of at most {} ms times out instead of parking (W078).", runtara_dsl::step_context_rules::SUSPEND_DEADLINE_MARGIN_MS)
+            "stepRequirements": "The workflow must be durable (E028), and the step may not sit in onError, a WaitForSignal onWait or an AiAgent tool or memory target (E131)."
         },
         "limits": {
             "inputBytes": format!("{} MiB per control call", mib(c::MAX_INPUT_BYTES)),
             "getOutputInline": format!("{} MiB output, {} KiB error, else outputOmitted/errorOmitted with the size", mib(c::GET_OUTPUT_INLINE_BYTES), kib(c::GET_ERROR_INLINE_BYTES)),
             "pageSize": format!("{}-{} (default 20) for query and list-pending-signals", c::PAGE_SIZE_MIN, c::PAGE_SIZE_MAX),
-            "waitTargets": c::MAX_WAIT_TARGETS,
-            "waitInline": format!("{} KiB output and {} KiB error per child, {} MiB per wait; larger values are omitted and flagged", kib(c::WAIT_OUTPUT_INLINE_BYTES), kib(c::WAIT_ERROR_INLINE_BYTES), mib(c::WAIT_TOTAL_INLINE_BYTES)),
+            "waitTargets": waits::MAX_WAIT_TARGETS,
+            "waitInline": format!("{} KiB output and {} KiB error per child, {} MiB per wait; larger values are omitted and flagged", kib(waits::WAIT_OUTPUT_INLINE_BYTES), kib(waits::WAIT_ERROR_INLINE_BYTES), mib(waits::WAIT_TOTAL_INLINE_BYTES)),
             "runLabelBytes": c::MAX_RUN_LABEL_BYTES,
             "lineageDepth": c::MAX_LINEAGE_DEPTH,
             "cancelGraceMs": format!("0-{} (default {})", c::MAX_CANCEL_GRACE_MS, c::DEFAULT_CANCEL_GRACE_MS),
@@ -526,13 +527,12 @@ pub(crate) fn control_agent_reference() -> serde_json::Value {
             "table": [
                 {"capability": "get, query, list-pending-signals", "onReplay": "A durable step returns its checkpointed result; a non-durable one reads again."},
                 {"capability": "start", "onReplay": "Returns the same child (replayed: true), also after a crash between admission and the checkpoint. Other arguments are CONTROL_REPLAY_CONFLICT."},
-                {"capability": "send-signal, cancel, pause, resume", "onReplay": "Returns the receipt of the first call (replayed: true) without acting again. Other arguments are CONTROL_REPLAY_CONFLICT."},
-                {"capability": "wait", "onReplay": "Reads the wait it registered: same targets, deadline and, for any, the same choice. Other targets or mode are CONTROL_REPLAY_CONFLICT."}
+                {"capability": "send-signal, cancel, pause, resume", "onReplay": "Returns the receipt of the first call (replayed: true) without acting again. Other arguments are CONTROL_REPLAY_CONFLICT."}
             ],
             "suspension": format!("A suspending step keeps at most {} KiB of state per operation and attempt; a failed step discards it, so a retry starts afresh ({} when a capability refuses its saved state, {} when the host refuses a suspension).", kib(MAX_CONTINUATION_BYTES), AGENT_CONTINUATION_REJECTED, AGENT_INVALID_SUSPENSION)
         },
         "validation": {
-            "E028": "A suspending step (control wait) is not durable.",
+            "E028": "A suspending step (WaitForInstances, or an agent capability that suspends) is not durable.",
             "E029": "A suspending step has no timeout, or timeout 0.",
             "E131": "A suspending step sits in an onError region, a WaitForSignal onWait, or an AiAgent tool or memory target.",
             "E132": "A control step sits in a WaitForSignal onWait, or an AiAgent tool or memory target.",
@@ -548,7 +548,7 @@ pub(crate) fn control_agent_reference() -> serde_json::Value {
             format!("parentClosePolicy cancel cancels a still-running child whenever its parent ends (completed, failed, cancelled, or gone), with a {} s grace, even when the parent crashed or was stopped from outside; leave_running leaves it alone. A suspended parent has not ended.", c::PARENT_CLOSE_GRACE_MS / 1000),
             "Pausing a waiting run (parked on a timer, a signal or its children) pauses it at once, in control and in the public API; it loses its wake, and only an explicit resume relaunches it. Signal answers and finished children are kept and seen after the resume.",
             "Pausing a parent does not pause its children, and neither an any result nor a wait deadline cancels the remaining children; cancel them explicitly.",
-            "A finished child stays readable through get and wait until its parent is terminal (one level deep), then follows normal retention.",
+            "A finished child stays readable through get and WaitForInstances until its parent is terminal (one level deep), then follows normal retention.",
             "Cancellation is not rollback of the child's business side effects."
         ],
         "errorCodes": c::ErrorCode::all_agent_codes()
@@ -1873,7 +1873,10 @@ mod tests {
         let reference = &schema["controlAgent"];
         assert_eq!(reference, &control_agent_reference());
         let limits = &reference["limits"];
-        assert_eq!(limits["waitTargets"], c::MAX_WAIT_TARGETS);
+        assert_eq!(
+            limits["waitTargets"],
+            crate::api::services::instance_waits::MAX_WAIT_TARGETS
+        );
         assert_eq!(limits["runLabelBytes"], c::MAX_RUN_LABEL_BYTES);
         assert_eq!(limits["lineageDepth"], c::MAX_LINEAGE_DEPTH);
         assert_eq!(limits["parentCloseGraceMs"], c::PARENT_CLOSE_GRACE_MS);

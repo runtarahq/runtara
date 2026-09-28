@@ -214,20 +214,19 @@ mod tests {
 
     #[test]
     fn run_only_capabilities_answer_requires_instance_without_running() {
-        let run_only =
-            serde_json::json!({"id": "wait", "tags": ["runtime:requires-run"], "suspends": true});
+        let run_only = serde_json::json!({"id": "cancel", "tags": ["runtime:requires-run"]});
         assert!(requires_run(&run_only));
         assert!(!requires_run(&serde_json::json!({"id": "get"})));
         assert!(!requires_run(
             &serde_json::json!({"id": "x", "tags": ["memory:read"]})
         ));
-        let result = requires_run_result("wait");
+        let result = requires_run_result("cancel");
         assert_eq!(result["success"], false);
         assert!(
             result["error"]
                 .as_str()
                 .unwrap()
-                .starts_with("CONTROL_REQUIRES_INSTANCE: wait ")
+                .starts_with("CONTROL_REQUIRES_INSTANCE: cancel ")
         );
     }
 

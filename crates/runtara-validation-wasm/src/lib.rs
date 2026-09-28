@@ -1170,30 +1170,35 @@ mod tests {
             "capabilities": [
                 {"id": "get", "name": "Get", "inputType": "GetInput", "inputs": [],
                  "output": {"type": "object"}, "hasSideEffects": false,
-                 "isIdempotent": true, "rateLimited": false},
-                {"id": "wait", "name": "Wait", "inputType": "WaitInput", "inputs": [],
+                 "isIdempotent": true, "rateLimited": false}
+            ]
+        }, {
+            "id": "waiter", "name": "Waiter", "description": "Long-polls",
+            "hasSideEffects": false, "supportsConnections": false, "integrationIds": [],
+            "capabilities": [
+                {"id": "pause", "name": "Pause", "inputType": "PauseInput", "inputs": [],
                  "output": {"type": "object"}, "hasSideEffects": false,
                  "isIdempotent": true, "rateLimited": false, "suspends": true}
             ]
         }]"#;
         let init_response: Value = serde_json::from_str(&init_agent_catalog(catalog)).unwrap();
         assert_eq!(init_response["success"], true);
-        let wait: Value = serde_json::from_str(&get_capability_schema_json("control", "wait"))
+        let pause: Value = serde_json::from_str(&get_capability_schema_json("waiter", "pause"))
             .expect("capability JSON");
-        assert_eq!(wait["suspends"], true);
+        assert_eq!(pause["suspends"], true);
 
         let response = validate_execution_graph_json_impl(
             r#"{
                 "steps": {
-                    "wait": {"stepType": "Agent", "id": "wait", "agentId": "control",
-                        "capabilityId": "wait", "maxRetries": 0},
+                    "pause": {"stepType": "Agent", "id": "pause", "agentId": "waiter",
+                        "capabilityId": "pause", "maxRetries": 0},
                     "signal": {"stepType": "WaitForSignal", "id": "signal", "onWait": {
                         "entryPoint": "get",
                         "steps": {"get": {"stepType": "Agent", "id": "get",
                             "agentId": "control", "capabilityId": "get"}}}}
                 },
-                "entryPoint": "wait",
-                "executionPlan": [{"fromStep": "wait", "toStep": "signal"}]
+                "entryPoint": "pause",
+                "executionPlan": [{"fromStep": "pause", "toStep": "signal"}]
             }"#,
         );
         assert!(response.success);

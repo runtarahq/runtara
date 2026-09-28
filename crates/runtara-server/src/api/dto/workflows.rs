@@ -1532,8 +1532,8 @@ mod tests {
         let cases = [
             (
                 ValidationError::SuspendingCapabilityNotDurable {
-                    step_id: "wait".into(),
-                    capability: "control:wait".into(),
+                    step_id: "pause".into(),
+                    capability: "waiter:pause".into(),
                     child_workflow_id: None,
                 },
                 "E028",
@@ -1541,16 +1541,16 @@ mod tests {
             ),
             (
                 ValidationError::SuspendingCapabilityMissingTimeout {
-                    step_id: "wait".into(),
-                    capability: "control:wait".into(),
+                    step_id: "pause".into(),
+                    capability: "waiter:pause".into(),
                 },
                 "E029",
                 Some("timeout"),
             ),
             (
                 ValidationError::SuspendingCapabilityUnsupportedContext {
-                    step_id: "wait".into(),
-                    capability: "control:wait".into(),
+                    step_id: "pause".into(),
+                    capability: "waiter:pause".into(),
                     context: "on-wait".into(),
                     child_workflow_id: None,
                 },

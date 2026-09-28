@@ -6,8 +6,8 @@ use crate::validation::validate_workflow;
 use runtara_dsl::step_context_rules::{OperationScopedKind, STEP_CONTEXT_RULES};
 use serde_json::{Value, json};
 
-/// `control` (start, get; wait suspends), `waiter` (pause suspends) and an
-/// ordinary `utils` agent.
+/// `control` (start, get), `waiter` (pause suspends) and an ordinary `utils`
+/// agent.
 fn catalog() -> AgentCatalog {
     let capability = |id: &str, suspends: bool| {
         json!({"id": id, "name": id, "inputType": "Input", "inputs": [],
@@ -22,11 +22,7 @@ fn catalog() -> AgentCatalog {
         &json!([
             agent(
                 "control",
-                vec![
-                    capability("start", false),
-                    capability("get", false),
-                    capability("wait", true),
-                ]
+                vec![capability("start", false), capability("get", false)]
             ),
             agent("waiter", vec![capability("pause", true)]),
             agent("utils", vec![capability("plain", false)]),

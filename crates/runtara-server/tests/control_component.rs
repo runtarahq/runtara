@@ -113,11 +113,6 @@ impl Harness {
         })
     }
 
-    /// A fresh runner over the same store and executor, as after a restart.
-    fn restarted_runner(&self) -> anyhow::Result<EmbeddedWasmRunner> {
-        runner(self.dir.path(), &self.persistence, &self.control)
-    }
-
     /// Compile `graph` against the same bundle.
     fn compile(&self, graph: Value) -> anyhow::Result<PathBuf> {
         let compiled = compile_direct_workflow_composed(
@@ -650,111 +645,21 @@ async fn a_composed_control_start_launches_a_real_child() -> anyhow::Result<()> 
     Ok(())
 }
 
-fn wait_graph() -> Value {
-    json!({"durable": true, "entryPoint": "read", "steps": {
-        "read": {"id": "read", "stepType": "Agent", "agentId": "control",
+/// Two `control:get` calls in a row: the first reads `data.first`, the
+/// second the same run again.
+fn two_reads_graph() -> Value {
+    let read = |id: &str| {
+        json!({"id": id, "stepType": "Agent", "agentId": "control",
             "capabilityId": "get", "maxRetries": 0, "inputMapping": {
-                "instanceId": {"valueType": "reference", "value": "data.first"}}},
-        "wait": {"id": "wait", "stepType": "Agent", "agentId": "control",
-            "capabilityId": "wait", "maxRetries": 0, "timeout": 300_000, "inputMapping": {
-                "instanceIds": {"valueType": "reference", "value": "data.children"},
-                "mode": {"valueType": "immediate", "value": "all"}}},
+                "instanceId": {"valueType": "reference", "value": "data.first"}}})
+    };
+    json!({"durable": true, "entryPoint": "read", "steps": {
+        "read": read("read"),
+        "again": read("again"),
         "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
-            "result": {"valueType": "reference", "value": "steps.wait.outputs"}}}},
-        "executionPlan": [{"fromStep": "read", "toStep": "wait"},
-            {"fromStep": "wait", "toStep": "finish"}]})
-}
-
-/// `control:wait` against the real native service: the parent parks on its
-/// children without holding a runner slot, both answers wake it (in either
-/// order), and a runner that started after the park resumes it to the
-/// children's results. The finished wait and its continuation are released.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_composed_control_wait_parks_without_a_slot_and_resumes_after_a_restart()
--> anyhow::Result<()> {
-    let harness = Harness::new().await?;
-    let wasm = harness.compile(wait_graph())?;
-    for order in [[0usize, 1], [1, 0]] {
-        let parent = format!("{}-parent-{}{}", harness.tenant, order[0], order[1]);
-        let children = [format!("{parent}-finance"), format!("{parent}-legal")];
-        let input = harness
-            .family(
-                &parent,
-                &children,
-                json!({"first": children[0], "children": children}),
-            )
-            .await;
-        let parked = harness
-            .run_on(&harness.runner, &wasm, &parent, Some(input))
-            .await?;
-        assert_eq!(
-            parked.status,
-            InstanceStatus::Suspended,
-            "{:?}",
-            parked.error
-        );
-        assert_eq!(
-            parked.termination_reason.as_deref(),
-            Some("waiting_instances")
-        );
-        assert_eq!(
-            harness.runner.occupancy().expect("occupancy").held,
-            0,
-            "a parked parent holds no runner slot"
-        );
-        let (continuations, waits): (i64, i64) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM instance_agent_continuations WHERE instance_id = $1), \
-                    (SELECT count(*) FROM instance_waits WHERE waiter_instance_id = $1)",
-        )
-        .bind(&parent)
-        .fetch_one(&harness.pool)
-        .await?;
-        assert_eq!((continuations, waits), (1, 1));
-
-        for (n, index) in order.into_iter().enumerate() {
-            harness
-                .persistence
-                .complete_instance(
-                    CompleteInstanceParams::new(&children[index], InstanceStatus::Completed)
-                        .with_output(format!(r#"{{"approved":{index}}}"#).as_bytes()),
-                )
-                .await?;
-            let row = harness.persistence.get_instance(&parent).await?.unwrap();
-            assert_eq!(
-                row.wake_reason == Some(runtara_core::domain::WakeReason::InstancesTerminal),
-                n == 1,
-                "only the second answer satisfies `all`"
-            );
-        }
-
-        let restarted = harness.restarted_runner()?;
-        let done = harness.run_on(&restarted, &wasm, &parent, None).await?;
-        assert_eq!(done.status, InstanceStatus::Completed, "{:?}", done.error);
-        let output: Value = serde_json::from_slice(done.output.as_deref().unwrap())?;
-        let result = &output["result"];
-        assert_eq!(result["resolution"], "satisfied");
-        assert_eq!(result["remaining"], json!([]));
-        let finished = result["finished"].as_array().unwrap();
-        assert_eq!(
-            finished
-                .iter()
-                .map(|target| target["instanceId"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            order.map(|index| children[index].as_str()),
-            "finish order"
-        );
-        assert_eq!(finished[0]["output"], json!({"approved": order[0]}));
-        assert_eq!(finished[0]["outputOmitted"], false);
-        let (continuations, waits): (i64, i64) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM instance_agent_continuations WHERE instance_id = $1), \
-                    (SELECT count(*) FROM instance_waits WHERE waiter_instance_id = $1)",
-        )
-        .bind(&parent)
-        .fetch_one(&harness.pool)
-        .await?;
-        assert_eq!((continuations, waits), (0, 0), "released after the result");
-    }
-    Ok(())
+            "result": {"valueType": "reference", "value": "steps.again.outputs"}}}},
+        "executionPlan": [{"fromStep": "read", "toStep": "again"},
+            {"fromStep": "again", "toStep": "finish"}]})
 }
 
 /// Revokes the control approvals right after the run's first control call.
@@ -777,25 +682,17 @@ impl runtara_component_host::control_host::ControlHost for RevokeAfterFirstCall 
         self.control.set_approved_pins(Vec::<String>::new());
         result
     }
-
-    async fn wait(
-        &self,
-        authority: &runtara_component_host::control_host::ControlAuthority,
-        request: runtara_component_host::control_host::WaitRequest,
-    ) -> Result<String, runtara_component_host::control_host::ControlError> {
-        self.native.wait(authority, request).await
-    }
 }
 
 /// Decision D2: approval is re-checked on every call, so a control version
-/// revoked while a run is live fails its next call with `denied`, and the wait
-/// registers nothing.
+/// revoked while a run is live fails its next call with `denied` before the
+/// service is reached.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revoked_control_digest_is_denied_at_the_call() -> anyhow::Result<()> {
     let harness =
         Harness::new_with(|native, control| Arc::new(RevokeAfterFirstCall { native, control }))
             .await?;
-    let wasm = harness.compile(wait_graph())?;
+    let wasm = harness.compile(two_reads_graph())?;
     let parent = format!("{}-parent", harness.tenant);
     let children = [format!("{parent}-child")];
     let input = harness
@@ -814,12 +711,13 @@ async fn a_revoked_control_digest_is_denied_at_the_call() -> anyhow::Result<()> 
         "{:?}",
         run.error
     );
-    let waits: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM instance_waits WHERE waiter_instance_id = $1")
-            .bind(&parent)
-            .fetch_one(&harness.pool)
-            .await?;
-    assert_eq!(waits, 0, "a denied wait registers nothing");
+    assert!(
+        run.error
+            .as_deref()
+            .is_some_and(|error| error.contains("again")),
+        "the second call is the denied one: {:?}",
+        run.error
+    );
     Ok(())
 }
 
@@ -838,14 +736,14 @@ async fn an_unapproved_control_digest_leaves_the_image_not_ready() -> anyhow::Re
     let server = sqlx::PgPool::connect(&server_url).await?;
     sqlx::migrate!("./migrations").run(&server).await?;
 
-    let wasm = harness.compile(wait_graph())?;
+    let wasm = harness.compile(two_reads_graph())?;
     let pins: Vec<String> =
         runtara_workflows::direct_wasm::trusted_artifact_pins(&std::fs::read(&wasm)?)?
             .into_iter()
             .collect();
     assert!(pins.contains(&harness.control.pin().to_owned()));
-    let workflow = format!("waiter-{}", Uuid::new_v4());
-    let definition = wait_graph();
+    let workflow = format!("reader-{}", Uuid::new_v4());
+    let definition = two_reads_graph();
     let image = Uuid::new_v4().to_string();
     sqlx::query(
         "INSERT INTO workflows (tenant_id, workflow_id, version_count, latest_version) VALUES ($1,$2,1,1)",

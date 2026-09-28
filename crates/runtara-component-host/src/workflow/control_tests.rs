@@ -1,10 +1,10 @@
 //! Decision D2 at the host: roots reach control only through an audited,
 //! approved control copy, with authority from the store, and every call
-//! re-checks approval and caps its outcome.
+//! re-checks approval and caps its output.
 use super::*;
 use crate::control_executor::{ControlExecutor, control_pin};
 use crate::control_host::{
-    ControlAuthority, ControlError, ControlErrorCode, ControlHost, WaitPoll,
+    CommandOutcome, CommandResult, ControlAuthority, ControlError, ControlHost,
 };
 use crate::precompile::audit_control_importers;
 use sha2::Digest;
@@ -64,18 +64,22 @@ fn sha(bytes: &[u8]) -> String {
 
 #[derive(Default)]
 struct Host {
-    polls: std::sync::Mutex<Vec<ControlAuthority>>,
+    calls: std::sync::Mutex<Vec<ControlAuthority>>,
 }
 
 #[async_trait::async_trait]
 impl ControlHost for Host {
-    async fn poll_wait(
+    async fn pause(
         &self,
         authority: &ControlAuthority,
-        _wait_id: String,
-    ) -> Result<WaitPoll, ControlError> {
-        self.polls.lock().unwrap().push(authority.clone());
-        Err(ControlError::new(ControlErrorCode::NotFound, "no wait"))
+        instance_id: String,
+    ) -> Result<CommandResult, ControlError> {
+        self.calls.lock().unwrap().push(authority.clone());
+        Ok(CommandResult {
+            instance_id,
+            outcome: CommandOutcome::Applied,
+            replayed: false,
+        })
     }
 }
 
@@ -266,13 +270,13 @@ async fn forwarded_calls_carry_host_authority_and_recheck_approval_per_call() ->
         .await?;
 
     let result =
-        bounded(executor.execute_prepared_invoke(&prepared, run_spec(), b"poll".to_vec())).await;
+        bounded(executor.execute_prepared_invoke(&prepared, run_spec(), b"pause".to_vec())).await;
     match &result.exit {
-        InvokeExit::Completed(bytes) => assert_eq!(bytes, b"\"polled\""),
+        InvokeExit::Completed(bytes) => assert_eq!(bytes, b"\"paused\""),
         other => panic!("{other:?}"),
     }
     assert_eq!(
-        fx.host.polls.lock().unwrap().as_slice(),
+        fx.host.calls.lock().unwrap().as_slice(),
         [ControlAuthority {
             tenant: "tenant-a".into(),
             caller: Some("run-1".into()),
@@ -285,9 +289,9 @@ async fn forwarded_calls_carry_host_authority_and_recheck_approval_per_call() ->
     // artifact is refused at the call, before the service is reached.
     fx.control.set_approved_pins(Vec::<String>::new());
     let result =
-        bounded(executor.execute_prepared_invoke(&prepared, run_spec(), b"poll".to_vec())).await;
+        bounded(executor.execute_prepared_invoke(&prepared, run_spec(), b"pause".to_vec())).await;
     assert_eq!(failed_code(&result), "CONTROL_DENIED");
-    assert_eq!(fx.host.polls.lock().unwrap().len(), 1);
+    assert_eq!(fx.host.calls.lock().unwrap().len(), 1);
     Ok(())
 }
 
@@ -298,20 +302,20 @@ async fn a_root_store_without_a_prepared_binding_is_denied() -> anyhow::Result<(
     let pre = executor
         .load_instance_pre(&fx.write("root.wasm", &root()))
         .await?;
-    let result = bounded(executor.execute_invoke(&pre, run_spec(), b"poll".to_vec())).await;
+    let result = bounded(executor.execute_invoke(&pre, run_spec(), b"pause".to_vec())).await;
     assert_eq!(failed_code(&result), "CONTROL_DENIED");
     let result = bounded(
         fx.executor(false)?
-            .execute_invoke(&pre, run_spec(), b"poll".to_vec()),
+            .execute_invoke(&pre, run_spec(), b"pause".to_vec()),
     )
     .await;
     assert_eq!(failed_code(&result), "CONTROL_DENIED");
-    assert!(fx.host.polls.lock().unwrap().is_empty());
+    assert!(fx.host.calls.lock().unwrap().is_empty());
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_executor_caps_outcomes_and_denies_its_own_revoked_bytes() -> anyhow::Result<()> {
+async fn the_executor_caps_outputs_and_denies_its_own_revoked_bytes() -> anyhow::Result<()> {
     let fx = Fixture::new()?;
     let call = |capability: &'static str| {
         let control = fx.control.clone();
@@ -325,23 +329,13 @@ async fn the_executor_caps_outcomes_and_denies_its_own_revoked_bytes() -> anyhow
                     },
                     capability,
                     b"{}".to_vec(),
-                    None,
                     tokio::time::Instant::now() + Duration::from_secs(10),
                 )
                 .await
         }
     };
-    assert_eq!(
-        call("ok").await.unwrap(),
-        crate::operation_scope_host::SuspendableOutcome::Completed(b"\"ok\"".to_vec())
-    );
-    for oversized in ["big", "state"] {
-        assert_eq!(
-            call(oversized).await.unwrap_err().code,
-            "CONTROL_TOO_LARGE",
-            "{oversized}"
-        );
-    }
+    assert_eq!(call("ok").await.unwrap(), b"\"ok\"".to_vec());
+    assert_eq!(call("big").await.unwrap_err().code, "CONTROL_TOO_LARGE");
     let too_big_input = fx
         .control
         .invoke(
@@ -352,7 +346,6 @@ async fn the_executor_caps_outcomes_and_denies_its_own_revoked_bytes() -> anyhow
             },
             "ok",
             vec![b' '; runtara_control_contract::MAX_INPUT_BYTES + 1],
-            None,
             tokio::time::Instant::now() + Duration::from_secs(10),
         )
         .await
@@ -443,8 +436,8 @@ async fn an_older_pin_runs_via_the_history_and_a_revoked_one_fails_the_call() ->
     reloaded.set_control_executor(control)?;
     let prepared = reloaded.prepare_path(&old_root).await?;
     let result =
-        bounded(reloaded.execute_prepared_invoke(&prepared, run_spec(), b"poll".to_vec())).await;
+        bounded(reloaded.execute_prepared_invoke(&prepared, run_spec(), b"pause".to_vec())).await;
     assert_eq!(failed_code(&result), "CONTROL_DENIED");
-    assert!(fx.host.polls.lock().unwrap().is_empty());
+    assert!(fx.host.calls.lock().unwrap().is_empty());
     Ok(())
 }

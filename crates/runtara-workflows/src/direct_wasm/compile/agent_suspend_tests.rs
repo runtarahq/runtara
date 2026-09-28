@@ -8,16 +8,15 @@
 //! (c) the result offsets the emitter reads are the WIT's `SizeAlign` layout
 //!     (pinned hermetically in `operation_scoped_tests`);
 //! (d) a relaunch delivers the saved continuation (host `context` import);
-//! (e) the composed control copy forwards to the host executor with the saved
-//!     continuation, while a direct control API call from a root store, or from
-//!     any agent-linker store, is `denied`.
+//! (e) the composed control copy forwards to the host executor under the
+//!     step's operation, while a direct control API call from a root store, or
+//!     from any agent-linker store, is `denied`.
 use super::*;
 use runtara_component_host::InvokeRunResult;
 use runtara_component_host::control_executor::ControlExecutor;
 use runtara_component_host::control_host::{
     CancelRequest, CommandOutcome, CommandResult, ControlAuthority, ControlError, ControlErrorCode,
-    ControlHost, InstanceStatus, TargetOutcome, TerminalResult, WaitMode, WaitPoll, WaitProgress,
-    WaitRequest, WaitResolution, WaitSettled,
+    ControlHost,
 };
 use runtara_component_host::lifecycle::WorkflowWake;
 
@@ -186,58 +185,42 @@ fn probe_component(agent: &str, behaviour: Behaviour) -> Vec<u8> {
     .expect("suspend probe parses")
 }
 
-/// A component that calls `runtara:control/api.poll-wait` directly from its
+/// A component that calls `runtara:control/api.pause` directly from its
 /// ordinary `capabilities.invoke` and answers "denied" when the store refused
 /// it with `denied`.
 fn control_api_probe() -> Vec<u8> {
     wat::parse_str(format!(
         r#"(component
   (import "runtara:control/api@0.1.0" (instance $api
-    (type $mode-def (enum "all" "any"))
-    (export "wait-mode" (type $mode (eq $mode-def)))
-    (type $status-def (enum "queued" "pending" "running" "suspended" "completed" "failed"
-      "cancelled" "not-started"))
-    (export "instance-status" (type $status (eq $status-def)))
-    (type $terminal-def (record (field "output" (option (list u8)))
-      (field "output-bytes" (option u64)) (field "output-omitted" bool)
-      (field "error" (option (list u8))) (field "error-omitted" bool)))
-    (export "terminal-result" (type $terminal (eq $terminal-def)))
-    (type $target-def (record (field "instance-id" string) (field "status" $status)
-      (field "finished-at-ms" (option u64)) (field "terminal" $terminal)))
-    (export "target-outcome" (type $target (eq $target-def)))
-    (type $progress-def (record (field "mode" $mode) (field "finished" (list $target))
-      (field "remaining" (list string)) (field "deadline-ms" (option u64))))
-    (export "wait-progress" (type $progress (eq $progress-def)))
-    (type $resolution-def (enum "satisfied" "deadline" "empty"))
-    (export "wait-resolution" (type $resolution (eq $resolution-def)))
-    (type $settled-def (record (field "resolution" $resolution) (field "progress" $progress)))
-    (export "wait-settled" (type $settled (eq $settled-def)))
-    (type $poll-def (variant (case "pending" $progress) (case "settled" $settled)))
-    (export "wait-poll" (type $poll (eq $poll-def)))
+    (type $outcome-def (enum "requested" "applied" "unchanged" "already-terminal"))
+    (export "command-outcome" (type $outcome (eq $outcome-def)))
+    (type $result-def (record (field "instance-id" string) (field "outcome" $outcome)
+      (field "replayed" bool)))
+    (export "command-result" (type $result (eq $result-def)))
     (type $code-def (enum "denied" "invalid" "not-found" "not-runnable" "not-child"
       "requires-instance" "requires-operation" "capacity" "replay-conflict" "label-conflict"
       "too-large" "unavailable" "unsupported" "not-waiting" "ambiguous" "already-answered"
-      "not-pausable" "not-paused" "wait-closed"))
+      "not-pausable" "not-paused"))
     (export "error-code" (type $code (eq $code-def)))
     (type $error-def (record (field "code" $code) (field "message" string)
       (field "retry-after-ms" (option u64))))
     (export "control-error" (type $control-error (eq $error-def)))
-    (export "poll-wait" (func async (param "wait-id" string)
-      (result (result $poll (error $control-error)))))))
-  (alias export $api "poll-wait" (func $poll-wait))
+    (export "pause" (func async (param "instance-id" string)
+      (result (result $result (error $control-error)))))))
+  (alias export $api "pause" (func $pause))
   {MEMORY}
-  (core func $poll (canon lower (func $poll-wait) (memory $memory "memory")
+  (core func $pause-lower (canon lower (func $pause) (memory $memory "memory")
     (realloc (func $memory "realloc"))))
   (core module $code
     (import "m" "memory" (memory 1))
-    (import "h" "poll" (func $poll (param i32 i32 i32)))
+    (import "h" "pause" (func $pause (param i32 i32 i32)))
     (data (i32.const 1024) "w")
     (data (i32.const 1040) "\22denied\22")
     (data (i32.const 1056) "\22allowed\22")
     (func (export "invoke") (param i32 i32 i32 i32) (result i32)
-      (call $poll (i32.const 1024) (i32.const 1) (i32.const 3072))
+      (call $pause (i32.const 1024) (i32.const 1) (i32.const 3072))
       (i32.store8 (i32.const 2048) (i32.const 0))
-      ;; `result<wait-poll, control-error>` is 8-aligned: err payload at +8.
+      ;; `result<command-result, control-error>` is 8-aligned: err payload at +8.
       (if (i32.and
             (i32.eq (i32.load8_u (i32.const 3072)) (i32.const 1))
             (i32.eqz (i32.load8_u (i32.const 3080))))
@@ -246,7 +229,7 @@ fn control_api_probe() -> Vec<u8> {
       (i32.const 2048)))
   (core instance $code (instantiate $code
     (with "m" (instance $memory))
-    (with "h" (instance (export "poll" (func $poll))))))
+    (with "h" (instance (export "pause" (func $pause-lower))))))
   {ERROR_INFO}
   (func $invoke async (param "capability-id" string) (param "input" (list u8))
     (result (result (list u8) (error $error)))
@@ -361,13 +344,13 @@ fn probe_graph() -> Value {
             {"fromStep": "pause", "toStep": "finish"}]})
 }
 
+/// One durable `control:cancel` of `child-1`, then Finish with its output.
 fn control_graph() -> Value {
-    json!({"durable": true, "entryPoint": "wait", "steps": {
-        "wait": agent_step("wait", "control", "wait", json!({
-            "instanceIds": {"valueType": "immediate", "value": ["child-1"]}})),
+    json!({"durable": true, "entryPoint": "stop", "steps": {
+        "stop": cancel_step("stop", "child-1", 0),
         "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
-            "result": {"valueType": "reference", "value": "steps.wait.outputs"}}}},
-        "executionPlan": [{"fromStep": "wait", "toStep": "finish"}]})
+            "result": {"valueType": "reference", "value": "steps.stop.outputs"}}}},
+        "executionPlan": [{"fromStep": "stop", "toStep": "finish"}]})
 }
 
 fn workflow_executor(
@@ -429,16 +412,17 @@ fn completed(result: &InvokeRunResult) -> Value {
     }
 }
 
-/// (a) One control instance satisfies both of its interfaces, and the
-/// dependency and dispatcher registries still see exactly one agent.
+/// (a) One probe instance satisfies both of its interfaces, and the
+/// dependency registry still sees exactly one agent.
 #[test]
 fn one_agent_instance_satisfies_capabilities_and_suspendable() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
-    let compiled = compile_graph(dir.path(), control_graph(), vec![control_info()?], &[])?;
+    let staging = stage_probe(dir.path())?;
+    let compiled = compile_graph(dir.path(), probe_graph(), vec![probe_info()], &[staging])?;
     let artifacts = &compiled.component_artifacts;
     for import in [
-        "import runtara:agent-control/capabilities@0.4.0;",
-        "import runtara:agent-control/suspendable@0.4.0;",
+        "import runtara:agent-suspend-probe/capabilities@0.4.0;",
+        "import runtara:agent-suspend-probe/suspendable@0.4.0;",
         "import runtara:workflow-operation/scope@0.1.0;",
     ] {
         assert!(
@@ -450,7 +434,7 @@ fn one_agent_instance_satisfies_capabilities_and_suspendable() -> anyhow::Result
     assert_eq!(
         artifacts
             .wac_source
-            .matches("= new runtara:agent-control {")
+            .matches("= new runtara:agent-suspend-probe {")
             .count(),
         1,
         "one instance serves both interfaces: {}",
@@ -460,9 +444,54 @@ fn one_agent_instance_satisfies_capabilities_and_suspendable() -> anyhow::Result
     assert!(
         !imports
             .iter()
-            .any(|name| name.starts_with("runtara:agent-control/")),
+            .any(|name| name.starts_with("runtara:agent-suspend-probe/")),
         "wac wires both agent interfaces internally: {imports:?}"
     );
+    for bubbled in [
+        runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME,
+        runtara_agent_suspension::CONTEXT_INTERFACE,
+    ] {
+        assert!(
+            imports.iter().any(|name| name == bubbled),
+            "{bubbled} is left to the host: {imports:?}"
+        );
+    }
+    let entries: Vec<_> = compiled
+        .artifact_metadata
+        .agent_components
+        .iter()
+        .filter(|entry| entry.agent_id.as_deref() == Some("suspend-probe"))
+        .collect();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    Ok(())
+}
+
+/// The control copy is a plain agent: a control step binds only its
+/// `capabilities`, and the root pins and audits exactly the bundled bytes
+/// (decision D2), which the dispatcher registry loads as one agent.
+#[test]
+fn a_control_step_binds_capabilities_and_pins_the_bundled_bytes() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let compiled = compile_graph(dir.path(), control_graph(), vec![control_info()?], &[])?;
+    let artifacts = &compiled.component_artifacts;
+    for import in [
+        "import runtara:agent-control/capabilities@0.4.0;",
+        "import runtara:workflow-operation/scope@0.1.0;",
+    ] {
+        assert!(
+            artifacts.world_wit.contains(import),
+            "{}",
+            artifacts.world_wit
+        );
+    }
+    assert!(
+        !artifacts
+            .world_wit
+            .contains("runtara:agent-control/suspendable"),
+        "control never suspends: {}",
+        artifacts.world_wit
+    );
+    let imports = root_imports(&compiled.wasm_path)?;
     for bubbled in [
         runtara_workflow_wit::CONTROL_EXECUTOR_INTERFACE_NAME,
         runtara_workflow_wit::CONTROL_API_INTERFACE_NAME,
@@ -473,6 +502,12 @@ fn one_agent_instance_satisfies_capabilities_and_suspendable() -> anyhow::Result
             "{bubbled} is left to the host: {imports:?}"
         );
     }
+    assert!(
+        !imports
+            .iter()
+            .any(|name| name.starts_with("runtara:agent-suspension/")),
+        "{imports:?}"
+    );
 
     // The dependency registry: one control entry, bound to the staged bytes.
     let control_wasm = components_dir().join("runtara_agent_control.wasm");
@@ -511,8 +546,7 @@ fn one_agent_instance_satisfies_capabilities_and_suspendable() -> anyhow::Result
     );
 
     // The dispatcher registry loads the same bytes through the agent linker
-    // (whose `denied` stubs satisfy the control imports) and still resolves
-    // the agent's `capabilities`, not its `suspendable`.
+    // (whose `denied` stubs satisfy the control imports).
     let engine = Arc::clone(executor().engine());
     let loaded = runtara_component_host::load_agent(
         &engine,
@@ -572,16 +606,13 @@ async fn each_site_binds_its_interface_and_a_relaunch_delivers_the_continuation(
     Ok(())
 }
 
-/// A control service whose one wait settles on its second poll, and whose
-/// `cancel` records the operation each call ran under (the first call on
-/// target `flaky` fails retryably).
+/// A control service whose `cancel` records the authority each call ran
+/// under (the first call on target `flaky` fails retryably), and whose
+/// `pause` records that it was reached.
 #[derive(Default)]
 struct FakeControl {
-    registrations: Mutex<Vec<(ControlAuthority, WaitRequest)>>,
-    polls: Mutex<Vec<(ControlAuthority, String)>>,
-    cancels: Mutex<Vec<(Option<String>, String)>>,
-    /// Raise this host's root cancel on the first poll.
-    cancel_on_poll: Mutex<Option<Arc<Host>>>,
+    cancels: Mutex<Vec<(ControlAuthority, String)>>,
+    pauses: Mutex<usize>,
 }
 
 impl FakeControl {
@@ -592,7 +623,12 @@ impl FakeControl {
             .unwrap()
             .iter()
             .filter(|(_, id)| id == target)
-            .map(|(operation, _)| operation.clone().expect("every control call is scoped"))
+            .map(|(authority, _)| {
+                authority
+                    .operation
+                    .clone()
+                    .expect("every control call is scoped")
+            })
             .collect()
     }
 }
@@ -606,7 +642,7 @@ impl ControlHost for FakeControl {
     ) -> Result<CommandResult, ControlError> {
         let first_flaky = {
             let mut cancels = self.cancels.lock().unwrap();
-            cancels.push((authority.operation.clone(), request.instance_id.clone()));
+            cancels.push((authority.clone(), request.instance_id.clone()));
             request.instance_id == "flaky"
                 && cancels.iter().filter(|(_, id)| id == "flaky").count() == 1
         };
@@ -623,56 +659,16 @@ impl ControlHost for FakeControl {
         })
     }
 
-    async fn wait(
+    async fn pause(
         &self,
-        authority: &ControlAuthority,
-        request: WaitRequest,
-    ) -> Result<String, ControlError> {
-        self.registrations
-            .lock()
-            .unwrap()
-            .push((authority.clone(), request));
-        Ok("wait-1".into())
-    }
-
-    async fn poll_wait(
-        &self,
-        authority: &ControlAuthority,
-        wait_id: String,
-    ) -> Result<WaitPoll, ControlError> {
-        if let Some(host) = self.cancel_on_poll.lock().unwrap().take() {
-            host.cancel.store(true, Ordering::SeqCst);
-        }
-        let mut polls = self.polls.lock().unwrap();
-        polls.push((authority.clone(), wait_id));
-        Ok(if polls.len() == 1 {
-            WaitPoll::Pending(WaitProgress {
-                mode: WaitMode::All,
-                finished: vec![],
-                remaining: vec!["child-1".into()],
-                deadline_ms: None,
-            })
-        } else {
-            WaitPoll::Settled(WaitSettled {
-                resolution: WaitResolution::Satisfied,
-                progress: WaitProgress {
-                    mode: WaitMode::All,
-                    finished: vec![TargetOutcome {
-                        instance_id: "child-1".into(),
-                        status: InstanceStatus::Completed,
-                        finished_at_ms: Some(1),
-                        terminal: TerminalResult {
-                            output: Some(b"{}".to_vec()),
-                            output_bytes: Some(2),
-                            output_omitted: false,
-                            error: None,
-                            error_omitted: false,
-                        },
-                    }],
-                    remaining: vec![],
-                    deadline_ms: None,
-                },
-            })
+        _authority: &ControlAuthority,
+        instance_id: String,
+    ) -> Result<CommandResult, ControlError> {
+        *self.pauses.lock().unwrap() += 1;
+        Ok(CommandResult {
+            instance_id,
+            outcome: CommandOutcome::Applied,
+            replayed: false,
         })
     }
 }
@@ -689,71 +685,42 @@ fn control_executor(fake: Arc<FakeControl>) -> anyhow::Result<Arc<ControlExecuto
     Ok(Arc::new(control))
 }
 
-/// (e) The composed control copy forwards `wait` to the host executor, which
-/// runs the host-loaded bytes with a real `api`, the caller's authority and,
-/// on relaunch, the saved continuation.
+/// (e) The composed control copy forwards to the host executor, which runs
+/// the host-loaded bytes with a real `api` and the caller's authority: the
+/// tenant and run from the runner, the operation from the step's scope.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_composed_control_copy_forwards_to_the_host_executor() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let compiled = compile_graph(dir.path(), control_graph(), vec![control_info()?], &[])?;
     let fake = Arc::new(FakeControl::default());
-    let control = control_executor(fake.clone())?;
     let host = Arc::new(Host::new());
 
-    let first = launch(&compiled, host.clone(), Some(control.clone())).await?;
-    let InvokeExit::Suspended(wakes) = &first.exit else {
-        panic!("the pending wait parks: {:?}", first.exit);
-    };
-    let [WorkflowWake::At(at)] = wakes.as_slice() else {
-        panic!("one timed wake: {wakes:?}");
-    };
-    assert!(
-        *at >= STEP_TIMEOUT_MS && *at <= 1_000 + STEP_TIMEOUT_MS + 30_000,
-        "with only an instance wake the step deadline bounds the park: {at}"
+    let run = launch(
+        &compiled,
+        host.clone(),
+        Some(control_executor(fake.clone())?),
+    )
+    .await?;
+    assert_eq!(
+        completed(&run),
+        json!({"result": {"instanceId": "child-1", "outcome": "applied", "replayed": false}})
     );
-    assert_eq!(first.instance_waits, vec!["wait-1".to_string()]);
-    let op_hash = {
-        let registrations = fake.registrations.lock().unwrap();
-        assert_eq!(registrations.len(), 1);
-        let (authority, request) = &registrations[0];
-        assert_eq!(request.instance_ids, vec!["child-1".to_string()]);
-        assert_eq!(request.mode, WaitMode::All);
-        assert_eq!(request.deadline_ms, None);
-        assert_eq!(authority.tenant, "fixture");
-        assert_eq!(authority.caller.as_deref(), Some("parent-1"));
-        authority
-            .operation
-            .clone()
-            .expect("the call site is scoped")
-    };
+    assert!(run.instance_waits.is_empty());
+    let cancels = fake.cancels.lock().unwrap();
+    assert_eq!(cancels.len(), 1);
+    let (authority, target) = &cancels[0];
+    assert_eq!(target, "child-1");
+    assert_eq!(authority.tenant, "fixture");
+    assert_eq!(authority.caller.as_deref(), Some("parent-1"));
+    let op_hash = authority
+        .operation
+        .as_deref()
+        .expect("the call site is scoped");
     assert_eq!(op_hash.len(), 64, "sha256 of the checkpoint key: {op_hash}");
     assert!(
-        host.continuations
-            .lock()
-            .unwrap()
-            .contains_key(&(op_hash.clone(), 1)),
-        "the continuation is kept under the operation the executor saw"
+        host.continuations.lock().unwrap().is_empty(),
+        "a control call keeps no continuation"
     );
-
-    let second = launch(&compiled, host.clone(), Some(control)).await?;
-    assert_eq!(
-        completed(&second),
-        json!({"result": {"mode": "all", "resolution": "satisfied",
-            "finished": [{"instanceId": "child-1", "status": "completed", "finishedAtMs": 1,
-                "output": {}, "outputBytes": 2, "outputOmitted": false,
-                "error": null, "errorOmitted": false}],
-            "remaining": []}})
-    );
-    assert_eq!(
-        fake.registrations.lock().unwrap().len(),
-        1,
-        "the relaunch polls the wait it registered instead of registering again"
-    );
-    let polls = fake.polls.lock().unwrap();
-    assert_eq!(polls.len(), 2);
-    assert!(polls.iter().all(|(authority, id)| id == "wait-1"
-        && authority.operation.as_deref() == Some(op_hash.as_str())));
-    assert!(host.continuations.lock().unwrap().is_empty());
     Ok(())
 }
 
@@ -953,8 +920,9 @@ async fn a_direct_control_api_call_is_denied_outside_the_executor() -> anyhow::R
         b"\"denied\"",
         "agent-linker store"
     );
-    assert!(
-        fake.registrations.lock().unwrap().is_empty() && fake.polls.lock().unwrap().is_empty(),
+    assert_eq!(
+        *fake.pauses.lock().unwrap(),
+        0,
         "the control service was never reached"
     );
     Ok(())
@@ -1180,37 +1148,5 @@ async fn a_lost_result_checkpoint_replays_with_the_continuation() -> anyhow::Res
     let replay = launch(&compiled, host.clone(), None).await?;
     assert_eq!(completed(&replay), json!({"pause": "paused"}));
     assert!(host.continuations.lock().unwrap().is_empty());
-    Ok(())
-}
-
-/// A cancel that lands while the control executor polls the wait never
-/// completes the step or loses its state: the run either parks with the
-/// continuation kept or stops.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_cancel_racing_the_wait_never_completes_the_step() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let compiled = compile_graph(dir.path(), control_graph(), vec![control_info()?], &[])?;
-    let fake = Arc::new(FakeControl::default());
-    let host = Arc::new(Host::new());
-    *fake.cancel_on_poll.lock().unwrap() = Some(host.clone());
-    let run = launch(
-        &compiled,
-        host.clone(),
-        Some(control_executor(fake.clone())?),
-    )
-    .await?;
-    match &run.exit {
-        InvokeExit::Suspended(_) => {
-            assert_eq!(run.instance_waits, vec!["wait-1".to_string()]);
-            assert_eq!(
-                saved(&host).len(),
-                1,
-                "the parked operation keeps its state"
-            );
-        }
-        InvokeExit::Cancelled | InvokeExit::Failed(_) => {}
-        other => panic!("a cancelled wait never completes: {other:?}"),
-    }
-    assert_eq!(fake.registrations.lock().unwrap().len(), 1);
     Ok(())
 }

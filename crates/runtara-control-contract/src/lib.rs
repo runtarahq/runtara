@@ -17,7 +17,7 @@ const MIB: usize = 1024 * KIB;
 
 /// Largest agent input the control executor accepts.
 pub const MAX_INPUT_BYTES: usize = MIB;
-/// Largest outcome (output or continuation) one control execution returns.
+/// Largest output one control execution returns.
 pub const MAX_OUTCOME_BYTES: usize = 4 * MIB;
 /// Largest response of one control service call.
 pub const MAX_RESPONSE_BYTES: usize = 4 * MIB;
@@ -28,15 +28,6 @@ pub const EXECUTION_TIME_LIMIT_MS: u64 = 90_000;
 pub const GET_OUTPUT_INLINE_BYTES: usize = MIB;
 /// `get` inlines a terminal error up to this size, else omits it.
 pub const GET_ERROR_INLINE_BYTES: usize = 64 * KIB;
-
-/// Most targets one `wait` accepts; more is `too-large`.
-pub const MAX_WAIT_TARGETS: usize = 1000;
-/// A wait inlines each target's output up to this size.
-pub const WAIT_OUTPUT_INLINE_BYTES: usize = 256 * KIB;
-/// A wait inlines each target's error up to this size.
-pub const WAIT_ERROR_INLINE_BYTES: usize = 16 * KIB;
-/// A wait inlines at most this much across all targets.
-pub const WAIT_TOTAL_INLINE_BYTES: usize = 3 * MIB;
 
 /// Smallest `page-size` of `query` and `list-pending-signals`.
 pub const PAGE_SIZE_MIN: u32 = 1;
@@ -111,10 +102,6 @@ pub fn parent_close_reason(parent_instance_id: &str, parent_status: Option<&str>
 /// [`CONTROL_REQUIRES_INSTANCE`].
 pub const REQUIRES_RUN_TAG: &str = "runtime:requires-run";
 
-/// Version of the control agent's continuation encoding. A continuation of
-/// any other version is rejected (`AGENT_CONTINUATION_REJECTED`).
-pub const CONTROL_CONTINUATION_V1: u32 = 1;
-
 /// The control executor ran past its deadline.
 pub const CONTROL_TIMEOUT: &str = "CONTROL_TIMEOUT";
 /// The control executor failed outside the capability (trap, limits).
@@ -149,12 +136,11 @@ pub enum ErrorCode {
     AlreadyAnswered,
     NotPausable,
     NotPaused,
-    WaitClosed,
 }
 
 impl ErrorCode {
     /// Every code, in WIT declaration order.
-    pub const ALL: [ErrorCode; 19] = [
+    pub const ALL: [ErrorCode; 18] = [
         Self::Denied,
         Self::Invalid,
         Self::NotFound,
@@ -173,7 +159,6 @@ impl ErrorCode {
         Self::AlreadyAnswered,
         Self::NotPausable,
         Self::NotPaused,
-        Self::WaitClosed,
     ];
 
     /// The WIT case name.
@@ -197,7 +182,6 @@ impl ErrorCode {
             Self::AlreadyAnswered => "already-answered",
             Self::NotPausable => "not-pausable",
             Self::NotPaused => "not-paused",
-            Self::WaitClosed => "wait-closed",
         }
     }
 
@@ -225,7 +209,6 @@ impl ErrorCode {
             Self::AlreadyAnswered => "CONTROL_ALREADY_ANSWERED",
             Self::NotPausable => "CONTROL_NOT_PAUSABLE",
             Self::NotPaused => "CONTROL_NOT_PAUSED",
-            Self::WaitClosed => "CONTROL_WAIT_CLOSED",
         }
     }
 

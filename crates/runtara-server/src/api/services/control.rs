@@ -23,11 +23,9 @@
 //! - `get` and `query(parent)` include children still in admission as
 //!   `queued`; `query(parent)` merges them with the launched ones in one
 //!   runtime read paged by admission time.
-//! - `wait` registers a durable instance wait of the caller's operation on
-//!   direct children (the wait id is the operation's `op_hash`) and
-//!   `poll-wait` reads it; both need a calling instance, then an operation.
-//!   Both are adapters over the [`InstanceWaits`] service, which authorizes
-//!   the targets and applies the wait caps.
+//! - Waiting on children is not a control call: a `WaitForInstances` step
+//!   calls the [`InstanceWaits`] service, which this service carries so the
+//!   runtime, the engine and the relations reach both.
 //!
 //! The service is late-bound: the executor exists before the embedded
 //! runtime and the execution engine do, so a call waits up to
@@ -42,19 +40,14 @@ use runtara_component_host::control_host::{
     CancelRequest, CommandResult, ControlAuthority, ControlError, ControlErrorCode, ControlHost,
     InstanceDetail, InstancePage, InstanceStatus, InstanceSummary, ParentFilter, PendingSignal,
     PendingSignalPage, PendingSignalsRequest, QueryRequest, SendSignalRequest, SendSignalResult,
-    SignalScope, SortField, SortOrder, StartRequest, StartResult, SuspensionReason, TargetOutcome,
-    TerminalResult, WaitMode, WaitPoll, WaitProgress, WaitRequest, WaitResolution, WaitSettled,
-};
-use runtara_component_host::instance_wait_host::{
-    InstanceWaitAuthority, InstanceWaitError, InstanceWaitErrorCode, InstanceWaitMode,
-    InstanceWaitPoll, InstanceWaitRequest, InstanceWaitResolution, InstanceWaitStatus,
+    SignalScope, SortField, SortOrder, StartRequest, StartResult, SuspensionReason, TerminalResult,
 };
 use runtara_control_contract as contract;
 use runtara_environment::control_reads::ControlInstance;
 use runtara_environment::instance_repository::ListInstancesOptions;
 use serde_json::{Value, json};
 
-use super::instance_waits::{InstanceWaits, Registration};
+use super::instance_waits::InstanceWaits;
 use crate::runtime_client::RuntimeClient;
 use crate::workers::execution_engine::{
     self, CommandEffect, ExecutionEngine, ExecutionError, PauseOutcome, ResumeOutcome,
@@ -98,7 +91,6 @@ pub enum Mutation {
     Cancel,
     Pause,
     Resume,
-    Wait,
     /// Admission of a child; authorized by the caller being a run, not by
     /// [`decide`].
     Start,
@@ -113,7 +105,6 @@ impl Mutation {
             Self::Cancel => "cancel",
             Self::Pause => "pause",
             Self::Resume => "resume",
-            Self::Wait => "wait",
         }
     }
 }
@@ -121,8 +112,8 @@ impl Mutation {
 /// Decision D1, pure. No mutation targets the caller (`invalid`).
 /// `send-signal` reaches children and ancestors, and any other run only
 /// through a request that opted in with `action.key` (`denied` otherwise).
-/// `wait`, `cancel`, `pause` and `resume` reach direct children only: an
-/// ancestor is `denied`, anything else `not-child`.
+/// `cancel`, `pause` and `resume` reach direct children only: an ancestor is
+/// `denied`, anything else `not-child`.
 pub fn decide(
     mutation: Mutation,
     relation: Relation,
@@ -213,8 +204,8 @@ pub struct NativeControl {
     relations: Option<Arc<dyn RelationResolver>>,
     /// The server database `audit_events` lives in, when auditing.
     audit: Option<sqlx::PgPool>,
-    /// The instance waits `wait` and `poll-wait` delegate to; installs
-    /// reach it too.
+    /// The instance waits `WaitForInstances` steps call; installs and the
+    /// relations reach it too.
     waits: Arc<InstanceWaits>,
 }
 
@@ -274,8 +265,8 @@ impl NativeControl {
         self.engine.send_replace(Some(engine));
     }
 
-    /// The instance wait service this control service delegates to, bound
-    /// by [`Self::install`] and [`Self::install_engine`].
+    /// The instance wait service for `WaitForInstances` steps, bound by
+    /// [`Self::install`] and [`Self::install_engine`].
     pub fn instance_waits(&self) -> Arc<InstanceWaits> {
         self.waits.clone()
     }
@@ -444,7 +435,6 @@ fn code_name(code: ControlErrorCode) -> &'static str {
         C::AlreadyAnswered => "already-answered",
         C::NotPausable => "not-pausable",
         C::NotPaused => "not-paused",
-        C::WaitClosed => "wait-closed",
     }
 }
 
@@ -1210,7 +1200,7 @@ async fn apply_lifecycle(
                 | ResumeOutcome::NotResumable { .. } => Err(not_paused()),
             }
         }
-        Mutation::SendSignal | Mutation::Wait | Mutation::Start => {
+        Mutation::SendSignal | Mutation::Start => {
             unreachable!("not a lifecycle command")
         }
     }
@@ -2005,137 +1995,6 @@ impl ControlHost for NativeControl {
         self.lifecycle(authority, Mutation::Resume, instance_id, arguments, None)
             .await
     }
-
-    async fn wait(
-        &self,
-        authority: &ControlAuthority,
-        request: WaitRequest,
-    ) -> Result<String, ControlError> {
-        let tenant = self.tenant(authority)?;
-        let (caller, operation) = mutation_identity(authority, "wait")?;
-        let request = InstanceWaitRequest {
-            instance_ids: request.instance_ids,
-            mode: match request.mode {
-                WaitMode::All => InstanceWaitMode::All,
-                WaitMode::Any => InstanceWaitMode::Any,
-            },
-            deadline_ms: request.deadline_ms,
-        };
-        // The wait id is the operation's `op_hash`.
-        let result = self
-            .waits
-            .register_wait(&wait_authority(tenant, caller), operation, request)
-            .await
-            .map(|registration| (operation.to_owned(), registration == Registration::Replayed))
-            .map_err(wait_error);
-        self.audit(
-            tenant,
-            caller,
-            operation,
-            Mutation::Wait,
-            caller,
-            &result
-                .as_ref()
-                .map(|(_, replayed)| ("registered".to_owned(), *replayed))
-                .map_err(Clone::clone),
-        )
-        .await;
-        result.map(|(wait_id, _)| wait_id)
-    }
-
-    async fn poll_wait(
-        &self,
-        authority: &ControlAuthority,
-        wait_id: String,
-    ) -> Result<WaitPoll, ControlError> {
-        let tenant = self.tenant(authority)?;
-        let (caller, operation) = mutation_identity(authority, "poll-wait")?;
-        check_id("waitId", &wait_id)?;
-        if wait_id != operation {
-            return Err(ControlError::new(
-                ControlErrorCode::Denied,
-                "the wait belongs to another operation",
-            ));
-        }
-        self.waits
-            .poll_wait(&wait_authority(tenant, caller), &wait_id)
-            .await
-            .map(wait_poll)
-            .map_err(wait_error)
-    }
-}
-
-fn wait_authority(tenant: &str, caller: &str) -> InstanceWaitAuthority {
-    InstanceWaitAuthority {
-        tenant: tenant.to_owned(),
-        caller: caller.to_owned(),
-    }
-}
-
-/// A wait failure under its control code.
-fn wait_error(error: InstanceWaitError) -> ControlError {
-    use InstanceWaitErrorCode as W;
-    ControlError {
-        code: match error.code {
-            W::Invalid => ControlErrorCode::Invalid,
-            W::Denied => ControlErrorCode::Denied,
-            W::NotChild => ControlErrorCode::NotChild,
-            W::NotFound => ControlErrorCode::NotFound,
-            W::TooLarge => ControlErrorCode::TooLarge,
-            W::ReplayConflict => ControlErrorCode::ReplayConflict,
-            W::Closed => ControlErrorCode::WaitClosed,
-            W::Unavailable => ControlErrorCode::Unavailable,
-        },
-        message: error.message,
-        retry_after_ms: error.retry_after_ms,
-    }
-}
-
-/// A wait read as `poll-wait` returns it.
-fn wait_poll(poll: InstanceWaitPoll) -> WaitPoll {
-    let progress = WaitProgress {
-        mode: match poll.mode {
-            InstanceWaitMode::All => WaitMode::All,
-            InstanceWaitMode::Any => WaitMode::Any,
-        },
-        finished: poll
-            .finished
-            .into_iter()
-            .map(|target| TargetOutcome {
-                instance_id: target.instance_id,
-                status: match target.status {
-                    InstanceWaitStatus::Pending => InstanceStatus::Pending,
-                    InstanceWaitStatus::Running => InstanceStatus::Running,
-                    InstanceWaitStatus::Suspended => InstanceStatus::Suspended,
-                    InstanceWaitStatus::Completed => InstanceStatus::Completed,
-                    InstanceWaitStatus::Failed => InstanceStatus::Failed,
-                    InstanceWaitStatus::Cancelled => InstanceStatus::Cancelled,
-                    InstanceWaitStatus::NotStarted => InstanceStatus::NotStarted,
-                },
-                finished_at_ms: target.finished_at_ms,
-                terminal: TerminalResult {
-                    output: target.output,
-                    output_bytes: target.output_bytes,
-                    output_omitted: target.output_omitted,
-                    error: target.error,
-                    error_omitted: target.error_omitted,
-                },
-            })
-            .collect(),
-        remaining: poll.remaining,
-        deadline_ms: poll.deadline_ms,
-    };
-    match poll.resolution {
-        None => WaitPoll::Pending(progress),
-        Some(resolution) => WaitPoll::Settled(WaitSettled {
-            resolution: match resolution {
-                InstanceWaitResolution::Satisfied => WaitResolution::Satisfied,
-                InstanceWaitResolution::Deadline => WaitResolution::Deadline,
-                InstanceWaitResolution::Empty => WaitResolution::Empty,
-            },
-            progress,
-        }),
-    }
 }
 
 #[cfg(test)]
@@ -2183,7 +2042,7 @@ mod tests {
         use ControlErrorCode as E;
         use Mutation as M;
         use Relation as R;
-        for mutation in [M::SendSignal, M::Cancel, M::Pause, M::Resume, M::Wait] {
+        for mutation in [M::SendSignal, M::Cancel, M::Pause, M::Resume] {
             for opted_in in [false, true] {
                 let expect = |relation| match (mutation, relation) {
                     (_, R::SelfCall) => Err(E::Invalid),
@@ -2373,146 +2232,6 @@ mod tests {
         assert_eq!(
             identity_call("a caller filter").code,
             ControlErrorCode::RequiresInstance
-        );
-    }
-
-    /// Every wait failure keeps its code under control's spelling.
-    #[test]
-    fn wait_errors_map_to_control_codes() {
-        use InstanceWaitErrorCode as W;
-        for (code, control) in [
-            (W::Invalid, ControlErrorCode::Invalid),
-            (W::Denied, ControlErrorCode::Denied),
-            (W::NotChild, ControlErrorCode::NotChild),
-            (W::NotFound, ControlErrorCode::NotFound),
-            (W::TooLarge, ControlErrorCode::TooLarge),
-            (W::ReplayConflict, ControlErrorCode::ReplayConflict),
-            (W::Closed, ControlErrorCode::WaitClosed),
-            (W::Unavailable, ControlErrorCode::Unavailable),
-        ] {
-            let error = wait_error(InstanceWaitError {
-                code,
-                message: "m".into(),
-                retry_after_ms: Some(5),
-            });
-            assert_eq!(
-                (error.code, error.message.as_str(), error.retry_after_ms),
-                (control, "m", Some(5))
-            );
-        }
-    }
-
-    /// A wait read keeps every value, pending or settled.
-    #[test]
-    fn wait_reads_map_to_the_poll_wait_shape() {
-        let read = InstanceWaitPoll {
-            mode: InstanceWaitMode::Any,
-            resolution: None,
-            finished: vec![
-                runtara_component_host::instance_wait_host::InstanceWaitOutcome {
-                    instance_id: "kid".into(),
-                    status: InstanceWaitStatus::NotStarted,
-                    finished_at_ms: Some(3),
-                    output: Some(b"1".to_vec()),
-                    output_bytes: Some(1),
-                    output_omitted: false,
-                    error: None,
-                    error_omitted: true,
-                },
-            ],
-            remaining: vec!["other".into()],
-            deadline_ms: Some(9),
-        };
-        let progress = WaitProgress {
-            mode: WaitMode::Any,
-            finished: vec![TargetOutcome {
-                instance_id: "kid".into(),
-                status: InstanceStatus::NotStarted,
-                finished_at_ms: Some(3),
-                terminal: TerminalResult {
-                    output: Some(b"1".to_vec()),
-                    output_bytes: Some(1),
-                    output_omitted: false,
-                    error: None,
-                    error_omitted: true,
-                },
-            }],
-            remaining: vec!["other".into()],
-            deadline_ms: Some(9),
-        };
-        assert_eq!(wait_poll(read.clone()), WaitPoll::Pending(progress.clone()));
-        for (resolution, expected) in [
-            (InstanceWaitResolution::Satisfied, WaitResolution::Satisfied),
-            (InstanceWaitResolution::Deadline, WaitResolution::Deadline),
-            (InstanceWaitResolution::Empty, WaitResolution::Empty),
-        ] {
-            let settled = InstanceWaitPoll {
-                resolution: Some(resolution),
-                ..read.clone()
-            };
-            assert_eq!(
-                wait_poll(settled),
-                WaitPoll::Settled(WaitSettled {
-                    resolution: expected,
-                    progress: progress.clone(),
-                })
-            );
-        }
-    }
-
-    /// `wait` and `poll-wait` check a calling run, then an operation, then
-    /// reach the (here uninstalled) wait service; another operation's wait
-    /// id is `denied` before any read.
-    #[tokio::test]
-    async fn control_waits_delegate_after_the_identity_checks() {
-        let control = NativeControl::with_install_wait(Some("tenant".into()), Duration::ZERO);
-        let request = WaitRequest {
-            instance_ids: vec!["kid".into()],
-            mode: WaitMode::All,
-            deadline_ms: None,
-        };
-        for (authority, code) in [
-            (scoped(None, Some("op")), ControlErrorCode::RequiresInstance),
-            (
-                scoped(Some("me"), None),
-                ControlErrorCode::RequiresOperation,
-            ),
-            (
-                scoped(Some("me"), Some("op")),
-                ControlErrorCode::Unavailable,
-            ),
-        ] {
-            assert_eq!(
-                control
-                    .wait(&authority, request.clone())
-                    .await
-                    .unwrap_err()
-                    .code,
-                code
-            );
-            assert_eq!(
-                control
-                    .poll_wait(&authority, "op".into())
-                    .await
-                    .unwrap_err()
-                    .code,
-                code
-            );
-        }
-        let me = scoped(Some("me"), Some("op"));
-        assert_eq!(
-            control
-                .poll_wait(&me, "other".into())
-                .await
-                .unwrap_err()
-                .code,
-            ControlErrorCode::Denied
-        );
-        let mut foreign = me.clone();
-        foreign.tenant = "other".into();
-        assert_eq!(
-            control.wait(&foreign, request).await.unwrap_err().code,
-            ControlErrorCode::Denied
         );
     }
 

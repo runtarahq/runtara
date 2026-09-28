@@ -10,7 +10,7 @@ use runtara_dsl::agent_meta::AgentCatalog;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// `control` (start, get; wait suspends), `waiter` (pause suspends), `utils`.
+/// `control` (start, get), `waiter` (plain; pause suspends), `utils`.
 fn catalog() -> Arc<AgentCatalog> {
     let capability = |id: &str, suspends: bool| {
         json!({"id": id, "name": id, "inputType": "Input", "inputs": [],
@@ -26,13 +26,12 @@ fn catalog() -> Arc<AgentCatalog> {
             &json!([
                 agent(
                     "control",
-                    vec![
-                        capability("start", false),
-                        capability("get", false),
-                        capability("wait", true)
-                    ]
+                    vec![capability("start", false), capability("get", false)]
                 ),
-                agent("waiter", vec![capability("pause", true)]),
+                agent(
+                    "waiter",
+                    vec![capability("plain", false), capability("pause", true)]
+                ),
                 agent("utils", vec![capability("plain", false)]),
             ])
             .to_string(),
@@ -287,16 +286,16 @@ fn suspending_and_control_sites_are_refused_in_on_wait_and_on_error() {
 /// Only artifacts with a suspending site lay out its refusal error.
 #[test]
 fn per_site_imports_and_the_suspension_error_follow_the_sites() {
-    let two_sites = json!({"entryPoint": "get", "steps": {
-        "get": agent("get", "control", "get"), "wait": agent("wait", "control", "wait"),
+    let two_sites = json!({"entryPoint": "plain", "steps": {
+        "plain": agent("plain", "waiter", "plain"), "pause": agent("pause", "waiter", "pause"),
         "finish": {"id": "finish", "stepType": "Finish"}},
-        "executionPlan": [{"fromStep": "get", "toStep": "wait"},
-            {"fromStep": "wait", "toStep": "finish"}]});
+        "executionPlan": [{"fromStep": "plain", "toStep": "pause"},
+            {"fromStep": "pause", "toStep": "finish"}]});
     let result = compile(two_sites, WorkflowAbi::InvokeHostImports).expect("compiles");
     let (world, logic) = world_and_logic(&result);
     for interface in ["capabilities", "suspendable"] {
         assert!(
-            world.contains(&format!("import runtara:agent-control/{interface}@0.4.0;")),
+            world.contains(&format!("import runtara:agent-waiter/{interface}@0.4.0;")),
             "{interface}: {world}"
         );
     }

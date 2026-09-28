@@ -3,7 +3,7 @@
 //! Control agent: coordinate child runs from a workflow.
 //!
 //! The composed copy of this component, inside a workflow, never runs a
-//! capability body. Its `capabilities` and `suspendable` exports forward to
+//! capability body. Its `capabilities` export forwards to
 //! `runtara:control/executor`; the host then runs `runtara:control/execution`
 //! on its own approved copy of these bytes, in a fresh store where
 //! `runtara:control/api` is real and the caller's tenant, instance and
@@ -18,287 +18,18 @@
 //! reach direct children only; none may target the calling run. Each is
 //! replay-safe under the step's operation identity,
 //! which the compiler emits and the host keeps, so a retried or replayed step
-//! never applies twice.
-//! `wait` registers a host-owned wait once, keeps the wait id as its
-//! continuation, and polls it on every re-invocation until the wait settles.
+//! never applies twice. Waiting on children is the `WaitForInstances` step,
+//! not a control call.
 
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
-use runtara_agent_suspension::{SuspendContext, Suspendable, Wake};
 use runtara_control_contract::ErrorCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// Version tag of the `wait` continuation.
-const CONTINUATION_VERSION: u32 = runtara_control_contract::CONTROL_CONTINUATION_V1;
-
-#[derive(Debug, Deserialize, CapabilityInput)]
-#[serde(rename_all = "camelCase")]
-#[capability_input(display_name = "Wait Input")]
-pub struct WaitInput {
-    #[field(
-        display_name = "Instance IDs",
-        description = "Direct child runs of this run to wait for (at most 1000)"
-    )]
-    pub instance_ids: Vec<String>,
-
-    #[field(
-        display_name = "Mode",
-        description = "`all` waits for every run to finish, `any` for the first",
-        example = "all",
-        default = "all"
-    )]
-    #[serde(default)]
-    pub mode: Option<String>,
-
-    #[field(
-        display_name = "Deadline",
-        description = "Business deadline, in milliseconds since the Unix epoch. When it passes the wait returns what finished so far (resolution `deadline`); it never cancels the runs. The step timeout still applies and fails the step."
-    )]
-    #[serde(default)]
-    pub deadline: Option<u64>,
-}
-
-/// One finished run of a wait. Values over their cap are omitted and
-/// flagged, never truncated.
-#[derive(Debug, Serialize, Deserialize, CapabilityOutput, PartialEq)]
-#[serde(rename_all = "camelCase")]
-#[capability_output(display_name = "Finished Run")]
-pub struct WaitFinished {
-    #[field(display_name = "Instance ID", description = "The finished run")]
-    pub instance_id: String,
-    #[field(
-        display_name = "Status",
-        description = "completed, failed, cancelled or not_started"
-    )]
-    pub status: String,
-    #[field(
-        display_name = "Finished At",
-        description = "Milliseconds since the Unix epoch"
-    )]
-    pub finished_at_ms: Option<u64>,
-    #[field(
-        display_name = "Output",
-        description = "The run's output, when inlined (up to 256 KiB)"
-    )]
-    pub output: Option<Value>,
-    #[field(
-        display_name = "Output Bytes",
-        description = "Size of the full output, also when omitted"
-    )]
-    pub output_bytes: Option<u64>,
-    #[field(
-        display_name = "Output Omitted",
-        description = "The output was over its cap and is not inlined"
-    )]
-    pub output_omitted: bool,
-    #[field(
-        display_name = "Error",
-        description = "The run's error, when inlined (up to 16 KiB)"
-    )]
-    pub error: Option<Value>,
-    #[field(
-        display_name = "Error Omitted",
-        description = "The error was over its cap and is not inlined"
-    )]
-    pub error_omitted: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize, CapabilityOutput)]
-#[serde(rename_all = "camelCase")]
-#[capability_output(display_name = "Wait Output")]
-pub struct WaitOutput {
-    #[field(display_name = "Mode", description = "The wait mode")]
-    pub mode: String,
-
-    #[field(
-        display_name = "Resolution",
-        description = "`satisfied` when the mode was met, `deadline` when the deadline passed first, `empty` for no runs"
-    )]
-    pub resolution: String,
-
-    #[field(
-        display_name = "Finished",
-        description = "Runs that finished, in finish order, with their results"
-    )]
-    pub finished: Vec<WaitFinished>,
-
-    #[field(display_name = "Remaining", description = "Runs that had not finished")]
-    pub remaining: Vec<String>,
-}
-
-/// The `wait` continuation: the id of the wait registered on first call and
-/// the deadline it persisted.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct WaitContinuation {
-    v: u32,
-    wait_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    deadline_ms: Option<u64>,
-}
-
-/// Wait-mode spelling accepted in the input. `true` means all.
-fn wait_all(mode: Option<&str>) -> Result<bool, String> {
-    match mode.unwrap_or("all") {
-        "all" => Ok(true),
-        "any" => Ok(false),
-        other => Err(control_error(
-            ErrorCode::Invalid,
-            &format!("mode must be `all` or `any`, not `{other}`"),
-            None,
-        )),
-    }
-}
-
-/// Check the targets before anything registers: at most
-/// [`runtara_control_contract::MAX_WAIT_TARGETS`], none empty.
-fn check_targets(ids: &[String]) -> Result<(), String> {
-    if ids.len() > runtara_control_contract::MAX_WAIT_TARGETS {
-        return Err(control_error(
-            ErrorCode::TooLarge,
-            &format!(
-                "a wait names at most {} runs, not {}",
-                runtara_control_contract::MAX_WAIT_TARGETS,
-                ids.len()
-            ),
-            None,
-        ));
-    }
-    if ids.iter().any(|id| id.trim().is_empty()) {
-        return Err(control_error(
-            ErrorCode::Invalid,
-            "instanceIds must not hold an empty id",
-            None,
-        ));
-    }
-    Ok(())
-}
-
-fn error(code: &str, message: &str) -> String {
-    serde_json::json!({
-        "code": code,
-        "message": message,
-        "category": "permanent",
-        "severity": "error",
-    })
-    .to_string()
-}
-
 /// A control failure as the `#[capability]` JSON error envelope.
 fn control_error(code: ErrorCode, message: &str, retry_after_ms: Option<u64>) -> String {
     runtara_control_contract::agent_error(code, message, retry_after_ms).to_string()
-}
-
-fn encode_continuation(wait_id: &str, deadline_ms: Option<u64>) -> Vec<u8> {
-    serde_json::to_vec(&WaitContinuation {
-        v: CONTINUATION_VERSION,
-        wait_id: wait_id.to_owned(),
-        deadline_ms,
-    })
-    .expect("a continuation always serializes")
-}
-
-fn decode_continuation(bytes: &[u8]) -> Result<WaitContinuation, String> {
-    serde_json::from_slice::<WaitContinuation>(bytes)
-        .ok()
-        .filter(|continuation| continuation.v == CONTINUATION_VERSION)
-        .ok_or_else(|| {
-            error(
-                runtara_agent_suspension::AGENT_CONTINUATION_REJECTED,
-                "the saved wait continuation is not a version this agent reads",
-            )
-        })
-}
-
-/// One read of a registered wait. Natively only the host stub exists.
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-enum Poll {
-    /// Not settled; `deadline_ms` is the persisted business deadline.
-    Pending { deadline_ms: Option<u64> },
-    Settled {
-        resolution: &'static str,
-        finished: Vec<WaitFinished>,
-        remaining: Vec<String>,
-    },
-}
-
-/// Park on the wait, and on its persisted deadline when it has one: the
-/// deadline settles the wait without any target finishing.
-fn suspend_on(wait_id: String, deadline_ms: Option<u64>) -> Suspendable<WaitOutput> {
-    let mut wakes = vec![Wake::Instances(wait_id.clone())];
-    wakes.extend(deadline_ms.map(Wake::At));
-    Suspendable::Suspended {
-        state: encode_continuation(&wait_id, deadline_ms),
-        wakes,
-    }
-}
-
-#[capability(
-    module = "control",
-    id = "wait",
-    display_name = "Wait For Runs",
-    description = "Park the workflow without holding a runner until direct child runs finish (`all`) or the first does (`any`), or the optional deadline passes. Registers once; a replayed or relaunched step reads the same wait, so `any` never picks again. The step must be durable and have a timeout.",
-    side_effects = false,
-    idempotent = true,
-    suspends = true,
-    tags = "runtime:requires-run",
-    errors(
-        permanent("CONTROL_INVALID", "Malformed arguments"),
-        permanent("CONTROL_TOO_LARGE", "More than 1000 runs"),
-        permanent("CONTROL_NOT_FOUND", "A run does not exist in this tenant"),
-        permanent("CONTROL_NOT_CHILD", "A run is not a direct child of this run"),
-        permanent(
-            "CONTROL_DENIED",
-            "A run is an ancestor, or control is not available to this call"
-        ),
-        permanent(
-            "CONTROL_REPLAY_CONFLICT",
-            "This step already waits on other runs or another mode"
-        ),
-        permanent("CONTROL_REQUIRES_INSTANCE", "Only works inside a run"),
-        permanent("CONTROL_REQUIRES_OPERATION", "Only works in a compiled workflow step"),
-        permanent("CONTROL_WAIT_CLOSED", "The wait was closed"),
-        transient(
-            "CONTROL_UNAVAILABLE",
-            "The control service is temporarily unavailable"
-        ),
-        permanent("CONTROL_TIMEOUT", "The control call ran past its deadline"),
-    )
-)]
-pub async fn wait(
-    input: WaitInput,
-    context: &SuspendContext,
-) -> Result<Suspendable<WaitOutput>, String> {
-    let all = wait_all(input.mode.as_deref())?;
-    check_targets(&input.instance_ids)?;
-    let mode = if all { "all" } else { "any" }.to_string();
-    if input.instance_ids.is_empty() {
-        return Ok(Suspendable::Completed(WaitOutput {
-            mode,
-            resolution: "empty".into(),
-            finished: vec![],
-            remaining: vec![],
-        }));
-    }
-    // Register once; every re-invocation only polls the wait it registered.
-    let wait_id = match context.continuation() {
-        Some(continuation) => decode_continuation(continuation)?.wait_id,
-        None => host::register_wait(input.instance_ids, all, input.deadline).await?,
-    };
-    Ok(match host::poll_wait(&wait_id).await? {
-        Poll::Pending { deadline_ms } => suspend_on(wait_id, deadline_ms),
-        Poll::Settled {
-            resolution,
-            finished,
-            remaining,
-        } => Suspendable::Completed(WaitOutput {
-            mode,
-            resolution: resolution.into(),
-            finished,
-            remaining,
-        }),
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1185,7 +916,7 @@ pub async fn start(input: StartInput) -> Result<StartOutput, String> {
 /// Host control calls. Real only in the host executor's store.
 #[cfg(target_arch = "wasm32")]
 mod host {
-    use super::{ErrorCode, Poll};
+    use super::ErrorCode;
     use crate::bindings::runtara::control::{api, types};
 
     fn control_error(error: types::ControlError) -> String {
@@ -1208,7 +939,6 @@ mod host {
             types::ErrorCode::AlreadyAnswered => ErrorCode::AlreadyAnswered,
             types::ErrorCode::NotPausable => ErrorCode::NotPausable,
             types::ErrorCode::NotPaused => ErrorCode::NotPaused,
-            types::ErrorCode::WaitClosed => ErrorCode::WaitClosed,
         };
         super::control_error(code, &error.message, error.retry_after_ms)
     }
@@ -1441,84 +1171,12 @@ mod host {
             replayed: result.replayed,
         })
     }
-
-    pub(super) async fn register_wait(
-        ids: Vec<String>,
-        all: bool,
-        deadline_ms: Option<u64>,
-    ) -> Result<String, String> {
-        let mode = if all {
-            types::WaitMode::All
-        } else {
-            types::WaitMode::Any
-        };
-        api::wait(types::WaitRequest {
-            instance_ids: ids,
-            mode,
-            deadline_ms,
-        })
-        .await
-        .map_err(control_error)
-    }
-
-    fn finished(target: types::TargetOutcome) -> super::WaitFinished {
-        let terminal = target.terminal;
-        let output_omitted = terminal.output_omitted
-            || terminal
-                .output
-                .as_ref()
-                .is_some_and(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).is_err());
-        let error_omitted = terminal.error_omitted
-            || terminal
-                .error
-                .as_ref()
-                .is_some_and(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).is_err());
-        super::WaitFinished {
-            instance_id: target.instance_id,
-            status: status_name(target.status).into(),
-            finished_at_ms: target.finished_at_ms,
-            output: json(terminal.output),
-            output_bytes: terminal.output_bytes,
-            output_omitted,
-            error: json(terminal.error),
-            error_omitted,
-        }
-    }
-
-    pub(super) async fn poll_wait(wait_id: &str) -> Result<Poll, String> {
-        Ok(
-            match api::poll_wait(wait_id.to_owned())
-                .await
-                .map_err(control_error)?
-            {
-                types::WaitPoll::Pending(progress) => Poll::Pending {
-                    deadline_ms: progress.deadline_ms,
-                },
-                types::WaitPoll::Settled(settled) => Poll::Settled {
-                    resolution: match settled.resolution {
-                        types::WaitResolution::Satisfied => "satisfied",
-                        types::WaitResolution::Deadline => "deadline",
-                        types::WaitResolution::Empty => "empty",
-                    },
-                    finished: settled
-                        .progress
-                        .finished
-                        .into_iter()
-                        .map(finished)
-                        .collect(),
-                    remaining: settled.progress.remaining,
-                },
-            },
-        )
-    }
 }
 
 /// Natively there is no control host: the capability runs only as a
 /// component under the host executor.
 #[cfg(not(target_arch = "wasm32"))]
 mod host {
-    use super::Poll;
-
     fn unavailable() -> String {
         super::control_error(
             super::ErrorCode::Unavailable,
@@ -1569,18 +1227,6 @@ mod host {
     ) -> Result<super::StartOutput, String> {
         Err(unavailable())
     }
-
-    pub(super) async fn register_wait(
-        _ids: Vec<String>,
-        _all: bool,
-        _deadline_ms: Option<u64>,
-    ) -> Result<String, String> {
-        Err(unavailable())
-    }
-
-    pub(super) async fn poll_wait(_wait_id: &str) -> Result<Poll, String> {
-        Err(unavailable())
-    }
 }
 
 /// Canonical `AgentInfo` for the sidecar meta.json (host-only).
@@ -1590,7 +1236,6 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
     use std::collections::HashMap;
 
     let output_types = HashMap::from([
-        ("WaitOutput", &__OUTPUT_META_WaitOutput),
         ("RunSummary", &__OUTPUT_META_RunSummary),
         ("GetOutput", &__OUTPUT_META_GetOutput),
         ("QueryOutput", &__OUTPUT_META_QueryOutput),
@@ -1659,12 +1304,6 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
                 Some(&__OUTPUT_META_CommandOutput),
                 &output_types,
             ),
-            capability_to_api_with_types(
-                &__CAPABILITY_META_WAIT,
-                Some(&__INPUT_META_WaitInput),
-                Some(&__OUTPUT_META_WaitOutput),
-                &output_types,
-            ),
         ],
     }
 }
@@ -1680,10 +1319,8 @@ runtara_agent_macro::agent_component!(
         send_signal,
         cancel,
         pause,
-        resume,
-        wait
+        resume
     ],
-    suspending = [wait],
 );
 
 #[cfg(test)]
@@ -1691,7 +1328,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn metadata_declares_wait_as_suspending() {
+    fn metadata_lists_every_capability_and_none_suspends() {
         let info = agent_info();
         assert_eq!(info.id, "control");
         let ids: Vec<_> = info.capabilities.iter().map(|c| c.id.as_str()).collect();
@@ -1705,13 +1342,14 @@ mod tests {
                 "send-signal",
                 "cancel",
                 "pause",
-                "resume",
-                "wait"
+                "resume"
             ]
         );
-        let wait = &info.capabilities[8];
-        assert!(wait.suspends);
-        assert!(!wait.trusted);
+        assert!(
+            info.capabilities
+                .iter()
+                .all(|capability| !capability.suspends && !capability.trusted)
+        );
     }
 
     #[test]
@@ -1990,116 +1628,6 @@ mod tests {
             assert_eq!(signal_scope(&input).is_ok(), ok);
         }
         assert_eq!(page_size(None), 20);
-    }
-
-    #[test]
-    fn the_continuation_round_trips_and_rejects_other_versions() {
-        let bytes = encode_continuation("wait-1", None);
-        assert_eq!(decode_continuation(&bytes).unwrap().wait_id, "wait-1");
-        let timed = decode_continuation(&encode_continuation("wait-2", Some(7))).unwrap();
-        assert_eq!(
-            (timed.wait_id.as_str(), timed.deadline_ms),
-            ("wait-2", Some(7))
-        );
-        let other = serde_json::to_vec(&serde_json::json!({"v": 2, "waitId": "w"})).unwrap();
-        assert!(
-            decode_continuation(&other)
-                .unwrap_err()
-                .contains("AGENT_CONTINUATION_REJECTED")
-        );
-        assert!(decode_continuation(b"not json").is_err());
-    }
-
-    #[test]
-    fn a_pending_wait_parks_on_the_wait_and_its_deadline() {
-        let Suspendable::Suspended { wakes, state } = suspend_on("w".into(), Some(42)) else {
-            panic!("a pending wait suspends");
-        };
-        assert_eq!(wakes, vec![Wake::Instances("w".into()), Wake::At(42)]);
-        assert_eq!(decode_continuation(&state).unwrap().deadline_ms, Some(42));
-        let Suspendable::Suspended { wakes, .. } = suspend_on("w".into(), None) else {
-            panic!("a pending wait suspends");
-        };
-        assert_eq!(wakes, vec![Wake::Instances("w".into())]);
-    }
-
-    #[test]
-    fn too_many_or_empty_targets_register_nothing() {
-        let many: Vec<String> = (0..=runtara_control_contract::MAX_WAIT_TARGETS)
-            .map(|i| format!("child-{i}"))
-            .collect();
-        let error = futures_lite_block_on(__suspend_wait(
-            serde_json::json!({"instanceIds": many}),
-            &SuspendContext::default(),
-        ))
-        .unwrap_err();
-        assert!(error.contains("CONTROL_TOO_LARGE"), "{error}");
-        let error = futures_lite_block_on(__suspend_wait(
-            serde_json::json!({"instanceIds": ["a", " "]}),
-            &SuspendContext::default(),
-        ))
-        .unwrap_err();
-        assert!(error.contains("CONTROL_INVALID"), "{error}");
-    }
-
-    #[test]
-    fn wait_needs_a_run_and_documents_its_errors() {
-        let info = agent_info();
-        let wait = info
-            .capabilities
-            .iter()
-            .find(|capability| capability.id == "wait")
-            .unwrap();
-        assert!(wait.suspends && !wait.has_side_effects);
-        assert!(
-            wait.tags
-                .iter()
-                .any(|tag| tag == runtara_control_contract::REQUIRES_RUN_TAG)
-        );
-        let codes: Vec<_> = wait.known_errors.iter().map(|e| e.code.as_str()).collect();
-        for code in [
-            "CONTROL_TOO_LARGE",
-            "CONTROL_NOT_FOUND",
-            "CONTROL_NOT_CHILD",
-            "CONTROL_DENIED",
-        ] {
-            assert!(codes.contains(&code), "{codes:?}");
-        }
-        let known = runtara_control_contract::ErrorCode::all_agent_codes();
-        assert!(codes.iter().all(|code| known.contains(code)), "{codes:?}");
-    }
-
-    #[test]
-    fn modes_are_all_or_any() {
-        assert!(wait_all(None).unwrap());
-        assert!(wait_all(Some("all")).unwrap());
-        assert!(!wait_all(Some("any")).unwrap());
-        assert!(wait_all(Some("some")).is_err());
-    }
-
-    #[test]
-    fn plain_invoke_refuses_the_suspending_capability() {
-        let error = futures_lite_block_on(__invoke_wait(serde_json::json!({})));
-        assert!(
-            error
-                .unwrap_err()
-                .contains(runtara_agent_suspension::SUSPENSION_UNSUPPORTED)
-        );
-    }
-
-    #[test]
-    fn an_empty_wait_completes_without_the_host() {
-        let result = futures_lite_block_on(__suspend_wait(
-            serde_json::json!({"instanceIds": []}),
-            &SuspendContext::default(),
-        ))
-        .unwrap();
-        assert_eq!(
-            result,
-            Suspendable::Completed(serde_json::json!({
-                "mode": "all", "resolution": "empty", "finished": [], "remaining": []
-            }))
-        );
     }
 
     /// The capability futures never pend natively; poll once.

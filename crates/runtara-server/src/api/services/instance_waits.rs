@@ -36,7 +36,6 @@ use runtara_component_host::instance_wait_host::{
     InstanceWaitMode, InstanceWaitOutcome, InstanceWaitPoll, InstanceWaitRequest,
     InstanceWaitResolution, InstanceWaitStatus,
 };
-use runtara_control_contract as contract;
 use runtara_core::persistence::waits::{self as store, TargetState, WaitError, WaitSpec, WaitView};
 use runtara_environment::control_reads::ControlInstance;
 
@@ -50,6 +49,15 @@ pub const INSTALL_WAIT: Duration = super::control::INSTALL_WAIT;
 
 /// Longest instance id or wait id accepted.
 const MAX_ID_BYTES: usize = 256;
+
+/// Most distinct targets one wait accepts; more is `too-large`.
+pub const MAX_WAIT_TARGETS: usize = store::MAX_WAIT_TARGETS;
+/// A wait inlines each target's output up to this size.
+pub const WAIT_OUTPUT_INLINE_BYTES: usize = 256 * 1024;
+/// A wait inlines each target's error up to this size.
+pub const WAIT_ERROR_INLINE_BYTES: usize = 16 * 1024;
+/// A wait inlines at most this much across all targets.
+pub const WAIT_TOTAL_INLINE_BYTES: usize = 3 * 1024 * 1024;
 
 /// Whether registering found an existing wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -421,7 +429,7 @@ fn wait_spec(request: InstanceWaitRequest) -> Result<WaitSpec, InstanceWaitError
     let mut ids = request.instance_ids;
     ids.sort();
     ids.dedup();
-    if ids.len() > contract::MAX_WAIT_TARGETS {
+    if ids.len() > MAX_WAIT_TARGETS {
         return Err(wait_error(WaitError::TooLarge));
     }
     for id in &ids {
@@ -463,7 +471,7 @@ fn wait_error(error: WaitError) -> InstanceWaitError {
             C::TooLarge,
             format!(
                 "a wait names at most {} distinct children",
-                contract::MAX_WAIT_TARGETS
+                MAX_WAIT_TARGETS
             ),
         ),
         WaitError::Invalid(message) => invalid(message),
@@ -524,7 +532,7 @@ fn inline_within(
 /// A launched target's outcome, read with the per-target caps and paid
 /// from the wait's budget: output first, then error.
 fn launched_outcome(row: &ControlInstance, budget: &mut usize) -> InstanceWaitOutcome {
-    let result = super::control::terminal_capped(row, contract::WAIT_ERROR_INLINE_BYTES);
+    let result = super::control::terminal_capped(row, WAIT_ERROR_INLINE_BYTES);
     let (output, output_omitted) = inline_within(budget, result.output, result.output_omitted);
     let (error, error_omitted) = inline_within(budget, result.error, result.error_omitted);
     InstanceWaitOutcome {
@@ -558,15 +566,15 @@ async fn read_wait(
         .control_instances_by_id(
             tenant,
             &launched,
-            contract::WAIT_OUTPUT_INLINE_BYTES,
-            contract::WAIT_ERROR_INLINE_BYTES,
+            WAIT_OUTPUT_INLINE_BYTES,
+            WAIT_ERROR_INLINE_BYTES,
         )
         .await
         .map_err(|_| InstanceWaitError::unavailable("the wait's results could not be read"))?
         .into_iter()
         .map(|row| (row.instance_id.clone(), row))
         .collect();
-    let mut budget = contract::WAIT_TOTAL_INLINE_BYTES;
+    let mut budget = WAIT_TOTAL_INLINE_BYTES;
     let mut finished = Vec::with_capacity(view.finished.len());
     for target in &view.finished {
         finished.push(match &target.state {
@@ -654,14 +662,10 @@ mod tests {
                 .message
                 .contains("kid-7")
         );
-        assert_eq!(
-            store::MAX_WAIT_TARGETS,
-            contract::MAX_WAIT_TARGETS,
-            "the store and the contract agree on the target cap"
-        );
     }
 
-    /// Decision D1 for waits is control's decision for its `wait` mutation.
+    /// Decision D1 for waits is control's decision for the commands that
+    /// reach direct children only.
     #[test]
     fn authorization_is_decision_d1_for_waits() {
         use super::super::control::{Mutation, decide};
@@ -680,7 +684,7 @@ mod tests {
         ] {
             assert_eq!(
                 authorize(relation).map_err(control_code),
-                decide(Mutation::Wait, relation, true),
+                decide(Mutation::Cancel, relation, true),
                 "{relation:?}"
             );
             if let Err(code) = authorize(relation) {
@@ -693,13 +697,11 @@ mod tests {
     fn requests_are_normalized_and_checked_before_any_read() {
         let spec = wait_spec(request(vec!["b".into(), "a".into(), "b".into()])).unwrap();
         assert_eq!(spec.targets(), ["a", "b"], "sorted and distinct");
-        let at_cap: Vec<String> = (0..=contract::MAX_WAIT_TARGETS)
-            .map(|i| format!("kid-{}", i % contract::MAX_WAIT_TARGETS))
+        let at_cap: Vec<String> = (0..=MAX_WAIT_TARGETS)
+            .map(|i| format!("kid-{}", i % MAX_WAIT_TARGETS))
             .collect();
         assert!(wait_spec(request(at_cap)).is_ok(), "duplicates count once");
-        let over: Vec<String> = (0..=contract::MAX_WAIT_TARGETS)
-            .map(|i| format!("kid-{i}"))
-            .collect();
+        let over: Vec<String> = (0..=MAX_WAIT_TARGETS).map(|i| format!("kid-{i}")).collect();
         assert_eq!(
             wait_spec(request(over)).unwrap_err().code,
             InstanceWaitErrorCode::TooLarge
@@ -773,9 +775,7 @@ mod tests {
             );
         }
         // Arguments are checked before the runtime is needed.
-        let over: Vec<String> = (0..=contract::MAX_WAIT_TARGETS)
-            .map(|i| format!("kid-{i}"))
-            .collect();
+        let over: Vec<String> = (0..=MAX_WAIT_TARGETS).map(|i| format!("kid-{i}")).collect();
         assert_eq!(
             waits
                 .register(&caller("tenant"), "w", request(over))

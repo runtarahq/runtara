@@ -10,10 +10,9 @@ serde-only so all three can depend on it.
 
 | Item | Value |
 |---|---|
-| Control call input / outcome / response | 1 MiB / 4 MiB / 4 MiB |
+| Control call input / output / response | 1 MiB / 4 MiB / 4 MiB |
 | One control call | 90 s (`CONTROL_TIMEOUT`) |
 | `get` inlined output / error | 1 MiB / 64 KiB |
-| `wait` targets, inlined output / error per child, total | 1000; 256 KiB / 16 KiB; 3 MiB |
 | Page size | 1-100 |
 | Lineage depth (decision D6) | 16 |
 | Run label | 1024 bytes (equals `runtara_dsl::run_label::MAX_RUN_LABEL_LENGTH`) |
@@ -35,8 +34,6 @@ serde-only so all three can depend on it.
   `CONTROL_REQUIRES_INSTANCE`.
 - `ParentClosePolicy` (`cancel` | `leave_running`) and `start_input_schema`,
   where the policy is required and has no default.
-- `CONTROL_CONTINUATION_V1`, the version of the control agent's `wait`
-  continuation.
 
 The author-facing reference built from these values is `controlAgent` in the
 MCP workflow authoring schema and "As built" in
