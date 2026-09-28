@@ -1153,3 +1153,172 @@ async fn a_lost_result_checkpoint_replays_with_the_continuation() -> anyhow::Res
     assert!(host.continuations.lock().unwrap().is_empty());
     Ok(())
 }
+
+/// Publish `graph` as workflow-agent `slug`, composed against `extra_dirs`,
+/// and stage it with the sidecar the server writes. Returns the staging dir
+/// and the catalog entry a parent compiles against.
+fn publish_workflow_agent(
+    dir: &Path,
+    slug: &str,
+    graph: Value,
+    agents: Vec<runtara_dsl::agent_meta::AgentInfo>,
+    extra_dirs: &[PathBuf],
+) -> anyhow::Result<(PathBuf, runtara_dsl::agent_meta::AgentInfo)> {
+    let mut child = crate::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: slug.into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(graph)?,
+            child_workflows: vec![],
+            output_dir: dir.join(slug),
+            track_events: false,
+            agent_catalog: Some(Arc::new(
+                runtara_dsl::agent_meta::AgentCatalog::from_agents(agents),
+            )),
+            agent_slug: Some(slug.into()),
+        },
+        crate::direct_wasm::WorkflowRole::PublishedAgent,
+        true,
+    )?;
+    assert!(
+        !child.omit_runtime,
+        "an operation-scoped site runs under the caller's runtime"
+    );
+    compose_direct_workflow_with_extra_dirs(
+        &mut child,
+        components_dir().to_str().expect("utf-8 components dir"),
+        extra_dirs,
+    )?;
+    let staging = dir.join("workflow-agents");
+    fs::create_dir_all(&staging)?;
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
+        slug,
+        slug,
+        "fixture",
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    let file = slug.replace('-', "_");
+    fs::copy(
+        &child.wasm_path,
+        staging.join(format!("runtara_agent_{file}.wasm")),
+    )?;
+    fs::write(
+        staging.join(format!("runtara_agent_{file}.meta.json")),
+        serde_json::to_vec(&info)?,
+    )?;
+    Ok((staging, info))
+}
+
+/// A root that calls workflow-agent `agent` once and finishes with its output.
+fn calls_workflow_agent(agent: &str) -> Value {
+    json!({"durable": true, "entryPoint": "call", "steps": {
+        "call": agent_step("call", agent, "run", json!({})),
+        "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
+            "result": {"valueType": "reference", "value": "steps.call.outputs"}}}},
+        "executionPlan": [{"fromStep": "call", "toStep": "finish"}]})
+}
+
+/// A published workflow-agent that calls a suspending capability parks its
+/// caller at the capability's wake. The continuation is saved under the
+/// workflow-agent's own operation, and a relaunch of the caller completes
+/// with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflow_agent_parks_its_caller_on_a_suspending_capability() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let probes = stage_probe(dir.path())?;
+    let child = json!({"durable": true, "entryPoint": "pause", "steps": {
+        "pause": agent_step("pause", "suspend-probe", "pause", json!({})),
+        "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
+            "pause": {"valueType": "reference", "value": "steps.pause.outputs"}}}},
+        "executionPlan": [{"fromStep": "pause", "toStep": "finish"}]});
+    let (staged, info) = publish_workflow_agent(
+        dir.path(),
+        "paused-flow",
+        child,
+        vec![probe_info()],
+        std::slice::from_ref(&probes),
+    )?;
+    let compiled = compile_graph(
+        dir.path(),
+        calls_workflow_agent("paused-flow"),
+        vec![info],
+        &[staged],
+    )?;
+    let host = Arc::new(Host::new());
+
+    let first = launch(&compiled, host.clone(), None).await?;
+    assert!(
+        matches!(&first.exit, InvokeExit::Suspended(wakes) if wakes == &[WorkflowWake::At(PROBE_WAKE_AT)]),
+        "the caller parks at the capability's wake: {:?}",
+        first.exit
+    );
+    let saved = saved(&host);
+    assert_eq!(saved, vec![(1, PROBE_STATE.to_vec())]);
+
+    let second = launch(&compiled, host.clone(), None).await?;
+    assert_eq!(completed(&second), json!({"result": {"pause": "paused"}}));
+    assert!(
+        host.continuations.lock().unwrap().is_empty(),
+        "the result checkpoint releases the continuation"
+    );
+    Ok(())
+}
+
+/// A published workflow-agent's control call runs under its caller's
+/// instance: the authority names the root run, and the operation is the
+/// workflow-agent's own site, namespaced under the caller's call site.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflow_agent_calls_control_as_its_caller() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (staged, info) = publish_workflow_agent(
+        dir.path(),
+        "stopper",
+        control_graph(),
+        vec![control_info()?],
+        &[],
+    )?;
+    let compiled = compile_graph(
+        dir.path(),
+        calls_workflow_agent("stopper"),
+        vec![info],
+        &[staged],
+    )?;
+    let pin = crate::direct_wasm::bundled_builtin_pin(&components_dir(), "control")
+        .expect("the bundle ships control");
+    let imports = root_imports(&compiled.wasm_path)?;
+    let pins: Vec<_> = imports
+        .iter()
+        .filter(|name| name.starts_with(runtara_dsl::agent_meta::BUILTIN_ARTIFACTS_PREFIX))
+        .collect();
+    assert_eq!(
+        pins,
+        [&pin],
+        "the caller carries the workflow-agent's pin: {imports:?}"
+    );
+
+    let fake = Arc::new(FakeControl::default());
+    let host = Arc::new(Host::new());
+    let run = launch(
+        &compiled,
+        host.clone(),
+        Some(control_executor(fake.clone())?),
+    )
+    .await?;
+    assert_eq!(
+        completed(&run),
+        json!({"result": {"result": {"instanceId": "child-1", "outcome": "applied", "replayed": false}}})
+    );
+    let cancels = fake.cancels.lock().unwrap();
+    assert_eq!(cancels.len(), 1, "{cancels:?}");
+    let (authority, target) = &cancels[0];
+    assert_eq!(target, "child-1");
+    assert_eq!(authority.caller.as_deref(), Some("parent-1"));
+    assert_eq!(
+        authority.operation.as_deref().map(str::len),
+        Some(64),
+        "the workflow-agent's site is scoped"
+    );
+    Ok(())
+}

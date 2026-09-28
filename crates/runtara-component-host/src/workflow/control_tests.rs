@@ -207,6 +207,28 @@ fn the_audit_fails_closed_on_imported_components_and_agents_binding_the_operatio
     )
     .unwrap();
     assert!(audit_control_importers(&logic).is_ok());
+
+    // A published workflow-agent exports an agent interface around its
+    // workflow logic, so it may bind the scope; the same shape without the
+    // logic inside may not.
+    let published = |section: &str| {
+        wat::parse_str(format!(
+            r#"(component
+              (import "runtara:workflow/operation@1.0.0" (instance $scope))
+              (component
+                (import "runtara:workflow/operation@1.0.0" (instance $inner))
+                (component {section} (import "runtara:workflow/operation@1.0.0" (instance)))
+                (instance (instantiate 0 (with "runtara:workflow/operation@1.0.0" (instance $inner))))
+                (instance $caps)
+                (export "runtara:agent-flow/capabilities@1.0.0" (instance $caps)))
+              (instance (instantiate 0
+                (with "runtara:workflow/operation@1.0.0" (instance $scope)))))"#
+        ))
+        .unwrap()
+    };
+    let logic_section = format!(r#"(@custom "{}" "")"#, runtara_wit::workflow::LOGIC_SECTION);
+    assert!(audit_control_importers(&published(&logic_section)).is_ok());
+    assert!(audit_control_importers(&published("")).is_err());
 }
 
 #[tokio::test(flavor = "multi_thread")]

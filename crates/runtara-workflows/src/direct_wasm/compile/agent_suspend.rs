@@ -54,7 +54,6 @@ use super::{
     DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DirectCompileError, DirectCoreFunctionIndices,
     DirectCoreStaticData, DirectWorkflowManifest,
 };
-use crate::direct_wasm::component::WorkflowRole;
 use crate::direct_wasm::manifest::{DirectAgentManifest, DirectEdgeManifest, DirectGraphManifest};
 
 // Canonical layout of `result<outcome, error-info>` in the retptr area, where
@@ -105,26 +104,23 @@ const PARK_AT: u32 = DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL;
 /// shapes only the compiler can see:
 ///
 /// - any operation-scoped site: an AiAgent tool, memory provider or synthetic
-///   AiAgent call, a workflow embedded as an AiAgent tool, the
-///   `PublishedAgent` ABI (a published workflow-agent), an omitted runtime, scoped isolation, and a
-///   control call compiled without the agent catalog (it could not be
-///   classified);
+///   AiAgent call, a workflow embedded as an AiAgent tool, an omitted runtime,
+///   scoped isolation, and a control call compiled without the agent catalog
+///   (it could not be classified);
 /// - any operation-scoped site in a `WaitForSignal.onWait` graph, directly or
 ///   through an embedded workflow;
 /// - a suspending site: non-durable, untimed, or an onError handler;
 /// - a WaitForInstances step wherever a suspending site is refused, except
 ///   that it has no step timeout: an AiAgent tool or memory target, a tool
-///   workflow, an onWait graph, a target other than the lifecycle invoke ABI
-///   with the runtime imported, a non-durable graph, or an onError handler.
+///   workflow, an onWait graph, an omitted runtime, a non-durable graph, or an
+///   onError handler.
 pub(super) fn check_sites(
     manifest: &DirectWorkflowManifest,
-    abi: WorkflowRole,
     omit_runtime: bool,
     scoped_agents: &BTreeSet<String>,
     has_catalog: bool,
 ) -> Result<(), DirectCompileError> {
     let target = SiteTarget {
-        abi,
         omit_runtime,
         scoped_agents,
     };
@@ -177,7 +173,6 @@ pub(super) fn check_sites(
 
 /// The compile target every operation-scoped site must support.
 struct SiteTarget<'a> {
-    abi: WorkflowRole,
     omit_runtime: bool,
     scoped_agents: &'a BTreeSet<String>,
 }
@@ -294,12 +289,6 @@ fn check_graph(
         if in_on_wait {
             return refuse(step, kind, "cannot run in a WaitForSignal onWait graph");
         }
-        match target.abi {
-            WorkflowRole::Root => {}
-            WorkflowRole::PublishedAgent => {
-                return refuse(step, kind, "cannot be published as a workflow-agent");
-            }
-        }
         if target.omit_runtime {
             return refuse(step, kind, "needs the host-imported workflow runtime");
         }
@@ -362,12 +351,6 @@ fn check_wait_for_instances(
     }
     if in_on_wait {
         return refuse_wait(step, "cannot run in a WaitForSignal onWait graph");
-    }
-    match target.abi {
-        WorkflowRole::Root => {}
-        WorkflowRole::PublishedAgent => {
-            return refuse_wait(step, "cannot be published as a workflow-agent");
-        }
     }
     if target.omit_runtime {
         return refuse_wait(step, "needs the host-imported workflow runtime");

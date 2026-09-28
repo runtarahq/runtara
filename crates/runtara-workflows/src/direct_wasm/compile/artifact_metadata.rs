@@ -336,7 +336,7 @@ pub(super) fn resolve_agent_component_dependencies(
                     ),
                 )));
             };
-            let tagged_kind = check_workflow_agent_checkpoint_scope(dir, component)?;
+            let tagged_kind = workflow_agent_import_kind(dir, component)?;
             // The sidecar is authored by whoever built the component, so its
             // `workflow-agent` tag alone never lifts the allowlist: only a
             // component resolved from a staging dir (where the server writes
@@ -346,10 +346,10 @@ pub(super) fn resolve_agent_component_dependencies(
             } else {
                 AgentImportKind::Agent
             };
-            // The parent re-raises a workflow-agent's reserved codes byte for
-            // byte, and the catalog tag that decides that is also authored by
-            // whoever built the component. Only a staged workflow-agent (built
-            // by the server, whose user errors the stdlib remaps) may be one.
+            // The parent forwards a workflow-agent's `suspended` outcome, and
+            // the catalog tag that decides that is also authored by whoever
+            // built the component. Only a staged workflow-agent (built by the
+            // server) may be one.
             if workflow_agents.contains(&component.agent_id)
                 && kind != AgentImportKind::StagedWorkflowAgent
             {
@@ -402,9 +402,10 @@ pub enum AgentImportKind {
     Agent,
     /// A tenant-staged workflow-agent: tagged `workflow-agent` in its sidecar
     /// AND resolved from an extra (staging) component dir, never the primary
-    /// components dir. The server compiled it, and it legitimately imports the
-    /// workflow runtime, so it skips the list; it is still denied the
-    /// [`STAGED_WORKFLOW_AGENT_DENIED_PREFIXES`].
+    /// components dir. The server compiled it and it runs under its caller's
+    /// instance, so it skips the list: it imports the workflow runtime, and
+    /// whatever the agents it composed left to the host. Control additionally
+    /// needs the control artifact pin.
     StagedWorkflowAgent,
 }
 
@@ -424,18 +425,6 @@ pub const AGENT_IMPORT_ALLOWLIST: &[&str] = &[
     runtara_wit::host::CONNECTIONS,
     runtara_wit::host::SQL,
 ];
-
-/// Interfaces no staged workflow-agent may import, although it skips the
-/// allowlist.
-pub const STAGED_WORKFLOW_AGENT_DENIED_PREFIXES: &[&str] = &[
-    runtara_wit::control::PREFIX,
-    runtara_wit::workflow::OPERATION_PREFIX,
-    runtara_wit::workflow::WAITS_PREFIX,
-    CONTINUATION_INTERFACE_PREFIX,
-];
-
-/// Any version of the continuation interface.
-const CONTINUATION_INTERFACE_PREFIX: &str = "runtara:agent/continuation@";
 
 /// Control interfaces the canonical `control` agent may import. Its own
 /// `runtara:control/execution` is an export, never an import.
@@ -588,14 +577,29 @@ pub fn check_agent_component_imports(
             .iter()
             .any(|export| export == runtara_wit::control::EXECUTION);
     }
+    // A staged workflow-agent that calls control composed the bundled control
+    // agent and carries its pin; composition checks the pin names the bundled
+    // version, and the host that it is approved.
+    if kind == AgentImportKind::StagedWorkflowAgent
+        && imports
+            .iter()
+            .any(|import| import.starts_with(runtara_wit::control::PREFIX))
+        && !imports.iter().any(|import| {
+            runtara_dsl::agent_meta::parse_builtin_artifact_import(import)
+                .is_some_and(|(agent, _)| agent == runtara_dsl::agent_meta::CONTROL_AGENT_ID)
+        })
+    {
+        return Err(DirectCompileError::Component(format!(
+            "workflow-agent `{agent_id}` imports control without the control artifact pin; \
+             republish it"
+        )));
+    }
     for import in imports {
         let allowed = match kind {
             AgentImportKind::Agent => {
                 agent_import_allowed(&import) || agent_import_granted(&import, grants)
             }
-            AgentImportKind::StagedWorkflowAgent => !STAGED_WORKFLOW_AGENT_DENIED_PREFIXES
-                .iter()
-                .any(|prefix| import.starts_with(prefix)),
+            AgentImportKind::StagedWorkflowAgent => true,
         };
         if !allowed {
             return Err(DirectCompileError::Component(format!(
@@ -606,75 +610,33 @@ pub fn check_agent_component_imports(
     Ok(())
 }
 
-/// Compatibility and safety gate for staged workflow-agents.
-///
-/// A workflow-agent must carry both the checkpoint namespacing marker and an
-/// explicit non-suspending certification. The capability ABI is synchronous:
-/// allowing an old sidecar to compose would let a wait/sleep/retry path hold
-/// the parent's runner without a way to park. Generic agents remain untouched:
-/// only a parseable sidecar explicitly tagged `workflow-agent` enters this
-/// gate.
-///
-/// Returns how the sidecar's tags classify the component: only a sidecar
+/// How a component's sidecar classifies it: only a sidecar with a capability
 /// tagged `workflow-agent` yields [`AgentImportKind::StagedWorkflowAgent`], and
 /// the caller still downgrades that to [`AgentImportKind::Agent`] unless the
-/// component was resolved from a staging dir.
-fn check_workflow_agent_checkpoint_scope(
+/// component was resolved from a staging dir. A workflow-agent built for an
+/// older ABI fails composition on its export's type.
+fn workflow_agent_import_kind(
     dir: &Path,
     component: &DirectAgentComponentRequirement,
 ) -> Result<AgentImportKind, DirectCompileError> {
     let meta = fs::read(dir.join(&component.bundle_meta_filename))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
-    let workflow_agent_capabilities: Vec<Vec<&str>> = meta
+    let tagged = meta
         .as_ref()
         .and_then(|meta| meta.get("capabilities"))
         .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
-        .map(|capability| {
+        .any(|capability| {
             capability
                 .get("tags")
                 .and_then(serde_json::Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(serde_json::Value::as_str)
-                .collect()
-        })
-        .filter(|tags: &Vec<&str>| tags.contains(&capability_tags::WORKFLOW_AGENT))
-        .collect();
-
-    if !workflow_agent_capabilities.is_empty() {
-        if workflow_agent_capabilities
-            .iter()
-            .any(|tags| !tags.contains(&capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE))
-        {
-            return Err(DirectCompileError::Component(format!(
-                "published workflow-agent `{}` is a stale artifact that predates checkpoint \
-                 namespacing; republish it (POST /workflows/<id>/publish-agent) and recompile",
-                component.agent_id
-            )));
-        }
-        // Either certificate composes: `non-suspending:1` proves the child never
-        // suspends, `parks:1` says it may but carries its deadline out
-        // through the suspend sentinel and this composer knows how to re-raise
-        // it. A child carrying neither is a stale or unproven artifact.
-        //
-        // The two are mutually exclusive by construction, which is what makes
-        // the second one safe to add: every composer built before parking
-        // existed demands `non-suspending:1`, so it refuses a parking child
-        // outright instead of dropping the deadline it cannot decode.
-        if workflow_agent_capabilities.iter().any(|tags| {
-            !tags.contains(&capability_tags::WORKFLOW_AGENT_NON_SUSPENDING)
-                && !tags.contains(&capability_tags::WORKFLOW_AGENT_PARKS)
-        }) {
-            return Err(DirectCompileError::Component(format!(
-                "published workflow-agent `{}` carries neither the non-suspending:1 certification \
-                 nor the parks:1 marker; republish it after removing every wait, delay, \
-                 retry/backoff, and breakpoint path, or republish it as a parking agent",
-                component.agent_id
-            )));
-        }
+                .any(|tag| tag.as_str() == Some(capability_tags::WORKFLOW_AGENT))
+        });
+    if tagged {
         return Ok(AgentImportKind::StagedWorkflowAgent);
     }
     if meta.is_some() {
@@ -954,64 +916,6 @@ mod tests {
         .expect("write sidecar");
     }
 
-    #[test]
-    fn workflow_agent_without_non_suspending_certificate_is_rejected() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let component = component_requirement();
-        write_sidecar(
-            dir.path(),
-            &[
-                capability_tags::WORKFLOW_AGENT,
-                capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE,
-            ],
-        );
-
-        let error = check_workflow_agent_checkpoint_scope(dir.path(), &component)
-            .expect_err("an old workflow-agent sidecar must not compose");
-
-        assert!(error.to_string().contains("non-suspending:1"), "{error}");
-    }
-
-    #[test]
-    fn a_parking_workflow_agent_composes_without_the_non_suspending_certificate() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let component = component_requirement();
-        write_sidecar(
-            dir.path(),
-            &[
-                capability_tags::WORKFLOW_AGENT,
-                capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE,
-                capability_tags::WORKFLOW_AGENT_PARKS,
-            ],
-        );
-
-        check_workflow_agent_checkpoint_scope(dir.path(), &component)
-            .expect("a parking workflow-agent composes on its own marker");
-    }
-
-    #[test]
-    fn a_parking_marker_never_accompanies_the_non_suspending_certificate() {
-        // The exclusivity is the compatibility guarantee: every composer built
-        // before parking existed demands `non-suspending:1`, so a child that
-        // carries only `parks:1` is refused by an older parent instead
-        // of composed by one that would drop the deadline it cannot decode.
-        let mut info = runtara_dsl::agent_meta::workflow_agent_info(
-            "parking-child",
-            "parking-child",
-            "fixture",
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-        );
-        runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
-        runtara_dsl::agent_meta::certify_workflow_agent_parks(&mut info);
-
-        assert!(runtara_dsl::agent_meta::is_parking_workflow_agent(&info));
-        assert!(
-            !runtara_dsl::agent_meta::is_certified_non_suspending_workflow_agent(&info),
-            "parking must strip the non-suspending certificate it contradicts"
-        );
-    }
-
     /// A component whose root imports are exactly `imports` (empty instances).
     fn component_importing(imports: &[&str]) -> Vec<u8> {
         component_importing_exporting(imports, &[])
@@ -1091,11 +995,7 @@ mod tests {
         .map(|_| ())
     }
 
-    const STAGED_TAGS: &[&str] = &[
-        capability_tags::WORKFLOW_AGENT,
-        capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE,
-        capability_tags::WORKFLOW_AGENT_NON_SUSPENDING,
-    ];
+    const STAGED_TAGS: &[&str] = &[capability_tags::WORKFLOW_AGENT];
 
     #[test]
     fn an_agent_importing_an_unlisted_interface_is_rejected() {
@@ -1217,30 +1117,46 @@ mod tests {
     }
 
     #[test]
-    fn a_staged_workflow_agent_skips_the_list_but_not_control_or_operation_scope() {
+    fn a_staged_workflow_agent_skips_the_list_but_needs_a_pin_for_control() {
+        let pin = runtara_dsl::agent_meta::builtin_artifact_import(
+            "control",
+            &"a".repeat(64),
+            &"b".repeat(64),
+        );
         resolve_fixture_agent_in(
             FixtureDir::Staging,
             &[
                 "wasi:cli/environment@0.2.6",
                 "runtara:workflow/runtime@1.0.0",
                 "runtara:workflow-stdlib/json@1.0.0",
+                runtara_wit::workflow::OPERATION,
+                runtara_wit::workflow::WAITS,
+                runtara_wit::agent::CONTINUATION,
+                runtara_wit::control::API,
+                runtara_wit::control::EXECUTOR,
+                &pin,
             ],
             STAGED_TAGS,
         )
-        .expect("a staged workflow-agent imports the runtime");
+        .expect("a staged workflow-agent parks, waits and calls control under its caller");
 
-        for denied in [
-            "runtara:control/api@1.0.0",
-            "runtara:workflow/operation@1.0.0",
-        ] {
-            let error = resolve_fixture_agent_in(
-                FixtureDir::Staging,
-                &["runtara:workflow/runtime@1.0.0", denied],
-                STAGED_TAGS,
-            )
-            .expect_err("staged workflow-agents never bind control or the operation scope");
-            assert!(error.to_string().contains(denied), "{error}");
-        }
+        let error = resolve_fixture_agent_in(
+            FixtureDir::Staging,
+            &["runtara:workflow/runtime@1.0.0", runtara_wit::control::API],
+            STAGED_TAGS,
+        )
+        .expect_err("control without the control pin");
+        assert!(
+            error.to_string().contains("control artifact pin"),
+            "{error}"
+        );
+
+        resolve_fixture_agent_in(
+            FixtureDir::Staging,
+            &[runtara_wit::agent::CONTINUATION],
+            STAGED_TAGS,
+        )
+        .expect("a composed native suspending agent leaves its continuation to the host");
     }
 
     /// Stage `agent_id` importing `imports`, with a sidecar that does or does
@@ -1514,15 +1430,15 @@ mod tests {
             .expect("a staged workflow-agent may park its caller");
 
         // A tagged sidecar in the primary dir, or an untagged one anywhere,
-        // is not a staged workflow-agent, so a caller that re-raises the
-        // reserved codes for it must not compose.
+        // is not a staged workflow-agent, so a caller that forwards its
+        // `suspended` outcome must not compose.
         for (location, tags) in [
             (FixtureDir::Primary, STAGED_TAGS),
             (FixtureDir::Primary, &["memory:read"][..]),
             (FixtureDir::Staging, &["memory:read"][..]),
         ] {
             let error = resolve_fixture_agent_re_raised(location, &imports, tags, true)
-                .expect_err("only a staged workflow-agent may carry the reserved codes");
+                .expect_err("only a staged workflow-agent may park its caller");
             let message = error.to_string();
             assert!(
                 message.contains("published-flow") && message.contains("staging"),
@@ -1602,7 +1518,7 @@ mod tests {
                 );
             }
         }
-        for prefix in STAGED_WORKFLOW_AGENT_DENIED_PREFIXES {
+        for prefix in ["runtara:agent/continuation@", runtara_wit::control::PREFIX] {
             for suffix in ["", "api", "scope@0.1.0", "scope@0.2.0", "anything@9.9.9"] {
                 let import = format!("{prefix}{suffix}");
                 assert!(
@@ -1730,23 +1646,20 @@ mod tests {
     }
 
     #[test]
-    fn certified_workflow_agent_and_unrelated_agent_are_distinguished_by_tags() {
-        let certified = tempfile::tempdir().expect("certified tempdir");
+    fn the_workflow_agent_tag_alone_classifies_a_staged_workflow_agent() {
+        let tagged = tempfile::tempdir().expect("tagged tempdir");
         let component = component_requirement();
-        write_sidecar(
-            certified.path(),
-            &[
-                capability_tags::WORKFLOW_AGENT,
-                capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE,
-                capability_tags::WORKFLOW_AGENT_NON_SUSPENDING,
-            ],
+        write_sidecar(tagged.path(), &[capability_tags::WORKFLOW_AGENT]);
+        assert_eq!(
+            workflow_agent_import_kind(tagged.path(), &component).unwrap(),
+            AgentImportKind::StagedWorkflowAgent
         );
-        check_workflow_agent_checkpoint_scope(certified.path(), &component)
-            .expect("certified workflow-agent composes");
 
         let generic = tempfile::tempdir().expect("generic tempdir");
         write_sidecar(generic.path(), &["memory:read"]);
-        check_workflow_agent_checkpoint_scope(generic.path(), &component)
-            .expect("an unrelated generic agent must not need workflow certification");
+        assert_eq!(
+            workflow_agent_import_kind(generic.path(), &component).unwrap(),
+            AgentImportKind::Agent
+        );
     }
 }

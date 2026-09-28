@@ -54,10 +54,10 @@ pub struct DirectWorkflowSupportReport {
     pub feature_summary: WorkflowFeatureSummary,
 }
 
-/// Static proof that a workflow is safe to publish through the workflow-agent
-/// capability ABI. Guest-local cancellable I/O and non-durable Agent/Split backoff
-/// can remain inside the invocation. Durable suspension and lifecycle ownership
-/// still cannot be delegated to a child through this result type.
+/// Static proof that a workflow is safe to publish as a workflow-agent. A
+/// published agent parks by returning the `suspended` outcome, which its
+/// caller forwards, so waits, sleeps, suspending capabilities and durable
+/// backoff are findings rather than refusals.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowAgentSafetyReport {
@@ -67,9 +67,8 @@ pub struct WorkflowAgentSafetyReport {
     /// Deterministic reasons that the graph cannot be published as an agent.
     pub violations: Vec<WorkflowAgentSafetyViolation>,
     /// Every site that parks when published: the path and step behind
-    /// `may_suspend_or_sleep`. These publish under `parks:1`, so they are
-    /// findings rather than refusals, and kept so a caller can say exactly where
-    /// an agent may park instead of only that it might.
+    /// `may_suspend_or_sleep`. Kept so a caller can say exactly where an agent
+    /// may park instead of only that it might.
     #[serde(default)]
     pub parking_sites: Vec<WorkflowAgentSafetyViolation>,
 }
@@ -99,11 +98,9 @@ pub struct WorkflowAgentSafetyViolation {
 /// conservative: when a child closure cannot be proven complete, publishing is
 /// refused rather than assuming a missing dependency cannot suspend.
 ///
-/// An operation-scoped call refuses publication: a suspending capability
-/// (`suspending-capability`, from the `catalog`) or any call to the control
-/// agent (`control-agent`, recognized by id even without a catalog). Neither
-/// is a parking site: the capability ABI cannot carry a typed suspension or
-/// the caller's operation identity.
+/// A suspending capability (`suspending-capability`, from the `catalog`) is a
+/// parking site. A control call runs under the caller's instance, and a
+/// published agent keeps the workflow runtime for it.
 pub fn analyze_workflow_agent_safety(
     graph: &ExecutionGraph,
     child_workflows: &[ChildWorkflowInput],
@@ -133,12 +130,11 @@ pub fn analyze_workflow_agent_safety(
             ))
     });
 
-    // A path that PARKS is not a publication hazard any more. Waits, sleeps and
-    // durable retry backoff all park under the capability ABI: the suspend
-    // sentinel carries the wake out to the caller, which parks in the child's
-    // place, so a published agent never holds a runner slot for them. They set
-    // `may_suspend_or_sleep`, which selects the `parks:1` certificate, and stay
-    // out of `violations`.
+    // A path that PARKS is not a publication hazard. Waits, sleeps, suspending
+    // capabilities and durable retry backoff return the `suspended` outcome,
+    // which the caller forwards and parks on in the child's place, so a
+    // published agent never holds a runner slot for them. They set
+    // `may_suspend_or_sleep` and stay out of `violations`.
     //
     // What remains a violation is what is unverified or genuinely unsound: an
     // AiAgent's model-call retry has not been shown to park, and a child closure
@@ -167,6 +163,8 @@ fn parks_under_capability_abi(violation: &WorkflowAgentSafetyViolation) -> bool 
             | ("Agent", "retry-or-rate-limit-backoff")
             | ("EmbedWorkflow", "retry-backoff")
             | ("Split", "retry-backoff")
+            | ("Agent", "suspending-capability")
+            | ("WaitForInstances", "wait-for-instances")
     )
 }
 
@@ -250,28 +248,18 @@ fn collect_workflow_agent_step_safety(
 ) {
     let child_workflows = context.child_workflows;
     let cooperative_waits_supported = context.cooperative_waits_supported;
-    if let Step::Agent(agent) = step {
-        let suspends = context.catalog.is_some_and(|catalog| {
+    if let Step::Agent(agent) = step
+        && context.catalog.is_some_and(|catalog| {
             catalog.capability_suspends(&agent.agent_id, &agent.capability_id)
-        });
-        let control = runtara_dsl::agent_meta::canonical_agent_id(&agent.agent_id)
-            == runtara_dsl::agent_meta::CONTROL_AGENT_ID;
-        let refusal = if suspends {
-            Some((
-                "suspending-capability",
-                "the capability suspends; a published agent cannot park its caller on a typed suspension",
-            ))
-        } else if control {
-            Some((
-                "control-agent",
-                "control calls need the caller's own operation identity, which a published agent does not have",
-            ))
-        } else {
-            None
-        };
-        if let Some((feature, reason)) = refusal {
-            push_workflow_agent_safety_violation(violations, path, step, feature, reason);
-        }
+        })
+    {
+        push_workflow_agent_safety_violation(
+            violations,
+            path,
+            step,
+            "suspending-capability",
+            "the capability suspends; published as an agent it parks in its caller's place",
+        );
     }
     // A breakpoint is not a publication hazard: the capability lowering strips
     // it, so a published agent carries no breakpoint import and cannot pause.
@@ -309,7 +297,7 @@ fn collect_workflow_agent_step_safety(
             path,
             step,
             "wait-for-instances",
-            "WaitForInstances waits on the caller's own child runs, which a published agent does not have",
+            "WaitForInstances parks in its caller's place until the runs it waits on settle",
         ),
         // Only workflows with no root runtime ownership can keep non-durable
         // retry/rate-limit waits local and unwind them on parent cancellation.
@@ -2511,7 +2499,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_agent_safety_refuses_suspending_and_control_calls_anywhere_in_the_closure() {
+    fn workflow_agent_safety_parks_suspending_calls_and_allows_control_anywhere_in_the_closure() {
         let catalog = runtara_dsl::agent_meta::AgentCatalog::from_json(
             &serde_json::json!([{
                 "id": "waiter", "name": "waiter", "description": "fixture",
@@ -2534,35 +2522,35 @@ mod tests {
         };
         let features = |report: &WorkflowAgentSafetyReport| {
             report
-                .violations
+                .parking_sites
                 .iter()
-                .map(|violation| (violation.path.clone(), violation.feature.clone()))
+                .map(|site| (site.path.clone(), site.feature.clone()))
                 .collect::<Vec<_>>()
         };
 
         let report = analyze_workflow_agent_safety(&single("waiter", "pause"), &[], Some(&catalog));
-        assert_eq!(
-            features(&report),
-            vec![("root/steps/call".into(), "suspending-capability".into())]
-        );
+        assert!(report.violations.is_empty(), "{report:?}");
+        assert!(report.may_suspend_or_sleep);
         assert!(
-            report
-                .parking_sites
-                .iter()
-                .all(|site| site.feature != "suspending-capability"),
-            "not a parking site: {report:?}"
+            features(&report).contains(&("root/steps/call".into(), "suspending-capability".into())),
+            "{report:?}"
         );
 
-        // Control is recognized by its id, with or without a catalog.
+        // Control is no refusal and no feature of its own, with or without a
+        // catalog; it parks only through the ordinary Agent retry backoff.
         for catalog in [None, Some(&catalog)] {
             let report = analyze_workflow_agent_safety(&single("control", "get"), &[], catalog);
-            assert_eq!(
-                features(&report),
-                vec![("root/steps/call".into(), "control-agent".into())]
+            assert!(report.violations.is_empty(), "{report:?}");
+            assert!(
+                report
+                    .parking_sites
+                    .iter()
+                    .all(|site| site.feature == "retry-or-rate-limit-backoff"),
+                "{report:?}"
             );
         }
 
-        // An embedded child's call refuses the parent too.
+        // An embedded child's call parks the parent too.
         let parent: ExecutionGraph = serde_json::from_value(serde_json::json!({
             "entryPoint": "embed", "steps": {
                 "embed": {"id": "embed", "stepType": "EmbedWorkflow", "childWorkflowId": "child",
@@ -2588,7 +2576,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_agent_safety_refuses_wait_for_instances() {
+    fn workflow_agent_safety_parks_on_wait_for_instances() {
         let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
             "entryPoint": "wait", "steps": {
                 "wait": {"id": "wait", "stepType": "WaitForInstances",
@@ -2597,16 +2585,16 @@ mod tests {
             "executionPlan": [{"fromStep": "wait", "toStep": "finish"}]}))
         .expect("graph parses");
         let report = analyze_workflow_agent_safety(&graph, &[], None);
+        assert!(report.violations.is_empty(), "{report:?}");
         assert_eq!(
             report
-                .violations
+                .parking_sites
                 .iter()
-                .map(|violation| (violation.path.as_str(), violation.feature.as_str()))
+                .map(|site| (site.path.as_str(), site.feature.as_str()))
                 .collect::<Vec<_>>(),
             vec![("root/steps/wait", "wait-for-instances")],
             "{report:?}"
         );
-        assert!(report.parking_sites.is_empty(), "not a parking site");
     }
 
     #[test]

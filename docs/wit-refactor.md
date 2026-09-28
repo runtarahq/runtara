@@ -494,6 +494,20 @@ Differences from the text below:
 - Former reserved codes (`__rt_on_signal__`, `__rt_suspended__`) are ordinary
   error codes now, passed through unchanged.
 
+5d differences:
+- Workflow-agents do not set `suspends`. That flag makes a caller wrap the
+  call in an operation scope, which a workflow-agent must not get. The
+  `workflow-agent` tag alone marks one, and staging still refuses `suspends`.
+- A staged workflow-agent has no import denylist: it inherits whatever its
+  composed agents leave to the host, including `runtara:agent/continuation`.
+  Control additionally needs the control pin, which must name the bundled
+  control version, like trusted pins.
+- The precompile audit counts a component that contains workflow logic as
+  workflow logic. It does not hash a composition with no core code of its own
+  as a control importer. The control agent nested in it is hashed as before.
+- `StepContext::PublishedWorkflowAgent` and `ContextVerdict::PublishRefused`
+  are deleted. They had no verdict left.
+
 **5a. WIT (`runtara-wit`)**
 - Replace `runtara:agent/types` and `suspension` with the unified `types`
   above. `capabilities.invoke` returns `outcome`.

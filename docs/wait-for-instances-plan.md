@@ -112,8 +112,10 @@ and no binding check.
 - durable workflow required (E028);
 - not in `onError`, `onWait`, AiAgent tools or AiAgent memory (E131, E132);
 - serialized out of parallel windows (W075);
-- a warning under an enclosing retry (W076);
-- refused when the workflow is published as an agent.
+- a warning under an enclosing retry (W076).
+
+A workflow published as an agent may wait too: it runs under its caller's
+instance, so it waits on the caller's children.
 
 E029 and W078 do not apply: they bound an agent step's own timeout against the
 suspension margin, and `timeoutMs` here is the wait's deadline.

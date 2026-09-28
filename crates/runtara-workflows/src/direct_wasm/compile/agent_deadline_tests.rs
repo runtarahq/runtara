@@ -692,14 +692,13 @@ fn wrap_published(
     fs::create_dir(&staging)?;
     let mut slug = "timed-child".to_string();
     for level in 0..depth {
-        let mut info = runtara_dsl::agent_meta::workflow_agent_info(
+        let info = runtara_dsl::agent_meta::workflow_agent_info(
             &slug,
             &slug,
             "fixture",
             &HashMap::new(),
             &HashMap::new(),
         );
-        runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
         fs::copy(
             &child.wasm_path,
             staging.join(format!("runtara_agent_{}.wasm", slug.replace('-', "_"))),

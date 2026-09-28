@@ -16,9 +16,8 @@ fn bundle() -> String {
         .expect("build components and set RUNTARA_AGENT_COMPONENTS_DIR")
 }
 
-/// Sidecar and catalog entry for the fixture. `tagged` stamps it as a
-/// certified workflow-agent, the tags that make a parent forward its
-/// `suspended` outcome.
+/// Sidecar and catalog entry for the fixture. `tagged` keeps the
+/// `workflow-agent` tag, which makes a parent forward its `suspended` outcome.
 fn fixture_info(tagged: bool) -> runtara_dsl::agent_meta::AgentInfo {
     let mut info = runtara_dsl::agent_meta::workflow_agent_info(
         AGENT_ID,
@@ -27,7 +26,6 @@ fn fixture_info(tagged: bool) -> runtara_dsl::agent_meta::AgentInfo {
         &HashMap::new(),
         &HashMap::new(),
     );
-    runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
     if !tagged {
         for capability in &mut info.capabilities {
             capability.tags.clear();

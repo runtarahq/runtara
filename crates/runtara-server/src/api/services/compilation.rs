@@ -314,26 +314,20 @@ pub fn direct_compilation_settings_from_config() -> DirectCompilationSettings {
     }
 }
 
-/// Refuse graphs requiring durable suspension or unsupported runtime ownership
-/// before any artifact or sidecar is staged. Non-durable Agent backoff can stay
-/// inside a callable workflow using cancellable guest waits.
-/// Refuse a workflow that cannot be published as an agent, and report whether
-/// the one that can will park.
+/// Refuse a workflow that cannot be published as an agent, before any
+/// artifact or sidecar is staged.
 ///
-/// A wait, a sleep or a durable retry backoff is not a refusal: each parks under
-/// the capability ABI, so the caller parks in the child's place and no runner
-/// slot is held. Those graphs publish under `parks:1` rather than
-/// `non-suspending:1`. What still refuses is what cannot be shown sound — an
-/// AiAgent model-call retry, or a child closure the compiler cannot see.
-///
-/// A suspending capability or any control-agent call anywhere in the closure
-/// refuses too (`suspending-capability`, `control-agent`): the capability ABI
-/// carries neither a typed suspension nor the caller's operation identity.
+/// Parking is not a refusal: a wait, a sleep, a suspending capability or a
+/// durable retry backoff returns the `suspended` outcome, which the caller
+/// forwards, so no runner slot is held. Control calls and WaitForInstances run
+/// under the caller's instance. What still refuses is what cannot be shown
+/// sound: an AiAgent model-call retry, or a child closure the compiler cannot
+/// see.
 fn require_publishable_workflow_agent(
     execution_graph: &runtara_dsl::ExecutionGraph,
     child_workflows: &[ChildWorkflowInput],
     catalog: Option<&runtara_dsl::agent_meta::AgentCatalog>,
-) -> Result<bool, ServiceError> {
+) -> Result<(), ServiceError> {
     let workflow_agent_safety = runtara_workflows::direct_wasm::analyze_workflow_agent_safety(
         execution_graph,
         child_workflows,
@@ -345,7 +339,7 @@ fn require_publishable_workflow_agent(
             violation.path, violation.step_type, violation.feature, violation.reason,
         )));
     }
-    Ok(workflow_agent_safety.may_suspend_or_sleep)
+    Ok(())
 }
 
 fn compile_workflow_direct_only(
@@ -1250,7 +1244,7 @@ impl CompilationService {
             .agent_catalog
             .as_ref()
             .map(|base| crate::workflow_agents::catalog_with_workflow_agents(base, tenant_id));
-        let parks = require_publishable_workflow_agent(
+        require_publishable_workflow_agent(
             &execution_graph,
             &child_workflows,
             agent_catalog.as_deref(),
@@ -1258,22 +1252,13 @@ impl CompilationService {
 
         let name = execution_graph.name.clone().unwrap_or_else(|| slug.clone());
         let description = execution_graph.description.clone().unwrap_or_default();
-        let mut info = runtara_dsl::agent_meta::workflow_agent_info(
+        let info = runtara_dsl::agent_meta::workflow_agent_info(
             &slug,
             &name,
             &description,
             &execution_graph.input_schema,
             &execution_graph.output_schema,
         );
-        // The two certificates are mutually exclusive by construction. A composer
-        // built before parking existed demands `non-suspending:1`, so it refuses a
-        // parking child outright instead of re-raising its suspend without the
-        // wake it carries.
-        if parks {
-            runtara_dsl::agent_meta::certify_workflow_agent_parks(&mut info);
-        } else {
-            runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
-        }
 
         // 2. Compile with the PublishedAgent ABI + compose. Same catalog
         //    overlay as a normal compile so a workflow-agent may itself invoke
@@ -1306,8 +1291,8 @@ impl CompilationService {
             let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
                 direct_input,
                 runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
-                // Static preflight excludes durable suspension. Callable Agent
-                // waits retain their guest stack and cooperate with parent cancellation.
+                // Omit the runtime where the graph allows; the compiler keeps
+                // it for anything that parks or runs under the caller's instance.
                 true,
             )?;
             runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
@@ -1786,17 +1771,12 @@ mod tests {
         }))
         .expect("graph parses");
 
-        // A sleep parks in a published agent, so it publishes — under `parks:1`,
-        // which is what the `true` selects.
-        assert!(
-            require_publishable_workflow_agent(&graph, &[], None)
-                .expect("a sleeping workflow-agent parks rather than holding a runner"),
-            "a Delay must be reported as parking"
-        );
+        require_publishable_workflow_agent(&graph, &[], None)
+            .expect("a sleeping workflow-agent parks rather than holding a runner");
     }
 
     #[test]
-    fn workflow_agent_publish_preflight_refuses_a_control_call() {
+    fn workflow_agent_publish_preflight_accepts_a_control_call() {
         let graph = parse_execution_graph(&serde_json::json!({
             "steps": {
                 "get": {"stepType": "Agent", "id": "get", "agentId": "control",
@@ -1806,14 +1786,8 @@ mod tests {
             "executionPlan": []
         }))
         .expect("graph parses");
-        let error = require_publishable_workflow_agent(&graph, &[], None)
-            .expect_err("a control call cannot be published");
-        assert!(
-            error
-                .to_string()
-                .contains("root/steps/get (Agent/control-agent)"),
-            "{error}"
-        );
+        require_publishable_workflow_agent(&graph, &[], None)
+            .expect("a workflow-agent calls control under its caller's instance");
     }
 
     #[test]
@@ -1849,7 +1823,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_agent_publish_preflight_certifies_agent_waits_by_durability() {
+    fn workflow_agent_publish_preflight_accepts_agent_waits_either_way() {
         let mut graph = parse_execution_graph(&serde_json::json!({
             "durable": false, "entryPoint": "call", "steps": {
                 "call": {"id":"call", "stepType":"Agent", "agentId":"http",
@@ -1858,19 +1832,11 @@ mod tests {
             }, "executionPlan":[{"fromStep":"call", "toStep":"finish"}]
         }))
         .expect("graph parses");
-        assert!(
-            !require_publishable_workflow_agent(&graph, &[], None)
-                .expect("guest-local Agent waits publish"),
-            "a non-durable Agent retry waits in the guest and never parks"
-        );
-        // Durable backoff used to be refused; it parks now, so it publishes as a
-        // parking agent rather than being turned away.
+        require_publishable_workflow_agent(&graph, &[], None)
+            .expect("guest-local Agent waits publish");
         graph.durable = Some(true);
-        assert!(
-            require_publishable_workflow_agent(&graph, &[], None)
-                .expect("durable Agent backoff parks rather than holding a runner"),
-            "a durable Agent retry must be reported as parking"
-        );
+        require_publishable_workflow_agent(&graph, &[], None)
+            .expect("durable Agent backoff parks rather than holding a runner");
     }
 
     #[test]
@@ -1885,11 +1851,8 @@ mod tests {
         }))
         .expect("graph parses");
 
-        assert!(
-            !require_publishable_workflow_agent(&graph, &[], None)
-                .expect("a pure finish is safe as a workflow-agent"),
-            "a pure finish never parks, so it keeps the non-suspending certificate"
-        );
+        require_publishable_workflow_agent(&graph, &[], None)
+            .expect("a pure finish is safe as a workflow-agent");
     }
 
     #[test]

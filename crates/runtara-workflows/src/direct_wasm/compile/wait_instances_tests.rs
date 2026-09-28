@@ -85,11 +85,11 @@ fn a_wait_imports_the_instance_waits_and_nothing_else_does() {
 
 #[test]
 fn the_backstops_refuse_what_validation_reports() {
-    let text = refusal(single(wait("wait")), WorkflowRole::PublishedAgent);
-    assert!(
-        text.contains("cannot be published as a workflow-agent"),
-        "{text}"
-    );
+    // A published workflow-agent waits under its caller's instance.
+    let result = compile(single(wait("wait")), WorkflowRole::PublishedAgent)
+        .expect("a workflow-agent may wait on instances");
+    assert!(!result.omit_runtime);
+    assert!(result.component_artifacts.wait_instances);
 
     let mut graph = single(wait("wait"));
     graph["durable"] = json!(false);

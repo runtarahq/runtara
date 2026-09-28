@@ -23,10 +23,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use runtara_dsl::agent_meta::{
-    AgentCatalog, AgentInfo, CONTROL_AGENT_ID, canonical_agent_id,
-    is_certified_non_suspending_workflow_agent, is_parking_workflow_agent,
-};
+use runtara_dsl::agent_meta::{AgentCatalog, AgentInfo, CONTROL_AGENT_ID, canonical_agent_id};
 
 /// Whether an agent id or workflow slug folds onto a built-in id no tenant
 /// workflow-agent may take, whether or not that built-in is installed:
@@ -36,8 +33,9 @@ pub fn folds_onto_reserved_agent(id: &str) -> bool {
 }
 
 /// Whether the metadata claims a host-enforced execution mode only built-ins
-/// may have: `trusted` (host credentials) or `suspends` (typed suspension,
-/// which composition wires to host continuation state).
+/// may have: `trusted` (host credentials) or `suspends` (a native agent's
+/// continuation state under an operation scope). A workflow-agent parks
+/// through its `suspended` outcome instead, which its caller forwards.
 fn claims_host_execution_mode(info: &AgentInfo) -> bool {
     info.capabilities.iter().any(|c| c.trusted || c.suspends)
 }
@@ -176,16 +174,6 @@ pub fn stage(
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("workflow-agent id `{slug}` is reserved for a built-in agent"),
-        ));
-    }
-    // Either certificate stages, exactly as composition accepts either: a proof
-    // the agent never suspends, or a declaration that it parks and carries its
-    // wake out through the suspend sentinel. Neither is a stale or unproven
-    // artifact.
-    if !is_certified_non_suspending_workflow_agent(info) && !is_parking_workflow_agent(info) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "workflow-agent metadata carries neither the non-suspending:1 certification nor the parks:1 marker",
         ));
     }
     let dir = staging_dir(tenant_id);

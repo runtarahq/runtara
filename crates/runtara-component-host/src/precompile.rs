@@ -673,7 +673,9 @@ fn is_agent_export(name: &str) -> bool {
 /// a root that imports a component or core module (its bytes are not here),
 /// and an agent (a component exporting an agent interface) that imports
 /// `runtara:workflow/operation` or `runtara:workflow/waits`, which only
-/// compiled workflow logic may bind.
+/// compiled workflow logic may bind. A published workflow-agent is a
+/// composition around workflow logic, so a component that contains workflow
+/// logic counts as workflow logic.
 pub fn audit_control_importers(component: &[u8]) -> Result<ControlAudit> {
     use wasmparser::{ComponentTypeRef, Encoding, Parser, Payload};
 
@@ -684,6 +686,8 @@ pub fn audit_control_importers(component: &[u8]) -> Result<ControlAudit> {
         operation: bool,
         agent: bool,
         workflow_logic: bool,
+        /// Whether a core module sits directly in this component.
+        code: bool,
     }
     let mut frames: Vec<Frame> = Vec::new();
     let mut nested: Option<std::ops::Range<usize>> = None;
@@ -703,12 +707,18 @@ pub fn audit_control_importers(component: &[u8]) -> Result<ControlAudit> {
                     operation: false,
                     agent: false,
                     workflow_logic: false,
+                    code: false,
                 });
             }
             Payload::ModuleSection {
                 unchecked_range, ..
+            } => {
+                if let Some(frame) = frames.last_mut() {
+                    frame.code = true;
+                }
+                nested = Some(unchecked_range);
             }
-            | Payload::ComponentSection {
+            Payload::ComponentSection {
                 unchecked_range, ..
             } => nested = Some(unchecked_range),
             Payload::ComponentImportSection(imports) => {
@@ -746,6 +756,9 @@ pub fn audit_control_importers(component: &[u8]) -> Result<ControlAudit> {
             }
             Payload::End(_) => {
                 let frame = frames.pop().context("unbalanced component nesting")?;
+                if let Some(parent) = frames.last_mut() {
+                    parent.workflow_logic |= frame.workflow_logic;
+                }
                 if frames.is_empty() {
                     audit.root_imports_control = frame.control;
                 } else if frame.component {
@@ -754,7 +767,11 @@ pub fn audit_control_importers(component: &[u8]) -> Result<ControlAudit> {
                         "a composed agent imports runtara:workflow/operation or \
                          runtara:workflow/waits, which only compiled workflow logic may bind"
                     );
-                    if frame.control {
+                    // A published workflow-agent only wires the control it
+                    // imports into the control agent nested in it, which is
+                    // audited on its own; it runs no code of its own.
+                    let composition = frame.workflow_logic && !frame.code;
+                    if frame.control && !composition {
                         let bytes = component
                             .get(frame.range)
                             .context("nested component range out of bounds")?;

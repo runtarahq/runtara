@@ -32,13 +32,11 @@ pub(super) fn pin_trusted_dependencies(
         // cannot lift their transitive imports into the root. Preserve those
         // version requirements explicitly before appending the child package.
         let component_bytes = std::fs::read(&dep.wasm_path)?;
+        // A staged workflow-agent that calls control carries the control pin
+        // it was composed with; the import allowlist refuses a pin anywhere
+        // else. Either kind must name the version in the bundle.
         for pin in artifact_pins(&component_bytes)? {
-            if pin.starts_with(runtara_dsl::agent_meta::BUILTIN_ARTIFACTS_PREFIX) {
-                return Err(DirectCompileError::Component(format!(
-                    "agent `{agent_id}` carries a built-in artifact pin; only the root may"
-                )));
-            }
-            require_bundled_trusted_version(components_dir, agent_id, &dep.wasm_path, &pin)?;
+            require_bundled_version(components_dir, agent_id, &dep.wasm_path, &pin)?;
             pins.insert(pin);
         }
         // The host runs control only for the exact control bytes a workflow
@@ -102,26 +100,26 @@ pub(super) fn pin_trusted_dependencies(
     Ok(())
 }
 
-/// A published workflow-agent keeps the pins of the trusted built-in versions
-/// it was composed against; nothing restages it when the operator upgrades
-/// one. A parent composed from it would pin a version no host runs, so every
-/// launch would compile, look unready and compile again. Refuse it with an
-/// actionable diagnostic instead: the version `pin` names must be the one in
-/// the primary component bundle. The error is typed so the server records the
-/// stale pin with the failure and retries it after a republish.
-fn require_bundled_trusted_version(
+/// A published workflow-agent keeps the pins of the trusted and control
+/// built-in versions it was composed against; nothing restages it when the
+/// operator upgrades one. A parent composed from it would pin a version no
+/// host runs, so every launch would compile, look unready and compile again.
+/// Refuse it with an actionable diagnostic instead: the version `pin` names
+/// must be the one in the primary component bundle. The error is typed so the
+/// server records the stale pin with the failure and retries it after a
+/// republish.
+fn require_bundled_version(
     components_dir: &std::path::Path,
     dependency: &str,
     wasm_path: &std::path::Path,
     pin: &str,
 ) -> Result<(), DirectCompileError> {
-    let agent =
-        runtara_dsl::agent_meta::trusted_artifact_import_agent_id(pin).ok_or_else(|| {
-            DirectCompileError::Component(format!(
-                "agent `{dependency}` carries a malformed trusted artifact pin"
-            ))
-        })?;
-    if bundled_trusted_pin(components_dir, agent).as_deref() == Some(pin) {
+    let (agent, bundled) = pinned_and_bundled(components_dir, pin).ok_or_else(|| {
+        DirectCompileError::Component(format!(
+            "agent `{dependency}` carries a malformed built-in artifact pin"
+        ))
+    })?;
+    if bundled.as_deref() == Some(pin) {
         return Ok(());
     }
     Err(DirectCompileError::StaleTrustedDependency {
@@ -151,10 +149,23 @@ pub fn staged_dependency_is_stale(
         return false;
     };
     pins.iter().any(|pin| {
-        runtara_dsl::agent_meta::trusted_artifact_import_agent_id(pin).is_some_and(|agent| {
-            bundled_trusted_pin(components_dir, agent).as_deref() != Some(pin.as_str())
-        })
+        pinned_and_bundled(components_dir, pin)
+            .is_some_and(|(_, bundled)| bundled.as_deref() != Some(pin.as_str()))
     })
+}
+
+/// The built-in agent `pin` names, and the pin of that agent's version in
+/// `components_dir` (`None` when the bundle does not ship it). `None` for a
+/// string that is no trusted or control pin.
+fn pinned_and_bundled<'a>(
+    components_dir: &std::path::Path,
+    pin: &'a str,
+) -> Option<(&'a str, Option<String>)> {
+    if let Some(agent) = runtara_dsl::agent_meta::trusted_artifact_import_agent_id(pin) {
+        return Some((agent, bundled_trusted_pin(components_dir, agent)));
+    }
+    let (agent, _) = runtara_dsl::agent_meta::parse_builtin_artifact_import(pin)?;
+    Some((agent, bundled_builtin_pin(components_dir, agent)))
 }
 
 /// The `runtara:trusted-artifacts/*` pin of the version of trusted built-in
@@ -282,7 +293,7 @@ mod tests {
             &super::super::sha256_hex(&meta),
         );
         let staged = bundle.path().join("runtara_agent_wrapper.wasm");
-        require_bundled_trusted_version(bundle.path(), "wrapper", &staged, &bundled).unwrap();
+        require_bundled_version(bundle.path(), "wrapper", &staged, &bundled).unwrap();
 
         assert_eq!(
             bundled_trusted_pin(bundle.path(), "s3-storage").as_deref(),
@@ -297,8 +308,8 @@ mod tests {
             bundled_trusted_pin(bundle.path(), "s3-storage").as_deref(),
             Some(bundled.as_str())
         );
-        let upgraded = require_bundled_trusted_version(bundle.path(), "wrapper", &staged, &bundled)
-            .unwrap_err();
+        let upgraded =
+            require_bundled_version(bundle.path(), "wrapper", &staged, &bundled).unwrap_err();
         let DirectCompileError::StaleTrustedDependency {
             dependency,
             agent,
@@ -319,17 +330,12 @@ mod tests {
         assert!(upgraded.contains("republish"), "{upgraded}");
         std::fs::remove_file(&meta_path).unwrap();
         assert_eq!(bundled_trusted_pin(bundle.path(), "s3-storage"), None);
-        let removed = require_bundled_trusted_version(bundle.path(), "wrapper", &staged, &bundled)
+        let removed = require_bundled_version(bundle.path(), "wrapper", &staged, &bundled)
             .unwrap_err()
             .to_string();
         assert!(removed.contains("republish"), "{removed}");
         assert!(matches!(
-            require_bundled_trusted_version(
-                bundle.path(),
-                "wrapper",
-                &staged,
-                "runtara:trusted/x@0.1.0"
-            ),
+            require_bundled_version(bundle.path(), "wrapper", &staged, "runtara:trusted/x@0.1.0"),
             Err(DirectCompileError::Component(_))
         ));
     }

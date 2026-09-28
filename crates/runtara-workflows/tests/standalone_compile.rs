@@ -305,14 +305,13 @@ fn workflow_agent_parent(dir: &std::path::Path) -> PathBuf {
 /// Stage the `reserved-code` fixture component with a certified workflow-agent
 /// sidecar in `dir`, the way the server publishes a workflow-agent.
 fn stage_workflow_agent(dir: &std::path::Path) {
-    let mut info = runtara_dsl::agent_meta::workflow_agent_info(
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
         "reserved-code",
         "Reserved Code",
         "",
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
     );
-    runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
     std::fs::write(
         dir.join("runtara_agent_reserved_code.meta.json"),
         serde_json::to_vec(&info).unwrap(),

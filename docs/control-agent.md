@@ -202,10 +202,12 @@ No built-in agent suspends today; agent suspension remains for future
 long-polling agents and may wake only on a timer (`at`). An agent asking to
 wake on instances is refused with `AGENT_INVALID_SUSPENSION`.
 
-A workflow with control, WaitForInstances or suspending steps (or embedding one) cannot be
-published as a workflow-agent, and the composed runtime binding
-(`RUNTARA_DIRECT_RUNTIME_BINDING=composed`) cannot compile it. The full
-context matrix is `operationScopedSteps` in the authoring schema.
+A workflow with control, WaitForInstances or suspending steps (or embedding
+one) may be published as a workflow-agent. The workflow-agent runs inside its
+caller's instance: the runs it starts are children of the caller, its
+WaitForInstances targets are those children, and a park crosses to the caller
+as the `suspended` outcome. The full context matrix is
+`operationScopedSteps` in the authoring schema.
 
 ### Lifecycle (D3, D4)
 

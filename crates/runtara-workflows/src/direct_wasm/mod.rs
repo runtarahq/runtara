@@ -40,11 +40,11 @@ pub use compile::{
     DIRECT_WORKFLOW_MANIFEST_SECTION, DIRECT_WORKFLOW_SUPPORT_SECTION, DirectArtifactFileMetadata,
     DirectArtifactMetadata, DirectChildWorkflowDependencyMetadata, DirectCompilationInput,
     DirectCompilationResult, DirectComponentDependencyMetadata, DirectComponentSidecarMetadata,
-    DirectIsolationMetadata, STAGED_WORKFLOW_AGENT_DENIED_PREFIXES, bundled_builtin_pin,
-    bundled_trusted_pin, check_agent_component_imports, compile_direct_workflow,
-    compile_direct_workflow_composed, compile_direct_workflow_composed_configured,
-    compile_direct_workflow_with_abi, compose_direct_workflow,
-    compose_direct_workflow_with_extra_dirs, staged_dependency_is_stale, trusted_artifact_pins,
+    DirectIsolationMetadata, bundled_builtin_pin, bundled_trusted_pin,
+    check_agent_component_imports, compile_direct_workflow, compile_direct_workflow_composed,
+    compile_direct_workflow_composed_configured, compile_direct_workflow_with_abi,
+    compose_direct_workflow, compose_direct_workflow_with_extra_dirs, staged_dependency_is_stale,
+    trusted_artifact_pins,
 };
 // Builders for old packages exist only in the existing integration-test surface.
 #[cfg(all(

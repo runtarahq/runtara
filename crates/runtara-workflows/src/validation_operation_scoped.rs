@@ -299,9 +299,7 @@ fn apply_rule(
                     other => unreachable!("rule {} warns with unknown code {other}", rule.key),
                 });
             }
-            ContextVerdict::Allowed
-            | ContextVerdict::PublishRefused { .. }
-            | ContextVerdict::NotApplicable => {}
+            ContextVerdict::Allowed | ContextVerdict::NotApplicable => {}
         }
     }
 }

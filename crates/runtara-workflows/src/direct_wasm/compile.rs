@@ -91,8 +91,7 @@ use abi::push_retptr_arg;
 pub use artifact_metadata::{
     AGENT_IMPORT_ALLOWLIST, AgentImportGrants, AgentImportKind, CONTROL_AGENT_IMPORTS,
     DirectArtifactFileMetadata, DirectArtifactMetadata, DirectComponentDependencyMetadata,
-    DirectComponentSidecarMetadata, DirectIsolationMetadata, STAGED_WORKFLOW_AGENT_DENIED_PREFIXES,
-    check_agent_component_imports,
+    DirectComponentSidecarMetadata, DirectIsolationMetadata, check_agent_component_imports,
 };
 use artifact_metadata::{
     InitialArtifactMetadataInput, initial_artifact_metadata, resolve_agent_component_dependencies,
@@ -1209,13 +1208,17 @@ fn compile_direct_workflow_inner(
         resolve_direct_child_workflow_metadata(&manifest, &input.child_workflows)?;
 
     // Callable workflows use cancellable guest-local waits for non-durable
-    // Agent I/O/backoff. They must not import the parent's lifecycle runtime.
+    // Agent I/O/backoff and then omit the workflow runtime. One that parks,
+    // or makes an operation-scoped call (suspending or control) or waits on
+    // instances, keeps it: those run under the caller's instance.
     // Production publishing additionally requires the static safety report.
     let needs_runtime = manifest.feature_summary.needs_runtime(input.track_events);
     let omit_runtime = match abi {
         super::component::WorkflowRole::PublishedAgent => {
             !needs_runtime
                 || (!workflow_agent_safety.may_suspend_or_sleep
+                    && !manifest.has_operation_scoped_sites()
+                    && !manifest.has_wait_for_instances()
                     && !workflow_agent_requires_runtime(
                         &input.execution_graph,
                         &input.child_workflows,
@@ -1262,7 +1265,6 @@ fn compile_direct_workflow_inner(
     }
     agent_suspend::check_sites(
         &manifest,
-        abi,
         omit_runtime,
         &scoped_agents,
         agent_catalog.is_some(),

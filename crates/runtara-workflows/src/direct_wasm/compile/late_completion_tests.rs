@@ -128,11 +128,7 @@ fn compiled_mode(
         .as_array_mut()
         .expect("http sidecar lists capabilities")
     {
-        capability["tags"] = json!([
-            runtara_dsl::agent_meta::capability_tags::WORKFLOW_AGENT,
-            runtara_dsl::agent_meta::capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE,
-            runtara_dsl::agent_meta::capability_tags::WORKFLOW_AGENT_NON_SUSPENDING,
-        ]);
+        capability["tags"] = json!([runtara_dsl::agent_meta::capability_tags::WORKFLOW_AGENT,]);
     }
     fs::write(
         staging.join("runtara_agent_http.meta.json"),

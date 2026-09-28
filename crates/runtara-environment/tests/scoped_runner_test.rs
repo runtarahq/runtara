@@ -773,14 +773,13 @@ fn parking_child_parent(dir: &Path, timeout_ms: Option<u64>) -> DirectCompilatio
 
     let staging = dir.join("staged");
     std::fs::create_dir_all(&staging).unwrap();
-    let mut info = runtara_dsl::agent_meta::workflow_agent_info(
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
         "parking-child",
         "parking-child",
         "fixture",
         &HashMap::new(),
         &HashMap::new(),
     );
-    runtara_dsl::agent_meta::certify_workflow_agent_parks(&mut info);
     std::fs::copy(
         &child.wasm_path,
         staging.join("runtara_agent_parking_child.wasm"),

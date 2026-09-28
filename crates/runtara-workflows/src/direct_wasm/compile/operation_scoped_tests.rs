@@ -106,11 +106,12 @@ fn control_sites_compile_under_the_invoke_abi_and_are_marked_in_the_manifest() {
 #[test]
 fn the_backstops_refuse_what_validation_reports() {
     let control = || single(agent("get", "control", "get"));
-    let text = refusal(compile(control(), WorkflowRole::PublishedAgent));
-    assert!(
-        text.contains("cannot be published as a workflow-agent"),
-        "{text}"
-    );
+    // A published workflow-agent calls control under its caller's instance.
+    let result = compile(control(), WorkflowRole::PublishedAgent)
+        .expect("a workflow-agent may call control");
+    assert!(!result.omit_runtime);
+    let world = fs::read_to_string(&result.world_wit_path).unwrap();
+    assert!(world.contains(runtara_wit::workflow::OPERATION), "{world}");
 
     let dir = tempfile::tempdir().unwrap();
     let text = refusal(compile_direct_workflow_with_abi(
