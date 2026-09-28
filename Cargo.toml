@@ -37,6 +37,7 @@ members = [
     # Control service contract: caps, codes, capacity share, start schema
     "crates/runtara-control-contract",
     "crates/runtara-workflow-wit",
+    "crates/runtara-invocation-contract",
     "crates/runtara-component-host",
     "crates/agents/runtara-agent-crypto",
     "crates/agents/runtara-agent-xml",

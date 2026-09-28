@@ -2,7 +2,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
-use runtara_workflow_wit::isolation_package::{Binding, InvocationManifest};
+use runtara_invocation_contract::{Binding, InvocationManifest};
 use wasmtime::{
     Engine,
     component::{Component, InstancePre, Linker, types::ComponentItem},

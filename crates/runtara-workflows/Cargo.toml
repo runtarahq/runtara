@@ -18,7 +18,7 @@ compiler = [
     "dep:runtara-agent-suspension",
     # Trusted executor interface name for the agent import allowlist.
     "dep:runtara-agent-trusted",
-    "runtara-workflow-wit/isolation-package",
+    "dep:runtara-invocation-contract",
     "dep:wasm-encoder",
     "dep:wit-component",
     "dep:wit-parser",
@@ -54,6 +54,7 @@ runtara-dsl = { path = "../runtara-dsl", version = "8.9" }
 # which this crate already depends on, so the dependency graph is unchanged.
 runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", version = "8.9", default-features = false }
 runtara-workflow-wit = { path = "../runtara-workflow-wit", version = "8.9", optional = true }
+runtara-invocation-contract = { path = "../runtara-invocation-contract", version = "8.9", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"

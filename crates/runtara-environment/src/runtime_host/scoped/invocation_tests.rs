@@ -140,7 +140,7 @@ async fn launcher(
 
 async fn catalog(
     fx: &Fixture,
-    invocations: Option<runtara_workflow_wit::isolation_package::InvocationManifest>,
+    invocations: Option<runtara_invocation_contract::InvocationManifest>,
 ) -> Arc<runtara_component_host::PreparedChildCatalog> {
     use runtara_component_host::precompile::{
         CompiledWorkflowPackage, PrecompileRequest, PrecompileResponse,
@@ -383,7 +383,7 @@ async fn scope_factory_root_cancel_deadline_and_task_cancel_prevent_initializers
 
 #[tokio::test]
 async fn compiler_checkpoint_contracts_bind_real_children_and_persistence() {
-    use runtara_workflow_wit::isolation_package::{
+    use runtara_invocation_contract::{
         AgentCallSite, AgentInvocationPath, CheckpointContract, CheckpointNamespace,
         InvocationCallSite, InvocationManifest,
     };
@@ -588,7 +588,7 @@ mod fenced_invocation_tests;
 
 #[tokio::test]
 async fn compiler_durability_authorizes_only_explicit_durable_fencing() {
-    use runtara_workflow_wit::isolation_package::{
+    use runtara_invocation_contract::{
         AgentCallSite, CheckpointContract, InvocationCallSite, InvocationManifest,
     };
     for durable in [None, Some(false), Some(true)] {

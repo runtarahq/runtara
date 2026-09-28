@@ -139,7 +139,7 @@ runtara-database-contract = { path = "../runtara-database-contract" }
 runtara-agent-trusted = { path = "../runtara-agent-trusted" }
 # Runtara crates
 runtara-workflows = { path = "../runtara-workflows" }
-runtara-workflow-wit = { path = "../runtara-workflow-wit", features = ["isolation-package"] }
+runtara-workflow-wit = { path = "../runtara-workflow-wit" }
 runtara-dsl = { path = "../runtara-dsl", features = ["utoipa"] }
 runtara-agents = { path = "../runtara-agents" }
 runtara-core = { path = "../runtara-core" }

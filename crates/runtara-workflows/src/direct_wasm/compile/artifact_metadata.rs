@@ -93,7 +93,7 @@ pub struct DirectIsolationMetadata {
     /// Identity semantics supplied to the scoped launcher.
     pub context_contract: String,
     /// Exact packaged components and their invocation interfaces.
-    pub bindings: Vec<runtara_workflow_wit::isolation_package::Binding>,
+    pub bindings: Vec<runtara_invocation_contract::Binding>,
     /// Packages left with their original component lifetime.
     pub legacy_agents: Vec<String>,
 }

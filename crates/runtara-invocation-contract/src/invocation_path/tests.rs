@@ -1,5 +1,5 @@
 use super::*;
-use crate::isolation_package::AgentCallSite;
+use crate::AgentCallSite;
 use serde_json::json;
 
 fn manifest() -> InvocationManifest {
@@ -186,7 +186,7 @@ fn compiler_inventory_checks_entry_identity_domain_and_attempt_before_authority(
 
 #[test]
 fn qualified_tokens_resolve_semantic_rules_without_reinterpreting_legacy_domains() {
-    use crate::isolation_package::InvocationCallSite;
+    use crate::InvocationCallSite;
     let mut inventory = manifest();
     inventory.version = 2;
     inventory.agent_calls[0].domains = vec![0, 3];

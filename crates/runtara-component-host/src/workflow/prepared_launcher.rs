@@ -4,7 +4,7 @@ use crate::execution_host::{
     Entry, ExecutionError, InvocationLauncher, PreparedInvocation, StartRequest,
 };
 use crate::isolated_tasks::{TaskCancellation, TaskLifecycle};
-use runtara_workflow_wit::isolation_package::NamespaceFrame;
+use runtara_invocation_contract::NamespaceFrame;
 
 /// Runtime authority for one invocation. Constructing the spec happens inside
 /// the owned task, after the registry's cancellation check and optional async
@@ -116,7 +116,7 @@ impl InvocationLauncher for PreparedInvocationLauncher {
             // Checkpoint grants and durable attempt fencing remain mandatory.
             let resolved = if matches!(
                 invocations.version,
-                3..=runtara_workflow_wit::isolation_package::INVOCATION_MANIFEST_VERSION
+                3..=runtara_invocation_contract::INVOCATION_MANIFEST_VERSION
             ) {
                 invocations.resolve_scoped_agent_invocation(
                     &request.binding,

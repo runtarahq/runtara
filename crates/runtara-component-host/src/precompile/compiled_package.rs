@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, ensure};
-use runtara_workflow_wit::isolation_package::{Binding, InvocationManifest, PackageLimits, parse};
+use runtara_invocation_contract::{Binding, InvocationManifest, PackageLimits, parse};
 use serde::{Deserialize, Serialize};
 use wasmtime::{Engine, component::Component};
 
@@ -280,7 +280,7 @@ pub(super) unsafe fn deserialize(engine: &Engine, bytes: &[u8]) -> Result<Compil
 mod tests {
     use super::*;
     use crate::{EngineConfig, build_engine};
-    use runtara_workflow_wit::isolation_package::{append, artifact_digest};
+    use runtara_invocation_contract::{append, artifact_digest};
 
     fn root() -> Vec<u8> {
         wat::parse_str("(component)").unwrap()
@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn invocation_authority_survives_native_transport_and_cannot_be_silently_dropped() {
-        use runtara_workflow_wit::isolation_package::{
+        use runtara_invocation_contract::{
             AgentCallSite, InvocationCallSite, append_with_invocations,
         };
         let engine = build_engine(&EngineConfig {
@@ -306,13 +306,10 @@ mod tests {
                 },
                 checkpoint_contracts: if version >= 4 {
                     [
-                        (
-                            7,
-                            runtara_workflow_wit::isolation_package::CheckpointContract::Child,
-                        ),
+                        (7, runtara_invocation_contract::CheckpointContract::Child),
                         (
                             8,
-                            runtara_workflow_wit::isolation_package::CheckpointContract::Tool {
+                            runtara_invocation_contract::CheckpointContract::Tool {
                                 ai_step_id: "ai".into(),
                                 labels: vec!["tool".into()],
                             },
@@ -394,7 +391,7 @@ mod tests {
                     "durability" => index.invocations.as_mut().unwrap().call_durability.clear(),
                     _ => {
                         index.invocations.as_mut().unwrap().version =
-                            runtara_workflow_wit::isolation_package::INVOCATION_MANIFEST_VERSION + 1
+                            runtara_invocation_contract::INVOCATION_MANIFEST_VERSION + 1
                     }
                 }
                 let json = serde_json::to_vec(&index).unwrap();

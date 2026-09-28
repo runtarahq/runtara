@@ -372,17 +372,17 @@ mod tests {
         let mut root = wasm_encoder::Component::new().finish();
         assert!(trusted_artifact_pins(&root).unwrap().is_empty());
         append_pins(&mut root, 0, std::iter::once(pin("s3-storage").as_str()));
-        let limits = runtara_workflow_wit::isolation_package::PackageLimits {
+        let limits = runtara_invocation_contract::PackageLimits {
             total_bytes: 1024 * 1024,
             manifest_bytes: 64 * 1024,
             artifacts: 4,
             bindings: 4,
         };
-        let digest = runtara_workflow_wit::isolation_package::artifact_digest(&child);
-        let packaged = runtara_workflow_wit::isolation_package::append(
+        let digest = runtara_invocation_contract::artifact_digest(&child);
+        let packaged = runtara_invocation_contract::append(
             &root,
             &[child.as_slice()],
-            vec![runtara_workflow_wit::isolation_package::Binding {
+            vec![runtara_invocation_contract::Binding {
                 id: "child".into(),
                 artifact: digest,
                 interface: "runtara:agent-child/capabilities@0.1.0".into(),

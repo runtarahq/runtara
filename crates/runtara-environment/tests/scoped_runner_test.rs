@@ -7,8 +7,8 @@ use runtara_core::{domain::InstanceStatus, persistence::Persistence};
 use runtara_environment::runner::{
     EmbeddedWasmRunner, LaunchOptions, Runner, ScopedAgentRunnerConfig, WorkflowRunnerConfig,
 };
+use runtara_invocation_contract::{PackageLimits, artifact_digest};
 use runtara_store_postgres::PostgresPersistence;
-use runtara_workflow_wit::isolation_package::{PackageLimits, artifact_digest};
 use runtara_workflows::direct_wasm::{
     AgentIsolationPolicy, AgentIsolationReview, DirectCompilationInput, DirectCompilationResult,
     WorkflowAbi, compile_direct_workflow, compile_direct_workflow_composed_with_isolation_policy,
@@ -58,13 +58,13 @@ fn compile(graph: Value, dir: &Path, agent: &str, backend: &str) -> DirectCompil
         // to prove pinned packages still execute with unknown durability.
         let mut compiled = compile(graph, &dir.join("current"), agent, "scoped");
         let bytes = std::fs::read(&compiled.wasm_path).unwrap();
-        let package = runtara_workflow_wit::isolation_package::parse(&bytes, limits())
+        let package = runtara_invocation_contract::parse(&bytes, limits())
             .unwrap()
             .unwrap();
         let mut inventory = package.invocations().unwrap().clone();
         inventory.version = 4;
         inventory.call_durability.clear();
-        let legacy = runtara_workflow_wit::isolation_package::append_with_invocations(
+        let legacy = runtara_invocation_contract::append_with_invocations(
             package.root,
             &package.artifacts().values().copied().collect::<Vec<_>>(),
             package.bindings().values().cloned().collect(),
@@ -95,10 +95,10 @@ fn compile(graph: Value, dir: &Path, agent: &str, backend: &str) -> DirectCompil
         assert!(pure.omit_runtime);
         compose_direct_workflow(&mut pure, components()).unwrap();
         let bytes = std::fs::read(&packaged.wasm_path).unwrap();
-        let catalog = runtara_workflow_wit::isolation_package::parse(&bytes, limits())
+        let catalog = runtara_invocation_contract::parse(&bytes, limits())
             .unwrap()
             .unwrap();
-        let replacement = runtara_workflow_wit::isolation_package::append_with_invocations(
+        let replacement = runtara_invocation_contract::append_with_invocations(
             &std::fs::read(pure.wasm_path).unwrap(),
             &catalog.artifacts().values().copied().collect::<Vec<_>>(),
             catalog.bindings().values().cloned().collect(),

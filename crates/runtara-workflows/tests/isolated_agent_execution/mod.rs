@@ -14,7 +14,7 @@ use runtara_component_host::{
     ChildInvocationScope, EngineConfig, InvocationScopeFactory, InvokeExit,
     PreparedInvocationLauncher, WorkflowExecutor, WorkflowRunSpec,
 };
-use runtara_workflow_wit::isolation_package::{PackageLimits, artifact_digest, parse};
+use runtara_invocation_contract::{PackageLimits, artifact_digest, parse};
 use runtara_workflows::compile::ChildWorkflowInput;
 use runtara_workflows::direct_wasm::{
     DirectCompilationResult, compose_direct_workflow_with_isolated_agents,
@@ -471,11 +471,10 @@ async fn run_composed(
         .unwrap();
         for (path, attempt) in &recorded {
             assert!(*attempt > 0);
-            let decoded =
-                runtara_workflow_wit::isolation_package::AgentInvocationPath::decode(path).unwrap();
+            let decoded = runtara_invocation_contract::AgentInvocationPath::decode(path).unwrap();
             assert!(matches!(
                 decoded.selector,
-                runtara_workflow_wit::isolation_package::InvocationSelector::CallSite(_)
+                runtara_invocation_contract::InvocationSelector::CallSite(_)
             ));
             invocations
                 .resolve_scoped_agent_invocation(
@@ -934,7 +933,7 @@ fn scoped_shared_ai_tool_has_distinct_caller_tokens_stable_across_selection() {
         .unwrap();
         inventories.push(compiled.invocation_manifest.unwrap());
     }
-    let tool_sites = |inventory: &runtara_workflow_wit::isolation_package::InvocationManifest| {
+    let tool_sites = |inventory: &runtara_invocation_contract::InvocationManifest| {
         inventory
             .call_sites
             .iter()
@@ -990,16 +989,9 @@ async fn scoped_agent_inside_embed_preserves_inline_child_ancestry() {
         assert_eq!(starts, if looped { 4 } else { 1 });
         let mut indices = std::collections::BTreeSet::new();
         for (path, _) in paths {
-            let decoded =
-                runtara_workflow_wit::isolation_package::AgentInvocationPath::decode(&path)
-                    .unwrap();
-            let [
-                runtara_workflow_wit::isolation_package::NamespaceFrame::Child {
-                    step_id,
-                    loops,
-                    ..
-                },
-            ] = &decoded.namespace[..]
+            let decoded = runtara_invocation_contract::AgentInvocationPath::decode(&path).unwrap();
+            let [runtara_invocation_contract::NamespaceFrame::Child { step_id, loops, .. }] =
+                &decoded.namespace[..]
             else {
                 panic!("unexpected child ancestry")
             };
@@ -1020,8 +1012,8 @@ async fn scoped_agent_inside_embed_preserves_inline_child_ancestry() {
 
 #[test]
 fn compiler_checkpoint_contracts_match_existing_workflow_agent_scope_helpers() {
+    use runtara_invocation_contract::{AgentInvocationPath, CheckpointContract};
     use runtara_workflow_stdlib::direct_json::DirectJsonManifest;
-    use runtara_workflow_wit::isolation_package::{AgentInvocationPath, CheckpointContract};
     use serde_json::json;
     let mut graph: Value = serde_json::from_str(&super::ai_agent_tool_loop_graph_json()).unwrap();
     graph["steps"]["echo_tool"]["agentId"] = "scoped-child".into();

@@ -1,3 +1,5 @@
+// Copyright (C) 2025 SyncMyOrders Sp. z o.o.
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! Versioned, self-contained child-component catalog shared by compiler and host.
 //!
 //! A final root custom section contains a bounded JSON index followed by unique

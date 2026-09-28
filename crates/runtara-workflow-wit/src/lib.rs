@@ -33,9 +33,6 @@
 //! compiled against the released 0.1.0 control, operation and suspension
 //! WIT; they must keep linking.
 
-#[cfg(feature = "isolation-package")]
-pub mod isolation_package;
-
 pub const OUTBOUND_HTTP_INTERFACE_NAME: &str = "runtara:outbound-http/client@0.1.0";
 pub const OUTBOUND_HTTP_WIT: &str = include_str!("../wit/outbound-http/runtara-outbound-http.wit");
 

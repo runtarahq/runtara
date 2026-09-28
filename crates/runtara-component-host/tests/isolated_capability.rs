@@ -195,7 +195,7 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
         PrecompileRequest, PrecompileResponse, deserialize_trusted_precompiled_package,
         precompile_artifact,
     };
-    use runtara_workflow_wit::isolation_package::{
+    use runtara_invocation_contract::{
         AgentCallSite, Binding, InvocationManifest, PackageLimits, append_with_invocations,
         artifact_digest,
     };

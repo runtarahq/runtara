@@ -3,7 +3,7 @@
 //! cancellation guard; the emitted guest handles errors and assembles results.
 use super::*;
 use runtara_component_host::ChildInvocationSpec;
-use runtara_workflow_wit::isolation_package::AgentInvocationPath;
+use runtara_invocation_contract::AgentInvocationPath;
 use std::sync::atomic::AtomicBool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, watch};

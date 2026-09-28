@@ -14289,7 +14289,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
         "{:x}",
         sha2::Sha256::digest(fs::read(components.join("runtara_agent_s3_storage.wasm")).unwrap())
     );
-    let package_limits = runtara_workflow_wit::isolation_package::PackageLimits {
+    let package_limits = runtara_invocation_contract::PackageLimits {
         total_bytes: 64 * 1024 * 1024,
         manifest_bytes: 1024 * 1024,
         artifacts: 16,
@@ -14304,7 +14304,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
     )
     .unwrap();
     let packaged = fs::read(&scoped.wasm_path).unwrap();
-    let parsed = runtara_workflow_wit::isolation_package::parse(&packaged, package_limits)
+    let parsed = runtara_invocation_contract::parse(&packaged, package_limits)
         .unwrap()
         .unwrap();
     assert!(

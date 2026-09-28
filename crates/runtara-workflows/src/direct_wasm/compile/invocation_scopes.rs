@@ -1,7 +1,7 @@
 //! Static address shapes derived from normalized graphs, without runtime edges.
 use super::*;
 use crate::direct_wasm::manifest::{DirectChildWorkflowGraphManifest, DirectGraphManifest};
-use runtara_workflow_wit::isolation_package::{
+use runtara_invocation_contract::{
     ChildScopePattern, InvocationScopePattern, LoopKind, LoopPattern,
 };
 use std::collections::{BTreeMap, BTreeSet};

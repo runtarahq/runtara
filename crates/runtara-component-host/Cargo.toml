@@ -76,7 +76,8 @@ runtara-agent-wit = { path = "../runtara-agent-wit" }
 runtara-dsl = { path = "../runtara-dsl" }
 # Canonical LIFECYCLE_INTERFACE_NAME — one source of truth for the invoke
 # export name shared with the compiler.
-runtara-workflow-wit = { path = "../runtara-workflow-wit", features = ["isolation-package"] }
+runtara-workflow-wit = { path = "../runtara-workflow-wit" }
+runtara-invocation-contract = { path = "../runtara-invocation-contract" }
 
 # Embedded wasmtime engine + WASI Preview 2 support.
 wasmtime = { version = "46", default-features = false, features = [

@@ -218,7 +218,7 @@ impl super::InvocationManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::isolation_package::{InvocationSelector, LoopKind};
+    use crate::{InvocationSelector, LoopKind};
     fn invocation() -> AgentInvocationPath {
         AgentInvocationPath {
             workflow_id: "parent::雪".into(),

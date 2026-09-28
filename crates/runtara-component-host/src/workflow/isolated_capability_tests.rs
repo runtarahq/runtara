@@ -343,7 +343,7 @@ fn compiled_package(
             "fixture-digest".into(),
             child.component().clone(),
         )]),
-        bindings: vec![runtara_workflow_wit::isolation_package::Binding {
+        bindings: vec![runtara_invocation_contract::Binding {
             id: "child".into(),
             artifact: "fixture-digest".into(),
             interface: interface.into(),

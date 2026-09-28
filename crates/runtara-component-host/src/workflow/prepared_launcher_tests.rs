@@ -2,7 +2,7 @@ use super::super::test_support::{Ticker, bounded, parent_wat, spec};
 use super::*;
 use crate::execution_host::{InvocationContext, TaskOutcome};
 use crate::isolated_tasks::{IsolatedTasks, TaskError, TaskId};
-use runtara_workflow_wit::isolation_package::Binding;
+use runtara_invocation_contract::Binding;
 use std::collections::BTreeMap;
 use std::sync::{Mutex, atomic::AtomicUsize};
 use tokio::sync::Notify;

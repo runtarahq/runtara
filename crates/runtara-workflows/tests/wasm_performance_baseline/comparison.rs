@@ -12,7 +12,7 @@ use runtara_component_host::precompile::{
 use runtara_component_host::{
     ChildInvocationScope, InvocationScopeFactory, PreparedInvocationLauncher, PreparedWorkflow,
 };
-use runtara_workflow_wit::isolation_package::{PackageLimits, parse};
+use runtara_invocation_contract::{PackageLimits, parse};
 use runtara_workflows::direct_wasm::compose_direct_workflow_with_isolated_agents;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};

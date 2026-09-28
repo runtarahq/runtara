@@ -567,7 +567,7 @@ pub struct DirectCompilationInput {
 pub struct DirectCompilationResult {
     /// Call-site inventory generated from the same normalized manifest as code.
     /// Included in package v2 when logical Agent isolation is selected.
-    pub invocation_manifest: Option<runtara_workflow_wit::isolation_package::InvocationManifest>,
+    pub invocation_manifest: Option<runtara_invocation_contract::InvocationManifest>,
     /// Agent dependencies emitted with the private logical-context interface.
     /// Composition must bind every selected dependency to a reviewed adapter.
     pub scoped_agents: std::collections::BTreeSet<String>,
@@ -675,7 +675,7 @@ pub fn compose_direct_workflow_with_isolated_agents(
     components_dir: impl AsRef<Path>,
     extra_component_dirs: &[PathBuf],
     reviewed_agents: &std::collections::BTreeMap<String, String>,
-    limits: runtara_workflow_wit::isolation_package::PackageLimits,
+    limits: runtara_invocation_contract::PackageLimits,
 ) -> Result<PathBuf, DirectCompileError> {
     compose_direct_workflow_selected(
         result,
@@ -687,7 +687,7 @@ pub fn compose_direct_workflow_with_isolated_agents(
 
 type IsolationSelection<'a> = (
     &'a std::collections::BTreeMap<String, String>,
-    runtara_workflow_wit::isolation_package::PackageLimits,
+    runtara_invocation_contract::PackageLimits,
 );
 
 fn compose_direct_workflow_selected(
@@ -795,7 +795,7 @@ fn compose_direct_workflow_selected(
                     "isolated Agent `{agent}` differs from its reviewed digest"
                 )));
             }
-            let binding = runtara_workflow_wit::isolation_package::Binding {
+            let binding = runtara_invocation_contract::Binding {
                 id: format!("agent:{agent}"),
                 artifact: digest.clone(),
                 interface: format!("runtara:agent-{agent}/capabilities@{AGENT_WIT_VERSION}"),
@@ -861,7 +861,7 @@ fn compose_direct_workflow_selected(
     let composed_wasm = if let Some((_, limits)) = selection.filter(|_| !bindings.is_empty()) {
         let refs: Vec<&[u8]> = children.iter().map(Vec::as_slice).collect();
         if let Some(invocations) = result.invocation_manifest.clone() {
-            runtara_workflow_wit::isolation_package::append_with_invocations(
+            runtara_invocation_contract::append_with_invocations(
                 &composed_wasm,
                 &refs,
                 bindings,
@@ -870,7 +870,7 @@ fn compose_direct_workflow_selected(
             )
             .map_err(component_error)?
         } else {
-            runtara_workflow_wit::isolation_package::append(&composed_wasm, &refs, bindings, limits)
+            runtara_invocation_contract::append(&composed_wasm, &refs, bindings, limits)
                 .map_err(component_error)?
         }
     } else {

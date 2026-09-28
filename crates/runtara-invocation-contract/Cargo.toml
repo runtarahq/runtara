@@ -1,0 +1,18 @@
+[package]
+name = "runtara-invocation-contract"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Isolated child-component package and invocation-path contract shared by the workflow compiler and host"
+keywords = ["wasm", "component-model", "workflow", "contract"]
+categories = ["development-tools"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }

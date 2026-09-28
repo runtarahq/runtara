@@ -305,7 +305,7 @@ async fn scoped_child_presigning_keeps_root_authority_and_exact_artifact_version
                     ),
                 )?,
                 artifacts: BTreeMap::from([(child_digest.clone(), child.clone())]),
-                bindings: vec![runtara_workflow_wit::isolation_package::Binding {
+                bindings: vec![runtara_invocation_contract::Binding {
                     id: "s3".into(),
                     artifact: child_digest,
                     interface: "runtara:agent-s3-storage/capabilities@0.4.0".into(),
@@ -527,13 +527,13 @@ async fn one_stale_trusted_pin_fails_only_its_own_agent_calls() -> anyhow::Resul
                 .collect::<BTreeMap<_, _>>(),
             bindings: members
                 .iter()
-                .map(|(agent, binding, _, digest, _, _, _)| {
-                    runtara_workflow_wit::isolation_package::Binding {
+                .map(
+                    |(agent, binding, _, digest, _, _, _)| runtara_invocation_contract::Binding {
                         id: (*binding).into(),
                         artifact: digest.clone(),
                         interface: format!("runtara:agent-{agent}/capabilities@0.4.0"),
-                    }
-                })
+                    },
+                )
                 .collect(),
             invocations: None,
         };
@@ -768,7 +768,7 @@ async fn approved_earlier_pin_presigns_only_when_a_parked_run_continues() -> any
                         control_importers: Default::default(),
                         root: root?,
                         artifacts: BTreeMap::from([(digest.clone(), child)]),
-                        bindings: vec![runtara_workflow_wit::isolation_package::Binding {
+                        bindings: vec![runtara_invocation_contract::Binding {
                             id: "s3".into(),
                             artifact: digest,
                             interface: "runtara:agent-s3-storage/capabilities@0.4.0".into(),
