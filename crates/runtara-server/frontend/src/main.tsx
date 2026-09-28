@@ -6,7 +6,6 @@ import { ReactFlowProvider } from '@xyflow/react';
 import { Toaster } from '@/shared/components/ui/sonner';
 import { oidcConfig } from '@/shared/config/oidcConfig';
 import { initAnalytics } from '@/shared/analytics/plausible';
-import { ensureReportDsl } from '@/wasm/runtara-report-dsl/index';
 import { ensureRustValidationInitialized } from '@/shared/lib/rust-validation-wasm';
 import App from '@/App';
 
@@ -17,12 +16,6 @@ import '@fontsource-variable/inter';
 import './index.css';
 
 initAnalytics();
-// Kick off WASM load early so report renderers don't suspend on first view.
-// The promise is memoized inside `ensureReportDsl`; failure is non-fatal —
-// individual consumers fall back to passthrough strings.
-ensureReportDsl().catch((err) => {
-  console.warn('[reportDsl] WASM preload failed', err);
-});
 ensureRustValidationInitialized().catch((err) => {
   console.warn('[validation] WASM preload failed', err);
 });

@@ -11,7 +11,6 @@ pub mod executions;
 pub mod metrics;
 pub mod object_model;
 pub mod operators;
-pub mod reports;
 pub mod trigger_event;
 pub mod triggers;
 pub mod workflows;
@@ -25,8 +24,6 @@ pub use metrics::*;
 #[allow(unused_imports)]
 #[allow(ambiguous_glob_reexports)]
 pub use object_model::*;
-#[allow(unused_imports)]
-pub use reports::*;
 #[allow(unused_imports)]
 pub use trigger_event::*;
 #[allow(unused_imports)]

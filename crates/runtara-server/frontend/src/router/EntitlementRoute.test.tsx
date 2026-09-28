@@ -29,7 +29,6 @@ function snapshot(
     tenantId: 'tenant-test',
     pricingTier: 'default',
     features: {
-      reports: false,
       database: false,
       api: false,
       mcp: false,
@@ -40,7 +39,7 @@ function snapshot(
   };
 }
 
-function renderGuarded(feature: 'reports' | 'database' | 'api' | 'mcp') {
+function renderGuarded(feature: 'database' | 'api' | 'mcp') {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
@@ -65,24 +64,23 @@ describe('EntitlementRoute', () => {
   });
 
   it('renders children when the feature is enabled', () => {
-    withSnapshot(snapshot({ reports: true }));
-    renderGuarded('reports');
+    withSnapshot(snapshot({ database: true }));
+    renderGuarded('database');
     expect(screen.getByTestId('real-child')).toBeInTheDocument();
     // Disabled-page sentinel should NOT appear.
     expect(screen.queryByText(/is not enabled/i)).not.toBeInTheDocument();
   });
 
   it('renders FeatureDisabled when the feature is disabled', () => {
-    withSnapshot(snapshot({ reports: false }));
-    renderGuarded('reports');
+    withSnapshot(snapshot({ database: false }));
+    renderGuarded('database');
     expect(screen.queryByTestId('real-child')).not.toBeInTheDocument();
     // Heading is generic ("Feature not enabled") and the label appears in the
-    // body — this avoids subject-verb-agreement issues for plural labels like
-    // "Reports".
+    // body — this avoids subject-verb-agreement issues for plural labels.
     expect(
       screen.getByRole('heading', { name: /feature not enabled/i })
     ).toBeInTheDocument();
-    expect(screen.getByText(/Reports/)).toBeInTheDocument();
+    expect(screen.getByText(/Database/)).toBeInTheDocument();
     // Back link is always rendered.
     expect(
       screen.getByRole('link', { name: /back to workflows/i })
@@ -108,9 +106,9 @@ describe('EntitlementRoute', () => {
   });
 
   it('isolates feature checks — disabling X does not block Y', () => {
-    // Snapshot disables reports but enables database. Database route must
+    // Snapshot disables mcp but enables database. Database route must
     // still render children, proving the gate is feature-scoped.
-    withSnapshot(snapshot({ reports: false, database: true }));
+    withSnapshot(snapshot({ mcp: false, database: true }));
     renderGuarded('database');
     expect(screen.getByTestId('real-child')).toBeInTheDocument();
   });

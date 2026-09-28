@@ -90,19 +90,16 @@ mod tests {
         let dto = EntitlementsDto::from(&snapshot(None, None, None));
         let value = serde_json::to_value(&dto).unwrap();
         let features = value["features"].as_object().expect("features object");
-        for key in ["reports", "database", "api", "mcp"] {
+        for key in ["database", "api", "mcp"] {
             assert_eq!(features[key], json!(true), "expected {key} = true");
         }
     }
 
     #[test]
     fn features_reflect_disabled_state() {
-        let dto = EntitlementsDto::from(&snapshot(
-            None,
-            Some(r#"{"features":{"reports":false}}"#),
-            None,
-        ));
-        assert!(!dto.features[&FeatureKey::Reports]);
+        let dto =
+            EntitlementsDto::from(&snapshot(None, Some(r#"{"features":{"mcp":false}}"#), None));
+        assert!(!dto.features[&FeatureKey::Mcp]);
         assert!(dto.features[&FeatureKey::Database]);
     }
 
@@ -155,7 +152,7 @@ mod tests {
 
         assert_eq!(value["tenantId"], json!("tenant-123"));
         assert_eq!(value["pricingTier"], json!("premium"));
-        assert_eq!(value["features"]["reports"], json!(true));
+        assert!(value["features"].get("reports").is_none());
         assert_eq!(value["features"]["database"], json!(true));
         assert_eq!(value["features"]["api"], json!(true));
         assert_eq!(value["features"]["mcp"], json!(false));

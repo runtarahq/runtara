@@ -577,124 +577,6 @@ impl SmoMcpServer {
         tools::object_model::bulk_delete_instances(self, params.0).await
     }
 
-    // ===== Report Tools =====
-
-    #[tool(
-        description = "Get the canonical report authoring schema for MCP agents, including table/chart/metric/action/card block shapes, lookup editors for object-model reference fields, Object Model sources, workflow runtime sources, and common mistakes. Optionally pass object_schema to include Object Model fields."
-    )]
-    async fn get_report_authoring_schema(
-        &self,
-        params: Parameters<tools::reports::GetReportAuthoringSchemaParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::get_report_authoring_schema(self, params.0).await
-    }
-
-    #[tool(
-        description = "Get the machine-readable JSON Schema for report.definition. This is different from get_report_authoring_schema, which is AI authoring guidance with examples."
-    )]
-    async fn get_report_definition_schema(
-        &self,
-        params: Parameters<tools::reports::GetReportDefinitionSchemaParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::get_report_definition_schema(self, params.0).await
-    }
-
-    #[tool(description = "List reports available to the tenant.")]
-    async fn list_reports(
-        &self,
-        params: Parameters<tools::reports::ListReportsParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::list_reports(self, params.0).await
-    }
-
-    #[tool(
-        description = "List reports whose stored definition failed to deserialize into the current schema (Phase 8 cutover). Each entry carries the parser error in `needsReAuthoring`. Use this to find reports to re-author via MCP after a schema change."
-    )]
-    async fn list_reports_needing_re_authoring(
-        &self,
-        params: Parameters<tools::reports::ListReportsNeedingReAuthoringParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::list_reports_needing_re_authoring(self, params.0).await
-    }
-
-    #[tool(
-        description = "Get a report by id or slug, including layout, filters, datasets, and blocks."
-    )]
-    async fn get_report(
-        &self,
-        params: Parameters<tools::reports::GetReportParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::get_report(self, params.0).await
-    }
-
-    #[tool(
-        description = "Create a report from a full definition: layout, filters, datasets, and blocks. Call get_report_authoring_schema first; every block must include a stable id for later MCP mutations."
-    )]
-    async fn create_report(
-        &self,
-        params: Parameters<tools::reports::CreateReportParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::create_report(self, params.0).await
-    }
-
-    #[tool(
-        description = "Replace a report with a full definition. Call get_report_authoring_schema first. Prefer edit_report for atomic block + layout edits."
-    )]
-    async fn update_report(
-        &self,
-        params: Parameters<tools::reports::UpdateReportParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::update_report(self, params.0).await
-    }
-
-    #[tool(description = "Delete a report by id or slug.")]
-    async fn delete_report(
-        &self,
-        params: Parameters<tools::reports::DeleteReportParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::delete_report(self, params.0).await
-    }
-
-    #[tool(
-        description = "Validate a report definition without saving it. mode='syntax' runs JSON Schema only, mode='semantic' runs backend tenant-reference checks, and mode='all' also includes MCP authoring-shape checks for misplaced table/chart/metric fields."
-    )]
-    async fn validate_report(
-        &self,
-        params: Parameters<tools::reports::ValidateReportParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::validate_report(self, params.0).await
-    }
-
-    #[tool(
-        description = "Render a report's data blocks using optional global filters and optional block data requests. This fetches Object Model data but does not launch workflows."
-    )]
-    async fn render_report(
-        &self,
-        params: Parameters<tools::reports::RenderReportParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::render_report(self, params.0).await
-    }
-
-    #[tool(
-        description = "Render one report block by stable block id with optional pagination, sorting, global filters, and block-specific filters."
-    )]
-    async fn get_report_block_data(
-        &self,
-        params: Parameters<tools::reports::GetReportBlockDataParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::get_report_block_data(self, params.0).await
-    }
-
-    #[tool(
-        description = "Apply a batch of report edit operations atomically. Each op is { kind: add_block | replace_block | patch_block | move_block | remove_block | add_layout_node | replace_layout_node | patch_layout_node | move_layout_node | remove_layout_node, ... }. The whole batch succeeds or fails together — partial application is impossible. The single-op layout/block tools fan into this endpoint."
-    )]
-    async fn edit_report(
-        &self,
-        params: Parameters<tools::reports::EditReportParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        tools::reports::edit_report(self, params.0).await
-    }
-
     // ===== Graph Mutation Tools =====
     // Each mutation: fetches latest graph → mutates → saves in-place via PUT .../versions/{v}/graph.
     // First mutation on a workflow creates a new version; subsequent mutations update that same version.
@@ -1036,7 +918,7 @@ impl SmoMcpServer {
     }
 
     #[tool(
-        description = "Submit a response to an open workflow action. Use instance_id with workflow_id for direct actions, or with report_id + block_id for report actions. Supply the opaque request ID as action_id and reuse operation_id on uncertain retries."
+        description = "Submit a response to an open workflow action, identified by workflow_id and instance_id. Supply the opaque request ID as action_id and reuse operation_id on uncertain retries. Report buttons are submitted by the report viewer, not this tool."
     )]
     async fn submit_action_response(
         &self,
@@ -1216,7 +1098,6 @@ impl ServerHandler for SmoMcpServer {
                 **Execution**: execute_workflow, execute_workflow_sync, execute_workflow_wait, list_executions, get_execution, get_step_summaries (supports compact mode), get_step_events, stop_execution, pause_execution, resume_execution\n\
                 **Debugging**: inspect_step (one-call step debugger), trace_reference (resolve a reference path at runtime), why_execution_failed (one-call failure diagnosis)\n\
                 **Object Model**: list_object_schemas, get_object_schema, create_object_schema, update_object_schema, delete_object_schema, list_object_instances, query_object_instances, query_aggregate, query_sql, query_sql_one, query_sql_raw, execute_sql, create_object_instance, update_object_instance, bulk_create_instances, bulk_update_instances, bulk_delete_instances. SQL tools use SQLx prepared statements with Postgres positional placeholders ($1, $2, ...), not named parameters; params are typed and bound in array order, and execute_sql returns rowsAffected.\n\
-                **Reports**: get_report_authoring_schema, get_report_definition_schema, list_reports, list_reports_needing_re_authoring, get_report, create_report, update_report, edit_report, delete_report, validate_report, render_report, get_report_block_data — call get_report_authoring_schema before authoring; use get_report_definition_schema for the generated JSON Schema; report blocks and layout nodes have stable ids; use edit_report with a batch of ReportEditOps for targeted block and layout mutations; use layout nodes (block, grid) for arrangement; reports can use Object Model sources, lookup editors for reference fields, or virtual workflow_runtime sources for workflow instance status/actions\n\
                 **Agents & DSL**: list_agents, get_agent, get_capability, test_capability, list_step_types, get_step_type_schema\n\
                 **Graph Reads/Mutations**: summarize_workflow, get_workflow_metadata, list_steps, get_step, list_edges, get_step_edges, get_step_mappings, get_workflow_slice, find_references, list_unmapped_inputs, get_input_schema, get_output_schema, list_variables, list_references, set_workflow_metadata, add_agent_step, add_step, remove_step, update_step, connect_steps, disconnect_steps, set_entry_point, set_mapping, remove_mapping, set_input_schema (replace all), set_input_schema_field, remove_input_schema_field, set_output_schema, set_variable, remove_variable, apply_graph_mutations (batch, one save) — MCP graph mutations are serialized per tenant/workflow so parallel tool calls do not clobber each other; first mutating call creates a new version, subsequent mutating calls update it in-place. All support nested subgraphs via optional path parameter. Prefer focused graph reads and mutation tools over raw get_workflow/update_workflow JSON. Use deploy_latest after mutations to compile and deploy.\n\
                 **Signals & Actions**: list_pending_signals, get_signal_schema, submit_signal_response, submit_action_response — interact with WaitForSignal / human-in-the-loop steps and open workflow actions in running executions\n\

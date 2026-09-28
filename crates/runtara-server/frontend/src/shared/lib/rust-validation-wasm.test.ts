@@ -4,9 +4,6 @@ const wasm = vi.hoisted(() => ({
   init: vi.fn(async () => undefined),
   agentCatalogLoaded: vi.fn(() => false),
   initAgentCatalog: vi.fn(() => JSON.stringify({ success: true })),
-  evaluateConditionJson: vi.fn(() =>
-    JSON.stringify({ success: true, value: true })
-  ),
 }));
 
 vi.mock('@/wasm/validation/runtara_validation.js', () => ({
@@ -14,7 +11,6 @@ vi.mock('@/wasm/validation/runtara_validation.js', () => ({
   agentCatalogLoaded: wasm.agentCatalogLoaded,
   initAgentCatalog: wasm.initAgentCatalog,
   analyzeFormJson: vi.fn(),
-  evaluateConditionJson: wasm.evaluateConditionJson,
   getAgentJson: vi.fn(),
   getAgentsJson: vi.fn(),
   getStepTypeSchemaJson: vi.fn(),

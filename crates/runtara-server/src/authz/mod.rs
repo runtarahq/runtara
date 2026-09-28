@@ -81,7 +81,7 @@ pub enum Access {
     /// Permitted only on resources the caller created (`created_by == caller.sub`).
     /// Owner/Admin bypass the ownership check; the check itself is enforced in the handler.
     ///
-    /// Used by exactly five cells for Member — `workflow:delete` plus `trigger`/`report`
+    /// Used by exactly three cells for Member — `workflow:delete` plus `trigger`
     /// update/delete — the resources whose per-row owner (`created_by`) is recorded and a
     /// server-crate handler can check it. `workflow:update` is intentionally *not* `Own`: it is
     /// tenant-wide `Allow` for Member (collaborative editing — workflows are versioned, so edits
@@ -113,10 +113,6 @@ pub enum Permission {
     DatabaseCreate,
     DatabaseUpdate,
     DatabaseDelete,
-    ReportRead,
-    ReportCreate,
-    ReportUpdate,
-    ReportDelete,
     TriggerRead,
     TriggerCreate,
     TriggerUpdate,
@@ -134,7 +130,7 @@ pub enum Permission {
 
 impl Permission {
     /// Every permission, in table order.
-    pub const ALL: [Permission; 25] = [
+    pub const ALL: [Permission; 21] = [
         WorkflowRead,
         WorkflowCreate,
         WorkflowUpdate,
@@ -146,10 +142,6 @@ impl Permission {
         DatabaseCreate,
         DatabaseUpdate,
         DatabaseDelete,
-        ReportRead,
-        ReportCreate,
-        ReportUpdate,
-        ReportDelete,
         TriggerRead,
         TriggerCreate,
         TriggerUpdate,
@@ -177,10 +169,6 @@ impl Permission {
             Permission::DatabaseCreate => "database:create",
             Permission::DatabaseUpdate => "database:update",
             Permission::DatabaseDelete => "database:delete",
-            Permission::ReportRead => "report:read",
-            Permission::ReportCreate => "report:create",
-            Permission::ReportUpdate => "report:update",
-            Permission::ReportDelete => "report:delete",
             Permission::TriggerRead => "trigger:read",
             Permission::TriggerCreate => "trigger:create",
             Permission::TriggerUpdate => "trigger:update",
@@ -207,7 +195,7 @@ impl Permission {
     /// membership is pinned by `is_read_matches_the_read_permissions`.
     ///
     /// Note this is a property of the *permission*, not of the HTTP method: routes that read
-    /// via `POST` (SQL queries, report renders, graph validation) map to a read permission and
+    /// via `POST` (SQL queries, graph validation) map to a read permission and
     /// are reads here, while `GET /connections/{id}/oauth/authorize` maps to
     /// `connection:update` and is not.
     pub fn is_read(self) -> bool {
@@ -243,7 +231,7 @@ impl<'de> Deserialize<'de> for Permission {
 // pinned by `permission_map_matches_contract`.
 //
 // Reads are allowed for everyone; create/execute for Member and above. For Member, `update`
-// and `delete` are `Own` (own resources only) for trigger and report, but `workflow:update` is
+// and `delete` are `Own` (own resources only) for trigger, but `workflow:update` is
 // the exception: it is tenant-wide `Allow` (collaborative editing — workflows are versioned, so
 // edits are non-destructive and recoverable), while `workflow:delete` stays `Own` since it
 // removes the whole workflow and its history. Folder rename is a tenant-wide bulk structural
@@ -255,9 +243,8 @@ use Access::{Allow, Own};
 use Permission::{
     AnalyticsRead, ConnectionCreate, ConnectionDelete, ConnectionRead, ConnectionUpdate,
     DatabaseCreate, DatabaseDelete, DatabaseRead, DatabaseUpdate, InvocationHistoryRead,
-    ReportCreate, ReportDelete, ReportRead, ReportUpdate, TriggerCreate, TriggerDelete,
-    TriggerRead, TriggerUpdate, UserManagementAccess, WorkflowCreate, WorkflowDelete,
-    WorkflowExecute, WorkflowFolderRename, WorkflowRead, WorkflowUpdate,
+    TriggerCreate, TriggerDelete, TriggerRead, TriggerUpdate, UserManagementAccess, WorkflowCreate,
+    WorkflowDelete, WorkflowExecute, WorkflowFolderRename, WorkflowRead, WorkflowUpdate,
 };
 
 /// Owner: every permission, unconditionally.
@@ -273,10 +260,6 @@ const OWNER_ACCESS: &[(Permission, Access)] = &[
     (DatabaseCreate, Allow),
     (DatabaseUpdate, Allow),
     (DatabaseDelete, Allow),
-    (ReportRead, Allow),
-    (ReportCreate, Allow),
-    (ReportUpdate, Allow),
-    (ReportDelete, Allow),
     (TriggerRead, Allow),
     (TriggerCreate, Allow),
     (TriggerUpdate, Allow),
@@ -303,10 +286,6 @@ const ADMIN_ACCESS: &[(Permission, Access)] = &[
     (DatabaseCreate, Allow),
     (DatabaseUpdate, Allow),
     (DatabaseDelete, Allow),
-    (ReportRead, Allow),
-    (ReportCreate, Allow),
-    (ReportUpdate, Allow),
-    (ReportDelete, Allow),
     (TriggerRead, Allow),
     (TriggerCreate, Allow),
     (TriggerUpdate, Allow),
@@ -322,7 +301,7 @@ const ADMIN_ACCESS: &[(Permission, Access)] = &[
 /// Member: read + create + execute on any resource. `workflow:update` is tenant-wide `Allow`
 /// (collaborative editing — workflows are versioned, so an edit to another member's workflow is
 /// a new, recoverable version), and so is `move` (gated by `workflow:update`). `workflow:delete`
-/// stays `Own` because it removes the whole workflow and every version. `trigger`/`report`
+/// stays `Own` because it removes the whole workflow and every version. `trigger`
 /// update/delete remain `Own`; database and connection have no enforceable per-row owner, so
 /// their update/delete are flat `Allow`. Folder rename is Owner/Admin-only
 /// (`WorkflowFolderRename`), so Member does not grant it (absent ⇒ `Deny`).
@@ -340,10 +319,6 @@ const MEMBER_ACCESS: &[(Permission, Access)] = &[
     // any object. Guarded by `no_role_has_own_for_database`.
     (DatabaseUpdate, Allow),
     (DatabaseDelete, Allow),
-    (ReportRead, Allow),
-    (ReportCreate, Allow),
-    (ReportUpdate, Own),
-    (ReportDelete, Own),
     (TriggerRead, Allow),
     (TriggerCreate, Allow),
     (TriggerUpdate, Own),
@@ -363,7 +338,6 @@ const VIEWER_ACCESS: &[(Permission, Access)] = &[
     (WorkflowRead, Allow),
     (InvocationHistoryRead, Allow),
     (DatabaseRead, Allow),
-    (ReportRead, Allow),
     (TriggerRead, Allow),
     (ConnectionRead, Allow),
     (AnalyticsRead, Allow),
@@ -461,7 +435,6 @@ mod tests {
                 "workflow:read",
                 "invocation_history:read",
                 "database:read",
-                "report:read",
                 "trigger:read",
                 "connection:read",
                 "analytics:read",
@@ -529,10 +502,6 @@ mod tests {
             (Permission::DatabaseCreate, [Allow, Allow, Allow, Deny]),
             (Permission::DatabaseUpdate, [Allow, Allow, Allow, Deny]),
             (Permission::DatabaseDelete, [Allow, Allow, Allow, Deny]),
-            (Permission::ReportRead, [Allow, Allow, Allow, Allow]),
-            (Permission::ReportCreate, [Allow, Allow, Allow, Deny]),
-            (Permission::ReportUpdate, [Allow, Allow, Own, Deny]),
-            (Permission::ReportDelete, [Allow, Allow, Own, Deny]),
             (Permission::TriggerRead, [Allow, Allow, Allow, Allow]),
             (Permission::TriggerCreate, [Allow, Allow, Allow, Deny]),
             (Permission::TriggerUpdate, [Allow, Allow, Own, Deny]),
@@ -564,7 +533,7 @@ mod tests {
         }
     }
 
-    /// `Own` is allowed for exactly five cells — `workflow:delete` plus trigger/report
+    /// `Own` is allowed for exactly three cells — `workflow:delete` plus trigger
     /// update/delete — the resources whose per-row owner (`created_by`) is recorded and a
     /// server-crate path can check it. `workflow:update` is deliberately excluded: it is
     /// tenant-wide `Allow` for Member (collaborative editing). Any other `Own` (a new resource,
@@ -574,15 +543,9 @@ mod tests {
     fn own_is_restricted_to_the_ownable_permissions() {
         use std::collections::BTreeSet;
 
-        let allowed: BTreeSet<&str> = [
-            "workflow:delete",
-            "trigger:update",
-            "trigger:delete",
-            "report:update",
-            "report:delete",
-        ]
-        .into_iter()
-        .collect();
+        let allowed: BTreeSet<&str> = ["workflow:delete", "trigger:update", "trigger:delete"]
+            .into_iter()
+            .collect();
 
         let mut actual: BTreeSet<&str> = BTreeSet::new();
         for role in Role::ALL {

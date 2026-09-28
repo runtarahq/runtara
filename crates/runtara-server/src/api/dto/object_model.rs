@@ -279,12 +279,14 @@ pub struct IndexDefinition {
 // Condition-based Filtering Structures
 // ============================================================================
 
-// `Condition` is the wire shape `{op, arguments?}` shared by reports and
-// object-model filtering. It lives in `runtara-report-dsl` so the reports
-// DSL crate and FE WASM bundle can use it without depending on the server.
-// Re-exporting here keeps the existing `api::dto::object_model::Condition`
-// import sites working unchanged.
-pub use runtara_report_dsl::Condition;
+/// Object-model filter condition, `{op, arguments?}`: logical AND/OR/NOT,
+/// comparisons, IN/NOT_IN, CONTAINS and null checks over field names.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct Condition {
+    pub op: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Vec<serde_json::Value>>,
+}
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct FilterRequest {

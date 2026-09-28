@@ -1580,6 +1580,7 @@ pub fn validate_workflow_with_children(
         .any(|e| matches!(e, ValidationError::CircularDependency { .. }))
     {
         validate_embed_workflow_inputs(graph, child_workflows, &mut result);
+        validate_embed_workflow_outputs(graph, child_workflows, &mut result);
     }
 
     result
@@ -1723,6 +1724,7 @@ pub fn validate_workflow_closure(
         .any(|e| matches!(e, ValidationError::CircularDependency { .. }))
     {
         validate_embed_workflow_inputs(root, &children_map, &mut root_result);
+        validate_embed_workflow_outputs(root, &children_map, &mut root_result);
     }
 
     let mut seen: HashSet<(String, i32)> = HashSet::new();
@@ -1735,6 +1737,7 @@ pub fn validate_workflow_closure(
         let mut result = validate_workflow(&child.execution_graph, catalog);
         report_missing_child_references(&child.execution_graph, &children_map, &mut result);
         validate_embed_workflow_inputs(&child.execution_graph, &children_map, &mut result);
+        validate_embed_workflow_outputs(&child.execution_graph, &children_map, &mut result);
         unique_child_graphs.push(&child.execution_graph);
         child_reports.push(ChildValidationReport {
             workflow_id: child.workflow_id.clone(),
@@ -1943,6 +1946,111 @@ fn build_dependency_graph(
 // ============================================================================
 
 /// Validate EmbedWorkflow input mappings against child workflow inputSchemas.
+/// Checks `steps.<embed>.outputs.<field>` references against the embedded
+/// child's declared output schema (E058). Children without an output schema
+/// are not checked: their outputs are whatever their Finish returns.
+fn validate_embed_workflow_outputs(
+    graph: &ExecutionGraph,
+    child_workflows: &HashMap<String, ExecutionGraph>,
+    result: &mut ValidationResult,
+) {
+    fn embeds<'a>(
+        graph: &'a ExecutionGraph,
+        children: &'a HashMap<String, ExecutionGraph>,
+        out: &mut HashMap<String, &'a ExecutionGraph>,
+    ) {
+        for (id, step) in &graph.steps {
+            match step {
+                Step::EmbedWorkflow(embed) => {
+                    if let Some(child) = children
+                        .get(&embed.child_workflow_id)
+                        .filter(|c| !c.output_schema.is_empty())
+                    {
+                        out.insert(id.clone(), child);
+                    }
+                }
+                Step::Split(split) => embeds(&split.subgraph, children, out),
+                Step::While(w) => embeds(&w.subgraph, children, out),
+                _ => {}
+            }
+        }
+    }
+    fn references(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                match (
+                    map.get("valueType").and_then(|v| v.as_str()),
+                    map.get("value").and_then(|v| v.as_str()),
+                ) {
+                    (Some("reference"), Some(path)) => out.push(path.to_string()),
+                    (Some("template"), Some(text)) => {
+                        // Template paths: `steps.<id>.outputs.<field>`.
+                        let mut rest = text;
+                        while let Some(i) = rest.find("steps.") {
+                            let tail = &rest[i..];
+                            let end = tail
+                                .find(|c: char| !(c.is_alphanumeric() || "._-".contains(c)))
+                                .unwrap_or(tail.len());
+                            out.push(tail[..end].to_string());
+                            rest = &tail[end..];
+                        }
+                    }
+                    _ => {}
+                }
+                map.values().for_each(|v| references(v, out));
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|v| references(v, out)),
+            _ => {}
+        }
+    }
+    let mut checked = HashMap::new();
+    embeds(graph, child_workflows, &mut checked);
+    if checked.is_empty() {
+        return;
+    }
+    let mut steps: Vec<_> = graph.steps.iter().collect();
+    steps.sort_by_key(|(id, _)| *id);
+    let mut seen = HashSet::new();
+    for (step_id, step) in steps {
+        let Ok(value) = serde_json::to_value(step) else {
+            continue;
+        };
+        let mut found = Vec::new();
+        references(&value, &mut found);
+        for reference in found {
+            let segments: Vec<&str> = reference.split('.').collect();
+            let (Some("steps"), Some(embed), Some("outputs"), Some(field)) = (
+                segments.first().copied(),
+                segments.get(1).copied(),
+                segments.get(2).copied(),
+                segments.get(3).copied(),
+            ) else {
+                continue;
+            };
+            let field = field.split('[').next().unwrap_or(field);
+            let Some(child) = checked.get(embed) else {
+                continue;
+            };
+            if child.output_schema.contains_key(field)
+                || !seen.insert((step_id.clone(), reference.clone()))
+            {
+                continue;
+            }
+            let mut available: Vec<String> = child.output_schema.keys().cloned().collect();
+            available.sort();
+            result
+                .errors
+                .push(ValidationError::UndefinedReferenceField {
+                    step_id: step_id.clone(),
+                    reference: reference.clone(),
+                    known_prefix: format!("steps.{embed}.outputs"),
+                    missing_field: field.to_string(),
+                    available_fields: available,
+                });
+        }
+    }
+}
+
 fn validate_embed_workflow_inputs(
     graph: &ExecutionGraph,
     child_workflows: &HashMap<String, ExecutionGraph>,
@@ -8963,7 +9071,7 @@ mod tests {
 
     /// `correlation`/`context` are `InputMapping`s in all but name, and no
     /// collector walked them — a wrong step id silently emitted `null` and
-    /// report filtering stopped matching.
+    /// action filtering stopped matching.
     #[test]
     fn test_wait_action_maps_reject_dangling_step_references() {
         let subject = wait_with_action(
@@ -13688,6 +13796,74 @@ mod tests {
             ValidationError::MissingChildRequiredInputs { missing_fields, .. }
                 if missing_fields.iter().any(|f| f.name == "required_field")
         )));
+    }
+
+    #[test]
+    fn test_validate_with_children_checks_embed_output_references() {
+        let parent: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "steps": {
+                "data": { "stepType": "EmbedWorkflow", "id": "data", "childWorkflowId": "child-1",
+                    "childVersion": "latest" },
+                "plain": { "stepType": "EmbedWorkflow", "id": "plain", "childWorkflowId": "child-2",
+                    "childVersion": "latest" },
+                "finish": { "stepType": "Finish", "id": "finish", "inputMapping": {
+                    "rows": { "valueType": "reference", "value": "steps.data.outputs.rows" },
+                    "first": { "valueType": "reference", "value": "steps.data.outputs.rows[0]" },
+                    "typo": { "valueType": "reference", "value": "steps.data.outputs.rowz" },
+                    "note": { "valueType": "template", "value": "{{ steps.data.outputs.totl }} total" },
+                    "free": { "valueType": "reference", "value": "steps.plain.outputs.anything" }
+                } }
+            },
+            "entryPoint": "data",
+            "executionPlan": [
+                { "fromStep": "data", "toStep": "plain" },
+                { "fromStep": "plain", "toStep": "finish" }
+            ]
+        }))
+        .unwrap();
+        let declared: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "steps": { "finish": { "stepType": "Finish", "id": "finish" } },
+            "entryPoint": "finish",
+            "outputSchema": {
+                "rows": { "type": "array" },
+                "total": { "type": "number" }
+            }
+        }))
+        .unwrap();
+        // A child without an output schema is not checked.
+        let undeclared: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "steps": { "finish": { "stepType": "Finish", "id": "finish" } },
+            "entryPoint": "finish"
+        }))
+        .unwrap();
+        let children = HashMap::from([
+            ("child-1".to_string(), declared),
+            ("child-2".to_string(), undeclared),
+        ]);
+        let result = validate_workflow_with_children(&parent, &test_catalog(), &children);
+        let missing: Vec<(&str, &str)> = result
+            .errors
+            .iter()
+            .filter_map(|e| match e {
+                ValidationError::UndefinedReferenceField {
+                    missing_field,
+                    reference,
+                    available_fields,
+                    ..
+                } => {
+                    assert_eq!(available_fields, &["rows", "total"]);
+                    Some((missing_field.as_str(), reference.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            missing,
+            [
+                ("totl", "steps.data.outputs.totl"),
+                ("rowz", "steps.data.outputs.rowz")
+            ]
+        );
     }
 
     #[test]

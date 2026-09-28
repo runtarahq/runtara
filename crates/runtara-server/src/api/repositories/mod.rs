@@ -3,7 +3,6 @@
 // NOTE: Connection and OAuth repositories are now in runtara-connections crate.
 
 pub mod object_model;
-pub mod reports;
 pub mod trigger_stream;
 pub mod triggers;
 pub mod workflows;

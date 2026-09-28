@@ -5,15 +5,23 @@ import type { FormSectionDefinition } from './types';
 interface FormSectionProps {
   section?: FormSectionDefinition;
   children: ReactNode;
+  /** How the section's fields are laid out; stacked by default. */
+  fieldsClassName?: string;
 }
 
-export function FormSection({ section, children }: FormSectionProps) {
+export function FormSection({
+  section,
+  children,
+  fieldsClassName = 'space-y-4',
+}: FormSectionProps) {
   if (!section) {
-    return <div className="space-y-4">{children}</div>;
+    return <div className={fieldsClassName}>{children}</div>;
   }
 
   const content = (
-    <div className="space-y-4 border-t border-border/60 pt-4">{children}</div>
+    <div className={`${fieldsClassName} border-t border-border/60 pt-4`}>
+      {children}
+    </div>
   );
 
   if (section.advanced) {

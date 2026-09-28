@@ -44,10 +44,10 @@ export const NODE_TYPE_SIZES: Record<
   string,
   { width: number; height: number }
 > = {
-  [NODE_TYPES.CreateNode]: { width: 132, height: 36 },
-  [NODE_TYPES.BasicNode]: { width: 132, height: 36 },
-  [NODE_TYPES.ConditionalNode]: { width: 132, height: 36 },
-  [NODE_TYPES.SwitchNode]: { width: 132, height: 36 }, // Base size, dynamically adjusted based on cases
+  [NODE_TYPES.CreateNode]: { width: 216, height: 52 },
+  [NODE_TYPES.BasicNode]: { width: 216, height: 52 },
+  [NODE_TYPES.ConditionalNode]: { width: 216, height: 52 },
+  [NODE_TYPES.SwitchNode]: { width: 216, height: 52 }, // Base size, dynamically adjusted based on cases
   [NODE_TYPES.AiAgentNode]: { width: 252, height: 96 }, // Card layout, dynamically adjusted based on tools/memory
   [NODE_TYPES.ContainerNode]: { width: 168, height: 132 },
   [NODE_TYPES.NoteNode]: { width: 192, height: 96 },

@@ -8,6 +8,7 @@ import {
 } from '@/shared/components/ui/alert';
 import { Label } from '@/shared/components/ui/label';
 
+import { inferControlKind } from './control-registry';
 import { FieldControl } from './FieldControl';
 import { FormSection } from './FormSection';
 import { analyzeFormWithRust } from './rust-form-validation';
@@ -28,6 +29,8 @@ export interface FormRendererProps {
   onChange: (value: Record<string, unknown>) => void;
   disabled?: boolean;
   className?: string;
+  /** How each section's fields are laid out; stacked by default. */
+  fieldsClassName?: string;
   onAnalysisChange?: (analysis: FormAnalysisResult) => void;
   fieldAnnotations?: Record<string, ReactNode>;
   /** Increment only at an explicit submit boundary to focus the first issue. */
@@ -70,6 +73,7 @@ export function FormRenderer({
   onChange,
   disabled = false,
   className,
+  fieldsClassName,
   onAnalysisChange,
   fieldAnnotations,
   submitAttempt = 0,
@@ -165,7 +169,11 @@ export function FormRenderer({
         if (visibleFields.length === 0) return null;
 
         return (
-          <FormSection key={section?.id ?? '__default'} section={section}>
+          <FormSection
+            key={section?.id ?? '__default'}
+            section={section}
+            fieldsClassName={fieldsClassName}
+          >
             {visibleFields.map(([name, field]) => {
               const state = analysis.fields[name] ?? {
                 visible: true,
@@ -183,11 +191,16 @@ export function FormRenderer({
               const fieldDisabled =
                 disabled || !state.enabled || field.access === 'read';
               return (
-                <div key={name} className="space-y-1.5" data-field={name}>
+                <div
+                  key={name}
+                  className="space-y-1.5"
+                  data-field={name}
+                  data-control={inferControlKind(field)}
+                >
                   <Label
                     id={labelId}
                     htmlFor={inputId}
-                    className="text-sm font-medium"
+                    className="block text-sm font-medium"
                   >
                     {field.label ?? name.replace(/_/g, ' ')}
                     {state.required && (
