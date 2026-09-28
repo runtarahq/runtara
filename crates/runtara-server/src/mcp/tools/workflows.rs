@@ -628,7 +628,7 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                 "steps": {
                     "stepId": {
                         "id": "stepId",
-                        "stepType": "Agent | Conditional | Finish | Split | Switch | EmbedWorkflow | While | Log | Connection | Error | Filter | GroupBy | Delay | WaitForSignal | WaitForInstances",
+                        "stepType": "Agent | Conditional | Finish | Split | Switch | EmbedWorkflow | While | Log | Error | Filter | GroupBy | Delay | WaitForSignal | WaitForInstances | AiAgent",
                         "name": "Human label",
                         "stepSpecificFields": "Use stepShapes below or get_step_type_schema. inputMapping is not a universal step field."
                     }
@@ -2024,6 +2024,38 @@ mod tests {
                     .contains(reason)
             );
         }
+    }
+
+    #[test]
+    fn advertised_step_type_lists_match_the_registry() {
+        use std::collections::BTreeSet;
+        let registry: BTreeSet<&str> = runtara_dsl::agent_meta::get_all_step_types()
+            .map(|meta| meta.id)
+            .collect();
+
+        let schema = workflow_authoring_schema("object_model", "bulk-update-instances");
+        let authoring: BTreeSet<&str> =
+            schema["graphShape"]["shape"]["steps"]["stepId"]["stepType"]
+                .as_str()
+                .unwrap()
+                .split(" | ")
+                .collect();
+        assert_eq!(authoring, registry, "authoring schema stepType list");
+
+        // The server instructions are built inline in `get_info`; check the
+        // advertised line in its source.
+        let instructions = include_str!("../server.rs");
+        let line = instructions
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("**Step types**: "))
+            .expect("server instructions list the step types");
+        let listed: BTreeSet<&str> = line
+            .split(" (no Start type).")
+            .next()
+            .unwrap()
+            .split(", ")
+            .collect();
+        assert_eq!(listed, registry, "server instructions step types");
     }
 
     #[test]
