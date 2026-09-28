@@ -9,51 +9,6 @@ fn queue_key(org_id: &str, session_id: &str) -> String {
     format!("queue:{}:{}", org_id, session_id)
 }
 
-fn activity_dedup_key(identity: &str) -> String {
-    format!("channel_activity_dedup:{identity}")
-}
-
-/// Reserve a one-time dedup key for an inbound activity (SET NX EX).
-///
-/// Returns `true` when the key was newly reserved (process this delivery) and
-/// `false` when it already existed (a duplicate — Teams redelivers at-least-once
-/// if the endpoint takes >~15s). Fails open (`true`) when Valkey is unreachable,
-/// so a backend blip never drops real messages; the deterministic-instance-id
-/// backstop still prevents a double execution in that window.
-pub async fn reserve_activity_dedup(
-    conn: &mut ConnectionManager,
-    identity: &str,
-    ttl_secs: i64,
-) -> bool {
-    let key = activity_dedup_key(identity);
-    let set: redis::RedisResult<Option<String>> = redis::cmd("SET")
-        .arg(&key)
-        .arg("1")
-        .arg("NX")
-        .arg("EX")
-        .arg(ttl_secs)
-        .query_async(conn)
-        .await;
-    match set {
-        // "OK" means the key was set (fresh); nil means it already existed.
-        Ok(Some(_)) => true,
-        Ok(None) => false,
-        Err(_) => true,
-    }
-}
-
-/// Release a previously reserved dedup key so a genuine redelivery can retry.
-///
-/// Called when processing a reserved activity FAILED: with ack-fast the webhook
-/// has already returned 200, but if Teams redelivers for any other reason
-/// (e.g. it never saw our ack) the tombstone would otherwise drop a message we
-/// never actually handled. Best-effort — a lost DEL just falls back to the
-/// natural TTL expiry.
-pub async fn release_activity_dedup(conn: &mut ConnectionManager, identity: &str) {
-    let key = activity_dedup_key(identity);
-    let _: redis::RedisResult<i64> = redis::cmd("DEL").arg(&key).query_async(conn).await;
-}
-
 /// Replies received while an execution runs are buffered per execution, apart
 /// from idle messages that start the next run. Neither can block the other.
 fn reply_key(org_id: &str, session_id: &str, instance_id: &str) -> String {
@@ -83,19 +38,22 @@ pub struct PeekedEvent {
     key: String,
 }
 
+/// `message_id` becomes the managed-queue message and operation id at handoff;
+/// a channel reply passes its intake id so a recovered handoff is deduplicated.
 pub async fn push_event(
     conn: &mut ConnectionManager,
     org_id: &str,
     session_id: &str,
     instance_id: Option<&str>,
     for_request: Option<&str>,
+    message_id: Option<uuid::Uuid>,
     payload: &Value,
 ) -> managed::QueueResult<()> {
     if for_request.is_some() && instance_id.is_none() {
         return Err(managed::QueueError::Invalid);
     }
     let event = BufferedEvent {
-        message_id: uuid::Uuid::new_v4().to_string(),
+        message_id: message_id.unwrap_or_else(uuid::Uuid::new_v4).to_string(),
         instance_id: instance_id.map(str::to_owned),
         target: None,
         for_request: for_request.map(str::to_owned),

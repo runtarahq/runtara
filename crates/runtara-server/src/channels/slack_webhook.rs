@@ -66,14 +66,6 @@ pub async fn slack_webhook(
         return StatusCode::OK.into_response();
     };
 
-    // Deduplicate at-least-once redeliveries (Slack retries the same event_id).
-    if let Some(event_id) = msg.activity_id.as_deref()
-        && !router.reserve_activity(&connection_id, event_id).await
-    {
-        debug!(connection_id = %connection_id, event_id, "Dropping duplicate Slack event");
-        return StatusCode::OK.into_response();
-    }
-
     let event_type = payload["event"]["type"].as_str().unwrap_or("unknown");
     debug!(
         connection_id = %connection_id,
@@ -82,15 +74,11 @@ pub async fn slack_webhook(
         "Slack event received"
     );
 
-    if let Err(e) = router.handle_message(&connection_id, &msg).await {
-        warn!(
-            connection_id = %connection_id,
-            error = %e,
-            "Failed to handle Slack event"
-        );
-    }
-
-    StatusCode::OK.into_response()
+    // Stored before the 200; a redelivered event_id is acknowledged and dropped.
+    router
+        .receive(&connection_id, msg, false)
+        .await
+        .into_response()
 }
 
 /// Normalize supported Slack Events API callbacks into channel session input.
@@ -152,6 +140,8 @@ fn normalize_text_event(payload: &Value, event: &Value) -> Option<InboundMessage
             .get("event_id")
             .and_then(Value::as_str)
             .map(str::to_string),
+        intake_id: None,
+        workflow: None,
     })
 }
 
@@ -193,6 +183,8 @@ fn normalize_reaction_event(payload: &Value, event: &Value) -> Option<InboundMes
             .get("event_id")
             .and_then(Value::as_str)
             .map(str::to_string),
+        intake_id: None,
+        workflow: None,
     })
 }
 

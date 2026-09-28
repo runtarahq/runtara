@@ -28,6 +28,7 @@ pub async fn collect_fields<F, Fut>(
     channel: &dyn Channel,
     conv_id: &str,
     user_rx: &mut mpsc::Receiver<InboundMessage>,
+    intake: Option<&super::intake::IntakeStore>,
     mut buffered: Option<BufferedReplies<'_>>,
     ensure_open: F,
 ) -> anyhow::Result<Value>
@@ -84,6 +85,15 @@ where
                         .to_owned();
                     ensure_open().await?;
                     session_queue::acknowledge_event(buffer.conn, &source).await?;
+                    if let Some(intake) = intake {
+                        intake
+                            .settle(
+                                uuid::Uuid::parse_str(&source.event.message_id).ok(),
+                                "collected",
+                                Some(buffer.instance),
+                            )
+                            .await;
+                    }
                     Some(text)
                 } else {
                     None
@@ -95,7 +105,14 @@ where
                 text
             } else {
                 tokio::select! {
-                    message = user_rx.recv() => message.ok_or_else(|| anyhow::anyhow!("Channel closed during field collection"))?.text,
+                    message = user_rx.recv() => {
+                        let message = message.ok_or_else(|| anyhow::anyhow!("Channel closed during field collection"))?;
+                        // Consumed for collection; field progress itself is actor-local.
+                        if let Some(intake) = intake {
+                            intake.settle(message.intake_id, "collected", None).await;
+                        }
+                        message.text
+                    }
                     _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
                         ensure_open().await?;
                         continue;

@@ -77,26 +77,13 @@ pub async fn telegram_webhook(
         attachments: vec![],
         original_message: update.clone(),
         target: None,
-        activity_id: activity_id.clone(),
+        activity_id,
+        intake_id: None,
+        workflow: None,
     };
-
-    // Deduplicate at-least-once redeliveries by update_id.
-    if let Some(update_id) = activity_id.as_deref()
-        && !router.reserve_activity(&connection_id, update_id).await
-    {
-        debug!(connection_id = %connection_id, update_id, "Dropping duplicate Telegram update");
-        return StatusCode::OK;
-    }
 
     debug!(connection_id = %connection_id, chat_id = %msg.conv_id, "Telegram message received");
 
-    if let Err(e) = router.handle_message(&connection_id, &msg).await {
-        warn!(
-            connection_id = %connection_id,
-            error = %e,
-            "Failed to handle Telegram message"
-        );
-    }
-
-    StatusCode::OK
+    // Stored before the 200; a redelivered update_id is acknowledged and dropped.
+    router.receive(&connection_id, msg, false).await
 }

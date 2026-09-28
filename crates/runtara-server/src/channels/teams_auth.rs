@@ -397,14 +397,14 @@ fn record_neg_cache(metadata_url: &str, kid: &str) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::http::HeaderValue;
     use jsonwebtoken::{EncodingKey, Header, encode};
     use serde_json::json;
 
     /// Fixed 2048-bit RSA test keypair (test-only, never used outside tests).
-    const TEST_RSA_PEM: &str = "-----BEGIN PRIVATE KEY-----
+    pub(crate) const TEST_RSA_PEM: &str = "-----BEGIN PRIVATE KEY-----
 MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDGcMsIA4zdJXmH
 S2Bpy1GX3t5KKa7KlOsa7CFO/yVYVMQnQzhdSuNxSZSixzqcMfEQqcEW6ftW4W5Z
 TNipquNTpa9ELOCHUdd8r1nN6tw9RjJ4r4a6K7jqJET5HBZbWFj9tSPL9uVkweOC
@@ -432,8 +432,8 @@ ub5Px952cG03BmZUDr2yyP8JmcWsG/I7rWetu+KRr6gOD6+IgEi3N4ja3SgGp5lq
 SzPGw0VwiPkNiu9FBu4mfbT9ouJT+4ux6xN/lSP2gkJfYWpBkKODlnRSMOoa6WIG
 sup34c5zDvmwEupkUwyybA==
 -----END PRIVATE KEY-----";
-    const TEST_RSA_N: &str = "xnDLCAOM3SV5h0tgactRl97eSimuypTrGuwhTv8lWFTEJ0M4XUrjcUmUosc6nDHxEKnBFun7VuFuWUzYqarjU6WvRCzgh1HXfK9ZzercPUYyeK-Guiu46iRE-RwWW1hY_bUjy_blZMHjgieLpPL64ccXoWgvfE3yQCijhTvTS-VAKx83VoPMcgfhJbg31FMV5c6ElSoxoNThO5JWW4Kwe9YjcHZnvTcXiq89WEuXQKFpJ5iRMVmLql0LAnVNnP67VLa1gqblrcVWRgyQHTvPiVBr5fw2qbubcsuBkBUpUIqsEW8eHDqxHVWSU_IhIfMpIEo6_PnLXFFELXKspEgVtw";
-    const TEST_RSA_E: &str = "AQAB";
+    pub(crate) const TEST_RSA_N: &str = "xnDLCAOM3SV5h0tgactRl97eSimuypTrGuwhTv8lWFTEJ0M4XUrjcUmUosc6nDHxEKnBFun7VuFuWUzYqarjU6WvRCzgh1HXfK9ZzercPUYyeK-Guiu46iRE-RwWW1hY_bUjy_blZMHjgieLpPL64ccXoWgvfE3yQCijhTvTS-VAKx83VoPMcgfhJbg31FMV5c6ElSoxoNThO5JWW4Kwe9YjcHZnvTcXiq89WEuXQKFpJ5iRMVmLql0LAnVNnP67VLa1gqblrcVWRgyQHTvPiVBr5fw2qbubcsuBkBUpUIqsEW8eHDqxHVWSU_IhIfMpIEo6_PnLXFFELXKspEgVtw";
+    pub(crate) const TEST_RSA_E: &str = "AQAB";
 
     const APP_ID: &str = "11111111-2222-3333-4444-555555555555";
     const TENANT: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
