@@ -5,6 +5,8 @@ import { WithTooltip } from '@/shared/components/ui/tooltip.tsx';
 import { resumeInstance } from '@/features/workflows/queries';
 import { toast } from 'sonner';
 import { useToken } from '@/shared/hooks';
+import { useQueryClient } from '@tanstack/react-query';
+import { refreshRunViews } from '../refreshRunViews';
 import { isOidcAuth } from '@/shared/config/runtimeConfig';
 
 type Props = {
@@ -22,6 +24,7 @@ export function ResumeButton(props: Props) {
     className = '',
   } = props;
   const token = useToken();
+  const queryClient = useQueryClient();
   const [isLoading, setIsLoading] = useState(false);
 
   const handleClick = async () => {
@@ -36,6 +39,7 @@ export function ResumeButton(props: Props) {
     setIsLoading(true);
     try {
       await resumeInstance(token, instanceId);
+      await refreshRunViews(queryClient);
       toast.success('Execution resumed from last checkpoint');
     } catch (error) {
       console.error('Error resuming instance:', error);
