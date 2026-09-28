@@ -15,6 +15,50 @@
 //! null, and a genuinely-nested path written in bracket form was rejected even
 //! though the runtime would have descended it.
 
+/// Something [`tokenize_reference`] dropped or read past while splitting a
+/// path. The segments are unaffected — the runtime resolves the path exactly as
+/// tokenized — so these only matter to callers that want to reject a malformed
+/// path rather than resolve it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PathDefect {
+    /// Two dots in a row outside a closed `[..]` body (`steps..outputs`), so
+    /// an empty dot segment was dropped. Dots inside a closed body belong to
+    /// the key (`data["a..b"]`); inside an *unterminated* body they still
+    /// count, since `outputs[0..name` is a malformed path, not a key.
+    ConsecutiveDots,
+    /// A closed `[..]` body that is empty after trimming and unquoting (`[]`,
+    /// `[""]`, `['']`, `[ ]`), which yields no segment at all. An unterminated
+    /// `[` with nothing after it is [`PathDefect::UnterminatedBracket`] only —
+    /// there is no body to be empty.
+    EmptyBracketKey,
+    /// A `[` with no closing `]`; the rest of the path became its body.
+    UnterminatedBracket,
+}
+
+/// A reference path split into lookup segments, plus each distinct
+/// [`PathDefect`] met along the way (each kind is recorded at most once).
+///
+/// Not every dropped segment is a defect: a leading or trailing dot (`.data`,
+/// `data.`) is dropped silently, as it always has been.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TokenizedPath {
+    pub segments: Vec<String>,
+    pub defects: Vec<PathDefect>,
+}
+
+impl TokenizedPath {
+    pub fn has_defect(&self, defect: PathDefect) -> bool {
+        self.defects.contains(&defect)
+    }
+
+    fn record(&mut self, defect: PathDefect) {
+        if !self.has_defect(defect) {
+            self.defects.push(defect);
+        }
+    }
+}
+
 /// Split a reference path into lookup segments.
 ///
 /// A dot separates segments; empty segments are dropped. A `[..]` body is one
@@ -25,77 +69,75 @@
 /// Index-vs-key is decided by token shape at lookup time (see
 /// `direct_json::descend`), so both stay raw here.
 pub fn reference_segments(path: &str) -> Vec<String> {
-    let mut segments = Vec::new();
-    let mut current = String::new();
-    let mut chars = path.chars();
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '.' => {
-                if !current.is_empty() {
-                    segments.push(std::mem::take(&mut current));
-                }
-            }
-            '[' => {
-                if !current.is_empty() {
-                    segments.push(std::mem::take(&mut current));
-                }
-
-                // An unterminated `[` consumes the rest of the path, matching
-                // the historical scan (no error surface here — an unbalanced
-                // bracket simply yields whatever key text it holds).
-                let mut body = String::new();
-                for next in chars.by_ref() {
-                    if next == ']' {
-                        break;
-                    }
-                    body.push(next);
-                }
-
-                if let Some(segment) = bracket_segment(body.trim()) {
-                    segments.push(segment);
-                }
-            }
-            _ => current.push(ch),
-        }
-    }
-
-    if !current.is_empty() {
-        segments.push(current);
-    }
-
-    segments
+    tokenize_reference(path).segments
 }
 
-/// True when a reference path has an empty dot-separated segment — two dots
-/// in a row outside any `[..]` body, e.g. `steps..outputs`.
+/// [`reference_segments`], also reporting each [`PathDefect`] met on the way.
 ///
-/// [`reference_segments`] silently drops such segments, so a caller that wants
-/// to reject them must look at the raw text; but a bracket body is one opaque
-/// key, so `data["a..b"]` names the literal key `a..b` and is not flagged.
-/// Only a *closed* body is skipped: an unterminated `[` is a malformed path,
-/// not a key, so `outputs[0..name` (missing `]`) is still flagged even though
-/// [`reference_segments`] would read the rest of it as one key.
-pub fn has_consecutive_dots(path: &str) -> bool {
+/// This is the one scan both the resolver and the validator go through, so a
+/// validator check for a malformed path can never disagree with how the
+/// runtime actually split it.
+pub fn tokenize_reference(path: &str) -> TokenizedPath {
+    let mut tokenized = TokenizedPath::default();
+    let mut current = String::new();
     let mut previous_dot = false;
     let mut chars = path.chars();
 
     while let Some(ch) = chars.next() {
         match ch {
-            '.' if previous_dot => return true,
-            '.' => previous_dot = true,
-            '[' => {
-                let Some(close) = chars.as_str().find(']') else {
-                    return chars.as_str().contains("..");
-                };
-                chars = chars.as_str()[close + 1..].chars();
-                previous_dot = false;
+            '.' => {
+                if previous_dot {
+                    tokenized.record(PathDefect::ConsecutiveDots);
+                }
+                previous_dot = true;
+                if !current.is_empty() {
+                    tokenized.segments.push(std::mem::take(&mut current));
+                }
             }
-            _ => previous_dot = false,
+            '[' => {
+                previous_dot = false;
+                if !current.is_empty() {
+                    tokenized.segments.push(std::mem::take(&mut current));
+                }
+
+                // An unterminated `[` consumes the rest of the path, matching
+                // the historical scan: an unbalanced bracket still yields
+                // whatever key text it holds, and is reported as a defect.
+                let mut body = String::new();
+                let mut closed = false;
+                for next in chars.by_ref() {
+                    if next == ']' {
+                        closed = true;
+                        break;
+                    }
+                    body.push(next);
+                }
+
+                if !closed {
+                    tokenized.record(PathDefect::UnterminatedBracket);
+                    if body.contains("..") {
+                        tokenized.record(PathDefect::ConsecutiveDots);
+                    }
+                }
+
+                match bracket_segment(body.trim()) {
+                    Some(segment) => tokenized.segments.push(segment),
+                    None if closed => tokenized.record(PathDefect::EmptyBracketKey),
+                    None => {}
+                }
+            }
+            _ => {
+                previous_dot = false;
+                current.push(ch);
+            }
         }
     }
 
-    false
+    if !current.is_empty() {
+        tokenized.segments.push(current);
+    }
+
+    tokenized
 }
 
 /// Render a reference path as an RFC 6901 JSON pointer, escaping `~` and `/`
@@ -169,6 +211,14 @@ mod tests {
 
     fn segments(path: &str) -> Vec<String> {
         reference_segments(path)
+    }
+
+    fn defects(path: &str) -> Vec<PathDefect> {
+        tokenize_reference(path).defects
+    }
+
+    fn has_consecutive_dots(path: &str) -> bool {
+        tokenize_reference(path).has_defect(PathDefect::ConsecutiveDots)
     }
 
     #[test]
@@ -278,6 +328,79 @@ mod tests {
         assert!(has_consecutive_dots("data[a..b"));
         assert!(has_consecutive_dots("steps.fetch.outputs[0..name"));
         assert!(!has_consecutive_dots("data[a.b"));
+    }
+
+    #[test]
+    fn well_formed_paths_have_no_defects() {
+        for path in [
+            "",
+            "data",
+            "data.order.id",
+            r#"data["a..b"]"#,
+            "items[0].sku",
+            "items[-1]",
+            r#"data.["a"].b"#,
+            r#"data[" "]"#,
+        ] {
+            assert_eq!(defects(path), [], "{path}");
+        }
+    }
+
+    #[test]
+    fn empty_bracket_keys_are_reported() {
+        for path in [
+            "data[]",
+            r#"data[""]"#,
+            "data['']",
+            "data[ ]",
+            r#"data[ "" ]"#,
+        ] {
+            assert!(
+                tokenize_reference(path).has_defect(PathDefect::EmptyBracketKey),
+                "{path}"
+            );
+            assert_eq!(segments(path), ["data"], "{path}");
+        }
+        assert!(tokenize_reference("steps.a.outputs[].id").has_defect(PathDefect::EmptyBracketKey));
+    }
+
+    #[test]
+    fn unterminated_brackets_are_reported() {
+        assert_eq!(defects("data[a.b"), [PathDefect::UnterminatedBracket]);
+        // No body at all: a missing `]`, not an empty key.
+        assert_eq!(defects("data["), [PathDefect::UnterminatedBracket]);
+        assert_eq!(defects("data[ "), [PathDefect::UnterminatedBracket]);
+        assert_eq!(
+            defects("data[a..b"),
+            [PathDefect::UnterminatedBracket, PathDefect::ConsecutiveDots]
+        );
+    }
+
+    #[test]
+    fn defects_do_not_change_segments() {
+        // The runtime resolves exactly these segments, defects or not.
+        assert_eq!(segments("steps..outputs"), ["steps", "outputs"]);
+        assert_eq!(segments("data[a..b"), ["data", "a..b"]);
+        assert_eq!(segments("data[]"), ["data"]);
+        let tokenized = tokenize_reference(r#"data["a"]..b[]"#);
+        assert_eq!(tokenized.segments, ["data", "a", "b"]);
+        assert_eq!(
+            tokenized.defects,
+            [PathDefect::ConsecutiveDots, PathDefect::EmptyBracketKey]
+        );
+    }
+
+    #[test]
+    fn each_defect_kind_is_recorded_once() {
+        assert_eq!(defects("a...b..c"), [PathDefect::ConsecutiveDots]);
+        assert_eq!(defects("a[][]"), [PathDefect::EmptyBracketKey]);
+    }
+
+    #[test]
+    fn leading_and_trailing_dots_are_dropped_without_a_defect() {
+        assert_eq!(defects(".data"), []);
+        assert_eq!(defects("steps.a.outputs."), []);
+        assert_eq!(segments("steps.a.outputs."), ["steps", "a", "outputs"]);
     }
 
     #[test]
