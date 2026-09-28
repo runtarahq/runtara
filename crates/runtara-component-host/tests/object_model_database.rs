@@ -117,7 +117,7 @@ async fn built_object_model_crud_bulk_aggregate_and_memory_use_native_postgres()
     )
     .await?;
     parent
-        .execute(&format!("CREATE SCHEMA {namespace}"), &[])
+        .execute_guarded(&format!("CREATE SCHEMA {namespace}"), &[], 60_000)
         .await?;
     let mut scoped = url::Url::parse(&url)?;
     scoped

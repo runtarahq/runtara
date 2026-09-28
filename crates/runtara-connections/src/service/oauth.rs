@@ -314,6 +314,13 @@ async fn exchange_code(
     if effective.token_url.is_empty() {
         return Err(OAuthError::MissingParameter("token_url".to_string()));
     }
+    // Re-check the endpoint before the code and client secret are sent: a
+    // stored URL may predate save-time validation. Nothing is sent on failure.
+    crate::net::validate_credentialed_endpoint(&effective.token_url).map_err(|reason| {
+        OAuthError::TokenExchangeFailed(format!(
+            "refusing to send credentials to the token endpoint: {reason}"
+        ))
+    })?;
     // Hardened egress: no redirect following (a 3xx must not carry the client
     // secret/Basic header to another host), DNS-guarded resolver (private-host
     // token endpoints rejected at connect time).
@@ -407,6 +414,82 @@ mod tests {
             pkce_required: false,
             params_driven: false,
         }
+    }
+
+    fn params_driven_cfg() -> OAuthConfig {
+        OAuthConfig {
+            params_driven: true,
+            ..cfg_with(&[])
+        }
+    }
+
+    async fn provider(route: &str, expected_calls: u64) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path(route))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"access_token": "at-1", "refresh_token": "rt-1"}),
+            ))
+            .expect(expected_calls)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn exchange(token_url: String) -> Result<Value, OAuthError> {
+        exchange_code(
+            &params_driven_cfg(),
+            &serde_json::json!({ "token_url": token_url }),
+            "code-1",
+            "cid",
+            "csec",
+            "https://runtara.example/callback",
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn code_exchange_refuses_plain_http_token_endpoint_before_sending() {
+        let server = provider("/token", 0).await;
+        for token_url in [
+            "http://auth.example.com/token".to_string(),
+            format!("{}/token", server.uri()),
+        ] {
+            let Err(OAuthError::TokenExchangeFailed(message)) = exchange(token_url.clone()).await
+            else {
+                panic!("{token_url}: an http token endpoint must be refused")
+            };
+            assert!(message.contains("https"), "{token_url}: {message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn code_exchange_sends_to_an_allowlisted_http_token_endpoint() {
+        let _loopback = crate::net::test_allowlist::allow("127.0.0.1");
+        let server = provider("/token", 1).await;
+        let body = exchange(format!("{}/token", server.uri()))
+            .await
+            .unwrap_or_else(|err| panic!("allowlisted endpoint must be used: {err}"));
+        assert_eq!(body["access_token"], "at-1");
+    }
+
+    #[tokio::test]
+    async fn revocation_refuses_plain_http_endpoint_before_sending() {
+        let server = provider("/revoke", 0).await;
+        let params = serde_json::json!({
+            "revocation_url": format!("{}/revoke", server.uri()),
+            "refresh_token": "rt-1",
+        });
+        let err = crate::auth::provider_auth::revoke_oauth_token(
+            crate::net::shared_hardened_client(),
+            &params_driven_cfg(),
+            &params,
+        )
+        .await
+        .expect_err("an http revocation endpoint must be refused");
+        assert!(err.contains("https"), "{err}");
     }
 
     static REALM: &[ExtraCallbackParam] = &[ExtraCallbackParam {

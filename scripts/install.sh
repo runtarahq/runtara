@@ -390,7 +390,7 @@ write_config() {
     # but simplified: if RUNTARA_NONINTERACTIVE=1, use defaults/env vars
 
     local db_url="${RUNTARA_DATABASE_URL:-postgres://runtara:password@localhost/runtara}"
-    local obj_db_url="${OBJECT_MODEL_DATABASE_URL:-postgres://runtara:password@localhost/runtara_objects}"
+    local obj_db_url="${OBJECT_MODEL_DATABASE_URL:-postgres://runtara_objects:password@localhost/runtara_objects}"
     # Server tables (workflows, connections, API keys) live in their own
     # database, distinct from the object-model and environment databases.
     local server_db_url="${RUNTARA_SERVER_DATABASE_URL:-postgres://runtara:password@localhost/runtara_server}"

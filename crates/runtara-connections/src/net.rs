@@ -257,7 +257,8 @@ pub fn shared_hardened_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(build_hardened_client)
 }
 
-/// Save-time validation for a user-supplied credentialed endpoint URL:
+/// Validation for a user-supplied credentialed endpoint URL (at save time, and
+/// again at send time through [`validate_credentialed_endpoint`]):
 /// https-only (unless the host is on the `RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS`
 /// dev allowlist the caller resolves), non-empty host, and — when the host is
 /// an IP *literal* — not a private/internal address.
@@ -293,6 +294,81 @@ pub fn validate_public_url(
         return Err(format!("URL host {host} is a private/internal address"));
     }
     Ok(())
+}
+
+/// Hosts allowed to use an `http://` endpoint (`RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS`,
+/// comma-separated bare hosts). Host-scoped so a single dev/socat sidecar can be
+/// allowed without disabling TLS enforcement globally. Empty = https-only
+/// (fail-closed default). Read once.
+pub fn connection_http_allowed(host: &str) -> bool {
+    static HOSTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let list = HOSTS.get_or_init(|| {
+        std::env::var("RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    });
+    let h = host.to_ascii_lowercase();
+    list.iter().any(|entry| entry == &h)
+}
+
+/// Send-time re-check for a credential-bearing OAuth endpoint (token mint,
+/// refresh, code exchange, revoke), run immediately before the POST.
+///
+/// Save-time validation already requires https, but a stored URL can predate
+/// that rule or reach the database another way, and the connect-time
+/// [`GuardedResolver`] never sees IP-literal hosts. So the same
+/// [`validate_public_url`] rules apply again here: https only, and no private
+/// IP literal. `http://` (and a private literal) is allowed only for a host on
+/// one of the operator's dev allowlists — `RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS`
+/// (the save-time list) or `RUNTARA_PROXY_ALLOWED_HOSTS` (the private-host
+/// egress list, which loopback emulators such as the Teams mock rely on).
+pub fn validate_credentialed_endpoint(raw: &str) -> Result<(), String> {
+    validate_public_url(raw, |host| {
+        connection_http_allowed(host)
+            || host_is_allowlisted_for_egress(host)
+            || test_allowlist::contains(host)
+    })
+}
+
+/// Unit tests cannot use the read-once env allowlists (other tests in the same
+/// binary assert they are empty), so they allow a host on their own thread.
+#[cfg(test)]
+pub(crate) mod test_allowlist {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static HOSTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Allow `host` for credentialed endpoints on this thread until the guard drops.
+    pub(crate) fn allow(host: &str) -> Guard {
+        HOSTS.with(|hosts| hosts.borrow_mut().push(host.to_ascii_lowercase()));
+        Guard
+    }
+
+    pub(crate) fn contains(host: &str) -> bool {
+        let host = host.to_ascii_lowercase();
+        HOSTS.with(|hosts| hosts.borrow().contains(&host))
+    }
+
+    pub(crate) struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            HOSTS.with(|hosts| hosts.borrow_mut().clear());
+        }
+    }
+}
+
+#[cfg(not(test))]
+mod test_allowlist {
+    #[inline]
+    pub(super) fn contains(_host: &str) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

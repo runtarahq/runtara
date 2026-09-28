@@ -17,6 +17,7 @@ pub mod environment_client;
 pub mod mcp;
 pub mod metrics;
 pub mod middleware;
+pub mod object_model_privileges;
 pub mod observability;
 pub mod plan_check;
 pub mod product_events;

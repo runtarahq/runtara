@@ -658,6 +658,9 @@ impl InstanceService {
     }
 
     /// Execute a typed positional SQL query against the tenant's object-model database.
+    ///
+    /// Runs read-only and bounded (see [`raw_sql_guardrails`]): the route is a
+    /// `database:read` permission, so it must not be able to write.
     pub async fn query_sql(
         &self,
         tenant_id: &str,
@@ -670,15 +673,17 @@ impl InstanceService {
         let result_schema: Vec<runtara_object_store::SqlResultColumn> =
             request.result_schema.into_iter().map(Into::into).collect();
 
+        let guardrails = raw_sql_guardrails();
         let rows = store
-            .query(&request.sql, &params, &result_schema)
+            .query_guarded(&request.sql, &params, Some(&result_schema), guardrails)
             .await
-            .map_err(map_raw_sql_error)?;
+            .map_err(|e| map_raw_sql_error(e, guardrails))?;
 
         Ok(sql_rows_to_values(rows))
     }
 
     /// Execute a typed positional SQL query that must return exactly one row.
+    /// Read-only and bounded like [`Self::query_sql`].
     pub async fn query_sql_one(
         &self,
         tenant_id: &str,
@@ -691,15 +696,17 @@ impl InstanceService {
         let result_schema: Vec<runtara_object_store::SqlResultColumn> =
             request.result_schema.into_iter().map(Into::into).collect();
 
+        let guardrails = raw_sql_guardrails();
         let row = store
-            .query_one(&request.sql, &params, &result_schema)
+            .query_one_guarded(&request.sql, &params, &result_schema, guardrails)
             .await
-            .map_err(map_raw_sql_error)?;
+            .map_err(|e| map_raw_sql_error(e, guardrails))?;
 
         Ok(serde_json::Value::Object(row))
     }
 
     /// Execute a positional SQL query and return raw decoded rows.
+    /// Read-only and bounded like [`Self::query_sql`].
     pub async fn query_sql_raw(
         &self,
         tenant_id: &str,
@@ -710,15 +717,17 @@ impl InstanceService {
         let params: Vec<runtara_object_store::SqlParam> =
             request.params.into_iter().map(Into::into).collect();
 
+        let guardrails = raw_sql_guardrails();
         let rows = store
-            .query_raw(&request.sql, &params)
+            .query_guarded(&request.sql, &params, None, guardrails)
             .await
-            .map_err(map_raw_sql_error)?;
+            .map_err(|e| map_raw_sql_error(e, guardrails))?;
 
         Ok(sql_rows_to_values(rows))
     }
 
-    /// Execute a positional SQL command and return rows affected.
+    /// Execute a positional SQL command and return rows affected, bounded by
+    /// the raw SQL statement timeout.
     pub async fn execute_sql(
         &self,
         tenant_id: &str,
@@ -729,10 +738,11 @@ impl InstanceService {
         let params: Vec<runtara_object_store::SqlParam> =
             request.params.into_iter().map(Into::into).collect();
 
+        let guardrails = raw_sql_guardrails();
         let result = store
-            .execute(&request.sql, &params)
+            .execute_guarded(&request.sql, &params, guardrails.statement_timeout_ms)
             .await
-            .map_err(map_raw_sql_error)?;
+            .map_err(|e| map_raw_sql_error(e, guardrails))?;
 
         Ok(result.rows_affected)
     }
@@ -969,7 +979,40 @@ fn sql_rows_to_values(rows: runtara_object_store::SqlRows) -> Vec<serde_json::Va
         .collect()
 }
 
-fn map_raw_sql_error(error: runtara_object_store::ObjectStoreError) -> ServiceError {
+/// The guard rails every raw SQL route runs under (configured once at boot).
+fn raw_sql_guardrails() -> runtara_object_store::SqlGuardrails {
+    crate::config::raw_sql_guardrails()
+}
+
+/// SQLSTATE `read_only_sql_transaction`: a write or DDL on a read route.
+const SQLSTATE_READ_ONLY_SQL_TRANSACTION: &str = "25006";
+/// SQLSTATE `query_canceled`: raised when `statement_timeout` fires.
+const SQLSTATE_QUERY_CANCELED: &str = "57014";
+
+fn map_raw_sql_error(
+    error: runtara_object_store::ObjectStoreError,
+    guardrails: runtara_object_store::SqlGuardrails,
+) -> ServiceError {
+    if let runtara_object_store::ObjectStoreError::Sql(sqlx_error) = &error {
+        let sqlstate = sqlx_error.as_database_error().and_then(|db| db.code());
+        match sqlstate.as_deref() {
+            Some(SQLSTATE_READ_ONLY_SQL_TRANSACTION) => {
+                return ServiceError::ValidationError(
+                    "SQL query routes are read-only: writes and DDL are rejected \
+                     (SQLSTATE 25006). Use sql/execute (MCP execute_sql) for commands."
+                        .to_string(),
+                );
+            }
+            Some(SQLSTATE_QUERY_CANCELED) => {
+                return ServiceError::ValidationError(format!(
+                    "SQL statement cancelled after exceeding the {} ms statement timeout \
+                     (SQLSTATE 57014); narrow the query or add LIMIT/indexes.",
+                    guardrails.statement_timeout_ms
+                ));
+            }
+            _ => {}
+        }
+    }
     match error {
         runtara_object_store::ObjectStoreError::Validation(msg)
         | runtara_object_store::ObjectStoreError::InvalidCondition(msg) => {

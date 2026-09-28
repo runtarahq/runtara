@@ -108,8 +108,14 @@ volumes:
 
     # init SQL
     cat > "${dir}/init-db.sql" <<'SQLEOF'
+-- Raw SQL (sql/execute, MCP execute_sql) runs as the object-model role, so it
+-- is a non-superuser that owns only runtara_objects and cannot connect to the
+-- server or runtime databases.
+CREATE ROLE runtara_objects LOGIN PASSWORD 'runtara_objects'
+  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 CREATE DATABASE runtara_server OWNER runtara;
-CREATE DATABASE runtara_objects OWNER runtara;
+CREATE DATABASE runtara_objects OWNER runtara_objects;
+REVOKE CONNECT, TEMPORARY ON DATABASE runtara_server, runtara FROM PUBLIC;
 
 -- The server and object-model stores use pg_trgm / pgvector / fuzzystrmatch
 -- for trigram, vector, and fuzzy-match schemas. The pgvector image ships these
@@ -124,6 +130,8 @@ CREATE EXTENSION IF NOT EXISTS "fuzzystrmatch";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 CREATE EXTENSION IF NOT EXISTS "vector";
 CREATE EXTENSION IF NOT EXISTS "fuzzystrmatch";
+ALTER SCHEMA public OWNER TO runtara_objects;
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
 SQLEOF
 
     # Dockerfile — uses the released install.sh to install the bundle
@@ -188,7 +196,7 @@ $([ -n "$vk_volume" ] && printf '        volumes:\n            - %s\n' "$vk_volu
         environment:
             RUNTARA_SERVER_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_server
             RUNTARA_DATABASE_URL: postgres://runtara:runtara@postgres/runtara
-            OBJECT_MODEL_DATABASE_URL: postgres://runtara:runtara@postgres/runtara_objects
+            OBJECT_MODEL_DATABASE_URL: postgres://runtara_objects:runtara_objects@postgres/runtara_objects
             DATA_DIR: /tmp/runtara-data
             VALKEY_HOST: valkey
             VALKEY_PORT: "6379"

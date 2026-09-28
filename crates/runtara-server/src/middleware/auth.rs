@@ -107,6 +107,9 @@ fn api_key_token(headers: &axum::http::HeaderMap) -> Option<&str> {
 /// Validate an API key token via the local database, returning the key row.
 async fn validate_api_key(token: &str, auth_state: &AuthState) -> Result<ApiKey, Response> {
     use sha2::Digest;
+    // A plain SHA-256 is right here: the token is a server-generated key with
+    // 192 random bits (`api_keys::create_api_key`), not a chosen password, so a
+    // slow KDF adds nothing and would break the indexed hash lookup.
     let key_hash = hex::encode(sha2::Sha256::digest(token.as_bytes()));
 
     crate::api::handlers::api_keys::validate_api_key_by_hash(&auth_state.pool, &key_hash)
