@@ -215,6 +215,7 @@ fn chain_next(node: &DirectRunPlan) -> Option<&DirectRunPlan> {
         | DirectRunPlan::AiAgent { next_plan, .. }
         | DirectRunPlan::AiAgentLoop { next_plan, .. }
         | DirectRunPlan::WaitForSignal { next_plan, .. }
+        | DirectRunPlan::WaitForInstances { next_plan, .. }
         | DirectRunPlan::Delay { next_plan, .. } => Some(next_plan),
         _ => None,
     }
@@ -469,6 +470,17 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
             durable: *durable,
             breakpoint: *breakpoint,
             next_plan,
+        },
+        DirectRunPlan::WaitForInstances {
+            step_id,
+            breakpoint,
+            error_plan,
+            ..
+        } => DirectRunPlan::WaitForInstances {
+            step_id: step_id.clone(),
+            breakpoint: *breakpoint,
+            next_plan,
+            error_plan: error_plan.clone(),
         },
         other => other.clone(),
     }

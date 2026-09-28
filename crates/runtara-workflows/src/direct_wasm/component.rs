@@ -181,6 +181,27 @@ pub struct DirectComponentArtifacts {
     /// Whether an operation-scoped site imports
     /// `runtara:workflow-operation/scope`.
     pub operation_scope: bool,
+    /// Whether a WaitForInstances step imports
+    /// `runtara:workflow-wait/instances`.
+    pub wait_instances: bool,
+}
+
+impl DirectComponentArtifacts {
+    /// Import `runtara:workflow-wait/instances` in the world when a
+    /// WaitForInstances step needs it.
+    pub(super) fn with_wait_instances(mut self, wait_instances: bool) -> Self {
+        if wait_instances && !self.wait_instances {
+            let stdlib =
+                format!("    import runtara:workflow-stdlib/json@{WORKFLOW_WIT_VERSION};\n");
+            let import = format!(
+                "{stdlib}    import {};\n",
+                runtara_workflow_wit::WAIT_INSTANCES_INTERFACE_NAME
+            );
+            self.world_wit = self.world_wit.replacen(&stdlib, &import, 1);
+        }
+        self.wait_instances |= wait_instances;
+        self
+    }
 }
 
 /// Emit the direct workflow component scaffolding.
@@ -336,6 +357,7 @@ pub(super) fn emit_direct_component_artifacts_scoped(
         agent_components: agents.iter().map(|agent| agent_component(agent)).collect(),
         suspending_agents: suspending_agents.clone(),
         operation_scope,
+        wait_instances: false,
     }
 }
 

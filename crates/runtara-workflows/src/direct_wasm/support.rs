@@ -1083,6 +1083,27 @@ fn supports_direct_control_step_inner(
                 include_on_error,
             )
         }
+        Step::WaitForInstances(_) => {
+            supports_normal_flow_step(
+                graph,
+                child_workflows,
+                step_id,
+                reachable,
+                used_edges,
+                stack,
+                child_stack,
+                include_on_error,
+            ) && on_error_supported_or_inert(
+                graph,
+                child_workflows,
+                step_id,
+                reachable,
+                used_edges,
+                stack,
+                child_stack,
+                include_on_error,
+            )
+        }
         Step::WaitForSignal(step)
             if supports_wait_for_signal_step_baseline(step, child_workflows) =>
         {
@@ -1567,7 +1588,7 @@ fn edge_condition_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -
         // handling owns next/error-plan interplay and needs its own analysis.
         Step::Filter(_) | Step::GroupBy(_) | Step::Log(_) => {}
         Step::Agent(_) => {}
-        Step::Delay(_) | Step::WaitForSignal(_) => {}
+        Step::Delay(_) | Step::WaitForSignal(_) | Step::WaitForInstances(_) => {}
         Step::Switch(step)
             if !step
                 .config
@@ -1614,6 +1635,8 @@ fn on_error_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -> bool
         // AiAgent handlers (single-shot AND tool loop) are lowered live, so
         // the shape rules apply to them like any Agent step.
         Step::AiAgent(_) => {}
+        // A failed WaitForInstances registration routes to the handler.
+        Step::WaitForInstances(_) => {}
         // WaitForSignal failures (timeout expiry) route to the handler
         // (GAP-14).
         Step::WaitForSignal(step)
@@ -1907,12 +1930,13 @@ fn collect_step_support(
             child_workflows,
             unsupported,
         ),
-        Step::WaitForInstances(_) => unsupported_step(
+        Step::WaitForInstances(_) if !graph_durable => unsupported_step(
             step,
-            "wait-for-instances",
-            "WaitForInstances steps are not lowered yet",
+            "non-durable-wait-for-instances",
+            "WaitForInstances requires a durable workflow so the run can park instead of holding a runner; enable durability",
             unsupported,
         ),
+        Step::WaitForInstances(_) => {}
         Step::AiAgent(ai_step)
             if supports_ai_agent_step_baseline(graph, ai_step, child_workflows) => {}
         Step::AiAgent(_) => unsupported_step(

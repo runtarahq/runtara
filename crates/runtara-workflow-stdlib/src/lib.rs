@@ -77,7 +77,7 @@ mod component {
     use std::cell::RefCell;
 
     use super::bindings::exports::runtara::workflow_stdlib::json::{
-        AgentRetryError, Guest, InvokeError,
+        AgentRetryError, Guest, InvokeError, WaitInstancesProgress,
     };
     use super::direct_json::{self, DirectJsonManifest};
 
@@ -704,6 +704,68 @@ mod component {
                     .as_ref()
                     .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
                 manifest.wait_output(&step_id, &signal_id, &signal_payload, &source)
+            })
+        }
+
+        fn wait_instances_key(step_id: String, source: Vec<u8>) -> Result<String, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.wait_instances_key(&step_id, &source)
+            })
+        }
+
+        fn wait_instances_request(
+            step_id: String,
+            source: Vec<u8>,
+            now_ms: u64,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.wait_instances_request(&step_id, &source, now_ms)
+            })
+        }
+
+        fn wait_instances_state(wait: Vec<u8>) -> Result<WaitInstancesProgress, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                let (pending, deadline_ms) = manifest.wait_instances_state(&wait)?;
+                Ok(WaitInstancesProgress {
+                    pending,
+                    deadline_ms,
+                })
+            })
+        }
+
+        fn wait_instances_output(
+            step_id: String,
+            wait: Vec<u8>,
+            source: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.wait_instances_output(&step_id, &wait, &source)
+            })
+        }
+
+        fn wait_instances_error(step_id: String, error: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.wait_instances_error(&step_id, &error)
             })
         }
 

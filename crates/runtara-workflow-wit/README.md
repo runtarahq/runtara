@@ -20,8 +20,9 @@ Parked runs wake on the artifact they were built from, across host, control
 agent and trusted agent upgrades:
 
 - Every shipped host version stays linked: lifecycle 0.1/0.2, runtime 0.3/0.4,
-  connection-resolver 0.1/0.2, `runtara:control`, `runtara:workflow-operation`
-  and `runtara:agent-suspension` 0.1.0, and built-in/trusted artifact pins.
+  connection-resolver 0.1/0.2, `runtara:control`, `runtara:workflow-operation`,
+  `runtara:workflow-wait` and `runtara:agent-suspension` 0.1.0, and
+  built-in/trusted artifact pins.
   A pin since revoked or no longer shipped fails at the call, not at load.
 - Approved `approved_builtin_artifacts` rows are only revoked, never deleted.
   Boot records the installed control and trusted (S3, Azure) pins there. A

@@ -68,6 +68,7 @@ pub use trusted::{
     bundled_builtin_pin, bundled_trusted_pin, staged_dependency_is_stale, trusted_artifact_pins,
 };
 mod wait;
+mod wait_instances;
 mod while_loop;
 
 use std::borrow::Cow;
@@ -1109,7 +1110,8 @@ pub fn compile_direct_workflow_composed_configured(
         result.component_artifacts.operation_scope,
         result.component_artifacts.has_timers,
         result.component_artifacts.needs_monotonic_clock,
-    );
+    )
+    .with_wait_instances(result.component_artifacts.wait_instances);
     // Keep the on-disk scaffolding consistent with what is composed.
     fs::write(
         &result.world_wit_path,
@@ -1449,7 +1451,8 @@ fn compile_direct_workflow_inner(
         manifest.has_operation_scoped_sites(),
         super::plan::needs_cooperative_timers(&manifest),
         super::manifest::needs_monotonic_clock(&manifest.graph, &manifest.child_workflows),
-    );
+    )
+    .with_wait_instances(manifest.has_wait_for_instances());
 
     let build_dir = input.output_dir.join(format!(
         "{}-v{}-direct",
@@ -1634,7 +1637,7 @@ fn emit_direct_component(
     let parallel_pools =
         split_parallel::parallel_agent_pools(&core_config.static_data, &core_config.run_plan);
     let has_connections = core_config.static_data.has_connections();
-    let (resolve, world) = build_direct_component_resolve_scoped(
+    let (resolve, world) = build_direct_component_resolve_with_waits(
         &manifest.feature_summary.agent_ids,
         abi,
         omit_runtime,
@@ -1646,6 +1649,7 @@ fn emit_direct_component(
         manifest.has_operation_scoped_sites(),
         super::plan::needs_cooperative_timers(manifest),
         core_config.static_data.needs_monotonic_clock(),
+        manifest.has_wait_for_instances(),
     )?;
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
@@ -1715,6 +1719,7 @@ fn build_direct_component_resolve_configured(
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn build_direct_component_resolve_scoped(
     agents: &[String],
@@ -1728,6 +1733,39 @@ fn build_direct_component_resolve_scoped(
     operation_scope: bool,
     needs_timers: bool,
     needs_monotonic_clock: bool,
+) -> Result<(Resolve, WorldId), DirectCompileError> {
+    build_direct_component_resolve_with_waits(
+        agents,
+        abi,
+        omit_runtime,
+        export_agent_id,
+        parallel_pools,
+        has_connections,
+        scoped_agents,
+        suspending_agents,
+        operation_scope,
+        needs_timers,
+        needs_monotonic_clock,
+        false,
+    )
+}
+
+/// [`build_direct_component_resolve_scoped`], also importing
+/// `runtara:workflow-wait/instances` when a WaitForInstances step needs it.
+#[allow(clippy::too_many_arguments)]
+fn build_direct_component_resolve_with_waits(
+    agents: &[String],
+    abi: super::component::WorkflowAbi,
+    omit_runtime: bool,
+    export_agent_id: Option<&str>,
+    parallel_pools: &std::collections::BTreeMap<String, u32>,
+    has_connections: bool,
+    scoped_agents: &std::collections::BTreeSet<String>,
+    suspending_agents: &std::collections::BTreeSet<String>,
+    operation_scope: bool,
+    needs_timers: bool,
+    needs_monotonic_clock: bool,
+    wait_instances: bool,
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
     // Control sites need the scope without any suspending agent.
     let operation_scope = operation_scope || !suspending_agents.is_empty();
@@ -1755,6 +1793,11 @@ fn build_direct_component_resolve_scoped(
     if !omit_runtime {
         resolve
             .push_str("runtara-workflow-runtime.wit", RUNTIME_WIT)
+            .map_err(component_error)?;
+    }
+    if wait_instances {
+        resolve
+            .push_str("runtara-workflow-wait.wit", runtara_workflow_wit::WAIT_WIT)
             .map_err(component_error)?;
     }
     match abi {
@@ -1865,6 +1908,12 @@ fn build_direct_component_resolve_scoped(
         workflow_wit.push_str(&format!(
             "    import {};\n",
             runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME
+        ));
+    }
+    if wait_instances {
+        workflow_wit.push_str(&format!(
+            "    import {};\n",
+            runtara_workflow_wit::WAIT_INSTANCES_INTERFACE_NAME
         ));
     }
     for agent in agents {
@@ -2080,6 +2129,9 @@ mod wait_failure_tests;
 
 #[cfg(test)]
 mod wide_result_tests;
+
+#[cfg(test)]
+mod wait_instances_tests;
 
 // AUDIT-05 timer scratch and nested deadline frames (append-only local layout).
 const DIRECT_LOOP_KEY_PTR_LOCAL: u32 = 130;

@@ -130,6 +130,16 @@ pub(super) enum DirectRunPlan {
         /// WAIT_TIMEOUT error dispatches here instead of failing the workflow.
         error_plan: Option<DirectErrorRoutePlan>,
     },
+    /// Park on a durable wait for direct child runs; the settled wait is the
+    /// step's output. Always operation-scoped and suspending.
+    WaitForInstances {
+        step_id: String,
+        breakpoint: bool,
+        next_plan: Box<DirectRunPlan>,
+        /// A failed registration or read (not a deadline, which settles the
+        /// wait) dispatches here instead of failing the workflow.
+        error_plan: Option<DirectErrorRoutePlan>,
+    },
     Log {
         step_id: String,
         log_id: u32,
@@ -459,8 +469,8 @@ pub(super) fn direct_run_plan(
 
     match entry.step_type.as_str() {
         "Finish" | "Filter" | "Switch" | "GroupBy" | "Split" | "While" | "Delay"
-        | "EmbedWorkflow" | "WaitForSignal" | "Log" | "Agent" | "AiAgent" | "Error"
-        | "Conditional" => step_run_plan(
+        | "EmbedWorkflow" | "WaitForSignal" | "WaitForInstances" | "Log" | "Agent" | "AiAgent"
+        | "Error" | "Conditional" => step_run_plan(
             &manifest.graph,
             &manifest.child_workflows,
             &manifest.graph.entry_point,
@@ -860,6 +870,28 @@ fn step_run_plan_inner(
                 step_id: step_id.to_string(),
                 breakpoint: step_breakpoint_enabled(graph, step),
                 on_wait_plan: on_wait_plan.map(Box::new),
+                next_plan: Box::new(next_plan),
+                error_plan: if include_on_error {
+                    on_error_plan(graph, child_workflows, step_id, stack, orders)?
+                } else {
+                    None
+                },
+            })
+        }
+        "WaitForInstances" => {
+            let next_plan = normal_flow_plan(
+                graph,
+                child_workflows,
+                step_id,
+                stack,
+                include_on_error,
+                stop_at,
+                region_root,
+                orders,
+            )?;
+            Ok(DirectRunPlan::WaitForInstances {
+                step_id: step_id.to_string(),
+                breakpoint: step_breakpoint_enabled(graph, step),
                 next_plan: Box::new(next_plan),
                 error_plan: if include_on_error {
                     on_error_plan(graph, child_workflows, step_id, stack, orders)?
@@ -1987,6 +2019,9 @@ fn chain_step_ids(plan: &DirectRunPlan, out: &mut Vec<String>) {
             }
             | DirectRunPlan::Delay {
                 step_id, next_plan, ..
+            }
+            | DirectRunPlan::WaitForInstances {
+                step_id, next_plan, ..
             } => {
                 // Collect only the loop's OWN step_id; its tool-target steps (Wait /
                 // Embed) are reached via tool edges, off the normal-flow graph
@@ -2126,6 +2161,8 @@ pub(super) fn plan_contains_operation_scoped(plan: &DirectRunPlan) -> bool {
         | P::GroupBy { next_plan, .. }
         | P::Log { next_plan, .. } => plan_contains_operation_scoped(next_plan),
         P::Delay { next_plan, .. } => plan_contains_operation_scoped(next_plan),
+        // Its wait is keyed by the step's own identity.
+        P::WaitForInstances { .. } => true,
         P::WaitForSignal {
             next_plan,
             error_plan,
@@ -2226,6 +2263,7 @@ pub(super) fn node_has_breakpoint(node: &DirectRunPlan) -> bool {
         | P::EmbedWorkflow { breakpoint, .. }
         | P::Delay { breakpoint, .. }
         | P::WaitForSignal { breakpoint, .. }
+        | P::WaitForInstances { breakpoint, .. }
         | P::Log { breakpoint, .. }
         | P::Agent { breakpoint, .. }
         | P::AiAgent { breakpoint, .. }
@@ -2247,7 +2285,7 @@ pub(super) fn plan_contains_suspension(plan: &DirectRunPlan) -> bool {
     }
     let err = error_route_suspends;
     match plan {
-        P::WaitForSignal { .. } | P::Delay { .. } => true,
+        P::WaitForSignal { .. } | P::WaitForInstances { .. } | P::Delay { .. } => true,
         P::Finish { .. } | P::Error { .. } | P::Join | P::ImplicitFinish => false,
         P::Agent {
             next_plan,
@@ -2360,7 +2398,7 @@ pub(super) fn node_body_suspends(node: &DirectRunPlan) -> bool {
         return true;
     }
     match node {
-        P::WaitForSignal { .. } | P::Delay { .. } => true,
+        P::WaitForSignal { .. } | P::WaitForInstances { .. } | P::Delay { .. } => true,
         P::Conditional {
             true_plan,
             false_plan,
@@ -2514,6 +2552,19 @@ fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
                     .is_some_and(|p| plan_contains_suspension(p))
                     || error_route_suspends(error_plan)
                 {
+                    return false;
+                }
+                if matches!(**next_plan, DirectRunPlan::Join) {
+                    return true;
+                }
+                next_plan
+            }
+            DirectRunPlan::WaitForInstances {
+                next_plan,
+                error_plan,
+                ..
+            } => {
+                if error_route_suspends(error_plan) {
                     return false;
                 }
                 if matches!(**next_plan, DirectRunPlan::Join) {
@@ -3364,6 +3415,18 @@ mod tests {
             } => {
                 out.push(format!("Embed:{step_id}"));
                 collect_plan_steps(child_plan, out);
+                collect_plan_steps(next_plan, out);
+                if let Some(error_plan) = error_plan {
+                    collect_error_plan(step_id, error_plan, out);
+                }
+            }
+            DirectRunPlan::WaitForInstances {
+                step_id,
+                next_plan,
+                error_plan,
+                ..
+            } => {
+                out.push(format!("WaitForInstances:{step_id}"));
                 collect_plan_steps(next_plan, out);
                 if let Some(error_plan) = error_plan {
                     collect_error_plan(step_id, error_plan, out);

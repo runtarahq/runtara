@@ -113,7 +113,12 @@ const PARK_AT: u32 = DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL;
 ///   catalog (it could not be classified);
 /// - any operation-scoped site in a `WaitForSignal.onWait` graph, directly or
 ///   through an embedded workflow;
-/// - a suspending site: non-durable, untimed, or an onError handler.
+/// - a suspending site: non-durable, untimed, or an onError handler;
+/// - a WaitForInstances step wherever a suspending site is refused, except
+///   that it has no step timeout: an AiAgent tool or memory target, a tool
+///   workflow, an onWait graph, a target other than the lifecycle invoke ABI
+///   with the host-imported runtime, a non-durable graph, or an onError
+///   handler.
 pub(super) fn check_sites(
     manifest: &DirectWorkflowManifest,
     abi: WorkflowAbi,
@@ -337,11 +342,76 @@ fn check_graph(
             return refuse(step, kind, "cannot run in an onError handler");
         }
     }
+    for step in graph
+        .steps
+        .iter()
+        .filter(|step| step.step_type == "WaitForInstances")
+    {
+        check_wait_for_instances(graph, &step.id, in_on_wait, in_tool_workflow, target)?;
+    }
     for step in &graph.steps {
         for nested in &step.nested_graphs {
             let on_wait = in_on_wait || nested.role == ON_WAIT_ROLE;
             check_graph(&nested.graph, on_wait, in_tool_workflow, target)?;
         }
+    }
+    Ok(())
+}
+
+fn refuse_wait(step: &str, why: &str) -> Result<(), DirectCompileError> {
+    Err(DirectCompileError::Component(format!(
+        "WaitForInstances step `{step}` {why}"
+    )))
+}
+
+/// The WaitForInstances backstop: the placements validation rejects (E028,
+/// E131) and the targets that cannot park on an instance wait.
+fn check_wait_for_instances(
+    graph: &DirectGraphManifest,
+    step: &str,
+    in_on_wait: bool,
+    in_tool_workflow: bool,
+    target: &SiteTarget<'_>,
+) -> Result<(), DirectCompileError> {
+    let callers = graph.edges.iter().filter(|edge| edge.to_step == step);
+    if callers.clone().any(|edge| is_ai_edge(graph, edge)) {
+        return refuse_wait(step, "cannot be an AiAgent tool or memory provider");
+    }
+    if in_tool_workflow {
+        return refuse_wait(step, "cannot run in a workflow embedded as an AiAgent tool");
+    }
+    if in_on_wait {
+        return refuse_wait(step, "cannot run in a WaitForSignal onWait graph");
+    }
+    match target.abi {
+        WorkflowAbi::InvokeHostImports => {}
+        WorkflowAbi::CliRunHttp => {
+            return refuse_wait(
+                step,
+                "needs the lifecycle invoke ABI; the CliRunHttp ABI blocks instead of parking",
+            );
+        }
+        WorkflowAbi::AgentCapabilities => {
+            return refuse_wait(step, "cannot be published as a workflow-agent");
+        }
+    }
+    if target.runtime_binding != RuntimeBinding::HostImport {
+        return refuse_wait(
+            step,
+            "cannot compile under the composed runtime binding; use the host-imported runtime",
+        );
+    }
+    if target.omit_runtime {
+        return refuse_wait(step, "needs the host-imported workflow runtime");
+    }
+    if !graph.durable {
+        return refuse_wait(step, "must be durable");
+    }
+    if callers
+        .clone()
+        .any(|edge| edge.label.as_deref() == Some("onError"))
+    {
+        return refuse_wait(step, "cannot run in an onError handler");
     }
     Ok(())
 }

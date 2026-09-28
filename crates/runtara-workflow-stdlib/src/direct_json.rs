@@ -1635,6 +1635,202 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to serialize wait steps context: {err}"))
     }
 
+    /// The durable key of a WaitForInstances step:
+    /// `runtara:v2:["wait-instances", workflow, namespace, loop-path, [step]]`.
+    /// The host hashes it into the step's wait id, and the settled wait is
+    /// checkpointed under it. Only v2 artifacts carry the step.
+    pub fn wait_instances_key(&self, step_id: &str, source: &[u8]) -> Result<String, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse wait-instances-key source: {err}"))?;
+        self.wait_instances_step_scoped(step_id, &source)?;
+        durable_key_v2(
+            &source,
+            WAIT_INSTANCES_KEY_KIND,
+            serde_json::json!([step_id]),
+        )
+        .ok_or_else(|| {
+            format!(
+                "WaitForInstances step '{step_id}' needs v2 durable keys; recompile the workflow"
+            )
+        })
+    }
+
+    /// The JSON wait request of a WaitForInstances step: the resolved
+    /// `instanceIds`, its `mode` and, with `timeoutMs`, the deadline
+    /// `now_ms + timeoutMs`. The host keeps the first registration's
+    /// deadline, so a replay passing a later one is harmless. A request that
+    /// cannot be built fails with a wait error (`{code, message}`), like the
+    /// host's own refusals.
+    pub fn wait_instances_request(
+        &self,
+        step_id: &str,
+        source: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse wait-instances-request source: {err}"))?;
+        let step = self.wait_instances_step_scoped(step_id, &source)?;
+        let refuse = |code: &str, message: String| {
+            serde_json::json!({ "code": code, "message": message }).to_string()
+        };
+        let invalid = |message: String| refuse("invalid", message);
+        let ids = step
+            .body
+            .get("instanceIds")
+            .ok_or_else(|| invalid("instanceIds is missing".to_string()))?;
+        let ids = apply_mapping_value(ids, &source)
+            .map(materialize)
+            .map_err(|err| invalid(format!("instanceIds could not be resolved: {err}")))?;
+        let Value::Array(ids) = ids else {
+            return Err(invalid(format!(
+                "instanceIds must be an array of instance ids, got {}",
+                json_type_name(&ids)
+            )));
+        };
+        let ids = ids
+            .into_iter()
+            .map(|id| match id {
+                Value::String(id) if !id.trim().is_empty() => Ok(id),
+                other => Err(invalid(format!(
+                    "instanceIds must hold non-empty string ids, got {}",
+                    json_type_name(&other)
+                ))),
+            })
+            .collect::<Result<Vec<String>, String>>()?;
+        let distinct: std::collections::BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+        if distinct.len() > MAX_WAIT_INSTANCES_TARGETS {
+            return Err(refuse(
+                "too-large",
+                format!(
+                    "a wait names at most {MAX_WAIT_INSTANCES_TARGETS} distinct runs, not {}",
+                    distinct.len()
+                ),
+            ));
+        }
+        let mode = match step
+            .body
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("all")
+        {
+            mode @ ("all" | "any") => mode,
+            other => return Err(invalid(format!("mode must be all or any, not {other}"))),
+        };
+        let timeout = match step.body.get("timeoutMs") {
+            None => Value::Null,
+            Some(timeout) => apply_mapping_value(timeout, &source)
+                .map(materialize)
+                .map_err(|err| invalid(format!("timeoutMs could not be resolved: {err}")))?,
+        };
+        let deadline_ms = match timeout {
+            Value::Null => None,
+            Value::Number(ref number) => Some(
+                number
+                    .as_u64()
+                    .and_then(|timeout| now_ms.checked_add(timeout))
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "timeoutMs must be a non-negative integer, got {number}"
+                        ))
+                    })?,
+            ),
+            other => {
+                return Err(invalid(format!(
+                    "timeoutMs must be a number of milliseconds, got {}",
+                    json_type_name(&other)
+                )));
+            }
+        };
+        serde_json::to_vec(&serde_json::json!({
+            "instanceIds": ids,
+            "mode": mode,
+            "deadlineMs": deadline_ms,
+        }))
+        .map_err(|err| format!("failed to serialize wait-instances request: {err}"))
+    }
+
+    /// Whether a wait read is still pending, and its persisted deadline.
+    pub fn wait_instances_state(&self, wait: &[u8]) -> Result<(bool, Option<u64>), String> {
+        let wait: Value = serde_json::from_slice(wait)
+            .map_err(|err| format!("failed to parse wait-instances read: {err}"))?;
+        let pending = wait.get("resolution").is_none_or(Value::is_null);
+        Ok((pending, wait.get("deadlineMs").and_then(Value::as_u64)))
+    }
+
+    /// Store a settled wait as the WaitForInstances step's `outputs`.
+    pub fn wait_instances_output(
+        &self,
+        step_id: &str,
+        wait: &[u8],
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse wait-instances-output source: {err}"))?;
+        let step = self.wait_instances_step_scoped(step_id, &source)?;
+        let wait: Value = serde_json::from_slice(wait)
+            .map_err(|err| format!("failed to parse wait-instances read: {err}"))?;
+        let steps = insert_step_output(
+            &source,
+            &step.id,
+            step.name.as_deref(),
+            "WaitForInstances",
+            wait,
+            None,
+        );
+        serde_json::to_vec(&Value::Object(steps))
+            .map_err(|err| format!("failed to serialize wait-instances steps context: {err}"))
+    }
+
+    /// A failed WaitForInstances call as the step's structured error:
+    /// `INSTANCE_WAIT_<CODE>`, transient only for `unavailable`. The wait
+    /// error's own code rides `attributes.wait_error`.
+    pub fn wait_instances_error(&self, step_id: &str, error: &[u8]) -> Result<Vec<u8>, String> {
+        if !self
+            .scoped_steps
+            .values()
+            .any(|step| step.id == step_id && step.step_type == "WaitForInstances")
+        {
+            return Err(format!("unknown direct WaitForInstances step '{step_id}'"));
+        }
+        let parsed = serde_json::from_slice::<Value>(error).ok();
+        let code = parsed
+            .as_ref()
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)
+            .filter(|code| {
+                !code.is_empty()
+                    && code
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
+            })
+            .unwrap_or("failed")
+            .to_string();
+        let message = parsed
+            .as_ref()
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| String::from_utf8_lossy(error).into_owned());
+        let transient = code == "unavailable";
+        let mut envelope = serde_json::json!({
+            "code": format!("INSTANCE_WAIT_{}", code.to_ascii_uppercase().replace('-', "_")),
+            "message": format!("WaitForInstances step '{step_id}': {message}"),
+            "category": if transient { "transient" } else { "permanent" },
+            "severity": "error",
+            "retryable": transient,
+            "attributes": { "wait_error": code },
+        });
+        if let Some(retry_after_ms) = parsed
+            .as_ref()
+            .and_then(|error| error.get("retryAfterMs"))
+            .and_then(Value::as_u64)
+        {
+            envelope["retryAfterMs"] = retry_after_ms.into();
+        }
+        serde_json::to_vec(&envelope)
+            .map_err(|err| format!("failed to serialize wait-instances error: {err}"))
+    }
+
     /// Build the generated-code-compatible durable cache key for an
     /// `EmbedWorkflow` call site.
     pub fn embed_workflow_cache_key(
@@ -3369,6 +3565,25 @@ impl DirectJsonManifest {
                     None,
                 ))
             }
+            "WaitForInstances" => {
+                // Tolerate unresolvable inputs (see the Agent arm): the start
+                // must emit so a resolution failure is attributed to the step.
+                let resolve = |field: &str| {
+                    step.body
+                        .get(field)
+                        .and_then(|value| apply_mapping_value(value, source).ok())
+                        .map(materialize)
+                        .unwrap_or(Value::Null)
+                };
+                Ok((
+                    serde_json::json!({
+                        "instance_ids": resolve("instanceIds"),
+                        "mode": step.body.get("mode").cloned().unwrap_or_else(|| "all".into()),
+                        "timeout_ms": resolve("timeoutMs"),
+                    }),
+                    None,
+                ))
+            }
             "Error" => Ok((Value::Null, None)),
             "Log" => {
                 let log = self
@@ -3520,6 +3735,10 @@ impl DirectJsonManifest {
                 .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
                 .cloned()
                 .ok_or_else(|| format!("missing direct WaitForSignal output for '{}'", step.id)),
+            "WaitForInstances" => source
+                .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
+                .cloned()
+                .ok_or_else(|| format!("missing direct WaitForInstances output for '{}'", step.id)),
             "Error" => {
                 let error = self
                     .error_by_step(step)
@@ -3576,6 +3795,22 @@ impl DirectJsonManifest {
         } else {
             Err(format!(
                 "direct step '{step_id}' is {}, not WaitForSignal",
+                step.step_type
+            ))
+        }
+    }
+
+    fn wait_instances_step_scoped(
+        &self,
+        step_id: &str,
+        source: &Value,
+    ) -> Result<&DirectJsonStep, String> {
+        let step = self.step(step_id, source)?;
+        if step.step_type == "WaitForInstances" {
+            Ok(step)
+        } else {
+            Err(format!(
+                "direct step '{step_id}' is {}, not WaitForInstances",
                 step.step_type
             ))
         }
@@ -3895,6 +4130,12 @@ fn ensure_step_id(mut value: Value, step_id: &str) -> Value {
 }
 
 const DURABLE_KEY_V2_PREFIX: &str = "runtara:v2:";
+
+/// Durable key kind of a WaitForInstances step.
+const WAIT_INSTANCES_KEY_KIND: &str = "wait-instances";
+
+/// Most distinct runs one WaitForInstances step may wait on.
+const MAX_WAIT_INSTANCES_TARGETS: usize = 1000;
 const CHILD_SCOPE_V2_PREFIX: &str = "runtara:scope:v2:";
 
 fn identity_variable(source: &Value, name: &str) -> Value {
@@ -14137,6 +14378,182 @@ mod invoke_error_and_delay_key_tests {
         let fields = invoke_error_fields(br#"{"code":"X"}"#);
         assert_eq!(fields.code, "X");
         assert_eq!(fields.message, r#"{"code":"X"}"#);
+    }
+
+    fn wait_instances_manifest(body: Value) -> DirectJsonManifest {
+        DirectJsonManifest::parse(
+            &serde_json::to_vec(&json!({
+                "graph": {"steps": [{
+                    "id": "wait",
+                    "stepType": "WaitForInstances",
+                    "name": "Wait Approvals",
+                    "body": body
+                }]}
+            }))
+            .unwrap(),
+        )
+        .expect("manifest")
+    }
+
+    #[test]
+    fn wait_instances_key_is_a_v2_key_per_iteration() {
+        let manifest = wait_instances_manifest(json!({}));
+        let key = manifest
+            .wait_instances_key(
+                "wait",
+                br#"{"data":{},"variables":{"_durable_key_version":2,"_workflow_id":"wf"}}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            key,
+            r#"runtara:v2:["wait-instances","wf",[],null,["wait"]]"#
+        );
+        let iteration = manifest
+            .wait_instances_key(
+                "wait",
+                br#"{"data":{},"variables":{"_durable_key_version":2,"_workflow_id":"wf","_loop_path":[["split","each",1]]}}"#,
+            )
+            .unwrap();
+        assert_ne!(iteration, key);
+        // Legacy (v1) artifacts carry no WaitForInstances step.
+        assert!(
+            manifest
+                .wait_instances_key("wait", br#"{"data":{},"variables":{}}"#)
+                .is_err()
+        );
+        assert!(
+            manifest
+                .wait_instances_key("nope", br#"{"data":{},"variables":{}}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn wait_instances_request_resolves_targets_mode_and_deadline() {
+        let manifest = wait_instances_manifest(json!({
+            "instanceIds": {"valueType": "reference", "value": "data.children"},
+            "mode": "any",
+            "timeoutMs": {"valueType": "reference", "value": "data.timeout"}
+        }));
+        let source =
+            |data: Value| serde_json::to_vec(&json!({"data": data, "variables": {}})).unwrap();
+        let request = manifest
+            .wait_instances_request(
+                "wait",
+                &source(json!({"children": ["a", "b"], "timeout": 500})),
+                1_000,
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&request).unwrap(),
+            json!({"instanceIds": ["a", "b"], "mode": "any", "deadlineMs": 1_500})
+        );
+        let untimed = manifest
+            .wait_instances_request("wait", &source(json!({"children": []})), 1_000)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&untimed).unwrap(),
+            json!({"instanceIds": [], "mode": "any", "deadlineMs": null})
+        );
+        let code = |data: Value| {
+            let error = manifest
+                .wait_instances_request("wait", &source(data), 1_000)
+                .unwrap_err();
+            serde_json::from_str::<Value>(&error).unwrap()["code"].clone()
+        };
+        assert_eq!(code(json!({"children": "a"})), json!("invalid"));
+        assert_eq!(code(json!({"children": [1]})), json!("invalid"));
+        assert_eq!(
+            code(json!({"children": ["a"], "timeout": -1})),
+            json!("invalid")
+        );
+        assert_eq!(
+            code(json!({"children": ["a"], "timeout": "soon"})),
+            json!("invalid")
+        );
+        let too_many: Vec<String> = (0..=1000).map(|i| format!("c{i}")).collect();
+        assert_eq!(code(json!({"children": too_many})), json!("too-large"));
+    }
+
+    #[test]
+    fn wait_instances_state_output_and_error() {
+        let manifest = wait_instances_manifest(json!({}));
+        assert_eq!(
+            manifest
+                .wait_instances_state(br#"{"resolution":null,"deadlineMs":9}"#)
+                .unwrap(),
+            (true, Some(9))
+        );
+        assert_eq!(
+            manifest
+                .wait_instances_state(br#"{"resolution":"deadline","deadlineMs":null}"#)
+                .unwrap(),
+            (false, None)
+        );
+
+        let source = build_source(b"{}", b"{}", br#"{"before":{"outputs":1}}"#).unwrap();
+        let wait = br#"{"mode":"all","resolution":"satisfied","finished":[],"remaining":[],"deadlineMs":null}"#;
+        let steps: Value = serde_json::from_slice(
+            &manifest
+                .wait_instances_output("wait", wait, &source)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(steps["before"]["outputs"], json!(1));
+        assert_eq!(steps["wait"]["stepType"], json!("WaitForInstances"));
+        assert_eq!(steps["wait"]["stepName"], json!("Wait Approvals"));
+        assert_eq!(steps["wait"]["outputs"]["resolution"], json!("satisfied"));
+
+        let error: Value = serde_json::from_slice(
+            &manifest
+                .wait_instances_error("wait", br#"{"code":"not-child","message":"not yours"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(error["code"], json!("INSTANCE_WAIT_NOT_CHILD"));
+        assert_eq!(error["category"], json!("permanent"));
+        assert_eq!(error["attributes"]["wait_error"], json!("not-child"));
+        assert!(error["message"].as_str().unwrap().contains("not yours"));
+        let error: Value = serde_json::from_slice(
+            &manifest
+                .wait_instances_error(
+                    "wait",
+                    br#"{"code":"unavailable","message":"later","retryAfterMs":1000}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(error["code"], json!("INSTANCE_WAIT_UNAVAILABLE"));
+        assert_eq!(error["category"], json!("transient"));
+        assert_eq!(error["retryAfterMs"], json!(1000));
+        let error: Value =
+            serde_json::from_slice(&manifest.wait_instances_error("wait", b"boom").unwrap())
+                .unwrap();
+        assert_eq!(error["code"], json!("INSTANCE_WAIT_FAILED"));
+        assert!(manifest.wait_instances_error("nope", b"{}").is_err());
+    }
+
+    #[test]
+    fn wait_instances_debug_events_carry_inputs_and_the_stored_output() {
+        let manifest = wait_instances_manifest(json!({
+            "instanceIds": {"valueType": "immediate", "value": ["a"]},
+            "mode": "all"
+        }));
+        let source = build_source(b"{}", b"{}", b"{}").unwrap();
+        let start: Value =
+            serde_json::from_slice(&manifest.step_debug_start("wait", &source).unwrap()).unwrap();
+        assert_eq!(start["step_type"], json!("WaitForInstances"));
+        assert_eq!(start["inputs"]["instance_ids"], json!(["a"]));
+        assert_eq!(start["inputs"]["mode"], json!("all"));
+        let wait = br#"{"mode":"all","resolution":"empty","finished":[],"remaining":[],"deadlineMs":null}"#;
+        let steps = manifest
+            .wait_instances_output("wait", wait, &source)
+            .unwrap();
+        let source = build_source(b"{}", b"{}", &steps).unwrap();
+        let end: Value =
+            serde_json::from_slice(&manifest.step_debug_end("wait", &source, 0, 0).unwrap())
+                .unwrap();
+        assert_eq!(end["outputs"]["outputs"]["resolution"], json!("empty"));
     }
 
     #[test]

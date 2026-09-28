@@ -138,6 +138,19 @@ impl DirectWorkflowManifest {
         any(&self.graph) || self.child_workflows.iter().any(|child| any(&child.graph))
     }
 
+    /// Whether a WaitForInstances step sits anywhere in the root graph, its
+    /// nested graphs or its embedded children. Only then does the workflow
+    /// import `runtara:workflow-wait/instances`.
+    pub fn has_wait_for_instances(&self) -> bool {
+        fn any(graph: &DirectGraphManifest) -> bool {
+            graph.steps.iter().any(|step| {
+                step.step_type == "WaitForInstances"
+                    || step.nested_graphs.iter().any(|nested| any(&nested.graph))
+            })
+        }
+        any(&self.graph) || self.child_workflows.iter().any(|child| any(&child.graph))
+    }
+
     /// Agent ids with a suspending call site anywhere in the root graph, its
     /// nested graphs or its embedded children. Each is imported through both
     /// `capabilities` and `suspendable`.
