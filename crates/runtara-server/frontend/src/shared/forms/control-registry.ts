@@ -1,3 +1,4 @@
+import { rangeFormat } from './date-values';
 import type { FormControlKind, FormField, FormOption } from './types';
 
 export function inferControlKind(field: FormField): FormControlKind {
@@ -14,6 +15,7 @@ export function inferControlKind(field: FormField): FormControlKind {
   if (field.type === 'boolean') return 'toggle';
   if (field.type === 'integer' || field.type === 'number') return 'number';
   if (field.type === 'array') return 'tags';
+  if (rangeFormat(field)) return 'date_range';
   if (field.type === 'object') return 'key_value';
   if (field.type === 'file') return 'file';
   return 'text';

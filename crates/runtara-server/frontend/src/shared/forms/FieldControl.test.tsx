@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { FieldControl } from './FieldControl';
 import { inferControlKind, optionKey } from './control-registry';
+import { toLocalInput } from './date-values';
 import type { FormControlKind, FormField } from './types';
 
 const field = (patch: Partial<FormField> = {}): FormField => ({
@@ -215,5 +216,88 @@ describe('enum option values', () => {
         </form>
       )
     ).not.toThrow();
+  });
+});
+
+describe('period ranges', () => {
+  const period: FormField = {
+    type: 'object',
+    properties: {
+      from: { type: 'string', format: 'date-time' },
+      to: { type: 'string', format: 'date-time' },
+    },
+  };
+
+  it('infers a range selector for a from/to object of date-times', () => {
+    expect(inferControlKind(period)).toBe('date_range');
+  });
+
+  it('applies a preset at once and custom bounds on Apply', () => {
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <>
+        <span id="period-label">Period</span>
+        <FieldControl
+          id="period"
+          labelledBy="period-label"
+          field={period}
+          value={{}}
+          disabled={false}
+          onChange={onChange}
+        />
+      </>
+    );
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Period Choose a period' })
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Last 7 days' }));
+    const week = onChange.mock.calls[0][0];
+    expect(Date.parse(week.to) - Date.parse(week.from)).toBeGreaterThanOrEqual(
+      7 * 24 * 3600 * 1000 - 3600 * 1000
+    );
+    rerender(
+      <>
+        <span id="period-label">Period</span>
+        <FieldControl
+          id="period"
+          labelledBy="period-label"
+          field={period}
+          value={week}
+          disabled={false}
+          onChange={onChange}
+        />
+      </>
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Period Last 7 days' }));
+    fireEvent.change(screen.getByLabelText('From'), {
+      target: { value: '2026-03-01T08:15' },
+    });
+    // Custom bounds wait for Apply.
+    expect(onChange).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...week,
+      from: new Date(2026, 2, 1, 8, 15).toISOString(),
+    });
+  });
+
+  it('stores a single date-time field in UTC', () => {
+    const onChange = vi.fn();
+    render(
+      <FieldControl
+        id="at"
+        field={{ type: 'string', format: 'date-time' }}
+        value="2026-03-01T08:15:00.000Z"
+        disabled={false}
+        onChange={onChange}
+      />
+    );
+    const input = document.getElementById('at') as HTMLInputElement;
+    expect(input.type).toBe('datetime-local');
+    expect(input.value).toBe(toLocalInput('2026-03-01T08:15:00.000Z'));
+    fireEvent.change(input, { target: { value: '2026-03-02T10:00' } });
+    expect(onChange).toHaveBeenCalledWith(
+      new Date(2026, 2, 2, 10, 0).toISOString()
+    );
   });
 });
