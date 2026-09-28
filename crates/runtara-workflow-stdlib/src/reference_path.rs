@@ -20,21 +20,27 @@
 /// tokenized — so these only matter to callers that want to reject a malformed
 /// path rather than resolve it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PathDefect {
     /// Two dots in a row outside a closed `[..]` body (`steps..outputs`), so
     /// an empty dot segment was dropped. Dots inside a closed body belong to
     /// the key (`data["a..b"]`); inside an *unterminated* body they still
     /// count, since `outputs[0..name` is a malformed path, not a key.
     ConsecutiveDots,
-    /// A `[..]` body that is empty after trimming and unquoting (`[]`, `[""]`,
-    /// `['']`, `[ ]`), which yields no segment at all.
+    /// A closed `[..]` body that is empty after trimming and unquoting (`[]`,
+    /// `[""]`, `['']`, `[ ]`), which yields no segment at all. An unterminated
+    /// `[` with nothing after it is [`PathDefect::UnterminatedBracket`] only —
+    /// there is no body to be empty.
     EmptyBracketKey,
     /// A `[` with no closing `]`; the rest of the path became its body.
     UnterminatedBracket,
 }
 
-/// A reference path split into lookup segments, plus whatever the split had to
-/// drop along the way.
+/// A reference path split into lookup segments, plus each distinct
+/// [`PathDefect`] met along the way (each kind is recorded at most once).
+///
+/// Not every dropped segment is a defect: a leading or trailing dot (`.data`,
+/// `data.`) is dropped silently, as it always has been.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TokenizedPath {
     pub segments: Vec<String>,
@@ -44,6 +50,12 @@ pub struct TokenizedPath {
 impl TokenizedPath {
     pub fn has_defect(&self, defect: PathDefect) -> bool {
         self.defects.contains(&defect)
+    }
+
+    fn record(&mut self, defect: PathDefect) {
+        if !self.has_defect(defect) {
+            self.defects.push(defect);
+        }
     }
 }
 
@@ -75,7 +87,7 @@ pub fn tokenize_reference(path: &str) -> TokenizedPath {
         match ch {
             '.' => {
                 if previous_dot {
-                    tokenized.defects.push(PathDefect::ConsecutiveDots);
+                    tokenized.record(PathDefect::ConsecutiveDots);
                 }
                 previous_dot = true;
                 if !current.is_empty() {
@@ -102,15 +114,16 @@ pub fn tokenize_reference(path: &str) -> TokenizedPath {
                 }
 
                 if !closed {
-                    tokenized.defects.push(PathDefect::UnterminatedBracket);
+                    tokenized.record(PathDefect::UnterminatedBracket);
                     if body.contains("..") {
-                        tokenized.defects.push(PathDefect::ConsecutiveDots);
+                        tokenized.record(PathDefect::ConsecutiveDots);
                     }
                 }
 
                 match bracket_segment(body.trim()) {
                     Some(segment) => tokenized.segments.push(segment),
-                    None => tokenized.defects.push(PathDefect::EmptyBracketKey),
+                    None if closed => tokenized.record(PathDefect::EmptyBracketKey),
+                    None => {}
                 }
             }
             _ => {
@@ -354,10 +367,9 @@ mod tests {
     #[test]
     fn unterminated_brackets_are_reported() {
         assert_eq!(defects("data[a.b"), [PathDefect::UnterminatedBracket]);
-        assert_eq!(
-            defects("data["),
-            [PathDefect::UnterminatedBracket, PathDefect::EmptyBracketKey]
-        );
+        // No body at all: a missing `]`, not an empty key.
+        assert_eq!(defects("data["), [PathDefect::UnterminatedBracket]);
+        assert_eq!(defects("data[ "), [PathDefect::UnterminatedBracket]);
         assert_eq!(
             defects("data[a..b"),
             [PathDefect::UnterminatedBracket, PathDefect::ConsecutiveDots]
@@ -370,10 +382,25 @@ mod tests {
         assert_eq!(segments("steps..outputs"), ["steps", "outputs"]);
         assert_eq!(segments("data[a..b"), ["data", "a..b"]);
         assert_eq!(segments("data[]"), ["data"]);
+        let tokenized = tokenize_reference(r#"data["a"]..b[]"#);
+        assert_eq!(tokenized.segments, ["data", "a", "b"]);
         assert_eq!(
-            tokenize_reference(r#"data["a"]..b[]"#).segments,
-            segments(r#"data["a"]..b[]"#)
+            tokenized.defects,
+            [PathDefect::ConsecutiveDots, PathDefect::EmptyBracketKey]
         );
+    }
+
+    #[test]
+    fn each_defect_kind_is_recorded_once() {
+        assert_eq!(defects("a...b..c"), [PathDefect::ConsecutiveDots]);
+        assert_eq!(defects("a[][]"), [PathDefect::EmptyBracketKey]);
+    }
+
+    #[test]
+    fn leading_and_trailing_dots_are_dropped_without_a_defect() {
+        assert_eq!(defects(".data"), []);
+        assert_eq!(defects("steps.a.outputs."), []);
+        assert_eq!(segments("steps.a.outputs."), ["steps", "a", "outputs"]);
     }
 
     #[test]
