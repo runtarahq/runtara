@@ -505,8 +505,8 @@ fn a_control_step_binds_capabilities_and_pins_the_bundled_bytes() -> anyhow::Res
     assert!(
         !imports
             .iter()
-            .any(|name| name.starts_with("runtara:agent-suspension/")),
-        "{imports:?}"
+            .any(|name| name == runtara_agent_suspension::CONTEXT_INTERFACE),
+        "no continuation is delivered to control: {imports:?}"
     );
 
     // The dependency registry: one control entry, bound to the staged bytes.

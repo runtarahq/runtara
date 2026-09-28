@@ -746,7 +746,7 @@ jobs:
             --features direct-wasm-integration-tests \
             --test direct_wasm_execute
 
-      - name: Run composed runner DSL, cancellation, persistence, control-wait and WaitForInstances integration tests
+      - name: Run composed runner DSL, cancellation, persistence, agent suspension and WaitForInstances integration tests
         env:
           TEST_ENVIRONMENT_DATABASE_URL: postgres://postgres@localhost:5432/scoped_runner_test
           RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release

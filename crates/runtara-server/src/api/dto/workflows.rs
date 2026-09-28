@@ -1559,7 +1559,7 @@ mod tests {
             ),
             (
                 ValidationError::ControlCapabilityUnsupportedContext {
-                    step_id: "wait".into(),
+                    step_id: "pause".into(),
                     capability: "control:get".into(),
                     context: "ai-agent-tool".into(),
                     child_workflow_id: Some("child".into()),
@@ -1571,7 +1571,7 @@ mod tests {
         for (error, code, field) in cases {
             let dto = ValidationErrorDto::from_runtara_error(&error);
             assert_eq!(dto.code, code);
-            assert_eq!(dto.step_id.as_deref(), Some("wait"));
+            assert_eq!(dto.step_id.as_deref(), Some("pause"));
             assert_eq!(dto.field_name.as_deref(), field);
             assert!(
                 dto.message.starts_with(&format!("[{code}]")),
