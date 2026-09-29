@@ -10,12 +10,17 @@ keywords = ["durable", "workflow", "ai", "llm", "agents"]
 categories = ["development-tools"]
 
 [features]
-default = ["tracing"]
+default = ["tracing", "completion"]
 
 # Structured logging via the tracing ecosystem. Off for wasm workflow
 # builds that re-export runtara-ai via runtara-workflow-stdlib — those
 # builds have no subscriber and shouldn't carry tracing in the .wasm.
 tracing = ["dep:tracing"]
+
+# LLM completion over HTTP: the OpenAI and Bedrock clients, provider dispatch
+# and `run_completion*`. Consumers that only need provider ids, catalogs and
+# defaults (runtara-server) turn it off so no HTTP backend is linked.
+completion = ["dep:runtara-http"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -26,11 +31,11 @@ tracing = { version = "0.1", optional = true }
 # schemars out of the wasm re-export via runtara-workflow-stdlib.
 runtara-dsl = { path = "../runtara-dsl", default-features = false }
 
-# Backend selected per target so wasm workflows (which re-export runtara-ai
-# via runtara-workflow-stdlib) don't drag ureq + rustls + ring + url + icu_*
-# into their .wasm. Same pattern as the per-agent crates.
+# Backend selected per target so wasm builds don't drag ureq + rustls + ring +
+# url + icu_* into their .wasm. Same pattern as the per-agent crates. Only
+# pulled in by the `completion` feature.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-runtara-http = { workspace = true, default-features = false, features = ["native"] }
+runtara-http = { workspace = true, default-features = false, features = ["native"], optional = true }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-runtara-http = { workspace = true, default-features = false, features = ["wasi"] }
+runtara-http = { workspace = true, default-features = false, features = ["wasi"], optional = true }

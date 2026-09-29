@@ -5,6 +5,7 @@
 //! Creates `CompletionModel` instances from connection parameters,
 //! dispatching based on `integration_id`.
 
+#[cfg(feature = "completion")]
 use crate::providers::{bedrock, openai};
 use serde_json::{Value, json};
 
@@ -67,6 +68,7 @@ pub fn provider_for_integration(integration_id: &str) -> Option<&'static str> {
 /// * `model` - Model identifier (e.g., "gpt-4o"). Defaults to
 ///   [`crate::defaults::DEFAULT_OPENAI_MODEL`] if None.
 /// * `connection_id` - Optional connection ID for proxy mode
+#[cfg(feature = "completion")]
 pub fn create_openai_model_with_connection(
     parameters: &Value,
     model: Option<&str>,
@@ -148,6 +150,7 @@ pub fn structured_output_params(integration_id: &str, json_schema: Value) -> Opt
 ///
 /// The first argument is the explicit provider id for AI Agent calls, but this
 /// function also accepts legacy connection integration ids for direct callers.
+#[cfg(feature = "completion")]
 pub fn create_completion_model_with_connection(
     integration_id: &str,
     parameters: &Value,
@@ -199,6 +202,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "completion")]
     fn structured_output_is_offered_only_for_dispatchable_providers() {
         // An id may carry a structured-output envelope only if the dispatcher
         // can actually build a model for it. Anything else is dead shape: the

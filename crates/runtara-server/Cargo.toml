@@ -149,7 +149,9 @@ runtara-agent-suspension = { path = "../runtara-agent-suspension" }
 runtara-object-store = { path = "../runtara-object-store" }
 runtara-text-parser = { path = "../runtara-text-parser" }
 runtara-connections = { path = "../runtara-connections", features = ["utoipa"] }
-runtara-ai = { path = "../runtara-ai" }
+# Provider ids, model catalogs and defaults only; without `completion` no LLM
+# HTTP client (and no ureq) is linked into the server.
+runtara-ai = { path = "../runtara-ai", default-features = false, features = ["tracing"] }
 runtara-component-host = { path = "../runtara-component-host" }
 
 # Database
@@ -201,7 +203,6 @@ dashmap = "6.1"
 # Bounded, self-evicting, single-flight cache for per-connection object-model
 # PgPools (see api/repositories/object_model.rs).
 moka = { version = "0.12", features = ["future"] }
-jsonschema = "0.26"
 croner = "2"
 
 # Redis/Valkey
@@ -278,7 +279,5 @@ tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 rsa = { version = "0.9", features = ["sha2"] }
 testcontainers = "0.27"
-insta = { version = "1", features = ["json", "filters"] }
-proptest = "1"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }

@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[cfg(feature = "completion")]
 use crate::completion::CompletionResponse;
 use crate::message::Message;
 use crate::types::ToolDefinition;
@@ -64,6 +65,7 @@ pub struct CompletionInvokeRequest {
 ///
 /// This is intentionally identical in behavior to the generated
 /// `__ai_llm_durable` body; keep the two in sync.
+#[cfg(feature = "completion")]
 pub fn run_completion(req: CompletionInvokeRequest) -> Result<CompletionResponse, String> {
     let (model, request) = prepare_completion(req)?;
     model
@@ -73,6 +75,7 @@ pub fn run_completion(req: CompletionInvokeRequest) -> Result<CompletionResponse
 
 /// Issue a completion through awaitable component I/O in WASM. Provider
 /// selection, request construction and errors match [`run_completion`].
+#[cfg(feature = "completion")]
 pub async fn run_completion_async(
     req: CompletionInvokeRequest,
 ) -> Result<CompletionResponse, String> {
@@ -83,6 +86,7 @@ pub async fn run_completion_async(
         .map_err(|e| format!("LLM call failed: {e}"))
 }
 
+#[cfg(feature = "completion")]
 fn prepare_completion(
     req: CompletionInvokeRequest,
 ) -> Result<(Box<dyn crate::CompletionModel>, crate::CompletionRequest), String> {
@@ -137,6 +141,7 @@ fn prepare_completion(
 /// a schema-conforming response. `None` means either no schema was declared, or
 /// the provider has no structured-output mode (best-effort via the prompt, as
 /// documented on [`crate::provider::structured_output_params`]).
+#[cfg(any(feature = "completion", test))]
 fn resolve_structured_output_params(
     integration_id: &str,
     output_schema_json: Option<&str>,

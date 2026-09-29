@@ -23,4 +23,6 @@ pub mod types;
 pub use completion::{CompletionError, CompletionModel, CompletionRequest, CompletionResponse};
 pub use message::{AssistantContent, Message, UserContent};
 pub use one_or_many::OneOrMany;
-pub use orchestration::{CompletionInvokeRequest, run_completion, run_completion_async};
+pub use orchestration::CompletionInvokeRequest;
+#[cfg(feature = "completion")]
+pub use orchestration::{run_completion, run_completion_async};
