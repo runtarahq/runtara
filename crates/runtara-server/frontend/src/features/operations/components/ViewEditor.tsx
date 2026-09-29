@@ -122,9 +122,7 @@ export function ViewEditor({
               bordered
               className="rounded-full aria-pressed:border-primary aria-pressed:bg-primary/10"
               aria-pressed={statuses.length === 0}
-              onClick={() =>
-                update({ where: { ...view.where, status: null } })
-              }
+              onClick={() => update({ where: { ...view.where, status: null } })}
             >
               {statuses.length === 0 && <Check aria-hidden="true" />}
               All statuses

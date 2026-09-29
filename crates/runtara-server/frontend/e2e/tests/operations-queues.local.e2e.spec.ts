@@ -54,8 +54,12 @@ for (const width of [1440, 390]) {
       await expect(
         statuses.getByRole('button', { name: 'All statuses', exact: true })
       ).toHaveAttribute('aria-pressed', 'true');
-      await statuses.getByRole('button', { name: 'Completed', exact: true }).click();
-      await statuses.getByRole('button', { name: 'Failed', exact: true }).click();
+      await statuses
+        .getByRole('button', { name: 'Completed', exact: true })
+        .click();
+      await statuses
+        .getByRole('button', { name: 'Failed', exact: true })
+        .click();
       await page
         .getByRole('button', { name: 'Save changes', exact: true })
         .click();
@@ -73,11 +77,15 @@ for (const width of [1440, 390]) {
       await expect(
         statuses.getByRole('button', { name: 'Failed', exact: true })
       ).toHaveAttribute('aria-pressed', 'true');
-      await statuses.getByRole('button', { name: 'Failed', exact: true }).click();
+      await statuses
+        .getByRole('button', { name: 'Failed', exact: true })
+        .click();
       await expect(
         statuses.getByRole('button', { name: 'Failed', exact: true })
       ).toHaveAttribute('aria-pressed', 'false');
-      await statuses.getByRole('button', { name: 'All statuses', exact: true }).click();
+      await statuses
+        .getByRole('button', { name: 'All statuses', exact: true })
+        .click();
       await expect(
         statuses.getByRole('button', { name: 'Completed', exact: true })
       ).toHaveAttribute('aria-pressed', 'false');
@@ -89,14 +97,12 @@ for (const width of [1440, 390]) {
       ).toBeLessThanOrEqual(width);
       await page.getByRole('button', { name: 'Cancel', exact: true }).click();
       await page.goto(appPath('/operations/queues'));
-      const item = page
-        .getByRole('listitem')
-        .filter({
-          has: page.getByRole('heading', {
-            name: `${name} edited`,
-            exact: true,
-          }),
-        });
+      const item = page.getByRole('listitem').filter({
+        has: page.getByRole('heading', {
+          name: `${name} edited`,
+          exact: true,
+        }),
+      });
       await expect(item).toBeVisible();
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth)
