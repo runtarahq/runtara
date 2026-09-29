@@ -21,6 +21,7 @@ struct Fixture {
     server: PgPool,
     runtime: PgPool,
     persistence: Arc<PostgresPersistence>,
+    client: Arc<RuntimeClient>,
     engine: ExecutionEngine,
     tenant: String,
     workflow: String,
@@ -69,7 +70,7 @@ impl Fixture {
         let engine = ExecutionEngine::new(
             server.clone(),
             Arc::new(WorkflowRepository::new(server.clone())),
-            Some(client),
+            Some(client.clone()),
             None,
             ProductEventSink::new(events),
         );
@@ -92,6 +93,7 @@ impl Fixture {
             server,
             runtime,
             persistence,
+            client,
             engine,
             tenant,
             workflow,
@@ -122,6 +124,104 @@ impl Fixture {
             .unwrap();
         id
     }
+}
+
+#[tokio::test]
+async fn answers_record_the_original_actor_and_keep_receipt_replay_compatible() {
+    use runtara_core::persistence::inputs::{InputAuthority, InputRequestSpec, InputState};
+    use runtara_server::{
+        api::services::workflow_runtime::submit_authenticated_input,
+        auth::{AuthContext, AuthMethod},
+    };
+    let fx = Fixture::new().await;
+    let id = fx.run(Some("ORDER-123")).await;
+    let request = fx
+        .persistence
+        .input_requests()
+        .unwrap()
+        .register_input(
+            &InputAuthority::Root {
+                tenant_id: fx.tenant.clone(),
+                instance_id: id.clone(),
+            },
+            &InputRequestSpec {
+                signal_id: "approval".into(),
+                response_schema: Some(
+                    json!({"decision":{"type":"string","enum":["approve","reject"]}}),
+                ),
+                metadata: json!({"action_key":"approval"}),
+                deadline: None,
+            },
+        )
+        .await
+        .unwrap();
+    let payload = json!({"decision":"approve"});
+    let alice = AuthContext::new(fx.tenant.clone(), "alice".into(), AuthMethod::Jwt);
+    let bob = AuthContext::new(fx.tenant.clone(), "bob".into(), AuthMethod::ApiKey);
+    let first = submit_authenticated_input(
+        &fx.client,
+        &fx.server,
+        &alice,
+        &id,
+        &request.request_id,
+        "answer",
+        &payload,
+    )
+    .await
+    .unwrap();
+    let replay = submit_authenticated_input(
+        &fx.client,
+        &fx.server,
+        &bob,
+        &id,
+        &request.request_id,
+        "answer",
+        &payload,
+    )
+    .await
+    .unwrap();
+    assert_eq!(first, replay);
+    let legacy = fx
+        .client
+        .submit_input_response(&fx.tenant, &id, &request.request_id, "answer", &payload)
+        .await
+        .unwrap();
+    assert_eq!(legacy.receipt_id, first.receipt_id);
+    let stored = fx
+        .persistence
+        .input_requests()
+        .unwrap()
+        .get_input(&fx.tenant, &id, &request.request_id)
+        .await
+        .unwrap();
+    let InputState::Accepted { receipt } = stored.state else {
+        panic!("accepted")
+    };
+    let attribution: Value =
+        serde_json::from_slice(receipt.acceptance_context.as_ref().unwrap()).unwrap();
+    assert_eq!(attribution["source"], "user");
+    assert_eq!(attribution["principal"], "alice");
+    let events: Vec<(Option<String>, Value)> = sqlx::query_as("SELECT actor_user_id, payload FROM audit_events WHERE tenant_id=$1 AND event_type='input.answer'")
+        .bind(&fx.tenant).fetch_all(&fx.server).await.unwrap();
+    assert_eq!(events.len(), 2);
+    for (actor, payload) in events {
+        assert_eq!(actor.as_deref(), Some("alice"));
+        assert_eq!(payload["receiptId"], first.receipt_id);
+        assert!(payload.get("decision").is_none());
+    }
+    assert!(
+        submit_authenticated_input(
+            &fx.client,
+            &fx.server,
+            &bob,
+            &id,
+            &request.request_id,
+            "other-answer",
+            &payload
+        )
+        .await
+        .is_err()
+    );
 }
 
 #[tokio::test]

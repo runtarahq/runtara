@@ -275,7 +275,8 @@ pub async fn list_workflow_actions(
 pub async fn submit_workflow_action(
     engine: &ExecutionEngine,
     client: &RuntimeClient,
-    tenant_id: &str,
+    pool: &sqlx::PgPool,
+    auth: &crate::auth::AuthContext,
     workflow_id: &str,
     instance_id: &str,
     request_id: &str,
@@ -284,13 +285,51 @@ pub async fn submit_workflow_action(
 ) -> Result<WorkflowActionReceipt, WorkflowRuntimeError> {
     validate_instance_id(instance_id)?;
     engine
-        .authorize_execution(workflow_id, instance_id, tenant_id)
+        .authorize_execution(workflow_id, instance_id, &auth.org_id)
         .await
         .map_err(map_execution_error)?;
-    Ok(client
-        .submit_input_response(tenant_id, instance_id, request_id, operation_id, payload)
-        .await?
-        .into())
+    submit_authenticated_input(
+        client,
+        pool,
+        auth,
+        instance_id,
+        request_id,
+        operation_id,
+        payload,
+    )
+    .await
+}
+
+/// The HTTP and action endpoints share actor attribution and acceptance semantics.
+pub async fn submit_authenticated_input(
+    client: &RuntimeClient,
+    pool: &sqlx::PgPool,
+    auth: &crate::auth::AuthContext,
+    instance_id: &str,
+    request_id: &str,
+    operation_id: &str,
+    payload: &Value,
+) -> Result<WorkflowActionReceipt, WorkflowRuntimeError> {
+    let receipt = client
+        .submit_authenticated_input_response(auth, instance_id, request_id, operation_id, payload)
+        .await?;
+    let attribution: Option<Value> = receipt
+        .acceptance_context
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice(bytes).ok());
+    let actor = attribution
+        .as_ref()
+        .and_then(|value| value["principal"].as_str());
+    crate::audit::emit(
+        pool,
+        &auth.org_id,
+        actor,
+        crate::audit::AuditEvent::new("input.answer")
+            .resource("instance", instance_id)
+            .payload(json!({"requestId":request_id,"receiptId":receipt.receipt_id})),
+    )
+    .await;
+    Ok(receipt.into())
 }
 
 fn validate_instance_id(instance_id: &str) -> Result<(), WorkflowRuntimeError> {

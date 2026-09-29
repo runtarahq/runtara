@@ -414,6 +414,37 @@ impl RuntimeClient {
             .await
     }
 
+    /// Attribute a direct response to the authenticated caller, atomically
+    /// with acceptance. Idempotent retries retain the original attribution.
+    pub async fn submit_authenticated_input_response(
+        &self,
+        auth: &crate::auth::AuthContext,
+        instance: &str,
+        request: &str,
+        operation: &str,
+        payload: &Value,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        runtara_core::persistence::inputs::InputReceipt,
+    > {
+        refuse_reserved_operation(operation)?;
+        let context = runtara_core::persistence::inputs::InputAcceptanceContext::new(
+            "user",
+            &auth.user_id,
+            &serde_json::json!({"tenantId": auth.org_id}),
+            payload,
+        )?;
+        self.client
+            .submit_contextual_input_response(
+                &auth.org_id,
+                instance,
+                request,
+                operation,
+                payload,
+                &context,
+            )
+            .await
+    }
+
     /// Control's `send-signal`: replay of its own `control:` operation.
     pub(crate) async fn replay_control_input_response(
         &self,
