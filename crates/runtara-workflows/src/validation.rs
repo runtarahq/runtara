@@ -3578,20 +3578,25 @@ struct TemplateStaticReferenceContext<'a> {
 /// segment or an empty bracket key, and reads an unterminated bracket's
 /// remainder as one key.
 fn malformed_path_reason(path: &str) -> Option<&'static str> {
-    let tokenized = tokenize_reference(path);
-    [
-        (
-            PathDefect::ConsecutiveDots,
-            "empty path segment (consecutive dots)",
-        ),
-        (PathDefect::EmptyBracketKey, "empty bracket key"),
-        (
-            PathDefect::UnterminatedBracket,
-            "unterminated bracket (missing `]`)",
-        ),
-    ]
-    .into_iter()
-    .find_map(|(defect, reason)| tokenized.has_defect(defect).then_some(reason))
+    tokenize_reference(path)
+        .defects
+        .into_iter()
+        .map(defect_reason)
+        .min_by_key(|(precedence, _)| *precedence)
+        .map(|(_, reason)| reason)
+}
+
+/// The reason reported for a path defect, with its precedence when a path has
+/// several (lowest wins). `PathDefect` is non-exhaustive, so a defect kind
+/// added later is rejected under a generic reason rather than silently
+/// accepted.
+fn defect_reason(defect: PathDefect) -> (u8, &'static str) {
+    match defect {
+        PathDefect::ConsecutiveDots => (0, "empty path segment (consecutive dots)"),
+        PathDefect::EmptyBracketKey => (1, "empty bracket key"),
+        PathDefect::UnterminatedBracket => (2, "unterminated bracket (missing `]`)"),
+        _ => (3, "malformed reference path"),
+    }
 }
 
 fn validate_template_static_reference(
