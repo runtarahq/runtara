@@ -16,6 +16,7 @@ mod continuations;
 mod control_receipts;
 mod inputs;
 mod invocations;
+mod run_state;
 mod waits;
 
 use crate::domain::InstanceStatus as CoreInstanceStatus;
@@ -59,6 +60,10 @@ struct Store {
     instance_waits: HashMap<(String, String), waits::MemWait>,
     /// Agent continuations by `(instance_id, op_hash)`: `(attempt, state)`.
     agent_continuations: HashMap<(String, String), (u32, Vec<u8>)>,
+    /// Run state by instance id.
+    run_state: HashMap<String, crate::persistence::run_state::RunStateRecord>,
+    /// The state write log: `(instance_id, operation_id)` pairs applied.
+    run_state_writes: std::collections::HashSet<(String, String)>,
     /// Stands in for a sequence: the only monotonic id source a store without
     /// one has to invent.
     next_id: i64,
@@ -288,6 +293,11 @@ fn prune_instance(store: &mut Store, id: &str) -> bool {
     let n = store.invocation_parents.len();
     store.invocation_parents.retain(|(inst, _), _| inst != id);
     note(n, store.invocation_parents.len());
+    // State stays (readers see it after the prune); its write log goes, since
+    // a terminal run never replays.
+    let n = store.run_state_writes.len();
+    store.run_state_writes.retain(|(inst, _)| inst != id);
+    note(n, store.run_state_writes.len());
     if let Some(instance) = store.instances.get_mut(id)
         && instance.input.take().is_some()
     {
@@ -350,6 +360,10 @@ impl Persistence for InMemoryPersistence {
     fn agent_continuations(
         &self,
     ) -> Option<&dyn crate::persistence::continuations::AgentContinuations> {
+        Some(self)
+    }
+
+    fn run_state(&self) -> Option<&dyn crate::persistence::run_state::RunState> {
         Some(self)
     }
 
@@ -1280,6 +1294,10 @@ impl Persistence for InMemoryPersistence {
             store
                 .agent_continuations
                 .retain(|(instance, _), _| instance != id);
+            store.run_state.remove(id);
+            store
+                .run_state_writes
+                .retain(|(instance, _)| instance != id);
             store.invocation_leases.remove(id);
             store
                 .invocation_parents
@@ -1640,6 +1658,13 @@ mod tests {
     async fn in_memory_backend_satisfies_the_agent_continuations_contract() {
         let backend = InMemoryPersistence::new();
         crate::persistence::conformance::continuations::run_all(&backend).await;
+    }
+
+    /// Run state, on the in-memory backend.
+    #[tokio::test]
+    async fn in_memory_backend_satisfies_the_run_state_contract() {
+        let backend = InMemoryPersistence::new();
+        crate::persistence::conformance::run_state::run_all(&backend).await;
     }
 
     /// Durable instance waits, on the in-memory backend.
