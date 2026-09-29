@@ -8,9 +8,13 @@ import {
   queryRuns,
   queryRunSummary,
   operationsRequest,
-  defaultView,
   selectedFields,
 } from '../queries';
+import {
+  attentionQueues,
+  attentionRequest,
+  overdueFilters,
+} from '../attention-requests';
 import { OverviewAttention } from '../components/OverviewAttention';
 import { OperationHeader, OperationSection, RefreshControls } from './shared';
 import type { OperationRequestPage } from '@/generated/RuntaraRuntimeApi';
@@ -38,18 +42,7 @@ export function OverviewPage() {
     refetchInterval: 30_000,
     placeholderData: undefined,
   });
-  const queueViews = (queues.data ?? [])
-    .filter((q) => q.count > 0)
-    .map((q) => ({
-      queue: q,
-      view:
-        views.data?.find(
-          (v) =>
-            v.configuration.workflow === q.workflowId &&
-            v.configuration.where?.openRequest === q.actionKey &&
-            v.configuration.roles?.due
-        )?.configuration ?? defaultView(q),
-    }));
+  const queueViews = attentionQueues(queues.data ?? [], views.data ?? []);
   const attention = useCustomQuery({
     queryKey: ['operations', tenant, 'attention', queueViews],
     queryFn: async (token: string) =>
@@ -79,13 +72,7 @@ export function OverviewPage() {
                     actionKey: queue.actionKey,
                     query: {
                       size: 1,
-                      state: [
-                        {
-                          field: due,
-                          op: 'lt',
-                          value: new Date().toISOString(),
-                        },
-                      ],
+                      state: overdueFilters(view, Date.now()),
                     },
                   }
                 )
@@ -106,19 +93,9 @@ export function OverviewPage() {
   const items =
     attention.data
       ?.flatMap((group) => group.page.content.map((row) => ({ ...group, row })))
-      .map(({ row, queue, view }) => {
-        const value = view.roles?.due ? row.state?.[view.roles.due] : undefined;
-        const due =
-          typeof value === 'string' && Number.isFinite(Date.parse(value))
-            ? value
-            : undefined;
-        return {
-          row,
-          workflowName: queue.workflowName,
-          due,
-          isOverdue: !!due && Date.parse(due) < Date.now(),
-        };
-      })
+      .map(({ row, queue, view }) =>
+        attentionRequest(row, { queue, view }, Date.now())
+      )
       .sort(
         (a, b) =>
           Number(b.isOverdue) - Number(a.isOverdue) ||
@@ -163,8 +140,8 @@ export function OverviewPage() {
             title="Waiting for a decision"
             value={waiting}
             note={`Across ${queues.data?.filter((q) => q.count > 0).length ?? '…'} queues`}
-            to="/operations/queues"
-            action="Open queues"
+            to="/operations/requests"
+            action="View requests"
           />
           <Metric
             title="Overdue"
@@ -174,7 +151,7 @@ export function OverviewPage() {
                 ? 'Past their configured due time'
                 : 'Choose a due field in a shared view'
             }
-            to="/operations/queues"
+            to="/operations/requests?filter=overdue"
             action="Review"
             warning
           />

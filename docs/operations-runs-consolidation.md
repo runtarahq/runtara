@@ -266,3 +266,25 @@ Verification: 55 focused Operations and invocation-history tests, scoped ESLint,
 production build and three browser layout checks passed. Browser checks cover
 1440/1000/390 widths, overdue priority, separate destinations, compact rows,
 action alignment and opening/cancelling Replay without submitting it.
+
+## Overview request metric drilldowns
+
+Waiting for a decision opens `/operations/requests`; Overdue opens
+`/operations/requests?filter=overdue`. View all requests uses the same list.
+Waiting/Overdue tabs and the page number survive URL sharing and reload. Browse
+queues remains a separate destination for queue configuration and saved views.
+
+The full list shares queue discovery, due-role selection and overdue predicates
+with Overview. It counts and paginates requests across queue partitions, grouped
+by workflow, using each queue's existing tenant-scoped API. The initial page of
+each queue supplies its total; additional pages are fetched only where needed
+for the current 25-row page. Saved presentation filters do not narrow these
+metric drilldowns. Queues without a configured due field are excluded from the
+overdue list. A failed queue request fails the aggregate visibly instead of
+showing a misleading partial total.
+
+Verification: 16 Operations tests, scoped ESLint and production build passed.
+Pagination covers 132 requests across three queues, including multiple requests
+on the same run, partition boundaries and out-of-range pages. Five browser checks
+passed: the cards open the matching four waiting/two overdue requests at desktop
+and mobile widths, Overdue survives reload, and existing Operations layouts work.

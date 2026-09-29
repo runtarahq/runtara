@@ -1,12 +1,9 @@
 import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
-import { AlertTriangle, CirclePlay, Copy, Eye } from 'lucide-react';
+import { CirclePlay, Copy, Eye } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
-import type {
-  OperationRequest,
-  WorkflowInstanceDto,
-} from '@/generated/RuntaraRuntimeApi';
+import type { WorkflowInstanceDto } from '@/generated/RuntaraRuntimeApi';
 import { Button } from '@/shared/components/ui/button';
 import { WithTooltip } from '@/shared/components/ui/tooltip';
 import { Can } from '@/shared/components/Can';
@@ -19,13 +16,8 @@ import {
 import { describeFailure } from '../queries';
 import { ReplayButton } from '../pages/shared';
 import { StateValue } from './StateValue';
-
-export interface AttentionRequest {
-  row: OperationRequest;
-  workflowName: string;
-  due?: string;
-  isOverdue: boolean;
-}
+import { RequestRows } from './RequestRows';
+import type { AttentionRequest } from '../attention-requests';
 
 const rowClass =
   'grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1 px-4 py-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1.5fr)_minmax(0,1fr)_6.5rem]';
@@ -134,93 +126,11 @@ export function OverviewAttention({
           title="Requests requiring input"
           count={requestCount}
           link="View all requests"
-          to="/operations/queues"
+          to="/operations/requests"
           columns={['Run', 'Request', 'Workflow', 'Due', 'Actions']}
         >
           {requests.length ? (
-            <ul
-              className="divide-y divide-border/50"
-              aria-label="Requests requiring input"
-            >
-              {requests.map(({ row, workflowName, due, isOverdue }) => {
-                const to = `/operations/runs/${row.workflowId}/${row.instanceId}`;
-                const label = row.runLabel || row.instanceId.slice(0, 8);
-                return (
-                  <li
-                    key={`${row.instanceId}/${row.requestId}`}
-                    className={rowClass}
-                  >
-                    <Link
-                      className={`${textClass} text-sm font-medium text-primary-text hover:underline`}
-                      title={label}
-                      to={to}
-                    >
-                      {label}
-                    </Link>
-                    <div className={textClass}>
-                      <p className="truncate text-sm" title={row.label}>
-                        {row.label}
-                      </p>
-                      {row.message && (
-                        <p
-                          className="truncate text-xs text-muted-foreground"
-                          title={row.message}
-                        >
-                          {row.message}
-                        </p>
-                      )}
-                    </div>
-                    <span
-                      className={`${textClass} text-xs text-muted-foreground`}
-                      title={workflowName}
-                    >
-                      {workflowName}
-                    </span>
-                    <div
-                      className={`${textClass} text-xs ${isOverdue ? 'text-warning' : 'text-muted-foreground'}`}
-                    >
-                      {isOverdue && (
-                        <span className="mb-0.5 flex items-center gap-1">
-                          <AlertTriangle
-                            aria-hidden="true"
-                            className="size-3"
-                          />
-                          Overdue
-                        </span>
-                      )}
-                      {due ? (
-                        <>
-                          <span className="lg:hidden">Due </span>
-                          <StateValue
-                            value={due}
-                            display={{ kind: 'relative' }}
-                          />
-                        </>
-                      ) : (
-                        <span aria-label="No due date">—</span>
-                      )}
-                    </div>
-                    <div className={actionsClass}>
-                      <WithTooltip label="Review request">
-                        <Button
-                          asChild
-                          variant="secondary"
-                          size="icon"
-                          className={iconClass}
-                        >
-                          <Link
-                            aria-label={`Review request for ${label}`}
-                            to={to}
-                          >
-                            <Eye className="size-4" />
-                          </Link>
-                        </Button>
-                      </WithTooltip>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
+            <RequestRows requests={requests} />
           ) : (
             <EmptyGroup
               loading={requestsPending}

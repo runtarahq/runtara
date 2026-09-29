@@ -52,7 +52,7 @@ for (const width of [1440, 1000, 390]) {
         await expect(failures).toBeVisible();
         await expect(
           page.getByRole('link', { name: 'View all requests' })
-        ).toHaveAttribute('href', appPath('/operations/queues'));
+        ).toHaveAttribute('href', appPath('/operations/requests'));
         await expect(
           page.getByRole('link', { name: 'View failed runs' })
         ).toHaveAttribute('href', /dateBasis=completed/);

@@ -2,6 +2,7 @@ import { lazy } from 'react';
 import { Route, Routes } from 'react-router';
 import { ManagedInputScope } from '@/features/workflows/components/ManagedInputSubmissions';
 import { OverviewPage } from './Overview';
+import { RequestsPage } from './Requests';
 import { QueuesPage } from './Queues';
 import { QueuePage } from './Queue';
 import { InvocationHistoryRedirect } from '@/router/InvocationHistoryRedirect';
@@ -17,6 +18,7 @@ export function Operations() {
     <ManagedInputScope>
       <Routes>
         <Route index element={<OverviewPage />} />
+        <Route path="requests" element={<RequestsPage />} />
         <Route path="queues" element={<QueuesPage />} />
         <Route path="queues/:workflowId/:actionKey" element={<QueuePage />} />
         <Route path="processes/:workflowId" element={<QueuePage />} />

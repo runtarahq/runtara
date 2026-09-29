@@ -54,12 +54,10 @@ describe('Overview attention', () => {
     expect(screen.getByRole('dialog')).toHaveTextContent('Confirm run run-id');
   });
   it('keeps copy and details available to readers while hiding Replay', () => {
-    useAuthStore
-      .getState()
-      .setMe({
-        role: 'viewer',
-        permissions: { 'invocation_history:read': true } as never,
-      });
+    useAuthStore.getState().setMe({
+      role: 'viewer',
+      permissions: { 'invocation_history:read': true } as never,
+    });
     render(
       <MemoryRouter>
         <OverviewAttention {...props} />
@@ -88,7 +86,7 @@ describe('Overview attention', () => {
     ).toBeInTheDocument();
     expect(
       screen.getByRole('link', { name: 'View all requests' })
-    ).toHaveAttribute('href', '/operations/queues');
+    ).toHaveAttribute('href', '/operations/requests');
     expect(
       screen.getByRole('link', { name: 'View failed runs' })
     ).toHaveAttribute('href', expect.stringContaining('dateBasis=completed'));
