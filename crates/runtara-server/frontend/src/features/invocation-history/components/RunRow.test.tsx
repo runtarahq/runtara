@@ -3,7 +3,7 @@ import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useAuthStore } from '@/shared/stores/authStore';
 import type { ExecutionHistoryItem } from '../types';
-import { RunActions, RunContext, RunIdentity, RunDetails } from './RunRow';
+import { RunActions, RunContext, RunIdentity } from './RunRow';
 vi.mock('@/features/workflows/components/ResumeButton', () => ({
   ResumeButton: () => <button>Resume</button>,
 }));
@@ -81,7 +81,12 @@ describe('operational run rows', () => {
         />
       </MemoryRouter>
     );
-    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Copy run ID' })).toHaveLength(
+      2
+    );
+    expect(
+      screen.queryByRole('button', { name: /^(Replay|Resume|Stop)$/ })
+    ).not.toBeInTheDocument();
     expect(
       screen.getAllByRole('link', { name: 'Open execution' })
     ).toHaveLength(2);
@@ -100,25 +105,20 @@ describe('operational run rows', () => {
   });
 });
 
-it('keeps full errors and completion metadata in expanded details', () => {
-  const message = 'A long error that must remain readable in full';
-  render(
-    <MemoryRouter>
-      <RunDetails
-        run={{
-          ...run,
-          error: JSON.stringify({
-            message,
-            code: 'TEMP',
-            category: 'transient',
-          }),
-          completedAt: '2026-09-29T10:01:14Z',
-        }}
-      />
-    </MemoryRouter>
-  );
-  expect(screen.getByText(message)).toBeInTheDocument();
-  expect(screen.getByText('TEMP · transient')).toBeInTheDocument();
-  expect(screen.getByText('Completed')).toBeInTheDocument();
-  expect(screen.getByText(run.instanceId)).toBeInTheDocument();
+it('copies the instance ID from actions, independently of its business label', async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal('navigator', { clipboard: { writeText } });
+  try {
+    render(
+      <MemoryRouter>
+        <RunActions run={run} onReplay={vi.fn()} />
+      </MemoryRouter>
+    );
+    await act(async () =>
+      fireEvent.click(screen.getByRole('button', { name: 'Copy run ID' }))
+    );
+    expect(writeText).toHaveBeenCalledWith(run.instanceId);
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });

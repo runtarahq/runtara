@@ -67,15 +67,6 @@ test('Runs shares date bounds, keeps URL context and recovers from refresh failu
   ).toBeVisible();
   await expect(row).toBeVisible();
 
-  await row.getByRole('button', { name: /^Details for/ }).click();
-  await expect(
-    row.getByRole('button', { name: /^Details for/ })
-  ).toHaveAttribute('aria-expanded', 'true');
-  await expect(
-    page.getByRole('heading', { name: 'Error details', exact: true })
-  ).toBeVisible();
-  await expect(page.getByRole('status')).toContainText('Auto-refresh paused');
-
   await page.route('**/api/runtime/executions?*', (route) =>
     route.fulfill({
       status: 500,
@@ -144,18 +135,26 @@ test('Runs stays compact and exposes secondary information on demand', async ({
   await expect(
     table.getByRole('columnheader', { name: 'Completed', exact: true })
   ).toHaveAttribute('aria-sort', 'ascending');
-  await rows
-    .first()
-    .getByRole('button', { name: /^Details for/ })
-    .click();
-  await expect(page.getByRole('status')).toContainText('Auto-refresh paused');
-  await expect(table.getByText('Run ID', { exact: true })).toBeVisible();
-  await rows
-    .first()
-    .getByRole('button', { name: /^Details for/ })
-    .click();
-  await expect(table.getByText('Run ID', { exact: true })).toHaveCount(0);
-  await expect(
-    page.getByText('Auto-refresh paused while run details are open.')
-  ).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /^Details for/ })).toHaveCount(
+    0
+  );
+  await page.getByRole('button', { name: /^Waiting / }).click();
+  await expect(rows.first()).toBeVisible();
+  for (const row of await rows.all()) {
+    const actions = row.getByRole('cell').last();
+    await expect(
+      actions.getByRole('button', { name: 'Copy run ID', exact: true })
+    ).toBeVisible();
+    const icons = await actions.locator('a, button').evaluateAll((elements) =>
+      elements.map((element) => {
+        const box = element.getBoundingClientRect();
+        return { y: box.y, right: box.right };
+      })
+    );
+    expect(new Set(icons.map((icon) => icon.y)).size).toBe(1);
+    const box = (await actions.boundingBox())!;
+    expect(Math.max(...icons.map((icon) => icon.right))).toBeLessThanOrEqual(
+      box.x + box.width
+    );
+  }
 });

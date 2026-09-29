@@ -1,7 +1,6 @@
 import React from 'react';
 import {
   ColumnDef,
-  ExpandedState,
   flexRender,
   getCoreRowModel,
   getExpandedRowModel,
@@ -48,8 +47,6 @@ interface DataTableProps<TData, TValue> {
   setPagination?: OnChangeFn<PaginationState>;
   shouldRenderPagination?: boolean;
   isFetching?: boolean;
-  expanded?: ExpandedState;
-  onExpandedChange?: OnChangeFn<ExpandedState>;
   getRowCanExpand?: (row: Row<TData>) => boolean;
   SubComponent?: React.ComponentType<{ row: Row<TData> }>;
   isNested?: boolean;
@@ -89,8 +86,6 @@ export function DataTable<TData, TValue>({
   shouldRenderPagination = true,
   isFetching = false,
   getRowCanExpand = () => false,
-  expanded,
-  onExpandedChange,
   SubComponent,
   isNested = false,
   initialState,
@@ -120,7 +115,6 @@ export function DataTable<TData, TValue>({
       sorting:
         controlledSorting ??
         (initialState?.sorting ? initialState.sorting : []),
-      ...(expanded === undefined ? {} : { expanded }),
       rowSelection: enableRowSelection ? rowSelection : {},
     },
     enableSorting: true,
@@ -165,7 +159,6 @@ export function DataTable<TData, TValue>({
         setPagination(updatedPagination);
       }
     },
-    ...(onExpandedChange ? { onExpandedChange } : {}),
     getRowCanExpand,
     getRowId,
     getCoreRowModel: getCoreRowModel(),

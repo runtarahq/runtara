@@ -3,20 +3,12 @@ import type { ColumnDef } from '@tanstack/react-table';
 import type { ExecutionHistoryItem } from '../types';
 import { isActiveStatus } from '@/shared/utils/status-display';
 import { ParentRunLink } from './RunLinks';
-import {
-  RunIdentity,
-  RunContext,
-  RunActions,
-  RunDetailsToggle,
-  RunTime,
-} from './RunRow';
+import { RunIdentity, RunContext, RunActions, RunTime } from './RunRow';
 
 export type RunExtraColumn = 'completedAt' | 'parentInstanceId' | 'version';
 
 export function operationsRunColumns(
   onReplay: (run: ExecutionHistoryItem) => void,
-  expanded: ReadonlySet<string>,
-  onDetailsChange: (id: string, open: boolean) => void,
   extraColumns: ReadonlySet<RunExtraColumn>
 ): ColumnDef<ExecutionHistoryItem>[] {
   return [
@@ -25,12 +17,7 @@ export function operationsRunColumns(
       header: 'Run',
       enableSorting: false,
       cell: ({ row }) => (
-        <div className="flex w-52 items-center gap-2 xl:w-64">
-          <RunDetailsToggle
-            run={row.original}
-            open={expanded.has(row.id)}
-            onChange={onDetailsChange}
-          />
+        <div className="w-52 xl:w-64">
           <RunIdentity run={row.original} />
         </div>
       ),

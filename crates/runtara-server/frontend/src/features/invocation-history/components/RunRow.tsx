@@ -1,15 +1,8 @@
 import { Link } from 'react-router';
 import { toast } from 'sonner';
-import {
-  Bug,
-  ChevronRight,
-  CirclePlay,
-  Copy,
-  Eye,
-  MessageSquare,
-} from 'lucide-react';
+import { Bug, CirclePlay, Copy, Eye, MessageSquare } from 'lucide-react';
 import type { ExecutionHistoryItem } from '../types';
-import { ParentRunLink, RunStatusPill } from './RunLinks';
+import { RunStatusPill } from './RunLinks';
 import { describeFailure } from '@/features/operations/queries';
 import { StateValue } from '@/features/operations/components/StateValue';
 import { Can } from '@/shared/components/Can';
@@ -32,19 +25,6 @@ export function RunIdentity({ run }: { run: ExecutionHistoryItem }) {
         >
           {run.runLabel || run.instanceId.slice(0, 8)}
         </Link>
-        <button
-          className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-          title={run.instanceId}
-          aria-label={`Copy run ID ${run.instanceId}`}
-          onClick={() =>
-            void navigator.clipboard
-              .writeText(run.instanceId)
-              .then(() => toast.success('Run ID copied'))
-              .catch(() => toast.error('Could not copy run ID'))
-          }
-        >
-          <Copy className="size-3" />
-        </button>
       </div>
       <p
         className="truncate text-xs text-muted-foreground"
@@ -81,81 +61,6 @@ export function RunTime({ value }: { value: string }) {
   );
 }
 
-export function RunDetailsToggle({
-  run,
-  open,
-  onChange,
-}: {
-  run: ExecutionHistoryItem;
-  open: boolean;
-  onChange: (id: string, open: boolean) => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-      aria-label={`Details for ${run.runLabel || run.instanceId}`}
-      aria-expanded={open}
-      onClick={() => onChange(run.instanceId, !open)}
-    >
-      <ChevronRight
-        className={`size-4 transition-transform ${open ? 'rotate-90' : ''}`}
-      />
-    </button>
-  );
-}
-
-export function RunDetails({ run }: { run: ExecutionHistoryItem }) {
-  const failed = run.status === 'failed' || run.status === 'timeout';
-  const error = describeFailure(run);
-  return (
-    <div className="space-y-3 whitespace-normal text-sm">
-      {failed && (
-        <div className="space-y-1">
-          <h3 className="text-xs font-medium text-muted-foreground">
-            Error details
-          </h3>
-          <p className="whitespace-pre-wrap break-words">{error.message}</p>
-          {(error.code || error.category) && (
-            <p className="break-all text-xs text-muted-foreground">
-              {[error.code, error.category].filter(Boolean).join(' · ')}
-            </p>
-          )}
-        </div>
-      )}
-      <dl className="flex flex-wrap gap-x-8 gap-y-3 text-xs">
-        <div>
-          <dt className="text-muted-foreground">Run ID</dt>
-          <dd className="mt-1 break-all font-mono">{run.instanceId}</dd>
-        </div>
-        <div>
-          <dt className="text-muted-foreground">Started</dt>
-          <dd className="mt-1">{formatDate(run.createdAt)}</dd>
-        </div>
-        <div>
-          <dt className="text-muted-foreground">Completed</dt>
-          <dd className="mt-1">
-            {!isActiveStatus(run.status) && run.completedAt
-              ? formatDate(run.completedAt)
-              : '—'}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-muted-foreground">Version</dt>
-          <dd className="mt-1">{run.version ?? '—'}</dd>
-        </div>
-        {run.parentInstanceId && (
-          <div>
-            <dt className="text-muted-foreground">Parent</dt>
-            <dd className="mt-1">
-              <ParentRunLink parentInstanceId={run.parentInstanceId} compact />
-            </dd>
-          </div>
-        )}
-      </dl>
-    </div>
-  );
-}
 export function RunActions({
   run,
   onReplay,
@@ -220,6 +125,22 @@ export function RunActions({
           >
             <Eye className="size-4" />
           </Link>
+        </Button>
+      </WithTooltip>
+      <WithTooltip label="Copy run ID">
+        <Button
+          variant="secondary"
+          size="icon"
+          className={`${iconClass} hover:bg-primary/10 hover:text-primary`}
+          aria-label="Copy run ID"
+          onClick={() =>
+            void navigator.clipboard
+              .writeText(run.instanceId)
+              .then(() => toast.success('Run ID copied'))
+              .catch(() => toast.error('Could not copy run ID'))
+          }
+        >
+          <Copy className="size-4" />
         </Button>
       </WithTooltip>
       <Can permission="workflow:execute">

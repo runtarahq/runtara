@@ -84,7 +84,7 @@ same context; changing filters resets pagination.
   name underneath, and a way to copy the full ID. The primary link opens the
   Operations run page. Keep an explicit Open execution link for technical details.
 - Status context: readable failure message or waiting reason. Put technical
-  error code/category behind expandable details; avoid large colored error boxes.
+  error code/category on the execution details page; avoid large colored error boxes.
   Handle structured errors, plain host errors and missing error details.
 - Timing: preserve created/completed dates and execution duration. Label elapsed
   run age as **Started … ago**, never **Waiting for …**. Never show completion
@@ -220,14 +220,14 @@ locally. The waiting-duration work described above remains deferred.
 ## Runs presentation follow-up
 
 The default table is Run, Status/context, Started, Duration and Actions. Business
-labels and workflow names occupy two lines, with copy-ID beside the label.
+labels and workflow names occupy two lines, with copy-ID in the right-hand actions.
 Started uses relative time with an exact timestamp on hover. Duration is neutral;
 there are no arbitrary speed colors. Eye, Replay and applicable live-run actions
 remain visible.
 
-A row disclosure opens the full error and run metadata beneath the row, including
-completion time, parent and version. Auto-refresh pauses while any disclosure is
-open. The Columns menu can reveal Completed, Parent and Version; an incoming
+Rows do not expand. The eye icon opens execution details for full errors and
+metadata; exact timestamps remain available on hover. The Columns menu can reveal
+Completed, Parent and Version; an incoming
 completion sort automatically reveals Completed. Desktop sorting uses accessible
 column headers; narrow screens retain a sort selector. Date basis and period are
 grouped in the time-range popover, with refresh controls together on the right.
@@ -236,3 +236,12 @@ Follow-up verification: all 1,374 frontend tests, scoped ESLint and the producti
 build passed. Five Chromium checks passed, covering 1440/1000/390 layouts, compact
 row heights, optional columns, keyboard sorting, expanding/collapsing details,
 URL context, refresh failures and recovery. No backend behavior changed.
+
+The subsequent simplification removes row disclosure and its polling state.
+Copy run ID is a read-only action beside the eye icon, outside execution permission
+checks. Actions stay on one line, including waiting runs with chat and Stop.
+
+This simplification passed all 43 invocation-history tests, scoped ESLint,
+production build, and five browser checks. Browser checks cover no expanders,
+copy-ID in the action cell, single-line waiting-run actions, optional columns,
+keyboard sorting, responsive layouts and refresh recovery.

@@ -1,6 +1,6 @@
 import { formatRunDuration } from '../utils/run-duration';
 import { useMemo, useCallback, useEffect, useState } from 'react';
-import { SortingState, Row } from '@tanstack/react-table';
+import { SortingState } from '@tanstack/react-table';
 import { DataTable } from '@/shared/components/table';
 import {
   Breadcrumb,
@@ -23,14 +23,7 @@ import {
   operationsRunColumns,
   type RunExtraColumn,
 } from './OperationsRunColumns';
-import {
-  RunIdentity,
-  RunContext,
-  RunActions,
-  RunDetails,
-  RunDetailsToggle,
-  RunTime,
-} from './RunRow';
+import { RunIdentity, RunContext, RunActions, RunTime } from './RunRow';
 import { ReplayButton } from '@/features/operations/pages/shared';
 import {
   Dialog,
@@ -63,18 +56,6 @@ export function InvocationHistoryTable({
   const tenant = useAuthStore((s) => s.orgId);
   const [refresh, setRefresh] = useState(true);
   const [replayRun, setReplayRun] = useState<ExecutionHistoryItem | null>(null);
-  const [expandedDetails, setExpandedDetails] = useState<ReadonlySet<string>>(
-    new Set()
-  );
-  const onDetailsChange = useCallback((id: string, open: boolean) => {
-    setExpandedDetails((previous) => {
-      if (previous.has(id) === open) return previous;
-      const next = new Set(previous);
-      if (open) next.add(id);
-      else next.delete(id);
-      return next;
-    });
-  }, []);
   const [extraColumns, setExtraColumns] = useState<ReadonlySet<RunExtraColumn>>(
     new Set()
   );
@@ -84,19 +65,9 @@ export function InvocationHistoryTable({
     if (filters.sortBy === 'completedAt') next.add('completedAt');
     return next;
   }, [extraColumns, filters.sortBy]);
-  const expanded = useMemo(
-    () => Object.fromEntries([...expandedDetails].map((id) => [id, true])),
-    [expandedDetails]
-  );
   const columns = useMemo(
-    () =>
-      operationsRunColumns(
-        setReplayRun,
-        expandedDetails,
-        onDetailsChange,
-        visibleExtraColumns
-      ),
-    [expandedDetails, onDetailsChange, visibleExtraColumns]
+    () => operationsRunColumns(setReplayRun, visibleExtraColumns),
+    [visibleExtraColumns]
   );
   const { pagination, setPagination } = usePagination();
   const [search, setSearch] = useState(filters.search ?? '');
@@ -147,8 +118,7 @@ export function InvocationHistoryTable({
         countsUnavailable: summary.status === 'rejected',
       };
     },
-    refetchInterval:
-      refresh && !replayRun && expandedDetails.size === 0 ? 30_000 : false,
+    refetchInterval: refresh && !replayRun ? 30_000 : false,
     refetchIntervalInBackground: false,
     placeholderData: undefined,
     staleTime: 0,
@@ -162,7 +132,6 @@ export function InvocationHistoryTable({
   // Reset to the first page whenever the active filters change
   useEffect(() => {
     setPagination((prev) => ({ ...prev, pageIndex: 0 }));
-    setExpandedDetails(new Set());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters]);
 
@@ -197,11 +166,9 @@ export function InvocationHistoryTable({
   const footerLeft = `${query.data ? totalElements : '—'} runs · ${data.length} on this page`;
 
   const handlePageChange = (page: number) => {
-    setExpandedDetails(new Set());
     setPagination((prev) => ({ ...prev, pageIndex: page }));
   };
   const handlePageSizeChange = (size: number) => {
-    setExpandedDetails(new Set());
     setPagination({ pageIndex: 0, pageSize: size });
   };
 
@@ -268,18 +235,9 @@ export function InvocationHistoryTable({
               busy={isFetching}
               updatedAt={query.dataUpdatedAt}
               onRefresh={() => {
-                setExpandedDetails(new Set());
                 void query.refetch();
               }}
             />
-            {refresh && expandedDetails.size > 0 && (
-              <p
-                role="status"
-                className="border-b px-4 py-2 text-xs text-muted-foreground"
-              >
-                Auto-refresh paused while run details are open.
-              </p>
-            )}
             {(query.error || query.data?.countsUnavailable) && (
               <p
                 role="alert"
@@ -312,9 +270,6 @@ export function InvocationHistoryTable({
       >
         <div className="hidden lg:block">
           <DataTable
-            expanded={expanded}
-            getRowCanExpand={() => true}
-            SubComponent={RunDetailRow}
             columns={columns}
             data={data}
             pagination={{
@@ -341,14 +296,7 @@ export function InvocationHistoryTable({
               className="space-y-3 p-4"
               aria-label={run.runLabel || run.instanceId}
             >
-              <div className="flex items-center gap-2">
-                <RunDetailsToggle
-                  run={run}
-                  open={expandedDetails.has(run.instanceId)}
-                  onChange={onDetailsChange}
-                />
-                <RunIdentity run={run} />
-              </div>
+              <RunIdentity run={run} />
               <RunContext run={run} />
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
@@ -361,11 +309,6 @@ export function InvocationHistoryTable({
                 </div>
                 <RunActions run={run} onReplay={setReplayRun} />
               </div>
-              {expandedDetails.has(run.instanceId) && (
-                <div className="rounded-md bg-muted/30 p-3">
-                  <RunDetails run={run} />
-                </div>
-              )}
             </article>
           ))}
           {!data.length && (
@@ -407,8 +350,4 @@ export function InvocationHistoryTable({
       </Dialog>
     </>
   );
-}
-
-function RunDetailRow({ row }: { row: Row<ExecutionHistoryItem> }) {
-  return <RunDetails run={row.original} />;
 }
