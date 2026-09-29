@@ -5562,8 +5562,8 @@ fn agent_error_info_envelope(
         object.insert("attributes".to_string(), parsed);
     }
     // A workflow-agent child's full error, as an embedded child's failure
-    // carries it. Native agents never set `details`, so their envelopes are
-    // unchanged.
+    // carries it. Agent components never set `details`, so their envelopes
+    // are unchanged.
     if let Some(details) = details {
         object.insert(
             "childError".to_string(),

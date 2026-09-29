@@ -56,7 +56,7 @@ the packages.
   - `InvokeHostImports` exports `lifecycle.invoke`.
   - `AgentCapabilities` exports `runtara:agent-<slug>/capabilities.invoke`,
     for publishing a workflow as an agent.
-  - Native agents add a fourth: `suspendable.invoke`.
+  - Suspending agents add a fourth: `suspendable.invoke`.
 - **Two outcome and wake types that almost match.**
   - Lifecycle: wake = `at | on-signal | on-resume`, no state.
   - Agent suspension: wake = `at | instances`, plus a continuation `state`.
@@ -92,7 +92,7 @@ privilege class and one versioning cadence. Everything starts at `1.0.0`.
 
 | Package | Interfaces | Imported / exported by | Use cases |
 |---|---|---|---|
-| `runtara:agent@1.0.0` | `types` (error-info, signal-wait, wake, suspension, outcome), `capabilities` (reference shape for host bindgen), `continuation` (host func) | every component (types); native suspending agents (continuation) | Every capability and every workflow returns `completed` or `suspended` with wakes, or fails with `error-info` (retryable, category, retry-after). A long-running native capability parks the step runner-free and resumes with its saved continuation. |
+| `runtara:agent@1.0.0` | `types` (error-info, signal-wait, wake, suspension, outcome), `capabilities` (reference shape for host bindgen), `continuation` (host func) | every component (types); suspending agents (continuation) | Every capability and every workflow returns `completed` or `suspended` with wakes, or fails with `error-info` (retryable, category, retry-after). A long-running agent capability parks the step runner-free and resumes with its saved continuation. |
 | `runtara:agent-<id>@1.0.0` | `capabilities` | generated per agent **and per workflow**; the unique package name is what lets composition tell components apart | A workflow Agent step calls `http`, `csv`, `slack` and so on. Every compiled workflow exports this shape: the host starts a top-level run through it, and a parent calls a published workflow-agent through it, including one that waits, sleeps or waits on child runs. Parallel pools get phantom copies of one agent. |
 | `runtara:host@1.0.0` | `http`, `sql`, `connections`, `timers` | ordinary agents and workflows | `http`: Shopify, HubSpot, Slack and other API agents send requests through the credential proxy without ever seeing secrets. `sql`: object-model queries and writes. `connections`: safe connection descriptors and resource lookups, such as the object-model layout or MCP tool config. `timers`: retry backoff, parallel-window waits and the whole-run abort alarm. |
 | `runtara:workflow@1.0.0` | `runtime`, `tasks`, `operation`, `waits` | compiled workflow logic only, including published workflow-agents | `runtime`: checkpoints, durable sleep (Delay), WaitForSignal input, events, heartbeat, cancel and pause. `tasks`: EmbedWorkflow child runs. `operation`: replay-safe identity for suspending capabilities and control mutations. `waits`: WaitForInstances. |
@@ -130,7 +130,7 @@ interface types {
         instances(string),      // a host-registered instance wait id
     }
 
-    /// `state` is a native agent's continuation (at most 64 KiB). Workflows
+    /// `state` is a suspending agent's continuation (at most 64 KiB). Workflows
     /// keep their state in checkpoints and always return it empty.
     record suspension {
         wakes: list<wake>,
@@ -165,9 +165,9 @@ interface continuation {
 - A non-suspending agent may only return `completed`. `suspended` from an agent
   whose metadata does not declare `suspends` fails the step with the existing
   `AGENT_UNEXPECTED_SUSPEND` code.
-- A native agent may return the wakes `at` and `instances`. `on-signal` and
-  `on-resume` come only from workflow logic, and the host refuses them from a
-  native agent with `AGENT_INVALID_SUSPENSION`. The Rust `Wake` enum in
+- An agent component may return the wakes `at` and `instances`. `on-signal` and
+  `on-resume` come only from workflow logic, and the host refuses them from an
+  agent component with `AGENT_INVALID_SUSPENSION`. The Rust `Wake` enum in
   `runtara-agent-suspension` exposes only the two it may use.
 - A caller forwards the wakes it receives. It adds `at(step deadline)` when
   the step has a timeout, instead of collapsing everything into one `at`.
@@ -550,7 +550,7 @@ every image must export it before launch.
 - **WaitForInstances emits `instances(wait-id)`** (`wait_instances.rs:382-393`)
   instead of `at`/`on-resume` plus the `InvokeRunResult.instance_waits` side
   channel.
-- **Native agent call sites:**
+- **Agent component call sites:**
   - Every agent returns `outcome`, and completed is read at @12/@16.
   - The `@12/@16 → @8/@12` shuffle in `agent_suspend::emit_after_invoke` goes.
   - A `suspended` from a non-suspending agent raises `AGENT_UNEXPECTED_SUSPEND`.
@@ -602,7 +602,7 @@ every image must export it before launch.
 - **Direct capability calls:** the dispatcher, `test_capability` and
   `registry.rs` bindgen map a `suspended` outside a workflow to
   `AGENT_UNEXPECTED_SUSPEND`.
-- **`operation_scope_host::check_suspension`:** native agents still may not
+- **`operation_scope_host::check_suspension`:** agent components still may not
   return `instances` (no operation registers one yet), nor `on-signal` or
   `on-resume`.
 
@@ -937,7 +937,7 @@ This is a hard break, by choice:
   - waits for a signal, answered through the signal API;
   - starts runs through the control agent and waits for them with
     WaitForInstances;
-  - calls a native suspending agent;
+  - calls a suspending agent capability;
   - calls another published workflow-agent that parks (two levels deep).
 
   For each case, assert:

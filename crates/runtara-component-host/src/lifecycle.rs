@@ -86,7 +86,7 @@ pub enum WorkflowWake {
 }
 
 /// WIT mirror of `runtara:agent/types.suspension`. A workflow's `state` is
-/// always empty (its state lives in checkpoints); a native agent's is its
+/// always empty (its state lives in checkpoints); an agent's is its
 /// continuation.
 #[derive(
     Debug,

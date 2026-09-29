@@ -33,7 +33,7 @@ pub fn folds_onto_reserved_agent(id: &str) -> bool {
 }
 
 /// Whether the metadata claims a host-enforced execution mode only built-ins
-/// may have: `trusted` (host credentials) or `suspends` (a native agent's
+/// may have: `trusted` (host credentials) or `suspends` (an agent component's
 /// continuation state under an operation scope). A workflow-agent parks
 /// through its `suspended` outcome instead, which its caller forwards.
 fn claims_host_execution_mode(info: &AgentInfo) -> bool {

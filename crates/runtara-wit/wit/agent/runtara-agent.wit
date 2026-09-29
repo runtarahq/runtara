@@ -45,7 +45,7 @@ interface types {
     }
 
     /// A request to be re-invoked later. `wakes` is non-empty. `state` is a
-    /// native agent's continuation (at most 64 KiB); workflows keep their
+    /// suspending agent's continuation (at most 64 KiB); workflows keep their
     /// state in checkpoints and return it empty.
     record suspension {
         wakes: list<wake>,

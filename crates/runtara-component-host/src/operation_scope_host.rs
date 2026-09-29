@@ -34,7 +34,7 @@ pub use crate::lifecycle::{
     WorkflowWake as SuspensionWake,
 };
 
-/// The contract form of a native agent's wake: only `at` and `instances` are
+/// The contract form of an agent's wake: only `at` and `instances` are
 /// an agent's to return; `on-signal` and `on-resume` belong to workflow logic.
 fn to_contract(wake: &SuspensionWake) -> Option<runtara_agent_suspension::Wake> {
     match wake {

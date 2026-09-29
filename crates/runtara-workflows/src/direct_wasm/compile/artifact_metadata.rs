@@ -1156,7 +1156,7 @@ mod tests {
             &[runtara_wit::agent::CONTINUATION],
             STAGED_TAGS,
         )
-        .expect("a composed native suspending agent leaves its continuation to the host");
+        .expect("a composed suspending agent leaves its continuation to the host");
     }
 
     /// Stage `agent_id` importing `imports`, with a sidecar that does or does

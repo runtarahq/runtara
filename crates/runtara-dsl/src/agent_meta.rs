@@ -2837,8 +2837,8 @@ mod workflow_agent_info_tests {
         assert!(cap.has_side_effects);
         assert!(!cap.is_idempotent);
         assert_eq!(cap.tags, vec!["workflow-agent"]);
-        // A workflow-agent parks through its outcome, never as a native
-        // suspending capability.
+        // A workflow-agent parks through its outcome, never as a suspending
+        // agent capability.
         assert!(!cap.suspends && !cap.trusted);
     }
 

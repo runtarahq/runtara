@@ -209,7 +209,7 @@ fn a_nested_primary_dir_agent_tagged_workflow_agent_does_not_compose() -> anyhow
     Ok(())
 }
 
-/// Case (b): an untagged native agent's former reserved code is an ordinary
+/// Case (b): an untagged agent's former reserved code is an ordinary
 /// failure: `onError` routes it, and without a route the parent fails with the
 /// code unchanged. It never suspends or parks the parent.
 #[tokio::test]
