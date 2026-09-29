@@ -72,12 +72,38 @@ impl ControlHost for FakeControl {
         })
     }
 
+    async fn get_state(
+        &self,
+        authority: &ControlAuthority,
+        instance_id: String,
+    ) -> Result<StateRead, ControlError> {
+        self.record("get-state", authority);
+        Ok(StateRead {
+            instance: summary(&instance_id),
+            state: Some(br#"{"stage":"approval"}"#.to_vec()),
+            state_updated_at_ms: Some(2_500),
+        })
+    }
+
     async fn query(
         &self,
         authority: &ControlAuthority,
         request: QueryRequest,
     ) -> Result<InstancePage, ControlError> {
         self.record("query", authority);
+        if let Some(state) = &request.state {
+            // State filters travel to the host as the JSON array given.
+            let filters: Value = serde_json::from_slice(state).unwrap();
+            assert_eq!(
+                filters,
+                json!([{"field": "stage", "op": "eq", "value": "approval"}])
+            );
+            return Ok(InstancePage {
+                items: vec![summary("a")],
+                total: 1,
+                next_page_token: None,
+            });
+        }
         if matches!(request.parent, Some(ParentFilter::Caller)) && authority.caller.is_none() {
             return Err(ControlError::new(
                 ControlErrorCode::RequiresInstance,
@@ -284,8 +310,25 @@ async fn reads_map_wit_records_to_json_under_the_tenant_authority() {
     assert_eq!(output["items"][0]["context"]["stepName"], "Approve");
     assert!(output["nextPageToken"].is_null());
 
+    let state = test(&harness, "get-state", json!({"instanceId": "run-8"})).await;
+    assert!(state.success, "{:?}", state.error);
+    let output = state.output.unwrap();
+    assert_eq!(output["instance"]["instanceId"], "run-8");
+    assert_eq!(output["instance"]["version"], 3);
+    assert_eq!(output["state"], json!({"stage": "approval"}));
+    assert_eq!(output["stateUpdatedAtMs"], 2500);
+
+    let filtered = test(
+        &harness,
+        "query",
+        json!({"state": [{"field": "stage", "op": "eq", "value": "approval"}]}),
+    )
+    .await;
+    assert!(filtered.success, "{:?}", filtered.error);
+    assert_eq!(filtered.output.unwrap()["total"], 1);
+
     let calls = harness.fake.calls.lock().unwrap();
-    assert_eq!(calls.len(), 3);
+    assert_eq!(calls.len(), 5);
     assert!(calls.iter().all(|(_, authority)| authority
         == &ControlAuthority {
             tenant: "tenant-a".into(),

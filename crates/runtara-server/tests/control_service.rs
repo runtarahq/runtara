@@ -53,6 +53,7 @@ fn query(page_size: u32) -> QueryRequest {
         order: SortOrder::Ascending,
         page_size,
         page_token: None,
+        state: None,
     }
 }
 
@@ -388,6 +389,101 @@ async fn query_pages_filters_and_sorts_before_paging() {
             .await
             .unwrap();
         assert_eq!((page.items.len(), page.total), (0, 0));
+    }
+}
+
+#[tokio::test]
+async fn get_state_and_state_filters_read_published_state() {
+    use runtara_core::persistence::run_state::StatePatch;
+
+    let fx = Fixture::new().await;
+    let me = authority(&fx.tenant, None);
+    let write = |id: String, op: char, patch: Value| {
+        let persistence = fx.persistence.clone();
+        let tenant = fx.tenant.clone();
+        async move {
+            persistence
+                .update_instance_status(&id, Core::Running, None)
+                .await
+                .unwrap();
+            persistence
+                .run_state()
+                .unwrap()
+                .apply_state(
+                    &tenant,
+                    &id,
+                    &op.to_string().repeat(64),
+                    &StatePatch::from_object(patch.as_object().unwrap()),
+                )
+                .await
+                .unwrap();
+        }
+    };
+    let waiting = fx.run("waiting", &fx.tenant).await;
+    let approved = fx.run("approved", &fx.tenant).await;
+    let blank = fx.run("blank", &fx.tenant).await;
+    write(
+        waiting.clone(),
+        'a',
+        json!({"stage": "approval", "amount": 5, "dueAt": "2026-10-01T12:00:00.000Z"}),
+    )
+    .await;
+    write(
+        approved.clone(),
+        'b',
+        json!({"stage": "approved", "amount": 50}),
+    )
+    .await;
+
+    let read = fx.control.get_state(&me, waiting.clone()).await.unwrap();
+    assert_eq!(read.instance.instance_id, waiting);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&read.state.unwrap()).unwrap(),
+        json!({"stage": "approval", "amount": 5, "dueAt": "2026-10-01T12:00:00.000Z"})
+    );
+    assert!(read.state_updated_at_ms.is_some());
+    let read = fx.control.get_state(&me, blank.clone()).await.unwrap();
+    assert_eq!((read.state, read.state_updated_at_ms), (None, None));
+    let other = authority("another-tenant", None);
+    assert!(fx.control.get_state(&other, waiting.clone()).await.is_err());
+
+    let ids = |filters: Value| {
+        let control = &fx.control;
+        let me = &me;
+        async move {
+            let request = QueryRequest {
+                state: Some(serde_json::to_vec(&filters).unwrap()),
+                ..query(10)
+            };
+            let page = control.query(me, request).await?;
+            Ok::<_, runtara_component_host::control_host::ControlError>(
+                page.items
+                    .into_iter()
+                    .map(|item| item.instance_id)
+                    .collect::<Vec<_>>(),
+            )
+        }
+    };
+    let stage = json!([{"field": "stage", "op": "eq", "value": "approval"}]);
+    assert_eq!(ids(stage).await.unwrap(), std::slice::from_ref(&waiting));
+    let range = json!([{"field": "amount", "op": "gte", "value": 10}]);
+    assert_eq!(ids(range).await.unwrap(), std::slice::from_ref(&approved));
+    // A datetime bound in any offset compares in canonical UTC.
+    let due = json!([{"field": "dueAt", "op": "lt", "value": "2026-10-01T14:00:00+01:00"}]);
+    assert_eq!(ids(due).await.unwrap(), std::slice::from_ref(&waiting));
+    let missing = json!([{"field": "dueAt", "op": "exists", "value": false}]);
+    assert_eq!(ids(missing).await.unwrap(), [approved.clone(), blank]);
+    let both = json!([
+        {"field": "stage", "op": "in", "value": ["approval", "approved"]},
+        {"field": "amount", "op": "lt", "value": 10}
+    ]);
+    assert_eq!(ids(both).await.unwrap(), [waiting]);
+    for bad in [
+        json!({"field": "stage"}),
+        json!([{"field": "stage", "op": "like", "value": "a"}]),
+        json!([{"field": "stage", "op": "eq", "value": {"nested": true}}]),
+    ] {
+        assert_eq!(ids(bad).await.unwrap_err().code, ControlErrorCode::Invalid);
     }
 }
 

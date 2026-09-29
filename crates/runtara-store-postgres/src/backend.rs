@@ -538,6 +538,10 @@ impl Persistence for PostgresPersistence {
         Some(self)
     }
 
+    fn run_state(&self) -> Option<&dyn runtara_core::persistence::run_state::RunState> {
+        Some(self)
+    }
+
     async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError> {
         Self::op_register_instance(&self.pool, instance_id, tenant_id).await
     }

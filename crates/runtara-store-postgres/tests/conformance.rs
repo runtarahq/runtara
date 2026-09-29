@@ -1762,6 +1762,22 @@ async fn agent_continuations_conformance() {
 }
 
 #[tokio::test]
+async fn run_state_conformance() {
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    runtara_core::persistence::conformance::run_state::run_all(&backend).await;
+    // Every case cleans up after itself, write log included.
+    let leftover: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM instance_state_writes w \
+         JOIN instances i ON i.instance_id = w.instance_id WHERE i.tenant_id = 'run-state'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(leftover, 0);
+}
+
+#[tokio::test]
 async fn instance_wait_conformance() {
     use runtara_core::persistence::conformance::waits;
     let (pool, _container) = postgres_test_pool().await;

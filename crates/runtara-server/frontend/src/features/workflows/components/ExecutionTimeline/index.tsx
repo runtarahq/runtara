@@ -26,6 +26,7 @@ import {
   Hand,
   Brain,
   Merge,
+  Database,
 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Badge } from '@/shared/components/ui/badge';
@@ -188,6 +189,22 @@ const stepTypeConfig: Record<
     dot: 'bg-amber-500',
     label: 'Wait for Instances',
     icon: Merge,
+  },
+  SetState: {
+    text: 'text-cyan-500',
+    bg: 'bg-cyan-500/10',
+    border: 'border-cyan-500',
+    dot: 'bg-cyan-500',
+    label: 'Set State',
+    icon: Database,
+  },
+  GetState: {
+    text: 'text-cyan-500',
+    bg: 'bg-cyan-500/10',
+    border: 'border-cyan-500',
+    dot: 'bg-cyan-500',
+    label: 'Get State',
+    icon: Database,
   },
   Default: {
     text: 'text-gray-500',

@@ -910,6 +910,8 @@ mod tests {
             errors: vec![],
             agents,
             edges: vec![],
+            state_schema: None,
+            state_mode: Default::default(),
         }
     }
 

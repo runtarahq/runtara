@@ -28,6 +28,9 @@ pub mod waits;
 /// Attempt-tagged per-operation continuations of suspending agent capabilities.
 pub mod continuations;
 
+/// A run's queryable state, merged once per writing step.
+pub mod run_state;
+
 pub use self::vocabulary::{EventVocabulary, EventVocabularySpec};
 
 use crate::domain::{EventType, InstanceStatus, SignalType};
@@ -691,6 +694,12 @@ pub trait Persistence: Send + Sync {
     /// Optional per-operation continuations of suspending agent capabilities.
     /// Typed agent suspension fails closed without them.
     fn agent_continuations(&self) -> Option<&dyn continuations::AgentContinuations> {
+        None
+    }
+
+    /// Optional queryable run state. `SetState` fails closed without it, and
+    /// readers report no state.
+    fn run_state(&self) -> Option<&dyn run_state::RunState> {
         None
     }
 

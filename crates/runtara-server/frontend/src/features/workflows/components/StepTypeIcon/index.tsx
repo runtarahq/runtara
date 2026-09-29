@@ -54,6 +54,12 @@ export function StepTypeIcon(props: Props) {
       return <Icons.merge className={iconClassName} />;
     case 'Delay':
       return <Icons.wait className={iconClassName} />;
+    case 'SetState':
+    case 'Set State':
+      return <Icons.edit className={iconClassName} />;
+    case 'GetState':
+    case 'Get State':
+      return <Icons.eye className={iconClassName} />;
     default:
       return <Icons.gear className={iconClassName} />;
   }

@@ -361,6 +361,13 @@ pub struct DirectJsonManifest {
     logs: BTreeMap<u32, DirectJsonLog>,
     errors: BTreeMap<u32, DirectJsonError>,
     agents: BTreeMap<u32, DirectJsonAgent>,
+    /// The governing workflow's `stateSchema`, per SetState step, keyed like
+    /// `scoped_steps`.
+    state_schemas: BTreeMap<(String, String), Rc<StateSchema>>,
+    /// Local state of every invocation that keeps it (an embedded child, a
+    /// published workflow-agent, a non-durable workflow), keyed by
+    /// [`local_state_scope`]. Rebuilt on replay from checkpoints.
+    local_states: RefCell<BTreeMap<String, Map<String, Value>>>,
     debug_start_ms: RefCell<BTreeMap<String, i64>>,
     /// Lazily-populated cache of compiled conditions, keyed by a stable string
     /// (`c{id}` Conditional/edge, `w{id}` While, `f{id}` Filter). A condition is
@@ -395,7 +402,12 @@ impl DirectJsonManifest {
         let manifest: ManifestWire = serde_json::from_slice(bytes)
             .map_err(|err| format!("failed to parse direct manifest: {err}"))?;
         let mut collections = DirectJsonManifestCollections::default();
-        collect_graph_manifest(&manifest.graph, &serde_json::json!([]), &mut collections)?;
+        collect_graph_manifest(
+            &manifest.graph,
+            &serde_json::json!([]),
+            &Rc::new(manifest.graph.state_schema.clone().unwrap_or_default()),
+            &mut collections,
+        )?;
         for child in &manifest.child_workflows {
             if collections
                 .child_workflows
@@ -418,6 +430,7 @@ impl DirectJsonManifest {
             collect_graph_manifest(
                 &child.graph,
                 &serde_json::json!([["embedWorkflow", child.step_id]]),
+                &Rc::new(child.graph.state_schema.clone().unwrap_or_default()),
                 &mut collections,
             )?;
         }
@@ -436,6 +449,8 @@ impl DirectJsonManifest {
             logs: collections.logs,
             errors: collections.errors,
             agents: collections.agents,
+            state_schemas: collections.state_schemas,
+            local_states: RefCell::new(BTreeMap::new()),
             debug_start_ms: RefCell::new(BTreeMap::new()),
             compiled_conditions: RefCell::new(BTreeMap::new()),
             compiled_mappings: RefCell::new(BTreeMap::new()),
@@ -776,7 +791,18 @@ impl DirectJsonManifest {
             .splits
             .get(&split_id)
             .ok_or_else(|| format!("unknown direct Split id {split_id}"))?;
-        let result = split_result(split, &source, results)?;
+        let mut result = split_result(split, &source, results)?;
+        // Replay takes a durable Split's result from its checkpoint without
+        // running the body again, so the local state its steps wrote rides
+        // along and is restored with the result.
+        if let Some(state) = self.local_states.borrow().get(&local_state_scope(&source))
+            && let Value::Object(result) = &mut result
+        {
+            result.insert(
+                SPLIT_LOCAL_STATE_KEY.to_string(),
+                Value::Object(state.clone()),
+            );
+        }
         serde_json::to_vec(&result)
             .map_err(|err| format!("failed to serialize Split step result: {err}"))
     }
@@ -790,8 +816,16 @@ impl DirectJsonManifest {
     ) -> Result<Vec<u8>, String> {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse Split output source: {err}"))?;
-        let step_result: Value = serde_json::from_slice(step_result)
+        let mut step_result: Value = serde_json::from_slice(step_result)
             .map_err(|err| format!("failed to parse Split step result: {err}"))?;
+        if let Some(Value::Object(state)) = step_result
+            .as_object_mut()
+            .and_then(|result| result.remove(SPLIT_LOCAL_STATE_KEY))
+        {
+            self.local_states
+                .borrow_mut()
+                .insert(local_state_scope(&source), state);
+        }
         let split = self
             .splits
             .get(&split_id)
@@ -1283,6 +1317,12 @@ impl DirectJsonManifest {
                 apply_input_mapping(&mapping.value, &source)?
             }
             "EmbedWorkflow" => source.get("data").cloned().unwrap_or(Value::Null),
+            "SetState" => step
+                .body
+                .get("values")
+                .map(|values| apply_input_mapping(values, &source))
+                .transpose()?
+                .unwrap_or_else(|| Value::Object(Map::new())),
             _ => Value::Null,
         };
 
@@ -3567,6 +3607,28 @@ impl DirectJsonManifest {
                     None,
                 ))
             }
+            "SetState" => {
+                // Tolerate unresolvable values (see the Agent arm): the start
+                // must emit so a resolution failure is attributed to the step.
+                let values = step
+                    .body
+                    .get("values")
+                    .and_then(Value::as_object)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .map(|(field, mapping)| {
+                                let value = apply_mapping_value(mapping, source)
+                                    .map(materialize)
+                                    .unwrap_or(Value::Null);
+                                (field.clone(), value)
+                            })
+                            .collect::<Map<String, Value>>()
+                    })
+                    .unwrap_or_default();
+                Ok((Value::Object(values), None))
+            }
+            "GetState" => Ok((Value::Object(Map::new()), None)),
             "Error" => Ok((Value::Null, None)),
             "Log" => {
                 let log = self
@@ -3722,6 +3784,12 @@ impl DirectJsonManifest {
                 .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
                 .cloned()
                 .ok_or_else(|| format!("missing direct WaitForInstances output for '{}'", step.id)),
+            "SetState" | "GetState" => source
+                .pointer(&format!("/steps/{}", escape_json_pointer_token(&step.id)))
+                .cloned()
+                .ok_or_else(|| {
+                    format!("missing direct {} output for '{}'", step.step_type, step.id)
+                }),
             "Error" => {
                 let error = self
                     .error_by_step(step)
@@ -3781,6 +3849,249 @@ impl DirectJsonManifest {
                 step.step_type
             ))
         }
+    }
+
+    fn state_step_scoped(&self, step_id: &str, source: &Value) -> Result<&DirectJsonStep, String> {
+        let step = self.step(step_id, source)?;
+        if matches!(step.step_type.as_str(), "SetState" | "GetState") {
+            Ok(step)
+        } else {
+            Err(format!(
+                "direct step '{step_id}' is {}, not SetState or GetState",
+                step.step_type
+            ))
+        }
+    }
+
+    /// A SetState step's values, resolved, checked against its workflow's
+    /// `stateSchema` and canonicalised. Errors are state error JSON.
+    fn resolve_state_patch(
+        &self,
+        step_id: &str,
+        source: &Value,
+    ) -> Result<Map<String, Value>, String> {
+        let step = self
+            .state_step_scoped(step_id, source)
+            .map_err(|err| state_refusal("invalid", err))?;
+        if step.step_type != "SetState" {
+            return Err(state_refusal(
+                "invalid",
+                format!("direct step '{step_id}' is not a SetState step"),
+            ));
+        }
+        let mut patch = Map::new();
+        if let Some(values) = step.body.get("values").and_then(Value::as_object) {
+            for (field, mapping) in values {
+                let value = apply_mapping_value(mapping, source)
+                    .map(materialize)
+                    .map_err(|err| {
+                        state_refusal(
+                            "invalid-value",
+                            format!(
+                                "SetState step '{step_id}': value of '{field}' could not be \
+                                 resolved: {err}"
+                            ),
+                        )
+                    })?;
+                patch.insert(field.clone(), value);
+            }
+        }
+        let schema = self
+            .state_schemas
+            .get(&(step.graph_scope.clone(), step.id.clone()))
+            .cloned()
+            .unwrap_or_default();
+        runtara_dsl::state::check_patch(&schema, &patch).map_err(|issue| {
+            state_refusal(
+                "invalid-value",
+                format!("SetState step '{step_id}': {issue}"),
+            )
+        })
+    }
+
+    /// The durable key of a SetState or GetState step:
+    /// `runtara:v2:[kind, workflow, namespace, loop-path, [step]]`, with kind
+    /// `state` / `state-read` for the outer run's published state and
+    /// `state-local` / `state-read-local` for local state.
+    pub fn state_key(&self, step_id: &str, source: &[u8], local: bool) -> Result<String, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse state-key source: {err}"))?;
+        let step = self.state_step_scoped(step_id, &source)?;
+        let kind = match (step.step_type.as_str(), local) {
+            ("SetState", false) => "state",
+            ("SetState", true) => "state-local",
+            (_, false) => "state-read",
+            (_, true) => "state-read-local",
+        };
+        durable_key_v2(&source, kind, serde_json::json!([step_id])).ok_or_else(|| {
+            format!(
+                "{} step '{step_id}' needs v2 durable keys; recompile the workflow",
+                step.step_type
+            )
+        })
+    }
+
+    /// A published SetState step's patch as JSON bytes.
+    pub fn state_patch(&self, step_id: &str, source: &[u8]) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| state_refusal("invalid", format!("bad state-patch source: {err}")))?;
+        let patch = self.resolve_state_patch(step_id, &source)?;
+        serde_json::to_vec(&Value::Object(patch))
+            .map_err(|err| state_refusal("invalid", format!("unserializable patch: {err}")))
+    }
+
+    /// A local SetState step: merge its patch into the invocation's local
+    /// state. Returns the record to checkpoint, `{patch, state}`.
+    pub fn state_local_set(&self, step_id: &str, source: &[u8]) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source).map_err(|err| {
+            state_refusal("invalid", format!("bad state-local-set source: {err}"))
+        })?;
+        let patch = self.resolve_state_patch(step_id, &source)?;
+        let scope = local_state_scope(&source);
+        let mut state = self
+            .local_states
+            .borrow()
+            .get(&scope)
+            .cloned()
+            .unwrap_or_default();
+        for (field, value) in &patch {
+            if value.is_null() {
+                state.remove(field);
+            } else {
+                state.insert(field.clone(), value.clone());
+            }
+        }
+        let size = serde_json::to_vec(&state).map_or(usize::MAX, |bytes| bytes.len());
+        if size > MAX_LOCAL_STATE_BYTES {
+            return Err(state_refusal(
+                "too-large",
+                format!("state exceeds the {MAX_LOCAL_STATE_BYTES}-byte limit"),
+            ));
+        }
+        let record = serde_json::json!({ "patch": patch, "state": state });
+        self.local_states.borrow_mut().insert(scope, state);
+        serde_json::to_vec(&record)
+            .map_err(|err| state_refusal("invalid", format!("unserializable state: {err}")))
+    }
+
+    /// A local GetState step: the invocation's local state.
+    pub fn state_local_get(&self, step_id: &str, source: &[u8]) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse state-local-get source: {err}"))?;
+        self.state_step_scoped(step_id, &source)?;
+        let state = self
+            .local_states
+            .borrow()
+            .get(&local_state_scope(&source))
+            .cloned()
+            .unwrap_or_default();
+        serde_json::to_vec(&Value::Object(state))
+            .map_err(|err| format!("failed to serialize local state: {err}"))
+    }
+
+    /// Make a local SetState record, or a local GetState read, the
+    /// invocation's local state (on replay, from its checkpoint), and return
+    /// the step's output value: the patch, or the state.
+    pub fn state_local_restore(
+        &self,
+        step_id: &str,
+        value: &[u8],
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse state-local-restore source: {err}"))?;
+        let step = self.state_step_scoped(step_id, &source)?;
+        let value: Value = serde_json::from_slice(value)
+            .map_err(|err| format!("failed to parse local state record: {err}"))?;
+        let (state, output) = if step.step_type == "SetState" {
+            let state = value.get("state").cloned().unwrap_or_default();
+            let patch = value.get("patch").cloned().unwrap_or_default();
+            (state, patch)
+        } else {
+            (value.clone(), value)
+        };
+        let Value::Object(state) = state else {
+            return Err(format!(
+                "{} step '{step_id}': local state is not an object",
+                step.step_type
+            ));
+        };
+        self.local_states
+            .borrow_mut()
+            .insert(local_state_scope(&source), state);
+        serde_json::to_vec(&output)
+            .map_err(|err| format!("failed to serialize state output: {err}"))
+    }
+
+    /// Store a SetState or GetState step's output value (empty bytes are
+    /// `{}`) as its `outputs`.
+    pub fn state_output(
+        &self,
+        step_id: &str,
+        value: &[u8],
+        source: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse state-output source: {err}"))?;
+        let step = self.state_step_scoped(step_id, &source)?;
+        let value = if value.is_empty() {
+            Value::Object(Map::new())
+        } else {
+            serde_json::from_slice(value)
+                .map_err(|err| format!("failed to parse state output: {err}"))?
+        };
+        let steps = insert_step_output(
+            &source,
+            &step.id,
+            step.name.as_deref(),
+            &step.step_type,
+            value,
+            None,
+        );
+        serde_json::to_vec(&Value::Object(steps))
+            .map_err(|err| format!("failed to serialize state steps context: {err}"))
+    }
+
+    /// A failed state call as the step's structured error: `STATE_<CODE>`,
+    /// transient only for `unavailable`.
+    pub fn state_error(&self, step_id: &str, error: &[u8]) -> Result<Vec<u8>, String> {
+        let step_type = self
+            .scoped_steps
+            .values()
+            .find(|step| {
+                step.id == step_id && matches!(step.step_type.as_str(), "SetState" | "GetState")
+            })
+            .map(|step| step.step_type.clone())
+            .ok_or_else(|| format!("unknown direct SetState or GetState step '{step_id}'"))?;
+        let parsed = serde_json::from_slice::<Value>(error).ok();
+        let code = parsed
+            .as_ref()
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)
+            .filter(|code| {
+                !code.is_empty()
+                    && code
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
+            })
+            .unwrap_or("failed")
+            .to_string();
+        let message = parsed
+            .as_ref()
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| String::from_utf8_lossy(error).into_owned());
+        let transient = code == "unavailable";
+        serde_json::to_vec(&serde_json::json!({
+            "code": format!("STATE_{}", code.to_ascii_uppercase().replace('-', "_")),
+            "message": format!("{step_type} step '{step_id}': {message}"),
+            "category": if transient { "transient" } else { "permanent" },
+            "severity": "error",
+            "retryable": transient,
+            "attributes": { "state_error": code },
+        }))
+        .map_err(|err| format!("failed to serialize state error: {err}"))
     }
 
     fn wait_instances_step_scoped(
@@ -4171,6 +4482,25 @@ fn durable_key_v2(source: &Value, kind: &str, parts: Value) -> Option<String> {
     })
 }
 
+/// Where a checkpointed Split result carries the invocation's local state.
+const SPLIT_LOCAL_STATE_KEY: &str = "__runtaraLocalState";
+
+/// Largest local state an invocation keeps (bytes of compact JSON), like the
+/// host's cap on published state.
+const MAX_LOCAL_STATE_BYTES: usize = 64 * 1024;
+
+/// The local state an invocation's steps share: its workflow and namespace
+/// frames, the same across its own loop iterations and different per
+/// invocation (call site and enclosing iteration of the caller).
+fn local_state_scope(source: &Value) -> String {
+    serde_json::json!([durable_workflow(source), durable_namespace(source)]).to_string()
+}
+
+/// A state error JSON, like the host's.
+fn state_refusal(code: &str, message: String) -> String {
+    serde_json::json!({ "code": code, "message": message }).to_string()
+}
+
 fn child_scope_v2(source: &Value, kind: &str, parts: Value) -> Option<String> {
     durable_keys_v2(source).then(|| {
         let mut frames = durable_namespace(source);
@@ -4350,11 +4680,18 @@ struct DirectJsonManifestCollections {
     logs: BTreeMap<u32, DirectJsonLog>,
     errors: BTreeMap<u32, DirectJsonError>,
     agents: BTreeMap<u32, DirectJsonAgent>,
+    state_schemas: BTreeMap<(String, String), Rc<StateSchema>>,
 }
 
+/// A workflow's `stateSchema`.
+type StateSchema = HashMap<String, runtara_dsl::SchemaField>;
+
+/// `state_schema` is the governing workflow's: a Split, While or onWait body
+/// inherits it.
 fn collect_graph_manifest(
     graph: &GraphWire,
     path: &Value,
+    state_schema: &Rc<StateSchema>,
     collections: &mut DirectJsonManifestCollections,
 ) -> Result<(), String> {
     let mut bindings_by_step: BTreeMap<String, BTreeMap<String, u32>> = BTreeMap::new();
@@ -4447,6 +4784,12 @@ fn collect_graph_manifest(
                 "duplicate direct step '{}' in graph {}",
                 step.id, path
             ));
+        }
+        if step.step_type == "SetState" {
+            collections.state_schemas.insert(
+                (step.graph_scope.clone(), step.id.clone()),
+                Rc::clone(state_schema),
+            );
         }
         collections.steps.entry(step.id.clone()).or_insert(step);
     }
@@ -4635,7 +4978,12 @@ fn collect_graph_manifest(
         for nested in &step.nested_graphs {
             let mut nested_path = path.as_array().cloned().unwrap_or_default();
             nested_path.push(serde_json::json!([nested.role, step.id]));
-            collect_graph_manifest(&nested.graph, &Value::Array(nested_path), collections)?;
+            collect_graph_manifest(
+                &nested.graph,
+                &Value::Array(nested_path),
+                state_schema,
+                collections,
+            )?;
         }
     }
     Ok(())
@@ -7638,6 +7986,9 @@ struct ChildWorkflowWire {
 struct GraphWire {
     #[serde(default)]
     variables: Value,
+    /// A workflow's `stateSchema`; only on a workflow's own graph.
+    #[serde(default)]
+    state_schema: Option<StateSchema>,
     #[serde(default)]
     input_schema: Value,
     #[serde(default)]
@@ -10206,6 +10557,48 @@ mod tests {
         assert_eq!(steps["split"], fresh["split"]);
         assert_eq!(steps["split"]["hasFailures"], json!(false));
         assert_eq!(steps["split"]["stats"]["error"], json!(0));
+    }
+
+    /// A replay takes a durable Split's result from its checkpoint without
+    /// running the body, so the local state the body wrote rides in the
+    /// cached result and is restored with it, never reaching the steps
+    /// context.
+    #[test]
+    fn a_cached_split_result_carries_the_local_state() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" }
+        })))
+        .expect("manifest");
+        let source = build_source(br#"{"items":[1]}"#, b"{}", b"{}").expect("source");
+        let scope = local_state_scope(&serde_json::from_slice(&source).unwrap());
+        let results = manifest.split_initial_results(0).expect("accumulator");
+        let results = manifest
+            .split_append_output(0, &results, br#"{"id":1}"#)
+            .expect("append");
+
+        // Without local state the cached result is unchanged.
+        let plain = manifest.split_result(0, &source, &results).expect("result");
+        assert!(!String::from_utf8_lossy(&plain).contains(SPLIT_LOCAL_STATE_KEY));
+
+        manifest.local_states.borrow_mut().insert(
+            scope.clone(),
+            json!({"count": 3}).as_object().unwrap().clone(),
+        );
+        let cached = manifest.split_result(0, &source, &results).expect("result");
+
+        let replay = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.items" }
+        })))
+        .expect("manifest");
+        let steps = replay
+            .split_output_from_result(0, &source, &cached)
+            .expect("steps");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+        assert!(steps["split"].get(SPLIT_LOCAL_STATE_KEY).is_none());
+        assert_eq!(
+            replay.local_states.borrow().get(&scope),
+            Some(json!({"count": 3}).as_object().unwrap())
+        );
     }
 
     #[test]
@@ -14421,6 +14814,165 @@ mod invoke_error_and_delay_key_tests {
         let fields = invoke_error_fields(br#"{"code":"X"}"#);
         assert_eq!(fields.code, "X");
         assert_eq!(fields.message, r#"{"code":"X"}"#);
+    }
+
+    /// A root graph `set` (SetState) + `get` (GetState) with a stateSchema,
+    /// and the same steps in an embedded child with its own schema.
+    fn state_manifest() -> DirectJsonManifest {
+        let schema = json!({
+            "stage": {"type": "string", "enum": ["received", "approval"]},
+            "count": {"type": "integer"},
+            "dueAt": {"type": "string", "format": "datetime"}
+        });
+        let steps = json!([
+            {"id": "set", "stepType": "SetState", "body": {"values": {
+                "stage": {"valueType": "reference", "value": "data.stage"},
+                "count": {"valueType": "reference", "value": "data.count"},
+                "dueAt": {"valueType": "immediate", "value": "2026-09-29T10:00:00+02:00"}
+            }}},
+            {"id": "get", "stepType": "GetState", "body": {}}
+        ]);
+        DirectJsonManifest::parse(
+            &serde_json::to_vec(&json!({
+                "graph": {"steps": steps, "stateSchema": schema},
+                "childWorkflows": [{
+                    "stepId": "embed",
+                    "workflowId": "child",
+                    "graph": {"steps": steps, "stateSchema": {"count": {"type": "integer"}}}
+                }]
+            }))
+            .unwrap(),
+        )
+        .expect("manifest")
+    }
+
+    fn state_source(data: Value, prefix: Option<&str>) -> Vec<u8> {
+        let mut variables =
+            json!({"_durable_key_version": 2, "_workflow_id": "wf", "_loop_path": []});
+        if let Some(prefix) = prefix {
+            variables["_cache_key_prefix"] = json!(prefix);
+            variables["_manifest_graph_path"] = json!([["embedWorkflow", "embed"]]);
+        }
+        serde_json::to_vec(&json!({"data": data, "variables": variables, "steps": {}})).unwrap()
+    }
+
+    #[test]
+    fn state_keys_name_published_and_local_kinds() {
+        let manifest = state_manifest();
+        let source = state_source(json!({}), None);
+        assert_eq!(
+            manifest.state_key("set", &source, false).unwrap(),
+            r#"runtara:v2:["state","wf",[],[],["set"]]"#
+        );
+        assert_eq!(
+            manifest.state_key("get", &source, false).unwrap(),
+            r#"runtara:v2:["state-read","wf",[],[],["get"]]"#
+        );
+        assert!(
+            manifest
+                .state_key("set", &source, true)
+                .unwrap()
+                .starts_with(r#"runtara:v2:["state-local""#)
+        );
+        assert!(
+            manifest
+                .state_key("get", &source, true)
+                .unwrap()
+                .starts_with(r#"runtara:v2:["state-read-local""#)
+        );
+    }
+
+    #[test]
+    fn a_published_patch_is_checked_and_canonical() {
+        let manifest = state_manifest();
+        let patch = manifest
+            .state_patch(
+                "set",
+                &state_source(json!({"stage": "approval", "count": 2}), None),
+            )
+            .unwrap();
+        let patch: Value = serde_json::from_slice(&patch).unwrap();
+        assert_eq!(
+            patch,
+            json!({"stage": "approval", "count": 2, "dueAt": "2026-09-29T08:00:00.000Z"})
+        );
+
+        let error = manifest
+            .state_patch(
+                "set",
+                &state_source(json!({"stage": "shipped", "count": 2}), None),
+            )
+            .unwrap_err();
+        let error: Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["code"], json!("invalid-value"));
+        let envelope: Value = serde_json::from_slice(
+            &manifest
+                .state_error("set", error.to_string().as_bytes())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(envelope["code"], json!("STATE_INVALID_VALUE"));
+        assert_eq!(envelope["retryable"], json!(false));
+    }
+
+    #[test]
+    fn local_state_merges_restores_and_is_scoped_per_invocation() {
+        let manifest = state_manifest();
+        let root = state_source(json!({"stage": "received", "count": 1}), None);
+        let record = manifest.state_local_set("set", &root).unwrap();
+        let record: Value = serde_json::from_slice(&record).unwrap();
+        assert_eq!(record["state"]["count"], json!(1));
+        let read: Value =
+            serde_json::from_slice(&manifest.state_local_get("get", &root).unwrap()).unwrap();
+        assert_eq!(read, record["state"]);
+
+        // Another invocation's state is independent.
+        let child = state_source(
+            json!({"count": 5}),
+            Some(r#"runtara:scope:v2:[["child","wf",[],["embed"]]]"#),
+        );
+        let child_read: Value =
+            serde_json::from_slice(&manifest.state_local_get("get", &child).unwrap()).unwrap();
+        assert_eq!(child_read, json!({}));
+
+        // The child validates against its own schema: `stage` is not declared.
+        let error = manifest
+            .state_local_set(
+                "set",
+                &state_source(
+                    json!({"stage": "received", "count": 5}),
+                    Some(r#"runtara:scope:v2:[["child","wf",[],["embed"]]]"#),
+                ),
+            )
+            .unwrap_err();
+        assert!(error.contains("invalid-value"), "{error}");
+
+        // A replay restores the checkpointed state and outputs the patch.
+        let fresh = state_manifest();
+        let output = fresh
+            .state_local_restore("set", record.to_string().as_bytes(), &root)
+            .unwrap();
+        let output: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(output, record["patch"]);
+        let restored: Value =
+            serde_json::from_slice(&fresh.state_local_get("get", &root).unwrap()).unwrap();
+        assert_eq!(restored, record["state"]);
+    }
+
+    #[test]
+    fn state_output_stores_the_value_as_outputs() {
+        let manifest = state_manifest();
+        let source = state_source(json!({}), None);
+        let steps: Value = serde_json::from_slice(
+            &manifest
+                .state_output("get", br#"{"count":3}"#, &source)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(steps["get"]["outputs"], json!({"count": 3}));
+        let steps: Value =
+            serde_json::from_slice(&manifest.state_output("set", b"", &source).unwrap()).unwrap();
+        assert_eq!(steps["set"]["outputs"], json!({}));
     }
 
     fn wait_instances_manifest(body: Value) -> DirectJsonManifest {

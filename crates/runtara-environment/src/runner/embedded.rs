@@ -160,6 +160,7 @@ impl WorkflowStartConfirmation for GateWorkflowStartConfirmation {
     }
 }
 
+mod run_state;
 mod scoped;
 pub use scoped::ScopedAgentRunnerConfig;
 
@@ -656,6 +657,13 @@ impl EmbeddedWasmRunner {
         spawn_epoch_ticker(Arc::clone(&engine));
         let executor = WorkflowExecutor::new(engine)
             .map_err(|e| RunnerError::Other(format!("build workflow executor: {e:#}")))?;
+        // Every run's queryable state lives in the same persistence as its
+        // checkpoints.
+        executor
+            .set_run_state_host(Arc::new(run_state::PersistenceRunState(Arc::clone(
+                &persistence,
+            ))))
+            .map_err(|e| RunnerError::Other(e.to_string()))?;
         let handler_state = Arc::new(runtara_core::instance_handlers::InstanceHandlerState::new(
             Arc::clone(&persistence),
         ));

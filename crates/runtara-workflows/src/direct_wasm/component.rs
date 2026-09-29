@@ -115,6 +115,8 @@ pub struct DirectComponentArtifacts {
     /// Whether a WaitForInstances step imports
     /// `runtara:workflow/waits`.
     pub wait_instances: bool,
+    /// Whether a state step publishes through `runtara:workflow/state`.
+    pub run_state: bool,
 }
 
 impl DirectComponentArtifacts {
@@ -127,6 +129,18 @@ impl DirectComponentArtifacts {
             self.world_wit = self.world_wit.replacen(&stdlib, &import, 1);
         }
         self.wait_instances |= wait_instances;
+        self
+    }
+
+    /// Import `runtara:workflow/state` in the world when a SetState or
+    /// GetState step publishes state.
+    pub(super) fn with_run_state(mut self, run_state: bool) -> Self {
+        if run_state && !self.run_state {
+            let stdlib = format!("    import {STDLIB_JSON_INTERFACE};\n");
+            let import = format!("{stdlib}    import {};\n", runtara_wit::workflow::STATE);
+            self.world_wit = self.world_wit.replacen(&stdlib, &import, 1);
+        }
+        self.run_state |= run_state;
         self
     }
 }
@@ -249,6 +263,7 @@ pub(super) fn emit_direct_component_artifacts_scoped(
         suspending_agents: suspending_agents.clone(),
         operation_scope,
         wait_instances: false,
+        run_state: false,
     }
 }
 

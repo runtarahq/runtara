@@ -349,6 +349,18 @@ impl RuntimeClient {
             .map_err(|e| RuntimeError::SdkError(e.to_string()))
     }
 
+    /// A run's published state, `None` when it has none.
+    pub async fn get_run_state(
+        &self,
+        tenant: &str,
+        instance_id: &str,
+    ) -> Result<Option<runtara_core::persistence::run_state::RunStateRecord>, RuntimeError> {
+        self.client
+            .get_run_state(tenant, instance_id)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
     /// A never-launched child's published outcome, if any.
     pub async fn get_external_outcome(
         &self,

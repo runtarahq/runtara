@@ -24,6 +24,7 @@ import { GroupByStepField } from './GroupByStepField';
 import { AiAgentStepField } from './AiAgentStepField';
 import { WaitForSignalStepField } from './WaitForSignalStepField';
 import { WaitForInstancesStepField } from './WaitForInstancesStepField';
+import { SetStateStepField } from './SetStateStepField';
 import { LogStepField } from './LogStepField';
 import { WhileStepField } from './WhileStepField';
 import { DelayStepField } from './DelayStepField';
@@ -528,6 +529,20 @@ function InputMappingWrapper(config: Record<string, unknown>) {
   if (stepType === 'WaitForInstances') {
     return (
       <WaitForInstancesStepField {...config} name={config.name as string} />
+    );
+  }
+
+  if (stepType === 'SetState') {
+    return <SetStateStepField {...config} name={config.name as string} />;
+  }
+
+  if (stepType === 'GetState') {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Reads the run&apos;s state as of this point:{' '}
+        <code>steps.&lt;id&gt;.outputs.&lt;field&gt;</code>. The read is
+        checkpointed, so a replay sees what the first execution read.
+      </p>
     );
   }
 

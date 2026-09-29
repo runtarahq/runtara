@@ -227,3 +227,31 @@ interface waits {
     /// Idempotent.
     release: func(key: string);
 }
+
+// The run's published state, declared by the workflow's `stateSchema`: one
+// JSON object per run, merged by its SetState steps and read by its GetState
+// steps, and read by other workflows (control `get-state` and `query`)
+// without waking the run.
+//
+// Only the outer run publishes. A workflow running inside the run (an
+// embedded child or a published workflow-agent), and a non-durable workflow,
+// keeps its state local in the guest and never calls this interface; the host
+// refuses a key with namespace frames.
+//
+// `key` is the step's canonical v2 checkpoint key: `state` for SetState,
+// `state-read` for GetState. The host keys a write by `sha256(key)` together
+// with the tenant and the run, and applies each key once, so a replayed step
+// changes nothing. `patch` is a JSON object merged shallowly (a `null` field
+// is cleared); the guest has already checked and canonicalised it against
+// `stateSchema`.
+//
+// Errors are JSON `{code, message}` with code `invalid`, `too-large`,
+// `not-running` or `unavailable`.
+interface state {
+    /// Merge `patch` into the run's state, once per `key`.
+    set: func(key: string, patch: list<u8>) -> result<_, string>;
+
+    /// The run's current state: a JSON object, `{}` before any write. `key`
+    /// is the reading GetState step's key.
+    get: func(key: string) -> result<list<u8>, string>;
+}

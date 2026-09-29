@@ -9,8 +9,10 @@
 //! `runtara:control/api` is real and the caller's tenant, instance and
 //! operation come from the host. Everywhere else `api` is linked `denied`.
 //!
-//! Reads: `get`, `query` and `list-pending-signals` cover the caller's
-//! tenant; identity and caller-relative filters need a calling instance.
+//! Reads: `get`, `get-state`, `query` and `list-pending-signals` cover the
+//! caller's tenant; identity and caller-relative filters need a calling
+//! instance. `get-state` reads a run's published state and `query` filters
+//! by it, without waking the run.
 //! Mutations: `start` durably admits a child of the calling run and returns
 //! once it is accepted, without waiting for it to run; `send-signal`
 //! answers an open `WaitForSignal` request of a child, an ancestor, or a
@@ -182,6 +184,53 @@ pub async fn get(input: GetInput) -> Result<GetOutput, String> {
     host::get(input.instance_id).await
 }
 
+#[derive(Debug, Serialize, Deserialize, CapabilityOutput, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[capability_output(display_name = "Get Run State Output")]
+pub struct GetStateOutput {
+    #[field(
+        display_name = "Run",
+        description = "The run's identity, status and workflow version"
+    )]
+    pub instance: RunSummary,
+    #[field(
+        display_name = "State",
+        description = "The run's published state, as declared by its workflow's stateSchema; absent when it published none"
+    )]
+    pub state: Option<Value>,
+    #[field(
+        display_name = "State Updated At",
+        description = "When the state last changed, milliseconds since the Unix epoch"
+    )]
+    pub state_updated_at_ms: Option<u64>,
+}
+
+#[capability(
+    module = "control",
+    id = "get-state",
+    display_name = "Get Run State",
+    description = "Read one run's published state (what its SetState steps wrote), without waking the run.",
+    side_effects = false,
+    idempotent = true,
+    errors(
+        permanent("CONTROL_NOT_FOUND", "No such run in this tenant"),
+        permanent("CONTROL_INVALID", "The instance id is malformed"),
+        permanent("CONTROL_DENIED", "Control is not available to this call"),
+        transient(
+            "CONTROL_UNAVAILABLE",
+            "The control service is temporarily unavailable"
+        ),
+        permanent("CONTROL_UNSUPPORTED", "The operation is not available in this build"),
+        permanent("CONTROL_TIMEOUT", "The control call ran past its deadline"),
+    )
+)]
+pub async fn get_state(input: GetInput) -> Result<GetStateOutput, String> {
+    if input.instance_id.trim().is_empty() {
+        return Err(invalid("instanceId must not be empty".into()));
+    }
+    host::get_state(input.instance_id).await
+}
+
 #[derive(Debug, Deserialize, CapabilityInput)]
 #[serde(rename_all = "camelCase")]
 #[capability_input(display_name = "Query Runs Input")]
@@ -228,6 +277,13 @@ pub struct QueryInput {
     #[field(display_name = "Finished Before", description = "Epoch ms, exclusive")]
     #[serde(default)]
     pub finished_before_ms: Option<u64>,
+    #[field(
+        display_name = "State Filters",
+        description = "Only runs whose published state matches every filter: [{field, op, value}] with op eq, ne, in, lt, lte, gt, gte or exists. A run without the field does not match; date-times compare in UTC.",
+        example = r#"[{"field": "stage", "op": "eq", "value": "approval"}]"#
+    )]
+    #[serde(default)]
+    pub state: Option<Value>,
     #[field(
         display_name = "Sort By",
         description = "created_at or finished_at",
@@ -1010,6 +1066,15 @@ mod host {
         })
     }
 
+    pub(super) async fn get_state(instance_id: String) -> Result<super::GetStateOutput, String> {
+        let read = api::get_state(instance_id).await.map_err(control_error)?;
+        Ok(super::GetStateOutput {
+            instance: summary(read.instance),
+            state: json(read.state),
+            state_updated_at_ms: read.state_updated_at_ms,
+        })
+    }
+
     pub(super) async fn query(
         input: super::QueryInput,
         args: super::QueryArgs,
@@ -1028,6 +1093,9 @@ mod host {
             created_before_ms: input.created_before_ms,
             finished_after_ms: input.finished_after_ms,
             finished_before_ms: input.finished_before_ms,
+            state: input
+                .state
+                .map(|filters| serde_json::to_vec(&filters).expect("JSON values serialize")),
             sort_by: if args.by_finished {
                 types::SortField::FinishedAt
             } else {
@@ -1189,6 +1257,10 @@ mod host {
         Err(unavailable())
     }
 
+    pub(super) async fn get_state(_instance_id: String) -> Result<super::GetStateOutput, String> {
+        Err(unavailable())
+    }
+
     pub(super) async fn query(
         _input: super::QueryInput,
         _args: super::QueryArgs,
@@ -1247,6 +1319,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
         ("StartOutput", &__OUTPUT_META_StartOutput),
         ("SendSignalOutput", &__OUTPUT_META_SendSignalOutput),
         ("CommandOutput", &__OUTPUT_META_CommandOutput),
+        ("GetStateOutput", &__OUTPUT_META_GetStateOutput),
     ]);
     AgentInfo {
         id: runtara_dsl::agent_meta::CONTROL_AGENT_ID.into(),
@@ -1304,6 +1377,12 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
                 Some(&__OUTPUT_META_CommandOutput),
                 &output_types,
             ),
+            capability_to_api_with_types(
+                &__CAPABILITY_META_GET_STATE,
+                Some(&__INPUT_META_GetInput),
+                Some(&__OUTPUT_META_GetStateOutput),
+                &output_types,
+            ),
         ],
     }
 }
@@ -1319,7 +1398,8 @@ runtara_agent_macro::agent_component!(
         send_signal,
         cancel,
         pause,
-        resume
+        resume,
+        get_state
     ],
 );
 
@@ -1342,7 +1422,8 @@ mod tests {
                 "send-signal",
                 "cancel",
                 "pause",
-                "resume"
+                "resume",
+                "get-state"
             ]
         );
         assert!(

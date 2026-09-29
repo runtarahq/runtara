@@ -96,6 +96,10 @@ pub mod workflow {
     pub const WAITS: &str = concat!("runtara:workflow/waits@", v!());
     /// Any version of the waits interface.
     pub const WAITS_PREFIX: &str = "runtara:workflow/waits@";
+    /// The run's queryable state (SetState / GetState).
+    pub const STATE: &str = concat!("runtara:workflow/state@", v!());
+    /// Any version of the state interface.
+    pub const STATE_PREFIX: &str = "runtara:workflow/state@";
     pub const WIT: &str = include_str!("../wit/workflow/runtara-workflow.wit");
 }
 

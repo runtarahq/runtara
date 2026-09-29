@@ -2752,6 +2752,10 @@ pub mod waits;
 /// fence, idempotent delete, cascade and isolation.
 pub mod continuations;
 
+/// Run state conformance: shallow merge, replay no-op, running and tenant
+/// fence, size cap, isolation, cascade and prune.
+pub mod run_state;
+
 /// Paired-record rule: one record per (correlation, scope), from the first
 /// start to the first end after it (S,S,E; S,E,S,E; E,S,E).
 pub mod paired;

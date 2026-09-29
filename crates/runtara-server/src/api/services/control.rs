@@ -40,7 +40,8 @@ use runtara_component_host::control_host::{
     CancelRequest, CommandResult, ControlAuthority, ControlError, ControlErrorCode, ControlHost,
     InstanceDetail, InstancePage, InstanceStatus, InstanceSummary, ParentFilter, PendingSignal,
     PendingSignalPage, PendingSignalsRequest, QueryRequest, SendSignalRequest, SendSignalResult,
-    SignalScope, SortField, SortOrder, StartRequest, StartResult, SuspensionReason, TerminalResult,
+    SignalScope, SortField, SortOrder, StartRequest, StartResult, StateRead, SuspensionReason,
+    TerminalResult,
 };
 use runtara_control_contract as contract;
 use runtara_environment::control_reads::ControlInstance;
@@ -996,11 +997,15 @@ impl NativeControl {
         let created_before = time("createdBeforeMs", request.created_before_ms)?;
         let finished_after = time("finishedAfterMs", request.finished_after_ms)?;
         let finished_before = time("finishedBeforeMs", request.finished_before_ms)?;
+        let state_filters = state_filters(request)?;
         let include_launched = request.statuses.is_empty() || !statuses.is_empty();
+        // Only a launched run has state: a state filter never matches a
+        // child still in admission or one that ended without launching.
         let include_admitted = (request.statuses.is_empty()
             || request.statuses.contains(&InstanceStatus::Queued))
             && finished_after.is_none()
-            && finished_before.is_none();
+            && finished_before.is_none()
+            && state_filters.is_empty();
         let requests: Vec<ControlChildRequest> = match (include_admitted, self.installed_engine()) {
             (true, Some(engine)) => engine
                 .admitted_children(tenant, parent)
@@ -1049,6 +1054,7 @@ impl NativeControl {
             finished_before,
             limit,
             offset: offset as i64,
+            state_filters,
             ..Default::default()
         };
         let runtime = self.runtime().await?;
@@ -1081,7 +1087,9 @@ impl NativeControl {
                 runtara_core::persistence::ExternalOutcomeKind::Cancelled,
             ),
         ] {
-            if request.statuses.is_empty() || request.statuses.contains(&status) {
+            if (request.statuses.is_empty() || request.statuses.contains(&status))
+                && options.state_filters.is_empty()
+            {
                 kinds.push(kind);
             }
         }
@@ -1257,6 +1265,17 @@ fn page_offset(token: Option<&str>) -> Result<u64, ControlError> {
             .ok()
             .filter(|offset| *offset <= i64::MAX as u64)
             .ok_or_else(|| invalid("pageToken is not one this service issued")),
+    }
+}
+
+/// The request's published-state filters, validated and canonical.
+fn state_filters(
+    request: &QueryRequest,
+) -> Result<Vec<runtara_environment::state_filter::StateFilter>, ControlError> {
+    match &request.state {
+        None => Ok(Vec::new()),
+        Some(json) => runtara_environment::state_filter::parse_state_filters(json)
+            .map_err(|error| invalid(format!("state: {error}"))),
     }
 }
 
@@ -1689,6 +1708,40 @@ impl ControlHost for NativeControl {
         }
     }
 
+    async fn get_state(
+        &self,
+        authority: &ControlAuthority,
+        instance_id: String,
+    ) -> Result<StateRead, ControlError> {
+        let tenant = self.tenant(authority)?;
+        check_id("instanceId", &instance_id)?;
+        let runtime = self.runtime().await?;
+        // The run's summary without its result; a run that never launched
+        // has none of its own, and no state.
+        let instance = match runtime
+            .control_instance(tenant, &instance_id, 0, 0)
+            .await
+            .map_err(|_| unavailable("the run could not be read"))?
+        {
+            Some(row) => summary(&row),
+            None => self.get(authority, instance_id.clone()).await?.instance,
+        };
+        let state = runtime
+            .get_run_state(tenant, &instance_id)
+            .await
+            .map_err(|_| unavailable("the run's state could not be read"))?;
+        Ok(StateRead {
+            instance,
+            state_updated_at_ms: state
+                .as_ref()
+                .map(|record| record.updated_at.timestamp_millis().max(0) as u64),
+            state: state.map(|record| {
+                serde_json::to_vec(&serde_json::Value::Object(record.state))
+                    .expect("a JSON object always serializes")
+            }),
+        })
+    }
+
     async fn query(
         &self,
         authority: &ControlAuthority,
@@ -1755,6 +1808,7 @@ impl ControlHost for NativeControl {
             created_before: time("createdBeforeMs", request.created_before_ms)?,
             finished_after: time("finishedAfterMs", request.finished_after_ms)?,
             finished_before: time("finishedBeforeMs", request.finished_before_ms)?,
+            state_filters: state_filters(&request)?,
             order_by: Some(order_by.into()),
             limit,
             offset: offset as i64,

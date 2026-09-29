@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::api::dto::executions::{
-    ExecutionFilters, ListAllExecutionsQuery, ListAllExecutionsResponse,
+    ExecutionFilters, ListAllExecutionsQuery, ListAllExecutionsResponse, QueryExecutionsRequest,
 };
 use crate::api::handlers::common::execution_error_response;
 use crate::workers::execution_engine::ExecutionEngine;
@@ -62,6 +62,62 @@ pub async fn list_all_executions_handler(
         }
         Err(e) => {
             tracing::error!("Failed to list executions: {:?}", e);
+            execution_error_response(&e)
+        }
+    }
+}
+
+/// List executions filtered by published state (plus the GET listing's
+/// filters). Returns executions, never their state.
+#[utoipa::path(
+    post,
+    path = "/api/runtime/executions/query",
+    request_body = QueryExecutionsRequest,
+    responses(
+        (status = 200, description = "Matching executions", body = ListAllExecutionsResponse),
+        (status = 400, description = "Invalid filters", body = Value),
+        (status = 401, description = "Missing Authorization header", body = Value),
+        (status = 500, description = "Internal server error", body = Value)
+    ),
+    tag = "executions-controller"
+)]
+pub async fn query_executions_handler(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(engine): State<Arc<ExecutionEngine>>,
+    Json(request): Json<QueryExecutionsRequest>,
+) -> (StatusCode, Json<Value>) {
+    let listing = request.listing();
+    let filters = parse_filters(&listing).and_then(|mut filters| {
+        let state = serde_json::to_vec(&request.state).map_err(|e| e.to_string())?;
+        filters.state_filters = runtara_environment::state_filter::parse_state_filters(&state)
+            .map_err(|e| format!("state: {e}"))?;
+        Ok(filters)
+    });
+    let filters = match filters {
+        Ok(filters) => filters,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "success": false, "error": e })),
+            );
+        }
+    };
+    match engine
+        .list_all_executions(&tenant_id, listing.page, listing.size, filters)
+        .await
+    {
+        Ok(page) => (
+            StatusCode::OK,
+            Json(
+                serde_json::to_value(ListAllExecutionsResponse {
+                    success: true,
+                    data: page,
+                })
+                .unwrap(),
+            ),
+        ),
+        Err(e) => {
+            tracing::error!("Failed to query executions: {:?}", e);
             execution_error_response(&e)
         }
     }
@@ -164,6 +220,7 @@ fn parse_filters(query: &ListAllExecutionsQuery) -> Result<ExecutionFilters, Str
         completed_to: query.completed_to,
         sort_by: sort_column.to_string(),
         sort_order: sort_order_sql.to_string(),
+        state_filters: Vec::new(),
     })
 }
 

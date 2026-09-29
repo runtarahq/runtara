@@ -94,6 +94,8 @@ export interface ExecutionGraphStepDto {
     | 'Delay'
     | 'WaitForSignal'
     | 'WaitForInstances'
+    | 'SetState'
+    | 'GetState'
     | 'AiAgent';
   inputMapping?: Record<string, string>;
   /** Configuration for Split steps (replaces inputMapping for Split) */

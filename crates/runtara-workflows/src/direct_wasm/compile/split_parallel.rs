@@ -310,6 +310,16 @@ fn collect_parallel_agent_components(
             next_plan,
             error_plan,
             ..
+        }
+        | P::SetState {
+            next_plan,
+            error_plan,
+            ..
+        }
+        | P::GetState {
+            next_plan,
+            error_plan,
+            ..
         } => {
             collect_parallel_agent_components(static_data, next_plan, out);
             if let Some(error_plan) = error_plan {

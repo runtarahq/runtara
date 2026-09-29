@@ -35,6 +35,10 @@ export const STEP_TYPES: Record<string, string> = {
   'Wait for Signal': NODE_TYPES.BasicNode, // Backend format (with space)
   WaitForInstances: NODE_TYPES.BasicNode,
   'Wait for Instances': NODE_TYPES.BasicNode, // Backend display name
+  SetState: NODE_TYPES.BasicNode,
+  'Set State': NODE_TYPES.BasicNode, // Backend display name
+  GetState: NODE_TYPES.BasicNode,
+  'Get State': NODE_TYPES.BasicNode, // Backend display name
   Delay: NODE_TYPES.BasicNode,
   Log: NODE_TYPES.BasicNode,
   Error: NODE_TYPES.BasicNode,

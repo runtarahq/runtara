@@ -18,10 +18,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   labels, formats and enums (DSL 3.4.0). It is stored with each version,
   returned by the workflow and version-schemas endpoints, editable in the
   workflow settings and through the MCP `get_state_schema`/`set_state_schema`
-  tools and the `set_state_schema` graph mutation. It is a declaration only;
-  it is not compiled and runs do not write state yet. Number fields accept
-  the `currency` format hint. W081 warns when a state field sets `required`,
+  tools and the `set_state_schema` graph mutation. Number fields accept the
+  `currency` format hint. W081 warns when a state field sets `required`,
   `default` or `visibleWhen`, which have no effect for state.
+- **Runs keep queryable state** (DSL 3.5.0). A `SetState` step merges values
+  into the run's state (shallow; `null` clears a field), each checked against
+  `stateSchema` (E134 without one, E135 for an undeclared field, E023/E024
+  for literal values, `STATE_INVALID_VALUE` at run time; date-times are
+  stored in UTC). A `GetState` step reads it; its output is the state object.
+  A write applies once per step and a read is checkpointed, so replays change
+  nothing and read-modify-write loops take the same path. Only the outer
+  durable run publishes its state: an embedded child, a published
+  workflow-agent and a non-durable workflow keep local state that readers
+  never see (W082, W083); a durable Split carries the local state its body
+  wrote in its cached result. Readers never wake the run: the control agent
+  gains `get-state` and a `state` filter on `query`
+  (`[{field, op, value}]`, op `eq`, `ne`, `in`, `lt`, `lte`, `gt`, `gte` or
+  `exists`), the single-run executions endpoint returns `state` and
+  `stateUpdatedAt`, and `POST /api/runtime/executions/query` (and MCP
+  `list_executions` with `state`) lists executions by state without
+  returning it. Compiled workflows import the new `runtara:workflow/state`
+  interface only when they publish state. **Upgrade note:** the first boot
+  migrates the runtime database (`043_instance_state`: `instance_state` and
+  `instance_state_writes`, deleted with their run; pruning a finished child
+  keeps its state).
 - **The `control` agent reads runs of the tenant from a workflow**, on every
   pricing tier and whatever the agent allowlist says. `get` returns one run's
   state with its output inlined up to 1 MiB and its error up to 64 KiB

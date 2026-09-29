@@ -15,7 +15,7 @@
 // including module.
 
 /// DSL version - bump when making breaking changes
-pub const DSL_VERSION: &str = "3.4.0";
+pub const DSL_VERSION: &str = "3.5.0";
 
 // ============================================================================
 // Root Types
@@ -125,9 +125,9 @@ pub struct ExecutionGraph {
 
     /// Schema declaring the typed state a run of this workflow exposes.
     /// Keys are state field names, values define the field type, label and
-    /// display format. State starts empty and is written by steps, so
-    /// `required`, `default` and `visibleWhen` have no effect here. This is a
-    /// declaration only: it is not compiled into the workflow.
+    /// display format. State starts empty and is written by `SetState`
+    /// steps, so `required`, `default` and `visibleWhen` have no effect here.
+    /// Only the root graph's declaration is used.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub state_schema: HashMap<String, SchemaField>,
 
@@ -381,6 +381,12 @@ pub enum Step {
 
     /// Park the run until direct child runs finish (durable)
     WaitForInstances(WaitForInstancesStep),
+
+    /// Merge values into the run's queryable state
+    SetState(SetStateStep),
+
+    /// Read the run's queryable state
+    GetState(GetStateStep),
 
     /// LLM-driven agent that selects and calls tools in a loop
     AiAgent(AiAgentStep),
@@ -1278,6 +1284,84 @@ impl WaitForInstancesMode {
             Self::Any => "any",
         }
     }
+}
+
+/// Merge values into the run's state, declared by the workflow's
+/// `stateSchema`.
+///
+/// The merge is shallow: each given field replaces its value, a field set to
+/// `null` is cleared and arrays are replaced; fields not given are kept. Every
+/// field must be declared in `stateSchema`, and each value must match its
+/// declaration. Other workflows read the state with the control agent
+/// (`get-state`, or `query` filtered by state) without waking the run.
+///
+/// A write applies once: a replayed step changes nothing. Only the outer run
+/// publishes state. When the workflow runs embedded in another or as a
+/// published workflow-agent, and in a non-durable workflow, its state is
+/// local: SetState and GetState work the same, but readers never see it. The
+/// step's output is the values it wrote, in canonical form.
+///
+/// Example:
+/// ```json
+/// {
+///   "stepType": "SetState",
+///   "id": "markApproved",
+///   "values": {
+///     "stage": { "valueType": "immediate", "value": "approved" },
+///     "decidedAt": { "valueType": "reference", "value": "steps.now.outputs" }
+///   }
+/// }
+/// ```
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", schemars(title = "SetStateStep"))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetStateStep {
+    /// Unique step identifier
+    pub id: String,
+
+    /// Human-readable step name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// The state fields to write, each declared in `stateSchema`. A `null`
+    /// value clears the field.
+    pub values: InputMapping,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
+}
+
+/// Read the run's state as of this point in the run.
+///
+/// The output is the state object, so its fields are
+/// `steps.<id>.outputs.<field>` (a field never written is absent). The read
+/// is checkpointed: a replay gets back what the first execution read, so a
+/// read-modify-write loop takes the same path. A workflow running embedded,
+/// as a published workflow-agent or non-durably reads its local state.
+///
+/// Example:
+/// ```json
+/// { "stepType": "GetState", "id": "current" }
+/// ```
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "json-schema", schemars(title = "GetStateStep"))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GetStateStep {
+    /// Unique step identifier
+    pub id: String,
+
+    /// Human-readable step name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// When true, execution pauses before this step in debug mode
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint: Option<bool>,
 }
 
 /// LLM-driven agent that selects and calls tools in a loop.

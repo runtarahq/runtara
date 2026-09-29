@@ -507,6 +507,9 @@ pub struct ListInstancesOptions {
     pub finished_after: Option<DateTime<Utc>>,
     /// Filter by finished_at < value.
     pub finished_before: Option<DateTime<Utc>>,
+    /// Filter by published state (normalised; AND-combined).
+    #[serde(default)]
+    pub state_filters: Vec<runtara_environment::state_filter::StateFilter>,
     /// Sort order.
     pub order_by: Option<ListInstancesOrder>,
     /// Maximum results to return.

@@ -236,6 +236,16 @@ pub fn step_output_shape(step_type: &str) -> Option<StepOutputShape> {
             outputs: OutputsShape::Object(WAIT_FOR_INSTANCES_FIELDS),
             siblings: &[],
         },
+        "SetState" => StepOutputShape {
+            summary: "`outputs` is the values the step wrote to the run's state, in canonical form (datetimes in UTC; a cleared field is null).",
+            outputs: OutputsShape::Dynamic,
+            siblings: &[],
+        },
+        "GetState" => StepOutputShape {
+            summary: "`outputs` is the run's state object: `steps.<id>.outputs.<field>` for each field declared in the workflow's `stateSchema` (a field never written is absent).",
+            outputs: OutputsShape::Dynamic,
+            siblings: &[],
+        },
         "Finish" => StepOutputShape {
             summary: "Terminal step: defines the workflow's own outputs. It is not referenced via `steps.<id>`.",
             outputs: OutputsShape::Dynamic,
@@ -327,6 +337,8 @@ mod tests {
         "GroupBy",
         "WaitForSignal",
         "WaitForInstances",
+        "SetState",
+        "GetState",
         "AiAgent",
         "Delay",
     ];

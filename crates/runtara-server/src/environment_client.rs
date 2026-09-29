@@ -386,6 +386,23 @@ impl EnvironmentClient {
             .map_err(runtara_environment::error::Error::Core)?)
     }
 
+    /// A run's published state, `None` when it has none or the run is
+    /// unknown in `tenant`.
+    pub async fn get_run_state(
+        &self,
+        tenant: &str,
+        instance_id: &str,
+    ) -> Result<Option<runtara_core::persistence::run_state::RunStateRecord>> {
+        let Some(store) = self.state.persistence.run_state() else {
+            return Ok(None);
+        };
+        match store.get_state(tenant, instance_id).await {
+            Ok(record) => Ok(record),
+            Err(runtara_core::error::CoreError::InstanceNotFound { .. }) => Ok(None),
+            Err(error) => Err(runtara_environment::error::Error::Core(error).into()),
+        }
+    }
+
     /// A never-launched child's published outcome, if any.
     pub async fn get_external_outcome(
         &self,
@@ -1150,6 +1167,7 @@ fn list_instances_options(
         created_before: options.created_before,
         finished_after: options.finished_after,
         finished_before: options.finished_before,
+        state_filters: options.state_filters.clone(),
         order_by: options.order_by.map(|o| o.as_str().to_string()),
         limit: i64::from(options.limit),
         offset: i64::from(options.offset),

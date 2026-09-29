@@ -1011,7 +1011,7 @@ fn validate_min_max(
     }
 }
 
-fn value_matches_type(value: &Value, field_type: &SchemaFieldType) -> bool {
+pub(crate) fn value_matches_type(value: &Value, field_type: &SchemaFieldType) -> bool {
     match field_type {
         SchemaFieldType::String => value.is_string(),
         SchemaFieldType::Integer => value.as_i64().is_some() || value.as_u64().is_some(),
@@ -1024,7 +1024,7 @@ fn value_matches_type(value: &Value, field_type: &SchemaFieldType) -> bool {
     }
 }
 
-fn value_matches_format(value: &str, format: &str) -> bool {
+pub(crate) fn value_matches_format(value: &str, format: &str) -> bool {
     match format {
         "email" => Regex::new(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
             .expect("static email regex")

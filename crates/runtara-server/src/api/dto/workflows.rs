@@ -673,6 +673,19 @@ impl ValidationErrorDto {
                 Some(field.clone()),
                 None,
             ),
+            ValidationError::StateStepWithoutStateSchema { step_id, .. } => {
+                (error.to_string(), Some(step_id.clone()), None, None)
+            }
+            ValidationError::UndeclaredStateField {
+                step_id,
+                field_name,
+                ..
+            } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some(format!("values.{field_name}")),
+                None,
+            ),
         };
 
         Self {
@@ -987,6 +1000,18 @@ pub struct WorkflowInstanceDto {
     /// Whether this execution has pending human input requests (AI Agent waiting for signal)
     #[serde(default, rename = "hasPendingInput")]
     pub has_pending_input: bool,
+    /// The run's published state, as its SetState steps wrote it (declared by
+    /// the workflow's `stateSchema`). Only on the single-run endpoints; lists
+    /// filter by state but never return it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<Value>,
+    /// When the published state last changed (RFC 3339).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "stateUpdatedAt"
+    )]
+    pub state_updated_at: Option<String>,
 }
 
 #[allow(dead_code)]

@@ -738,7 +738,8 @@ pub fn audit_control_importers(component: &[u8]) -> Result<ControlAudit> {
                     );
                     frame.control |= name.starts_with(runtara_wit::control::PREFIX);
                     frame.operation |= name.starts_with(runtara_wit::workflow::OPERATION_PREFIX)
-                        || name.starts_with(runtara_wit::workflow::WAITS_PREFIX);
+                        || name.starts_with(runtara_wit::workflow::WAITS_PREFIX)
+                        || name.starts_with(runtara_wit::workflow::STATE_PREFIX);
                 }
             }
             Payload::ComponentExportSection(exports) => {
@@ -764,8 +765,9 @@ pub fn audit_control_importers(component: &[u8]) -> Result<ControlAudit> {
                 } else if frame.component {
                     ensure!(
                         !(frame.agent && !frame.workflow_logic && frame.operation),
-                        "a composed agent imports runtara:workflow/operation or \
-                         runtara:workflow/waits, which only compiled workflow logic may bind"
+                        "a composed agent imports runtara:workflow/operation, \
+                         runtara:workflow/waits or runtara:workflow/state, which only compiled \
+                         workflow logic may bind"
                     );
                     // A published workflow-agent only wires the control it
                     // imports into the control agent nested in it, which is

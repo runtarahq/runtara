@@ -462,7 +462,8 @@ pub(crate) fn control_agent_reference() -> serde_json::Value {
         "capabilities": {
             "start": "Durably admit a child run of another workflow and return {instanceId, workflowId, version, runLabel, replayed} once it is accepted, without waiting for it.",
             "get": "Read one run of the tenant: status, suspensionReason, parentInstanceId, output or error.",
-            "query": "Page runs of the tenant by createdAtMs or finishedAtMs; parentInstanceId or callerChildren lists children, including ones still queued in admission.",
+            "get-state": "Read one run's published state (what its SetState steps wrote) with its workflow version, without waking it: {instance, state, stateUpdatedAtMs}.",
+            "query": "Page runs of the tenant by createdAtMs or finishedAtMs; parentInstanceId or callerChildren lists children, including ones still queued in admission. state: [{field, op, value}] (op eq, ne, in, lt, lte, gt, gte, exists) keeps runs whose published state matches every filter; it never returns state.",
             "list-pending-signals": "List open WaitForSignal requests of one run, a workflow, or the calling run's children.",
             "send-signal": "Answer the one open request of a WaitForSignal step, validated against its response schema.",
             "cancel": "Cancel a direct child: cooperatively, forced after graceMs. A parked or queued child ends at once.",
@@ -470,7 +471,7 @@ pub(crate) fn control_agent_reference() -> serde_json::Value {
             "resume": "Resume an explicitly paused direct child (CONTROL_NOT_PAUSED otherwise). It never answers a WaitForSignal request."
         },
         "authorization": [
-            "Reads (get, query, list-pending-signals) see every run of the tenant. The caller-relative filters (query callerChildren, list-pending-signals children) need a calling run.",
+            "Reads (get, get-state, query, list-pending-signals) see every run of the tenant. The caller-relative filters (query callerChildren, list-pending-signals children) need a calling run.",
             "cancel, pause and resume reach direct children only: CONTROL_NOT_CHILD otherwise, CONTROL_DENIED for an ancestor.",
             "send-signal answers a child, an ancestor, or any run whose WaitForSignal request opted in with action.key when the step passes the same actionKey; anything else is CONTROL_DENIED.",
             "No mutation may target the calling run (CONTROL_INVALID). Tenant, caller and operation come from the host, never from step inputs."
@@ -525,7 +526,7 @@ pub(crate) fn control_agent_reference() -> serde_json::Value {
         "replay": {
             "identity": "Each control step call has an operation identity: the step plus its loop position. A retried attempt, a crash recovery and a resumed run replay the same identity.",
             "table": [
-                {"capability": "get, query, list-pending-signals", "onReplay": "A durable step returns its checkpointed result; a non-durable one reads again."},
+                {"capability": "get, get-state, query, list-pending-signals", "onReplay": "A durable step returns its checkpointed result; a non-durable one reads again."},
                 {"capability": "start", "onReplay": "Returns the same child (replayed: true), also after a crash between admission and the checkpoint. Other arguments are CONTROL_REPLAY_CONFLICT."},
                 {"capability": "send-signal, cancel, pause, resume", "onReplay": "Returns the receipt of the first call (replayed: true) without acting again. Other arguments are CONTROL_REPLAY_CONFLICT."}
             ],
@@ -610,6 +611,33 @@ pub(crate) fn wait_for_instances_step_shape() -> serde_json::Value {
     })
 }
 
+/// The SetState/GetState reference advertised in the authoring schema.
+fn run_state_step_shapes() -> serde_json::Value {
+    serde_json::json!({
+        "SetState": {
+            "required": ["id", "stepType", "values"],
+            "values": "Map of stateSchema field name to MappingValue. The merge is shallow: a given field replaces its value, null clears it, arrays are replaced; fields not given are kept.",
+            "rules": "Every field must be declared in the workflow's stateSchema (E134 without one, E135 for an undeclared field); immediate values are type, format and enum checked (E023/E024), every value again at run time (STATE_INVALID_VALUE). Datetimes are stored as UTC. A write applies once, so a replay changes nothing. The output is the values written.",
+            "local": "Only the outer durable run publishes state. A workflow running embedded (W083) or as a published workflow-agent, and a non-durable workflow (W082), keeps local state: SetState and GetState work the same, scoped to that invocation, but readers never see it.",
+            "example": {
+                "id": "markApproved",
+                "stepType": "SetState",
+                "values": {
+                    "stage": {"valueType": "immediate", "value": "approved"},
+                    "decidedBy": {"valueType": "reference", "value": "steps.approve.outputs.user"}
+                }
+            }
+        },
+        "GetState": {
+            "required": ["id", "stepType"],
+            "outputs": "steps.<id>.outputs is the state object; steps.<id>.outputs.<field> for a declared field (absent until written).",
+            "replay": "The read is checkpointed: a replay sees what the first execution read, so read-modify-write loops are replay-safe.",
+            "example": {"id": "current", "stepType": "GetState"}
+        },
+        "readingOtherRuns": "Other workflows read a run's state with the control agent: get-state for one run, query with a state filter to list runs. Neither wakes the run."
+    })
+}
+
 /// Build the canonical workflow-authoring schema returned by
 /// `get_workflow_authoring_schema`. Extracted as a pure function so the advertised
 /// condition-operator enum can be drift-tested against `ConditionOperator`
@@ -628,7 +656,7 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                 "steps": {
                     "stepId": {
                         "id": "stepId",
-                        "stepType": "Agent | Conditional | Finish | Split | Switch | EmbedWorkflow | While | Log | Error | Filter | GroupBy | Delay | WaitForSignal | WaitForInstances | AiAgent",
+                        "stepType": "Agent | Conditional | Finish | Split | Switch | EmbedWorkflow | While | Log | Error | Filter | GroupBy | Delay | WaitForSignal | WaitForInstances | SetState | GetState | AiAgent",
                         "name": "Human label",
                         "stepSpecificFields": "Use stepShapes below or get_step_type_schema. inputMapping is not a universal step field."
                     }
@@ -650,7 +678,7 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                 "Error steps do not accept inputMapping; put static error fields directly on the step and dynamic mappings in context",
                 "executionPlan edges use fromStep/toStep",
                 "Conditional outgoing edges must use label 'true' or 'false'; do not put condition on those edges",
-                "stateSchema (optional, root graph only) declares the typed state a run exposes, as SchemaField rows with label, format (string: date, datetime, email, url, ...; number/integer: currency) and enum. It is a declaration only: runs do not write state yet. State starts empty and is written by steps, so required, default and visibleWhen have no effect (W081). Edit it with get_state_schema/set_state_schema."
+                "stateSchema (optional, root graph only) declares the typed state a run exposes, as SchemaField rows with label, format (string: date, datetime, email, url, ...; number/integer: currency) and enum. State starts empty and is written by SetState steps (read back with GetState; see stepShapes), so required, default and visibleWhen have no effect (W081). Edit it with get_state_schema/set_state_schema."
             ]
         },
         "stepShapes": {
@@ -696,7 +724,10 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                     "rethrowSemantics": "An Error step emits a new error envelope. Referencing steps.__error from context preserves the original as metadata; it does not replace the new error's top-level static code or message."
                 }
             },
-            "WaitForInstances": wait_for_instances_step_shape()
+            "WaitForInstances": wait_for_instances_step_shape(),
+            "SetState": run_state_step_shapes()["SetState"],
+            "GetState": run_state_step_shapes()["GetState"],
+            "runState": run_state_step_shapes()["readingOtherRuns"]
         },
         "mappingValue": {
             "reference": {"valueType": "reference", "value": "data.foo"},

@@ -50,7 +50,7 @@ pub(crate) const PRUNE_PAGE_SQL: &str = r#"
 /// What a prune removes, per table, for the locked children in `$1`. Each
 /// statement returns the instance ids it touched, so the page counts only
 /// children that still had something to prune.
-pub(crate) const PRUNE_STATEMENTS: [&str; 8] = [
+pub(crate) const PRUNE_STATEMENTS: [&str; 9] = [
     "DELETE FROM checkpoints WHERE instance_id = ANY($1) RETURNING instance_id",
     "DELETE FROM pending_signals WHERE instance_id = ANY($1) RETURNING instance_id",
     "DELETE FROM pending_checkpoint_signals WHERE instance_id = ANY($1) RETURNING instance_id",
@@ -60,6 +60,9 @@ pub(crate) const PRUNE_STATEMENTS: [&str; 8] = [
     "DELETE FROM instance_input_parks WHERE instance_id = ANY($1) RETURNING instance_id",
     "DELETE FROM invocation_attempts WHERE instance_id = ANY($1) RETURNING instance_id",
     "DELETE FROM invocation_root_leases WHERE instance_id = ANY($1) RETURNING instance_id",
+    // The state stays for readers; its write log only guards replays, and a
+    // terminal run never replays.
+    "DELETE FROM instance_state_writes WHERE instance_id = ANY($1) RETURNING instance_id",
     // Not `OF status`, so neither terminal trigger fires.
     "UPDATE instances SET input = NULL, stderr = NULL \
      WHERE instance_id = ANY($1) AND (input IS NOT NULL OR stderr IS NOT NULL) \

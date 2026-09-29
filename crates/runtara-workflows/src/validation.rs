@@ -53,6 +53,8 @@
 //! | E131 | SuspendingCapabilityUnsupportedContext | Suspending step in onError, onWait or an AiAgent tool/memory |
 //! | E132 | ControlCapabilityUnsupportedContext | Control step in onWait or an AiAgent tool/memory |
 //! | E133 | InvalidWaitForInstancesConfig | WaitForInstances literal instanceIds or timeoutMs out of range |
+//! | E134 | StateStepWithoutStateSchema | SetState/GetState in a workflow without stateSchema |
+//! | E135 | UndeclaredStateField | SetState writes a field not declared in stateSchema |
 //! | E043 | InvalidChildVersion | Invalid child workflow version format |
 //! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
 //! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
@@ -504,6 +506,15 @@ pub enum ValidationError {
         field: String,
         message: String,
     },
+    /// A SetState or GetState step in a workflow that declares no
+    /// `stateSchema`.
+    StateStepWithoutStateSchema { step_id: String, step_type: String },
+    /// A SetState step writes a field that `stateSchema` does not declare.
+    UndeclaredStateField {
+        step_id: String,
+        field_name: String,
+        declared: Vec<String>,
+    },
 }
 
 /// Information about a missing required input field.
@@ -579,6 +590,8 @@ impl ValidationError {
             Self::SuspendingCapabilityUnsupportedContext { .. } => "E131",
             Self::ControlCapabilityUnsupportedContext { .. } => "E132",
             Self::InvalidWaitForInstancesConfig { .. } => "E133",
+            Self::StateStepWithoutStateSchema { .. } => "E134",
+            Self::UndeclaredStateField { .. } => "E135",
         }
     }
 }
@@ -1316,6 +1329,26 @@ impl std::fmt::Display for ValidationError {
                 "[E133] WaitForInstances step '{}' has an invalid {}: {}",
                 step_id, field, message
             ),
+            ValidationError::StateStepWithoutStateSchema { step_id, step_type } => write!(
+                f,
+                "[E134] {} step '{}' needs the workflow to declare its state: add a stateSchema",
+                step_type, step_id
+            ),
+            ValidationError::UndeclaredStateField {
+                step_id,
+                field_name,
+                declared,
+            } => {
+                write!(
+                    f,
+                    "[E135] SetState step '{}' writes field '{}', which stateSchema does not declare",
+                    step_id, field_name
+                )?;
+                if !declared.is_empty() {
+                    write!(f, ". Declared fields: {}", declared.join(", "))?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -1500,6 +1533,15 @@ pub enum ValidationWarning {
         /// The ineffective settings, in DSL spelling.
         settings: Vec<String>,
     },
+    /// A SetState or GetState step in a non-durable workflow, whose state is
+    /// local to the run and not published.
+    NonDurableStateIsLocal { step_id: String, step_type: String },
+    /// An EmbedWorkflow step embeds a child with state steps, whose state is
+    /// local to the embedded run and not published.
+    EmbeddedChildStateIsLocal {
+        step_id: String,
+        child_workflow_id: String,
+    },
 }
 
 impl ValidationWarning {
@@ -1527,6 +1569,8 @@ impl ValidationWarning {
             Self::DynamicControlStartTarget { .. } => "W077",
             Self::WaitTimeoutBelowDeadlineMargin { .. } => "W078",
             Self::IneffectiveStateSchemaSetting { .. } => "W081",
+            Self::NonDurableStateIsLocal { .. } => "W082",
+            Self::EmbeddedChildStateIsLocal { .. } => "W083",
         }
     }
 }
@@ -1761,6 +1805,19 @@ impl std::fmt::Display for ValidationWarning {
                 field_name,
                 settings.join(", ")
             ),
+            ValidationWarning::NonDurableStateIsLocal { step_id, step_type } => write!(
+                f,
+                "[W082] {} step '{}' keeps local state: a non-durable workflow does not publish its state to readers. Make the workflow durable to publish it.",
+                step_type, step_id
+            ),
+            ValidationWarning::EmbeddedChildStateIsLocal {
+                step_id,
+                child_workflow_id,
+            } => write!(
+                f,
+                "[W083] EmbedWorkflow step '{}' embeds '{}', whose SetState and GetState steps keep state local to the embedded run: only the outer run publishes state.",
+                step_id, child_workflow_id
+            ),
         }
     }
 }
@@ -1830,6 +1887,9 @@ pub fn validate_workflow(
 
     // Phase 4.1: stateSchema settings that have no effect for state (W081)
     state_schema::validate_state_schema(graph, &mut result);
+
+    // Phase 4.2: SetState/GetState against stateSchema (E134, E135, W082)
+    state_schema::validate_state_steps(graph, &mut result);
 
     // Phase 5: Child workflow validation
     validate_child_workflows(graph, &mut result);
@@ -2039,6 +2099,7 @@ pub fn validate_workflow_closure(
         validate_embed_workflow_inputs(root, &children_map, &mut root_result);
         validate_embed_workflow_outputs(root, &children_map, &mut root_result);
     }
+    state_schema::validate_embedded_state_steps(root, &children_map, &mut root_result);
 
     let mut seen: HashSet<(String, i32)> = HashSet::new();
     let mut child_reports = Vec::new();
@@ -3155,10 +3216,12 @@ fn collect_step_mappings(step: &Step) -> Vec<&InputMapping> {
                 mappings.push(&action.context);
             }
         }
+        Step::SetState(set_state) => mappings.push(&set_state.values),
         Step::Conditional(_)
         | Step::Switch(_)
         | Step::Delay(_)
         | Step::WaitForInstances(_)
+        | Step::GetState(_)
         | Step::AiAgent(_) => {}
     }
 
@@ -3246,7 +3309,9 @@ fn collect_unmapped_step_references(step: &Step) -> Vec<String> {
         | Step::Finish(_)
         | Step::EmbedWorkflow(_)
         | Step::Log(_)
-        | Step::Error(_) => {}
+        | Step::Error(_)
+        | Step::SetState(_)
+        | Step::GetState(_) => {}
     }
 
     refs
@@ -4724,6 +4789,8 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
             Step::Delay(s) => s.name.as_ref(),
             Step::WaitForSignal(s) => s.name.as_ref(),
             Step::WaitForInstances(s) => s.name.as_ref(),
+            Step::SetState(s) => s.name.as_ref(),
+            Step::GetState(s) => s.name.as_ref(),
             Step::AiAgent(s) => s.name.as_ref(),
         };
 
@@ -5251,6 +5318,8 @@ fn get_step_type_name(step: &Step) -> &'static str {
         Step::Delay(_) => "Delay",
         Step::WaitForSignal(_) => "WaitForSignal",
         Step::WaitForInstances(_) => "WaitForInstances",
+        Step::SetState(_) => "SetState",
+        Step::GetState(_) => "GetState",
         Step::AiAgent(_) => "AiAgent",
     }
 }
@@ -5585,7 +5654,7 @@ fn sorted_value_keys(map: &serde_json::Map<String, serde_json::Value>) -> Vec<St
     keys
 }
 
-fn schema_field_type_name(field_type: &SchemaFieldType) -> &'static str {
+pub(super) fn schema_field_type_name(field_type: &SchemaFieldType) -> &'static str {
     match field_type {
         SchemaFieldType::String => "string",
         SchemaFieldType::Integer => "integer",
@@ -6229,6 +6298,10 @@ fn collect_references_from_step(step: &Step) -> Vec<String> {
                 extract_references_from_mapping_value(timeout, &mut refs);
             }
         }
+        Step::SetState(set_state) => {
+            extract_references_from_input_mapping(&set_state.values, &mut refs);
+        }
+        Step::GetState(_) => {}
         Step::Error(error_step) => {
             if let Some(ref context) = error_step.context {
                 extract_references_from_input_mapping(context, &mut refs);
@@ -6374,6 +6447,10 @@ fn collect_template_static_references_from_step(step: &Step) -> Vec<String> {
                 extract_template_static_references_from_mapping_value(timeout, &mut refs);
             }
         }
+        Step::SetState(set_state) => {
+            extract_template_static_references_from_input_mapping(&set_state.values, &mut refs);
+        }
+        Step::GetState(_) => {}
         Step::Error(error_step) => {
             if let Some(ref context) = error_step.context {
                 extract_template_static_references_from_input_mapping(context, &mut refs);

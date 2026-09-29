@@ -217,6 +217,8 @@ fn enable_step_breakpoint(graph: &mut ExecutionGraph, step_id: &str) {
         runtara_dsl::Step::Delay(step) => step.breakpoint = Some(true),
         runtara_dsl::Step::WaitForSignal(step) => step.breakpoint = Some(true),
         runtara_dsl::Step::WaitForInstances(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::SetState(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::GetState(step) => step.breakpoint = Some(true),
         runtara_dsl::Step::AiAgent(step) => step.breakpoint = Some(true),
     }
 }
@@ -493,7 +495,9 @@ fn collect_run_plan_ids(
             }
         }
         DirectRunPlan::Delay { next_plan, .. }
-        | DirectRunPlan::WaitForInstances { next_plan, .. } => {
+        | DirectRunPlan::WaitForInstances { next_plan, .. }
+        | DirectRunPlan::SetState { next_plan, .. }
+        | DirectRunPlan::GetState { next_plan, .. } => {
             collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
         }
         DirectRunPlan::WaitForSignal {
@@ -829,6 +833,8 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::Delay { breakpoint, .. }
         | DirectRunPlan::WaitForSignal { breakpoint, .. }
         | DirectRunPlan::WaitForInstances { breakpoint, .. }
+        | DirectRunPlan::SetState { breakpoint, .. }
+        | DirectRunPlan::GetState { breakpoint, .. }
         | DirectRunPlan::Log { breakpoint, .. }
         | DirectRunPlan::Agent { breakpoint, .. }
         | DirectRunPlan::AiAgent { breakpoint, .. }
