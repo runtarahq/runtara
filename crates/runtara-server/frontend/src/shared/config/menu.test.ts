@@ -20,6 +20,7 @@ describe('filterMenu — entitlement gate', () => {
     const out = filterMenu(menu, [], snapshot());
     expect(keys(out)).toEqual([
       'workflows',
+      'operations',
       'invocation-history',
       'objects',
       'triggers',
@@ -47,6 +48,7 @@ describe('filterMenu — entitlement gate', () => {
     );
     expect(keys(out)).toEqual([
       'workflows',
+      'operations',
       'invocation-history',
       'triggers',
       'connections',

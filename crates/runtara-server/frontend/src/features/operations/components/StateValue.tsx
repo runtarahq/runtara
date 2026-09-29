@@ -11,17 +11,10 @@ export interface StateField {
 
 /** Presentation only. The stored value remains the query/sort value. */
 export interface DisplayFormat {
-  kind?: 'text' | 'number' | 'date' | 'datetime' | 'relative';
-  decimals?: number;
-  prefix?: string;
-  suffix?: string;
-}
-
-export function stateLabel(key: string, field?: StateField) {
-  return (
-    field?.label ??
-    key.replace(/[_-]/g, ' ').replace(/^./, (c) => c.toUpperCase())
-  );
+  kind?: 'text' | 'number' | 'date' | 'datetime' | 'relative' | null;
+  decimals?: number | null;
+  prefix?: string | null;
+  suffix?: string | null;
 }
 
 export function StateValue({
@@ -61,10 +54,10 @@ export function StateValue({
     }
   }
   let text: string;
-  if (typeof value === 'number') {
+  if (typeof value === 'number' && kind !== 'text') {
     const decimals = display?.decimals;
     const precision =
-      decimals === undefined || !Number.isFinite(decimals)
+      decimals == null || !Number.isFinite(decimals)
         ? undefined
         : Math.max(0, Math.min(20, Math.trunc(decimals)));
     text = new Intl.NumberFormat(undefined, {

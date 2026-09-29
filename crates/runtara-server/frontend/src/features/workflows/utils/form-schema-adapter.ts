@@ -149,3 +149,18 @@ function initialValueForField(field: FormField): unknown {
   if (field.type === 'object') return {};
   return '';
 }
+
+// Blank optional controls represent omitted input. Conditional requirements are
+// still evaluated by Rust against the resulting payload before submission.
+export function workflowFormPayload(
+  definition: FormDefinition,
+  values: Record<string, unknown>
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(values).filter(
+      ([name, value]) =>
+        value !== undefined &&
+        !(value === '' && !definition.fields[name]?.required)
+    )
+  );
+}

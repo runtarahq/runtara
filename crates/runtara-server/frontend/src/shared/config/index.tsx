@@ -1,5 +1,6 @@
 import {
   BarChart3,
+  ListChecks,
   Database,
   History,
   Link,
@@ -66,6 +67,21 @@ export const menu: MenuItem[] = [
     to: '/workflows',
     icon: <Workflow size={16} />,
     allowedGroups: [],
+  },
+  {
+    key: 'operations',
+    title: 'Operations',
+    to: '/operations',
+    icon: <ListChecks size={16} />,
+    allowedGroups: [],
+    children: [
+      { key: 'operations-overview', title: 'Overview', to: '/operations' },
+      {
+        key: 'operations-monitor',
+        title: 'Monitor',
+        to: '/operations/monitor',
+      },
+    ],
   },
   {
     key: 'invocation-history',

@@ -11,6 +11,10 @@ import { NotFound } from '@/shared/pages/NotFound';
 import { ErrorBoundary } from '@/shared/components/error-boundary.tsx';
 import { Spinner } from '@/shared/components/ui/spinner';
 
+const Operations = lazy(() =>
+  import('@/features/operations/pages').then((m) => ({ default: m.Operations }))
+);
+
 // Lazy load all page components
 const Connections = lazy(() =>
   import('@/features/connections/pages/Connections').then((m) => ({
@@ -398,6 +402,16 @@ export const router = createBrowserRouter(
             <PrivateRoute>
               <Suspense fallback={<PageLoader />}>
                 <AnalyticsRateLimits />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/operations/*',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <Operations />
               </Suspense>
             </PrivateRoute>
           ),

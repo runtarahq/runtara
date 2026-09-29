@@ -1,3 +1,4 @@
+import { stateLabel } from '../state-label';
 import {
   Card,
   CardContent,
@@ -8,7 +9,7 @@ import { useCustomQuery } from '@/shared/hooks/api';
 import { RuntimeREST } from '@/shared/queries';
 import { createAuthHeaders } from '@/shared/queries/utils';
 import { queryKeys } from '@/shared/queries/query-keys';
-import { StateValue, stateLabel, type StateField } from './StateValue';
+import { StateValue, type StateField } from './StateValue';
 
 export function StatePanel({
   state,
@@ -28,7 +29,9 @@ export function StatePanel({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">State</CardTitle>
+        <CardTitle className="text-base">
+          <h2>State</h2>
+        </CardTitle>
         {updatedAt && (
           <p className="text-xs text-muted-foreground">
             Updated{' '}

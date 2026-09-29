@@ -1,3 +1,4 @@
+import { workflowFormPayload } from './form-schema-adapter';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -58,4 +59,19 @@ describe('workflow schema form adapter boundary', () => {
     );
     expect(initialWorkflowFormValues(definition)).toEqual({ mode: 'manual' });
   });
+});
+
+it('omits blank optional controls without dropping false, zero or required blanks', () => {
+  expect(
+    workflowFormPayload(
+      {
+        fields: {
+          reason: { type: 'string' },
+          required: { type: 'string', required: true },
+        },
+        sections: [],
+      },
+      { reason: '', required: '', amount: 0, approved: false }
+    )
+  ).toEqual({ required: '', amount: 0, approved: false });
 });
