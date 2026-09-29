@@ -13,6 +13,7 @@ const CONTROL_EXECUTOR: &str = include_str!("frozen_abi/control-executor.wat");
 const OPERATION_SCOPE: &str = include_str!("frozen_abi/operation-scope.wat");
 const SUSPENSION_CONTEXT: &str = include_str!("frozen_abi/suspension-context.wat");
 const WORKFLOW_WAIT: &str = include_str!("frozen_abi/workflow-wait.wat");
+const WORKFLOW_STATE: &str = include_str!("frozen_abi/workflow-state.wat");
 
 fn engine() -> Arc<Engine> {
     crate::build_engine(&crate::EngineConfig {
@@ -37,6 +38,7 @@ fn fixtures_import_the_released_names() {
         (OPERATION_SCOPE, "runtara:workflow/operation@1.0.0"),
         (SUSPENSION_CONTEXT, "runtara:agent/continuation@1.0.0"),
         (WORKFLOW_WAIT, "runtara:workflow/waits@1.0.0"),
+        (WORKFLOW_STATE, "runtara:workflow/state@1.0.0"),
     ] {
         let component = fixture(&engine, name, wat);
         assert!(
@@ -62,6 +64,7 @@ fn workflow_stores_link_every_frozen_1_0_0_guest() {
         ("workflow/operation", OPERATION_SCOPE),
         ("agent/continuation", SUSPENSION_CONTEXT),
         ("workflow/waits", WORKFLOW_WAIT),
+        ("workflow/state", WORKFLOW_STATE),
     ] {
         executor
             .linker
@@ -119,15 +122,21 @@ fn a_drifted_1_0_0_shape_does_not_link() {
     assert!(executor.linker.instantiate_pre(&drifted).is_err());
 }
 
-/// Instance waits are workflow-only: no agent store links them.
+/// Instance waits and run state are workflow-only: no agent store links
+/// them.
 #[test]
 fn agent_stores_do_not_link_instance_waits() {
     let engine = engine();
-    let wait = fixture(&engine, "workflow/waits", WORKFLOW_WAIT);
-    let linker = crate::registry::build_linker(&engine).expect("agent linker");
-    assert!(linker.instantiate_pre(&wait).is_err());
-    let linker = crate::control_executor::control_linker(&engine).expect("control linker");
-    assert!(linker.instantiate_pre(&wait).is_err());
+    for (name, wat) in [
+        ("workflow/waits", WORKFLOW_WAIT),
+        ("workflow/state", WORKFLOW_STATE),
+    ] {
+        let guest = fixture(&engine, name, wat);
+        let linker = crate::registry::build_linker(&engine).expect("agent linker");
+        assert!(linker.instantiate_pre(&guest).is_err(), "{name}");
+        let linker = crate::control_executor::control_linker(&engine).expect("control linker");
+        assert!(linker.instantiate_pre(&guest).is_err(), "{name}");
+    }
 }
 
 /// The versioning rule relies on the linker's semver matching: an import of

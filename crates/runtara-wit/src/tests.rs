@@ -45,6 +45,7 @@ fn every_name_constant_names_a_real_interface() {
         crate::workflow::TASKS,
         crate::workflow::OPERATION,
         crate::workflow::WAITS,
+        crate::workflow::STATE,
         crate::stdlib::JSON,
         crate::trusted::EXECUTOR,
         crate::trusted::EXECUTION,
@@ -65,6 +66,7 @@ fn every_name_constant_names_a_real_interface() {
             crate::workflow::OPERATION,
         ),
         (crate::workflow::WAITS_PREFIX, crate::workflow::WAITS),
+        (crate::workflow::STATE_PREFIX, crate::workflow::STATE),
         (crate::control::PREFIX, crate::control::API),
     ] {
         assert!(

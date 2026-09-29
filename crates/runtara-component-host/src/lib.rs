@@ -26,6 +26,8 @@ pub(crate) mod host_io;
 pub mod host_state;
 pub mod instance_wait_host;
 pub use instance_wait_host::InstanceWaitHost;
+pub mod run_state_host;
+pub use run_state_host::RunStateHost;
 pub mod isolated_tasks;
 pub mod lifecycle;
 pub mod operation_scope_host;

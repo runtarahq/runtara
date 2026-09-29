@@ -242,6 +242,8 @@ pub struct WorkflowState {
     pub(crate) operation: crate::operation_scope_host::OperationScopeState,
     /// Durable instance waits of WaitForInstances steps.
     pub(crate) instance_waits: crate::instance_wait_host::RunInstanceWaits,
+    /// The run's queryable state (SetState / GetState steps).
+    pub(crate) run_state: crate::run_state_host::RunStateAccess,
     wasi: WasiCtx,
     http: WasiHttpCtx,
     table: ResourceTable,
@@ -399,6 +401,7 @@ pub struct WorkflowExecutor {
     trusted: std::sync::OnceLock<Arc<crate::trusted::TrustedExecutor>>,
     control: std::sync::OnceLock<Arc<crate::control_executor::ControlExecutor>>,
     instance_waits: std::sync::OnceLock<Arc<dyn crate::InstanceWaitHost>>,
+    run_state: std::sync::OnceLock<Arc<dyn crate::RunStateHost>>,
     engine: Arc<Engine>,
     linker: Linker<WorkflowState>,
     cache: tokio::sync::Mutex<HashMap<PathBuf, CachedComponent>>,
@@ -493,6 +496,13 @@ impl WorkflowExecutor {
             .map_err(|_| anyhow::anyhow!("instance wait host already configured"))
     }
 
+    /// Serve every run's queryable state with `host`.
+    pub fn set_run_state_host(&self, host: Arc<dyn crate::RunStateHost>) -> Result<()> {
+        self.run_state
+            .set(host)
+            .map_err(|_| anyhow::anyhow!("run state host already configured"))
+    }
+
     /// `engine` must have epoch interruption enabled (see
     /// [`crate::engine::build_engine`]) and an epoch ticker running.
     pub fn new(engine: Arc<Engine>) -> Result<Self> {
@@ -521,10 +531,13 @@ impl WorkflowExecutor {
         crate::control_host::add_denied_control_api_to_linker(&mut linker)?;
         // Durable instance waits of compiled WaitForInstances steps.
         crate::instance_wait_host::add_instance_waits_to_linker(&mut linker)?;
+        // Queryable run state of compiled SetState / GetState steps.
+        crate::run_state_host::add_run_state_to_linker(&mut linker)?;
         Ok(Self {
             trusted: std::sync::OnceLock::new(),
             control: std::sync::OnceLock::new(),
             instance_waits: std::sync::OnceLock::new(),
+            run_state: std::sync::OnceLock::new(),
             outbound_http: std::sync::OnceLock::new(),
             database: std::sync::OnceLock::new(),
             connection_resolver: std::sync::OnceLock::new(),
@@ -1041,6 +1054,11 @@ impl WorkflowExecutor {
                 spec.trusted_tenant.as_deref(),
                 spec.trusted_instance.as_deref(),
             ),
+            run_state: crate::run_state_host::RunStateAccess::for_run(
+                self.run_state.get().cloned(),
+                spec.trusted_tenant.as_deref(),
+                spec.trusted_instance.as_deref(),
+            ),
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
@@ -1309,6 +1327,7 @@ impl WorkflowExecutor {
             control_executor: None,
             operation: Default::default(),
             instance_waits: Default::default(),
+            run_state: Default::default(),
             wasi: WasiCtxBuilder::new().build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
