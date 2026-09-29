@@ -8,13 +8,13 @@ use text::BorrowedText;
 
 mod bindings {
     wasmtime::component::bindgen!({
-        path: "../runtara-workflow-wit/wit/outbound-http",
-        world: "outbound-http-client",
+        path: "../runtara-wit/wit/host",
+        world: "http-client",
         imports: { default: async | trappable },
     });
 }
 
-pub use bindings::runtara::outbound_http::client::{
+pub use bindings::runtara::host::http::{
     ConnectionDestination, Destination, OutboundError, RequestOptions, Response,
 };
 
@@ -270,7 +270,7 @@ pub(crate) fn add_to_linker<T: OutboundHttpContext + Send + 'static>(
     linker: &mut Linker<T>,
 ) -> anyhow::Result<()> {
     linker
-        .instance(runtara_workflow_wit::OUTBOUND_HTTP_INTERFACE_NAME)?
+        .instance(runtara_wit::host::HTTP)?
         .func_wrap_concurrent("request", |accessor, (request,): (BorrowedRequest,)| {
             let started = tokio::time::Instant::now();
             let ready = accessor.with(|mut access| {

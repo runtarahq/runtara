@@ -79,10 +79,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use runtara_dsl::ExecutionGraph;
-use runtara_workflow_wit::{
-    ABI_WIT, CONNECTION_RESOLVER_WIT, LIFECYCLE_INTERFACE_NAME, LIFECYCLE_WIT,
-    RUNTIME_INTERFACE_NAME, RUNTIME_WIT, STDLIB_WIT, WORKFLOW_WIT_VERSION,
-};
+use runtara_wit::workflow::RUNTIME as RUNTIME_INTERFACE_NAME;
 use sha2::{Digest, Sha256};
 use wasm_encoder::{CustomSection, Encode, Function as WasmFunction, Instruction, Section};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -90,12 +87,10 @@ use wit_parser::{Resolve, WorldId};
 
 pub use super::child_workflows::DirectChildWorkflowDependencyMetadata;
 use super::child_workflows::resolve_direct_child_workflow_metadata;
-use abi::push_retptr_arg;
 pub use artifact_metadata::{
     AGENT_IMPORT_ALLOWLIST, AgentImportGrants, AgentImportKind, CONTROL_AGENT_IMPORTS,
     DirectArtifactFileMetadata, DirectArtifactMetadata, DirectComponentDependencyMetadata,
-    DirectComponentSidecarMetadata, DirectIsolationMetadata, STAGED_WORKFLOW_AGENT_DENIED_PREFIXES,
-    check_agent_component_imports,
+    DirectComponentSidecarMetadata, DirectIsolationMetadata, check_agent_component_imports,
 };
 use artifact_metadata::{
     InitialArtifactMetadataInput, initial_artifact_metadata, resolve_agent_component_dependencies,
@@ -112,7 +107,9 @@ pub use isolation_selection::{
     compile_direct_workflow_composed_with_isolation_policy,
 };
 
-use super::component::{DIRECT_AGENT_WIT_VERSION, DirectComponentArtifacts};
+use super::component::{
+    DIRECT_AGENT_WIT_VERSION, DIRECT_WORKFLOW_LOGIC_PACKAGE, DirectComponentArtifacts,
+};
 use super::error::DirectCompileError;
 use super::manifest::{
     DIRECT_WORKFLOW_MANIFEST_VERSION, DirectManifestChildWorkflowInput, DirectWorkflowManifest,
@@ -136,49 +133,21 @@ use super::support::{
     analyze_workflow_agent_safety, workflow_agent_requires_runtime,
 };
 
-/// Direct workflow artifact ABI version (`wasi:cli/run` export shape).
-pub const DIRECT_WORKFLOW_ABI_VERSION: u32 = 1;
-/// Direct workflow artifact ABI version for the unified invoke export
-/// (`runtara:workflow-lifecycle/lifecycle.invoke`).
-pub const DIRECT_WORKFLOW_INVOKE_ABI_VERSION: u32 = 2;
+/// Direct workflow artifact ABI version: every workflow exports
+/// `runtara:agent-<id>/capabilities.invoke -> result<outcome, error-info>`.
+/// Bumped whenever the export shape changes, so cached artifacts recompile.
+pub const DIRECT_WORKFLOW_INVOKE_ABI_VERSION: u32 = 5;
 /// Custom section containing [`DirectWorkflowManifest`] JSON.
 pub const DIRECT_WORKFLOW_MANIFEST_SECTION: &str = "runtara.direct_workflow.manifest";
 /// Custom section containing [`DirectWorkflowSupportReport`] JSON.
 pub const DIRECT_WORKFLOW_SUPPORT_SECTION: &str = "runtara.direct_workflow.support";
 /// Custom section containing direct artifact ABI metadata JSON.
-pub const DIRECT_WORKFLOW_ABI_SECTION: &str = "runtara.direct_workflow.abi";
+pub const DIRECT_WORKFLOW_ABI_SECTION: &str = runtara_wit::workflow::LOGIC_SECTION;
 /// Version for `artifact-metadata.json` emitted beside direct artifacts.
 pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION: u32 = 4;
 /// Sidecar filename containing direct artifact dependency/provenance metadata.
 pub const DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME: &str = "artifact-metadata.json";
 
-const WASI_CLI_RUN_WIT: &str = r#"
-package wasi:cli@0.2.3;
-
-interface run {
-    run: func() -> result;
-}
-
-world command {
-    export run;
-}
-"#;
-const AGENT_TYPES_WIT: &str = include_str!("../../../runtara-agent-wit/wit/runtara-agent.wit");
-/// Host-satisfied concurrent timer for retry backoff and lifecycle polling.
-/// Imported for parallel windows and runtime-backed Agent waits;
-/// the wac trailing `...` bubbles it to
-/// the composed component where the executor binds it func_wrap_concurrent.
-const HOST_IO_TIMERS_WIT: &str = "\
-package runtara:host-io@0.1.0;
-
-interface timers {
-    /// Async-TYPED so the emitter may async-lower it into a waitable; the
-    /// world-level sync lowering is never called.
-    sleep: async func(ms: u64);
-    /// Emergency whole-execution alarm; dispose through standard cancellation.
-    abort-after: async func(ms: u64);
-}
-";
 const AGENT_WIT_VERSION: &str = DIRECT_AGENT_WIT_VERSION;
 
 const DIRECT_RUN_RETPTR_OFFSET: i32 = 0;
@@ -205,19 +174,8 @@ const DIRECT_WAIT_DEADLINE_SCRATCH_OFFSET: i32 = 208;
 const DIRECT_AGENT_RESULT_OK_PTR_OFFSET: u64 = 8;
 const DIRECT_AGENT_RESULT_OK_LEN_OFFSET: u64 = 12;
 const DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET: u64 = 8;
-const DIRECT_AGENT_RESULT_ERR_CODE_LEN_OFFSET: u64 = 12;
-const DIRECT_AGENT_RESULT_ERR_MESSAGE_PTR_OFFSET: u64 = 16;
-const DIRECT_AGENT_RESULT_ERR_MESSAGE_LEN_OFFSET: u64 = 20;
-const DIRECT_AGENT_RESULT_ERR_CATEGORY_PTR_OFFSET: u64 = 24;
-const DIRECT_AGENT_RESULT_ERR_CATEGORY_LEN_OFFSET: u64 = 28;
-const DIRECT_AGENT_RESULT_ERR_SEVERITY_PTR_OFFSET: u64 = 32;
-const DIRECT_AGENT_RESULT_ERR_SEVERITY_LEN_OFFSET: u64 = 36;
-const DIRECT_AGENT_RESULT_ERR_RETRYABLE_OFFSET: u64 = 40;
 const DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET: u64 = 48;
 const DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET: u64 = 56;
-const DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_TAG_OFFSET: u64 = 64;
-const DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_PTR_OFFSET: u64 = 68;
-const DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_LEN_OFFSET: u64 = 72;
 const DIRECT_AGENT_RETRY_INFO_PAYLOAD_PTR_OFFSET: u64 = 4;
 const DIRECT_AGENT_RETRY_INFO_PAYLOAD_LEN_OFFSET: u64 = 8;
 const DIRECT_AGENT_RETRY_INFO_RETRYABLE_OFFSET: u64 = 12;
@@ -555,7 +513,7 @@ pub struct DirectCompilationInput {
     /// `None` falls back to the statically linked registry, matching the Rust
     /// codegen compiler's transition behavior.
     pub agent_catalog: Option<std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>>,
-    /// The workflow's slug — the capability id an `AgentCapabilities` compile
+    /// The workflow's slug — the capability id an `PublishedAgent` compile
     /// exports as `runtara:agent-<slug>/capabilities`. Ignored for the other
     /// ABIs. `None` derives one from the graph name + workflow id (tests /
     /// legacy paths); production passes `workflows.slug`.
@@ -567,13 +525,13 @@ pub struct DirectCompilationInput {
 pub struct DirectCompilationResult {
     /// Call-site inventory generated from the same normalized manifest as code.
     /// Included in package v2 when logical Agent isolation is selected.
-    pub invocation_manifest: Option<runtara_workflow_wit::isolation_package::InvocationManifest>,
+    pub invocation_manifest: Option<runtara_invocation_contract::InvocationManifest>,
     /// Agent dependencies emitted with the private logical-context interface.
     /// Composition must bind every selected dependency to a reviewed adapter.
     pub scoped_agents: std::collections::BTreeSet<String>,
     /// Agents the emitted code treats as workflow-agents: their invokes
-    /// re-raise the reserved park and suspend codes. Composition refuses any
-    /// of them that does not resolve as a staged workflow-agent.
+    /// forward a `suspended` outcome. Composition refuses any of them that
+    /// does not resolve as a staged workflow-agent.
     pub workflow_agents: std::collections::BTreeSet<String>,
     /// Every capability each agent is called with, and whether the compile
     /// treated it as suspending. Composition refuses an agent whose
@@ -622,7 +580,7 @@ pub struct DirectCompilationResult {
     pub component_artifacts: DirectComponentArtifacts,
     /// Dependency/provenance metadata emitted beside the direct artifact.
     pub artifact_metadata: DirectArtifactMetadata,
-    /// Whether this compile dropped the `runtara:workflow-runtime/runtime`
+    /// Whether this compile dropped the `runtara:workflow/runtime`
     /// import (a pure, non-durable, invoke-ABI workflow compiled agent-shaped).
     /// Re-emit paths (e.g. the composed axis) must honor this to keep the
     /// on-disk world/wac consistent with the emitted module.
@@ -675,7 +633,7 @@ pub fn compose_direct_workflow_with_isolated_agents(
     components_dir: impl AsRef<Path>,
     extra_component_dirs: &[PathBuf],
     reviewed_agents: &std::collections::BTreeMap<String, String>,
-    limits: runtara_workflow_wit::isolation_package::PackageLimits,
+    limits: runtara_invocation_contract::PackageLimits,
 ) -> Result<PathBuf, DirectCompileError> {
     compose_direct_workflow_selected(
         result,
@@ -687,7 +645,7 @@ pub fn compose_direct_workflow_with_isolated_agents(
 
 type IsolationSelection<'a> = (
     &'a std::collections::BTreeMap<String, String>,
-    runtara_workflow_wit::isolation_package::PackageLimits,
+    runtara_invocation_contract::PackageLimits,
 );
 
 fn compose_direct_workflow_selected(
@@ -795,7 +753,7 @@ fn compose_direct_workflow_selected(
                     "isolated Agent `{agent}` differs from its reviewed digest"
                 )));
             }
-            let binding = runtara_workflow_wit::isolation_package::Binding {
+            let binding = runtara_invocation_contract::Binding {
                 id: format!("agent:{agent}"),
                 artifact: digest.clone(),
                 interface: format!("runtara:agent-{agent}/capabilities@{AGENT_WIT_VERSION}"),
@@ -861,7 +819,7 @@ fn compose_direct_workflow_selected(
     let composed_wasm = if let Some((_, limits)) = selection.filter(|_| !bindings.is_empty()) {
         let refs: Vec<&[u8]> = children.iter().map(Vec::as_slice).collect();
         if let Some(invocations) = result.invocation_manifest.clone() {
-            runtara_workflow_wit::isolation_package::append_with_invocations(
+            runtara_invocation_contract::append_with_invocations(
                 &composed_wasm,
                 &refs,
                 bindings,
@@ -870,7 +828,7 @@ fn compose_direct_workflow_selected(
             )
             .map_err(component_error)?
         } else {
-            runtara_workflow_wit::isolation_package::append(&composed_wasm, &refs, bindings, limits)
+            runtara_invocation_contract::append(&composed_wasm, &refs, bindings, limits)
                 .map_err(component_error)?
         }
     } else {
@@ -1000,124 +958,16 @@ pub fn compile_direct_workflow_composed(
     Ok(result)
 }
 
-/// Runtime binding for production compiles, from
-/// `RUNTARA_DIRECT_RUNTIME_BINDING` — the operational rollback lever.
-///
-/// Default (unset or anything else): `HostImport`. `composed` reverts new
-/// compiles to the legacy composed-runtime shape (guest HTTP loopback). It is
-/// no longer an escape hatch: such an artifact cannot reach core under the
-/// production runner. Its runtime traps on the first call to core, and past
-/// that the outbound guard would refuse the loopback HTTP and guests receive
-/// no runtime address; the run ends promptly as `crashed` (pinned by
-/// `a_composed_runtime_artifact_crashes_promptly_under_the_production_runner`
-/// in runtara-environment). The lever is kept (not failed closed) until no
-/// deployment is confirmed to set it.
-fn runtime_binding_from_env() -> super::component::RuntimeBinding {
-    runtime_binding_from_raw(
-        std::env::var("RUNTARA_DIRECT_RUNTIME_BINDING")
-            .ok()
-            .as_deref(),
-    )
-}
-
-fn runtime_binding_from_raw(raw: Option<&str>) -> super::component::RuntimeBinding {
-    match raw {
-        Some("composed") => super::component::RuntimeBinding::Composed,
-        _ => super::component::RuntimeBinding::HostImport,
-    }
-}
-
-/// [`compile_direct_workflow_composed`] with an explicit [`RuntimeBinding`],
-/// re-emitting the component scaffolding under `binding` before composing.
-///
-/// Used where the default (HostImport) binding cannot run: the wasmtime-CLI
-/// A/B reference axis has no way to satisfy host imports, so it composes the
-/// legacy runtime component in — and by binding-differential tests comparing
-/// the two artifact shapes.
-pub fn compile_direct_workflow_composed_with_binding(
-    input: DirectCompilationInput,
-    components_dir: impl AsRef<Path>,
-    binding: super::component::RuntimeBinding,
-) -> Result<DirectCompilationResult, DirectCompileError> {
-    // This entry exists for the legacy axes (the wasmtime-CLI A/B and the
-    // composed-binding differential) — pin the legacy export shape; the
-    // invoke shape goes through compile_direct_workflow_composed_configured.
-    compile_direct_workflow_composed_configured(
-        input,
-        components_dir,
-        binding,
-        super::component::WorkflowAbi::CliRunHttp,
-        // Legacy axes keep the runtime import.
-        false,
-    )
-}
-
-/// Fully-configured compile+compose: explicit [`RuntimeBinding`] AND
-/// [`super::component::WorkflowAbi`] — the entry the ABI-differential test
+/// Fully-configured compile+compose: explicit
+/// [`super::component::WorkflowRole`] — the entry the ABI-differential test
 /// axis drives.
 pub fn compile_direct_workflow_composed_configured(
     input: DirectCompilationInput,
     components_dir: impl AsRef<Path>,
-    binding: super::component::RuntimeBinding,
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
-    // Mirror the inner path's export-id derivation so the re-emitted world
-    // names the same `runtara:agent-<slug>` package the module actually exports.
-    let export_agent_id = match abi {
-        super::component::WorkflowAbi::AgentCapabilities => {
-            Some(input.agent_slug.clone().unwrap_or_else(|| {
-                runtara_dsl::agent_meta::generate_workflow_slug(
-                    input.execution_graph.name.as_deref().unwrap_or(""),
-                    &input.workflow_id,
-                )
-            }))
-        }
-        _ => None,
-    };
     let mut result = compile_direct_workflow_with_abi(input, abi, omit_runtime)?;
-    // The inner compile checked its sites against the environment's binding;
-    // this entry re-emits under `binding`, so check them again.
-    let manifest: DirectWorkflowManifest =
-        serde_json::from_slice(&fs::read(&result.manifest_path)?)?;
-    agent_suspend::check_sites(
-        &manifest,
-        abi,
-        result.omit_runtime,
-        binding,
-        &result.scoped_agents,
-        true,
-    )?;
-    let agent_ids: Vec<String> = result
-        .component_artifacts
-        .agent_components
-        .iter()
-        .map(|component| component.agent_id.clone())
-        .collect();
-    // Re-emit with the EFFECTIVE omit decision (a runtime-needing workflow keeps
-    // the import even when omit was requested), so the on-disk world/wac match
-    // the module that was actually emitted.
-    result.component_artifacts = super::component::emit_direct_component_artifacts_scoped(
-        &agent_ids,
-        binding,
-        abi,
-        result.omit_runtime,
-        export_agent_id.as_deref(),
-        &result.parallel_pools,
-        result.component_artifacts.has_connections,
-        &Default::default(),
-        &result.component_artifacts.suspending_agents.clone(),
-        result.component_artifacts.operation_scope,
-        result.component_artifacts.has_timers,
-        result.component_artifacts.needs_monotonic_clock,
-    )
-    .with_wait_instances(result.component_artifacts.wait_instances);
-    // Keep the on-disk scaffolding consistent with what is composed.
-    fs::write(
-        &result.world_wit_path,
-        &result.component_artifacts.world_wit,
-    )?;
-    fs::write(&result.wac_path, &result.component_artifacts.wac_source)?;
     compose_direct_workflow(&mut result, components_dir)?;
     Ok(result)
 }
@@ -1139,7 +989,7 @@ const DIRECT_COMPILE_STACK_SIZE: usize = 256 * 1024 * 1024;
 /// Accepts exactly the graphs passed by [`super::support::analyze_direct_wasm_support`];
 /// anything else is a hard [`DirectCompileError::Unsupported`] carrying the
 /// per-feature report. The emitted component-format artifact is a stable
-/// direct pipeline artifact with a canonical `lifecycle.invoke` export, stdlib
+/// direct pipeline artifact with the canonical workflow entry export, stdlib
 /// JSON calls, and runtime completion calls.
 ///
 /// Runs on a dedicated thread with an explicit [`DIRECT_COMPILE_STACK_SIZE`]
@@ -1151,7 +1001,7 @@ pub fn compile_direct_workflow(
     ensure_supported_production_workflow_abi()?;
     compile_direct_workflow_with_abi(
         input,
-        super::component::WorkflowAbi::InvokeHostImports,
+        super::component::WorkflowRole::Root,
         omit_runtime_from_env(),
     )
 }
@@ -1173,9 +1023,9 @@ pub fn compile_direct_workflow(
 /// Older images have no tag at all, which reads as a miss and rebuilds once.
 pub fn direct_lowering_tag() -> String {
     // The ABI belongs here as much as any lowering flag — more, in fact. It
-    // decides whether the artifact exports `wasi:cli/run` or `lifecycle.invoke`,
-    // so an artifact built under one and run under the other is not merely
-    // differently optimised, it is the wrong shape. Leaving it out meant a
+    // decides which entry interface the artifact exports, so an artifact
+    // built under one and run under the other is not merely differently
+    // optimised, it is the wrong shape. Leaving it out meant a
     // release that changed the default ABI did not disturb this tag, the
     // definition checksum was unchanged too, and every existing workflow kept
     // its stale artifact: launches then hung with no steps and no error, held
@@ -1183,7 +1033,7 @@ pub fn direct_lowering_tag() -> String {
     // success without rebuilding anything.
     format!(
         "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v24,agent-composition=standard-v1,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,trusted-artifacts=v1,on-signal-remap=v1,wide-result-errors=v1,omit_runtime={}",
-        workflow_abi_tag(super::component::WorkflowAbi::InvokeHostImports),
+        workflow_abi_tag(super::component::WorkflowRole::Root),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()
     )
@@ -1193,18 +1043,17 @@ pub fn direct_lowering_tag() -> String {
 ///
 /// Spelled out rather than derived from `Debug` so renaming a variant cannot
 /// silently invalidate every image in a deployment.
-fn workflow_abi_tag(abi: super::component::WorkflowAbi) -> &'static str {
+fn workflow_abi_tag(abi: super::component::WorkflowRole) -> &'static str {
     match abi {
-        super::component::WorkflowAbi::CliRunHttp => "cli-run",
-        super::component::WorkflowAbi::InvokeHostImports => "invoke",
-        super::component::WorkflowAbi::AgentCapabilities => "agent",
+        super::component::WorkflowRole::Root => "invoke",
+        super::component::WorkflowRole::PublishedAgent => "agent",
     }
 }
 
-/// Opt-in to dropping the `runtara:workflow-runtime/runtime` import for a PURE,
+/// Opt-in to dropping the `runtara:workflow/runtime` import for a PURE,
 /// non-durable, invoke-ABI workflow (see `WorkflowFeatureSummary::needs_runtime`
-/// and the omit path in the emitter). Default OFF — the runtime import is kept
-/// and the additive `runtime.complete`/`fail` fire as today. Set to `1`/`true`
+/// and the omit path in the emitter). Default OFF — the runtime import is
+/// kept. Set to `1`/`true`
 /// to let eligible workflows compile agent-shaped (zero runtime imports). This
 /// is the compile lever behind workflow-as-agent.
 pub(crate) fn omit_runtime_from_env() -> bool {
@@ -1220,17 +1069,15 @@ fn omit_runtime_from_raw(raw: Option<&str>) -> bool {
 
 /// Reject the removed direct-workflow ABI switch.
 ///
-/// `wasi:cli/run` cannot return a durable suspend outcome, so a workflow
-/// waiting for a human signal retained its runner slot. It is not a safe
-/// rollback mode: production direct workflows are always emitted with
-/// `lifecycle.invoke`. Explicit ABI construction remains available for compiler
-/// differential tests and artifact migration tooling, but an environment must
-/// never silently select the legacy shape for a production compile.
+/// Production direct workflows always export the workflow entry; no other
+/// export shape exists. A stale environment that
+/// still sets `RUNTARA_DIRECT_WORKFLOW_ABI` to anything else fails loudly
+/// instead of being silently ignored.
 fn ensure_supported_production_workflow_abi() -> Result<(), DirectCompileError> {
     match std::env::var("RUNTARA_DIRECT_WORKFLOW_ABI") {
         Err(std::env::VarError::NotPresent) => ensure_supported_production_workflow_abi_raw(None),
         Err(std::env::VarError::NotUnicode(_)) => Err(DirectCompileError::Component(
-            "RUNTARA_DIRECT_WORKFLOW_ABI is not valid Unicode; direct workflows must use lifecycle.invoke".to_string(),
+            "RUNTARA_DIRECT_WORKFLOW_ABI is not valid Unicode; direct workflows must export the workflow entry".to_string(),
         )),
         Ok(value) => ensure_supported_production_workflow_abi_raw(Some(&value)),
     }
@@ -1242,20 +1089,19 @@ fn ensure_supported_production_workflow_abi_raw(
     match raw {
         None | Some("") | Some("invoke") => Ok(()),
         Some(value) => Err(DirectCompileError::Component(format!(
-            "RUNTARA_DIRECT_WORKFLOW_ABI={value:?} is unsupported: direct workflows must use lifecycle.invoke; rebuild or republish legacy artifacts"
+            "RUNTARA_DIRECT_WORKFLOW_ABI={value:?} is unsupported: direct workflows must export the workflow entry; rebuild or republish legacy artifacts"
         ))),
     }
 }
 
-/// [`compile_direct_workflow`] with an explicit [`super::component::WorkflowAbi`].
+/// [`compile_direct_workflow`] with an explicit [`super::component::WorkflowRole`].
 ///
-/// Production callers use [`compile_direct_workflow`], which always emits the
-/// lifecycle invoke ABI. This lower-level entry remains for compiler
-/// differential tests and artifact migration tooling, including the retired
-/// `wasi:cli/run` reference shape.
+/// Production callers use [`compile_direct_workflow`], which compiles a root.
+/// This lower-level entry also compiles a published workflow-agent, which
+/// exports its slug instead of the workflow entry.
 pub fn compile_direct_workflow_with_abi(
     input: DirectCompilationInput,
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     compile_direct_workflow_selected(
@@ -1272,7 +1118,7 @@ pub fn compile_direct_workflow_with_abi(
 #[cfg(any(test, feature = "direct-wasm-integration-tests"))]
 pub fn compile_direct_workflow_with_scoped_agents(
     input: DirectCompilationInput,
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
     scoped_agents: std::collections::BTreeSet<String>,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
@@ -1286,7 +1132,7 @@ pub fn compile_direct_workflow_with_scoped_agents(
 
 fn compile_direct_workflow_selected(
     input: DirectCompilationInput,
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
     selection: AgentLoweringSelection,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
@@ -1307,7 +1153,7 @@ fn compile_direct_workflow_selected(
 
 fn compile_direct_workflow_inner(
     input: DirectCompilationInput,
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime_requested: bool,
     selection: AgentLoweringSelection,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
@@ -1350,32 +1196,32 @@ fn compile_direct_workflow_inner(
         resolve_direct_child_workflow_metadata(&manifest, &input.child_workflows)?;
 
     // Callable workflows use cancellable guest-local waits for non-durable
-    // Agent I/O/backoff. They must not import the parent's lifecycle runtime.
-    // Keep the lower-level legacy compile path for differential/replay tooling;
-    // production publishing additionally requires the static safety report.
+    // Agent I/O/backoff and then omit the workflow runtime. One that parks,
+    // or makes an operation-scoped call (suspending or control) or waits on
+    // instances, keeps it: those run under the caller's instance.
+    // Production publishing additionally requires the static safety report.
     let needs_runtime = manifest.feature_summary.needs_runtime(input.track_events);
     let omit_runtime = match abi {
-        super::component::WorkflowAbi::AgentCapabilities => {
+        super::component::WorkflowRole::PublishedAgent => {
             !needs_runtime
                 || (!workflow_agent_safety.may_suspend_or_sleep
+                    && !manifest.has_operation_scoped_sites()
+                    && !manifest.has_wait_for_instances()
                     && !workflow_agent_requires_runtime(
                         &input.execution_graph,
                         &input.child_workflows,
                         input.track_events,
                     ))
         }
-        super::component::WorkflowAbi::InvokeHostImports => {
-            omit_runtime_requested && !needs_runtime
-        }
-        super::component::WorkflowAbi::CliRunHttp => false,
+        super::component::WorkflowRole::Root => omit_runtime_requested && !needs_runtime,
     };
 
-    // The export id an AgentCapabilities compile publishes under. A supplied
+    // The export id an PublishedAgent compile publishes under. A supplied
     // slug is re-validated defensively (a corrupt/legacy row would otherwise
     // surface as an opaque wit-parser lexer error that bricks the compile);
     // absent one, derive from the graph name — same transform the server uses.
     let export_agent_id = match abi {
-        super::component::WorkflowAbi::AgentCapabilities => {
+        super::component::WorkflowRole::PublishedAgent => {
             let slug = match input.agent_slug.as_deref() {
                 Some(slug) => {
                     runtara_dsl::agent_meta::validate_workflow_slug(slug).map_err(|e| {
@@ -1395,10 +1241,7 @@ fn compile_direct_workflow_inner(
         _ => None,
     };
 
-    let runtime_binding = runtime_binding_from_env();
-    let root_supports_isolation = abi == super::component::WorkflowAbi::InvokeHostImports
-        && !omit_runtime
-        && runtime_binding == super::component::RuntimeBinding::HostImport;
+    let root_supports_isolation = abi == super::component::WorkflowRole::Root && !omit_runtime;
     let (scoped_agents, selection_report) =
         selection.resolve(&manifest, &input.workflow_id, root_supports_isolation)?;
     for agent in &scoped_agents {
@@ -1410,9 +1253,7 @@ fn compile_direct_workflow_inner(
     }
     agent_suspend::check_sites(
         &manifest,
-        abi,
         omit_runtime,
-        runtime_binding,
         &scoped_agents,
         agent_catalog.is_some(),
     )?;
@@ -1440,7 +1281,6 @@ fn compile_direct_workflow_inner(
     });
     let component_artifacts = super::component::emit_direct_component_artifacts_scoped(
         &manifest.feature_summary.agent_ids,
-        runtime_binding,
         abi,
         omit_runtime,
         export_agent_id.as_deref(),
@@ -1528,11 +1368,11 @@ fn compile_direct_workflow_inner(
     })
 }
 
-fn workflow_abi_version(abi: super::component::WorkflowAbi) -> u32 {
+fn workflow_abi_version(abi: super::component::WorkflowRole) -> u32 {
     match abi {
-        super::component::WorkflowAbi::CliRunHttp => DIRECT_WORKFLOW_ABI_VERSION,
-        super::component::WorkflowAbi::InvokeHostImports
-        | super::component::WorkflowAbi::AgentCapabilities => DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
+        super::component::WorkflowRole::Root | super::component::WorkflowRole::PublishedAgent => {
+            DIRECT_WORKFLOW_INVOKE_ABI_VERSION
+        }
     }
 }
 
@@ -1543,53 +1383,26 @@ fn emit_direct_artifact(
     support_json: &[u8],
     track_events: bool,
     workflow_id: &str,
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
     scoped_agents: &std::collections::BTreeSet<String>,
 ) -> Result<(Vec<u8>, std::collections::BTreeMap<String, u32>), DirectCompileError> {
-    let abi_json = match abi {
-        super::component::WorkflowAbi::CliRunHttp => serde_json::to_vec(&serde_json::json!({
-            "abiVersion": DIRECT_WORKFLOW_ABI_VERSION,
-            "artifactKind": "direct-run-component",
-            "componentRunExport": "wasi:cli/run@0.2.3",
-            "entryPointExecutable": true,
-            "runtimeExecutable": true,
-            "outputMode": "stdlib-apply-mapping",
-            "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
-            "stepCount": manifest.feature_summary.total_steps,
-            "note": "direct compiler component with canonical run export, stdlib mapping/condition calls, and runtime.complete call"
-        }))?,
-        super::component::WorkflowAbi::InvokeHostImports => {
-            serde_json::to_vec(&serde_json::json!({
-                "abiVersion": DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
-                "artifactKind": "direct-invoke-component",
-                "componentRunExport": LIFECYCLE_INTERFACE_NAME,
-                "entryPointExecutable": true,
-                "runtimeExecutable": true,
-                "outputMode": "invoke-result-outcome",
-                "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
-                "stepCount": manifest.feature_summary.total_steps,
-                "note": "unified invoke export: input as the call argument, terminal result as result<outcome, error-info>; runtime interface host-satisfied; complete/fail still fire additively"
-            }))?
-        }
-        super::component::WorkflowAbi::AgentCapabilities => {
-            serde_json::to_vec(&serde_json::json!({
-                "abiVersion": DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
-                "artifactKind": "direct-agent-capability-component",
-                "componentRunExport": format!(
-                    "runtara:agent-{}/capabilities@{DIRECT_AGENT_WIT_VERSION}",
-                    export_agent_id.unwrap_or(super::component::CAPABILITIES_EXPORT_AGENT_ID)
-                ),
-                "entryPointExecutable": true,
-                "runtimeExecutable": true,
-                "outputMode": "capabilities-invoke-list",
-                "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
-                "stepCount": manifest.feature_summary.total_steps,
-                "note": "workflow-as-agent: exports runtara:agent-<slug>/capabilities.invoke(cap-id, input) -> result<list<u8>, error-info>; zero runtime imports; pure/non-suspending"
-            }))?
-        }
-    };
+    let entry_id = super::component::entry_agent_id(abi, export_agent_id);
+    let abi_json = serde_json::to_vec(&serde_json::json!({
+        "abiVersion": DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
+        "artifactKind": match abi {
+            super::component::WorkflowRole::Root => "direct-invoke-component",
+            super::component::WorkflowRole::PublishedAgent => "direct-agent-capability-component",
+        },
+        "componentRunExport": format!("runtara:agent-{entry_id}/capabilities@{DIRECT_AGENT_WIT_VERSION}"),
+        "entryPointExecutable": true,
+        "runtimeExecutable": true,
+        "outputMode": "invoke-result-outcome",
+        "manifestVersion": DIRECT_WORKFLOW_MANIFEST_VERSION,
+        "stepCount": manifest.feature_summary.total_steps,
+        "note": "every workflow exports capabilities.invoke(\"run\", input) -> result<outcome, error-info>; a published workflow-agent under its slug, a top-level run under the reserved entry id"
+    }))?;
 
     let (mut component, parallel_pools) = emit_direct_component(
         manifest,
@@ -1622,7 +1435,7 @@ fn emit_direct_component(
     manifest_json: &[u8],
     track_events: bool,
     workflow_id: &str,
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
     scoped_agents: &std::collections::BTreeSet<String>,
@@ -1666,11 +1479,10 @@ fn emit_direct_component(
 
 #[cfg(test)]
 fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileError> {
-    // Pinned to the legacy world to match DirectCoreConfig::new (the
-    // structural tests describe the wasi:cli/run lowering).
+    // Pinned to the default (invoke) world to match DirectCoreConfig::new.
     build_direct_component_resolve_configured(
         &[],
-        super::component::WorkflowAbi::CliRunHttp,
+        super::component::WorkflowRole::Root,
         false,
         None,
         &std::collections::BTreeMap::new(),
@@ -1682,10 +1494,10 @@ fn build_direct_component_resolve() -> Result<(Resolve, WorldId), DirectCompileE
 fn build_direct_component_resolve_with_agents(
     agents: &[String],
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
-    // See build_direct_component_resolve: pinned to the legacy world.
+    // See build_direct_component_resolve: pinned to the default world.
     build_direct_component_resolve_configured(
         agents,
-        super::component::WorkflowAbi::CliRunHttp,
+        super::component::WorkflowRole::Root,
         false,
         None,
         &std::collections::BTreeMap::new(),
@@ -1696,7 +1508,7 @@ fn build_direct_component_resolve_with_agents(
 #[cfg(test)]
 fn build_direct_component_resolve_configured(
     agents: &[String],
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
     parallel_pools: &std::collections::BTreeMap<String, u32>,
@@ -1723,7 +1535,7 @@ fn build_direct_component_resolve_configured(
 #[allow(clippy::too_many_arguments)]
 fn build_direct_component_resolve_scoped(
     agents: &[String],
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
     parallel_pools: &std::collections::BTreeMap<String, u32>,
@@ -1751,11 +1563,11 @@ fn build_direct_component_resolve_scoped(
 }
 
 /// [`build_direct_component_resolve_scoped`], also importing
-/// `runtara:workflow-wait/instances` when a WaitForInstances step needs it.
+/// `runtara:workflow/waits` when a WaitForInstances step needs it.
 #[allow(clippy::too_many_arguments)]
 fn build_direct_component_resolve_with_waits(
     agents: &[String],
-    abi: super::component::WorkflowAbi,
+    abi: super::component::WorkflowRole,
     omit_runtime: bool,
     export_agent_id: Option<&str>,
     parallel_pools: &std::collections::BTreeMap<String, u32>,
@@ -1769,152 +1581,80 @@ fn build_direct_component_resolve_with_waits(
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
     // Control sites need the scope without any suspending agent.
     let operation_scope = operation_scope || !suspending_agents.is_empty();
-    let mut resolve = Resolve::default();
-    if needs_monotonic_clock {
-        resolve
-            .push_str("wasi-io-poll.wit", runtara_agent_wit::WASI_IO_POLL_WIT)
-            .map_err(component_error)?;
+    // Every runtara package, once; the world below imports only what it names.
+    let mut resolve = runtara_wit::resolve().map_err(component_error)?;
+    // Every workflow exports its entry as an agent package: a published
+    // workflow-agent under its slug, a top-level run under the reserved entry
+    // id. The reserved-slug check at save time guarantees the export package
+    // can never collide with an imported agent's.
+    let entry_id = super::component::entry_agent_id(abi, export_agent_id);
+    resolve
+        .push_str(
+            format!("runtara-agent-{entry_id}.wit"),
+            &runtara_wit::agent_package(entry_id, runtara_wit::AgentShape::default()),
+        )
+        .map_err(component_error)?;
+    for agent in agents {
+        let shape = runtara_wit::AgentShape {
+            scoped: scoped_agents.contains(agent),
+            suspendable: suspending_agents.contains(agent),
+            ..Default::default()
+        };
         resolve
             .push_str(
-                "wasi-monotonic-clock.wit",
-                runtara_agent_wit::WASI_MONOTONIC_CLOCK_WIT,
+                format!("runtara-agent-{agent}.wit"),
+                &runtara_wit::agent_package(agent, shape),
             )
             .map_err(component_error)?;
-    }
-    resolve
-        .push_str("runtara-database.wit", runtara_workflow_wit::DATABASE_WIT)
-        .map_err(component_error)?;
-    resolve
-        .push_str("runtara-connection-resolver.wit", CONNECTION_RESOLVER_WIT)
-        .map_err(component_error)?;
-    resolve
-        .push_str("runtara-workflow-stdlib.wit", STDLIB_WIT)
-        .map_err(component_error)?;
-    if !omit_runtime {
-        resolve
-            .push_str("runtara-workflow-runtime.wit", RUNTIME_WIT)
-            .map_err(component_error)?;
-    }
-    if wait_instances {
-        resolve
-            .push_str("runtara-workflow-wait.wit", runtara_workflow_wit::WAIT_WIT)
-            .map_err(component_error)?;
-    }
-    match abi {
-        super::component::WorkflowAbi::CliRunHttp => {
-            resolve
-                .push_str("wasi-cli-run.wit", WASI_CLI_RUN_WIT)
-                .map_err(component_error)?;
-        }
-        super::component::WorkflowAbi::InvokeHostImports => {
-            // The lifecycle package `use`s runtara:abi — push it first.
-            resolve
-                .push_str("runtara-abi.wit", ABI_WIT)
-                .map_err(component_error)?;
-            resolve
-                .push_str("runtara-workflow-lifecycle.wit", LIFECYCLE_WIT)
-                .map_err(component_error)?;
-        }
-        super::component::WorkflowAbi::AgentCapabilities => {
-            // Export the agent capability interface under the workflow's own
-            // slug. The reserved-slug check at save time guarantees the export
-            // package can never collide with an imported native agent's.
-            resolve
-                .push_str("runtara-agent-types.wit", AGENT_TYPES_WIT)
-                .map_err(component_error)?;
-            let id = export_agent_id.unwrap_or(super::component::CAPABILITIES_EXPORT_AGENT_ID);
-            resolve
-                .push_str(format!("runtara-agent-{id}.wit"), &agent_wit_package(id))
-                .map_err(component_error)?;
-        }
-    }
-    if needs_timers || !parallel_pools.is_empty() || !agents.is_empty() {
-        resolve
-            .push_str("runtara-host-io-timers.wit", HOST_IO_TIMERS_WIT)
-            .map_err(component_error)?;
-    }
-    if !agents.is_empty() {
-        // Under AgentCapabilities the types package was already pushed above;
-        // pushing the same content twice is a wit-parser error.
-        if !matches!(abi, super::component::WorkflowAbi::AgentCapabilities) {
-            resolve
-                .push_str("runtara-agent-types.wit", AGENT_TYPES_WIT)
-                .map_err(component_error)?;
-        }
-        if operation_scope {
-            // The suspension types, then the operation scope that `use`s them.
-            resolve
-                .push_str(
-                    "runtara-agent-suspension.wit",
-                    runtara_agent_suspension::WIT,
-                )
-                .map_err(component_error)?;
-            resolve
-                .push_str(
-                    "runtara-workflow-operation.wit",
-                    runtara_workflow_wit::OPERATION_WIT,
-                )
-                .map_err(component_error)?;
-        }
-        for agent in agents {
-            resolve
-                .push_str(
-                    format!("runtara-agent-{agent}.wit"),
-                    &agent_wit_package_with_interfaces(
-                        agent,
-                        scoped_agents.contains(agent),
-                        suspending_agents.contains(agent),
-                    ),
-                )
-                .map_err(component_error)?;
-            // Phantom pool-member packages (structurally identical interface
-            // under a distinct package id).
-            if let Some(pool) = parallel_pools.get(agent) {
-                for member in 1..*pool {
-                    let phantom = split_parallel::pool_member_component_id(agent, member);
-                    resolve
-                        .push_str(
-                            format!("runtara-agent-{phantom}.wit"),
-                            &agent_wit_package_configured(&phantom, scoped_agents.contains(agent)),
-                        )
-                        .map_err(component_error)?;
-                }
+        // Phantom pool-member packages (structurally identical interface
+        // under a distinct package id).
+        if let Some(pool) = parallel_pools.get(agent) {
+            for member in 1..*pool {
+                let phantom = split_parallel::pool_member_component_id(agent, member);
+                let shape = runtara_wit::AgentShape {
+                    scoped: shape.scoped,
+                    ..Default::default()
+                };
+                resolve
+                    .push_str(
+                        format!("runtara-agent-{phantom}.wit"),
+                        &runtara_wit::agent_package(&phantom, shape),
+                    )
+                    .map_err(component_error)?;
             }
         }
     }
 
     let mut workflow_wit = format!(
-        "package runtara:workflow@{WORKFLOW_WIT_VERSION};\n\
+        "package {DIRECT_WORKFLOW_LOGIC_PACKAGE};\n\
          \n\
          world workflow {{\n\
-             import runtara:workflow-stdlib/json@{WORKFLOW_WIT_VERSION};\n"
+             import {};\n",
+        runtara_wit::stdlib::JSON
     );
     if !omit_runtime {
         workflow_wit.push_str(&format!("    import {RUNTIME_INTERFACE_NAME};\n"));
     }
     if has_connections {
-        workflow_wit.push_str("    import runtara:connection-resolver/resolver@0.2.0;\n");
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::host::CONNECTIONS));
     }
     if needs_timers || !parallel_pools.is_empty() || !agents.is_empty() {
-        workflow_wit.push_str("    import runtara:host-io/timers@0.1.0;\n");
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::host::TIMERS));
     }
     if needs_monotonic_clock {
         workflow_wit.push_str(&format!(
             "    import {};\n",
-            runtara_agent_wit::WASI_MONOTONIC_CLOCK_INTERFACE
+            runtara_wit::wasi::MONOTONIC_CLOCK
         ));
     }
     if operation_scope {
         workflow_wit.push_str(&format!(
             "    import {};\n",
-            runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME
+            runtara_wit::workflow::OPERATION
         ));
     }
     if wait_instances {
-        workflow_wit.push_str(&format!(
-            "    import {};\n",
-            runtara_workflow_wit::WAIT_INSTANCES_INTERFACE_NAME
-        ));
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::workflow::WAITS));
     }
     for agent in agents {
         let interface = if scoped_agents.contains(agent) {
@@ -1925,12 +1665,6 @@ fn build_direct_component_resolve_with_waits(
         workflow_wit.push_str(&format!(
             "    import runtara:agent-{agent}/{interface}@{AGENT_WIT_VERSION};\n",
         ));
-        if suspending_agents.contains(agent) {
-            workflow_wit.push_str(&format!(
-                "    import runtara:agent-{agent}/{}@{AGENT_WIT_VERSION};\n",
-                runtara_agent_suspension::SUSPENDABLE_INTERFACE
-            ));
-        }
         if let Some(pool) = parallel_pools.get(agent) {
             for member in 1..*pool {
                 let phantom = split_parallel::pool_member_component_id(agent, member);
@@ -1940,20 +1674,9 @@ fn build_direct_component_resolve_with_waits(
             }
         }
     }
-    match abi {
-        super::component::WorkflowAbi::CliRunHttp => {
-            workflow_wit.push_str("    export wasi:cli/run@0.2.3;\n")
-        }
-        super::component::WorkflowAbi::InvokeHostImports => {
-            workflow_wit.push_str(&format!("    export {LIFECYCLE_INTERFACE_NAME};\n"))
-        }
-        super::component::WorkflowAbi::AgentCapabilities => {
-            let id = export_agent_id.unwrap_or(super::component::CAPABILITIES_EXPORT_AGENT_ID);
-            workflow_wit.push_str(&format!(
-                "    export runtara:agent-{id}/capabilities@{AGENT_WIT_VERSION};\n"
-            ))
-        }
-    }
+    workflow_wit.push_str(&format!(
+        "    export runtara:agent-{entry_id}/capabilities@{AGENT_WIT_VERSION};\n"
+    ));
     workflow_wit.push_str("}\n");
     let package = resolve
         .push_str("runtara-workflow.wit", &workflow_wit)
@@ -1965,107 +1688,33 @@ fn build_direct_component_resolve_with_waits(
     Ok((resolve, world))
 }
 
-fn agent_wit_package(agent: &str) -> String {
-    agent_wit_package_configured(agent, false)
-}
-
-fn agent_wit_package_configured(agent: &str, scoped: bool) -> String {
-    agent_wit_package_with_interfaces(agent, scoped, false)
-}
-
-/// The per-agent package the workflow logic is encoded against. A suspending
-/// agent's package also declares `suspendable`, so the world can import both
-/// of its type-identical invoke interfaces.
-fn agent_wit_package_with_interfaces(agent: &str, scoped: bool, suspendable: bool) -> String {
-    let (suspendable_interface, suspendable_export) = if suspendable {
-        (
-            runtara_agent_suspension::SUSPENDABLE_INTERFACE_WIT,
-            format!(
-                "    export {};\n",
-                runtara_agent_suspension::SUSPENDABLE_INTERFACE
-            ),
-        )
-    } else {
-        ("", String::new())
-    };
-    let interface = if scoped {
-        "scoped-capabilities-v3"
-    } else {
-        "capabilities"
-    };
-    let context = if scoped {
-        "path: string, call-site: u32, activation: u32, attempt: u64,"
-    } else {
-        ""
-    };
-    format!(
-        "package runtara:agent-{agent}@{AGENT_WIT_VERSION};\n\
-         \n\
-         interface {interface} {{\n\
-             use runtara:agent/types@{AGENT_WIT_VERSION}.{{error-info}};\n\
-             invoke: async func(\n\
-                 capability-id: string,\n\
-                 input: list<u8>,\n\
-                 {context}\n\
-             ) -> result<list<u8>, error-info>;\n\
-         }}\n\
-         {suspendable_interface}\
-         \n\
-         world agent {{\n\
-             export {interface};\n\
-         {suspendable_export}\
-         }}\n"
-    )
-}
-
-/// Terminal-failure return — the ONE place that owns the per-ABI exit shape.
-/// Every fail site in every lowerer funnels here (directly or via the
-/// `abi.rs` retptr-error wrappers).
+/// Terminal-failure return — the ONE place that owns the exit shape. Every
+/// fail site in every lowerer funnels here (directly or via the `abi.rs`
+/// retptr-error wrappers).
 ///
-/// Both ABIs still record the failure host-side via `runtime.fail` (additive
-/// during the migration). The return differs:
-/// - `wasi:cli/run`: the classic non-zero result tag.
-/// - invoke export: `Err(error-info)` written into the fixed result area at
-///   offset 0 (the low retptr scratch — dead here by construction: no host
-///   call runs between this write and the canonical lift, and it is
-///   8-aligned as the payload requires). Layout (payload @8, align 8):
-///   code@8/12, message@16/20, category@24/28, severity@32/36, retryable@40,
-///   retry-after-ms tag@48 val@56, attributes tag@64 str@68/72 — total 80.
-///   v1 wraps the raw error bytes as `message` and leaves code/category/
-///   severity as empty strings (zeroed ptr/len is a valid empty string);
-///   structured mapping arrives with the suspend wiring phase.
+/// The return is `Err(error-info)` written into the fixed result area at
+/// offset 0 (the low retptr scratch — dead here by construction: no host call
+/// runs between this write and the canonical lift, and it is 8-aligned as the
+/// payload requires). Layout (payload @8, align 8): code@8/12,
+/// message@16/20, category@24/28, severity@32/36, retryable@40,
+/// retry-after-ms tag@48 val@56, attributes tag@64 str@68/72, details tag@76
+/// str@80/84 — total 88. The host persists the run's error from it.
 fn emit_runtime_fail_return(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
     error_ptr_local: u32,
     error_len_local: u32,
 ) {
-    // The additive `runtime.fail` records the terminal error host-side during
-    // the migration. Suppressed when terminal status is suppressed
-    // (omit-runtime, or an AgentCapabilities child whose caller owns the
-    // instance) — the `Err(error-info)` return value is the sole terminal error.
-    if indices.report_terminal_status() {
-        body.instruction(&Instruction::LocalGet(error_ptr_local));
-        body.instruction(&Instruction::LocalGet(error_len_local));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_fail));
-    }
-    if indices.abi.is_invoke_export() {
-        // Structured Err(error-info): stdlib decomposes the payload directly
-        // into the result area; abi.rs owns the writer. Both invoke shapes have
-        // `result<_, error-info>` with error-info at the same offset.
-        abi::emit_invoke_err_return_from_locals(
-            body,
-            indices,
-            indices.stdlib_invoke_error_fields,
-            error_ptr_local,
-            error_len_local,
-        );
-    } else {
-        deadline_scope::close_alarm(body, indices);
-        body.instruction(&Instruction::I32Const(1));
-        body.instruction(&Instruction::Return);
-    }
+    // Structured Err(error-info): stdlib decomposes the payload directly
+    // into the result area; abi.rs owns the writer. Both invoke shapes have
+    // `result<_, error-info>` with error-info at the same offset.
+    abi::emit_invoke_err_return_from_locals(
+        body,
+        indices,
+        indices.stdlib_invoke_error_fields,
+        error_ptr_local,
+        error_len_local,
+    );
 }
 
 fn append_component_custom_section(bytes: &mut Vec<u8>, name: &str, data: &[u8]) {

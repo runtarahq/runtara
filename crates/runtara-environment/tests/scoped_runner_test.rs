@@ -7,11 +7,11 @@ use runtara_core::{domain::InstanceStatus, persistence::Persistence};
 use runtara_environment::runner::{
     EmbeddedWasmRunner, LaunchOptions, Runner, ScopedAgentRunnerConfig, WorkflowRunnerConfig,
 };
+use runtara_invocation_contract::{PackageLimits, artifact_digest};
 use runtara_store_postgres::PostgresPersistence;
-use runtara_workflow_wit::isolation_package::{PackageLimits, artifact_digest};
 use runtara_workflows::direct_wasm::{
     AgentIsolationPolicy, AgentIsolationReview, DirectCompilationInput, DirectCompilationResult,
-    WorkflowAbi, compile_direct_workflow, compile_direct_workflow_composed_with_isolation_policy,
+    WorkflowRole, compile_direct_workflow, compile_direct_workflow_composed_with_isolation_policy,
     compose_direct_workflow, compose_direct_workflow_with_isolated_agents,
 };
 use serde_json::{Value, json};
@@ -58,13 +58,13 @@ fn compile(graph: Value, dir: &Path, agent: &str, backend: &str) -> DirectCompil
         // to prove pinned packages still execute with unknown durability.
         let mut compiled = compile(graph, &dir.join("current"), agent, "scoped");
         let bytes = std::fs::read(&compiled.wasm_path).unwrap();
-        let package = runtara_workflow_wit::isolation_package::parse(&bytes, limits())
+        let package = runtara_invocation_contract::parse(&bytes, limits())
             .unwrap()
             .unwrap();
         let mut inventory = package.invocations().unwrap().clone();
         inventory.version = 4;
         inventory.call_durability.clear();
-        let legacy = runtara_workflow_wit::isolation_package::append_with_invocations(
+        let legacy = runtara_invocation_contract::append_with_invocations(
             package.root,
             &package.artifacts().values().copied().collect::<Vec<_>>(),
             package.bindings().values().cloned().collect(),
@@ -88,17 +88,17 @@ fn compile(graph: Value, dir: &Path, agent: &str, backend: &str) -> DirectCompil
         };
         let mut pure = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
             pure_input,
-            WorkflowAbi::InvokeHostImports,
+            WorkflowRole::Root,
             true,
         )
         .unwrap();
         assert!(pure.omit_runtime);
         compose_direct_workflow(&mut pure, components()).unwrap();
         let bytes = std::fs::read(&packaged.wasm_path).unwrap();
-        let catalog = runtara_workflow_wit::isolation_package::parse(&bytes, limits())
+        let catalog = runtara_invocation_contract::parse(&bytes, limits())
             .unwrap()
             .unwrap();
-        let replacement = runtara_workflow_wit::isolation_package::append_with_invocations(
+        let replacement = runtara_invocation_contract::append_with_invocations(
             &std::fs::read(pure.wasm_path).unwrap(),
             &catalog.artifacts().values().copied().collect::<Vec<_>>(),
             catalog.bindings().values().cloned().collect(),
@@ -124,7 +124,7 @@ fn compile(graph: Value, dir: &Path, agent: &str, backend: &str) -> DirectCompil
     if backend == "scoped" {
         return compile_direct_workflow_composed_with_isolation_policy(
             input,
-            WorkflowAbi::InvokeHostImports,
+            WorkflowRole::Root,
             false,
             &components(),
             &[],
@@ -212,7 +212,6 @@ impl Harness {
             instance_id: id,
             tenant_id: "scoped-runner-test".into(),
             wasm_path: wasm.to_owned(),
-            requires_lifecycle_invoke: true,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,
@@ -765,7 +764,7 @@ fn parking_child_parent(dir: &Path, timeout_ms: Option<u64>) -> DirectCompilatio
             agent_catalog: None,
             agent_slug: Some("parking-child".into()),
         },
-        WorkflowAbi::AgentCapabilities,
+        WorkflowRole::PublishedAgent,
         false,
     )
     .unwrap();
@@ -773,14 +772,13 @@ fn parking_child_parent(dir: &Path, timeout_ms: Option<u64>) -> DirectCompilatio
 
     let staging = dir.join("staged");
     std::fs::create_dir_all(&staging).unwrap();
-    let mut info = runtara_dsl::agent_meta::workflow_agent_info(
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
         "parking-child",
         "parking-child",
         "fixture",
         &HashMap::new(),
         &HashMap::new(),
     );
-    runtara_dsl::agent_meta::certify_workflow_agent_parks(&mut info);
     std::fs::copy(
         &child.wasm_path,
         staging.join("runtara_agent_parking_child.wasm"),
@@ -813,7 +811,7 @@ fn parking_child_parent(dir: &Path, timeout_ms: Option<u64>) -> DirectCompilatio
             )),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )
     .unwrap();
@@ -1050,115 +1048,4 @@ async fn the_wake_scheduler_claims_a_parked_nested_wait_and_relaunches_it() {
         "the relaunched run must not leave the instance marked live"
     );
     assert_eq!(runner.occupancy().unwrap().held, 0);
-}
-
-/// `RUNTARA_DIRECT_RUNTIME_BINDING=composed` is kept as a lever, but the
-/// artifact it produces cannot run under the production runner. Pin what an
-/// operator who sets it gets: the run ends promptly as a crash, well inside its
-/// execution timeout, never completing and never reaching the SDK's default
-/// core address. Today the composed runtime traps on its first call to core,
-/// before any request leaves the guest (its SDK blocks a synchronous task
-/// under the async host); past that, the outbound guard would deny raw
-/// `wasi:http`, and guests get no `RUNTARA_HTTP_URL`. The trap reason reaches
-/// only the runner's log: the instance error is the generic crash fallback.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_composed_runtime_artifact_crashes_promptly_under_the_production_runner() {
-    use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
-    use runtara_environment::handlers::{DrainController, spawn_container_monitor};
-    let h = Harness::new().await;
-    let graph = json!({"durable":true,"entryPoint":"finish","steps":{
-        "finish":{"id":"finish","stepType":"Finish","inputMapping":{
-            "value":{"valueType":"immediate","value":1}}}},"executionPlan":[]});
-    let input = DirectCompilationInput {
-        workflow_id: "composed-runtime-test".into(),
-        version: 1,
-        source_checksum: None,
-        execution_graph: serde_json::from_value(graph).unwrap(),
-        child_workflows: vec![],
-        output_dir: h.dir.path().join("composed"),
-        track_events: false,
-        agent_catalog: None,
-        agent_slug: None,
-    };
-    let artifact = runtara_workflows::direct_wasm::compile_direct_workflow_composed_configured(
-        input,
-        components(),
-        runtara_workflows::direct_wasm::RuntimeBinding::Composed,
-        WorkflowAbi::InvokeHostImports,
-        false,
-    )
-    .unwrap();
-
-    // The SDK's default core address. When nothing else holds it, a
-    // connection arriving here would mean the guest reached a loopback core.
-    let loopback = tokio::net::TcpListener::bind("127.0.0.1:8003").await.ok();
-
-    let runner = Arc::new(h.runner(None));
-    let mut options = h.options(&artifact.wasm_path).await;
-    let timeout = Duration::from_secs(20);
-    options.timeout = timeout;
-    let started = std::time::Instant::now();
-    let handle = runner.try_launch_detached(&options).await.unwrap();
-    // The production monitor turns an exit without a terminal report into the
-    // instance's terminal state; it acts only on a registered generation.
-    let pool = sqlx::PgPool::connect(&std::env::var("TEST_ENVIRONMENT_DATABASE_URL").unwrap())
-        .await
-        .unwrap();
-    ContainerRegistry::new(pool.clone())
-        .register(&ContainerInfo {
-            container_id: handle.handle_id.clone(),
-            launch_id: handle.launch_id.clone(),
-            instance_id: options.instance_id.clone(),
-            tenant_id: handle.tenant_id.clone(),
-            binary_path: artifact.wasm_path.to_string_lossy().into_owned(),
-            started_at: handle.started_at,
-            timeout_seconds: Some(timeout.as_secs() as i64),
-        })
-        .await
-        .unwrap();
-    spawn_container_monitor(
-        pool.clone(),
-        runner.clone(),
-        handle.clone(),
-        h.persistence.clone(),
-        timeout,
-        DrainController::new(),
-        Default::default(),
-        None,
-        None,
-    );
-
-    let bound = Duration::from_secs(10);
-    let instance = tokio::time::timeout(bound, async {
-        loop {
-            let instance = h
-                .persistence
-                .get_instance(&options.instance_id)
-                .await
-                .unwrap()
-                .unwrap();
-            if instance.status != InstanceStatus::Running
-                && instance.status != InstanceStatus::Pending
-            {
-                return instance;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("a composed-runtime artifact must end well inside its execution timeout");
-    assert!(started.elapsed() < bound);
-    assert!(!runner.is_running(&handle).await);
-    assert_eq!(instance.status, InstanceStatus::Failed);
-    assert_eq!(instance.termination_reason.as_deref(), Some("crashed"));
-    assert!(instance.output.is_none(), "it must never report success");
-    if let Some(listener) = loopback {
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), listener.accept())
-                .await
-                .is_err(),
-            "the guest must not reach the SDK's default core address"
-        );
-    }
-    pool.close().await;
 }

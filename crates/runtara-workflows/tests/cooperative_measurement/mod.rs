@@ -148,7 +148,7 @@ fn cases() -> Vec<Case> {
     cases
 }
 
-pub(super) fn host(input: &[u8]) -> (Arc<CapturingRuntimeHost>, mpsc::Receiver<CapturedMessage>) {
+pub(super) fn host() -> (Arc<CapturingRuntimeHost>, mpsc::Receiver<CapturedMessage>) {
     let (tx, rx) = mpsc::channel();
     let state = ServerState {
         checkpoints: Mutex::new(HashMap::new()),
@@ -166,7 +166,6 @@ pub(super) fn host(input: &[u8]) -> (Arc<CapturingRuntimeHost>, mpsc::Receiver<C
         Arc::new(CapturingRuntimeHost {
             instance_id: "baseline".into(),
             debug_mode: false,
-            input: Arc::new(input.to_vec()),
             sink: Mutex::new(tx),
             state: Arc::new(state),
         }),
@@ -227,11 +226,7 @@ fn measure(smoke: bool) -> Value {
     let measured = if smoke { 2 } else { 1000 };
     let warmups = if smoke { 1 } else { 5 };
     let cold_samples = if smoke { 1 } else { 3 };
-    for name in [
-        "RUNTARA_DIRECT_OMIT_RUNTIME",
-        "RUNTARA_DIRECT_RUNTIME_BINDING",
-        "RUNTARA_DIRECT_WORKFLOW_ABI",
-    ] {
+    for name in ["RUNTARA_DIRECT_OMIT_RUNTIME", "RUNTARA_DIRECT_WORKFLOW_ABI"] {
         assert!(
             std::env::var_os(name).is_none(),
             "remove production override {name} before measurement"
@@ -241,7 +236,6 @@ fn measure(smoke: bool) -> Value {
     let dependency_hashes: Vec<_> = [
         "runtara_agent_utils.wasm",
         "runtara_workflow_stdlib.wasm",
-        "runtara_workflow_runtime.wasm",
     ]
     .into_iter()
     .map(|name| {
@@ -329,7 +323,7 @@ fn measure(smoke: bool) -> Value {
             assert!(
                 !imports
                     .iter()
-                    .any(|name| name.starts_with("runtara:workflow-execution/")),
+                    .any(|name| name.starts_with("runtara:workflow/tasks@")),
                 "custom task service must not participate in this comparison"
             );
             let start = Instant::now();
@@ -337,7 +331,7 @@ fn measure(smoke: bool) -> Value {
                 .block_on(executor.prepare_precompiled(component.clone()))
                 .unwrap();
             prepare_times.push(micros(start));
-            let (host, _rx) = host(&input);
+            let (host, _rx) = host();
             let (out, _) = runtime.block_on(run(&executor, pre.instance_pre(), host, &input));
             cold_times.push(micros(total));
             validate(&case, &out);
@@ -387,7 +381,7 @@ fn measure(smoke: bool) -> Value {
         let mut event_count = 0;
         let mut output_bytes = 0;
         for i in 0..n + warmups {
-            let (host, rx) = host(&input);
+            let (host, rx) = host();
             let start = Instant::now();
             let (out, peak) =
                 runtime.block_on(run(&executor, pre.instance_pre(), host.clone(), &input));
@@ -463,7 +457,12 @@ fn random_service(
             let export = instance
                 .get_export_index(&mut store, Some(&iface), "invoke")
                 .unwrap();
-            type Output = (Result<Vec<u8>, runtara_component_host::ErrorInfo>,);
+            type Output = (
+                Result<
+                    runtara_component_host::lifecycle::WorkflowOutcome,
+                    runtara_component_host::lifecycle::WorkflowErrorInfo,
+                >,
+            );
             let invoke = instance
                 .get_typed_func::<(String, Vec<u8>), Output>(&mut store, export)
                 .unwrap();
@@ -471,7 +470,12 @@ fn random_service(
             let start = Instant::now();
             let (result,) = invoke.call_async(&mut store, args).await.unwrap();
             let elapsed = micros(start);
-            let value: f64 = serde_json::from_slice(&result.unwrap()).unwrap();
+            let runtara_component_host::lifecycle::WorkflowOutcome::Completed(output) =
+                result.unwrap()
+            else {
+                panic!("a pure capability completes");
+            };
+            let value: f64 = serde_json::from_slice(&output).unwrap();
             assert!((0.0..1.0).contains(&value));
             elapsed
         });

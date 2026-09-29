@@ -9,7 +9,7 @@ use runtara_dsl::{ExecutionGraph, agent_meta::AgentCatalog};
 use runtara_workflows::{
     compile::ChildWorkflowInput,
     direct_wasm::{
-        DirectCompilationInput, DirectCompilationResult, RuntimeBinding, WorkflowAbi,
+        DirectCompilationInput, DirectCompilationResult, WorkflowRole,
         compile_direct_workflow_composed_configured,
     },
     validation::validate_workflow,
@@ -84,8 +84,7 @@ fn compile_configured_tracking(
             agent_slug: None,
         },
         direct_e2e_components_dir(),
-        RuntimeBinding::HostImport,
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )
     .expect("audit graph compiles and composes");
@@ -103,7 +102,7 @@ fn run(id: &str, graph: Value) -> Value {
     let (_temp, artifact) = compile(id, graph);
     completed(run_invoke_once(
         &artifact.wasm_path,
-        Arc::new(CheckpointingRuntimeHost::new(b"{}")),
+        Arc::new(CheckpointingRuntimeHost::new()),
         b"{}".to_vec(),
     ))
 }
@@ -215,7 +214,7 @@ fn audit_01_early_finish_skips_durable_continuation() {
                 .unwrap()
                 .push(json!({"fromStep":"side_effect","toStep":"merge"}));
             let (_temp, artifact) = compile("audit-side-effect", graph);
-            let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+            let host = Arc::new(CheckpointingRuntimeHost::new());
             *host.pinned_clock_ms.lock().unwrap() = Some(1_000_000);
             let exit = run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
             if early {
@@ -317,7 +316,7 @@ fn audit_01_child_finish_returns_to_parent() {
     );
     let output = completed(run_invoke_once(
         &artifact.wasm_path,
-        Arc::new(CheckpointingRuntimeHost::new(b"{}")),
+        Arc::new(CheckpointingRuntimeHost::new()),
         b"{}".to_vec(),
     ));
     assert_eq!(
@@ -468,7 +467,7 @@ fn audit_02_child_loop_preserves_caller_source() {
     );
     assert_saved_large(&completed(run_invoke_once(
         &artifact.wasm_path,
-        Arc::new(CheckpointingRuntimeHost::new(b"{}")),
+        Arc::new(CheckpointingRuntimeHost::new()),
         b"{}".to_vec(),
     )));
 }
@@ -482,7 +481,7 @@ fn audit_02_nested_collection_survives_suspend_and_replay() {
     graph["steps"]["loop_0"]["config"]["maxIterations"] = json!(1);
     graph["steps"]["loop_0"]["subgraph"]["steps"]["loop_1"]["config"]["maxIterations"] = json!(1);
     let (_temp, artifact) = compile("audit-replay-gc", preserve_outer_source(graph));
-    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
     *host.pinned_clock_ms.lock().unwrap() = Some(1_000_000);
     let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
     for _ in 0..2 {
@@ -559,7 +558,7 @@ fn audit_02_parallel_split_preserves_live_chunk_and_outer_values() {
     );
     let output = completed(run_invoke_once(
         &artifact.wasm_path,
-        Arc::new(CheckpointingRuntimeHost::new(b"{}")),
+        Arc::new(CheckpointingRuntimeHost::new()),
         b"{}".to_vec(),
     ));
     assert_saved_large(&output);
@@ -588,7 +587,7 @@ fn audit_02_nested_growing_accumulator_completes_with_bounded_memory() {
         json!({"valueType":"reference","value":"steps.loop_0.outputs.iterations"});
     let (_temp, artifact) = compile("audit-bounded-nested-gc", graph);
     let input = br#"{"count":60}"#.to_vec();
-    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
     let executor = super::embedded_executor();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let result = runtime.block_on(async {
@@ -654,7 +653,7 @@ fn signal_key(exit: InvokeExit) -> String {
 
 fn assert_independent_waits(second_id: &str) {
     let (_temp, artifact) = compile("audit-waits", waits_graph(second_id));
-    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
     let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
     let first = signal_key(invoke());
     let fields = super::key_fields(&first);
@@ -703,7 +702,7 @@ fn audit_loop(id: &str, kind: &str, count: usize, body: Value) -> Value {
 
 fn assert_sequential_signals(graph: Value, count: usize) {
     let (_temp, artifact) = compile("audit-scoped-waits", graph);
-    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
     let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
     let mut keys = std::collections::HashSet::new();
     for n in 0..count {
@@ -755,7 +754,7 @@ fn audit_03_sibling_delays_checkpoint_independent_deadlines() {
             json!({"id":"wait","stepType":"Delay","durationMs":immediate(json!(60_000))});
     }
     let (_temp, artifact) = compile("audit-delays", graph);
-    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
     let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
     *host.pinned_clock_ms.lock().unwrap() = Some(1_000_000);
     assert!(matches!(invoke(), InvokeExit::Suspended(_)));
@@ -806,7 +805,7 @@ fn audit_03_durable_agent_and_split_caches_keep_sibling_results_on_replay() {
         serde_json::from_slice(&meta).unwrap(),
     ]));
     let (_temp, artifact) = compile_configured("audit-cache-sites", graph, vec![], Some(catalog));
-    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
     for _ in 0..2 {
         assert_eq!(
             completed(run_invoke_once(
@@ -840,7 +839,7 @@ fn configured_wait_body(timeout: u64, poll: u64, label: &str) -> Value {
 }
 
 fn assert_configured_waits(artifact: &DirectCompilationResult, labels: [&str; 2]) {
-    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
     let clock = super::now_ms();
     *host.pinned_clock_ms.lock().unwrap() = Some(clock);
     let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
@@ -947,7 +946,7 @@ fn audit_04_on_wait_graph_can_shadow_its_parent_step_type() {
     }});
     let (_temp, artifact) =
         compile_configured_tracking("audit-registry-onwait", graph, vec![], None, true);
-    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
     *host.pinned_clock_ms.lock().unwrap() = Some(super::now_ms());
     let key = signal_key(run_invoke_once(
         &artifact.wasm_path,
@@ -993,7 +992,7 @@ fn audit_04_nested_step_type_and_debug_mapping_are_graph_local() {
     },"executionPlan":[{"fromStep":"loop","toStep":"same"}]});
     let (_temp, artifact) =
         compile_configured_tracking("audit-registry-types", graph, vec![], None, true);
-    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
     assert_eq!(
         completed(run_invoke_once(
             &artifact.wasm_path,
@@ -1048,7 +1047,7 @@ fn timeout_graph(delay_ms: u64, split: bool) -> Value {
 
 fn resume_after_delay(delay_ms: u64, split: bool) -> InvokeExit {
     let (_temp, artifact) = compile("audit-timeout", timeout_graph(delay_ms, split));
-    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
     *host.pinned_clock_ms.lock().unwrap() = Some(1_000_000);
     let first = run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
     assert!(
@@ -1096,7 +1095,7 @@ fn audit_05_split_timeout_survives_suspend_resume() {
 }
 
 fn audit_deadline_host(now: u64) -> Arc<CheckpointingRuntimeHost> {
-    let host = Arc::new(CheckpointingRuntimeHost::new(b"{}"));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
     *host.pinned_clock_ms.lock().unwrap() = Some(now);
     host
 }

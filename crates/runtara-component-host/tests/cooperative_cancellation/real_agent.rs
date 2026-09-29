@@ -335,18 +335,26 @@ pub(super) async fn invoke_named_agent_with_state(
         .get_export_index(
             &mut store,
             None,
-            &format!("runtara:agent-{agent_id}/capabilities@0.4.0"),
+            &format!("runtara:agent-{agent_id}/capabilities@1.0.0"),
         )
         .unwrap();
     let export = instance
         .get_export_index(&mut store, Some(&interface), "invoke")
         .unwrap();
-    type Output = (Result<Vec<u8>, runtara_component_host::ErrorInfo>,);
+    use runtara_component_host::bindings::exports::runtara::agent::capabilities::Outcome;
+    type Output = (Result<Outcome, runtara_component_host::ErrorInfo>,);
     let invoke = instance.get_typed_func::<(String, Vec<u8>), Output>(&mut store, export)?;
     let (result,) = invoke
         .call_async(&mut store, (capability.into(), input))
         .await?;
-    Ok(result)
+    // A direct call cannot park: only `completed` is a result here.
+    Ok(match result {
+        Ok(Outcome::Completed(bytes)) => Ok(bytes),
+        Ok(Outcome::Suspended(_)) => {
+            anyhow::bail!("{agent_id}:{capability} suspended outside a workflow")
+        }
+        Err(error) => Err(error),
+    })
 }
 
 #[tokio::test]

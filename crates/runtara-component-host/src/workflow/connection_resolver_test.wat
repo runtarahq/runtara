@@ -1,5 +1,5 @@
 (component
-  (import "runtara:connection-resolver/resolver@{{VERSION}}" (instance $resolver
+  (import "runtara:host/connections@{{VERSION}}" (instance $resolver
     (export "describe" (func {{ASYNC}} (param "connection-id" string) (result (result (list u8) (error string)))))
     (export "resolve-resource" (func {{ASYNC}} (param "connection-id" string) (param "request" (list u8)) (result (result (list u8) (error string)))))))
   (core module $memory
@@ -22,7 +22,7 @@
     (func $check
       i32.const 64 i32.load if unreachable end
       i32.const 72 i32.load i32.const 3 i32.ne if unreachable end)
-    (func (export "invoke") (param i32 i32) (result i32)
+    (func (export "invoke") (param i32 i32 i32 i32) (result i32)
       (call $describe (i32.const 0) (i32.const 4) (i32.const 64)) call $check
       (call $describe (i32.const 0) (i32.const 4) (i32.const 64)) call $check
       (call $resolve (i32.const 0) (i32.const 4) (i32.const 4) (i32.const 2) (i32.const 64)) call $check
@@ -35,13 +35,14 @@
   (core instance $code (instantiate $code (with "mem" (instance $mem))
     (with "host" (instance (export "describe" (func $describe)) (export "resolve" (func $resolve))))))
   (type $error (record (field "code" string) (field "message" string) (field "category" string)
-    (field "severity" string) (field "retryable" bool) (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
+    (field "severity" string) (field "retryable" bool) (field "retry-after-ms" (option u64)) (field "attributes" (option string)) (field "details" (option string))))
   (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
-  (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")))
-  (type $outcome (variant (case "completed" (list u8)) (case "suspended" (list $wake))))
-  (func $invoke async (param "input" (list u8)) (result (result $outcome (error $error)))
+  (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume") (case "instances" string)))
+  (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+  (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
+  (func $invoke async (param "capability-id" string) (param "input" (list u8)) (result (result $outcome (error $error)))
     (canon lift (core func $code "invoke") (memory $mem "memory") (realloc (func $mem "realloc"))))
   (instance $lifecycle
     (export "error-info" (type $error)) (export "signal-wait" (type $signal)) (export "wake" (type $wake))
-    (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
-  (export "runtara:workflow-lifecycle/lifecycle@0.2.0" (instance $lifecycle)))
+    (export "suspension" (type $suspension)) (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
+  (export "runtara:agent-workflow-agent/capabilities@1.0.0" (instance $lifecycle)))

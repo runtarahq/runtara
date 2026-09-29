@@ -35,47 +35,30 @@ pub struct Image {
 }
 
 impl Image {
-    /// Whether this image was registered as a compiled workflow rather than an
-    /// arbitrary executable component.
+    /// Immutable SHA-256 identity of the image's binary, which durable
+    /// preparation compares to the bytes it reads.
     ///
-    /// This deliberately keys on the established `workflow` metadata envelope
-    /// written by the server, not on a filename or on `wasi:cli/run`: generic
-    /// agent components retain their own ABI and must not be rejected merely
-    /// because they are not lifecycle-invokable.
-    pub fn requires_lifecycle_invoke(&self) -> bool {
+    /// Every image carries it in its `workflow` metadata envelope; an image
+    /// without one is refused, so no bytes run unverified.
+    pub fn workflow_binary_checksum(&self) -> std::result::Result<&str, String> {
         self.metadata
             .as_ref()
             .and_then(|metadata| metadata.get("workflow"))
-            .is_some_and(serde_json::Value::is_object)
-    }
-
-    /// Immutable SHA-256 identity recorded for a generated direct workflow.
-    ///
-    /// Generic components deliberately have no such requirement. A workflow
-    /// envelope without this value is treated as an unsupported legacy image
-    /// by durable preparation instead of falling back to `wasi:cli/run`.
-    pub fn workflow_binary_checksum(&self) -> Option<&str> {
-        self.metadata
-            .as_ref()?
-            .pointer("/workflow/binaryChecksum")?
-            .as_str()
+            .and_then(|workflow| workflow.get("binaryChecksum"))
+            .and_then(serde_json::Value::as_str)
             .filter(|checksum| !checksum.is_empty())
+            .ok_or_else(|| "workflow image is missing its immutable binary checksum".to_string())
     }
 }
 
-/// Reject a compiled workflow image that does not export the current lifecycle
-/// entrypoint. This is called before the launch, so an old direct
-/// `wasi:cli/run` workflow cannot take a runner permit or receive a container
-/// registry entry. Images not identified as compiled workflows are intentionally
-/// left alone for generic component compatibility.
+/// Reject an image that does not export the workflow entry
+/// (`runtara:agent-workflow-agent/capabilities`). This is called before the
+/// launch, so such an artifact cannot take a runner permit or receive a
+/// container registry entry.
 pub async fn require_current_workflow_entrypoint(image: &Image) -> Result<()> {
-    if !image.requires_lifecycle_invoke() {
-        return Ok(());
-    }
-
     let binary_path = image.binary_path.clone();
     tokio::task::spawn_blocking(move || {
-        runtara_component_host::lifecycle::require_lifecycle_invoke_file(&binary_path)
+        runtara_component_host::lifecycle::require_workflow_entry_file(&binary_path)
     })
     .await
     .map_err(|error| {
@@ -554,24 +537,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_compiled_workflow_images_require_lifecycle_invoke() {
-        let workflow = ImageBuilder::new("tenant", "workflow", "/tmp/workflow.wasm")
-            .metadata(serde_json::json!({
-                "workflow": {
-                    "compilerMode": "direct-wasm",
-                    "directWasm": { "entryAbi": "invoke" }
-                }
-            }))
-            .build();
-        assert!(workflow.requires_lifecycle_invoke());
+    fn every_image_must_record_its_binary_checksum() {
+        let workflow = |envelope: serde_json::Value| {
+            ImageBuilder::new("tenant", "workflow", "/tmp/workflow.wasm")
+                .metadata(serde_json::json!({ "workflow": envelope }))
+                .build()
+        };
+        assert_eq!(
+            workflow(serde_json::json!({ "binaryChecksum": "abc" })).workflow_binary_checksum(),
+            Ok("abc")
+        );
+        assert!(
+            workflow(serde_json::json!({ "compilerMode": "direct-wasm" }))
+                .workflow_binary_checksum()
+                .is_err()
+        );
+        assert!(
+            workflow(serde_json::json!({ "binaryChecksum": "" }))
+                .workflow_binary_checksum()
+                .is_err()
+        );
 
-        let generic_agent = ImageBuilder::new("tenant", "agent", "/tmp/agent.wasm")
-            .metadata(serde_json::json!({ "agent": { "id": "custom" } }))
-            .build();
-        assert!(!generic_agent.requires_lifecycle_invoke());
-
-        let legacy_without_workflow_metadata =
-            ImageBuilder::new("tenant", "old-agent", "/tmp/agent.wasm").build();
-        assert!(!legacy_without_workflow_metadata.requires_lifecycle_invoke());
+        let without_envelope = ImageBuilder::new("tenant", "image", "/tmp/image.wasm").build();
+        assert!(
+            without_envelope.workflow_binary_checksum().is_err(),
+            "every image records its checksum"
+        );
     }
 }

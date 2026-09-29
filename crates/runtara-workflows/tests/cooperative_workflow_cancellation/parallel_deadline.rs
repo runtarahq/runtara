@@ -35,8 +35,7 @@ async fn run_result_control(durable: bool, fail: bool) -> anyhow::Result<()> {
             agent_slug: None,
         },
         direct_e2e_components_dir(),
-        RuntimeBinding::HostImport,
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )?;
 
@@ -87,7 +86,7 @@ async fn run_result_control(durable: bool, fail: bool) -> anyhow::Result<()> {
         anyhow::Ok(())
     });
     let result = async {
-        let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+        let host = Arc::new(PersistingRuntimeHost::new());
         let executor = embedded_executor();
         let pre = executor.load_instance_pre(&compiled.wasm_path).await?;
         for _ in 0..if durable && !fail { 2 } else { 1 } {
@@ -120,7 +119,6 @@ async fn run_result_control(durable: bool, fail: bool) -> anyhow::Result<()> {
                 "wrong result: {}",
                 String::from_utf8_lossy(&output)
             );
-            anyhow::ensure!(host.failed.lock().unwrap().is_none());
         }
         anyhow::ensure!(arrivals.load(Ordering::SeqCst) == 2);
         anyhow::ensure!(*order.lock().unwrap() == [1, 0]);

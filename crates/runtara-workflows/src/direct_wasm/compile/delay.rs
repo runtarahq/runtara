@@ -20,9 +20,8 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_fail_if_retptr_error_inplace, emit_retptr_error_or_step_fail, load_retptr_list,
-    push_i64_load_from_ptr, push_retptr_arg, push_retptr_i64_load, push_segment_args,
-    return_if_retptr_error, store_local_i64_at,
+    emit_retptr_error_or_step_fail, load_retptr_list, push_i64_load_from_ptr, push_retptr_arg,
+    push_retptr_i64_load, push_segment_args, return_if_retptr_error, store_local_i64_at,
 };
 use super::checkpoint::{
     emit_check_signals_and_suspend, emit_checkpoint_lookup, emit_checkpoint_save,
@@ -47,37 +46,6 @@ use super::{
 /// `some([])` — a HIT — so a legacy blocking run must never be mistaken for a
 /// deadline written by the parked lifecycle-invoke path.
 const DIRECT_DELAY_DEADLINE_STATE_LEN: i32 = 8;
-
-/// Blocking durable sleep: the host holds the wasmtime Store and the tokio task
-/// for the whole duration on `durable-sleep-checkpoint`.
-///
-/// The host saves the sleep checkpoint but does NOT look one up, so a replayed
-/// blocking delay sleeps again. Only retired/migration ABI paths can reach
-/// this helper; current lifecycle-invoke workflows always park instead.
-fn emit_blocking_durable_sleep(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
-    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::LocalGet(DIRECT_DELAY_DURATION_MS_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_durable_sleep_checkpoint));
-    // REPORT the failure rather than returning a bare `Err`. Under `wasi:cli/run`
-    // a bare return is an exit code and nothing else — no SDK event, no
-    // diagnostic — so a sleep that fails surfaces to an operator as a process
-    // that died for no stated reason. That is the whole of what they get, and it
-    // names neither the sleep nor its cause. The blocking arm is also the only
-    // one that can fail this way: it is the arm the composed binding takes, where
-    // the sleep is an HTTP request held open for its full duration and so subject
-    // to the client's request deadline.
-    emit_fail_if_retptr_error_inplace(body, indices);
-    // The sleep writes no checkpoint on the GUEST side, so it has no
-    // `emit_checkpoint_save` to fold signal handling into. Poll explicitly:
-    // without this a cancel that arrived mid-sleep is never observed, and a
-    // chain of delays has no poll site at all — the run ignores the cancel and
-    // finishes normally.
-    emit_check_signals_and_suspend(body, indices);
-}
 
 /// Store-freeing park: checkpoint an absolute deadline and EXIT with
 /// `suspended(at(deadline))`, so the host tears down the Store and the wake
@@ -307,22 +275,15 @@ pub(super) fn emit_delay_plan(
         // While body all park already, because the emitter lowers them into the
         // root artifact and they inherit its ABI.
         //
-        // A published agent is the one place that crosses a component boundary,
-        // and it no longer lacks a way back: the suspend sentinel carries an
-        // absolute deadline in the error's numeric `retry-after` field, and each
-        // caller re-raises it until the chain reaches the real instance owner.
+        // A published agent is the one place that crosses a component boundary:
+        // it returns the `suspended` outcome with its `at` wake, and each caller
+        // forwards it until the chain reaches the real instance owner.
         // The checkpoint discipline in `emit_park_until_deadline` is what makes
         // that safe to reuse — the deadline is durable before the first park, so
         // a relaunch resumes the ORIGINAL wait instead of starting a fresh one —
         // and only the park's return shape differs, which
         // `emit_suspend_at_return` owns.
-        //
-        // `wasi:cli/run` has no wake channel at all, so it keeps blocking.
-        if indices.abi == crate::direct_wasm::component::WorkflowAbi::CliRunHttp {
-            emit_blocking_durable_sleep(body, indices);
-        } else {
-            emit_park_until_deadline(body, indices, output_ptr_local, output_len_local);
-        }
+        emit_park_until_deadline(body, indices, output_ptr_local, output_len_local);
     } else {
         body.instruction(&Instruction::LocalGet(DIRECT_DELAY_DURATION_MS_LOCAL));
         push_retptr_arg(body);

@@ -9,7 +9,7 @@
 //! sequence that lets an instance mid-checkpoint finish writing.
 //!
 //! Only guests using the SDK's HTTP backend come through here. The default
-//! composition binds `runtara:workflow-runtime/runtime` as a host import, and
+//! composition binds `runtara:workflow/runtime` as a host import, and
 //! those calls reach the same core handlers in-process without a socket.
 //!
 //! # Deployment configuration

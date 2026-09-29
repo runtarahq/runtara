@@ -12,7 +12,7 @@ async fn run_nested(
     in_child: Option<bool>,
 ) -> anyhow::Result<()> {
     let host = Arc::new(Host {
-        inner: PersistingRuntimeHost::new(b"{}"),
+        inner: PersistingRuntimeHost::new(),
         requested: AtomicBool::new(false),
         requests: AtomicUsize::new(0),
         closed: Notify::new(),
@@ -89,8 +89,7 @@ async fn run_nested(
             agent_slug: None,
         },
         direct_e2e_components_dir(),
-        RuntimeBinding::HostImport,
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )?;
     anyhow::ensure!(
@@ -103,7 +102,7 @@ async fn run_nested(
         compiled
             .component_artifacts
             .world_wit
-            .contains("host-io/timers")
+            .contains("runtara:host/timers")
             == (retries > 0),
         "timer imports must follow the graph's retry requirement"
     );
@@ -165,7 +164,6 @@ async fn run_nested(
         );
         anyhow::ensure!(host.acknowledged.load(Ordering::SeqCst));
         anyhow::ensure!(count_errors(&host) == 1, "cancelled scope retried");
-        anyhow::ensure!(host.inner.completed.lock().unwrap().is_none());
     } else {
         let runtara_component_host::InvokeExit::Completed(output) = result.exit else {
             anyhow::bail!("retry did not recover: {:?}", result.exit)
@@ -183,7 +181,6 @@ async fn run_nested(
         );
         anyhow::ensure!(!host.acknowledged.load(Ordering::SeqCst));
     }
-    anyhow::ensure!(host.inner.failed.lock().unwrap().is_none());
     anyhow::ensure!(host.inner.checkpoint_writes.lock().unwrap().is_empty());
     anyhow::ensure!(host.inner.sleep_ids.lock().unwrap().is_empty());
     Ok(())

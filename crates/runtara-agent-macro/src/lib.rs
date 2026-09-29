@@ -466,8 +466,8 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let executor_wrapper = if suspends {
         let suspend_fn_ident = format_ident!("__suspend_{}", fn_name);
-        // The plain `capabilities.invoke` path cannot park, so it refuses; only
-        // `suspendable.invoke` (through `agent_component!`) reaches the body.
+        // The plain executor path cannot park, so it refuses; only the
+        // suspending dispatch of `agent_component!` reaches the body.
         quote! {
             #[doc(hidden)]
             pub(crate) async fn #invoke_fn_ident(_input: serde_json::Value) -> Result<serde_json::Value, String> {

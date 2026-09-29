@@ -1,0 +1,785 @@
+// Canonical WIT contract for the shared workflow stdlib component.
+//
+// The stdlib owns reusable JSON-heavy workflow semantics. Direct-emitted
+// workflow logic should call these functions instead of embedding serde,
+// mapping, condition, filter, group-by, or switch implementations in every
+// workflow artifact.
+
+package runtara:workflow-stdlib@1.0.0;
+
+interface json {
+    use runtara:agent/types@1.0.0.{error-info};
+
+    record agent-retry-error {
+        payload: list<u8>,
+        retryable: bool,
+        rate-limited: bool,
+    }
+
+    // One WaitForInstances read: still pending, and its persisted deadline.
+    record wait-instances-progress {
+        pending: bool,
+        deadline-ms: option<u64>,
+    }
+
+    // Structured fields for the invoke export's Err arm. Field order matches
+    // the lifecycle error-info record EXACTLY: the canonical-ABI layout of
+    // `result<invoke-error, string>`'s ok arm at retptr+8 is byte-identical
+    // to error-info at result-area+8, so the emitter writes the stdlib call's
+    // retptr at the result area and flips one discriminant byte.
+    record invoke-error {
+        code: string,
+        message: string,
+        category: string,
+        severity: string,
+        retryable: bool,
+        retry-after-ms: option<u64>,
+        attributes: option<string>,
+        details: option<string>,
+    }
+
+    init-manifest: func(manifest: list<u8>) -> result<_, string>;
+
+    // Legacy unscoped collection. Callers must supply all live roots; new
+    // emitters use value-store-retain-scoped to protect enclosing frames.
+    // Free interned scope values not reachable from the given loop roots (the
+    // parent source and the surviving accumulator/state). Called at a loop
+    // iteration boundary to reclaim the previous iteration's superseded values,
+    // bounding a growing-accumulator loop to ~one live copy. Best-effort: a
+    // root that fails to parse frees nothing.
+    value-store-retain: func(parent-source: list<u8>, survivor: list<u8>) -> result<_, string>;
+
+    // Run-local allocation boundary; saved/restored with each loop frame.
+    value-store-scope: func() -> u64;
+    // Preserve entries predating scope as well as transitive local roots.
+    // New emitters use this for sequential iterations and parallel chunk resets.
+    value-store-retain-scoped: func(parent-source: list<u8>, survivor: list<u8>, scope: u64) -> result<_, string>;
+
+    build-source: func(
+        data: list<u8>,
+        variables: list<u8>,
+        steps: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    apply-mapping: func(
+        mapping-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    eval-condition: func(
+        condition-id: u32,
+        source: list<u8>,
+    ) -> result<bool, string>;
+
+    process-switch: func(
+        switch-id: u32,
+        source: list<u8>,
+    ) -> result<string, string>;
+
+    value-switch: func(
+        switch-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    split-items: func(
+        split-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    split-item-count: func(
+        split-id: u32,
+        source: list<u8>,
+    ) -> result<u32, string>;
+
+    split-item: func(
+        split-id: u32,
+        source: list<u8>,
+        index: u32,
+    ) -> result<list<u8>, string>;
+
+    split-iteration-variables: func(
+        split-id: u32,
+        source: list<u8>,
+        item: list<u8>,
+        index: u32,
+    ) -> result<list<u8>, string>;
+
+    split-validate-input: func(
+        split-id: u32,
+        item: list<u8>,
+        index: u32,
+    ) -> result<_, string>;
+
+    split-validate-output: func(
+        split-id: u32,
+        output: list<u8>,
+        index: u32,
+    ) -> result<_, string>;
+
+    split-initial-results: func(
+        split-id: u32,
+    ) -> result<list<u8>, string>;
+
+    split-append-output: func(
+        split-id: u32,
+        results: list<u8>,
+        output: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    split-append-error: func(
+        split-id: u32,
+        results: list<u8>,
+        error: string,
+        index: u32,
+    ) -> result<list<u8>, string>;
+
+    split-output: func(
+        split-id: u32,
+        source: list<u8>,
+        results: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    split-cache-key: func(
+        split-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    split-result: func(
+        split-id: u32,
+        source: list<u8>,
+        results: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    split-output-from-result: func(
+        split-id: u32,
+        source: list<u8>,
+        step-result: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    while-max-iterations: func(
+        while-id: u32,
+    ) -> result<u32, string>;
+
+    while-initial-state: func(
+        while-id: u32,
+    ) -> result<list<u8>, string>;
+
+    while-condition-source: func(
+        while-id: u32,
+        source: list<u8>,
+        state: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    while-condition: func(
+        while-id: u32,
+        source: list<u8>,
+    ) -> result<bool, string>;
+
+    while-iteration-variables: func(
+        while-id: u32,
+        source: list<u8>,
+        state: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    while-advance-state: func(
+        while-id: u32,
+        state: list<u8>,
+        output: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    while-output: func(
+        while-id: u32,
+        source: list<u8>,
+        state: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    filter: func(
+        filter-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    log-event: func(
+        log-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    log: func(
+        log-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    error-event: func(
+        error-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    error: func(
+        error-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    error-steps: func(
+        step-id: string,
+        error: list<u8>,
+        steps: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    group-by: func(
+        group-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    delay-duration-ms: func(
+        delay-id: u32,
+        source: list<u8>,
+    ) -> result<u64, string>;
+
+    delay: func(
+        delay-id: u32,
+        source: list<u8>,
+        duration-ms: u64,
+    ) -> result<list<u8>, string>;
+
+    // Per-scope durability key for a durable Delay's sleep checkpoint: the
+    // bare step id at top level, `{step-id}::{indices}` inside Split/While
+    // iterations (folding `variables._loop_indices` like breakpoint-key) —
+    // without the fold, per-item durable delays collide on ONE key.
+    /// Timer/completion checkpoint identity for one loop invocation.
+    loop-deadline-key: func(step-id: string, source: list<u8>, complete: bool) -> result<list<u8>, string>;
+
+    delay-sleep-key: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // Best-effort decomposition of a terminal error payload into structured
+    // error-info fields: a JSON envelope ({code, message, category, severity,
+    // retryable, retryAfterMs, attributes}) maps field-for-field; anything
+    // else rides `message` verbatim. Infallible by construction — the err arm
+    // exists only for WIT-convention uniformity.
+    invoke-error-fields: func(
+        error: list<u8>,
+    ) -> result<invoke-error, string>;
+
+    breakpoint-key: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<string, string>;
+
+    breakpoint-event: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    wait-signal-id: func(
+        step-id: string,
+        instance-id: string,
+        source: list<u8>,
+    ) -> result<string, string>;
+
+    wait-timeout-ms: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<option<u64>, string>;
+
+    wait-timeout-error: func(
+        step-id: string,
+        signal-id: string,
+        timeout-ms: u64,
+    ) -> result<list<u8>, string>;
+
+    // Structured WAIT_TIMEOUT envelope for onError routing (GAP-14): the
+    // plain-string variant above stays the /failed payload for parity; routed
+    // handlers need {code, message, category, severity} so steps.__error.*
+    // references resolve.
+    wait-timeout-error-envelope: func(
+        step-id: string,
+        signal-id: string,
+        timeout-ms: u64,
+    ) -> result<list<u8>, string>;
+
+    // Managed closure is authoritative, including for waits without a timeout.
+    wait-closed-error: func(
+        step-id: string,
+        signal-id: string,
+        reason: string,
+        timeout-ms: option<u64>,
+    ) -> result<list<u8>, string>;
+
+    wait-on-wait-variables: func(
+        step-id: string,
+        instance-id: string,
+        signal-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    wait-on-wait-error: func(
+        step-id: string,
+        error: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    wait-poll-interval-ms: func(
+        step-id: string,
+    ) -> result<u64, string>;
+
+    /// Graph-qualified variant; legacy callers retain wait-poll-interval-ms.
+    wait-poll-interval-ms-scoped: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<u64, string>;
+
+    wait-event: func(
+        step-id: string,
+        signal-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    wait-debug-start: func(
+        step-id: string,
+        signal-id: string,
+        timeout-ms: option<u64>,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    wait-output: func(
+        step-id: string,
+        signal-id: string,
+        signal-payload: list<u8>,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // WaitForInstances: the step's canonical v2 `wait-instances` key. The host
+    // hashes it into the step's wait id; the settled wait is checkpointed
+    // under it.
+    wait-instances-key: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<string, string>;
+
+    // WaitForInstances: the JSON wait request (`instanceIds`, `mode`, and
+    // `deadlineMs = now-ms + timeoutMs` with a timeout). The error is a wait
+    // error JSON (`{code, message}`), like the host's.
+    wait-instances-request: func(
+        step-id: string,
+        source: list<u8>,
+        now-ms: u64,
+    ) -> result<list<u8>, string>;
+
+    // WaitForInstances: whether a JSON wait read is pending, and its deadline.
+    wait-instances-state: func(
+        wait: list<u8>,
+    ) -> result<wait-instances-progress, string>;
+
+    // WaitForInstances: store a settled wait as the step's outputs; returns
+    // the steps context.
+    wait-instances-output: func(
+        step-id: string,
+        wait: list<u8>,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // WaitForInstances: a wait error JSON as the step's structured error.
+    wait-instances-error: func(
+        step-id: string,
+        error: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // Build the per-call signal id for a WaitForSignal step used as an AiAgent
+    // tool: `{instance}/{workflow}/{step}.tool.{label}.{call}{indices}`, matching
+    // the generated `emit_wait_for_signal_tool_arm`.
+    ai-wait-tool-signal-id: func(
+        step-id: string,
+        instance-id: string,
+        label: string,
+        call-counter: u32,
+        source: list<u8>,
+    ) -> result<string, string>;
+
+    // Wrap a received WaitForSignal-tool signal payload as the tool result the
+    // model sees: `{ "status": "received", "human_response": <payload> }`,
+    // matching the generated tool arm.
+    ai-wait-tool-result: func(
+        signal-payload: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    embed-workflow-cache-key: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    embed-workflow-variables: func(
+        step-id: string,
+        source: list<u8>,
+        child-input: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    embed-workflow-result: func(
+        step-id: string,
+        source: list<u8>,
+        child-output: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    embed-workflow-output-from-result: func(
+        step-id: string,
+        source: list<u8>,
+        step-result: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    embed-workflow-error: func(
+        step-id: string,
+        child-error: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    /// Graph-qualified variant for the current EmbedWorkflow call site.
+    embed-workflow-error-scoped: func(
+        step-id: string,
+        source: list<u8>,
+        child-error: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    retry-sleep-key: func(
+        checkpoint-id: string,
+        attempt-number: u32,
+    ) -> result<list<u8>, string>;
+
+    retry-delay-ms: func(
+        attempt-number: u32,
+        total-attempts: u32,
+        base-delay-ms: u64,
+        max-delay-ms: u64,
+        retry-after-ms: option<u64>,
+    ) -> result<u64, string>;
+
+    workflow-error-retryable: func(
+        error: list<u8>,
+    ) -> result<bool, string>;
+
+    workflow-error-rate-limited: func(
+        error: list<u8>,
+    ) -> result<bool, string>;
+
+    workflow-error-retry-after-ms: func(
+        error: list<u8>,
+    ) -> result<option<u64>, string>;
+
+    agent-output: func(
+        agent-id: u32,
+        source: list<u8>,
+        output: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // Build an Ai Agent step output context from a `chat-completion` capability
+    // result. Extracts the final assistant text from the choice and wraps it in
+    // the generated-code-compatible `{response, iterations, toolCalls}` envelope
+    // under the AiAgent step's id. Single-shot (one iteration, no tool calls).
+    ai-agent-output: func(
+        agent-id: u32,
+        source: list<u8>,
+        output: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // Ai Agent tool-loop helpers driving the `chat-turn` capability.
+    // Build the next chat-turn input from the constant base config, the prior
+    // turn output (loop state), and this round's pending tool results.
+    ai-turn-next-input: func(
+        base: list<u8>,
+        turn-out: list<u8>,
+        pending: list<u8>,
+    ) -> result<list<u8>, string>;
+    // True when the turn's action is `complete`.
+    ai-turn-is-complete: func(turn-out: list<u8>) -> result<bool, string>;
+    // Number of tool calls the turn requested.
+    ai-turn-tool-count: func(turn-out: list<u8>) -> result<u32, string>;
+    // The index-th tool call's arguments, as the tool agent input payload.
+    ai-turn-tool-args: func(turn-out: list<u8>, index: u32) -> result<list<u8>, string>;
+    // The resolved tool index for the index-th tool call (u32::MAX = unknown).
+    ai-turn-tool-index: func(turn-out: list<u8>, index: u32) -> result<u32, string>;
+    // Merge a `timeout_ms` field into a tool call's argument object so the
+    // dispatched tool capability applies the configured per-call timeout. The
+    // arguments come from the model, so the emitter injects the tool's own
+    // Agent-step timeout here. A non-object args value is returned unchanged.
+    ai-tool-args-with-timeout: func(
+        args: list<u8>,
+        timeout-ms: u64,
+    ) -> result<list<u8>, string>;
+    // Append the index-th tool call's dispatched result to the pending list.
+    ai-turn-add-result: func(
+        pending: list<u8>,
+        turn-out: list<u8>,
+        index: u32,
+        tool-result: list<u8>,
+    ) -> result<list<u8>, string>;
+    // Per-turn durability: the checkpoint key for one AiAgent loop turn —
+    // "{step-id}.turn.{iteration}", scoped by `variables._loop_indices` like
+    // breakpoint/agent cache keys.
+    ai-turn-cache-key: func(
+        step-id: string,
+        iteration: u32,
+        source: list<u8>,
+    ) -> result<string, string>;
+    // Persisted model decision, before tools, separate from completed turns.
+    ai-turn-response-key: func(step-id: string, iteration: u32, source: list<u8>) -> result<string, string>;
+    ai-turn-response-validate: func(response: list<u8>) -> result<_, string>;
+    // Per-turn durability: wrap the post-turn loop state
+    // ({state, pending, toolCalls, complete}) for the turn checkpoint.
+    ai-turn-snapshot: func(
+        state: list<u8>,
+        pending: list<u8>,
+        tool-calls: u32,
+        complete: bool,
+    ) -> result<list<u8>, string>;
+    // Per-turn durability: unpack a snapshot field (0 = state, 1 = pending).
+    ai-turn-snapshot-part: func(snapshot: list<u8>, part: u32) -> result<list<u8>, string>;
+    // Per-turn durability: the snapshot's monotonic tool-call counter.
+    ai-turn-snapshot-tool-calls: func(snapshot: list<u8>) -> result<u32, string>;
+    // Per-turn durability: whether the snapshotted turn completed the loop.
+    ai-turn-snapshot-complete: func(snapshot: list<u8>) -> result<bool, string>;
+    // Build the AiAgent step output context from a completed turn.
+    ai-turn-output: func(
+        agent-id: u32,
+        source: list<u8>,
+        turn-out: list<u8>,
+    ) -> result<list<u8>, string>;
+    // Build the step-debug-start payload for one dispatched tool call: a
+    // synthetic "{ai-step}.tool.{name}.{call}" step of type AiAgentToolCall,
+    // mirroring the generated loop so tool calls appear in the step trace.
+    // call-counter is the loop's 0-based monotonic counter; the visible
+    // call number is 1-based.
+    ai-tool-debug-start: func(
+        agent-id: u32,
+        turn-out: list<u8>,
+        index: u32,
+        iteration: u32,
+        call-counter: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+    // The matching step-debug-end payload carrying the dispatched result.
+    ai-tool-debug-end: func(
+        agent-id: u32,
+        turn-out: list<u8>,
+        index: u32,
+        iteration: u32,
+        call-counter: u32,
+        tool-result: list<u8>,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+    // Debug payloads for the AiAgent conversation-memory phases, as synthetic
+    // AiAgentMemoryLoad/Save/Compaction steps mirroring the generated
+    // compiler. phase: 0 = load, 1 = save, 2 = sliding-window compaction,
+    // 3 = summarize compaction. The compaction phases return an EMPTY payload
+    // when the history is at/below the threshold — the emitter skips the
+    // event, matching the generated "only when exceeded" gate.
+    ai-memory-debug-start: func(
+        agent-id: u32,
+        phase: u32,
+        conversation: list<u8>,
+        state: list<u8>,
+        max-messages: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+    // The matching step-debug-end payload. `state` is the post-phase loop
+    // state; `prior-state` is the pre-compaction state (empty object for
+    // load/save).
+    ai-memory-debug-end: func(
+        agent-id: u32,
+        phase: u32,
+        conversation: list<u8>,
+        state: list<u8>,
+        prior-state: list<u8>,
+        max-messages: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+    // Build the initial loop state from a load-memory result (loaded
+    // conversation becomes the starting chat history).
+    ai-memory-initial-state: func(load-output: list<u8>) -> result<list<u8>, string>;
+    // Build the save-memory input `{conversation_id, messages}` from the final
+    // loop state and the resolved conversation object.
+    ai-memory-save-input: func(
+        conversation: list<u8>,
+        final-state: list<u8>,
+    ) -> result<list<u8>, string>;
+    // Sliding-window compaction: drop the oldest messages from the loop state's
+    // chat history so at most max-messages remain (no-op below the threshold).
+    ai-memory-compact-sliding: func(
+        state: list<u8>,
+        max-messages: u32,
+    ) -> result<list<u8>, string>;
+    // Build the summarize-memory capability input `{provider, model,
+    // max_messages, state}` from the base chat-turn config and the loop state.
+    ai-summarize-input: func(
+        base: list<u8>,
+        state: list<u8>,
+        max-messages: u32,
+    ) -> result<list<u8>, string>;
+    // Unwrap the loop state from a summarize-memory result (`{state}`).
+    ai-summarize-output: func(summarize-result: list<u8>) -> result<list<u8>, string>;
+
+    agent-validate-input: func(
+        agent-id: u32,
+        input: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // Resolve the concrete id first. A `connection_ref` (dynamic selection or
+    // rotation) wins over the literal `connection_id`; empty means no binding.
+    agent-connection-id: func(
+        agent-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // Inject an authoritative, safe descriptor returned by the host resolver.
+    // This is the SINGLE connection channel — agents read `input._connection`
+    // directly; there is no out-of-band connection argument.
+    agent-connection-input: func(
+        agent-id: u32,
+        input: list<u8>,
+        descriptor: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // Wrap a composed workflow-agent child's input in the canonical
+    // `{data, variables}` envelope carrying the invocation-site checkpoint
+    // namespace (`variables._cache_key_prefix`, the same compositional
+    // formula the EmbedWorkflow path uses). A durable child shares the
+    // parent instance's checkpoint store; without this scope, its baked
+    // checkpoint ids collide across invocations and with the parent's.
+    // Emitted ONLY for workflow-agent targets — native agents receive the
+    // bare input unchanged.
+    agent-scope-input: func(
+        agent-id: u32,
+        input: list<u8>,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // The tool-call variant of `agent-scope-input`: a workflow-agent invoked
+    // as an AiAgent TOOL gets a PER-CALL checkpoint namespace —
+    // `{ai-step}.tool.{label}.{call-counter}` folded through the same
+    // compositional prefix formula — because one tool can be dispatched many
+    // times in one loop (the per-step scope would collide across calls). The
+    // counter is the loop's replay-stable tool-call counter (restored from
+    // the turn snapshot), so replays re-derive identical scopes.
+    agent-tool-scope-input: func(
+        ai-step-id: string,
+        label: string,
+        call-counter: u32,
+        input: list<u8>,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // Inline tool source with the same per-call identity as workflow-agent tools.
+    tool-scope-source: func(
+        ai-step-id: string,
+        label: string,
+        call-counter: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // Memory activation scope, distinct from model-selected tool calls.
+    agent-aux-scope-source: func(
+        agent-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    agent-cache-key: func(
+        agent-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    agent-retry-sleep-key: func(
+        checkpoint-id: string,
+        attempt-number: u32,
+    ) -> result<list<u8>, string>;
+
+    // Durable per-attempt invoke-result key for an Agent retry:
+    // "{checkpoint-id}::attempt::{attempt-number}". A distinct namespace from
+    // `agent-retry-sleep-key` ("::retry_sleep::") and the write-only audit key
+    // ("::retry::"), so a per-attempt invoke-result checkpoint never collides
+    // with the durable-sleep or audit checkpoints. Used to make each failed
+    // retry attempt durable so a resumed retry loop short-circuits attempts that
+    // already ran instead of re-invoking the agent.
+    agent-attempt-result-key: func(
+        checkpoint-id: string,
+        attempt-number: u32,
+    ) -> result<list<u8>, string>;
+
+    // Encode a per-attempt invoke-result envelope: a fixed 12-byte header
+    // (tag:u8, retryable:u8, rate-limited:u8, retry-after-tag:u8,
+    // retry-after-ms:u64 little-endian) followed by the raw error-info payload.
+    // Persisted as the per-attempt checkpoint state so a resumed retry loop
+    // replays the stored failure — including its classification bits — instead
+    // of re-invoking the agent. The leading tag byte keeps the envelope
+    // non-empty (a `checkpoint` with empty state is treated as a read probe).
+    agent-attempt-envelope: func(
+        tag: u8,
+        retryable: bool,
+        rate-limited: bool,
+        retry-after-tag: bool,
+        retry-after-ms: u64,
+        payload: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    agent-retry-delay-ms: func(
+        attempt-number: u32,
+        total-attempts: u32,
+        base-delay-ms: u64,
+        max-delay-ms: u64,
+        retry-after-ms: option<u64>,
+    ) -> result<u64, string>;
+
+    // An Agent's error as the retry payload envelope plus its retry
+    // classification. A workflow-agent child's `details` ride in the envelope
+    // as `childError`. The record flattens past 16 values, so the caller
+    // passes a pointer to it: the error-info the Agent returned, in place.
+    agent-retry-error-info: func(
+        error: error-info,
+    ) -> result<agent-retry-error, string>;
+
+    // An Agent's error as the step's envelope, with its invocation context.
+    // `(agent-id, error)` lays out as the Agent's result area once its tag
+    // word holds the agent id, so the caller passes that area.
+    agent-error: func(
+        agent-id: u32,
+        error: error-info,
+    ) -> result<list<u8>, string>;
+
+    agent-error-from-info: func(
+        agent-id: u32,
+        error-info: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    agent-debug-error: func(
+        agent-id: u32,
+        source: list<u8>,
+        error: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    step-debug-start: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // `launched-at-ms` / `settled-at-ms` are the OPTIONAL wall-clock bounds of a
+    // parallel branch's real async work — when the branch launched its invoke and
+    // when its subtask settled. They OVERLAP across sibling branches, so the
+    // timeline/replay render true concurrency instead of the sequential assemble
+    // cascade that `timestamp-ms`/`duration-ms` describe. 0 == absent (the caller
+    // is a sequential/linearised step): the payload then carries neither field and
+    // consumers fall back to the assemble timestamp. Purely observational.
+    step-debug-end: func(
+        step-id: string,
+        source: list<u8>,
+        launched-at-ms: u64,
+        settled-at-ms: u64,
+    ) -> result<list<u8>, string>;
+
+    // Build a step-debug-end payload carrying an input-resolution error for any
+    // step type (generic analogue of agent-debug-error, keyed by step id). Used
+    // to attribute an unhandled mapping/condition/config failure to the step.
+    step-debug-error: func(
+        step-id: string,
+        source: list<u8>,
+        error: list<u8>,
+    ) -> result<list<u8>, string>;
+}
+
+world workflow-stdlib {
+    export json;
+}

@@ -3,7 +3,7 @@ use crate::isolated_tasks::{IsolatedTasks, TaskId};
 use tokio::sync::Notify;
 use wasmtime::component::InstancePre;
 
-const INTERFACE: &str = "runtara:test-capability/capabilities@0.4.0";
+const INTERFACE: &str = "runtara:test-capability/capabilities@1.0.0";
 
 struct Ticker {
     stop: Arc<AtomicBool>,
@@ -89,8 +89,9 @@ impl Fixture {
 
     fn pre(&self, body: &str, initializer: &str) -> Arc<InstancePre<WorkflowState>> {
         // A real canonical Agent ABI, with controllable initialization and body.
-        // The success list payload begins at offset 8 because the error arm
-        // contains an option<u64>, giving the result an 8-byte alignment.
+        // The success payload begins at offset 8 because the error arm
+        // contains an option<u64>, giving the result an 8-byte alignment; the
+        // `completed` outcome's list follows its case tag at offset 12.
         let wat = format!(
             r#"(component
           (import "probe" (func $probe))
@@ -107,18 +108,27 @@ impl Fixture {
             (func $init {initializer}) (start $init)
             (func (export "invoke") (param i32 i32 i32 i32) (result i32)
               {body}
-              i32.const 1032 local.get 2 i32.store
-              i32.const 1036 local.get 3 i32.store
+              i32.const 1024 i32.const 0 i32.store8
+              i32.const 1032 i32.const 0 i32.store8
+              i32.const 1036 local.get 2 i32.store
+              i32.const 1040 local.get 3 i32.store
               i32.const 1024))
           (core instance $host (export "probe" (func $probe)))
           (core instance $m (instantiate $m (with "host" (instance $host))))
           (type $error (record (field "code" string) (field "message" string)
             (field "category" string) (field "severity" string) (field "retryable" bool)
-            (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
+            (field "retry-after-ms" (option u64)) (field "attributes" (option string)) (field "details" (option string))))
+          (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
+          (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+            (case "instances" string)))
+          (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+          (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
           (func $invoke async (param "capability-id" string) (param "input" (list u8))
-            (result (result (list u8) (error $error)))
+            (result (result $outcome (error $error)))
             (canon lift (core func $m "invoke") (memory $m "memory") (realloc (func $m "realloc"))))
-          (instance $api (export "error-info" (type $error)) (export "invoke" (func $invoke)))
+          (instance $api (export "error-info" (type $error)) (export "signal-wait" (type $signal))
+            (export "wake" (type $wake)) (export "suspension" (type $suspension))
+            (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
           (export "{INTERFACE}" (instance $api)))"#
         );
         let component = Component::new(self.executor.engine(), wat).unwrap();
@@ -329,21 +339,12 @@ fn compiled_package(
     crate::precompile::CompiledWorkflowPackage {
         invocations: None,
         control_importers: Default::default(),
-        root: Component::new(
-            fx.executor.engine(),
-            r#"(component
-          (core module $m (func (export "run") (result i32) i32.const 0))
-          (core instance $m (instantiate $m))
-          (func $run (result (result)) (canon lift (core func $m "run")))
-          (instance $api (export "run" (func $run)))
-          (export "wasi:cli/run@0.2.3" (instance $api)))"#,
-        )
-        .unwrap(),
+        root: Component::new(fx.executor.engine(), test_support::minimal_entry()).unwrap(),
         artifacts: std::collections::BTreeMap::from([(
             "fixture-digest".into(),
             child.component().clone(),
         )]),
-        bindings: vec![runtara_workflow_wit::isolation_package::Binding {
+        bindings: vec![runtara_invocation_contract::Binding {
             id: "child".into(),
             artifact: "fixture-digest".into(),
             interface: interface.into(),

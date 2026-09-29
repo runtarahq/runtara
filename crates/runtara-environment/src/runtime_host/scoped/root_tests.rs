@@ -3,6 +3,7 @@ use runtara_component_host::execution_host::{
     ExecutionContext, ExecutionError, InvocationLauncher, PreparedInvocation, StartRequest,
 };
 use runtara_component_host::isolated_tasks::TaskError;
+use runtara_component_host::runtime_host::RunTerminal;
 use runtara_component_host::{InvokeExit, RootExecutionCoordinator, WorkflowRunSpec};
 
 struct NoChildren;
@@ -170,10 +171,8 @@ async fn native_root_pause_preserves_waiting_child_but_cancel_closes_it() {
 fn root_wat(exit: &str) -> String {
     format!(
         r#"(component
-      (import "runtara:workflow-runtime/runtime@0.3.0" (instance $runtime
-        (export "complete" (func (param "output" (list u8)) (result (result (error string)))))
+      (import "runtara:workflow/runtime@1.0.0" (instance $runtime
         (export "check-signals" (func (result (result bool (error string)))))))
-      (alias export $runtime "complete" (func $complete))
       (alias export $runtime "check-signals" (func $signals))
       (core module $memory (memory (export "memory") 1)
         (global $heap (mut i32) (i32.const 8192))
@@ -181,32 +180,35 @@ fn root_wat(exit: &str) -> String {
           (local $p i32) global.get $heap local.set $p global.get $heap local.get 3 i32.add
           i32.const 7 i32.add i32.const -8 i32.and global.set $heap local.get $p))
       (core instance $memory (instantiate $memory))
-      (core func $complete (canon lower (func $complete) (memory $memory "memory") (realloc (func $memory "realloc"))))
       (core func $signals (canon lower (func $signals) (memory $memory "memory") (realloc (func $memory "realloc"))))
       (core module $code (import "memory" "memory" (memory 1))
-        (import "host" "complete" (func $complete (param i32 i32 i32)))
         (import "host" "signals" (func $signals (param i32)))
         (data (i32.const 4000) "42")
-        (func (export "invoke") (param i32 i32) (result i32)
+        (func (export "invoke") (param i32 i32 i32 i32) (result i32)
           (call $signals (i32.const 64))
           {exit}
           (i32.const 2048)))
-      (core instance $host (export "complete" (func $complete)) (export "signals" (func $signals)))
+      (core instance $host (export "signals" (func $signals)))
       (core instance $code (instantiate $code (with "host" (instance $host)) (with "memory" (instance $memory))))
       (type $error (record (field "code" string) (field "message" string) (field "category" string)
-        (field "severity" string) (field "retryable" bool) (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
+        (field "severity" string) (field "retryable" bool) (field "retry-after-ms" (option u64)) (field "attributes" (option string)) (field "details" (option string))))
       (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
-      (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")))
-      (type $outcome (variant (case "completed" (list u8)) (case "suspended" (list $wake))))
-      (func $invoke async (param "input" (list u8)) (result (result $outcome (error $error)))
+      (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+        (case "instances" string)))
+      (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+      (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
+      (func $invoke async (param "capability-id" string) (param "input" (list u8))
+        (result (result $outcome (error $error)))
         (canon lift (core func $code "invoke") (memory $memory "memory") (realloc (func $memory "realloc"))))
       (instance $api (export "error-info" (type $error)) (export "signal-wait" (type $signal))
-        (export "wake" (type $wake)) (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
-      (export "runtara:workflow-lifecycle/lifecycle@0.2.0" (instance $api)))"#
+        (export "wake" (type $wake)) (export "suspension" (type $suspension))
+        (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
+      (export "runtara:agent-workflow-agent/capabilities@1.0.0" (instance $api)))"#
     )
 }
-const COMPLETE: &str = r#"(call $complete (i32.const 4000) (i32.const 2) (i32.const 64))
-    (i32.store (i32.const 2060) (i32.const 4000)) (i32.store (i32.const 2064) (i32.const 2))"#;
+/// Return `completed("42")`; the supervisor publishes it after cleanup.
+const COMPLETE: &str =
+    r#"(i32.store (i32.const 2060) (i32.const 4000)) (i32.store (i32.const 2064) (i32.const 2))"#;
 
 async fn run(
     fx: &Fixture,
@@ -375,7 +377,7 @@ async fn root_coordination_preserves_wakes_and_coalesces_breakpoints() {
         matches!(result.exit, InvokeExit::Suspended(ref wakes) if wakes == &[runtara_component_host::lifecycle::WorkflowWake::OnResume])
     );
     assert_eq!(fx.status().await, InstanceStatus::Suspended);
-    assert!(root.complete(vec![]).await.is_err());
+    assert!(root.terminal(RunTerminal::Completed(vec![])).await.is_err());
     assert_eq!(
         fx.owner.apply_root_effects().await.unwrap(),
         AppliedRootEffects::default()
@@ -383,8 +385,8 @@ async fn root_coordination_preserves_wakes_and_coalesces_breakpoints() {
 }
 
 #[tokio::test]
-async fn root_coordination_does_not_publish_after_cleanup_failure_trap_or_conflict() {
-    for mode in ["cleanup", "trap", "conflict"] {
+async fn root_coordination_does_not_publish_after_cleanup_failure_or_trap() {
+    for mode in ["cleanup", "trap"] {
         let fx = Fixture::new().await;
         let root = fx.owner.root_runtime();
         fx.persistence
@@ -403,9 +405,6 @@ async fn root_coordination_does_not_publish_after_cleanup_failure_trap_or_confli
         }
         let exit = match mode {
             "trap" => format!("{COMPLETE} unreachable"),
-            "conflict" => {
-                format!("{COMPLETE} (call $complete (i32.const 4000) (i32.const 1) (i32.const 64))")
-            }
             _ => COMPLETE.into(),
         };
         let result = run(&fx, root.clone(), &exit).await.await.unwrap();
@@ -421,7 +420,7 @@ async fn root_coordination_does_not_publish_after_cleanup_failure_trap_or_confli
                 .unwrap()
                 .is_some()
         );
-        assert!(root.complete(vec![]).await.is_err());
+        assert!(root.terminal(RunTerminal::Completed(vec![])).await.is_err());
         assert!(root.heartbeat().await.is_err());
         if mode == "cleanup" {
             assert!(root.finalize().await.is_err());
@@ -430,17 +429,17 @@ async fn root_coordination_does_not_publish_after_cleanup_failure_trap_or_confli
 }
 
 #[tokio::test]
-async fn root_runtime_requires_successful_finalization_before_terminal_callbacks() {
+async fn root_runtime_requires_successful_finalization_before_terminal_publication() {
     let fx = Fixture::new().await;
     let root = fx.owner.root_runtime();
-    assert!(root.complete(vec![]).await.is_err());
-    assert!(root.fail(vec![]).await.is_err());
+    assert!(root.terminal(RunTerminal::Completed(vec![])).await.is_err());
+    assert!(root.terminal(RunTerminal::Failed(vec![])).await.is_err());
     assert!(root.finalize().await.is_err());
     fx.tasks.shutdown().await.unwrap();
     root.close(false).unwrap();
     root.close(true).unwrap();
     assert!(root.finalize().await.is_err());
-    assert!(root.complete(vec![]).await.is_err());
+    assert!(root.terminal(RunTerminal::Completed(vec![])).await.is_err());
     assert_eq!(fx.status().await, InstanceStatus::Running);
 }
 

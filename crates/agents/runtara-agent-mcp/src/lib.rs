@@ -144,8 +144,8 @@ pub struct RawConnection {
 #[cfg(target_family = "wasm")]
 mod connection_bindings {
     wit_bindgen::generate!({
-        path: "../../runtara-workflow-wit/wit/connection-resolver",
-        world: "connection-client",
+        path: "../../runtara-wit/wit/host",
+        world: "connections-client",
         async: true,
     });
 }
@@ -163,7 +163,7 @@ async fn resolve_connection_params(
     }
     #[cfg(target_family = "wasm")]
     {
-        let bytes = connection_bindings::runtara::connection_resolver::resolver::describe(
+        let bytes = connection_bindings::runtara::host::connections::describe(
             connection.connection_id.clone(),
         )
         .await

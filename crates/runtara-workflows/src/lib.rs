@@ -3,8 +3,9 @@
 //! Runtara Workflows - Workflow Compilation to WebAssembly Components
 //!
 //! This crate compiles workflow definitions (DSL workflows) into WebAssembly
-//! component-model modules. The composed `workflow.wasm` communicates with
-//! runtara-core via the SDK for durability, checkpointing, and signal handling.
+//! component-model modules. The composed `workflow.wasm` imports the
+//! `runtara:workflow/runtime` interface, which the embedding host
+//! implements natively for durability, checkpointing, and signal handling.
 //!
 //! # Architecture
 //!

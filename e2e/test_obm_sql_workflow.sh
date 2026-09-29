@@ -162,7 +162,7 @@ if [ ! -x "${RUNTARA_SERVER_BIN}" ]; then
     print_step "Building runtara-server (debug)..."
     SQLX_OFFLINE="${SQLX_OFFLINE}" cargo build -p runtara-server --bin runtara-server >&2
 fi
-for f in runtara_agent_object_model.wasm runtara_agent_utils.wasm runtara_workflow_stdlib.wasm runtara_workflow_runtime.wasm; do
+for f in runtara_agent_object_model.wasm runtara_agent_utils.wasm runtara_workflow_stdlib.wasm; do
     if [ ! -f "${COMPONENTS_DIR}/${f}" ]; then
         print_error "Missing component ${COMPONENTS_DIR}/${f} — run scripts/build-agent-components.sh"
         exit 1

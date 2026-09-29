@@ -300,7 +300,6 @@ mod tests {
             instance_id: "test-instance-123".to_string(),
             tenant_id: "test-tenant".to_string(),
             wasm_path: PathBuf::from("/test/workflow.wasm"),
-            requires_lifecycle_invoke: false,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,

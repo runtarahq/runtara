@@ -27,7 +27,12 @@ fn agent_wasm_path() -> PathBuf {
 
 type InvokeFunc = wasmtime::component::TypedFunc<
     (String, Vec<u8>),
-    (Result<Vec<u8>, runtara_component_host::ErrorInfo>,),
+    (
+        Result<
+            runtara_component_host::bindings::exports::runtara::agent::capabilities::Outcome,
+            runtara_component_host::ErrorInfo,
+        >,
+    ),
 >;
 
 #[tokio::test(flavor = "multi_thread")]

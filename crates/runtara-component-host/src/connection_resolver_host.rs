@@ -12,7 +12,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Mutex;
-use wasmtime::StoreContextMut;
 use wasmtime::component::Linker;
 
 use crate::workflow::WorkflowState;
@@ -21,8 +20,7 @@ type ResourceCacheKey = (String, Vec<u8>);
 type ResourceCache = HashMap<ResourceCacheKey, Vec<u8>>;
 
 /// Fully-qualified component import name of the resolver interface.
-pub const CONNECTION_RESOLVER_INTERFACE_NAME: &str =
-    runtara_workflow_wit::CONNECTION_RESOLVER_INTERFACE_NAME;
+pub const CONNECTION_RESOLVER_INTERFACE_NAME: &str = runtara_wit::host::CONNECTIONS;
 
 /// Process-wide native service injected by the embedding application.
 /// The linker supplies host-owned tenant authority and per-run caches.
@@ -132,7 +130,7 @@ fn require_host<T: ConnectionResolverContext>(
         .map_err(|error| wasmtime::format_err!("connection resolution is unavailable: {error}"))
 }
 
-/// Bind both supported resolver ABIs to the native run-scoped service.
+/// Bind the connections interface to the native run-scoped service.
 pub(crate) fn add_connection_resolver_to_linker<T: ConnectionResolverContext + Send + 'static>(
     linker: &mut Linker<T>,
 ) -> anyhow::Result<()> {
@@ -146,24 +144,6 @@ pub(crate) fn add_connection_resolver_to_linker<T: ConnectionResolverContext + S
         |accessor, (connection_id, request): (String, Vec<u8>)| {
             let host = accessor.with(|mut access| require_host(access.get()));
             Box::pin(async move { Ok((host?.resolve_resource(connection_id, request).await,)) })
-        },
-    )?;
-    // Already-built artifacts keep the synchronous 0.1 contract. Registration
-    // depends only on the artifact's ABI version, never a workflow feature flag.
-    let mut legacy =
-        linker.instance(runtara_workflow_wit::LEGACY_CONNECTION_RESOLVER_INTERFACE_NAME)?;
-    legacy.func_wrap_async(
-        "describe",
-        |store: StoreContextMut<'_, T>, (connection_id,): (String,)| {
-            let host = require_host(store.data());
-            Box::new(async move { Ok((host?.describe(connection_id).await,)) })
-        },
-    )?;
-    legacy.func_wrap_async(
-        "resolve-resource",
-        |store: StoreContextMut<'_, T>, (connection_id, request): (String, Vec<u8>)| {
-            let host = require_host(store.data());
-            Box::new(async move { Ok((host?.resolve_resource(connection_id, request).await,)) })
         },
     )?;
     Ok(())

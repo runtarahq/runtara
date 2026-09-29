@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Host side of typed agent suspension.
 //!
-//! - `runtara:workflow-operation/scope`, imported only by compiled workflow
+//! - `runtara:workflow/operation`, imported only by compiled workflow
 //!   logic, names the operation of an operation-scoped call site (a suspending
 //!   capability or a control call, durable or not). `enter` parses the site's
 //!   canonical v2 Agent checkpoint key into an [`OperationIdentity`] and the
@@ -10,7 +10,7 @@
 //!   run's own instance; nothing about the identity comes from agent input.
 //!   The entered `op_hash` is the `operation` of every control call the site
 //!   makes (`ControlAuthority`), and a second `enter` in one run fails closed.
-//! - `runtara:agent-suspension/context.continuation()` hands a suspending
+//! - `runtara:agent/continuation.continuation()` hands a suspending
 //!   agent the continuation of the entered operation.
 //!
 //! An agent suspension may wake at a time (`at`). Nothing lets an agent
@@ -28,66 +28,21 @@ use wasmtime::component::Linker;
 
 use crate::workflow::WorkflowState;
 
-/// WIT mirror of `runtara:agent-suspension/types.wake`.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    wasmtime::component::ComponentType,
-    wasmtime::component::Lift,
-    wasmtime::component::Lower,
-)]
-#[component(variant)]
-pub enum SuspensionWake {
-    /// Re-invoke at (or after) this wall-clock ms since the Unix epoch.
-    #[component(name = "at")]
-    At(u64),
-    /// Re-invoke when this host-owned instance wait settles.
-    #[component(name = "instances")]
-    Instances(String),
-}
+/// The suspension types are the shared `runtara:agent/types` mirrors.
+pub use crate::lifecycle::{
+    WorkflowOutcome as SuspendableOutcome, WorkflowSuspension as Suspension,
+    WorkflowWake as SuspensionWake,
+};
 
-/// WIT mirror of `runtara:agent-suspension/types.suspension`.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    wasmtime::component::ComponentType,
-    wasmtime::component::Lift,
-    wasmtime::component::Lower,
-)]
-#[component(record)]
-pub struct Suspension {
-    pub wakes: Vec<SuspensionWake>,
-    pub state: Vec<u8>,
-}
-
-/// WIT mirror of `runtara:agent-suspension/types.outcome`.
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    wasmtime::component::ComponentType,
-    wasmtime::component::Lift,
-    wasmtime::component::Lower,
-)]
-#[component(variant)]
-pub enum SuspendableOutcome {
-    #[component(name = "completed")]
-    Completed(Vec<u8>),
-    #[component(name = "suspended")]
-    Suspended(Suspension),
-}
-
-impl SuspensionWake {
-    fn to_contract(&self) -> runtara_agent_suspension::Wake {
-        match self {
-            Self::At(at) => runtara_agent_suspension::Wake::At(*at),
-            Self::Instances(id) => runtara_agent_suspension::Wake::Instances(id.clone()),
+/// The contract form of an agent's wake: only `at` and `instances` are
+/// an agent's to return; `on-signal` and `on-resume` belong to workflow logic.
+fn to_contract(wake: &SuspensionWake) -> Option<runtara_agent_suspension::Wake> {
+    match wake {
+        SuspensionWake::At(at) => Some(runtara_agent_suspension::Wake::At(*at)),
+        SuspensionWake::Instances(id) => {
+            Some(runtara_agent_suspension::Wake::Instances(id.clone()))
         }
+        SuspensionWake::OnSignal(_) | SuspensionWake::OnResume => None,
     }
 }
 
@@ -103,7 +58,7 @@ const DERIVED_KEY_SUFFIXES: [&str; 3] = ["::attempt::", "::retry_sleep::", "::re
 
 /// The identity of an operation-scoped call site, parsed from the canonical
 /// v2 Agent checkpoint key the compiler hands `scope.enter`. Frozen with
-/// `runtara:workflow-operation@0.1.0`: the key is
+/// `runtara:workflow@1.0.0`: the key is
 /// `runtara:v2:["agent", workflow, namespace, loop-path, [agent, capability, step]]`,
 /// so it differs per loop iteration and per embedding and is the same on every
 /// replay and retry of the same site.
@@ -250,11 +205,15 @@ impl OperationScopeState {
                 runtara_agent_suspension::AGENT_INVALID_SUSPENSION
             )
         };
-        let contract: Vec<_> = wakes.iter().map(SuspensionWake::to_contract).collect();
+        let contract = wakes
+            .iter()
+            .map(to_contract)
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| invalid("an agent may wake only `at` or on `instances`".into()))?;
         runtara_agent_suspension::validate_suspension(&contract, state).map_err(invalid)?;
         if let Some(foreign) = wakes.iter().find_map(|wake| match wake {
             SuspensionWake::Instances(id) => Some(id),
-            SuspensionWake::At(_) => None,
+            _ => None,
         }) {
             return Err(invalid(format!(
                 "`{foreign}` is not an instance wait this operation registered; agents cannot register one"
@@ -274,7 +233,7 @@ pub fn operation_hash(checkpoint_key: &str) -> String {
     format!("{:x}", Sha256::digest(checkpoint_key.as_bytes()))
 }
 
-/// Store data that can answer `runtara:agent-suspension/context`.
+/// Store data that can answer `runtara:agent/continuation`.
 pub(crate) trait SuspensionContextView {
     /// The continuation of the entered operation, if any.
     fn continuation(&self) -> Option<Vec<u8>>;
@@ -296,12 +255,12 @@ impl SuspensionContextView for crate::host_state::HostState {
     }
 }
 
-/// Bind `runtara:agent-suspension/context`.
+/// Bind `runtara:agent/continuation`.
 pub(crate) fn add_suspension_context_to_linker<T: SuspensionContextView + Send + 'static>(
     linker: &mut Linker<T>,
 ) -> anyhow::Result<()> {
     linker
-        .instance(runtara_agent_suspension::CONTEXT_INTERFACE)?
+        .instance(runtara_wit::agent::CONTINUATION)?
         .func_wrap("continuation", |store: StoreContextMut<'_, T>, (): ()| {
             Ok((store.data().continuation(),))
         })?;
@@ -316,11 +275,11 @@ fn runtime(
     })
 }
 
-/// Bind `runtara:workflow-operation/scope` for workflow stores.
+/// Bind `runtara:workflow/operation` for workflow stores.
 pub(crate) fn add_operation_scope_to_linker(
     linker: &mut Linker<WorkflowState>,
 ) -> anyhow::Result<()> {
-    let mut scope = linker.instance(runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME)?;
+    let mut scope = linker.instance(runtara_wit::workflow::OPERATION)?;
     scope.func_wrap_async(
         "enter",
         |mut store: StoreContextMut<'_, WorkflowState>,
@@ -543,7 +502,7 @@ mod tests {
 
     /// The hand-written suspension mirrors have the canonical layout the
     /// emitter reads (`runtara_agent_suspension::layout`, pinned against the
-    /// WIT by `runtara-workflow-wit`).
+    /// WIT by `runtara-agent-suspension`'s tests).
     #[test]
     fn suspension_mirrors_match_the_canonical_layout() {
         use runtara_agent_suspension::layout;

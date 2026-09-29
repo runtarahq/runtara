@@ -75,6 +75,8 @@ def environment(target):
         if name in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS") or name.startswith("CARGO_PROFILE_"):
             if env[name]:
                 raise RuntimeError(f"remove compiler override {name} for this measurement")
+    # RUNTARA_DIRECT_RUNTIME_BINDING is gone from current revisions but still
+    # honoured by older baseline worktrees.
     for name in ("RUNTARA_DIRECT_OMIT_RUNTIME", "RUNTARA_DIRECT_RUNTIME_BINDING", "RUNTARA_DIRECT_WORKFLOW_ABI"):
         env.pop(name, None)
     env.update(RUSTC_WRAPPER="", SQLX_OFFLINE="true", CARGO_BUILD_JOBS="4",
@@ -106,7 +108,7 @@ def build(root, target, label, output):
 
 def component_inputs(target):
     directory = target / "wasm32-wasip2/release"
-    names = [f"{name}.{suffix}" for name in ("runtara_agent_utils", "runtara_workflow_stdlib", "runtara_workflow_runtime") for suffix in ("wasm", "meta.json")]
+    names = [f"{name}.{suffix}" for name in ("runtara_agent_utils", "runtara_workflow_stdlib") for suffix in ("wasm", "meta.json")]
     return {name: digest((directory / name).read_bytes()) for name in names}
 
 

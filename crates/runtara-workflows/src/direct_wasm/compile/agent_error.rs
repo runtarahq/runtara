@@ -14,8 +14,7 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, MemArg};
 
 use super::abi::{
-    load_agent_retptr_list, load_retptr_list, load_retptr_tag, push_retptr_arg,
-    push_retptr_i32_load, push_retptr_i64_load, push_retptr_u8_load, push_segment_args,
+    load_agent_retptr_list, load_retptr_list, load_retptr_tag, push_retptr_arg, push_segment_args,
     return_if_retptr_error,
 };
 use super::debug::emit_agent_debug_error;
@@ -23,13 +22,6 @@ use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
 use super::split::emit_split_append_error_payload_and_continue;
 use super::{
-    DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_PTR_OFFSET,
-    DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_TAG_OFFSET, DIRECT_AGENT_RESULT_ERR_CATEGORY_LEN_OFFSET,
-    DIRECT_AGENT_RESULT_ERR_CATEGORY_PTR_OFFSET, DIRECT_AGENT_RESULT_ERR_CODE_LEN_OFFSET,
-    DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET, DIRECT_AGENT_RESULT_ERR_MESSAGE_LEN_OFFSET,
-    DIRECT_AGENT_RESULT_ERR_MESSAGE_PTR_OFFSET, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET,
-    DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET, DIRECT_AGENT_RESULT_ERR_RETRYABLE_OFFSET,
-    DIRECT_AGENT_RESULT_ERR_SEVERITY_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_SEVERITY_PTR_OFFSET,
     DIRECT_RUN_RETPTR_OFFSET, DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment,
     DirectEdgeConditionPlan, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
     DirectRunPlan, DirectVariables, emit_runtime_fail_return,
@@ -581,36 +573,15 @@ fn emit_terminal_run_plan_mapping(
     if let Some(DirectHandledTarget { branch_depth }) = handled_target {
         body.instruction(&Instruction::Br(branch_depth));
     } else {
-        // Terminal completion from an onError handler — same per-ABI exit
-        // shape as the entry function's own tail, including the terminal-status
-        // suppression (omit-runtime, and AgentCapabilities where the caller
-        // owns instance lifecycle).
-        if indices.report_terminal_status() {
-            super::core_module::emit_complete(body, indices, output_ptr_local, output_len_local);
-        }
+        // Terminal completion from an onError handler — same exit shape as
+        // the entry function's own tail.
         super::deadline_scope::close_alarm(body, indices);
-        match indices.abi {
-            crate::direct_wasm::component::WorkflowAbi::CliRunHttp => {
-                load_retptr_tag(body);
-                body.instruction(&Instruction::Return);
-            }
-            crate::direct_wasm::component::WorkflowAbi::InvokeHostImports => {
-                super::core_module::emit_invoke_ok_completed_return(
-                    body,
-                    output_ptr_local,
-                    output_len_local,
-                );
-                body.instruction(&Instruction::Return);
-            }
-            crate::direct_wasm::component::WorkflowAbi::AgentCapabilities => {
-                super::core_module::emit_capabilities_ok_return(
-                    body,
-                    output_ptr_local,
-                    output_len_local,
-                );
-                body.instruction(&Instruction::Return);
-            }
-        }
+        super::core_module::emit_invoke_ok_completed_return(
+            body,
+            output_ptr_local,
+            output_len_local,
+        );
+        body.instruction(&Instruction::Return);
     }
 }
 
@@ -621,21 +592,19 @@ fn emit_agent_error(
     output_ptr_local: u32,
     output_len_local: u32,
 ) {
+    // `agent-error(agent-id, error-info)` flattens past 16 values, so its
+    // arguments pass by pointer, laid out as `u32 @0, error-info @8`: the
+    // Agent's own result area once its tag word holds the agent id. The host
+    // copies the arguments before the stdlib runs, so the same area then
+    // receives the result.
+    push_retptr_arg(body);
     body.instruction(&Instruction::I32Const(agent_id as i32));
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CODE_LEN_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_MESSAGE_PTR_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_MESSAGE_LEN_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CATEGORY_PTR_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CATEGORY_LEN_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_SEVERITY_PTR_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_SEVERITY_LEN_OFFSET);
-    push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_RETRYABLE_OFFSET);
-    push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET);
-    push_retptr_i64_load(body, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET);
-    push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_TAG_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_PTR_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_LEN_OFFSET);
+    body.instruction(&Instruction::I32Store(MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    }));
+    push_retptr_arg(body);
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_agent_error));
     return_if_retptr_error(body, indices);

@@ -14,7 +14,7 @@ use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, ValType};
 
 use super::abi::{
     load_retptr_list, push_retptr_arg, push_retptr_i64_load, push_retptr_u8_load,
-    push_segment_args, return_if_retptr_error,
+    return_if_retptr_error,
 };
 use super::retry_park::emit_retry_park_until_deadline;
 use super::{
@@ -24,21 +24,16 @@ use super::{
     DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL, DIRECT_EMBED_RETRYABLE_LOCAL,
     DIRECT_RESULT_OPTION_U64_TAG_OFFSET, DIRECT_RESULT_OPTION_U64_VALUE_OFFSET,
     DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U64_OK_OFFSET, DirectCoreFunctionIndices,
-    DirectCoreStaticData,
 };
 
 const EMBED_RETRY_MAX_DELAY_MS: u64 = 60_000;
 
-#[allow(clippy::too_many_arguments)]
+/// Non-durable retry backoff before the next attempt: a cooperative timer
+/// wait that keeps the invocation's stack. Durable embeds park instead (see
+/// [`emit_embed_retry_park`]).
 pub(super) fn emit_embed_retry_before_attempt(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
-    static_data: &DirectCoreStaticData,
-    durable_checkpoint: bool,
-    cache_key_ptr_local: u32,
-    cache_key_len_local: u32,
-    error_ptr_local: u32,
-    error_len_local: u32,
     max_retries: u32,
     retry_delay_ms: u64,
 ) {
@@ -47,24 +42,8 @@ pub(super) fn emit_embed_retry_before_attempt(
     body.instruction(&Instruction::I32GtU);
     body.instruction(&Instruction::If(BlockType::Empty));
     emit_embed_retry_delay(body, indices, max_retries, retry_delay_ms);
-    emit_embed_retry_sleep(
-        body,
-        indices,
-        static_data,
-        durable_checkpoint,
-        cache_key_ptr_local,
-        cache_key_len_local,
-    );
-    if durable_checkpoint {
-        emit_embed_record_retry_attempt(
-            body,
-            indices,
-            cache_key_ptr_local,
-            cache_key_len_local,
-            error_ptr_local,
-            error_len_local,
-        );
-    }
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL));
+    super::cooperative_wait::emit_timer_wait(body, indices);
     body.instruction(&Instruction::End);
 }
 
@@ -219,56 +198,6 @@ fn emit_embed_retry_delay(
     if indices.monotonic_now.is_some() {
         super::agent_deadline::clamp_wait(body, indices, false, DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL);
     }
-}
-
-fn emit_embed_retry_sleep(
-    body: &mut WasmFunction,
-    indices: &DirectCoreFunctionIndices,
-    static_data: &DirectCoreStaticData,
-    durable_checkpoint: bool,
-    cache_key_ptr_local: u32,
-    cache_key_len_local: u32,
-) {
-    if durable_checkpoint {
-        body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_AFTER_TAG_LOCAL));
-        body.instruction(&Instruction::If(BlockType::Empty));
-        body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
-        body.instruction(&Instruction::LocalGet(cache_key_len_local));
-        body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_ATTEMPT_LOCAL));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.stdlib_retry_sleep_key));
-        return_if_retptr_error(body, indices);
-        load_retptr_list(
-            body,
-            DIRECT_EMBED_RETRY_SLEEP_KEY_PTR_LOCAL,
-            DIRECT_EMBED_RETRY_SLEEP_KEY_LEN_LOCAL,
-        );
-
-        body.instruction(&Instruction::LocalGet(
-            DIRECT_EMBED_RETRY_SLEEP_KEY_PTR_LOCAL,
-        ));
-        body.instruction(&Instruction::LocalGet(
-            DIRECT_EMBED_RETRY_SLEEP_KEY_LEN_LOCAL,
-        ));
-        push_segment_args(body, &static_data.agent_rate_limit_wait);
-        body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_durable_sleep_checkpoint));
-        return_if_retptr_error(body, indices);
-        body.instruction(&Instruction::Else);
-        emit_blocking_sleep(body, indices);
-        body.instruction(&Instruction::End);
-    } else {
-        body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL));
-        super::cooperative_wait::emit_timer_wait(body, indices);
-    }
-}
-
-fn emit_blocking_sleep(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
-    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_RETRY_SLEEP_MS_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_blocking_sleep));
-    return_if_retptr_error(body, indices);
 }
 
 fn emit_embed_record_retry_attempt(

@@ -542,7 +542,7 @@ pub(crate) fn control_agent_reference() -> serde_json::Value {
             "W076": "A control or suspending step under a retrying Split or EmbedWorkflow; a region retry replays the operation's first outcome.",
             "W077": "A control start whose workflowId is not a literal; the target is only checked when the step runs.",
             "W078": format!("A suspending step's timeout is at most {} ms, so it times out instead of parking.", runtara_dsl::step_context_rules::SUSPEND_DEADLINE_MARGIN_MS),
-            "publishing": "A workflow with control or suspending steps (or embedding one) cannot be published as a workflow-agent, and the composed runtime binding (RUNTARA_DIRECT_RUNTIME_BINDING=composed) cannot compile it."
+            "publishing": "A workflow with control or suspending steps (or embedding one) cannot be published as a workflow-agent."
         },
         "lifecycle": [
             format!("parentClosePolicy cancel cancels a still-running child whenever its parent ends (completed, failed, cancelled, or gone), with a {} s grace, even when the parent crashed or was stopped from outside; leave_running leaves it alone. A suspended parent has not ended.", c::PARENT_CLOSE_GRACE_MS / 1000),

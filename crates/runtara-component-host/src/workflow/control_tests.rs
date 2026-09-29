@@ -43,8 +43,8 @@ fn root_with(pins: &[String], nested: &str) -> Vec<u8> {
         .collect();
     let nested = format!(
         "(component {nested}) (instance (instantiate 0 \
-         (with \"runtara:control/executor@0.1.0\" (instance $exec)) \
-         (with \"runtara:control/api@0.1.0\" (instance $api))))"
+         (with \"runtara:control/executor@1.0.0\" (instance $exec)) \
+         (with \"runtara:control/api@1.0.0\" (instance $api))))"
     );
     let root = section("ROOT")
         .replace("{{PINS}}", &pins)
@@ -167,46 +167,68 @@ fn the_audit_fails_closed_on_imported_components_and_agents_binding_the_operatio
 
     let spoofing_agent = wat::parse_str(
         r#"(component
-          (import "runtara:workflow-operation/scope@0.1.0" (instance $scope))
+          (import "runtara:workflow/operation@1.0.0" (instance $scope))
           (component
-            (import "runtara:workflow-operation/scope@0.1.0" (instance))
+            (import "runtara:workflow/operation@1.0.0" (instance))
             (instance $caps)
-            (export "runtara:agent-evil/capabilities@0.4.0" (instance $caps)))
+            (export "runtara:agent-evil/capabilities@1.0.0" (instance $caps)))
           (instance (instantiate 0
-            (with "runtara:workflow-operation/scope@0.1.0" (instance $scope)))))"#,
+            (with "runtara:workflow/operation@1.0.0" (instance $scope)))))"#,
     )
     .unwrap();
     let error = audit_control_importers(&spoofing_agent)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("workflow-operation"), "{error}");
+    assert!(error.contains("runtara:workflow/operation"), "{error}");
 
     let waiting_agent = wat::parse_str(
         r#"(component
-          (import "runtara:workflow-wait/instances@0.1.0" (instance $waits))
+          (import "runtara:workflow/waits@1.0.0" (instance $waits))
           (component
-            (import "runtara:workflow-wait/instances@0.1.0" (instance))
+            (import "runtara:workflow/waits@1.0.0" (instance))
             (instance $caps)
-            (export "runtara:agent-evil/capabilities@0.4.0" (instance $caps)))
+            (export "runtara:agent-evil/capabilities@1.0.0" (instance $caps)))
           (instance (instantiate 0
-            (with "runtara:workflow-wait/instances@0.1.0" (instance $waits)))))"#,
+            (with "runtara:workflow/waits@1.0.0" (instance $waits)))))"#,
     )
     .unwrap();
     let error = audit_control_importers(&waiting_agent)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("workflow-wait"), "{error}");
+    assert!(error.contains("runtara:workflow/waits"), "{error}");
 
     // Compiled workflow logic (no agent export) may bind the scope.
     let logic = wat::parse_str(
         r#"(component
-          (import "runtara:workflow-operation/scope@0.1.0" (instance $scope))
-          (component (import "runtara:workflow-operation/scope@0.1.0" (instance)))
+          (import "runtara:workflow/operation@1.0.0" (instance $scope))
+          (component (import "runtara:workflow/operation@1.0.0" (instance)))
           (instance (instantiate 0
-            (with "runtara:workflow-operation/scope@0.1.0" (instance $scope)))))"#,
+            (with "runtara:workflow/operation@1.0.0" (instance $scope)))))"#,
     )
     .unwrap();
     assert!(audit_control_importers(&logic).is_ok());
+
+    // A published workflow-agent exports an agent interface around its
+    // workflow logic, so it may bind the scope; the same shape without the
+    // logic inside may not.
+    let published = |section: &str| {
+        wat::parse_str(format!(
+            r#"(component
+              (import "runtara:workflow/operation@1.0.0" (instance $scope))
+              (component
+                (import "runtara:workflow/operation@1.0.0" (instance $inner))
+                (component {section} (import "runtara:workflow/operation@1.0.0" (instance)))
+                (instance (instantiate 0 (with "runtara:workflow/operation@1.0.0" (instance $inner))))
+                (instance $caps)
+                (export "runtara:agent-flow/capabilities@1.0.0" (instance $caps)))
+              (instance (instantiate 0
+                (with "runtara:workflow/operation@1.0.0" (instance $scope)))))"#
+        ))
+        .unwrap()
+    };
+    let logic_section = format!(r#"(@custom "{}" "")"#, runtara_wit::workflow::LOGIC_SECTION);
+    assert!(audit_control_importers(&published(&logic_section)).is_ok());
+    assert!(audit_control_importers(&published("")).is_err());
 }
 
 #[tokio::test(flavor = "multi_thread")]

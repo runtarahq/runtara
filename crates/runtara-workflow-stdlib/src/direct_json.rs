@@ -3063,30 +3063,8 @@ impl DirectJsonManifest {
         workflow_retry_info(error).retry_after_ms
     }
 
-    /// Convert a WIT `error-info` into the raw JSON envelope used for retries.
-    #[allow(clippy::too_many_arguments)]
-    pub fn agent_error_info(
-        code: &str,
-        message: &str,
-        category: &str,
-        severity: &str,
-        retryable: bool,
-        retry_after_ms: Option<u64>,
-        attributes: Option<&str>,
-    ) -> Result<Vec<u8>, String> {
-        Ok(Self::agent_retry_error_info(
-            code,
-            message,
-            category,
-            severity,
-            retryable,
-            retry_after_ms,
-            attributes,
-        )?
-        .payload)
-    }
-
     /// Convert a WIT `error-info` into retry payload and retry classification.
+    /// A workflow-agent child's `details` become the envelope's `childError`.
     #[allow(clippy::too_many_arguments)]
     pub fn agent_retry_error_info(
         code: &str,
@@ -3096,6 +3074,7 @@ impl DirectJsonManifest {
         retryable: bool,
         retry_after_ms: Option<u64>,
         attributes: Option<&str>,
+        details: Option<&str>,
     ) -> Result<DirectJsonAgentRetryError, String> {
         Ok(DirectJsonAgentRetryError {
             payload: agent_error_info_envelope(
@@ -3106,6 +3085,7 @@ impl DirectJsonManifest {
                 retryable,
                 retry_after_ms,
                 attributes,
+                details,
             )
             .into_bytes(),
             retryable: retryable && category != "permanent",
@@ -3125,8 +3105,9 @@ impl DirectJsonManifest {
         retryable: bool,
         retry_after_ms: Option<u64>,
         attributes: Option<&str>,
+        details: Option<&str>,
     ) -> Result<Vec<u8>, String> {
-        let raw = Self::agent_error_info(
+        let raw = Self::agent_retry_error_info(
             code,
             message,
             category,
@@ -3134,7 +3115,9 @@ impl DirectJsonManifest {
             retryable,
             retry_after_ms,
             attributes,
-        )?;
+            details,
+        )?
+        .payload;
         self.agent_error_from_info(agent_id, &raw)
     }
 
@@ -5550,6 +5533,7 @@ fn apply_error(config: &Value, source: &Value) -> Result<DirectErrorResult, Stri
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn agent_error_info_envelope(
     code: &str,
     message: &str,
@@ -5558,6 +5542,7 @@ fn agent_error_info_envelope(
     retryable: bool,
     retry_after_ms: Option<u64>,
     attributes: Option<&str>,
+    details: Option<&str>,
 ) -> String {
     let mut object = Map::new();
     object.insert("code".to_string(), Value::String(code.to_string()));
@@ -5576,6 +5561,16 @@ fn agent_error_info_envelope(
     {
         object.insert("attributes".to_string(), parsed);
     }
+    // A workflow-agent child's full error, as an embedded child's failure
+    // carries it. Agent components never set `details`, so their envelopes
+    // are unchanged.
+    if let Some(details) = details {
+        object.insert(
+            "childError".to_string(),
+            serde_json::from_str::<Value>(details)
+                .unwrap_or_else(|_| Value::String(details.to_string())),
+        );
+    }
 
     Value::Object(object).to_string()
 }
@@ -5590,6 +5585,9 @@ pub struct DirectInvokeErrorFields {
     pub retryable: bool,
     pub retry_after_ms: Option<u64>,
     pub attributes: Option<String>,
+    /// The payload itself (lossily decoded): what the host persists as the
+    /// run's error, so it stays byte-for-byte what the stdlib built.
+    pub details: Option<String>,
 }
 
 /// Best-effort decomposition of a terminal error payload into structured
@@ -5597,19 +5595,21 @@ pub struct DirectInvokeErrorFields {
 /// stdlib error-step shape: `{code, message, category, severity, retryable,
 /// retryAfterMs, attributes}`) maps field-for-field; anything else — plain
 /// strings, non-object JSON, invalid UTF-8 — rides `message` verbatim
-/// (lossily decoded), matching what `runtime.fail` records. Infallible by
+/// (lossily decoded), and `details` carries the payload itself, which the host
+/// records as the run's error. Infallible by
 /// construction.
 pub fn invoke_error_fields(error: &[u8]) -> DirectInvokeErrorFields {
     let raw = String::from_utf8_lossy(error).into_owned();
     let Ok(Value::Object(envelope)) = serde_json::from_slice::<Value>(error) else {
         return DirectInvokeErrorFields {
             code: String::new(),
-            message: raw,
+            message: raw.clone(),
             category: String::new(),
             severity: String::new(),
             retryable: false,
             retry_after_ms: None,
             attributes: None,
+            details: Some(raw),
         };
     };
     let field = |name: &str| {
@@ -5622,21 +5622,11 @@ pub fn invoke_error_fields(error: &[u8]) -> DirectInvokeErrorFields {
     let message = match envelope.get("message").and_then(Value::as_str) {
         Some(message) => message.to_string(),
         // An object without a message string still surfaces everything.
-        None => raw,
+        None => raw.clone(),
     };
-    // The `__rt_suspended__` and `__rt_on_signal__` codes are RESERVED: they
-    // are how a composed workflow-agent's lifecycle suspend and signal wait
-    // cross the capability boundary, and the composing parent re-raises its
-    // own suspend (or signal park) on seeing one. Every user-authored terminal
-    // error (Error steps, bubbled agent errors) flows through here — remap a
-    // spoofed sentinel so a workflow error can never silently suspend its
-    // parent instead of failing it.
-    let mut code = field("code");
-    if code == "__rt_suspended__" {
-        code = "__rt_suspended__:user".to_string();
-    } else if code == "__rt_on_signal__" {
-        code = "__rt_on_signal__:user".to_string();
-    }
+    // A suspension crosses the agent boundary as a typed `suspended` outcome,
+    // so no error code is reserved: every code passes through as written.
+    let code = field("code");
     DirectInvokeErrorFields {
         code,
         message,
@@ -5654,6 +5644,7 @@ pub fn invoke_error_fields(error: &[u8]) -> DirectInvokeErrorFields {
             .or_else(|| envelope.get("context"))
             .filter(|value| !value.is_null())
             .map(|value| value.to_string()),
+        details: Some(raw),
     }
 }
 
@@ -12591,6 +12582,7 @@ mod tests {
                 true,
                 Some(u64::MAX),
                 Some(r#"{"attempt":2,"nested":{"provider":"slack"}}"#),
+                None,
             )
             .unwrap();
         for _ in 0..3 {
@@ -12631,6 +12623,7 @@ mod tests {
                 fields.retryable,
                 fields.retry_after_ms,
                 fields.attributes.as_deref(),
+                None,
             )
             .unwrap();
         assert!(DirectJsonManifest::workflow_error_rate_limited(&reimported));
@@ -13774,11 +13767,75 @@ mod tests {
         assert_eq!(end["outputs"]["outputs"]["iterations"], json!(2));
     }
 
+    /// A workflow-agent child's `details` (its full error envelope) become
+    /// the step error's `childError`, the shape an embedded child's failure
+    /// has, and survive the per-attempt checkpoint the retry loop replays.
+    #[test]
+    fn agent_error_carries_a_workflow_agent_childs_details_as_child_error() {
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).expect("manifest");
+        let child = json!({"stepId": "fail", "stepName": "Fail", "code": "CHILD_BROKE",
+            "message": "the child failed", "category": "permanent", "severity": "error"});
+        let error = manifest
+            .agent_error(
+                0,
+                "CHILD_BROKE",
+                "the child failed",
+                "permanent",
+                "error",
+                false,
+                None,
+                None,
+                Some(&child.to_string()),
+            )
+            .expect("Agent error");
+        let value: Value = serde_json::from_slice(&error).expect("structured error");
+        assert_eq!(value["childError"], child);
+        assert_eq!(value["stepId"], "agent");
+        assert_eq!(value["code"], "CHILD_BROKE");
+
+        // The retry payload is what a per-attempt checkpoint stores; restoring
+        // it keeps the chain.
+        let payload = DirectJsonManifest::agent_retry_error_info(
+            "CHILD_BROKE",
+            "the child failed",
+            "permanent",
+            "error",
+            false,
+            None,
+            None,
+            Some(&child.to_string()),
+        )
+        .expect("retry payload")
+        .payload;
+        let replayed = manifest
+            .agent_error_from_info(0, &payload)
+            .expect("replayed error");
+        let replayed: Value = serde_json::from_slice(&replayed).expect("replayed json");
+        assert_eq!(replayed["childError"], child);
+
+        // Details that are not JSON still reach the parent, as a string.
+        let error = manifest
+            .agent_error(
+                0,
+                "",
+                "plain",
+                "",
+                "",
+                false,
+                None,
+                None,
+                Some("plain child failure"),
+            )
+            .expect("Agent error");
+        let value: Value = serde_json::from_slice(&error).expect("structured error");
+        assert_eq!(value["childError"], "plain child failure");
+    }
+
     #[test]
     fn agent_error_preserves_structured_fields_and_invocation_context() {
         let manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).expect("manifest");
 
-        let raw = DirectJsonManifest::agent_error_info(
+        let raw = DirectJsonManifest::agent_retry_error_info(
             "CAPABILITY_ERROR",
             "bad request",
             "permanent",
@@ -13786,9 +13843,12 @@ mod tests {
             false,
             Some(1500),
             Some(r#"{"field":"value"}"#),
+            None,
         )
-        .expect("Agent error-info");
+        .expect("Agent error-info")
+        .payload;
         let raw: Value = serde_json::from_slice(&raw).expect("raw json");
+        assert!(raw.get("childError").is_none(), "no details, no childError");
         assert_eq!(raw["code"], json!("CAPABILITY_ERROR"));
         assert_eq!(raw["message"], json!("bad request"));
         assert_eq!(raw["category"], json!("permanent"));
@@ -13807,6 +13867,7 @@ mod tests {
                 false,
                 Some(1500),
                 Some(r#"{"field":"value"}"#),
+                None,
             )
             .expect("Agent error");
         let raw: Value = serde_json::from_slice(&error).expect("structured error");
@@ -13832,6 +13893,7 @@ mod tests {
             true,
             None,
             None,
+            None,
         )
         .expect("Agent retry error-info");
         let raw: Value = serde_json::from_slice(&retry.payload).expect("raw json");
@@ -13848,6 +13910,7 @@ mod tests {
             "error",
             true,
             Some(1500),
+            None,
             None,
         )
         .expect("Agent retry error-info");
@@ -14305,34 +14368,12 @@ mod invoke_error_and_delay_key_tests {
     use serde_json::json;
 
     #[test]
-    fn user_error_cannot_spoof_the_suspend_sentinel() {
-        // `__rt_suspended__` is the reserved code a composed workflow-agent's
-        // lifecycle suspend uses to cross the capability boundary; a
-        // user-authored error carrying it must be remapped, or an Error step
-        // could silently SUSPEND its composing parent instead of failing it.
-        let fields =
-            invoke_error_fields(br#"{"code":"__rt_suspended__","message":"spoof attempt"}"#);
-        assert_eq!(fields.code, "__rt_suspended__:user");
-        assert_eq!(fields.message, "spoof attempt");
-    }
-
-    #[test]
-    fn user_error_cannot_spoof_the_signal_wait_sentinel() {
-        // `__rt_on_signal__` is the reserved code a composed workflow-agent's
-        // signal wait uses to cross the capability boundary, carrying the
-        // route in `message`. A user-authored error carrying it must be
-        // remapped, or an Error step could park its composing parent on an
-        // arbitrary signal instead of failing it.
-        let fields = invoke_error_fields(
-            br#"{"code":"__rt_on_signal__","message":"approval","retryAfterMs":1}"#,
-        );
-        assert_eq!(fields.code, "__rt_on_signal__:user");
-        assert_eq!(fields.message, "approval");
-        // Only the exact reserved code is remapped.
-        assert_eq!(
-            invoke_error_fields(br#"{"code":"__rt_on_signal__x"}"#).code,
-            "__rt_on_signal__x"
-        );
+    fn former_sentinel_codes_are_ordinary_error_codes() {
+        // Suspension is a typed outcome now; no error code is reserved.
+        for code in ["__rt_suspended__", "__rt_on_signal__"] {
+            let error = format!(r#"{{"code":"{code}","message":"m"}}"#);
+            assert_eq!(invoke_error_fields(error.as_bytes()).code, code);
+        }
     }
 
     #[test]
@@ -14357,6 +14398,8 @@ mod invoke_error_and_delay_key_tests {
             fields.attributes.as_deref(),
             Some(r#"{"host":"api.example.com"}"#)
         );
+        // The host persists `details`, so it is the envelope byte for byte.
+        assert_eq!(fields.details, Some(envelope.to_string()));
     }
 
     #[test]

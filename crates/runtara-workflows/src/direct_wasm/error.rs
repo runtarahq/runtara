@@ -46,9 +46,10 @@ pub enum DirectCompileError {
     StaleTrustedDependency {
         /// The workflow-agent to republish.
         dependency: String,
-        /// Canonical id of the trusted built-in it pins.
+        /// Canonical id of the trusted or control built-in it pins.
         agent: String,
-        /// The stale `runtara:trusted-artifacts/*` pins it carries.
+        /// The stale `runtara:trusted-artifacts/*` or
+        /// `runtara:builtin-artifacts/*` pins it carries.
         pins: Vec<String>,
         /// The staged artifact the parent was composed from. The server
         /// re-reads it before recording the failure, so a republish during
@@ -90,7 +91,7 @@ impl fmt::Display for DirectCompileError {
                 dependency, agent, ..
             } => write!(
                 f,
-                "published workflow-agent `{dependency}` was built against a version of trusted \
+                "published workflow-agent `{dependency}` was built against a version of \
                  built-in `{agent}` that is not in the installed component bundle; republish it \
                  (POST /workflows/<id>/publish-agent), after which workflows that use it \
                  recompile on their next launch"

@@ -145,7 +145,7 @@ fn call_helper(body: &mut Function, indices: &DirectCoreFunctionIndices, helper:
     body.instruction(&Instruction::End);
     if matches!(
         indices.abi,
-        crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
+        crate::direct_wasm::component::WorkflowRole::PublishedAgent
     ) {
         body.instruction(&Instruction::LocalGet(CURSOR));
         body.instruction(&Instruction::I32Const(3));
@@ -168,7 +168,7 @@ fn call_helper(body: &mut Function, indices: &DirectCoreFunctionIndices, helper:
 fn handle_wait_event(body: &mut Function, indices: &DirectCoreFunctionIndices) {
     if matches!(
         indices.abi,
-        crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
+        crate::direct_wasm::component::WorkflowRole::PublishedAgent
     ) {
         body.instruction(&Instruction::I32Const(6));
         body.instruction(&Instruction::I32Eq);

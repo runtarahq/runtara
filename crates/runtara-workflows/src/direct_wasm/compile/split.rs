@@ -554,8 +554,6 @@ pub(super) fn emit_split_plan(
     // retry loop below checkpoints a failed whole-Split attempt before it
     // schedules that wake, so a restart replays the error decision rather than
     // the items that already ran.
-    let lifecycle_retry_park =
-        durable && indices.abi != crate::direct_wasm::component::WorkflowAbi::CliRunHttp;
     let fresh_failure_target = if retry_enabled {
         Some(DirectFailureTarget::SplitRetry { branch_depth: 0 })
     } else {
@@ -573,7 +571,7 @@ pub(super) fn emit_split_plan(
         body.instruction(&Instruction::Loop(BlockType::Empty));
         body.instruction(&Instruction::I32Const(0));
         body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_RETRY_ERROR_FLAG_LOCAL));
-        if lifecycle_retry_park {
+        if durable {
             // `route` is shared scratch and can have been clobbered by a nested
             // item plan. Rebuild the Split scope for every attempt before
             // deriving its result key.
@@ -613,16 +611,7 @@ pub(super) fn emit_split_plan(
             body.instruction(&Instruction::LocalSet(DIRECT_SPLIT_RETRY_ERROR_FLAG_LOCAL));
             body.instruction(&Instruction::Else);
         } else {
-            emit_split_retry_before_attempt(
-                body,
-                indices,
-                static_data,
-                durable,
-                route_ptr_local,
-                route_len_local,
-                max_retries,
-                retry_delay_ms,
-            );
+            emit_split_retry_before_attempt(body, indices, max_retries, retry_delay_ms);
         }
         body.instruction(&Instruction::Block(BlockType::Empty));
     }
@@ -1053,13 +1042,13 @@ pub(super) fn emit_split_plan(
         // loop (so a retryable failure re-iterates the loop), then close the
         // loop and the retry-outer block.
         body.instruction(&Instruction::End);
-        if lifecycle_retry_park {
+        if durable {
             // Close the per-attempt checkpoint lookup. Its HIT arm has already
             // restored the failed envelope; its MISS arm has just finished the
             // attempt body inside the inner block closed above.
             body.instruction(&Instruction::End);
         }
-        let retry_park = if lifecycle_retry_park {
+        let retry_park = if durable {
             Some(SplitRetryPark {
                 split_id,
                 route_ptr_local,

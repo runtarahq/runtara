@@ -1,27 +1,24 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Host-side surface for the `runtara:workflow-runtime/runtime` interface.
+//! Host-side surface for the `runtara:workflow/runtime` interface.
 //!
-//! A composed workflow whose `RuntimeBinding` is `HostImport` (see
-//! `runtara-workflows::direct_wasm`) lists `runtara:workflow-runtime/runtime`
-//! among its component-level imports instead of satisfying it internally with
-//! the composed guest runtime component (which loops back to core over
-//! `wasi:http`). This module provides the native replacement: a [`RuntimeHost`]
-//! trait mirroring the interface's guest-visible semantics, and
+//! Every composed workflow (see `runtara-workflows::direct_wasm`) lists
+//! `runtara:workflow/runtime` among its component-level imports; the
+//! host is its only implementation. This module provides it: a
+//! [`RuntimeHost`] trait carrying the interface's guest-visible semantics, and
 //! [`add_runtime_to_linker`] which binds every interface function to the trait
 //! via `func_wrap_async`.
 //!
 //! Layering: this crate stays persistence-agnostic. The trait is DEFINED here;
 //! the production implementation lives in `runtara-environment`, delegating to
-//! `runtara-core::instance_handlers` over `Arc<dyn Persistence>` (never the
-//! SDK's `EmbeddedBackend`, whose per-call `block_on` would nest runtimes).
+//! `runtara-core::instance_handlers` over `Arc<dyn Persistence>`.
 //!
 //! Three interface functions are handled locally in the glue and never reach
-//! the trait, mirroring the guest runtime component they replace:
+//! the trait:
 //! - `now-ms` — wall clock.
 //! - `blocking-sleep` — plain (non-durable) sleep for the requested duration.
 //! - `durable-sleep` — aliased to `durable-sleep-checkpoint` under
-//!   [`DURABLE_SLEEP_CHECKPOINT_ID`], exactly like the guest runtime does.
+//!   [`DURABLE_SLEEP_CHECKPOINT_ID`].
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -34,16 +31,15 @@ use crate::workflow::WorkflowState;
 
 /// Fully-qualified component import name of the runtime interface.
 ///
-/// Must match `runtara:workflow-runtime@0.4.0`'s `runtime` interface as
+/// Must match `runtara:workflow@1.0.0`'s `runtime` interface as
 /// emitted into the workflow world by `runtara-workflows::direct_wasm`
 /// (`emit_world_wit`) — the Spike-B integration test asserts a HostImport
 /// composition surfaces exactly this name.
-pub use runtara_workflow_wit::RUNTIME_INTERFACE_NAME;
+pub use runtara_wit::workflow::RUNTIME as RUNTIME_INTERFACE_NAME;
 
-/// Checkpoint id the guest runtime component uses for plain `durable-sleep`
-/// (see `runtara-workflow-runtime/src/lib.rs::durable_sleep`). The host glue
-/// aliases `durable-sleep` to `durable-sleep-checkpoint` under this key for
-/// byte-identical persistence behavior.
+/// Checkpoint id used for plain `durable-sleep`: the host glue aliases
+/// `durable-sleep` to `durable-sleep-checkpoint` under this key. The value is
+/// persisted in existing checkpoints, so it must not change.
 pub const DURABLE_SLEEP_CHECKPOINT_ID: &str = "__direct_workflow_runtime_durable_sleep";
 
 /// WIT mirror of the authoritative managed-input state.
@@ -121,14 +117,12 @@ pub struct RuntimeCheckpointResult {
 
 /// Native implementation surface for the runtime interface.
 ///
-/// Semantics contract: each method must be observably equivalent to the guest
-/// runtime component + HTTP SDK backend + core guest-protocol handler chain it
-/// replaces (see `runtara-workflow-runtime/src/lib.rs` for the guest side and
-/// `runtara-core::instance_handlers` for the server side). In particular:
+/// Semantics contract: each method follows the corresponding
+/// `runtara-core::instance_handlers` handler. In particular:
 ///
 /// - `is_cancelled`/`check_signals` acknowledge consumed lifecycle signals
-///   server-side (status transitions included) exactly like the SDK's
-///   `acknowledge_cancellation`/`acknowledge_pause`/`acknowledge_shutdown`.
+///   server-side (status transitions included) through core's signal
+///   acknowledgement.
 /// - `durable_sleep_checkpoint` mirrors core `handle_sleep`: persist the
 ///   checkpoint, then sleep the FULL duration in-process (no resume-remaining
 ///   math — parity with today's guest-visible behavior; the suspend/re-invoke
@@ -137,21 +131,75 @@ pub struct RuntimeCheckpointResult {
 ///   `result`'s err arm). Host misconfiguration and unconfirmed managed-input
 ///   abandonment trap: the guest must not recover past a failed mandatory close.
 ///
-/// Scoped child hosts capture terminal callbacks locally and report lifecycle
+/// A run finishes through its entry's return value, which the embedding
+/// persists once through [`RuntimeHost::terminal`]; the guest has no terminal
+/// call. Scoped child hosts report lifecycle
 /// receipts to a root-owned coordinator instead of applying root transitions.
 /// The embedding finalizes those effects after invocation teardown; it must
 /// supply explicit checkpoint authority and persistent attempt fencing.
+/// A run's terminal result, persisted once from the entry's return value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunTerminal {
+    /// Terminal success with the output payload.
+    Completed(Vec<u8>),
+    /// Terminal failure with the error payload the run records.
+    Failed(Vec<u8>),
+}
+
+impl RunTerminal {
+    /// The terminal of an invocation that completed or failed; `None` when
+    /// it parked, trapped, timed out or was cancelled, which the embedding
+    /// records its own way.
+    pub fn from_exit(exit: &crate::workflow::InvokeExit) -> Option<Self> {
+        match exit {
+            crate::workflow::InvokeExit::Completed(output) => Some(Self::Completed(output.clone())),
+            crate::workflow::InvokeExit::Failed(error) => Some(Self::Failed(error_payload(error))),
+            _ => None,
+        }
+    }
+}
+
+/// The bytes a run records for its error: `details` verbatim when the
+/// workflow supplied them (the stdlib's envelope, so a failure records what it
+/// always did); else the plain `message` when there is no `code`; else JSON
+/// built from the fields.
+pub fn error_payload(error: &crate::lifecycle::WorkflowErrorInfo) -> Vec<u8> {
+    if let Some(details) = &error.details {
+        return details.clone().into_bytes();
+    }
+    if error.code.is_empty() {
+        return error.message.clone().into_bytes();
+    }
+    let mut object = serde_json::Map::new();
+    object.insert("code".into(), error.code.clone().into());
+    object.insert("message".into(), error.message.clone().into());
+    object.insert("category".into(), error.category.clone().into());
+    object.insert("severity".into(), error.severity.clone().into());
+    object.insert("retryable".into(), error.retryable.into());
+    if let Some(retry_after_ms) = error.retry_after_ms {
+        object.insert("retryAfterMs".into(), retry_after_ms.into());
+    }
+    if let Some(attributes) = &error.attributes {
+        object.insert(
+            "attributes".into(),
+            serde_json::from_str(attributes).unwrap_or_else(|_| attributes.clone().into()),
+        );
+    }
+    serde_json::Value::Object(object).to_string().into_bytes()
+}
+
 #[async_trait::async_trait]
 pub trait RuntimeHost: Send + Sync {
-    /// Persisted input for this instance; `None` when the record has no input
-    /// (the glue substitutes the `{}` envelope, matching the guest runtime).
-    async fn load_input(&self) -> Result<Option<Vec<u8>>, String>;
     /// This run's instance id.
     fn instance_id(&self) -> Result<String, String>;
-    /// Report terminal success with the output payload.
-    async fn complete(&self, output: Vec<u8>) -> Result<(), String>;
-    /// Report terminal failure with the error payload.
-    async fn fail(&self, error: Vec<u8>) -> Result<(), String>;
+    /// Persist the run's terminal result. The embedding calls it once, after
+    /// the entry returned and cleanup finished; it is never bound for the
+    /// guest. A host that does not own the instance's terminal state (a
+    /// scoped child, most test doubles) keeps the default no-op.
+    async fn terminal(&self, terminal: RunTerminal) -> Result<(), String> {
+        let _ = terminal;
+        Ok(())
+    }
     /// Emit a custom event (`kind` becomes the event subtype).
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String>;
     /// Whether step-level debug instrumentation is enabled for this run.
@@ -311,48 +359,20 @@ fn require_host(
     })
 }
 
-/// Bind every `runtara:workflow-runtime/runtime` function to the store's
+/// Bind every `runtara:workflow/runtime` function to the store's
 /// [`RuntimeHost`].
 ///
 /// Registering these definitions is non-invasive for components that do not
 /// import the interface — wasmtime only consults linker definitions for
 /// imports a component actually declares (the same way the full WASI surface
-/// coexists with minimal components). Old composed artifacts therefore run
-/// unchanged through a linker that carries these bindings.
+/// coexists with minimal components).
 pub fn add_runtime_to_linker(linker: &mut Linker<WorkflowState>) -> anyhow::Result<()> {
-    add_runtime_version_to_linker(linker, runtara_workflow_wit::LEGACY_RUNTIME_INTERFACE_NAME)?;
-    add_runtime_version_to_linker(linker, RUNTIME_INTERFACE_NAME)
-}
-
-fn add_runtime_version_to_linker(
-    linker: &mut Linker<WorkflowState>,
-    interface: &str,
-) -> anyhow::Result<()> {
-    let mut inst = linker.instance(interface)?;
-    if interface == RUNTIME_INTERFACE_NAME {
-        inst.func_wrap_async(
-            "poll-signal",
-            |mut store: StoreContextMut<'_, WorkflowState>, (): ()| {
-                let host = require_host(&mut store);
-                Box::new(async move { Ok((host?.poll_signal().await,)) })
-            },
-        )?;
-    }
-
+    let mut inst = linker.instance(RUNTIME_INTERFACE_NAME)?;
     inst.func_wrap_async(
-        "load-input",
+        "poll-signal",
         |mut store: StoreContextMut<'_, WorkflowState>, (): ()| {
             let host = require_host(&mut store);
-            Box::new(async move {
-                let host = host?;
-                // Mirror the guest runtime: absent input loads as the empty
-                // JSON envelope, never as an error.
-                let result = host
-                    .load_input()
-                    .await
-                    .map(|input| input.unwrap_or_else(|| b"{}".to_vec()));
-                Ok((result,))
-            })
+            Box::new(async move { Ok((host?.poll_signal().await,)) })
         },
     )?;
 
@@ -361,22 +381,6 @@ fn add_runtime_version_to_linker(
         |mut store: StoreContextMut<'_, WorkflowState>, (): ()| {
             let host = require_host(&mut store);
             Box::new(async move { Ok((host?.instance_id(),)) })
-        },
-    )?;
-
-    inst.func_wrap_async(
-        "complete",
-        |mut store: StoreContextMut<'_, WorkflowState>, (output,): (Vec<u8>,)| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.complete(output).await,)) })
-        },
-    )?;
-
-    inst.func_wrap_async(
-        "fail",
-        |mut store: StoreContextMut<'_, WorkflowState>, (error,): (Vec<u8>,)| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.fail(error).await,)) })
         },
     )?;
 
@@ -477,8 +481,7 @@ fn add_runtime_version_to_linker(
         |mut store: StoreContextMut<'_, WorkflowState>, (ms,): (u64,)| {
             let host = require_host(&mut store);
             Box::new(async move {
-                // Alias to durable-sleep-checkpoint under the fixed key, as
-                // the guest runtime component does.
+                // Alias to durable-sleep-checkpoint under the fixed key.
                 let result = host?
                     .durable_sleep_checkpoint(
                         DURABLE_SLEEP_CHECKPOINT_ID.to_string(),
@@ -495,9 +498,8 @@ fn add_runtime_version_to_linker(
         "blocking-sleep",
         |_store: StoreContextMut<'_, WorkflowState>, (ms,): (u64,)| {
             Box::new(async move {
-                // The guest runtime blocks in std::thread::sleep; host-side an
-                // async sleep is observably identical to the guest (the call
-                // returns after `ms`) without pinning an executor thread.
+                // An async sleep returns after `ms`, like a blocking sleep,
+                // without pinning an executor thread.
                 tokio::time::sleep(Duration::from_millis(ms)).await;
                 Ok((Ok::<(), String>(()),))
             })
@@ -568,7 +570,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runtime_versions_link_with_distinct_signal_observation_contracts() {
+    fn the_runtime_links_with_its_signal_observation_contract() {
         let engine = crate::build_engine(&crate::EngineConfig {
             cache_dir: None,
             enable_epoch_interruption: false,
@@ -586,17 +588,8 @@ mod tests {
             (export "poll-signal" (func (result (result (option $exported-signal) (error string)))))
         "#;
         for (version, poll, expected) in [
-            (
-                runtara_workflow_wit::LEGACY_RUNTIME_INTERFACE_NAME,
-                "",
-                true,
-            ),
             (RUNTIME_INTERFACE_NAME, observation, true),
-            (
-                runtara_workflow_wit::LEGACY_RUNTIME_INTERFACE_NAME,
-                observation,
-                false,
-            ),
+            (RUNTIME_INTERFACE_NAME, "", true),
         ] {
             let component = wasmtime::component::Component::new(
                 &engine,

@@ -238,11 +238,11 @@ pub(super) fn emit_agent_plan(
         }
     }
 
-    // A suspending site calls the type-identical `suspendable` interface of the
-    // same agent instance; every other site calls its standard interface.
+    // Every site calls the agent's standard interface; a suspending site
+    // additionally handles the `suspended` outcome it may return.
     let suspends = static_data.agent_suspends(agent_id);
     // An operation-scoped site (suspending or control) runs its invoke inside
-    // `runtara:workflow-operation/scope`, entered with the site's checkpoint
+    // `runtara:workflow/operation`, entered with the site's checkpoint
     // key — durable or not — and left on every path.
     let scoped = suspends || static_data.agent_operation_scoped(agent_id);
     debug_assert!(
@@ -253,15 +253,9 @@ pub(super) fn emit_agent_plan(
         !suspends || (durable_checkpoint && memo_slot_ptr_local.is_none()),
         "agent_suspend::check_sites admits only durable sequential suspending sites"
     );
-    let invoke = if suspends {
-        indices.agent_import(
-            agent_component_id,
-            super::core_imports::AgentInterface::Suspendable,
-        )
-    } else {
-        indices.agent_invoke(agent_component_id)
-    }
-    .expect("direct Agent run plans have matching component imports");
+    let invoke = indices
+        .agent_invoke(agent_component_id)
+        .expect("direct Agent run plans have matching component imports");
     let capability_id = static_data
         .agent_capability_id(agent_id)
         .expect("direct Agent run plans have static capability ids");
@@ -343,6 +337,12 @@ pub(super) fn emit_agent_plan(
                     align: 2,
                     memory_index: 0,
                 }));
+                // The launch pass stored the agent's raw outcome; normalize it like
+                // a sequential invoke (parallel windows never hold a workflow-agent). The
+                // private scoped interface still answers a bare list.
+                if !invoke.is_scoped() {
+                    super::agent_invoke::emit_normalize_outcome(body, indices, static_data, false);
+                }
                 body.instruction(&Instruction::Else);
             }
             if scoped {
@@ -475,6 +475,12 @@ pub(super) fn emit_agent_plan(
                     align: 2,
                     memory_index: 0,
                 }));
+                // The launch pass stored the agent's raw outcome; normalize it like
+                // a sequential invoke (parallel windows never hold a workflow-agent). The
+                // private scoped interface still answers a bare list.
+                if !invoke.is_scoped() {
+                    super::agent_invoke::emit_normalize_outcome(body, indices, static_data, false);
+                }
                 body.instruction(&Instruction::Else);
             }
             if scoped {
@@ -550,9 +556,7 @@ pub(super) fn emit_agent_plan(
         emit_agent_retry_condition(body, max_retries, retry_delay_ms, rate_limit_budget_ms);
         body.instruction(&Instruction::If(BlockType::Empty));
         emit_agent_advance_retry_attempt(body);
-        if durable_checkpoint
-            && indices.abi != crate::direct_wasm::component::WorkflowAbi::CliRunHttp
-        {
+        if durable_checkpoint {
             // No invocation may hold its Store across backoff — a published agent
             // would otherwise retain the parent's runner slot for the whole delay.
             // Recompute the delay for checkpoint-replayed failures as well: if a
@@ -586,43 +590,6 @@ pub(super) fn emit_agent_plan(
                 route_len_local,
                 timeout_ms.map(|_| super::agent_deadline::DEADLINE),
             );
-        } else if durable_checkpoint {
-            // A replayed (HIT) attempt already slept its backoff and recorded its
-            // audit row on the original run; skip both. Core `handle_sleep`
-            // re-sleeps the full duration on replay, so this gate — not the sleep
-            // key — is what prevents re-sleeping every completed attempt.
-            body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_HIT_FLAG_LOCAL));
-            body.instruction(&Instruction::I32Eqz);
-            body.instruction(&Instruction::If(BlockType::Empty));
-            emit_agent_retry_delay(
-                body,
-                indices,
-                max_retries,
-                retry_delay_ms,
-                rate_limit_budget_ms,
-            );
-            if indices.monotonic_now.is_some() {
-                super::agent_deadline::clamp_retry(body, indices, timeout_ms.is_some());
-            }
-            emit_agent_retry_sleep(
-                body,
-                indices,
-                static_data,
-                durable_checkpoint,
-                route_ptr_local,
-                route_len_local,
-                DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
-                DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
-            );
-            emit_agent_record_retry_attempt(
-                body,
-                indices,
-                route_ptr_local,
-                route_len_local,
-                DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
-                DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
-            );
-            body.instruction(&Instruction::End); // !HIT gate
         } else {
             emit_agent_retry_delay(
                 body,
@@ -634,16 +601,7 @@ pub(super) fn emit_agent_plan(
             if indices.monotonic_now.is_some() {
                 super::agent_deadline::clamp_retry(body, indices, timeout_ms.is_some());
             }
-            emit_agent_retry_sleep(
-                body,
-                indices,
-                static_data,
-                durable_checkpoint,
-                route_ptr_local,
-                route_len_local,
-                DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
-                DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
-            );
+            emit_agent_retry_sleep(body, indices);
         }
         body.instruction(&Instruction::Br(2));
         body.instruction(&Instruction::End);
@@ -714,6 +672,12 @@ pub(super) fn emit_agent_plan(
                 align: 2,
                 memory_index: 0,
             }));
+            // The launch pass stored the agent's raw outcome; normalize it like
+            // a sequential invoke (parallel windows never hold a workflow-agent). The
+            // private scoped interface still answers a bare list.
+            if !invoke.is_scoped() {
+                super::agent_invoke::emit_normalize_outcome(body, indices, static_data, false);
+            }
             body.instruction(&Instruction::Else);
             emit_agent_invoke(
                 body,

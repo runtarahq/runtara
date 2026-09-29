@@ -65,7 +65,7 @@ async fn invoke(outcome: Option<InvokeExit>) -> Arc<TaskResult> {
                             runtime: None,
                         },
                         CapabilityInvocation {
-                            interface: "runtara:agent-utils/capabilities@0.4.0",
+                            interface: "runtara:agent-utils/capabilities@1.0.0",
                             capability: "test",
                             input: b"input".to_vec(),
                         },
@@ -106,6 +106,7 @@ async fn isolated_adapter_preserves_every_error_field_and_raw_success_bytes() {
         retryable: true,
         retry_after_ms: Some(u64::MAX),
         attributes: Some("{\"detail\":\"unicode 🦀\"}".into()),
+        details: Some("{\"code\":\"E_TEST\",\"stepId\":\"🦀\"}".into()),
     };
     let result = invoke(Some(InvokeExit::Failed(error.clone()))).await;
     let InvokeExit::Failed(actual) = result.outcome() else {
@@ -215,7 +216,7 @@ async fn scoped_adapter_preserves_context_bits_payload_and_repeated_call_identit
         .get_export_index(
             &mut store,
             None,
-            "runtara:agent-utils/scoped-capabilities-v3@0.4.0",
+            "runtara:agent-utils/scoped-capabilities-v3@1.0.0",
         )
         .unwrap();
     let index = instance
@@ -283,7 +284,7 @@ async fn scoped_adapter_preserves_context_bits_payload_and_repeated_call_identit
             .get_export_index(
                 &mut store,
                 None,
-                "runtara:agent-utils/scoped-capabilities-v3@0.4.0",
+                "runtara:agent-utils/scoped-capabilities-v3@1.0.0",
             )
             .unwrap();
         let index = instance

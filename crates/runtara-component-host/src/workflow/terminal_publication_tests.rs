@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime_host::{RuntimeCheckpointResult, RuntimeHost};
+use crate::runtime_host::{RunTerminal, RuntimeCheckpointResult, RuntimeHost};
 use std::sync::Mutex;
 
 #[derive(Default)]
@@ -13,13 +13,10 @@ struct Publication {
 }
 #[async_trait]
 impl RuntimeHost for Publication {
-    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
-        panic!("unexpected load_input call")
-    }
     fn instance_id(&self) -> Result<String, String> {
         panic!("unexpected instance_id call")
     }
-    async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
+    async fn terminal(&self, terminal: RunTerminal) -> Result<(), String> {
         let _dropped = Dropped(self.dropped.clone());
         self.entered.notify_one();
         if self.pending {
@@ -28,14 +25,14 @@ impl RuntimeHost for Publication {
         if self.fails {
             return Err("publication failed".into());
         }
-        self.calls.lock().unwrap().push(output);
+        let (RunTerminal::Completed(bytes) | RunTerminal::Failed(bytes)) = terminal;
+        self.calls.lock().unwrap().push(bytes);
         Ok(())
     }
-    async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
-        self.complete(error).await
-    }
-    async fn custom_event(&self, _kind: String, _payload: Vec<u8>) -> Result<(), String> {
-        panic!("unexpected custom_event call")
+    async fn custom_event(&self, _kind: String, payload: Vec<u8>) -> Result<(), String> {
+        let _dropped = Dropped(self.dropped.clone());
+        self.calls.lock().unwrap().push(payload);
+        Ok(())
     }
     fn debug_mode_enabled(&self) -> Result<bool, String> {
         panic!("unexpected debug_mode_enabled call")
@@ -120,24 +117,12 @@ fn run_publishing_coordinated(
     failed: bool,
     coordinator: Option<Arc<dyn RootExecutionCoordinator>>,
 ) -> tokio::task::JoinHandle<InvokeRunResult> {
-    let terminal = r#"
-    (import "runtara:workflow-runtime/runtime@0.3.0" (instance $runtime
-      (export "complete" (func (param "output" (list u8)) (result (result (error string)))))
-      (export "fail" (func (param "error" (list u8)) (result (result (error string)))))))
-    (alias export $runtime "complete" (func $complete))
-    (alias export $runtime "fail" (func $fail))
-    "#;
-    let mut wat = parent_wat(exit)
-        .replacen("(component", &format!("(component {terminal}"), 1)
-        .replace("  (core module $code", r#"
-          (core func $complete (canon lower (func $complete) (memory $mem "memory") (realloc (func $mem "realloc"))))
-          (core func $fail (canon lower (func $fail) (memory $mem "memory") (realloc (func $mem "realloc"))))
-          (core module $code
-          (import "host" "complete" (func $complete (param i32 i32 i32)))
-          (import "host" "fail" (func $fail (param i32 i32 i32)))
-        "#)
-        .replace("  (core instance $host", r#"  (core instance $host (export "complete" (func $complete)) (export "fail" (func $fail))"#);
+    // The root returns its result; nothing publishes until the supervisor
+    // does, from that exit.
+    let mut wat = parent_wat(exit);
     if failed {
+        // err(error-info { message: "42" }), everything else empty, so the
+        // recorded payload is the plain message.
         wat = wat.replace(
             r#"    (i32.store (i32.const 2048) (i32.const 0))
     (i32.store (i32.const 2056) (i32.const 0))
@@ -145,9 +130,9 @@ fn run_publishing_coordinated(
     (i32.store (i32.const 2064) (i32.const 2))"#,
             r#"
     (i32.store (i32.const 2048) (i32.const 1))
-    (memory.fill (i32.const 2056) (i32.const 0) (i32.const 72))
-    (i32.store (i32.const 2056) (i32.const 3500))
-    (i32.store (i32.const 2060) (i32.const 2))"#,
+    (memory.fill (i32.const 2056) (i32.const 0) (i32.const 80))
+    (i32.store (i32.const 2064) (i32.const 3500))
+    (i32.store (i32.const 2068) (i32.const 2))"#,
         );
     }
     let component = Component::new(fx.executor.engine(), wat).unwrap();
@@ -161,15 +146,17 @@ fn run_publishing_coordinated(
             .await
     })
 }
-const COMPLETE: &str =
-    "(call $complete (i32.const 3500) (i32.const 2) (i32.const 3000)) i32.const 42 return";
+/// Leave the root's body early; its `invoke` then returns `completed("42")`.
+const COMPLETE: &str = "i32.const 42 return";
 
+/// A run's terminal result has no guest call left, but every remaining
+/// runtime call still refuses to start once the cleanup alarm expired.
 #[tokio::test]
-async fn expired_cleanup_alarm_rejects_new_runtime_publication_in_both_versions() {
-    // Use the ordinary executor, without the legacy child registry or its
-    // deferred-publication wrapper: the runtime import itself must reject this.
-    for version in ["0.3.0", "0.4.0"] {
-        for callback in ["complete", "fail"] {
+async fn expired_cleanup_alarm_rejects_new_runtime_calls() {
+    // Use the ordinary executor, without a child registry: the runtime
+    // import itself must reject this.
+    for version in [runtara_wit::VERSION] {
+        {
             for expired in [false, true] {
                 let engine = crate::build_engine(&crate::EngineConfig {
                     cache_dir: None,
@@ -191,33 +178,29 @@ async fn expired_cleanup_alarm_rejects_new_runtime_publication_in_both_versions(
                 let wat = format!(
                     r#"(component
                   (import "expire" (func $expire))
-                  (import "runtara:workflow-runtime/runtime@{version}" (instance $runtime
-                    (export "{callback}" (func (param "{}" (list u8)) (result (result (error string)))))))
+                  (import "runtara:workflow/runtime@{version}" (instance $runtime
+                    (export "custom-event" (func (param "kind" string) (param "payload" (list u8)) (result (result (error string)))))))
                   (core module $mem
                     (memory (export "memory") 1)
                     (data (i32.const 128) "42")
+                    ;; The entry's result area: `Ok(completed("42"))`.
+                    (data (i32.const 2060) "\80\00\00\00\02\00\00\00")
                     (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 4096))
                   (core instance $mem (instantiate $mem))
                   (core func $expire (canon lower (func $expire)))
-                  (core func $publish (canon lower (func $runtime "{callback}")
+                  (core func $publish (canon lower (func $runtime "custom-event")
                     (memory $mem "memory") (realloc (func $mem "realloc"))))
                   (core module $code
                     (import "h" "expire" (func $expire))
-                    (import "h" "publish" (func $publish (param i32 i32 i32)))
-                    (func (export "run") (result i32)
+                    (import "h" "publish" (func $publish (param i32 i32 i32 i32 i32)))
+                    (func (export "invoke") (param i32 i32 i32 i32) (result i32)
                       call $expire
-                      (call $publish (i32.const 128) (i32.const 2) (i32.const 512))
-                      i32.const 0))
+                      (call $publish (i32.const 128) (i32.const 1) (i32.const 128) (i32.const 2) (i32.const 512))
+                      i32.const 2048))
                   (core instance $code (instantiate $code (with "h" (instance
                     (export "expire" (func $expire)) (export "publish" (func $publish))))))
-                  (func $run (result (result)) (canon lift (core func $code "run")))
-                  (instance $cli (export "run" (func $run)))
-                  (export "wasi:cli/run@0.2.3" (instance $cli)))"#,
-                    if callback == "complete" {
-                        "output"
-                    } else {
-                        "error"
-                    }
+                  {entry})"#,
+                    entry = crate::workflow::test_support::entry_export_split("code", "mem"),
                 );
                 let prepared = executor
                     .prepare_precompiled(Component::new(&engine, wat).unwrap())
@@ -226,10 +209,12 @@ async fn expired_cleanup_alarm_rejects_new_runtime_publication_in_both_versions(
                 let publication = Arc::new(Publication::default());
                 let mut config = spec();
                 config.runtime = Some(publication.clone());
-                let result = bounded(executor.execute(prepared.command().unwrap(), config)).await;
+                let result =
+                    bounded(executor.execute_prepared_invoke(&prepared, config, b"{}".to_vec()))
+                        .await;
                 if expired {
                     assert!(
-                        matches!(result.exit, WorkflowExit::CleanupAborted),
+                        matches!(result.exit, InvokeExit::CleanupAborted),
                         "{result:?}"
                     );
                     assert!(publication.calls.lock().unwrap().is_empty());
@@ -237,8 +222,12 @@ async fn expired_cleanup_alarm_rejects_new_runtime_publication_in_both_versions(
                         !publication.dropped.load(Ordering::Acquire),
                         "host body never entered"
                     );
+                    let _ = version;
                 } else {
-                    assert!(matches!(result.exit, WorkflowExit::Completed), "{result:?}");
+                    assert!(
+                        matches!(&result.exit, InvokeExit::Completed(bytes) if bytes == b"42"),
+                        "{result:?}"
+                    );
                     assert_eq!(*publication.calls.lock().unwrap(), vec![b"42".to_vec()]);
                 }
             }
@@ -343,7 +332,7 @@ async fn root_coordinator_closes_after_cleanup_and_cannot_publish_on_failure() {
 }
 
 #[tokio::test]
-async fn root_coordinator_native_stop_precedes_terminal_validation_after_cleanup() {
+async fn root_coordinator_native_stop_precedes_terminal_publication_after_cleanup() {
     for timeout in [false, true] {
         let fx = Fixture::new(true, false);
         let publication = Arc::new(Publication::default());
@@ -354,11 +343,9 @@ async fn root_coordinator_native_stop_precedes_terminal_validation_after_cleanup
         if timeout {
             config.timeout = Duration::from_millis(100);
         }
-        let mismatched =
-            "(call $complete (i32.const 3500) (i32.const 1) (i32.const 3000)) i32.const 42 return";
         let running = run_publishing_coordinated(
             &fx,
-            mismatched,
+            COMPLETE,
             config,
             publication.clone(),
             false,
@@ -430,7 +417,7 @@ async fn root_coordinator_pending_io_is_bounded_by_timeout_cancel_and_abandonmen
 }
 
 #[tokio::test]
-async fn terminal_callback_waits_for_descendant_cleanup_and_is_discarded_on_failure() {
+async fn terminal_result_waits_for_descendant_cleanup_and_is_discarded_on_failure() {
     for fail_cleanup in [false, true] {
         let fx = Fixture::new(true, fail_cleanup);
         let publication = Arc::new(Publication::default());
@@ -454,18 +441,8 @@ async fn terminal_callback_waits_for_descendant_cleanup_and_is_discarded_on_fail
 }
 
 #[tokio::test]
-async fn terminal_callback_is_discarded_on_root_trap_conflict_and_late_cancel() {
-    for (exit, cancel) in [
-        (
-            "(call $complete (i32.const 3500) (i32.const 2) (i32.const 3000)) unreachable",
-            false,
-        ),
-        (
-            "(call $complete (i32.const 3500) (i32.const 2) (i32.const 3000)) (call $fail (i32.const 3500) (i32.const 2) (i32.const 3000)) i32.const 42 return",
-            false,
-        ),
-        (COMPLETE, true),
-    ] {
+async fn terminal_result_is_discarded_on_root_trap_and_late_cancel() {
+    for (exit, cancel) in [("unreachable", false), (COMPLETE, true)] {
         let fx = Fixture::new(true, false);
         let publication = Arc::new(Publication::default());
         let token = Arc::new(AtomicBool::new(false));
@@ -530,18 +507,16 @@ async fn publication_failure_timeout_and_abandonment_cannot_escape_supervision()
     }
 }
 
+/// The returned result is published exactly once: a failure as its payload,
+/// a success as its output.
 #[tokio::test]
-async fn terminal_failure_payload_is_preserved_and_identical_callbacks_publish_once() {
+async fn terminal_result_is_published_once_from_the_exit() {
     for failure in [false, true] {
         let fx = Fixture::new(false, false);
         let publication = Arc::new(Publication::default());
-        let callback = if failure { "fail" } else { "complete" };
-        let exit = format!(
-            "(call ${callback} (i32.const 3500) (i32.const 2) (i32.const 3000)) (call ${callback} (i32.const 3500) (i32.const 2) (i32.const 3000)) i32.const 42 return"
-        );
         let result = bounded(run_publishing_as(
             &fx,
-            &exit,
+            COMPLETE,
             spec(),
             publication.clone(),
             failure,
@@ -550,7 +525,7 @@ async fn terminal_failure_payload_is_preserved_and_identical_callbacks_publish_o
         .unwrap();
         if failure {
             assert!(
-                matches!(result.exit, InvokeExit::Failed(ref error) if error.code == "42"),
+                matches!(result.exit, InvokeExit::Failed(ref error) if error.message == "42"),
                 "{result:?}"
             );
         } else {
@@ -581,20 +556,4 @@ async fn terminal_publication_does_not_restart_timeout_after_cleanup() {
     assert!(matches!(result.exit, InvokeExit::Timeout), "{result:?}");
     assert!(publication.calls.lock().unwrap().is_empty());
     assert!(!publication.dropped.load(Ordering::Acquire));
-}
-
-#[tokio::test]
-async fn terminal_output_mismatch_cannot_publish_a_stale_success() {
-    let fx = Fixture::new(false, false);
-    let publication = Arc::new(Publication::default());
-    let result = bounded(run_publishing(
-        &fx,
-        "(call $complete (i32.const 3500) (i32.const 1) (i32.const 3000)) i32.const 42 return",
-        spec(),
-        publication.clone(),
-    ))
-    .await
-    .unwrap();
-    assert!(matches!(result.exit, InvokeExit::Trapped { .. }));
-    assert!(publication.calls.lock().unwrap().is_empty());
 }

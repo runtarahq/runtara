@@ -1,6 +1,6 @@
 //! A compiled `WaitForInstances` step parks a real run runner-free and
 //! resumes it: DSL -> composed WASM -> EmbeddedWasmRunner ->
-//! `runtara:workflow-wait` -> durable instance waits on PostgreSQL.
+//! `runtara:workflow/waits` -> durable instance waits on PostgreSQL.
 //!
 //! The instance wait service is a minimal stand-in for the server's
 //! `InstanceWaits` over the store's own waits (register, then read), so the
@@ -39,7 +39,7 @@ fn components() -> PathBuf {
         .expect("scoped-workflow-integration-tests requires RUNTARA_AGENT_COMPONENTS_DIR")
 }
 
-/// The store's waits behind `runtara:workflow-wait`: a wait is keyed by the
+/// The store's waits behind `runtara:workflow/waits`: a wait is keyed by the
 /// host-derived wait id of the waiting run, as the native service keys it.
 struct StoreWaits {
     persistence: Arc<PostgresPersistence>,
@@ -334,7 +334,6 @@ impl Harness {
             instance_id: id.to_owned(),
             tenant_id: self.tenant.clone(),
             wasm_path: wasm.to_owned(),
-            requires_lifecycle_invoke: true,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,

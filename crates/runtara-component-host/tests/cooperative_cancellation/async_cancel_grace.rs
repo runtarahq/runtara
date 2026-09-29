@@ -112,7 +112,7 @@ async fn run(cleanup: Cleanup) -> anyhow::Result<()> {
     let mut linker = if matches!(cleanup, Cleanup::CpuLoopWithTimerTrap) {
         let mut linker = Linker::<HostState>::new(&engine);
         linker
-            .instance("runtara:host-io/timers@0.1.0")?
+            .instance("runtara:host/timers@1.0.0")?
             .func_wrap_concurrent("sleep", |_, (ms,): (u64,)| {
                 Box::pin(async move {
                     tokio::time::sleep(Duration::from_millis(ms)).await;

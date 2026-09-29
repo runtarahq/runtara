@@ -68,9 +68,9 @@ impl DirectWorkflowManifest {
     }
 
     /// Agent ids the emitted code treats as workflow-agents anywhere in the
-    /// root graph, its nested graphs and its embedded children. Those invokes
-    /// re-raise the reserved park and suspend codes, so composition requires
-    /// each of these agents to resolve as a staged workflow-agent.
+    /// root graph, its nested graphs and its embedded children. Their invokes
+    /// forward a `suspended` outcome, so composition requires each of these
+    /// agents to resolve as a staged workflow-agent.
     pub fn workflow_agent_ids(&self) -> std::collections::BTreeSet<String> {
         fn collect(graph: &DirectGraphManifest, ids: &mut std::collections::BTreeSet<String>) {
             for agent in &graph.agents {
@@ -125,7 +125,7 @@ impl DirectWorkflowManifest {
 
     /// Whether an operation-scoped (suspending or control) call site exists
     /// anywhere in the root graph, its nested graphs or its embedded children.
-    /// Only then does the workflow import `runtara:workflow-operation/scope`,
+    /// Only then does the workflow import `runtara:workflow/operation`,
     /// so every other artifact keeps its exact bytes.
     pub fn has_operation_scoped_sites(&self) -> bool {
         fn any(graph: &DirectGraphManifest) -> bool {
@@ -140,7 +140,7 @@ impl DirectWorkflowManifest {
 
     /// Whether a WaitForInstances step sits anywhere in the root graph, its
     /// nested graphs or its embedded children. Only then does the workflow
-    /// import `runtara:workflow-wait/instances`.
+    /// import `runtara:workflow/waits`.
     pub fn has_wait_for_instances(&self) -> bool {
         fn any(graph: &DirectGraphManifest) -> bool {
             graph.steps.iter().any(|step| {
@@ -152,8 +152,8 @@ impl DirectWorkflowManifest {
     }
 
     /// Agent ids with a suspending call site anywhere in the root graph, its
-    /// nested graphs or its embedded children. Each is imported through both
-    /// `capabilities` and `suspendable`.
+    /// nested graphs or its embedded children. Each is composed with the host
+    /// `runtara:agent/continuation` import.
     pub fn suspending_agent_ids(&self) -> std::collections::BTreeSet<String> {
         fn collect(graph: &DirectGraphManifest, ids: &mut std::collections::BTreeSet<String>) {
             for agent in &graph.agents {
@@ -530,7 +530,7 @@ pub struct DirectAgentManifest {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_workflow_agent: bool,
     /// Whether the catalog declares the capability `suspends`: the site calls
-    /// the agent's `suspendable` interface inside an operation scope. Skipped
+    /// the agent inside an operation scope. Skipped
     /// when false so existing manifests stay byte-identical.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub suspends: bool,

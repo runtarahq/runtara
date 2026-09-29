@@ -1,10 +1,7 @@
 //! Root execution owns supervision outside its Store and its caller's future.
 use super::*;
-use tokio::sync::Notify;
-#[path = "deferred_terminal.rs"]
-mod deferred_terminal;
 use crate::isolated_tasks::TeardownDisposition;
-use deferred_terminal::DeferredTerminal;
+use tokio::sync::Notify;
 use wasmtime::component::InstancePre;
 
 /// Root lifecycle disposition after guest and descendant teardown. This cannot
@@ -61,9 +58,9 @@ impl Drop for Abandonment {
 impl WorkflowExecutor {
     /// Run a root with child-execution imports enabled for its owned context.
     /// Return only after the root Store and every registered child are reaped.
-    /// Host RuntimeHost complete/fail callbacks are staged until then. They are
-    /// discarded on cleanup failure, cancellation, timeout or outcome mismatch;
-    /// final publication remains supervised under the original run budget.
+    /// The terminal result is published from the returned exit only then, and
+    /// never on cleanup failure, cancellation or timeout; publication remains
+    /// supervised under the original run budget.
     /// This cannot intercept lifecycle writes made through an internally composed
     /// legacy SDK runtime, which belongs on the legacy execution path.
     /// The context is single-run: it is closed even on failed start confirmation.
@@ -84,12 +81,12 @@ impl WorkflowExecutor {
             .await
     }
 
-    /// Coordinate root lifecycle after cleanup, before staged terminal publication.
+    /// Coordinate root lifecycle after cleanup, before terminal publication.
     /// Suspension preserves all guest-returned wakes; native coordination invents none.
     pub async fn execute_invoke_with_coordinator(
         self: &Arc<Self>,
         pre: &InstancePre<WorkflowState>,
-        mut spec: WorkflowRunSpec,
+        spec: WorkflowRunSpec,
         input: Vec<u8>,
         start_confirmation: Option<Arc<dyn WorkflowStartConfirmation>>,
         execution: Arc<ExecutionContext>,
@@ -105,13 +102,7 @@ impl WorkflowExecutor {
         let timeout = spec.timeout;
         let root_cancel = spec.cancel.clone();
         let abandoned = abandonment.requested.clone();
-        let terminal = spec
-            .runtime
-            .take()
-            .map(|host| Arc::new(DeferredTerminal::new(host)));
-        spec.runtime = terminal
-            .as_ref()
-            .map(|host| host.clone() as Arc<dyn crate::runtime_host::RuntimeHost>);
+        let terminal = spec.runtime.clone();
         let executor = self.clone();
         let pre = pre.clone();
         let wake = abandonment.wake.clone();
@@ -199,22 +190,6 @@ impl WorkflowExecutor {
                         .as_ref()
                         .is_some_and(|flag| flag.load(Ordering::Acquire))
             };
-            // A control receipt must not mask an inconsistent terminal result.
-            // Validate staged callbacks before allowing durable coordination.
-            if coordinator.is_some()
-                && !cancelled()
-                && overall_started.elapsed() < timeout
-                && matches!(
-                    &result.exit,
-                    InvokeExit::Completed(_) | InvokeExit::Failed(_)
-                )
-                && let Some(terminal) = terminal.as_ref()
-                && let Err(reason) = terminal.validate(&result.exit)
-            {
-                result.exit = InvokeExit::Trapped {
-                    reason: format!("root terminal validation failed: {reason}"),
-                };
-            }
             if cleanup_succeeded
                 && let Some(coordinator) = coordinator
                 && matches!(
@@ -265,7 +240,10 @@ impl WorkflowExecutor {
                     result.exit = InvokeExit::Cancelled;
                 } else if overall_started.elapsed() >= timeout {
                     result.exit = InvokeExit::Timeout;
-                } else if let Some(terminal) = terminal {
+                } else if let Some(terminal) = terminal
+                    && let Some(run_terminal) =
+                        crate::runtime_host::RunTerminal::from_exit(&result.exit)
+                {
                     // Publication remains supervised IO under the original run
                     // budget. Caller abandonment and root cancellation can drop
                     // an in-flight callback; persistent commit fencing is still
@@ -283,7 +261,7 @@ impl WorkflowExecutor {
                         biased;
                         _ = cancellation => Err(InvokeExit::Cancelled),
                         _ = tokio::time::sleep(remaining) => Err(InvokeExit::Timeout),
-                        result = terminal.publish(&result.exit) => result.map_err(|reason| InvokeExit::Trapped { reason: format!("root terminal publication failed: {reason}") }),
+                        result = terminal.terminal(run_terminal) => result.map_err(|reason| InvokeExit::Trapped { reason: format!("root terminal publication failed: {reason}") }),
                     };
                     if let Err(exit) = published {
                         result.exit = exit;

@@ -39,7 +39,7 @@ async fn run_retry_in_scope(
     composite_scope: Option<RetryScope>,
 ) -> anyhow::Result<()> {
     let host = Arc::new(Host {
-        inner: PersistingRuntimeHost::new(b"{}"),
+        inner: PersistingRuntimeHost::new(),
         requested: AtomicBool::new(false),
         requests: AtomicUsize::new(0),
         closed: Notify::new(),
@@ -167,8 +167,7 @@ async fn run_retry_in_scope(
                 agent_slug: None,
             },
             direct_e2e_components_dir(),
-            RuntimeBinding::HostImport,
-            WorkflowAbi::InvokeHostImports,
+            WorkflowRole::Root,
             false,
         )?
     } else {
@@ -298,7 +297,6 @@ async fn run_retry_in_scope(
                 host.requests.load(Ordering::SeqCst) == 1,
                 "cancelled retry/recovery issued another request"
             );
-            anyhow::ensure!(host.inner.completed.lock().unwrap().is_none());
         } else {
             anyhow::ensure!(
                 matches!(
@@ -358,7 +356,6 @@ async fn run_retry_in_scope(
                 );
             }
         }
-        anyhow::ensure!(host.inner.failed.lock().unwrap().is_none());
         anyhow::ensure!(
             host.inner.checkpoint_writes.lock().unwrap().is_empty(),
             "non-durable retry wrote a checkpoint"
@@ -673,7 +670,7 @@ async fn published_embed_pure_child_preserves_output_without_runtime_or_agent_io
             )?,
         }];
         let compiled = compile_nested_agents_with_children(graph, children, 2, dir.path())?;
-        let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+        let host = Arc::new(PersistingRuntimeHost::new());
         let pre = embedded_executor()
             .load_instance_pre(&compiled.wasm_path)
             .await?;

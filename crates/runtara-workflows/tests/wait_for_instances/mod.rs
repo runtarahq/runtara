@@ -183,17 +183,8 @@ struct Host {
 
 #[async_trait::async_trait]
 impl RuntimeHost for Host {
-    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
-        Ok(Some(br#"{"data":{},"variables":{}}"#.to_vec()))
-    }
     fn instance_id(&self) -> Result<String, String> {
         Ok(PARENT.into())
-    }
-    async fn complete(&self, _: Vec<u8>) -> Result<(), String> {
-        Ok(())
-    }
-    async fn fail(&self, _: Vec<u8>) -> Result<(), String> {
-        Ok(())
     }
     async fn custom_event(&self, _: String, _: Vec<u8>) -> Result<(), String> {
         Ok(())
@@ -767,4 +758,85 @@ fn without_a_service_the_step_fails_closed() {
     let error = failed(&result);
     assert_eq!(error.code, "INSTANCE_WAIT_UNAVAILABLE");
     assert_eq!(error.category, "transient");
+}
+
+/// A published workflow-agent waits on instances under its caller's instance:
+/// the caller parks on the wait the workflow-agent registered, and the
+/// relaunch settles it into the workflow-agent's output.
+#[test]
+fn a_workflow_agent_parks_its_caller_on_its_wait() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut child = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "waiting-flow".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(child_wait()).expect("child"),
+            child_workflows: vec![],
+            output_dir: temp.path().join("child"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some("waiting-flow".into()),
+        },
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
+        true,
+    )
+    .expect("a workflow-agent may wait on instances");
+    compose_direct_workflow(&mut child, components_dir().to_str().unwrap()).expect("composes");
+    let staging = temp.path().join("workflow-agents");
+    std::fs::create_dir_all(&staging).unwrap();
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
+        "waiting-flow",
+        "waiting-flow",
+        "fixture",
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    std::fs::copy(
+        &child.wasm_path,
+        staging.join("runtara_agent_waiting_flow.wasm"),
+    )
+    .unwrap();
+    std::fs::write(
+        staging.join("runtara_agent_waiting_flow.meta.json"),
+        serde_json::to_vec(&info).unwrap(),
+    )
+    .unwrap();
+
+    let graph = single(
+        json!({"id": "call", "stepType": "Agent", "agentId": "waiting-flow",
+            "capabilityId": "run", "maxRetries": 0, "timeout": 60_000}),
+        json!({"result": reference("steps.call.outputs")}),
+    );
+    let mut compiled =
+        runtara_workflows::direct_wasm::compile_direct_workflow(DirectCompilationInput {
+            workflow_id: WORKFLOW.into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(graph).expect("graph"),
+            child_workflows: vec![],
+            output_dir: temp.path().join("parent"),
+            track_events: false,
+            agent_catalog: Some(Arc::new(
+                runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![info]),
+            )),
+            agent_slug: None,
+        })
+        .expect("compiles");
+    runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+        &mut compiled,
+        components_dir().to_str().unwrap(),
+        &[staging],
+    )
+    .expect("composes");
+
+    let fixture = fixture(FakeWaits::default());
+    let (parks, result) = run_to_end(&fixture, &compiled);
+    let output = completed(&result);
+    assert_eq!(
+        output.to_string().matches("satisfied").count(),
+        1,
+        "{output}"
+    );
+    assert_one_park_per_wait(&fixture, &parks, 1);
 }

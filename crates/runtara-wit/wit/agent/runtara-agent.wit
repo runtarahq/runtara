@@ -1,0 +1,87 @@
+// The shared vocabulary of every runtara component, and the agent export shape.
+//
+// Every agent and every compiled workflow uses `types`. Each agent exports a
+// copy of `capabilities` under its own `runtara:agent-<id>` package (generated
+// by `runtara_wit::agent_package`); the interface here is the reference shape
+// the host binds against. Inputs and outputs are opaque bytes carrying JSON.
+//
+// Released WIT is never edited, only versioned (see `runtara-wit`'s crate docs).
+package runtara:agent@1.0.0;
+
+interface types {
+    record error-info {
+        code: string,
+        message: string,
+        category: string,            // "transient" | "permanent" | "timeout" | ...
+        severity: string,            // "warning" | "error" | "critical"
+        retryable: bool,
+        retry-after-ms: option<u64>,
+        attributes: option<string>,  // JSON object
+        /// The producer's full structured error as JSON, when it has more to
+        /// say than the fields above (a workflow's failing step, agent and
+        /// child-run chain). Hosts persist it verbatim as the run's error.
+        /// Agents leave it none.
+        details: option<string>,
+    }
+
+    /// A pending WaitForSignal: the deterministic signal id (the wait's
+    /// checkpoint id) and its persisted absolute timeout deadline.
+    record signal-wait {
+        checkpoint-id: string,
+        deadline-ms: option<u64>,
+    }
+
+    /// When the host should re-invoke. Wakes form a set with re-invoke-on-ANY
+    /// semantics; the caller's step deadline always applies in addition.
+    variant wake {
+        /// Re-invoke at (or after) this wall-clock ms since the Unix epoch.
+        at(u64),
+        /// Re-invoke when the signal arrives, or at its deadline. Workflows only.
+        on-signal(signal-wait),
+        /// Pause or drain: re-invoke on relaunch. Workflows only.
+        on-resume,
+        /// Re-invoke when the host-owned instance wait with this id settles.
+        instances(string),
+    }
+
+    /// A request to be re-invoked later. `wakes` is non-empty. `state` is a
+    /// suspending agent's continuation (at most 64 KiB); workflows keep their
+    /// state in checkpoints and return it empty.
+    record suspension {
+        wakes: list<wake>,
+        state: list<u8>,
+    }
+
+    /// The success arm of every `invoke`: agents' and workflows' alike.
+    variant outcome {
+        /// Terminal output (JSON bytes).
+        completed(list<u8>),
+        /// Park, and re-invoke when any wake fires.
+        suspended(suspension),
+    }
+}
+
+/// Continuation delivery for suspending agents: the state saved by the last
+/// suspension of the operation this call runs in, or none on its first
+/// invocation. The host derives the operation from its own execution state,
+/// never from guest arguments.
+interface continuation {
+    continuation: func() -> option<list<u8>>;
+}
+
+interface capabilities {
+    use types.{error-info, outcome};
+
+    // The connection (if any) is delivered inside `input` under `_connection`;
+    // there is no out-of-band connection argument. A connection is an opaque
+    // id: the host proxy resolves credentials by (id, tenant), so nothing
+    // secret crosses this boundary.
+    invoke: async func(
+        capability-id: string,
+        input: list<u8>,
+    ) -> result<outcome, error-info>;
+}
+
+world agent {
+    export capabilities;
+}

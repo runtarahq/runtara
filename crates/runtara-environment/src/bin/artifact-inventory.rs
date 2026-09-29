@@ -26,7 +26,7 @@
 //! ```
 use std::collections::BTreeMap;
 
-use runtara_workflow_wit::isolation_package::{PackageLimits, parse};
+use runtara_invocation_contract::{PackageLimits, parse};
 
 /// Generous enough to decode any artifact this fleet could have produced:
 /// misjudging a large legacy package as unreadable would understate the risk.

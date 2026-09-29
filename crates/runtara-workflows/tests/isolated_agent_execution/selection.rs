@@ -1,7 +1,7 @@
 //! Policy selection, real composition, byte parity and mixed execution.
 use super::*;
 use runtara_workflows::direct_wasm::{
-    AgentIsolationPolicy, AgentIsolationReason as Reason, AgentIsolationReview, WorkflowAbi,
+    AgentIsolationPolicy, AgentIsolationReason as Reason, AgentIsolationReview, WorkflowRole,
     compile_direct_workflow_composed_with_isolation_policy,
 };
 use serde_json::json;
@@ -99,7 +99,7 @@ fn policy_fallback_preserves_legacy_wasm_bytes_and_reports_each_gate() {
             .insert("../../not-a-dependency".into(), review("0".repeat(64)));
         let compiled = compile_direct_workflow_composed_with_isolation_policy(
             input(graph.clone(), &dir.path().join(format!("{reason:?}"))),
-            WorkflowAbi::InvokeHostImports,
+            WorkflowRole::Root,
             false,
             &components,
             &[],
@@ -145,7 +145,7 @@ fn policy_rechecks_selected_bytes_and_does_not_hide_invalid_artifacts() {
     let reviewed = selected(dir.path());
     let mut compiled = compile_direct_workflow_composed_with_isolation_policy(
         input(graph.clone(), &dir.path().join("selected")),
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
         dir.path(),
         &[],
@@ -185,7 +185,7 @@ fn policy_rechecks_selected_bytes_and_does_not_hide_invalid_artifacts() {
     fs::write(&sidecar, serde_json::to_vec(&metadata).unwrap()).unwrap();
     let error = compile_direct_workflow_composed_with_isolation_policy(
         input(graph, &dir.path().join("disabled")),
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
         dir.path(),
         &[],
@@ -205,7 +205,7 @@ async fn policy_executes_only_approved_packages_in_fresh_stores() {
     graph["steps"]["r1"]["capabilityId"] = "get-current-date".into();
     let compiled = compile_direct_workflow_composed_with_isolation_policy(
         input(graph, dir.path()),
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
         &components,
         &[],
@@ -237,7 +237,7 @@ fn stage_child(id: &str, dir: &Path, components: &Path) -> runtara_dsl::agent_me
     child_input.agent_slug = Some(id.into());
     let mut child = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
         child_input,
-        WorkflowAbi::AgentCapabilities,
+        WorkflowRole::PublishedAgent,
         false,
     )
     .unwrap();
@@ -294,7 +294,7 @@ fn policy_checkpoint_conflicts_include_legacy_packages_and_preserve_unrelated_is
             compilation_input.agent_catalog = Some(catalog.clone());
             let compiled = compile_direct_workflow_composed_with_isolation_policy(
                 compilation_input,
-                WorkflowAbi::InvokeHostImports,
+                WorkflowRole::Root,
                 false,
                 &components,
                 &[dir.path().to_owned()],
@@ -363,7 +363,7 @@ fn policy_rejects_grants_overlapping_inline_embed_checkpoints_without_agent_call
         );
         let compiled = compile_direct_workflow_composed_with_isolation_policy(
             compilation_input.clone(),
-            WorkflowAbi::InvokeHostImports,
+            WorkflowRole::Root,
             false,
             &components,
             &[dir.path().to_owned()],
@@ -397,42 +397,41 @@ fn policy_rejects_grants_overlapping_inline_embed_checkpoints_without_agent_call
 }
 
 #[test]
-fn policy_falls_back_for_unsupported_root_abis_without_changing_legacy_bytes() {
+fn policy_falls_back_for_an_unsupported_root_abi_without_changing_legacy_bytes() {
     let components = direct_e2e_components_dir();
     let dir = tempfile::tempdir().unwrap();
-    for abi in [WorkflowAbi::CliRunHttp, WorkflowAbi::AgentCapabilities] {
-        let graph = super::super::wasm_performance_baseline::random_chain(1, false);
-        let mut compilation_input = input(graph, &dir.path().join(format!("{abi:?}-legacy")));
-        compilation_input.agent_slug = Some("fallback-test".into());
-        let mut legacy = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
-            compilation_input.clone(),
-            abi,
-            false,
-        )
-        .unwrap();
-        compose_direct_workflow(&mut legacy, &components).unwrap();
-        compilation_input.output_dir = dir.path().join(format!("{abi:?}-policy"));
-        let fallback = compile_direct_workflow_composed_with_isolation_policy(
-            compilation_input,
-            abi,
-            false,
-            &components,
-            &[],
-            approved(&components),
-            limits(),
-        )
-        .unwrap();
-        assert_eq!(
-            decisions(&fallback)["utils"],
-            Reason::UnsupportedRootRuntime
-        );
-        assert!(fallback.scoped_agents.is_empty());
-        assert!(fallback.invocation_manifest.is_none());
-        assert_eq!(
-            fs::read(fallback.wasm_path).unwrap(),
-            fs::read(legacy.wasm_path).unwrap()
-        );
-    }
+    let abi = WorkflowRole::PublishedAgent;
+    let graph = super::super::wasm_performance_baseline::random_chain(1, false);
+    let mut compilation_input = input(graph, &dir.path().join(format!("{abi:?}-legacy")));
+    compilation_input.agent_slug = Some("fallback-test".into());
+    let mut legacy = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        compilation_input.clone(),
+        abi,
+        false,
+    )
+    .unwrap();
+    compose_direct_workflow(&mut legacy, &components).unwrap();
+    compilation_input.output_dir = dir.path().join(format!("{abi:?}-policy"));
+    let fallback = compile_direct_workflow_composed_with_isolation_policy(
+        compilation_input,
+        abi,
+        false,
+        &components,
+        &[],
+        approved(&components),
+        limits(),
+    )
+    .unwrap();
+    assert_eq!(
+        decisions(&fallback)["utils"],
+        Reason::UnsupportedRootRuntime
+    );
+    assert!(fallback.scoped_agents.is_empty());
+    assert!(fallback.invocation_manifest.is_none());
+    assert_eq!(
+        fs::read(fallback.wasm_path).unwrap(),
+        fs::read(legacy.wasm_path).unwrap()
+    );
 }
 
 #[test]
@@ -459,7 +458,7 @@ fn policy_rechecks_shared_bytes_before_replacing_a_composed_artifact() {
     }
     let mut compiled = compile_direct_workflow_composed_with_isolation_policy(
         input(graph, &dir.path().join("selected")),
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
         dir.path(),
         &[],
@@ -521,7 +520,7 @@ fn production_compile_wrapper_uses_standard_composition_while_legacy_fixture_sta
     // Construct the retired shape only through the compatibility-test builder.
     let legacy = compile_direct_workflow_composed_with_isolation_policy(
         input(graph.clone(), &dir.path().join("legacy")),
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
         &components,
         &[],
@@ -568,7 +567,7 @@ fn production_compile_wrapper_uses_standard_composition_while_legacy_fixture_sta
         if let wit_parser::WorldItem::Interface { id, .. } = item {
             assert_ne!(
                 resolve.id_of(*id).as_deref(),
-                Some(runtara_workflow_wit::EXECUTION_INTERFACE_NAME)
+                Some(runtara_wit::workflow::TASKS)
             );
         }
     }

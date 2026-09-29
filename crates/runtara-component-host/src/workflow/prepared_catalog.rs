@@ -2,7 +2,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
-use runtara_workflow_wit::isolation_package::{Binding, InvocationManifest};
+use runtara_invocation_contract::{Binding, InvocationManifest};
 use wasmtime::{
     Engine,
     component::{Component, InstancePre, Linker, types::ComponentItem},
@@ -102,7 +102,7 @@ impl PreparedChildCatalog {
             else {
                 anyhow::bail!("isolated binding interface has no invoke function");
             };
-            invocation_abi::validate(&invoke, &binding.interface).with_context(|| {
+            invocation_abi::validate(&invoke).with_context(|| {
                 format!(
                     "invalid isolated binding `{}` ({})",
                     binding.id, binding.interface

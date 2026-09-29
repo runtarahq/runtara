@@ -1,25 +1,10 @@
-//! What happens when a workflow-agent suspends anyway.
+//! What happens when a workflow-agent parks.
 //!
-//! The capability ABI is synchronous, so a child that waits would hold the
-//! parent's runner with no way to park. A workflow-agent is therefore published
-//! either certified `non-suspending:1` (the DSL safety report, the staging
-//! certification, the composition gate and the server's loader all refuse a
-//! suspending graph under that certificate) or as a parking agent, `parks:1`,
-//! whose waits cross the capability boundary as reserved error codes:
-//! `AGENT_SUSPEND_SENTINEL_CODE` for a lifecycle suspend and
-//! `AGENT_SUSPEND_ON_SIGNAL_SENTINEL_CODE` for a signal wait. The parent
-//! re-raises either up the chain before retry classification, per-attempt
-//! checkpointing or onError routing can read it as a failure, and the stdlib
-//! remaps a user error that spoofs either code (pinned end to end by
-//! `workflow_agent_error_step_cannot_spoof_signal_park_or_suspend` in
-//! `tests/direct_wasm_execute.rs`).
-//!
-//! These tests stage a child that waits under `parks:1`, the marker that
-//! says exactly that, and pin what the parent does with it — including when a
-//! root Cancel is in flight. The marker is deliberately an alternative to
-//! `non-suspending:1` rather than an addition, so an older composer, which
-//! demands the latter, refuses a parking child instead of dropping the deadline
-//! it cannot decode.
+//! A published workflow-agent parks by returning the `suspended` outcome with
+//! its wakes. The parent forwards it up the chain before retry
+//! classification, per-attempt checkpointing or onError routing can read it
+//! as a failure. These tests stage a child that waits and pin what the parent
+//! does with its park, including when a root Cancel is in flight.
 //!
 //! A nested `Delay` deliberately does NOT park, even though the same wake
 //! channel would carry it. A wait is open-ended and holds a runner slot for an
@@ -34,13 +19,12 @@
 //! `delay.rs` to `emit_suspend_at_return` makes those four fail first, which is
 //! the guard: the wake channel is ready if that trade is ever worth making.
 use super::*;
-use crate::direct_wasm::WorkflowAbi;
+use crate::direct_wasm::WorkflowRole;
 
 /// A child that waits on a signal that never arrives, published as an agent.
 ///
-/// Compiled through the library rather than the server: the server refuses this
-/// graph, which is the point. The certificate is stamped without being earned,
-/// modelling the mis-certified artifact the sentinel exists to survive.
+/// Compiled through the library and staged by hand, the way the server
+/// publishes it.
 fn suspending_child(dir: &Path, components: &str) -> anyhow::Result<PathBuf> {
     suspending_child_with_timeout(dir, components, None)
 }
@@ -72,11 +56,11 @@ fn suspending_child_with_timeout(
             agent_catalog: None,
             agent_slug: Some("waiting-child".into()),
         },
-        WorkflowAbi::AgentCapabilities,
+        WorkflowRole::PublishedAgent,
         false,
     )?;
-    // A waiting child needs the parent's runtime; that is precisely why the
-    // capability ABI cannot park it and why publishing is refused.
+    // A waiting child keeps the runtime: it checkpoints under its caller's
+    // instance.
     assert!(
         !child.omit_runtime,
         "a waiting child must keep runtime ownership"
@@ -85,17 +69,13 @@ fn suspending_child_with_timeout(
 
     let staging = dir.join("staged");
     fs::create_dir_all(&staging)?;
-    let mut info = runtara_dsl::agent_meta::workflow_agent_info(
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
         "waiting-child",
         "waiting-child",
         "fixture",
         &HashMap::new(),
         &HashMap::new(),
     );
-    // A child that waits is exactly what `parks:1` describes. Staging it
-    // as `non-suspending:1` would be a lie, and an older composer would take
-    // that lie and drop the deadline it cannot decode.
-    runtara_dsl::agent_meta::certify_workflow_agent_parks(&mut info);
     fs::copy(
         &child.wasm_path,
         staging.join("runtara_agent_waiting_child.wasm"),
@@ -108,7 +88,7 @@ fn suspending_child_with_timeout(
 }
 
 /// A root workflow that calls the waiting child with retries configured, so a
-/// sentinel misread as a failure would show up as a retry.
+/// park misread as a failure would show up as a retry.
 fn parent_of(
     dir: &Path,
     components: &str,
@@ -121,8 +101,6 @@ fn parent_of(
         &HashMap::new(),
         &HashMap::new(),
     );
-    let mut certified = info.clone();
-    runtara_dsl::agent_meta::certify_workflow_agent_parks(&mut certified);
     let graph = serde_json::from_value(json!({"durable":true,"entryPoint":"call","steps":{
         "call":{"id":"call","stepType":"Agent","agentId":"waiting-child","capabilityId":"run",
             "maxRetries":3,"retryDelay":10},
@@ -139,11 +117,11 @@ fn parent_of(
             output_dir: dir.join("parent"),
             track_events: false,
             agent_catalog: Some(Arc::new(
-                runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![certified]),
+                runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![info]),
             )),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )?;
     compose_direct_workflow_with_extra_dirs(&mut parent, components, &[staging.to_path_buf()])?;
@@ -181,7 +159,7 @@ async fn a_suspending_child_suspends_the_parent_instead_of_failing_it() -> anyho
     assert_eq!(
         child_invocations(&host),
         1,
-        "the sentinel must not be classified as a retryable failure"
+        "a park must not be classified as a retryable failure"
     );
     let attempts: Vec<_> = host
         .checkpoint_calls
@@ -397,10 +375,9 @@ async fn a_timed_nested_wait_parks_until_its_deadline_and_still_times_out() -> a
     let first = invoke_prepared().await.exit;
     let after_first = now_ms();
 
-    // The capability result type has no wake channel, so the child carries its
-    // absolute deadline out through the sentinel's category field and the owner
-    // parks until it. Parking on a wakeless `on-resume` here would silently turn
-    // a timed wait into an open-ended one.
+    // The child's `on-signal` wake carries its absolute deadline and the owner
+    // parks until it. Parking on a wakeless `on-resume` here would silently
+    // turn a timed wait into an open-ended one.
     let InvokeExit::Suspended(ref wakes) = first else {
         panic!("a timed nested wait must park: {first:?}");
     };
@@ -514,8 +491,8 @@ fn breakpointed_graph() -> Value {
 /// A breakpoint does not survive publication as an agent.
 ///
 /// Pausing is an instance-level action and the instance belongs to the caller,
-/// which is why a composed child already never fires `runtime.complete` or
-/// `runtime.fail`. A breakpoint left in a reusable agent would halt whichever
+/// which is why a composed child's outcome is only its return value to that
+/// caller. A breakpoint left in a reusable agent would halt whichever
 /// workflow invoked it, for every caller and every run.
 ///
 /// The proof is the artifact, not a flag: the emitted component must contain no
@@ -538,7 +515,7 @@ async fn a_published_agent_carries_no_breakpoint() -> anyhow::Result<()> {
             agent_catalog: None,
             agent_slug: Some("breakpointed-child".into()),
         },
-        WorkflowAbi::AgentCapabilities,
+        WorkflowRole::PublishedAgent,
         false,
     )?;
     compose_direct_workflow(&mut published, &components)?;
@@ -581,7 +558,7 @@ async fn a_published_agent_carries_no_breakpoint() -> anyhow::Result<()> {
             agent_catalog: None,
             agent_slug: Some("breakpointed-child".into()),
         },
-        WorkflowAbi::AgentCapabilities,
+        WorkflowRole::PublishedAgent,
         false,
     )?;
     compose_direct_workflow(&mut eventless, &components)?;

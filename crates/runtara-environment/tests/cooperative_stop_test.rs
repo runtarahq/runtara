@@ -17,8 +17,7 @@ use runtara_environment::{
 };
 use runtara_store_postgres::PostgresPersistence;
 use runtara_workflows::direct_wasm::{
-    DirectCompilationInput, RuntimeBinding, WorkflowAbi,
-    compile_direct_workflow_composed_configured,
+    DirectCompilationInput, WorkflowRole, compile_direct_workflow_composed_configured,
 };
 use serde_json::json;
 use std::{
@@ -137,8 +136,7 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
             agent_slug: None,
         },
         components,
-        RuntimeBinding::HostImport,
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )?;
     anyhow::ensure!(compiled.scoped_agents.is_empty() && compiled.invocation_manifest.is_none());
@@ -210,7 +208,6 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
             instance_id: id.clone(),
             tenant_id: "stop-test".into(),
             wasm_path: compiled.wasm_path.clone(),
-            requires_lifecycle_invoke: true,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,

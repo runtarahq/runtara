@@ -41,8 +41,8 @@ pub struct CapabilityMeta {
     pub rate_limited: bool,
     /// Requires isolated, credential-bearing execution by an approved built-in.
     pub trusted: bool,
-    /// May answer with a typed suspension instead of a result
-    /// (`runtara:agent-suspension`); invoked only through `suspendable.invoke`.
+    /// May answer with the `suspended` outcome instead of `completed`; a
+    /// workflow calls it only inside an operation scope.
     pub suspends: bool,
     /// Known errors this capability can return.
     /// Used for tooling hints, validation, and documentation generation.
@@ -63,33 +63,6 @@ pub mod capability_tags {
     /// child's input in the checkpoint-namespace envelope at the invoke
     /// boundary — native agents must never receive an envelope-shaped input.
     pub const WORKFLOW_AGENT: &str = "workflow-agent";
-    /// Artifact-compatibility marker for checkpoint namespacing: the staged
-    /// workflow-agent was compiled with the `_cache_key_prefix` whitelist, so
-    /// it honors the namespace envelope its parent injects. A DURABLE
-    /// workflow-agent sidecar WITHOUT this tag predates namespacing (it would
-    /// silently drop the prefix and its checkpoint ids would collide across
-    /// invocation sites) — the parent compile refuses to compose it until it
-    /// is republished. The separate `non-suspending:1` marker is required for
-    /// every staged workflow-agent, including a pure one.
-    pub const WORKFLOW_AGENT_CHECKPOINT_SCOPE: &str = "checkpoint-scope:1";
-    /// Audit marker for a published workflow-agent whose complete static graph
-    /// closure was proven not to wait, sleep, retry, or pause. The synchronous
-    /// capability ABI cannot propagate a durable suspension to its parent, so
-    /// staged workflow agents without this proof are never composable.
-    pub const WORKFLOW_AGENT_NON_SUSPENDING: &str = "non-suspending:1";
-    /// Marker for a published workflow-agent that CAN park: on a wait, a sleep,
-    /// or a retry backoff. It carries its wake out through the suspend sentinel
-    /// — an absolute deadline in the numeric `retry-after` field, or the signal
-    /// route in the message — so its caller parks and is woken in its place.
-    ///
-    /// This is deliberately an alternative to `non-suspending:1`, never an
-    /// addition. Every composer built before parking existed requires
-    /// `non-suspending:1` on every staged workflow-agent, so a child tagged
-    /// this way is refused outright by an older parent rather than composed by
-    /// one that would re-raise its suspend without the deadline and silently
-    /// drop the timeout. Delays still block, so a child that sleeps is not
-    /// covered by this marker.
-    pub const WORKFLOW_AGENT_PARKS: &str = "parks:1";
 }
 
 /// Error category for capability errors
@@ -1819,7 +1792,7 @@ pub fn validate_agent_metadata_or_panic() {
 pub const CONTROL_AGENT_ID: &str = "control";
 
 /// Whether a call to `capability` of `agent_id` is operation-scoped: the
-/// compiler wraps it in a `runtara:workflow-operation` scope, so the host
+/// compiler wraps it in a `runtara:workflow/operation` scope, so the host
 /// derives a replay-safe identity from the call site. That holds for every
 /// suspending capability and for every capability of the control agent
 /// (reads included, since caller-relative filters need the scope too).
@@ -1968,100 +1941,6 @@ pub fn validate_workflow_slug(slug: &str) -> Result<(), SlugError> {
 /// (an Agent step targets it as `agentId: <slug>, capabilityId: "run"`).
 pub const WORKFLOW_AGENT_CAPABILITY_ID: &str = "run";
 
-/// Attach the audit marker after a caller has statically proven that every
-/// reachable path of the workflow is non-suspending.
-///
-/// [`workflow_agent_info`] intentionally does not add this marker itself:
-/// schema synthesis cannot establish execution safety. Production publishing
-/// must first inspect the complete workflow/embedded-child closure, then call
-/// this helper immediately before staging the sidecar.
-/// Mark every workflow-agent capability in this sidecar as able to park.
-/// Mutually exclusive with [`certify_workflow_agent_non_suspending`]: carrying
-/// both would let an older composer accept a parking child.
-pub fn certify_workflow_agent_parks(info: &mut AgentInfo) {
-    for capability in &mut info.capabilities {
-        let tags = &mut capability.tags;
-        if tags
-            .iter()
-            .any(|tag| tag == capability_tags::WORKFLOW_AGENT)
-        {
-            tags.retain(|tag| tag != capability_tags::WORKFLOW_AGENT_NON_SUSPENDING);
-            if !tags
-                .iter()
-                .any(|tag| tag == capability_tags::WORKFLOW_AGENT_PARKS)
-            {
-                tags.push(capability_tags::WORKFLOW_AGENT_PARKS.to_string());
-            }
-        }
-    }
-}
-
-/// Whether every workflow-agent capability here is marked as able to park.
-/// `false` also covers metadata that is not a workflow-agent at all.
-pub fn is_parking_workflow_agent(info: &AgentInfo) -> bool {
-    let mut has_workflow_capability = false;
-    for capability in &info.capabilities {
-        if capability
-            .tags
-            .iter()
-            .any(|tag| tag == capability_tags::WORKFLOW_AGENT)
-        {
-            has_workflow_capability = true;
-            if !capability
-                .tags
-                .iter()
-                .any(|tag| tag == capability_tags::WORKFLOW_AGENT_PARKS)
-            {
-                return false;
-            }
-        }
-    }
-    has_workflow_capability
-}
-
-pub fn certify_workflow_agent_non_suspending(info: &mut AgentInfo) {
-    for capability in &mut info.capabilities {
-        if capability
-            .tags
-            .iter()
-            .any(|tag| tag == capability_tags::WORKFLOW_AGENT)
-            && !capability
-                .tags
-                .iter()
-                .any(|tag| tag == capability_tags::WORKFLOW_AGENT_NON_SUSPENDING)
-        {
-            capability
-                .tags
-                .push(capability_tags::WORKFLOW_AGENT_NON_SUSPENDING.to_string());
-        }
-    }
-}
-
-/// Whether every workflow-agent capability in this sidecar carries the
-/// non-suspending certification. `false` also covers metadata that is not a
-/// workflow-agent, which keeps callers from accidentally staging a generic
-/// agent through the workflow-agent publisher.
-pub fn is_certified_non_suspending_workflow_agent(info: &AgentInfo) -> bool {
-    let mut has_workflow_capability = false;
-    for capability in &info.capabilities {
-        if capability
-            .tags
-            .iter()
-            .any(|tag| tag == capability_tags::WORKFLOW_AGENT)
-        {
-            has_workflow_capability = true;
-            if !capability
-                .tags
-                .iter()
-                .any(|tag| tag == capability_tags::WORKFLOW_AGENT_NON_SUSPENDING)
-            {
-                return false;
-            }
-        }
-    }
-    has_workflow_capability
-}
-
 /// Synthesize the catalog metadata for a workflow published as an agent — the
 /// exact `AgentInfo` shape a native agent's `meta.json` sidecar carries, so a
 /// staged workflow-agent drops into the same catalog/validation/step-picker
@@ -2164,10 +2043,7 @@ pub fn workflow_agent_info(
             trusted: false,
             suspends: false,
             known_errors: Vec::new(),
-            tags: vec![
-                capability_tags::WORKFLOW_AGENT.to_string(),
-                capability_tags::WORKFLOW_AGENT_CHECKPOINT_SCOPE.to_string(),
-            ],
+            tags: vec![capability_tags::WORKFLOW_AGENT.to_string()],
         }],
     }
 }
@@ -2960,25 +2836,10 @@ mod workflow_agent_info_tests {
         // Conservative execution semantics for published workflows.
         assert!(cap.has_side_effects);
         assert!(!cap.is_idempotent);
-        assert_eq!(
-            cap.tags,
-            vec!["workflow-agent", "checkpoint-scope:1"],
-            "synthesized metadata must not claim a safety proof it has not earned"
-        );
-    }
-
-    #[test]
-    fn non_suspending_certification_is_explicit_and_auditable() {
-        let mut info = workflow_agent_info("echo", "Echo", "", &HashMap::new(), &HashMap::new());
-
-        assert!(!is_certified_non_suspending_workflow_agent(&info));
-        certify_workflow_agent_non_suspending(&mut info);
-
-        assert!(is_certified_non_suspending_workflow_agent(&info));
-        assert_eq!(
-            info.capabilities[0].tags,
-            vec!["workflow-agent", "checkpoint-scope:1", "non-suspending:1",]
-        );
+        assert_eq!(cap.tags, vec!["workflow-agent"]);
+        // A workflow-agent parks through its outcome, never as a suspending
+        // agent capability.
+        assert!(!cap.suspends && !cap.trusted);
     }
 
     #[test]
@@ -3180,7 +3041,7 @@ mod tests {
             Some("fetch-http")
         );
         for name in [
-            "runtara:trusted/executor@0.1.0",
+            "runtara:trusted/executor@1.0.0",
             "runtara:trusted-artifacts/s3-storage-hab-hcd@0.1.0",
             &format!("runtara:trusted-artifacts/-h{wasm}-h{wasm}@0.1.0"),
             &format!("runtara:trusted-artifacts/x-h{wasm}-h{wasm}@0.2.0"),

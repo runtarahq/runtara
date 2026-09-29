@@ -14,7 +14,7 @@ use runtara_component_host::{
     ChildInvocationScope, EngineConfig, InvocationScopeFactory, InvokeExit,
     PreparedInvocationLauncher, WorkflowExecutor, WorkflowRunSpec,
 };
-use runtara_workflow_wit::isolation_package::{PackageLimits, artifact_digest, parse};
+use runtara_invocation_contract::{PackageLimits, artifact_digest, parse};
 use runtara_workflows::compile::ChildWorkflowInput;
 use runtara_workflows::direct_wasm::{
     DirectCompilationResult, compose_direct_workflow_with_isolated_agents,
@@ -140,6 +140,7 @@ impl InvocationLauncher for RetryFixture {
                         retryable: true,
                         retry_after_ms: None,
                         attributes: None,
+                        details: None,
                     })
                 })
             })))
@@ -175,7 +176,7 @@ fn compile_children(
     if scoped {
         runtara_workflows::direct_wasm::compile_direct_workflow_with_scoped_agents(
             input,
-            runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+            runtara_workflows::direct_wasm::WorkflowRole::Root,
             false,
             ["utils".into()].into(),
         )
@@ -399,7 +400,7 @@ async fn run_composed(
         None
     };
     let input = serde_json::to_vec(&input).unwrap();
-    let (host, _rx) = super::wasm_performance_baseline::host(&input);
+    let (host, _rx) = super::wasm_performance_baseline::host();
     let ticker = EpochTicker::spawn(engine);
     let run_spec = WorkflowRunSpec {
         trusted_instance: None,
@@ -471,11 +472,10 @@ async fn run_composed(
         .unwrap();
         for (path, attempt) in &recorded {
             assert!(*attempt > 0);
-            let decoded =
-                runtara_workflow_wit::isolation_package::AgentInvocationPath::decode(path).unwrap();
+            let decoded = runtara_invocation_contract::AgentInvocationPath::decode(path).unwrap();
             assert!(matches!(
                 decoded.selector,
-                runtara_workflow_wit::isolation_package::InvocationSelector::CallSite(_)
+                runtara_invocation_contract::InvocationSelector::CallSite(_)
             ));
             invocations
                 .resolve_scoped_agent_invocation(
@@ -811,7 +811,7 @@ fn scoped_agent_ai_auxiliary_call_sites_validate_and_compose() {
                     agent_catalog: None,
                     agent_slug: None,
                 },
-                runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+                runtara_workflows::direct_wasm::WorkflowRole::Root,
                 false,
                 agents.clone(),
             )
@@ -927,14 +927,14 @@ fn scoped_shared_ai_tool_has_distinct_caller_tokens_stable_across_selection() {
                 agent_catalog: None,
                 agent_slug: None,
             },
-            runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+            runtara_workflows::direct_wasm::WorkflowRole::Root,
             false,
             agents,
         )
         .unwrap();
         inventories.push(compiled.invocation_manifest.unwrap());
     }
-    let tool_sites = |inventory: &runtara_workflow_wit::isolation_package::InvocationManifest| {
+    let tool_sites = |inventory: &runtara_invocation_contract::InvocationManifest| {
         inventory
             .call_sites
             .iter()
@@ -990,16 +990,9 @@ async fn scoped_agent_inside_embed_preserves_inline_child_ancestry() {
         assert_eq!(starts, if looped { 4 } else { 1 });
         let mut indices = std::collections::BTreeSet::new();
         for (path, _) in paths {
-            let decoded =
-                runtara_workflow_wit::isolation_package::AgentInvocationPath::decode(&path)
-                    .unwrap();
-            let [
-                runtara_workflow_wit::isolation_package::NamespaceFrame::Child {
-                    step_id,
-                    loops,
-                    ..
-                },
-            ] = &decoded.namespace[..]
+            let decoded = runtara_invocation_contract::AgentInvocationPath::decode(&path).unwrap();
+            let [runtara_invocation_contract::NamespaceFrame::Child { step_id, loops, .. }] =
+                &decoded.namespace[..]
             else {
                 panic!("unexpected child ancestry")
             };
@@ -1020,8 +1013,8 @@ async fn scoped_agent_inside_embed_preserves_inline_child_ancestry() {
 
 #[test]
 fn compiler_checkpoint_contracts_match_existing_workflow_agent_scope_helpers() {
+    use runtara_invocation_contract::{AgentInvocationPath, CheckpointContract};
     use runtara_workflow_stdlib::direct_json::DirectJsonManifest;
-    use runtara_workflow_wit::isolation_package::{AgentInvocationPath, CheckpointContract};
     use serde_json::json;
     let mut graph: Value = serde_json::from_str(&super::ai_agent_tool_loop_graph_json()).unwrap();
     graph["steps"]["echo_tool"]["agentId"] = "scoped-child".into();
@@ -1047,7 +1040,7 @@ fn compiler_checkpoint_contracts_match_existing_workflow_agent_scope_helpers() {
             agent_catalog: Some(Arc::new(catalog)),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
         ["scoped-child".into()].into(),
     )
@@ -1138,7 +1131,7 @@ fn compiler_detects_workflow_agent_checkpoint_aliases_across_on_wait_graphs() {
                 agent_catalog: Some(catalog.clone()),
                 agent_slug: None,
             },
-            runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+            runtara_workflows::direct_wasm::WorkflowRole::Root,
             false,
             ["scoped-child".into()].into(),
         )

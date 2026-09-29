@@ -95,12 +95,12 @@ pub struct AgentIsolationReport {
 #[cfg(any(test, feature = "direct-wasm-integration-tests"))]
 pub fn compile_direct_workflow_composed_with_isolation_policy(
     input: DirectCompilationInput,
-    abi: super::super::component::WorkflowAbi,
+    abi: super::super::component::WorkflowRole,
     omit_runtime: bool,
     components_dir: &Path,
     extra_component_dirs: &[PathBuf],
     policy: AgentIsolationPolicy,
-    limits: runtara_workflow_wit::isolation_package::PackageLimits,
+    limits: runtara_invocation_contract::PackageLimits,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     let mut result = compile_direct_workflow_selected(
         input,
@@ -230,7 +230,7 @@ impl AgentLoweringSelection {
             let bindings = agents
                 .iter()
                 .map(|agent| {
-                    let binding = runtara_workflow_wit::isolation_package::Binding {
+                    let binding = runtara_invocation_contract::Binding {
                         id: format!("agent:{}", agent.agent_id),
                         artifact: agent.sha256.clone(),
                         interface: format!(
@@ -252,9 +252,7 @@ impl AgentLoweringSelection {
                     // An inline Embed may have no Agent calls, yet its graph owns
                     // checkpoint keys. Reject a grant containing that subtree too.
                     let scopes = super::invocation_scopes::build_inventory(manifest)?;
-                    use runtara_workflow_wit::isolation_package::{
-                        CheckpointContract, ChildScopePattern,
-                    };
+                    use runtara_invocation_contract::{CheckpointContract, ChildScopePattern};
                     for site in &inventory.call_sites {
                         if inventory.checkpoint_contracts[&site.token] != CheckpointContract::Child
                         {
@@ -309,11 +307,8 @@ impl AgentLoweringSelection {
             .iter()
             .any(|a| a.reason == AgentIsolationReason::Isolated)
         {
-            let requirements = super::super::component::DIRECT_SHARED_COMPONENT_REQUIREMENTS
-                .iter()
-                .filter(|c| c.package != "runtara:workflow-runtime")
-                .copied()
-                .collect::<Vec<_>>();
+            let requirements =
+                super::super::component::DIRECT_SHARED_COMPONENT_REQUIREMENTS.to_vec();
             let shared = resolve_shared_component_dependencies(&components_dir, &requirements)?;
             let mut unsupported = false;
             for dep in &shared {
@@ -425,9 +420,7 @@ mod tests {
                     reviews: [(
                         "utils".into(),
                         AgentIsolationReview {
-                            sha256: runtara_workflow_wit::isolation_package::artifact_digest(
-                                &child,
-                            ),
+                            sha256: runtara_invocation_contract::artifact_digest(&child),
                             reset_safe: true,
                             compiler_checkpoint_contract: true,
                         },

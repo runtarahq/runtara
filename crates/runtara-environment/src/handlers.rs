@@ -317,7 +317,7 @@ pub enum StartRejection {
     },
 
     /// The image row exists but cannot be launched: its artifact is missing
-    /// from disk, or it does not export the current lifecycle entrypoint.
+    /// from disk, or it does not export the workflow entry.
     ///
     /// Grouped with [`Self::ImageNotFound`] by callers on purpose — both are
     /// repaired by registering the image again, and neither is retryable as-is.
@@ -616,14 +616,14 @@ pub async fn handle_start_instance(
         ));
     }
 
-    // A compiled workflow must prove its current lifecycle ABI before we
-    // create a pending instance. This keeps a retired `wasi:cli/run` artifact
-    // from ever taking a runner permit or consuming admission while it waits.
+    // Every image must export the workflow entry before we create a pending
+    // instance. This keeps any other artifact from ever taking a runner permit
+    // or consuming admission while it waits.
     if let Err(error) = require_current_workflow_entrypoint(&image).await {
         warn!(
             image_id = %request.image_id,
             error = %error,
-            "Refusing workflow image without lifecycle.invoke"
+            "Refusing workflow image without the workflow entry"
         );
         return Ok(StartInstanceResponse::rejected(
             StartRejection::ImageNotRunnable {
@@ -2498,14 +2498,17 @@ pub enum StoreImageError {
     Io(String),
     /// Writing the image row failed.
     Register(String),
+    /// The metadata does not record the uploaded binary's checksum.
+    Invalid(String),
 }
 
 impl std::fmt::Display for StoreImageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Lookup(message) | Self::Io(message) | Self::Register(message) => {
-                f.write_str(message)
-            }
+            Self::Lookup(message)
+            | Self::Io(message)
+            | Self::Register(message)
+            | Self::Invalid(message) => f.write_str(message),
         }
     }
 }
@@ -2523,7 +2526,23 @@ pub async fn handle_store_image(
     params: StoreImageParams,
     binary: &[u8],
 ) -> std::result::Result<String, StoreImageError> {
+    use sha2::{Digest, Sha256};
     use std::io::Write;
+
+    // Every image records the checksum of its exact bytes, which durable
+    // preparation compares to what it reads before running them.
+    let actual = format!("{:x}", Sha256::digest(binary));
+    let recorded = params
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.pointer("/workflow/binaryChecksum"))
+        .and_then(Value::as_str);
+    if recorded != Some(actual.as_str()) {
+        return Err(StoreImageError::Invalid(format!(
+            "image metadata must record the binary's checksum at workflow.binaryChecksum \
+             ({actual}), got {recorded:?}"
+        )));
+    }
 
     let image_registry = ImageRegistry::new(state.pool.clone());
     let candidate_image_id = uuid::Uuid::new_v4().to_string();

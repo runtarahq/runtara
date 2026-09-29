@@ -3,13 +3,13 @@
 //! Lowering of a suspending Agent call site (typed agent suspension).
 //!
 //! A capability the catalog declares `suspends` is invoked through its
-//! agent's `suspendable` interface instead of `capabilities`, inside the
-//! compiler-emitted `runtara:workflow-operation/scope`:
+//! agent's `capabilities`, inside the compiler-emitted
+//! `runtara:workflow/operation`:
 //!
 //! 1. `scope.enter(checkpoint-key, attempt, load)` names the operation. The
 //!    host derives `op_hash = sha256(checkpoint-key)` and hands the saved
-//!    continuation to the capability itself (`runtara:agent-suspension/context`).
-//!    `suspendable.invoke` never carries one, so this module passes none.
+//!    continuation to the capability itself (`runtara:agent/continuation`).
+//!    `invoke` never carries one, so this module passes none.
 //! 2. `suspended { wakes, state }`: `scope.suspend(state, wakes)` persists the
 //!    continuation for the entered attempt, then the workflow returns the
 //!    unchanged lifecycle
@@ -54,15 +54,14 @@ use super::{
     DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL, DirectCompileError, DirectCoreFunctionIndices,
     DirectCoreStaticData, DirectWorkflowManifest,
 };
-use crate::direct_wasm::component::{RuntimeBinding, WorkflowAbi};
 use crate::direct_wasm::manifest::{DirectAgentManifest, DirectEdgeManifest, DirectGraphManifest};
 
 // Canonical layout of `result<outcome, error-info>` in the retptr area, where
 // `outcome = variant { completed(list<u8>), suspended(suspension) }`,
 // `suspension = record { wakes: list<wake>, state: list<u8> }` and
-// `wake = variant { at(u64), instances(string) }`. The error arm is the same
+// `wake = variant { at(u64), on-signal(signal-wait), on-resume, instances(string) }`. The error arm is the same
 // `error-info` at +8 as `capabilities.invoke`'s. Every offset comes from
-// `runtara_agent_suspension::layout`, which `runtara-workflow-wit` pins against
+// `runtara_agent_suspension::layout`, which `runtara-agent-suspension`'s tests pin against
 // the WIT's `SizeAlign`; `agent_suspend_tests` re-derives them here.
 
 /// Discriminant of `outcome` (0 = completed, 1 = suspended).
@@ -105,31 +104,24 @@ const PARK_AT: u32 = DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL;
 /// shapes only the compiler can see:
 ///
 /// - any operation-scoped site: an AiAgent tool, memory provider or synthetic
-///   AiAgent call, a workflow embedded as an AiAgent tool, the `CliRunHttp`
-///   ABI (it blocks instead of parking), the `AgentCapabilities` ABI (a
-///   published workflow-agent), the composed runtime binding, an omitted
-///   runtime, scoped isolation, and a control call compiled without the agent
-///   catalog (it could not be classified);
+///   AiAgent call, a workflow embedded as an AiAgent tool, an omitted runtime,
+///   scoped isolation, and a control call compiled without the agent catalog
+///   (it could not be classified);
 /// - any operation-scoped site in a `WaitForSignal.onWait` graph, directly or
 ///   through an embedded workflow;
 /// - a suspending site: non-durable, untimed, or an onError handler;
 /// - a WaitForInstances step wherever a suspending site is refused, except
 ///   that it has no step timeout: an AiAgent tool or memory target, a tool
-///   workflow, an onWait graph, a target other than the lifecycle invoke ABI
-///   with the host-imported runtime, a non-durable graph, or an onError
-///   handler.
+///   workflow, an onWait graph, an omitted runtime, a non-durable graph, or an
+///   onError handler.
 pub(super) fn check_sites(
     manifest: &DirectWorkflowManifest,
-    abi: WorkflowAbi,
     omit_runtime: bool,
-    runtime_binding: RuntimeBinding,
     scoped_agents: &BTreeSet<String>,
     has_catalog: bool,
 ) -> Result<(), DirectCompileError> {
     let target = SiteTarget {
-        abi,
         omit_runtime,
-        runtime_binding,
         scoped_agents,
     };
     if !has_catalog {
@@ -181,9 +173,7 @@ pub(super) fn check_sites(
 
 /// The compile target every operation-scoped site must support.
 struct SiteTarget<'a> {
-    abi: WorkflowAbi,
     omit_runtime: bool,
-    runtime_binding: RuntimeBinding,
     scoped_agents: &'a BTreeSet<String>,
 }
 
@@ -299,26 +289,6 @@ fn check_graph(
         if in_on_wait {
             return refuse(step, kind, "cannot run in a WaitForSignal onWait graph");
         }
-        match target.abi {
-            WorkflowAbi::InvokeHostImports => {}
-            WorkflowAbi::CliRunHttp => {
-                return refuse(
-                    step,
-                    kind,
-                    "needs the lifecycle invoke ABI; the CliRunHttp ABI blocks instead of parking",
-                );
-            }
-            WorkflowAbi::AgentCapabilities => {
-                return refuse(step, kind, "cannot be published as a workflow-agent");
-            }
-        }
-        if target.runtime_binding != RuntimeBinding::HostImport {
-            return refuse(
-                step,
-                kind,
-                "cannot compile under the composed runtime binding; use the host-imported runtime",
-            );
-        }
         if target.omit_runtime {
             return refuse(step, kind, "needs the host-imported workflow runtime");
         }
@@ -381,24 +351,6 @@ fn check_wait_for_instances(
     }
     if in_on_wait {
         return refuse_wait(step, "cannot run in a WaitForSignal onWait graph");
-    }
-    match target.abi {
-        WorkflowAbi::InvokeHostImports => {}
-        WorkflowAbi::CliRunHttp => {
-            return refuse_wait(
-                step,
-                "needs the lifecycle invoke ABI; the CliRunHttp ABI blocks instead of parking",
-            );
-        }
-        WorkflowAbi::AgentCapabilities => {
-            return refuse_wait(step, "cannot be published as a workflow-agent");
-        }
-    }
-    if target.runtime_binding != RuntimeBinding::HostImport {
-        return refuse_wait(
-            step,
-            "cannot compile under the composed runtime binding; use the host-imported runtime",
-        );
     }
     if target.omit_runtime {
         return refuse_wait(step, "needs the host-imported workflow runtime");
@@ -469,7 +421,7 @@ pub(super) fn emit_exit(body: &mut WasmFunction, indices: &DirectCoreFunctionInd
     body.instruction(&Instruction::Call(indices.operation_scope().exit));
 }
 
-/// Consume a `suspendable.invoke` result left in the retptr area.
+/// Consume a suspending site's `invoke` result left in the retptr area.
 ///
 /// A suspension parks the workflow and returns from the entry function,
 /// unless it is refused or too close to the step deadline: then the retptr

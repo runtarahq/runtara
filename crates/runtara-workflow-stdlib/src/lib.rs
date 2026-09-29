@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Runtara Workflow Standard Library
 //!
-//! The manifest evaluator behind `runtara:workflow-stdlib/json@0.1.0`. A
+//! The manifest evaluator behind `runtara:workflow-stdlib/json@1.0.0`. A
 //! direct-emitted workflow carries its graph as a JSON manifest and calls
 //! into this component for every pure decision it has to make: resolving a
 //! reference path, applying an input mapping, rendering a template,
@@ -11,8 +11,9 @@
 //!
 //! Everything here is pure: JSON in, JSON out, plus an interning value
 //! store. Durability (registration, checkpointing, signals, heartbeats)
-//! lives in `runtara-workflow-runtime`, and agent calls go out over each
-//! agent's own WIT interface (`runtara:agent-<id>/capabilities@0.3.0`),
+//! is the host-implemented `runtara:workflow/runtime` interface, and
+//! agent calls go out over each
+//! agent's own WIT interface (`runtara:agent-<id>/capabilities@1.0.0`),
 //! bound at `wac compose` time. This crate therefore has no HTTP client,
 //! no SDK dependency, and no target-specific backends.
 //!
@@ -29,8 +30,10 @@ mod bindings {
     // Generated at compile time by the wit-bindgen macro (no committed
     // bindings.rs, no cargo-component).
     wit_bindgen::generate!({
-        path: "../runtara-workflow-wit/wit/stdlib",
-        world: "workflow-stdlib",
+        // `json` uses `runtara:agent/types.error-info`, so its package comes
+        // first.
+        path: ["../runtara-wit/wit/agent", "../runtara-wit/wit/workflow-stdlib"],
+        world: "runtara:workflow-stdlib/workflow-stdlib",
         generate_all,
     });
 }
@@ -77,7 +80,7 @@ mod component {
     use std::cell::RefCell;
 
     use super::bindings::exports::runtara::workflow_stdlib::json::{
-        AgentRetryError, Guest, InvokeError, WaitInstancesProgress,
+        AgentRetryError, ErrorInfo, Guest, InvokeError, WaitInstancesProgress,
     };
     use super::direct_json::{self, DirectJsonManifest};
 
@@ -528,6 +531,7 @@ mod component {
                 retryable: fields.retryable,
                 retry_after_ms: fields.retry_after_ms,
                 attributes: fields.attributes,
+                details: fields.details,
             })
         }
 
@@ -1320,43 +1324,16 @@ mod component {
             ))
         }
 
-        fn agent_error_info(
-            code: String,
-            message: String,
-            category: String,
-            severity: String,
-            retryable: bool,
-            retry_after_ms: Option<u64>,
-            attributes: Option<String>,
-        ) -> Result<Vec<u8>, String> {
-            direct_json::DirectJsonManifest::agent_error_info(
-                &code,
-                &message,
-                &category,
-                &severity,
-                retryable,
-                retry_after_ms,
-                attributes.as_deref(),
-            )
-        }
-
-        fn agent_retry_error_info(
-            code: String,
-            message: String,
-            category: String,
-            severity: String,
-            retryable: bool,
-            retry_after_ms: Option<u64>,
-            attributes: Option<String>,
-        ) -> Result<AgentRetryError, String> {
+        fn agent_retry_error_info(error: ErrorInfo) -> Result<AgentRetryError, String> {
             let retry = direct_json::DirectJsonManifest::agent_retry_error_info(
-                &code,
-                &message,
-                &category,
-                &severity,
-                retryable,
-                retry_after_ms,
-                attributes.as_deref(),
+                &error.code,
+                &error.message,
+                &error.category,
+                &error.severity,
+                error.retryable,
+                error.retry_after_ms,
+                error.attributes.as_deref(),
+                error.details.as_deref(),
             )?;
             Ok(AgentRetryError {
                 payload: retry.payload,
@@ -1365,16 +1342,7 @@ mod component {
             })
         }
 
-        fn agent_error(
-            agent_id: u32,
-            code: String,
-            message: String,
-            category: String,
-            severity: String,
-            retryable: bool,
-            retry_after_ms: Option<u64>,
-            attributes: Option<String>,
-        ) -> Result<Vec<u8>, String> {
+        fn agent_error(agent_id: u32, error: ErrorInfo) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();
                 let manifest = slot
@@ -1382,13 +1350,14 @@ mod component {
                     .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
                 manifest.agent_error(
                     agent_id,
-                    &code,
-                    &message,
-                    &category,
-                    &severity,
-                    retryable,
-                    retry_after_ms,
-                    attributes.as_deref(),
+                    &error.code,
+                    &error.message,
+                    &error.category,
+                    &error.severity,
+                    error.retryable,
+                    error.retry_after_ms,
+                    error.attributes.as_deref(),
+                    error.details.as_deref(),
                 )
             })
         }

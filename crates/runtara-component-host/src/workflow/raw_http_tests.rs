@@ -80,16 +80,24 @@ async fn an_agent_cannot_reach_a_loopback_listener_over_raw_wasi_http() -> anyho
     let linker = crate::build_linker(&engine)?;
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let interface = instance
-        .get_export_index(&mut store, None, crate::lifecycle::LIFECYCLE_INTERFACE_NAME)
-        .expect("lifecycle export");
+        .get_export_index(&mut store, None, crate::lifecycle::ENTRY_INTERFACE_NAME)
+        .expect("workflow entry export");
     let export = instance
         .get_export_index(&mut store, Some(&interface), "invoke")
         .expect("invoke export");
     let invoke = instance
-        .get_typed_func::<(Vec<u8>,), (Result<WorkflowOutcome, WorkflowErrorInfo>,)>(
+        .get_typed_func::<(String, Vec<u8>), (Result<WorkflowOutcome, WorkflowErrorInfo>,)>(
             &mut store, export,
         )?;
-    let (result,) = invoke.call_async(&mut store, (b"{}".to_vec(),)).await?;
+    let (result,) = invoke
+        .call_async(
+            &mut store,
+            (
+                crate::lifecycle::ENTRY_CAPABILITY.to_owned(),
+                b"{}".to_vec(),
+            ),
+        )
+        .await?;
     let Ok(WorkflowOutcome::Completed(bytes)) = result else {
         panic!("expected the fixture to report the handler result: {result:?}")
     };

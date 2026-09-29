@@ -1,5 +1,6 @@
 ;; Appended to the shared callback-Agent fixture. This parent uses the current
-;; production ABI, including synchronous subtask.cancel, and exports lifecycle.
+;; production ABI, including synchronous subtask.cancel, and exports the
+;; workflow entry.
   (component $workflow
     (import "target" (func $target async))
     (import "ready" (func $ready async))
@@ -34,7 +35,7 @@
         (if (i32.ne (i32.and (local.get $status) (i32.const 15)) (i32.const 1)) (then unreachable))
         (i32.shr_u (local.get $status) (i32.const 4)))
       (data (i32.const 3500) "42")
-      (func (export "invoke") (param i32 i32) (result i32)
+      (func (export "invoke") (param i32 i32 i32 i32) (result i32)
         (local $target i32) (local $alarm i32)
         (local.set $alarm (call $handle (call $alarm (i64.const 500))))
         (local.set $target (call $handle (call $target)))
@@ -59,19 +60,22 @@
         (export "trace" (func $trace)) (export "cancel" (func $cancel)) (export "drop" (func $drop))))))
     (type $error (record (field "code" string) (field "message" string) (field "category" string)
       (field "severity" string) (field "retryable" bool) (field "retry-after-ms" (option u64))
-      (field "attributes" (option string))))
+      (field "attributes" (option string)) (field "details" (option string))))
     (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
-    (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")))
-    (type $outcome (variant (case "completed" (list u8)) (case "suspended" (list $wake))))
-    (func $invoke async (param "input" (list u8)) (result (result $outcome (error $error)))
+    (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+      (case "instances" string)))
+    (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+    (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
+    (func $invoke async (param "capability-id" string) (param "input" (list u8)) (result (result $outcome (error $error)))
       (canon lift (core func $code "invoke") (memory $memory "memory") (realloc (func $memory "realloc"))))
     (instance $lifecycle
       (export "error-info" (type $error)) (export "signal-wait" (type $signal))
-      (export "wake" (type $wake)) (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
-    (export "runtara:workflow-lifecycle/lifecycle@0.2.0" (instance $lifecycle)))
+      (export "wake" (type $wake)) (export "suspension" (type $suspension))
+      (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
+    (export "runtara:agent-workflow-agent/capabilities@1.0.0" (instance $lifecycle)))
   (instance $workflow (instantiate $workflow
     (with "target" (func $agent "run")) (with "ready" (func $ready))
     (with "alarm" (func $timers "abort-after")) (with "sleep" (func $timers "sleep"))
     (with "trace" (func $trace))))
-  (alias export $workflow "runtara:workflow-lifecycle/lifecycle@0.2.0" (instance $lifecycle))
-  (export "runtara:workflow-lifecycle/lifecycle@0.2.0" (instance $lifecycle)))
+  (alias export $workflow "runtara:agent-workflow-agent/capabilities@1.0.0" (instance $lifecycle))
+  (export "runtara:agent-workflow-agent/capabilities@1.0.0" (instance $lifecycle)))

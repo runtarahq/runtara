@@ -54,6 +54,36 @@ fn spec() -> WorkflowRunSpec {
     }
 }
 
+/// The smallest workflow entry, after `imports`: `invoke` returns
+/// `Ok(completed(""))` from a zeroed result area.
+fn minimal_entry(imports: &str) -> String {
+    format!(
+        r#"(component {imports}
+  (core module $m
+    (memory (export "memory") 1)
+    (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 4096)
+    (func (export "invoke") (param i32 i32 i32 i32) (result i32) i32.const 2048))
+  (core instance $m (instantiate $m))
+  (type $error (record (field "code" string) (field "message" string)
+    (field "category" string) (field "severity" string) (field "retryable" bool)
+    (field "retry-after-ms" (option u64)) (field "attributes" (option string))
+    (field "details" (option string))))
+  (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
+  (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+    (case "instances" string)))
+  (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+  (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
+  (func $invoke async (param "capability-id" string) (param "input" (list u8))
+    (result (result $outcome (error $error)))
+    (canon lift (core func $m "invoke") (memory $m "memory") (realloc (func $m "realloc"))))
+  (instance $entry (export "error-info" (type $error)) (export "signal-wait" (type $signal))
+    (export "wake" (type $wake)) (export "suspension" (type $suspension))
+    (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
+  (export "{entry}" (instance $entry)))"#,
+        entry = runtara_wit::workflow::ENTRY
+    )
+}
+
 fn component_path(agent: &str) -> PathBuf {
     // A separately built revision stages its components outside the workspace
     // target tree; honour the directory the suites are given.
@@ -101,7 +131,7 @@ async fn real_random_agent_completes_while_hung_http_agent_is_cancelled() {
                 &http,
                 spec(),
                 CapabilityInvocation {
-                    interface: "runtara:agent-http/capabilities@0.4.0",
+                    interface: "runtara:agent-http/capabilities@1.0.0",
                     capability: "http-request",
                     input: serde_json::to_vec(
                         &serde_json::json!({"url":url,"method":"GET","timeout_ms":120000}),
@@ -132,7 +162,7 @@ async fn real_random_agent_completes_while_hung_http_agent_is_cancelled() {
                 &utils,
                 spec(),
                 CapabilityInvocation {
-                    interface: "runtara:agent-utils/capabilities@0.4.0",
+                    interface: "runtara:agent-utils/capabilities@1.0.0",
                     capability: "random-double",
                     input: b"{}".to_vec(),
                 },
@@ -195,7 +225,7 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
         PrecompileRequest, PrecompileResponse, deserialize_trusted_precompiled_package,
         precompile_artifact,
     };
-    use runtara_workflow_wit::isolation_package::{
+    use runtara_invocation_contract::{
         AgentCallSite, Binding, InvocationManifest, PackageLimits, append_with_invocations,
         artifact_digest,
     };
@@ -208,15 +238,7 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
     executor
         .set_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))
         .unwrap();
-    let root = wat::parse_str(
-        r#"(component
-      (core module $m (func (export "run") (result i32) i32.const 0))
-      (core instance $m (instantiate $m))
-      (func $run (result (result)) (canon lift (core func $m "run")))
-      (instance $api (export "run" (func $run)))
-      (export "wasi:cli/run@0.2.3" (instance $api)))"#,
-    )
-    .unwrap();
+    let root = wat::parse_str(minimal_entry("")).unwrap();
     let child = std::fs::read(component_path("utils")).unwrap();
     let invocations = InvocationManifest {
         call_durability: Default::default(),
@@ -239,7 +261,7 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
         vec![Binding {
             id: "agent:utils".into(),
             artifact: artifact_digest(&child),
-            interface: "runtara:agent-utils/capabilities@0.4.0".into(),
+            interface: "runtara:agent-utils/capabilities@1.0.0".into(),
         }],
         invocations.clone(),
         PackageLimits {
@@ -289,11 +311,17 @@ async fn prepared_catalog_survives_queue_and_enabled_cache() {
     executor
         .set_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))
         .unwrap();
-    let root_result = executor.execute(prepared.command().unwrap(), spec()).await;
-    assert!(matches!(
-        root_result.exit,
-        runtara_component_host::WorkflowExit::Completed
-    ));
+    let root_result = executor
+        .execute_prepared_invoke(&prepared, spec(), b"{}".to_vec())
+        .await;
+    assert!(
+        matches!(
+            root_result.exit,
+            runtara_component_host::InvokeExit::Completed(_)
+        ),
+        "{:?}",
+        root_result.exit
+    );
     let scopes = Arc::new(CachedChildScope::default());
     let launcher = PreparedInvocationLauncher::new(
         executor,

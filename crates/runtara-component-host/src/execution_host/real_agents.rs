@@ -89,7 +89,7 @@ async fn guest_owned_control_cancels_real_http_agent_after_random_sibling_comple
         let pre = executor.load_instance_pre(&path).await.unwrap();
         bindings.insert(
             name.into(),
-            (format!("runtara:agent-{name}/capabilities@0.4.0"), pre),
+            (format!("runtara:agent-{name}/capabilities@1.0.0"), pre),
         );
     }
     let results = Arc::new(Mutex::new(vec![]));

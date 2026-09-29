@@ -1,0 +1,393 @@
+// The control service, called only through the approved control agent.
+//
+// Every shape here is frozen at 1.0.0. Wasmtime lifts records, variants and
+// enums exactly, so no case or field may ever be added in place; a change is a
+// new package version, and the host keeps linking every released one.
+// Operations whose implementation has not landed yet answer `unsupported`.
+//
+// Authority comes from the host store that runs the call, never from
+// arguments: no function takes a tenant, a caller instance or an operation.
+// The tenant is the calling run's; the caller is the calling instance; the
+// operation is the compiler-emitted `runtara:workflow/operation` scope of the
+// calling step, keyed by `op-hash` (sha256 of the step's checkpoint key), so a
+// replay of the same step is the same operation.
+//
+// JSON values travel as UTF-8 JSON bytes (`list<u8>`), like agent inputs and
+// outputs. Times are wall-clock milliseconds since the Unix epoch.
+//
+// Checks run in this order: `requires-instance` (the call needs a calling
+// instance and has none), then `requires-operation` (a mutation outside an
+// operation scope), then validation, then authorization, then the operation.
+//
+// Released WIT is never edited, only versioned.
+package runtara:control@1.0.0;
+
+interface types {
+    /// Why a control call failed.
+    enum error-code {
+        /// Not authorized: a target outside the rules of the operation, or
+        /// any call that does not come through the approved control agent in
+        /// a host executor store.
+        denied,
+        /// Malformed or out-of-range arguments, a payload that does not match
+        /// the request's response schema, a command aimed at the caller
+        /// itself, or a start past the lineage depth of 16.
+        invalid,
+        /// No such instance, workflow or request in the caller's tenant,
+        /// including an accepted child whose record was deleted.
+        not-found,
+        /// `start` of a workflow whose compilation failed permanently. A
+        /// workflow that is not compiled yet is accepted instead.
+        not-runnable,
+        /// The target is not a direct child of the caller (`cancel`, `pause`,
+        /// `resume`).
+        not-child,
+        /// The call needs a calling instance (identity operations and
+        /// caller-relative filters), and this one runs outside a run.
+        requires-instance,
+        /// A mutation called outside a compiler-emitted operation scope, so it
+        /// would have no replay-safe identity.
+        requires-operation,
+        /// `start` hit the tenant concurrency limit or the control share of
+        /// it. With `retry-after-ms` it is retryable; without it the limit
+        /// can never admit a child (a limit of at most 1, which the parent
+        /// itself holds).
+        capacity,
+        /// The same operation replayed with different arguments.
+        replay-conflict,
+        /// `start` reused a run label the caller already gave another child.
+        label-conflict,
+        /// A request, payload or page over its cap.
+        too-large,
+        /// A transient platform failure; retryable, `retry-after-ms` may hint.
+        unavailable,
+        /// The operation is not available in this build.
+        unsupported,
+        /// `send-signal` found no open request for the signal: none was ever
+        /// opened, or it already closed.
+        not-waiting,
+        /// `send-signal` matched several open requests; pass a request id
+        /// from `list-pending-signals`.
+        ambiguous,
+        /// `send-signal` found the request already answered by another
+        /// operation.
+        already-answered,
+        /// `pause` of a run that cannot pause (not started yet, or finished).
+        not-pausable,
+        /// `resume` of a run that is not explicitly paused.
+        not-paused,
+    }
+
+    /// A failed control call.
+    record control-error {
+        code: error-code,
+        /// Human-readable; never carries payloads.
+        message: string,
+        /// Set on retryable failures: `capacity` while the control share is
+        /// full (a 3-8 s hint), and optionally `unavailable`.
+        retry-after-ms: option<u64>,
+    }
+
+    /// What happens to a child still running when its parent ends. The
+    /// author must choose; the editor preselects `cancel`.
+    enum parent-close-policy {
+        /// Cancel the child when the parent ends in any way (completion,
+        /// failure, cancellation, crash), after a 5 s grace period.
+        cancel,
+        /// Leave the child running.
+        leave-running,
+    }
+
+    /// Lifecycle state of an instance as control reports it.
+    enum instance-status {
+        /// Admitted by `start` and not launched yet.
+        queued,
+        /// Launched, before execution starts.
+        pending,
+        running,
+        /// Parked or paused; see `suspension-reason`.
+        suspended,
+        completed,
+        failed,
+        cancelled,
+        /// Admitted but never launched, and now never will be.
+        not-started,
+    }
+
+    /// Why a `suspended` instance is not running.
+    enum suspension-reason {
+        /// Explicitly paused. A parked run pauses immediately.
+        paused,
+        waiting-signal,
+        waiting-instances,
+        sleeping,
+        shutdown,
+    }
+
+    /// Identity and lifecycle of one instance.
+    record instance-summary {
+        instance-id: string,
+        workflow-id: string,
+        version: option<u32>,
+        run-label: option<string>,
+        parent-instance-id: option<string>,
+        status: instance-status,
+        suspension-reason: option<suspension-reason>,
+        /// Why a terminal instance ended (for example `completed`,
+        /// `application_error`, `cancelled`).
+        termination-reason: option<string>,
+        created-at-ms: u64,
+        started-at-ms: option<u64>,
+        finished-at-ms: option<u64>,
+    }
+
+    /// The terminal output or error of an instance. Values over their cap
+    /// are omitted and flagged rather than truncated.
+    record terminal-result {
+        /// Output JSON, when inlined.
+        output: option<list<u8>>,
+        /// Size of the full output, also when it was omitted.
+        output-bytes: option<u64>,
+        output-omitted: bool,
+        /// Error JSON, when inlined.
+        error: option<list<u8>>,
+        error-omitted: bool,
+    }
+
+    /// `get`: the summary plus, for a terminal instance, its result (output
+    /// inlined up to 1 MiB, error up to 64 KiB).
+    record instance-detail {
+        instance: instance-summary,
+        terminal: terminal-result,
+    }
+
+    /// `start` a child of the calling instance.
+    record start-request {
+        /// A workflow id, never a slug.
+        workflow-id: string,
+        /// Defaults to the workflow's current version, resolved and stored at
+        /// admission so a replay cannot pick a newer one.
+        version: option<u32>,
+        /// The `{data, variables}` input envelope.
+        input: list<u8>,
+        /// Unique per parent for the parent's whole lifetime; 1-1024 bytes of
+        /// printable ASCII.
+        run-label: option<string>,
+        parent-close-policy: parent-close-policy,
+    }
+
+    record start-result {
+        instance-id: string,
+        workflow-id: string,
+        version: u32,
+        run-label: option<string>,
+        /// The operation had already started this child; nothing new ran.
+        replayed: bool,
+    }
+
+    enum sort-field {
+        created-at,
+        finished-at,
+    }
+
+    enum sort-order {
+        ascending,
+        descending,
+    }
+
+    /// Restrict `query` to the children of one parent.
+    variant parent-filter {
+        /// The calling instance's children (`requires-instance` without one).
+        caller,
+        /// The children of this instance.
+        instance(string),
+    }
+
+    /// `query` instances in the caller's tenant. Filters apply before
+    /// pagination.
+    record query-request {
+        workflow-id: option<string>,
+        run-label: option<string>,
+        /// Empty means every status.
+        statuses: list<instance-status>,
+        parent: option<parent-filter>,
+        created-after-ms: option<u64>,
+        created-before-ms: option<u64>,
+        finished-after-ms: option<u64>,
+        finished-before-ms: option<u64>,
+        sort-by: sort-field,
+        order: sort-order,
+        /// 1-100.
+        page-size: u32,
+        page-token: option<string>,
+    }
+
+    record instance-page {
+        items: list<instance-summary>,
+        /// Instances matching the filters across all pages.
+        total: u64,
+        next-page-token: option<string>,
+    }
+
+    /// Where `list-pending-signals` looks.
+    variant signal-scope {
+        instance(string),
+        workflow(string),
+        /// The calling instance's children (`requires-instance` without one).
+        children,
+    }
+
+    record pending-signals-request {
+        scope: signal-scope,
+        /// The target's `WaitForSignal` step id.
+        signal-id: option<string>,
+        action-key: option<string>,
+        /// 1-100.
+        page-size: u32,
+        page-token: option<string>,
+    }
+
+    /// One open `WaitForSignal` request.
+    record pending-signal {
+        instance-id: string,
+        workflow-id: string,
+        /// The waiting step's id.
+        signal-id: string,
+        request-id: string,
+        action-key: option<string>,
+        /// JSON Schema the response must match.
+        response-schema: option<list<u8>>,
+        /// Prompt and correlation context, JSON.
+        context: option<list<u8>>,
+        requested-at-ms: u64,
+        deadline-ms: option<u64>,
+    }
+
+    record pending-signal-page {
+        items: list<pending-signal>,
+        next-page-token: option<string>,
+    }
+
+    /// `send-signal`: answer an open `WaitForSignal` request, validated
+    /// against its response schema.
+    record send-signal-request {
+        instance-id: string,
+        /// The target's `WaitForSignal` step id.
+        signal-id: string,
+        /// Narrow to the request carrying this `action.key`.
+        action-key: option<string>,
+        /// Pick one request when several are open (`ambiguous` otherwise).
+        request-id: option<string>,
+        payload: list<u8>,
+    }
+
+    record send-signal-result {
+        request-id: string,
+        /// This operation had already answered the request.
+        replayed: bool,
+    }
+
+    record cancel-request {
+        instance-id: string,
+        reason: option<string>,
+        /// Cooperative grace before the forced stop: 0-3600000 ms, default
+        /// 5000.
+        grace-ms: option<u64>,
+    }
+
+    /// What a lifecycle command did. Acceptance is not arrival: `requested`
+    /// means the target applies it at its next checkpoint.
+    enum command-outcome {
+        requested,
+        /// Took effect at once: a parked run paused, an unlaunched child
+        /// cancelled, a paused run relaunched.
+        applied,
+        /// The target was already in the requested state.
+        unchanged,
+        /// The target had already finished; nothing changed.
+        already-terminal,
+    }
+
+    record command-result {
+        instance-id: string,
+        outcome: command-outcome,
+        /// This operation had already issued the command.
+        replayed: bool,
+    }
+}
+
+/// Host control operations. Real only in the fresh stores the host executor
+/// runs approved control bytes in; every other store links `denied` stubs.
+///
+/// Reads (`get`, `query`, `list-pending-signals`) cover the caller's tenant.
+/// `send-signal` reaches the caller's children, its ancestors, and requests
+/// that opt in with `action.key`. `cancel`, `pause` and `resume` reach only
+/// direct children: an ancestor is `denied`, anything else `not-child`. No
+/// operation may target the caller itself (`invalid`).
+interface api {
+    use types.{
+        control-error, instance-detail, start-request, start-result, query-request,
+        instance-page, pending-signals-request, pending-signal-page,
+        send-signal-request, send-signal-result, cancel-request, command-result,
+    };
+
+    /// Durably admit a child of the caller and return once it is accepted,
+    /// without waiting for it to run. Replay of the same operation returns
+    /// the same child (`replayed`); changed arguments are `replay-conflict`.
+    /// A reused label is `label-conflict`; lineage deeper than 16 is
+    /// `invalid`; a missing workflow is `not-found`; a permanently failed
+    /// compilation is `not-runnable`, while a workflow not compiled yet is
+    /// accepted. Children count against the tenant concurrency limit (parked
+    /// runs free their slot) and may hold at most `max(1, floor(0.8 x
+    /// limit))` slots; beyond that `capacity` is retryable.
+    start: async func(request: start-request) -> result<start-result, control-error>;
+
+    /// Read one instance of the tenant, with its result once terminal.
+    get: async func(instance-id: string) -> result<instance-detail, control-error>;
+
+    /// Find instances of the tenant, sorted by creation or finish time.
+    query: async func(request: query-request) -> result<instance-page, control-error>;
+
+    /// List open `WaitForSignal` requests.
+    list-pending-signals: async func(request: pending-signals-request) -> result<pending-signal-page, control-error>;
+
+    /// Answer an open request; acceptance does not mean the target handled it.
+    send-signal: async func(request: send-signal-request) -> result<send-signal-result, control-error>;
+
+    /// Cancel a child cooperatively, then force it after the grace period.
+    /// Works in every admission state; a finished child is `already-terminal`.
+    cancel: async func(request: cancel-request) -> result<command-result, control-error>;
+
+    /// Pause a child. A parked (waiting) child pauses immediately
+    /// (`applied`); a running one pauses at its next checkpoint (`requested`).
+    pause: async func(instance-id: string) -> result<command-result, control-error>;
+
+    /// Resume an explicitly paused child. This never answers a
+    /// `WaitForSignal` request.
+    resume: async func(instance-id: string) -> result<command-result, control-error>;
+}
+
+/// What the composed copy of the control agent forwards to. The result is
+/// the capability's JSON output.
+interface executor {
+    use runtara:agent/types@1.0.0.{error-info};
+
+    invoke: async func(capability-id: string, input: list<u8>) -> result<list<u8>, error-info>;
+}
+
+/// Exported by the control agent and called only by the host executor, in a
+/// fresh store where `api` is real.
+interface execution {
+    use runtara:agent/types@1.0.0.{error-info};
+
+    invoke: async func(capability-id: string, input: list<u8>) -> result<list<u8>, error-info>;
+}
+
+world control-client {
+    import executor;
+}
+
+world control-agent-host {
+    import api;
+    export execution;
+}

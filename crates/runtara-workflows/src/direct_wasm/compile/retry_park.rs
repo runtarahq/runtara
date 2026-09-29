@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Store-freeing retry/backoff parking.
 //!
-//! A published workflow-agent parks here too: the suspend sentinel carries the
-//! absolute deadline out to its caller, which re-raises it until the chain
-//! reaches the real instance owner. Only `wasi:cli/run`, which has no wake
-//! channel, keeps a blocking backoff.
+//! A published workflow-agent parks here too: its `suspended` outcome carries
+//! the absolute deadline to its caller, which forwards it until the chain
+//! reaches the real instance owner.
 //!
 //! A retry cannot keep a running component Store alive while it waits.  The
 //! caller derives a distinct retry key for the *next* attempt; this helper
@@ -45,9 +44,7 @@ const RETRY_DEADLINE_STATE_LEN: i32 = 8;
 /// invoke while the backoff is still owed.
 ///
 /// `retry_key_*` identifies the next retry attempt and `delay_ms_local` holds
-/// the already-clamped backoff duration.  This helper is valid only for the
-/// lifecycle invoke ABI; legacy ABI callers retain their historical blocking
-/// lowering because they have nowhere to return a wake.
+/// the already-clamped backoff duration.
 pub(super) fn emit_retry_park_until_deadline(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,

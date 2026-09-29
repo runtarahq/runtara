@@ -3,7 +3,7 @@
 //! cancellation guard; the emitted guest handles errors and assembles results.
 use super::*;
 use runtara_component_host::ChildInvocationSpec;
-use runtara_workflow_wit::isolation_package::AgentInvocationPath;
+use runtara_invocation_contract::AgentInvocationPath;
 use std::sync::atomic::AtomicBool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, watch};
@@ -173,7 +173,7 @@ async fn execute_cancelled_http(parallel: bool, recover: bool, root_stop: bool) 
             agent_catalog: None,
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
         ["http".into()].into(),
     )
@@ -232,7 +232,7 @@ async fn execute_cancelled_http(parallel: bool, recover: bool, root_stop: bool) 
     .unwrap();
     let ticker = super::EpochTicker::spawn(engine);
     let input = serde_json::to_vec(&input).unwrap();
-    let (host, captured) = super::super::wasm_performance_baseline::host(&input);
+    let (host, _captured) = super::super::wasm_performance_baseline::host();
     let root_cancel = Arc::new(AtomicBool::new(false));
     let run_cancel = root_cancel.clone();
     let run_context = context.clone();
@@ -316,13 +316,12 @@ async fn execute_cancelled_http(parallel: bool, recover: bool, root_stop: bool) 
     context.shutdown().await.unwrap();
     assert_eq!(tasks.retained_result_bytes(), 0);
     if root_stop {
-        assert!(matches!(result.exit, InvokeExit::Cancelled));
+        // A Cancelled exit is the whole outcome: root cancellation neither
+        // published an onError recovery nor an ordinary failure.
         assert!(
-            !captured.try_iter().any(|event| matches!(
-                event,
-                CapturedMessage::Completed(_) | CapturedMessage::Failed(_)
-            )),
-            "root cancellation must not publish an onError recovery or ordinary failure"
+            matches!(result.exit, InvokeExit::Cancelled),
+            "root cancellation must not publish an onError recovery or ordinary failure: {:?}",
+            result.exit
         );
     }
     {

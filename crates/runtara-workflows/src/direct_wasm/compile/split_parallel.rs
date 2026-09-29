@@ -113,9 +113,6 @@ pub(super) fn parallel_agent_body<'a>(
     max_retries: u32,
     nested_plan: &'a DirectRunPlan,
 ) -> Option<ParallelAgentBody<'a>> {
-    if !static_data.parallel_enabled {
-        return None;
-    }
     let window = parallel_window?;
     // Split-level durability is fine: the whole-split checkpoint if/else wraps
     // the item region (parallel windows included) unchanged. The shared wait

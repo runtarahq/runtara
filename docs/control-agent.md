@@ -202,10 +202,12 @@ No built-in agent suspends today; agent suspension remains for future
 long-polling agents and may wake only on a timer (`at`). An agent asking to
 wake on instances is refused with `AGENT_INVALID_SUSPENSION`.
 
-A workflow with control, WaitForInstances or suspending steps (or embedding one) cannot be
-published as a workflow-agent, and the composed runtime binding
-(`RUNTARA_DIRECT_RUNTIME_BINDING=composed`) cannot compile it. The full
-context matrix is `operationScopedSteps` in the authoring schema.
+A workflow with control, WaitForInstances or suspending steps (or embedding
+one) may be published as a workflow-agent. The workflow-agent runs inside its
+caller's instance: the runs it starts are children of the caller, its
+WaitForInstances targets are those children, and a park crosses to the caller
+as the `suspended` outcome. The full context matrix is
+`operationScopedSteps` in the authoring schema.
 
 ### Lifecycle (D3, D4)
 
@@ -614,10 +616,10 @@ external batch job, or a long-running provider operation instead of holding a
 worker); no built-in agent uses it since control `wait` became the
 WaitForInstances step, and an agent may now only wake on a timer (`at`).
 
-Today only a composed workflow-agent can suspend its caller, through the
-reserved `__rt_suspended__` error code; any other agent or user error carrying
-it is remapped so it fails (`runtara-workflow-stdlib/src/direct_json.rs`).
-Replace that sentinel with a typed contract:
+This contract is in place: every agent's `invoke` returns
+`result<outcome, error-info>`, where `outcome` is `completed(output)` or
+`suspended({wakes, state})` (`runtara-wit`, `runtara:agent/types`). A
+composed workflow-agent parks its caller the same way. What it provides:
 
 - **Typed result.** The agent WIT gains a suspend result alongside success and
   error: a wake set plus an opaque continuation state blob. Suspension is
@@ -726,10 +728,8 @@ Missing:
   persisted deadlines, and the check-then-park self-wake exist for signals.
   Missing: a wake source for another instance becoming terminal, a durable
   wait/subscription row, a hook on the terminal path that re-evaluates waits
-  (the existing `on_terminal` hook is metrics-only and drops errors), typed
-  agent suspension with continuation state (only compiler-emitted steps and
-  composed workflow-agents can suspend today, via an error sentinel),
-  `suspends` capability metadata and its validation, retention pinning, and
+  (the existing `on_terminal` hook is metrics-only and drops errors),
+  retention pinning, and
   artifact retention for suspended instances.
 
 Related: the component host exports `RUNTARA_HTTP_URL`, `RUNTARA_TENANT_ID`,

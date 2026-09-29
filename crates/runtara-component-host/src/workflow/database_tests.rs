@@ -143,16 +143,24 @@ async fn restricted_instances_deny_all_database_imports_even_with_a_backend() ->
     let linker = crate::build_linker(&engine)?;
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let interface = instance
-        .get_export_index(&mut store, None, crate::lifecycle::LIFECYCLE_INTERFACE_NAME)
+        .get_export_index(&mut store, None, crate::lifecycle::ENTRY_INTERFACE_NAME)
         .unwrap();
     let export = instance
         .get_export_index(&mut store, Some(&interface), "invoke")
         .unwrap();
     let invoke = instance
-        .get_typed_func::<(Vec<u8>,), (Result<WorkflowOutcome, WorkflowErrorInfo>,)>(
+        .get_typed_func::<(String, Vec<u8>), (Result<WorkflowOutcome, WorkflowErrorInfo>,)>(
             &mut store, export,
         )?;
-    let (result,) = invoke.call_async(&mut store, (b"{}".to_vec(),)).await?;
+    let (result,) = invoke
+        .call_async(
+            &mut store,
+            (
+                crate::lifecycle::ENTRY_CAPABILITY.to_owned(),
+                b"{}".to_vec(),
+            ),
+        )
+        .await?;
     let Ok(WorkflowOutcome::Completed(bytes)) = result else {
         panic!("expected a denied database result")
     };

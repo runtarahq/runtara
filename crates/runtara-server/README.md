@@ -45,7 +45,7 @@ timeout, so it is this value rather than runtara-environment's own
 `RUNTARA_DEFAULT_INSTANCE_TIMEOUT_SECS` (3600) that governs anything the server
 starts.
 
-It replaces `RUNTARA_REQUEST_TIMEOUT_MS`, which is the runtara-sdk per-request
+It replaces `RUNTARA_REQUEST_TIMEOUT_MS`, which was the runtara-sdk per-request
 HTTP timeout, in milliseconds, and never meant this. The two never collided in
 effect — a server process does not run the SDK, and `build_env` does not forward
 the variable to workflow guests — but they collided in name and in unit: an

@@ -87,18 +87,28 @@ impl Agent {
             .get_export_index(
                 &mut store,
                 None,
-                "runtara:agent-object-model/capabilities@0.4.0",
+                "runtara:agent-object-model/capabilities@1.0.0",
             )
             .unwrap();
         let export = instance
             .get_export_index(&mut store, Some(&interface), "invoke")
             .unwrap();
-        type Output = (Result<Vec<u8>, runtara_component_host::ErrorInfo>,);
+        type Output = (
+            Result<
+                runtara_component_host::bindings::exports::runtara::agent::capabilities::Outcome,
+                runtara_component_host::ErrorInfo,
+            >,
+        );
         let invoke = instance.get_typed_func::<(String, Vec<u8>), Output>(&mut store, export)?;
         let (output,) = invoke
             .call_async(&mut store, (capability.into(), serde_json::to_vec(&input)?))
             .await?;
-        let output = output.map_err(|e| anyhow::anyhow!("{capability}: {e:?}"))?;
+        let output = match output.map_err(|e| anyhow::anyhow!("{capability}: {e:?}"))? {
+            runtara_component_host::bindings::exports::runtara::agent::capabilities::Outcome::Completed(bytes) => bytes,
+            runtara_component_host::bindings::exports::runtara::agent::capabilities::Outcome::Suspended(_) => {
+                anyhow::bail!("{capability}: suspended outside a workflow")
+            }
+        };
         let value: Value = serde_json::from_slice(&output)?;
         anyhow::ensure!(value["success"] != false, "{capability}: {value}");
         Ok(value)

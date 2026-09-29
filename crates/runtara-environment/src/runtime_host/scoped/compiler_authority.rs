@@ -2,9 +2,7 @@
 use super::*;
 use runtara_component_host::PreparedChildCatalog;
 use runtara_component_host::execution_host::{Entry, ExecutionError, StartRequest};
-use runtara_workflow_wit::isolation_package::{
-    CheckpointNamespace, InvocationSelector, NamespaceFrame,
-};
+use runtara_invocation_contract::{CheckpointNamespace, InvocationSelector, NamespaceFrame};
 
 /// Bound to the exact prepared catalog and inherited parent namespace. Package
 /// reset eligibility and execution ownership remain the root runner's concern.

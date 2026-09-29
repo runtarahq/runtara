@@ -5,7 +5,7 @@
   (import "cleanup" (func $cleanup async))
   (import "ready" (func $ready async))
   (import "trace" (func $trace (param "event" u32)))
-  (import "runtara:host-io/timers@0.1.0" (instance $timers
+  (import "runtara:host/timers@1.0.0" (instance $timers
     (export "sleep" (func async (param "ms" u64)))))
   (component $agent
     (import "request" (func $request async))

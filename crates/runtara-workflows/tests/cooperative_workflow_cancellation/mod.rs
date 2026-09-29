@@ -35,17 +35,8 @@ impl Host {
 
 #[async_trait::async_trait]
 impl RuntimeHost for Host {
-    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
-        self.inner.load_input().await
-    }
     fn instance_id(&self) -> Result<String, String> {
         self.inner.instance_id()
-    }
-    async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
-        self.inner.complete(output).await
-    }
-    async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
-        self.inner.fail(error).await
     }
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
         if self.scenario == Scenario::PreparationDeadline
@@ -413,7 +404,7 @@ fn compile_nested_agents_with_parent(
                 }),
                 agent_slug: Some(slug.clone()),
             },
-            WorkflowAbi::AgentCapabilities,
+            WorkflowRole::PublishedAgent,
             false,
         )?;
         anyhow::ensure!(
@@ -480,7 +471,7 @@ fn compile_nested_agents_with_parent(
             )),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )?;
     compose_direct_workflow_with_extra_dirs(&mut parent, &components, &[staging])?;
@@ -492,6 +483,9 @@ async fn run(scenario: Scenario) -> anyhow::Result<()> {
 }
 
 async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result<()> {
+    // Deadlines here are hundreds of milliseconds: keep a host's first-flow
+    // network stall out of them.
+    super::outbound_fixture::warm_up_process_network();
     let pre_cancel = scenario == Scenario::BeforeLaunch;
     let partial_body = matches!(
         scenario,
@@ -551,7 +545,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
         1
     };
     let host = Arc::new(Host {
-        inner: PersistingRuntimeHost::new(b"{}"),
+        inner: PersistingRuntimeHost::new(),
         requested: AtomicBool::new(pre_cancel),
         requests: AtomicUsize::new(0),
         closed: Notify::new(),
@@ -866,8 +860,7 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
                 agent_slug: None,
             },
             direct_e2e_components_dir(),
-            RuntimeBinding::HostImport,
-            WorkflowAbi::InvokeHostImports,
+            WorkflowRole::Root,
             false,
         )?
     };
@@ -882,8 +875,8 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
     let bytes = fs::read(&compiled.wasm_path)?;
     anyhow::ensure!(
         !bytes
-            .windows(b"runtara:workflow-execution/tasks".len())
-            .any(|bytes| bytes == b"runtara:workflow-execution/tasks"),
+            .windows(b"runtara:workflow/tasks".len())
+            .any(|bytes| bytes == b"runtara:workflow/tasks"),
         "fixture contains the superseded task interface"
     );
     let server_host = host.clone();
@@ -1173,36 +1166,31 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
             };
             anyhow::ensure!(serde_json::from_slice::<Value>(output)? == serde_json::json!({"code": if own_split_deadline {"SPLIT_TIMEOUT"} else {"WHILE_TIMEOUT"},"stepId": if own_split_deadline {"split"} else {"outer"}}), "wrong timeout owner: {:?}", run.exit);
             tokio::time::timeout(Duration::from_secs(2), host.wait_closed()).await?;
-            anyhow::ensure!(host.requests.load(Ordering::SeqCst) == expected_requests, "cancelled AI work sent another request");
+            anyhow::ensure!(host.requests.load(Ordering::SeqCst) == expected_requests, "cancelled AI work sent another request: {} of {} requests", host.requests.load(Ordering::SeqCst), expected_requests);
             anyhow::ensure!(!host.acknowledged.load(Ordering::SeqCst), "scope timeout acknowledged a root command");
             anyhow::ensure!(!host.inner.checkpoints.lock().unwrap().keys().any(|key| key.contains("attempt")), "enclosing timeout became a child attempt checkpoint");
-            anyhow::ensure!(host.inner.failed.lock().unwrap().is_none(), "handled deadline published failure");
             if scenario == Scenario::ParallelDeadlineAfterAssemble {
                 anyhow::ensure!(host.events.lock().unwrap().iter().any(|(kind,payload)| kind == "step_debug_end" && serde_json::from_slice::<Value>(payload).unwrap()["step_id"] == "b"), "fast branch never reached its assembly boundary");
             }
             return anyhow::Ok(());
         }
         if fail_signal_read {
-            anyhow::ensure!(matches!(&run.exit, runtara_component_host::InvokeExit::Failed(error) if error.message == "signal delivery failed"), "signal error lost: {:?}", run.exit);
+            // The returned error is the only failure channel; it records the
+            // transport error verbatim.
+            anyhow::ensure!(matches!(&run.exit, runtara_component_host::InvokeExit::Failed(error) if error.message == "signal delivery failed" && runtara_component_host::runtime_host::error_payload(error) == b"signal delivery failed"), "signal error lost: {:?}", run.exit);
             tokio::time::timeout(Duration::from_secs(2), host.wait_closed()).await?;
             anyhow::ensure!(!host.acknowledged.load(Ordering::SeqCst), "failed signal read was acknowledged");
         } else {
-            anyhow::ensure!(matches!(run.exit, runtara_component_host::InvokeExit::Suspended(_)), "expected lifecycle stop, got {:?}; requests={}; error={:?}", run.exit, host.requests.load(Ordering::SeqCst), host.inner.failed.lock().unwrap());
+            anyhow::ensure!(matches!(run.exit, runtara_component_host::InvokeExit::Suspended(_)), "expected lifecycle stop, got {:?}; requests={}", run.exit, host.requests.load(Ordering::SeqCst));
             anyhow::ensure!(host.acknowledged.load(Ordering::SeqCst), "WASM did not acknowledge the command");
         }
         anyhow::ensure!(
             host.requests.load(Ordering::SeqCst) == expected_requests,
             "unexpected HTTP retry or pre-cancel invocation"
         );
-        anyhow::ensure!(
-            host.inner.completed.lock().unwrap().is_none(),
-            "normal/onError path ran after root cancellation"
-        );
-        if fail_signal_read {
-            anyhow::ensure!(host.inner.failed.lock().unwrap().as_deref() == Some(b"signal delivery failed"), "signal transport error publication changed");
-        } else {
-            anyhow::ensure!(host.inner.failed.lock().unwrap().is_none(), "root cancellation became an ordinary step failure");
-        }
+        // The exit checks above are the whole outcome: a Failed or Suspended
+        // exit means neither the normal/onError path completed nor did root
+        // cancellation become an ordinary step failure.
         if scenario == Scenario::CheckpointCancelBranches {
             let checkpoints = host.inner.checkpoints.lock().unwrap();
             let completed = ["b", "c"].iter().filter(|step| checkpoints.keys().any(|key| key.ends_with(&format!("\"{step}\"]]")))).count();

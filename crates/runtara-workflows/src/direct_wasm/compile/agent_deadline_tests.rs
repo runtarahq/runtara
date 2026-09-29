@@ -72,8 +72,6 @@ struct Host {
     recovery_observed: AtomicBool,
     checkpoint_fault: Mutex<Option<CheckpointFault>>,
     checkpoint_calls: Mutex<Vec<(String, bool)>>,
-    failure_cleanup: Mutex<Option<Arc<tokio::sync::Notify>>>,
-    failure_observed: AtomicBool,
     checkpoint_signal: Mutex<Option<String>>,
     checkpoint_cancel: AtomicBool,
     checkpoint_signal_remaining: AtomicUsize,
@@ -107,9 +105,11 @@ struct Host {
     released_operations: Mutex<Vec<String>>,
     /// Every `operation_wait_close`, in order.
     closed_waits: Mutex<Vec<String>>,
-    /// When the run reported completion. Under a loaded suite the invocation
-    /// can return seconds after this, so budget timing is measured here.
-    completed_at: Mutex<Option<Instant>>,
+    /// When the fixture saw a hanging provider call's connection close: the
+    /// run drops a pending call when its budget expires. Under a loaded suite
+    /// the invocation can return seconds after this, so budget timing is
+    /// measured here.
+    hang_closed_at: Mutex<Option<Instant>>,
 }
 impl Host {
     fn new() -> Self {
@@ -129,8 +129,6 @@ impl Host {
             recovery_observed: AtomicBool::new(false),
             checkpoint_fault: Mutex::new(None),
             checkpoint_calls: Mutex::new(Vec::new()),
-            failure_cleanup: Mutex::new(None),
-            failure_observed: AtomicBool::new(false),
             checkpoint_signal: Mutex::new(None),
             checkpoint_cancel: AtomicBool::new(false),
             checkpoint_signal_remaining: AtomicUsize::new(usize::MAX),
@@ -152,7 +150,7 @@ impl Host {
             continuations: Mutex::new(HashMap::new()),
             released_operations: Mutex::new(Vec::new()),
             closed_waits: Mutex::new(Vec::new()),
-            completed_at: Mutex::new(None),
+            hang_closed_at: Mutex::new(None),
         }
     }
     fn fail_checkpoints(&self, pattern: &str, write: bool) {
@@ -185,25 +183,8 @@ impl Host {
 }
 #[async_trait::async_trait]
 impl RuntimeHost for Host {
-    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
-        Ok(Some(b"{}".to_vec()))
-    }
     fn instance_id(&self) -> Result<String, String> {
         Ok("agent-deadline".into())
-    }
-    async fn complete(&self, _: Vec<u8>) -> Result<(), String> {
-        *self.completed_at.lock().unwrap() = Some(Instant::now());
-        Ok(())
-    }
-    async fn fail(&self, _: Vec<u8>) -> Result<(), String> {
-        let cleanup = self.failure_cleanup.lock().unwrap().clone();
-        if let Some(cleanup) = cleanup {
-            tokio::time::timeout(FIXTURE_WATCHDOG, cleanup.notified())
-                .await
-                .map_err(|_| "storage failure preceded peer cleanup")?;
-            self.failure_observed.store(true, Ordering::SeqCst);
-        }
-        Ok(())
     }
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
         if kind == "late-return-start" {
@@ -590,9 +571,9 @@ fn compile_shaped(
     let published = matches!(shape, Shape::Published(_));
     assert!(!published || !durable);
     let abi = if published {
-        super::super::component::WorkflowAbi::AgentCapabilities
+        super::super::component::WorkflowRole::PublishedAgent
     } else {
-        super::super::component::WorkflowAbi::InvokeHostImports
+        super::super::component::WorkflowRole::Root
     };
     let slug = published.then_some("timed-child");
     let mut scope = &mut graph;
@@ -686,20 +667,19 @@ fn wrap_published(
     dir: &Path,
     components: &str,
 ) -> anyhow::Result<DirectCompilationResult> {
-    use super::super::component::WorkflowAbi;
+    use super::super::component::WorkflowRole;
     assert!(depth > 0);
     let staging = dir.join("published");
     fs::create_dir(&staging)?;
     let mut slug = "timed-child".to_string();
     for level in 0..depth {
-        let mut info = runtara_dsl::agent_meta::workflow_agent_info(
+        let info = runtara_dsl::agent_meta::workflow_agent_info(
             &slug,
             &slug,
             "fixture",
             &HashMap::new(),
             &HashMap::new(),
         );
-        runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
         fs::copy(
             &child.wasm_path,
             staging.join(format!("runtara_agent_{}.wasm", slug.replace('-', "_"))),
@@ -733,9 +713,9 @@ fn wrap_published(
                 agent_slug: (!root).then(|| slug.clone()),
             },
             if root {
-                WorkflowAbi::InvokeHostImports
+                WorkflowRole::Root
             } else {
-                WorkflowAbi::AgentCapabilities
+                WorkflowRole::PublishedAgent
             },
             false,
         )?;
@@ -901,6 +881,7 @@ async fn run_shaped(
             match response {
                 Response::Hang => {
                     assert_eq!(stream.read(&mut buffer).await?, 0);
+                    *server_host.hang_closed_at.lock().unwrap() = Some(Instant::now());
                 }
                 Response::Ok
                 | Response::Error
@@ -1094,18 +1075,23 @@ async fn run_shaped(
         ) {
             let budget = Duration::from_millis(timeout);
             assert!(first_request.lock().unwrap().is_some());
-            // The expiry is observed when the recovered run reports completion,
-            // which follows the pending call's cleanup. The invocation's own
+            // The expiry is observed when the run drops the pending call and
+            // the fixture sees its connection close. The invocation's own
             // return can lag that by seconds of host teardown under a loaded
             // suite, and would charge that teardown to the budget.
-            let completed_at = host
-                .completed_at
-                .lock()
-                .unwrap()
-                .expect("the recovered run reported completion");
+            let expired_at = tokio::time::timeout(FIXTURE_WATCHDOG, async {
+                loop {
+                    if let Some(at) = *host.hang_closed_at.lock().unwrap() {
+                        break at;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the expired call's connection closed");
             // The budget starts before component initialization and the first
             // provider request. Measure its lower bound from invocation entry.
-            let active_elapsed = completed_at.duration_since(
+            let active_elapsed = expired_at.duration_since(
                 host.first_invocation_start
                     .lock()
                     .unwrap()
@@ -1124,7 +1110,7 @@ async fn run_shaped(
                 .lock()
                 .unwrap()
                 .expect("the retry reached the provider");
-            let since_retry = completed_at.duration_since(retried_at);
+            let since_retry = expired_at.duration_since(retried_at);
             let backoff = retried_at.duration_since(first_request.lock().unwrap().unwrap());
             assert!(
                 since_retry < budget - Duration::from_millis(250),
@@ -1470,7 +1456,7 @@ async fn agent_deadline_inherited_budget_interrupts_untimed_cpu_loop_with_frozen
             agent_catalog: None,
             agent_slug: None,
         },
-        super::super::component::WorkflowAbi::InvokeHostImports,
+        super::super::component::WorkflowRole::Root,
         false,
     )?;
     let components = std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")?;

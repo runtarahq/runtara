@@ -4,7 +4,7 @@
 //! control) Agent sites: the `check_sites` backstops, byte-identical
 //! manifests without such sites, and the serialized parallel windows.
 use super::*;
-use crate::direct_wasm::component::{RuntimeBinding, WorkflowAbi};
+use crate::direct_wasm::component::WorkflowRole;
 use crate::direct_wasm::plan::plan_contains_operation_scoped;
 use runtara_dsl::agent_meta::AgentCatalog;
 use serde_json::{Value, json};
@@ -67,7 +67,7 @@ fn input(graph: Value, dir: &Path, catalog: Option<Arc<AgentCatalog>>) -> Direct
 }
 
 /// Compile into a fresh directory kept for the rest of the test.
-fn compile(graph: Value, abi: WorkflowAbi) -> Result<DirectCompilationResult, DirectCompileError> {
+fn compile(graph: Value, abi: WorkflowRole) -> Result<DirectCompilationResult, DirectCompileError> {
     thread_local! {
         static DIRS: std::cell::RefCell<Vec<tempfile::TempDir>> = const {
             std::cell::RefCell::new(Vec::new())
@@ -86,11 +86,8 @@ fn refusal(result: Result<DirectCompilationResult, DirectCompileError>) -> Strin
 
 #[test]
 fn control_sites_compile_under_the_invoke_abi_and_are_marked_in_the_manifest() {
-    let result = compile(
-        single(agent("get", "control", "get")),
-        WorkflowAbi::InvokeHostImports,
-    )
-    .expect("a top-level control read compiles");
+    let result = compile(single(agent("get", "control", "get")), WorkflowRole::Root)
+        .expect("a top-level control read compiles");
     let manifest: DirectWorkflowManifest =
         serde_json::from_slice(&fs::read(&result.manifest_path).unwrap()).unwrap();
     let site = &manifest.graph.agents[0];
@@ -99,11 +96,8 @@ fn control_sites_compile_under_the_invoke_abi_and_are_marked_in_the_manifest() {
     assert_eq!(json["graph"]["agents"][0]["operationScoped"], true);
 
     // Ordinary sites carry neither flag, so their manifests are unchanged.
-    let result = compile(
-        single(agent("plain", "utils", "plain")),
-        WorkflowAbi::InvokeHostImports,
-    )
-    .expect("compiles");
+    let result =
+        compile(single(agent("plain", "utils", "plain")), WorkflowRole::Root).expect("compiles");
     let json: Value = serde_json::from_slice(&fs::read(&result.manifest_path).unwrap()).unwrap();
     let site = &json["graph"]["agents"][0];
     assert!(site.get("operationScoped").is_none() && site.get("suspends").is_none());
@@ -112,36 +106,25 @@ fn control_sites_compile_under_the_invoke_abi_and_are_marked_in_the_manifest() {
 #[test]
 fn the_backstops_refuse_what_validation_reports() {
     let control = || single(agent("get", "control", "get"));
-    let text = refusal(compile(control(), WorkflowAbi::AgentCapabilities));
-    assert!(
-        text.contains("cannot be published as a workflow-agent"),
-        "{text}"
-    );
-    let text = refusal(compile(control(), WorkflowAbi::CliRunHttp));
-    assert!(text.contains("CliRunHttp"), "{text}");
+    // A published workflow-agent calls control under its caller's instance.
+    let result = compile(control(), WorkflowRole::PublishedAgent)
+        .expect("a workflow-agent may call control");
+    assert!(!result.omit_runtime);
+    let world = fs::read_to_string(&result.world_wit_path).unwrap();
+    assert!(world.contains(runtara_wit::workflow::OPERATION), "{world}");
 
     let dir = tempfile::tempdir().unwrap();
     let text = refusal(compile_direct_workflow_with_abi(
         input(control(), dir.path(), None),
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     ));
     assert!(text.contains("without the agent catalog"), "{text}");
 
     let dir = tempfile::tempdir().unwrap();
-    let text = refusal(compile_direct_workflow_composed_configured(
-        input(control(), dir.path(), Some(catalog())),
-        dir.path(),
-        RuntimeBinding::Composed,
-        WorkflowAbi::InvokeHostImports,
-        false,
-    ));
-    assert!(text.contains("composed runtime binding"), "{text}");
-
-    let dir = tempfile::tempdir().unwrap();
     let text = refusal(compile_direct_workflow_with_scoped_agents(
         input(control(), dir.path(), Some(catalog())),
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
         ["control".to_string()].into(),
     ));
@@ -150,11 +133,11 @@ fn the_backstops_refuse_what_validation_reports() {
     // A suspending step without durability or a timeout.
     let mut step = agent("wait", "waiter", "pause");
     step["durable"] = json!(false);
-    let text = refusal(compile(single(step), WorkflowAbi::InvokeHostImports));
+    let text = refusal(compile(single(step), WorkflowRole::Root));
     assert!(text.contains("must be durable"), "{text}");
     let mut step = agent("wait", "waiter", "pause");
     step["timeout"] = Value::Null;
-    let text = refusal(compile(single(step), WorkflowAbi::InvokeHostImports));
+    let text = refusal(compile(single(step), WorkflowRole::Root));
     assert!(text.contains("needs a timeout"), "{text}");
 
     // An AiAgent tool, but not the AiAgent's continuation.
@@ -172,9 +155,9 @@ fn the_backstops_refuse_what_validation_reports() {
             "executionPlan": [edge, {"fromStep": if label.is_some() { "ai" } else { "get" },
                 "toStep": "finish"}]})
     };
-    let text = refusal(compile(ai(Some("lookup")), WorkflowAbi::InvokeHostImports));
+    let text = refusal(compile(ai(Some("lookup")), WorkflowRole::Root));
     assert!(text.contains("AiAgent tool"), "{text}");
-    compile(ai(None), WorkflowAbi::InvokeHostImports)
+    compile(ai(None), WorkflowRole::Root)
         .expect("a control step after an AiAgent is an ordinary site");
 }
 
@@ -195,7 +178,7 @@ fn compile_with_children(
             execution_graph: serde_json::from_value(graph.clone()).expect("child graph"),
         })
         .collect();
-    let result = compile_direct_workflow_with_abi(input, WorkflowAbi::InvokeHostImports, false);
+    let result = compile_direct_workflow_with_abi(input, WorkflowRole::Root, false);
     std::mem::forget(dir);
     result
 }
@@ -235,8 +218,8 @@ fn suspending_sites_compile_wherever_the_matrix_allows() {
         ("While", while_loop),
         ("branch arm", branches),
     ] {
-        let result = compile(graph, WorkflowAbi::InvokeHostImports)
-            .unwrap_or_else(|error| panic!("{shape}: {error}"));
+        let result =
+            compile(graph, WorkflowRole::Root).unwrap_or_else(|error| panic!("{shape}: {error}"));
         assert!(
             result.parallel_pools.is_empty(),
             "{shape}: a suspending site never shares a window: {:?}",
@@ -260,7 +243,7 @@ fn suspending_and_control_sites_are_refused_in_on_wait_and_on_error() {
         agent("pause", "waiter", "pause"),
         agent("get", "control", "get"),
     ] {
-        let text = refusal(compile(wait(single(site)), WorkflowAbi::InvokeHostImports));
+        let text = refusal(compile(wait(single(site)), WorkflowRole::Root));
         assert!(text.contains("onWait"), "{text}");
     }
     let embed = json!({"id": "embed", "stepType": "EmbedWorkflow",
@@ -277,12 +260,11 @@ fn suspending_and_control_sites_are_refused_in_on_wait_and_on_error() {
         "executionPlan": [{"fromStep": "plain", "toStep": "finish"},
             {"fromStep": "plain", "toStep": "pause", "label": "onError"},
             {"fromStep": "pause", "toStep": "finish"}]});
-    let text = refusal(compile(on_error, WorkflowAbi::InvokeHostImports));
+    let text = refusal(compile(on_error, WorkflowRole::Root));
     assert!(text.contains("onError"), "{text}");
 }
 
-/// Each site binds its own `(agent, interface)` import: a suspending site the
-/// agent's `suspendable`, a plain one its `capabilities`, even on one agent.
+/// Suspending and plain sites on one agent share its `capabilities` import.
 /// Only artifacts with a suspending site lay out its refusal error.
 #[test]
 fn per_site_imports_and_the_suspension_error_follow_the_sites() {
@@ -291,21 +273,19 @@ fn per_site_imports_and_the_suspension_error_follow_the_sites() {
         "finish": {"id": "finish", "stepType": "Finish"}},
         "executionPlan": [{"fromStep": "plain", "toStep": "pause"},
             {"fromStep": "pause", "toStep": "finish"}]});
-    let result = compile(two_sites, WorkflowAbi::InvokeHostImports).expect("compiles");
+    let result = compile(two_sites, WorkflowRole::Root).expect("compiles");
     let (world, logic) = world_and_logic(&result);
-    for interface in ["capabilities", "suspendable"] {
-        assert!(
-            world.contains(&format!("import runtara:agent-waiter/{interface}@0.4.0;")),
-            "{interface}: {world}"
-        );
-    }
+    // Both sites call the one `capabilities` interface; only the suspending
+    // one handles a `suspended` outcome through the operation scope.
+    assert!(
+        world.contains("import runtara:agent-waiter/capabilities@1.0.0;"),
+        "{world}"
+    );
+    assert!(!world.contains("suspendable"), "{world}");
     assert!(contains(&logic, b"AGENT_INVALID_SUSPENSION"));
 
-    let read_only = compile(
-        single(agent("get", "control", "get")),
-        WorkflowAbi::InvokeHostImports,
-    )
-    .expect("compiles");
+    let read_only =
+        compile(single(agent("get", "control", "get")), WorkflowRole::Root).expect("compiles");
     let (world, logic) = world_and_logic(&read_only);
     assert!(!world.contains("suspendable"), "{world}");
     assert!(!contains(&logic, b"AGENT_INVALID_SUSPENSION"));
@@ -327,11 +307,8 @@ fn a_parallel_split_body_with_a_control_step_runs_sequentially() {
             "config": {"value": {"valueType": "immediate", "value": [1, 2, 3]}, "parallelism": 4},
             "subgraph": single(body)}))
     };
-    let plain = compile(
-        split(agent("call", "utils", "plain")),
-        WorkflowAbi::InvokeHostImports,
-    )
-    .expect("compiles");
+    let plain =
+        compile(split(agent("call", "utils", "plain")), WorkflowRole::Root).expect("compiles");
     assert!(
         plain.parallel_pools.contains_key("utils"),
         "an ordinary body gets a window: {:?}",
@@ -339,11 +316,8 @@ fn a_parallel_split_body_with_a_control_step_runs_sequentially() {
     );
     assert!(!split_body_is_scoped(&plain));
 
-    let scoped = compile(
-        split(agent("call", "control", "get")),
-        WorkflowAbi::InvokeHostImports,
-    )
-    .expect("compiles");
+    let scoped =
+        compile(split(agent("call", "control", "get")), WorkflowRole::Root).expect("compiles");
     assert!(
         scoped.parallel_pools.is_empty(),
         "a control body is serialized: {:?}",
@@ -363,20 +337,14 @@ fn a_branch_group_with_a_control_step_runs_sequentially() {
                 {"fromStep": "start", "toStep": "left"}, {"fromStep": "start", "toStep": "right"},
                 {"fromStep": "left", "toStep": "join"}, {"fromStep": "right", "toStep": "join"}]})
     };
-    let plain = compile(
-        fan_out(agent("left", "utils", "plain")),
-        WorkflowAbi::InvokeHostImports,
-    )
-    .expect("compiles");
+    let plain =
+        compile(fan_out(agent("left", "utils", "plain")), WorkflowRole::Root).expect("compiles");
     assert!(
         !plain.parallel_pools.is_empty(),
         "ordinary branches run concurrently"
     );
-    let scoped = compile(
-        fan_out(agent("left", "control", "get")),
-        WorkflowAbi::InvokeHostImports,
-    )
-    .expect("compiles");
+    let scoped =
+        compile(fan_out(agent("left", "control", "get")), WorkflowRole::Root).expect("compiles");
     assert!(
         scoped.parallel_pools.is_empty(),
         "a group holding a control step serializes: {:?}",
@@ -404,13 +372,10 @@ fn control_sites_import_the_operation_scope_even_when_not_durable() {
     for durable in [true, false] {
         let mut graph = single(agent("stop", "control", "get"));
         graph["durable"] = json!(durable);
-        let result = compile(graph, WorkflowAbi::InvokeHostImports).expect("compiles");
+        let result = compile(graph, WorkflowRole::Root).expect("compiles");
         let (world, logic) = world_and_logic(&result);
         assert!(
-            world.contains(&format!(
-                "import {};",
-                runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME
-            )),
+            world.contains(&format!("import {};", runtara_wit::workflow::OPERATION)),
             "durable={durable}: {world}"
         );
         assert!(
@@ -423,7 +388,7 @@ fn control_sites_import_the_operation_scope_even_when_not_durable() {
         );
         assert!(contains(
             &logic,
-            runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME.as_bytes()
+            runtara_wit::workflow::OPERATION.as_bytes()
         ));
     }
 }
@@ -433,11 +398,8 @@ fn control_sites_import_the_operation_scope_even_when_not_durable() {
 /// the one the compiler emitted before scoped sites existed.
 #[test]
 fn unscoped_workflows_carry_nothing_of_the_operation_scope() {
-    let result = compile(
-        single(agent("plain", "utils", "plain")),
-        WorkflowAbi::InvokeHostImports,
-    )
-    .expect("compiles");
+    let result =
+        compile(single(agent("plain", "utils", "plain")), WorkflowRole::Root).expect("compiles");
     let (world, logic) = world_and_logic(&result);
     assert!(!world.contains("workflow-operation"), "{world}");
     assert!(!contains(&logic, b"workflow-operation"));
@@ -446,8 +408,7 @@ fn unscoped_workflows_carry_nothing_of_the_operation_scope() {
     // The same world as the unscoped emitter produces from its inputs alone.
     let artifacts = crate::direct_wasm::component::emit_direct_component_artifacts_scoped(
         &["utils".to_string()],
-        RuntimeBinding::HostImport,
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
         None,
         &Default::default(),
@@ -461,23 +422,20 @@ fn unscoped_workflows_carry_nothing_of_the_operation_scope() {
     assert_eq!(artifacts.world_wit, result.component_artifacts.world_wit);
 }
 
-/// (c) The offsets the emitter reads from a `suspendable.invoke` result are
-/// the canonical layout of the WIT, and the two agent interfaces are
-/// type-identical in their flat signature (which is why (b) is behavioural).
+/// (c) The offsets the emitter reads from an `invoke` result are the
+/// canonical layout of the WIT.
 #[test]
 fn the_emitted_result_offsets_match_the_wit_layout() {
     use wit_parser::{Int, Resolve, SizeAlign, Type, TypeDefKind};
-    let mut resolve = Resolve::default();
-    resolve
-        .push_str("agent.wit", runtara_agent_wit::RUNTARA_AGENT_WIT)
-        .unwrap();
-    resolve
-        .push_str("agent-suspension.wit", runtara_agent_suspension::WIT)
-        .unwrap();
+    let mut resolve: Resolve = runtara_wit::resolve().unwrap();
+    let shape = runtara_wit::AgentShape {
+        suspendable: true,
+        ..Default::default()
+    };
     let package = resolve
         .push_str(
             "probe.wit",
-            &agent_wit_package_with_interfaces("suspend-probe", false, true),
+            &runtara_wit::agent_package("suspend-probe", shape),
         )
         .unwrap();
     let mut sizes = SizeAlign::default();
@@ -497,11 +455,11 @@ fn the_emitted_result_offsets_match_the_wit_layout() {
         },
         other => panic!("not a variant: {other:?}"),
     };
-    let Some(Type::Id(result)) = invoke("suspendable").result else {
-        panic!("suspendable.invoke returns a result");
+    let Some(Type::Id(result)) = invoke("capabilities").result else {
+        panic!("capabilities.invoke returns a result");
     };
     let TypeDefKind::Result(result) = &resolve.types[result].kind else {
-        panic!("suspendable.invoke returns a result");
+        panic!("capabilities.invoke returns a result");
     };
     let result_payload =
         at(sizes.payload_offset(Int::U8, [result.ok.as_ref(), result.err.as_ref()]));
@@ -578,18 +536,5 @@ fn the_emitted_result_offsets_match_the_wit_layout() {
     assert_eq!(
         at(sizes.payload_offset(Int::U8, [result.ok.as_ref(), result.err.as_ref()])),
         DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET
-    );
-
-    // Type-identical flat signatures: only the result's shape differs.
-    let mangling = wit_parser::ManglingAndAbi::Legacy(wit_parser::LiftLowerAbi::AsyncCallback);
-    let signature =
-        |interface: &str| resolve.wasm_signature(mangling.import_variant(), invoke(interface));
-    assert_eq!(
-        signature("capabilities").params,
-        signature("suspendable").params
-    );
-    assert_eq!(
-        signature("capabilities").results,
-        signature("suspendable").results
     );
 }

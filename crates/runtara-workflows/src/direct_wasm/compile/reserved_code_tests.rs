@@ -1,14 +1,12 @@
-//! An agent outside the staging dirs cannot use the reserved park codes.
+//! An error code never parks a parent.
 //!
-//! `__rt_on_signal__` and `__rt_suspended__` are how a composed workflow-agent's
-//! signal wait and lifecycle suspend cross the capability boundary. The parent
-//! re-raises them only for agents it treats as workflow-agents, and the stdlib
-//! remaps them when a workflow's own Error step spoofs them. The fixture here is
-//! a hand-written agent that returns either code directly, so neither guard in
-//! the child applies. Whatever its catalog entry claims, it must never park or
-//! suspend its parent.
+//! `__rt_on_signal__` and `__rt_suspended__` once carried a composed
+//! workflow-agent's park across the capability boundary. A park now crosses
+//! only as the `suspended` outcome, so these are ordinary error codes. The
+//! fixture is a hand-written agent that returns either code directly: whatever
+//! its catalog entry claims, it must never park or suspend its parent.
 use super::*;
-use crate::direct_wasm::WorkflowAbi;
+use crate::direct_wasm::WorkflowRole;
 
 const AGENT_ID: &str = "reserved-code";
 const RESERVED_CODES: [&str; 2] = ["__rt_on_signal__", "__rt_suspended__"];
@@ -18,9 +16,8 @@ fn bundle() -> String {
         .expect("build components and set RUNTARA_AGENT_COMPONENTS_DIR")
 }
 
-/// Sidecar and catalog entry for the fixture. `tagged` stamps it as a
-/// certified non-suspending workflow-agent, the tags that make a parent emit
-/// the reserved-code re-raise.
+/// Sidecar and catalog entry for the fixture. `tagged` keeps the
+/// `workflow-agent` tag, which makes a parent forward its `suspended` outcome.
 fn fixture_info(tagged: bool) -> runtara_dsl::agent_meta::AgentInfo {
     let mut info = runtara_dsl::agent_meta::workflow_agent_info(
         AGENT_ID,
@@ -29,7 +26,6 @@ fn fixture_info(tagged: bool) -> runtara_dsl::agent_meta::AgentInfo {
         &HashMap::new(),
         &HashMap::new(),
     );
-    runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
     if !tagged {
         for capability in &mut info.capabilities {
             capability.tags.clear();
@@ -150,13 +146,13 @@ fn compile_parent_at(
             }),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )?)
 }
 
-/// Case (a): the catalog says workflow-agent, so the parent's code would
-/// re-raise the reserved codes. A component resolved from the primary dir is
+/// Case (a): the catalog says workflow-agent, so the parent would forward the
+/// agent's `suspended` outcome. A component resolved from the primary dir is
 /// never a staged workflow-agent, whatever its sidecar says, so composition
 /// refuses the pair rather than hand that agent a park.
 #[test]
@@ -171,7 +167,7 @@ fn a_primary_dir_agent_tagged_workflow_agent_does_not_compose() -> anyhow::Resul
                 &components,
                 &[dir.path().join("staging")],
             )
-            .expect_err("a workflow-agent the parent re-raises for must come from staging");
+            .expect_err("a workflow-agent the parent forwards parks for must come from staging");
             let message = error.to_string();
             assert!(
                 message.contains(AGENT_ID) && message.contains("staging"),
@@ -213,10 +209,9 @@ fn a_nested_primary_dir_agent_tagged_workflow_agent_does_not_compose() -> anyhow
     Ok(())
 }
 
-/// Case (b): an untagged native agent gets no re-raise at all. A raw reserved
-/// code is an ordinary failure: `onError` routes it (and sees the raw step
-/// error), and without a route the parent fails with the code remapped to
-/// `<code>:user`. It never suspends or parks the parent.
+/// Case (b): an untagged agent's former reserved code is an ordinary
+/// failure: `onError` routes it, and without a route the parent fails with the
+/// code unchanged. It never suspends or parks the parent.
 #[tokio::test]
 async fn a_native_agent_returning_a_reserved_code_fails_its_step() -> anyhow::Result<()> {
     for code in RESERVED_CODES {
@@ -236,13 +231,9 @@ async fn a_native_agent_returning_a_reserved_code_fails_its_step() -> anyhow::Re
                         "{code}: onError must see the agent's failure: {output}"
                     );
                 }
-                // The root's terminal Err passes through the stdlib remap, so
-                // the raw reserved code never leaves the workflow: a caller
-                // that re-raises it could otherwise be parked by it.
                 (false, InvokeExit::Failed(error)) => assert_eq!(
-                    error.code,
-                    format!("{code}:user"),
-                    "{code}: the parent must fail with the remapped code: {error:?}"
+                    error.code, code,
+                    "{code}: the parent must fail with the code: {error:?}"
                 ),
                 (_, other) => panic!(
                     "{code} (onError={route_on_error}): a native agent's reserved code must \

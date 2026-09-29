@@ -5,7 +5,7 @@
 ;; It deliberately never calls task.cancel/task.return. The parent must remain
 ;; blocked in subtask.cancel until the host aborts the entire execution.
 (component
-  (import "runtara:outbound-http/client@0.1.0" (instance $http
+  (import "runtara:host/http@1.0.0" (instance $http
                 (type $connection-def (record (field "connection-id" string) (field "url" string)
                     (field "endpoint" (option string)) (field "endpoint-ref" (option string))
                     (field "ai-provider" (option string)) (field "aws-service" (option string))))
@@ -82,12 +82,19 @@
       (export "new" (func $new)) (export "join" (func $join))))))
   (type $error (record (field "code" string) (field "message" string)
     (field "category" string) (field "severity" string) (field "retryable" bool)
-    (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
+    (field "retry-after-ms" (option u64)) (field "attributes" (option string)) (field "details" (option string))))
+  (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
+  (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+    (case "instances" string)))
+  (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+  (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
   (func $invoke async (param "capability-id" string) (param "input" (list u8))
-    (result (result (list u8) (error $error)))
+    (result (result $outcome (error $error)))
     (canon lift (core func $code "invoke") async (callback (func $code "callback"))
       (memory $memory "memory") (realloc (func $memory "realloc"))))
   (instance $capabilities
     (export "error-info" (type $error))
+    (export "signal-wait" (type $signal)) (export "wake" (type $wake))
+    (export "suspension" (type $suspension)) (export "outcome" (type $outcome))
     (export "invoke" (func $invoke)))
-  (export "runtara:agent-http/capabilities@0.4.0" (instance $capabilities)))
+  (export "runtara:agent-http/capabilities@1.0.0" (instance $capabilities)))

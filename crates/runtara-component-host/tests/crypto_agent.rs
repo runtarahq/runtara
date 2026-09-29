@@ -8,6 +8,7 @@ mod common;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use runtara_component_host::bindings::exports::runtara::agent::capabilities::Outcome;
 use runtara_component_host::{
     CallContext, EngineConfig, HostState, build_engine, build_linker, instantiate, load_agent,
 };
@@ -43,7 +44,7 @@ async fn crypto_invoke_hash() -> anyhow::Result<()> {
         .expect("invoke export inside capabilities");
     type InvokeFunc = wasmtime::component::TypedFunc<
         (String, Vec<u8>),
-        (Result<Vec<u8>, runtara_component_host::ErrorInfo>,),
+        (Result<Outcome, runtara_component_host::ErrorInfo>,),
     >;
     let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
     let (result,) = invoke
@@ -52,7 +53,11 @@ async fn crypto_invoke_hash() -> anyhow::Result<()> {
             ("hash".to_string(), br#"{"data":"hello"}"#.to_vec()),
         )
         .await?;
-    let result = result.map_err(|e| anyhow::anyhow!("guest error: {}: {}", e.code, e.message))?;
+    let result =
+        match result.map_err(|e| anyhow::anyhow!("guest error: {}: {}", e.code, e.message))? {
+            Outcome::Completed(bytes) => bytes,
+            Outcome::Suspended(_) => anyhow::bail!("crypto:hash suspended outside a workflow"),
+        };
 
     // SHA-256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
     let out: serde_json::Value = serde_json::from_slice(&result)?;

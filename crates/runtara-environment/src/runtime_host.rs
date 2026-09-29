@@ -1,34 +1,24 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Persistence-backed [`RuntimeHost`]: the native replacement for the guest
-//! runtime component + HTTP SDK backend + core guest-protocol HTTP chain.
+//! Persistence-backed [`RuntimeHost`]: the production implementation of the
+//! `runtara:workflow/runtime` interface.
 //!
-//! A workflow composed with `RuntimeBinding::HostImport` imports
-//! `runtara:workflow-runtime/runtime`; the component host binds each function
-//! to this implementation, which delegates straight to
-//! `runtara_core::instance_handlers` over the environment's shared
-//! `Arc<dyn Persistence>` — no HTTP loopback, no `EmbeddedBackend` (whose
-//! per-call `block_on` would nest tokio runtimes).
+//! Every composed workflow imports `runtara:workflow/runtime`; the
+//! component host binds each function to this implementation, which delegates
+//! straight to `runtara_core::instance_handlers` over the environment's shared
+//! `Arc<dyn Persistence>` — no HTTP loopback.
 //!
-//! Semantics parity is the load-bearing property here. Each method reproduces,
-//! observably, what the composed guest runtime did end-to-end:
-//!
-//! - Signal polling is rate-limited like the SDK (default 1s), non-destructive
-//!   until acknowledged, and consumed lifecycle signals trigger the same
-//!   server-side acknowledgement + status transitions (`handle_signal_ack`)
-//!   the SDK's `acknowledge_cancellation`/`acknowledge_pause`/
-//!   `acknowledge_shutdown` free functions performed, plus the same
-//!   `suspended` instance event where the guest called `sdk.suspended()`.
+//! - Signal polling is rate-limited (default 1s) and non-destructive until
+//!   acknowledged; consumed lifecycle signals trigger server-side
+//!   acknowledgement + status transitions (`handle_signal_ack`), plus a
+//!   `suspended` instance event where a pause is honoured.
 //! - `durable_sleep_checkpoint` delegates to core `handle_sleep`: persist the
 //!   checkpoint, then sleep in-process — for the full duration unless a cancel
 //!   or shutdown arrives, which cuts the sleep short so the guest's next
-//!   `check-signals` can act on it. The embedded SDK backend's resume-remaining
-//!   math is deliberately NOT ported — the guest's HTTP backend never had it,
-//!   and differential parity with the composed artifact is the acceptance gate
+//!   `check-signals` can act on it. There is no resume-remaining math
 //!   (absolute-deadline wake supersedes this in a later phase).
-//! - A local cancelled flag mirrors `runtara_sdk::inst_id.as_str()_CANCELLED` so
-//!   `is_cancelled` short-circuits after a consumed cancel/shutdown, exactly
-//!   like `runtara_sdk::is_cancelled()`.
+//! - A per-run cancelled flag makes `is_cancelled` short-circuit after a
+//!   consumed cancel/shutdown.
 
 mod inputs;
 pub mod scoped;
@@ -43,7 +33,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use runtara_component_host::runtime_host::{
-    RuntimeCheckpointResult, RuntimeCustomSignalInfo, RuntimeHost, RuntimeSignalInfo,
+    RunTerminal, RuntimeCheckpointResult, RuntimeCustomSignalInfo, RuntimeHost, RuntimeSignalInfo,
 };
 use runtara_core::instance_handlers::{
     CheckpointRequest, GetCheckpointRequest, InstanceEvent, InstanceEventType,
@@ -53,11 +43,9 @@ use runtara_core::instance_handlers::{
 };
 use runtara_core::persistence::Persistence;
 
-/// Default minimum interval between signal polls, mirroring the SDK's
-/// `RUNTARA_SIGNAL_POLL_INTERVAL_MS` default. Tight guest loops (While, wait
-/// polls) call `is-cancelled`/`check-signals` every iteration; the limiter
-/// keeps that from hammering persistence, exactly as it kept the guest from
-/// hammering the HTTP API.
+/// Default minimum interval between signal polls. Tight guest loops (While,
+/// wait polls) call `is-cancelled`/`check-signals` every iteration; the
+/// limiter keeps that from hammering persistence.
 const DEFAULT_SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// Persistence-backed runtime host for one workflow instance run.
@@ -66,14 +54,9 @@ pub struct PersistenceRuntimeHost {
     state: Arc<InstanceHandlerState>,
     instance_id: String,
     debug_mode: bool,
-    /// The instance's enriched input envelope, supplied by a launch that had
-    /// just written it. `None` means `load_input` reads the store, which is
-    /// what a wake or resume must do — see
-    /// [`crate::runner::traits::LaunchOptions::prepersisted_input`].
-    prepersisted_input: Option<Vec<u8>>,
-    /// Mirrors `runtara_sdk::inst_id.as_str()_CANCELLED` (per-run, not process-global).
+    /// Set once a cancel/shutdown is consumed (per-run, not process-global).
     cancelled: AtomicBool,
-    /// Signal-poll rate limiter state (mirrors the SDK's `last_signal_poll`).
+    /// Signal-poll rate limiter state.
     last_signal_poll: std::sync::Mutex<Option<Instant>>,
     signal_poll_interval: Duration,
     /// Set when a durable sleep was cut short by a pending cancel/shutdown and
@@ -102,7 +85,6 @@ impl PersistenceRuntimeHost {
             state,
             instance_id,
             debug_mode,
-            prepersisted_input: None,
 
             cancelled: AtomicBool::new(false),
             last_signal_poll: std::sync::Mutex::new(None),
@@ -124,16 +106,6 @@ impl PersistenceRuntimeHost {
         launch: runtara_component_host::trusted::TrustedLaunch,
     ) -> Self {
         self.trusted_launch = launch;
-        self
-    }
-
-    /// Serve `load_input` from these bytes instead of reading the store.
-    ///
-    /// Only a first-start launch may set this, and only with the bytes it has
-    /// just persisted; anything else must leave it unset so a woken instance
-    /// still resumes on its real input.
-    pub fn with_prepersisted_input(mut self, input: Option<Vec<u8>>) -> Self {
-        self.prepersisted_input = input;
         self
     }
 
@@ -343,7 +315,7 @@ impl PersistenceRuntimeHost {
         .map_err(Self::err)
     }
 
-    /// The `sdk.suspended()` equivalent: record a suspended instance event
+    /// Record a suspended instance event
     /// (status transition guarded by `if_running` inside the handler).
     async fn suspended_event(&self) -> Result<(), String> {
         self.event(InstanceEventType::EventSuspended, None, Vec::new(), None)
@@ -400,8 +372,7 @@ impl PersistenceRuntimeHost {
         }
     }
 
-    /// Map a handler signal to its wire name, mirroring the guest runtime's
-    /// `signal_type_name`.
+    /// Map a handler signal to its wire name.
     fn signal_type_name(signal_type: i32) -> &'static str {
         match Self::signal_type_of(signal_type) {
             Some(SignalType::SignalCancel) => "cancel",
@@ -419,29 +390,17 @@ impl PersistenceRuntimeHost {
             command_id: signal.command_id,
             payload: signal.payload,
             // The guest-protocol handlers never scope lifecycle signals to a
-            // checkpoint; the composed runtime forwarded `None` here too.
+            // checkpoint.
             checkpoint_id: None,
         }
     }
 }
 
+/// Attempts at the terminal write before the run is left to the monitor.
+const TERMINAL_WRITE_ATTEMPTS: u32 = 5;
+
 #[async_trait::async_trait]
 impl RuntimeHost for PersistenceRuntimeHost {
-    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
-        self.escalate_if_cancel_ignored().await;
-        if let Some(input) = &self.prepersisted_input {
-            return Ok(Some(input.clone()));
-        }
-        let instance = self
-            .state
-            .persistence
-            .get_instance(&self.instance_id)
-            .await
-            .map_err(Self::err)?
-            .ok_or_else(|| format!("instance {} not found", self.instance_id))?;
-        Ok(instance.input)
-    }
-
     fn trusted_launch(&self) -> runtara_component_host::trusted::TrustedLaunch {
         self.trusted_launch
     }
@@ -450,21 +409,43 @@ impl RuntimeHost for PersistenceRuntimeHost {
         Ok(self.instance_id.clone())
     }
 
-    async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
+    /// Persist the terminal result through the same guarded event path the
+    /// guest's calls used: dropped once the run is being cancelled, written
+    /// only while the instance is running. A store error is retried, because
+    /// no guest is left to call again and the monitor would otherwise record
+    /// the run as crashed.
+    async fn terminal(&self, terminal: RunTerminal) -> Result<(), String> {
+        // A guest that ignored a cancel after an interrupted sleep does not
+        // get to publish: escalating sets the cancel flag the event checks.
         self.escalate_if_cancel_ignored().await;
-        self.event(InstanceEventType::EventCompleted, None, output, None)
-            .await
-    }
-
-    async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
-        self.escalate_if_cancel_ignored().await;
-        self.event(InstanceEventType::EventFailed, None, error, None)
-            .await
+        let (event_type, payload) = match terminal {
+            RunTerminal::Completed(output) => (InstanceEventType::EventCompleted, output),
+            RunTerminal::Failed(error) => (InstanceEventType::EventFailed, error),
+        };
+        let mut delay = Duration::from_millis(50);
+        let mut attempt = 1;
+        loop {
+            match self.event(event_type, None, payload.clone(), None).await {
+                Ok(()) => return Ok(()),
+                Err(error) if attempt < TERMINAL_WRITE_ATTEMPTS => {
+                    tracing::warn!(
+                        instance_id = %self.instance_id,
+                        attempt,
+                        error = %error,
+                        "terminal write failed; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_secs(2));
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
         self.escalate_if_cancel_ignored().await;
-        // SDK wire shape: event_type "custom", subtype = kind.
+        // Wire shape: event_type "custom", subtype = kind.
         self.event(InstanceEventType::EventCustom, None, payload, Some(kind))
             .await
     }
@@ -764,9 +745,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_input_returns_stored_enriched_bytes() {
+    async fn instance_id_and_debug_mode_are_reported() {
         let (_p, host, inst_id) = setup().await;
-        assert_eq!(host.load_input().await.unwrap(), Some(INPUT.to_vec()));
         assert_eq!(host.instance_id().unwrap(), inst_id.as_str());
         assert!(!host.debug_mode_enabled().unwrap());
     }
@@ -837,7 +817,9 @@ mod tests {
     #[tokio::test]
     async fn complete_persists_output_and_terminal_status() {
         let (p, host, inst_id) = setup().await;
-        host.complete(b"{\"result\":1}".to_vec()).await.unwrap();
+        host.terminal(RunTerminal::Completed(b"{\"result\":1}".to_vec()))
+            .await
+            .unwrap();
         let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
         assert_eq!(inst.status, CoreInstanceStatus::Completed);
         assert_eq!(inst.output.as_deref(), Some(b"{\"result\":1}".as_slice()));
@@ -855,8 +837,12 @@ mod tests {
                 .await
                 .unwrap();
             let host = PersistenceRuntimeHost::from_persistence(p.clone(), id.clone(), false);
-            host.complete(b"{}".to_vec()).await.unwrap();
-            host.complete(b"replacement output".to_vec()).await.unwrap();
+            host.terminal(RunTerminal::Completed(b"{}".to_vec()))
+                .await
+                .unwrap();
+            host.terminal(RunTerminal::Completed(b"replacement output".to_vec()))
+                .await
+                .unwrap();
             let instance = p.get_instance(&id).await.unwrap().unwrap();
             assert_eq!(instance.run_label.as_deref(), label);
             assert_eq!(instance.status, CoreInstanceStatus::Completed);
@@ -867,7 +853,9 @@ mod tests {
     #[tokio::test]
     async fn fail_persists_error_and_terminal_status() {
         let (p, host, inst_id) = setup().await;
-        host.fail(b"boom".to_vec()).await.unwrap();
+        host.terminal(RunTerminal::Failed(b"boom".to_vec()))
+            .await
+            .unwrap();
         let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
         assert_eq!(inst.status, CoreInstanceStatus::Failed);
     }
@@ -1435,7 +1423,9 @@ mod tests {
             .await
             .unwrap();
         // Stale guest proceeds to Finish and reports completion.
-        host.complete(br#"{"done":true}"#.to_vec()).await.unwrap();
+        host.terminal(RunTerminal::Completed(br#"{"done":true}"#.to_vec()))
+            .await
+            .unwrap();
 
         let inst = p.get_instance(inst_id.as_str()).await.unwrap().unwrap();
         assert_eq!(
@@ -1462,8 +1452,12 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(true));
         let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), id.clone(), false)
             .with_cancel_token(cancel);
-        host.complete(b"late output".to_vec()).await.unwrap();
-        host.fail(b"late error".to_vec()).await.unwrap();
+        host.terminal(RunTerminal::Completed(b"late output".to_vec()))
+            .await
+            .unwrap();
+        host.terminal(RunTerminal::Failed(b"late error".to_vec()))
+            .await
+            .unwrap();
         host.breakpoint_pause().await.unwrap();
         let instance = p.get_instance(&id).await.unwrap().unwrap();
         assert_eq!(instance.status, CoreInstanceStatus::Running);
@@ -1491,10 +1485,14 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let host = PersistenceRuntimeHost::from_persistence(Arc::clone(&p), id.clone(), false)
             .with_cancel_token(Arc::clone(&cancel));
-        host.complete(b"accepted output".to_vec()).await.unwrap();
+        host.terminal(RunTerminal::Completed(b"accepted output".to_vec()))
+            .await
+            .unwrap();
         let before = p.get_instance(&id).await.unwrap().unwrap();
         cancel.store(true, Ordering::SeqCst);
-        host.fail(b"late error".to_vec()).await.unwrap();
+        host.terminal(RunTerminal::Failed(b"late error".to_vec()))
+            .await
+            .unwrap();
         let after = p.get_instance(&id).await.unwrap().unwrap();
         assert_eq!(after.status, CoreInstanceStatus::Completed);
         assert_eq!(after.output, before.output);
@@ -1571,7 +1569,9 @@ mod tests {
         host.durable_sleep_checkpoint("delay-2".into(), b"s".to_vec(), 10)
             .await
             .unwrap();
-        host.complete(br#"{"ok":true}"#.to_vec()).await.unwrap();
+        host.terminal(RunTerminal::Completed(br#"{"ok":true}"#.to_vec()))
+            .await
+            .unwrap();
 
         assert!(!cancel.load(Ordering::SeqCst));
         assert_eq!(
@@ -1594,8 +1594,8 @@ mod tests {
         p.insert_signal(inst_id.as_str(), CoreSignalType::Cancel, b"")
             .await
             .unwrap();
-        // Within the interval the poll is suppressed — parity with the SDK's
-        // limiter; the signal stays pending and undetected for now.
+        // Within the interval the poll is suppressed by the limiter; the
+        // signal stays pending and undetected for now.
         assert!(!host.is_cancelled().await.unwrap());
         assert!(
             p.get_pending_signal(inst_id.as_str())

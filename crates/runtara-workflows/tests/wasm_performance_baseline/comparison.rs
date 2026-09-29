@@ -12,7 +12,7 @@ use runtara_component_host::precompile::{
 use runtara_component_host::{
     ChildInvocationScope, InvocationScopeFactory, PreparedInvocationLauncher, PreparedWorkflow,
 };
-use runtara_workflow_wit::isolation_package::{PackageLimits, parse};
+use runtara_invocation_contract::{PackageLimits, parse};
 use runtara_workflows::direct_wasm::compose_direct_workflow_with_isolated_agents;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -270,7 +270,7 @@ fn measure(
             .unwrap();
         link_times.push(micros(start));
         assert_eq!(pre.child_catalog().is_some(), isolated);
-        let (host, _rx) = host(&input);
+        let (host, _rx) = host();
         let result = runtime.block_on(execute(executor, &pre, host, &input, false));
         cold_times.push(micros(total));
         validate(case, &result.bytes);
@@ -308,7 +308,7 @@ fn measure(
         } else {
             [true, false]
         } {
-            let (host, rx) = host(&input);
+            let (host, rx) = host();
             let start = Instant::now();
             let result =
                 runtime.block_on(execute(executor, &pre, host.clone(), &input, instrument));
@@ -385,17 +385,13 @@ fn compare(first: Backend, smoke: bool) -> Value {
     }
     let executable_sha256 = format!("{:x}", hasher.finalize());
     let components = shared_components_dir();
-    let dependencies: Vec<_> = [
-        "runtara_agent_utils.wasm",
-        "runtara_workflow_stdlib.wasm",
-        "runtara_workflow_runtime.wasm",
-    ]
-    .into_iter()
-    .map(|name| {
-        let bytes = fs::read(components.join(name)).unwrap();
-        json!({"name":name,"bytes":bytes.len(),"sha256":format!("{:x}",Sha256::digest(bytes))})
-    })
-    .collect();
+    let dependencies: Vec<_> = ["runtara_agent_utils.wasm", "runtara_workflow_stdlib.wasm"]
+        .into_iter()
+        .map(|name| {
+            let bytes = fs::read(components.join(name)).unwrap();
+            json!({"name":name,"bytes":bytes.len(),"sha256":format!("{:x}",Sha256::digest(bytes))})
+        })
+        .collect();
     let reviewed = BTreeMap::from([(
         "utils".into(),
         dependencies[0]["sha256"].as_str().unwrap().to_owned(),

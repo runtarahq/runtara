@@ -1,8 +1,6 @@
 //! Exercise the actual package wire format through Wasmtime validation/execution.
 use runtara_component_host::{EngineConfig, build_engine};
-use runtara_workflow_wit::isolation_package::{
-    Binding, PackageLimits, append, artifact_digest, parse,
-};
+use runtara_invocation_contract::{Binding, PackageLimits, append, artifact_digest, parse};
 use wasmtime::{
     Store,
     component::{Component, Linker},

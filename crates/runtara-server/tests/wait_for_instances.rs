@@ -1,6 +1,6 @@
 //! A compiled `WaitForInstances` step against the real `InstanceWaits`
 //! service end to end: DSL -> composed WASM -> environment runner ->
-//! `runtara:workflow-wait` -> `InstanceWaits` -> runtime persistence.
+//! `runtara:workflow/waits` -> `InstanceWaits` -> runtime persistence.
 //!
 //! The parent parks on its children without holding a runner slot, both
 //! answers wake it, a runner started after the park resumes it to the
@@ -129,7 +129,6 @@ impl Harness {
             instance_id: id.to_owned(),
             tenant_id: self.tenant.clone(),
             wasm_path: wasm_path.to_owned(),
-            requires_lifecycle_invoke: true,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,

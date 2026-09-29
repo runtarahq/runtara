@@ -3,9 +3,9 @@
 //! Direct core Wasm module assembly and export wiring.
 //!
 //! Plays the role `rustc` + the linker would in the generated path. `emit_direct_core_module`
-//! emits the complete module: types, imports, the single real `wasi:cli/run` body
-//! (`direct_run_function` — init manifest, load input, build the initial source,
-//! lower the whole run plan, complete), zero-return stubs for the other exports,
+//! emits the complete module: types, imports, the single real entry-export body
+//! (`direct_run_function` — init manifest, take the input argument, build the
+//! initial source, lower the whole run plan, return the result), zero-return stubs for the other exports,
 //! the Canonical-ABI-mandated realloc/initialize/post-return intrinsics, one linear
 //! memory sized to the static-data layout, the seeded heap-base global, and the
 //! data segments. The shape must match exactly what `wac compose` expects, while
@@ -23,12 +23,11 @@ use wit_parser::{
 };
 
 use super::abi::{
-    emit_fail_if_retptr_error, load_retptr_list, load_retptr_tag, push_core_type, push_retptr_arg,
-    push_segment_args, zero_return_function,
+    emit_fail_if_retptr_error, push_core_type, push_retptr_arg, push_segment_args,
+    zero_return_function,
 };
 use super::core_imports::{
     DirectCoreFunctionIndices, DirectCoreImportIndices, agent_import_for, import_core_function,
-    is_wasi_cli_run_export,
 };
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
@@ -43,22 +42,17 @@ pub(super) struct DirectCoreConfig {
     pub(super) run_plan: DirectRunPlan,
     pub(super) static_data: DirectCoreStaticData,
     pub(super) track_events: bool,
-    /// Top-level export shape (see `component::WorkflowAbi`). Defaults to the
-    /// legacy `wasi:cli/run`; set via [`Self::with_abi`].
-    pub(super) abi: crate::direct_wasm::component::WorkflowAbi,
-    /// When true, the component imports no `runtara:workflow-runtime/runtime`,
-    /// so the emitter must NOT lower any `runtime.*` call — the terminal
-    /// `complete`/`fail` are dropped and the result travels solely in-band via
-    /// the invoke return value. Only valid for a pure workflow under the invoke
-    /// export (see [`Self::with_omit_runtime`]).
+    /// Top-level export shape (see `component::WorkflowRole`). Defaults to
+    /// the workflow entry; set via [`Self::with_abi`].
+    pub(super) abi: crate::direct_wasm::component::WorkflowRole,
+    /// When true, the component imports no `runtara:workflow/runtime`,
+    /// so the emitter must NOT lower any `runtime.*` call. Only valid for a
+    /// pure workflow (see [`Self::with_omit_runtime`]).
     pub(super) omit_runtime: bool,
 }
 
 impl DirectCoreConfig {
-    /// Test constructor pinned to the LEGACY `wasi:cli/run` body shape — the
-    /// structural lowering tests describe that sequence (load-input included).
-    /// Invoke-shape structure is asserted by explicit `.with_abi` tests and
-    /// the execution battery.
+    /// Test constructor with the default (root) export.
     #[cfg(test)]
     pub(super) fn new(
         manifest: &DirectWorkflowManifest,
@@ -66,7 +60,7 @@ impl DirectCoreConfig {
         track_events: bool,
     ) -> Result<Self, DirectCompileError> {
         Self::new_inner(manifest, manifest_json, track_events, None)
-            .map(|config| config.with_abi(crate::direct_wasm::component::WorkflowAbi::CliRunHttp))
+            .map(|config| config.with_abi(crate::direct_wasm::component::WorkflowRole::default()))
     }
 
     pub(super) fn new_with_workflow_id(
@@ -79,13 +73,8 @@ impl DirectCoreConfig {
     }
 
     /// Override the export shape.
-    pub(super) fn with_abi(mut self, abi: crate::direct_wasm::component::WorkflowAbi) -> Self {
+    pub(super) fn with_abi(mut self, abi: crate::direct_wasm::component::WorkflowRole) -> Self {
         self.abi = abi;
-        // Parallel Split windows require an async-TYPED root task (the invoke
-        // shapes); the legacy sync-typed `wasi:cli/run` root always compiles
-        // sequentially.
-        self.static_data.parallel_enabled =
-            !matches!(abi, crate::direct_wasm::component::WorkflowAbi::CliRunHttp);
         self
     }
 
@@ -104,7 +93,7 @@ impl DirectCoreConfig {
         let variables_json =
             direct_core_variables_json(&manifest.graph.variables, workflow_id, manifest.version)?;
         Ok(Self {
-            abi: crate::direct_wasm::component::WorkflowAbi::default(),
+            abi: crate::direct_wasm::component::WorkflowRole::default(),
             omit_runtime: false,
             run_plan: direct_run_plan(manifest)?,
             static_data: DirectCoreStaticData::new_with_child_workflows(
@@ -161,8 +150,7 @@ pub(super) fn emit_direct_core_module(
             }
             WorldItem::Interface { id, .. } => {
                 for function in resolve.interfaces[*id].functions.values() {
-                    if resolve.name_world_key(name)
-                        == runtara_agent_wit::WASI_MONOTONIC_CLOCK_INTERFACE
+                    if resolve.name_world_key(name) == runtara_wit::wasi::MONOTONIC_CLOCK
                         && function.name != "now"
                     {
                         continue;
@@ -188,7 +176,7 @@ pub(super) fn emit_direct_core_module(
     // A pure callable workflow can cooperate between CPU loop iterations
     // without a runtime or I/O import. This is a canonical intrinsic, not a
     // host scheduler API, and works with the existing synchronous lift.
-    if config.abi == crate::direct_wasm::component::WorkflowAbi::AgentCapabilities {
+    if config.abi == crate::direct_wasm::component::WorkflowRole::PublishedAgent {
         types.ty().function([], [ValType::I32]);
         imports.import(
             "$root",
@@ -211,7 +199,7 @@ pub(super) fn emit_direct_core_module(
         || world
             .imports
             .keys()
-            .any(|name| resolve.name_world_key(name) == "runtara:host-io/timers@0.1.0");
+            .any(|name| resolve.name_world_key(name) == "runtara:host/timers@1.0.0");
     if has_async_calls {
         let builtin = |field: &str,
                        params: &[ValType],
@@ -259,7 +247,7 @@ pub(super) fn emit_direct_core_module(
         import_indices.waitable_set_wait = Some(builtin(
             if matches!(
                 config.abi,
-                crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
+                crate::direct_wasm::component::WorkflowRole::PublishedAgent
             ) {
                 "[cancellable][waitable-set-wait]"
             } else {
@@ -315,7 +303,7 @@ pub(super) fn emit_direct_core_module(
         if world
             .imports
             .keys()
-            .any(|name| resolve.name_world_key(name) == "runtara:host-io/timers@0.1.0")
+            .any(|name| resolve.name_world_key(name) == "runtara:host/timers@1.0.0")
         {
             let type_index = {
                 let index = type_count;
@@ -324,14 +312,14 @@ pub(super) fn emit_direct_core_module(
                 index
             };
             imports.import(
-                "runtara:host-io/timers@0.1.0",
+                "runtara:host/timers@1.0.0",
                 "[async-lower]sleep",
                 wasm_encoder::EntityType::Function(type_index),
             );
             import_indices.timer_sleep_async = Some(imported_function_count);
             imported_function_count += 1;
             imports.import(
-                "runtara:host-io/timers@0.1.0",
+                "runtara:host/timers@1.0.0",
                 "[async-lower]abort-after",
                 wasm_encoder::EntityType::Function(type_index),
             );
@@ -427,7 +415,6 @@ pub(super) fn emit_direct_core_module(
             &mut code,
             imported_function_count,
             &mut next_defined_function,
-            import_indices.operation_scope.is_some(),
         );
         for key in scoped_async {
             let params = import_indices.agent_invokes[&key].params.clone();
@@ -588,7 +575,6 @@ pub(super) fn emit_direct_core_module(
             &mut code,
             imported_function_count,
             &mut next_defined_function,
-            import_indices.operation_scope.is_some(),
         );
     }
     export_initialize(
@@ -676,13 +662,10 @@ fn export_core_function(
     );
     exports.export(&export_name, ExportKind::Func, function_index);
 
-    let body = if is_wasi_cli_run_export(resolve, interface, function)
-        || super::core_imports::is_lifecycle_invoke_export(resolve, interface, function)
-        || super::core_imports::is_capabilities_invoke_export(resolve, interface, function)
-    {
-        // The entry export of the current ABI (the world declares exactly one):
-        // `wasi:cli/run` under CliRunHttp, `lifecycle.invoke` under
-        // InvokeHostImports, `capabilities.invoke` under AgentCapabilities.
+    let body = if super::core_imports::is_capabilities_invoke_export(resolve, interface, function) {
+        // The entry export (the world declares exactly one): the workflow
+        // entry under Root, the slug's `capabilities.invoke` under
+        // PublishedAgent; both take `(capability-id, input)`.
         // `direct_run_function` shapes its prologue, param fold, and return
         // convention from `config.abi` and the export's param count.
         direct_run_function(import_indices, config, signature.params.len())
@@ -722,11 +705,6 @@ fn export_realloc(
     code: &mut CodeSection,
     imported_function_count: u32,
     next_defined_function: &mut u32,
-    // Honour the requested alignment. Needed once an 8-aligned value (the
-    // `wake` list of a suspension) is lowered into this memory; without such
-    // a site the historic unaligned bump allocator keeps every other workflow
-    // byte-identical.
-    aligned: bool,
 ) {
     let type_index = push_core_type(
         types,
@@ -742,8 +720,10 @@ fn export_realloc(
     exports.export(&realloc_name, ExportKind::Func, function_index);
 
     let mut body = WasmFunction::new([(3, ValType::I32)]);
+    // Honour the requested alignment: every agent's outcome can carry an
+    // 8-aligned `wake` list, which the canonical ABI lowers into this memory.
     body.instruction(&Instruction::GlobalGet(0));
-    if aligned {
+    {
         // `align` (param 2) is a power of two by the canonical ABI.
         body.instruction(&Instruction::LocalGet(2));
         body.instruction(&Instruction::I32Add);
@@ -755,11 +735,7 @@ fn export_realloc(
         body.instruction(&Instruction::I32And);
     }
     body.instruction(&Instruction::LocalSet(4));
-    body.instruction(&if aligned {
-        Instruction::LocalGet(4)
-    } else {
-        Instruction::GlobalGet(0)
-    });
+    body.instruction(&Instruction::LocalGet(4));
     body.instruction(&Instruction::LocalGet(3));
     body.instruction(&Instruction::I32Add);
     body.instruction(&Instruction::LocalSet(5));
@@ -813,12 +789,10 @@ fn export_initialize(
     code.function(&body);
 }
 
-/// Canonical declared-local groups for the run function under ZERO export
-/// params (the `wasi:cli/run` shape). Every other ABI derives its declared
-/// locals by dropping its export params off the FRONT of this list
-/// ([`drop_leading_locals`]): `wasi:cli/run` takes 0 params (uses this list
-/// verbatim), `lifecycle.invoke(input)` takes 2 (its `input` folds onto locals
-/// 0/1), and `capabilities.invoke(capability-id, input)` takes 4. Because
+/// Canonical declared-local groups for the run function as if it took ZERO
+/// export params. Each ABI derives its declared locals by dropping its export
+/// params off the FRONT of this list ([`drop_leading_locals`]):
+/// `capabilities.invoke(capability-id, input)` takes 4. Because
 /// the ~100 hand-assigned `DIRECT_*_LOCAL` indices are ABSOLUTE, dropping params
 /// off the front keeps each surviving declared local at its original absolute
 /// index with its original type — the invariant the lowerers depend on.
@@ -888,11 +862,11 @@ pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     (2, ValType::I64),
     // 186-187: resolved terminal run label JSON, separate from workflow output.
     (2, ValType::I32),
-    // 188: absolute deadline a nested workflow-agent child asked to park until,
-    // carried out of its capability call by the suspend sentinel.
+    // 188: absolute deadline a composed workflow-agent's forwarded `at` wake
+    // parks until.
     (1, ValType::I64),
-    // 189-190: the signal route that child is parked on, so the caller re-raises
-    // an on-signal wake rather than a bare resume the waker would ignore.
+    // 189-190: the wakes a composed workflow-agent returned, then the signal
+    // route of its forwarded `on-signal` wake.
     (2, ValType::I32),
 ];
 
@@ -920,8 +894,6 @@ fn direct_run_function(
     config: &DirectCoreConfig,
     export_param_count: usize,
 ) -> WasmFunction {
-    use crate::direct_wasm::component::WorkflowAbi;
-
     const DATA_PTR_LOCAL: u32 = 0;
     const DATA_LEN_LOCAL: u32 = 1;
     const SOURCE_PTR_LOCAL: u32 = 2;
@@ -933,12 +905,11 @@ fn direct_run_function(
     const ROUTE_PTR_LOCAL: u32 = 8;
     const ROUTE_LEN_LOCAL: u32 = 9;
 
-    // Fold the export params onto the front of the canonical local layout. The
-    // input list's two i32s land on DATA_PTR/DATA_LEN (0/1) under
-    // `lifecycle.invoke` (2 params); under `capabilities.invoke(capability-id,
-    // input)` (4 params: cap-id + input, ≤ the 16-param flat limit so passed
-    // DIRECTLY) the input lands on params 2/3 and is copied to 0/1 in the
-    // prologue below. Every surviving declared local keeps its absolute
+    // Fold the export params onto the front of the canonical local layout.
+    // Under `capabilities.invoke(capability-id, input)` (4 params: cap-id +
+    // input, ≤ the 16-param flat limit so passed DIRECTLY) the input lands on
+    // params 2/3 and is copied to DATA_PTR/DATA_LEN (0/1) in the prologue
+    // below. Every surviving declared local keeps its absolute
     // DIRECT_*_LOCAL index.
     let mut body = WasmFunction::new(drop_leading_locals(
         CANONICAL_LOCAL_GROUPS,
@@ -949,35 +920,16 @@ fn direct_run_function(
     // input-len @3). The input params ALIAS the SOURCE locals (2/3), which
     // init-manifest's error path scribbles into — so stash the input onto
     // DATA_PTR/DATA_LEN (0/1) BEFORE init-manifest runs. (The cap-id at 0/1 is
-    // unused: a workflow-agent has a single self-capability.)
-    if matches!(config.abi, WorkflowAbi::AgentCapabilities) {
-        body.instruction(&Instruction::LocalGet(2));
-        body.instruction(&Instruction::LocalSet(DATA_PTR_LOCAL));
-        body.instruction(&Instruction::LocalGet(3));
-        body.instruction(&Instruction::LocalSet(DATA_LEN_LOCAL));
-    }
+    // unused: every workflow entry answers the single `run` capability.)
+    body.instruction(&Instruction::LocalGet(2));
+    body.instruction(&Instruction::LocalSet(DATA_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(3));
+    body.instruction(&Instruction::LocalSet(DATA_LEN_LOCAL));
 
     push_segment_args(&mut body, &config.static_data.manifest);
     push_retptr_arg(&mut body);
     body.instruction(&Instruction::Call(indices.stdlib_init_manifest));
     emit_fail_if_retptr_error(&mut body, indices, SOURCE_PTR_LOCAL, SOURCE_LEN_LOCAL);
-
-    match config.abi {
-        WorkflowAbi::CliRunHttp => {
-            push_retptr_arg(&mut body);
-            body.instruction(&Instruction::Call(indices.runtime_load_input));
-            emit_fail_if_retptr_error(&mut body, indices, SOURCE_PTR_LOCAL, SOURCE_LEN_LOCAL);
-            load_retptr_list(&mut body, DATA_PTR_LOCAL, DATA_LEN_LOCAL);
-        }
-        WorkflowAbi::InvokeHostImports => {
-            // The input envelope arrived as the call argument — params 0/1 ARE
-            // (DATA_PTR, DATA_LEN); no load-input round-trip.
-        }
-        WorkflowAbi::AgentCapabilities => {
-            // Input already stashed onto DATA_PTR/DATA_LEN above (before
-            // init-manifest could clobber the aliased SOURCE params).
-        }
-    }
 
     body.instruction(&Instruction::I32Const(config.static_data.steps.offset));
     body.instruction(&Instruction::LocalSet(STEPS_PTR_LOCAL));
@@ -1020,55 +972,21 @@ fn direct_run_function(
         None,
     );
 
-    // The additive `runtime.complete` records terminal status/output host-side
-    // during the migration. Suppressed when the runtime is omitted (nothing to
-    // call) and under AgentCapabilities. Production workflow-agents are
-    // statically certified non-suspending and omit runtime; the retained
-    // lower-level runtime-importing test/migration shape shares the parent's
-    // instance, so completing it here would finish the parent mid-flight. The
-    // capability return value is the sole terminal result.
-    if !config.omit_runtime && !matches!(config.abi, WorkflowAbi::AgentCapabilities) {
-        emit_complete(&mut body, indices, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
-    }
     super::deadline_scope::close_alarm(&mut body, indices);
-    match config.abi {
-        WorkflowAbi::CliRunHttp => {
-            load_retptr_tag(&mut body);
-        }
-        WorkflowAbi::InvokeHostImports => {
-            // The terminal result travels as the return value:
-            // Ok(outcome::completed(output)).
-            emit_invoke_ok_completed_return(&mut body, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
-        }
-        WorkflowAbi::AgentCapabilities => {
-            // Agent capability shape: Ok(output) as a bare list<u8>.
-            emit_capabilities_ok_return(&mut body, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
-        }
-    }
+    // The terminal result travels as the return value:
+    // Ok(outcome::completed(output)).
+    emit_invoke_ok_completed_return(&mut body, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
     body.instruction(&Instruction::End);
     body
 }
 
 /// Locals live in the invocation frame; child/loop scratch cannot overwrite them.
-/// Where a re-raised child suspend stashes the deadline it wants to park until.
+/// Where a forwarded workflow-agent `at` wake stashes its deadline.
 /// The parent needs its own slot: the child's is inside the callee.
 pub(super) const NESTED_SUSPEND_DEADLINE_LOCAL: u32 = 188;
-/// The nested child's signal route, re-raised so the park is `on-signal`.
+/// The forwarded wakes, then the signal route of a forwarded `on-signal`.
 pub(super) const NESTED_SUSPEND_SIGNAL_PTR_LOCAL: u32 = 189;
 pub(super) const NESTED_SUSPEND_SIGNAL_LEN_LOCAL: u32 = 190;
-
-/// Both normal and handled-error terminal paths use the same completion API.
-pub(super) fn emit_complete(
-    body: &mut WasmFunction,
-    indices: &DirectCoreFunctionIndices,
-    output_ptr: u32,
-    output_len: u32,
-) {
-    body.instruction(&Instruction::LocalGet(output_ptr));
-    body.instruction(&Instruction::LocalGet(output_len));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_complete));
-}
 
 /// Write `Ok(outcome::completed(output))` for the invoke export into the
 /// fixed result area and leave its pointer on the stack.
@@ -1104,42 +1022,5 @@ pub(super) fn emit_invoke_ok_completed_return(
         memory_index: 0,
     }));
     // The return value: the result area's address.
-    body.instruction(&Instruction::I32Const(0));
-}
-
-/// Write `Ok(output)` for the agent-capabilities export into the fixed result
-/// area and leave its pointer on the stack.
-///
-/// Canonical-ABI layout of `result<list<u8>, error-info>` (payload align 8 —
-/// error-info carries a `u64`): result disc u8 @0 (0 = ok); ok payload = the
-/// `list<u8>` directly at @8: ptr @8, len @12. (Contrast the lifecycle export's
-/// `result<outcome, error-info>`, whose ok arm is `outcome::completed` — a
-/// variant disc @8 plus the list at @12/@16.) The error arm is `error-info` at
-/// @8, byte-identical to the lifecycle error arm, so the shared err writer
-/// applies unchanged.
-pub(super) fn emit_capabilities_ok_return(
-    body: &mut WasmFunction,
-    output_ptr_local: u32,
-    output_len_local: u32,
-) {
-    // Zero the header (result disc @0 = 0 = ok) and the ok payload slot.
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::I32Const(16));
-    body.instruction(&Instruction::MemoryFill(0));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::LocalGet(output_ptr_local));
-    body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
-        offset: 8,
-        align: 2,
-        memory_index: 0,
-    }));
-    body.instruction(&Instruction::I32Const(0));
-    body.instruction(&Instruction::LocalGet(output_len_local));
-    body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
-        offset: 12,
-        align: 2,
-        memory_index: 0,
-    }));
     body.instruction(&Instruction::I32Const(0));
 }

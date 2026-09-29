@@ -2,12 +2,14 @@
 //! These imports return Err in linear memory, unlike the native close import
 //! which traps itself. This covers the composed SDK runtime boundary.
 use super::*;
-use crate::direct_wasm::component::WorkflowAbi;
+use crate::direct_wasm::component::WorkflowRole;
 use wasmtime::{ExternType, Linker, Val};
 
 #[derive(Default)]
 struct Calls {
     closed: usize,
+    /// Failed returns: `invoke-error-fields` decomposing the run's error into
+    /// its returned `Err(error-info)`.
     failed: usize,
     after_close: Vec<String>,
 }
@@ -16,11 +18,7 @@ const ORIGINAL_ERROR: &[u8] = b"wait interval failed";
 
 #[test]
 fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
-    for abi in [
-        WorkflowAbi::CliRunHttp,
-        WorkflowAbi::InvokeHostImports,
-        WorkflowAbi::AgentCapabilities,
-    ] {
+    for abi in [WorkflowRole::Root, WorkflowRole::PublishedAgent] {
         let graph = serde_json::from_value(serde_json::json!({
             "durable": true, "entryPoint": "wait", "steps": {
                 "wait": {"id": "wait", "stepType": "WaitForSignal"},
@@ -53,15 +51,7 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
             .to_owned();
         let entry_name = module
             .exports()
-            .find(|export| {
-                export
-                    .name()
-                    .ends_with(if matches!(abi, WorkflowAbi::CliRunHttp) {
-                        "|run"
-                    } else {
-                        "|invoke"
-                    })
-            })
+            .find(|export| export.name().ends_with("|invoke"))
             .unwrap()
             .name()
             .to_owned();
@@ -92,7 +82,7 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
                             assert!(results.is_empty(), "unexpected direct result from {name}");
                             let mut response = [0u8; 48];
                             match name.as_str() {
-                                "init-manifest" | "load-input" | "build-source" | "instance-id"
+                                "init-manifest" | "build-source" | "instance-id"
                                 | "wait-signal-id" | "wait-timeout-ms" | "wait-event"
                                 | "register-input" | "custom-event" => {}
                                 "wait-poll-interval-ms-scoped" => {
@@ -115,7 +105,7 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
                                     // A successful closure returns InputState::Closed.
                                     response[4] = 2;
                                 }
-                                "fail" | "invoke-error-fields" => {
+                                "invoke-error-fields" => {
                                     let address = args[0].i32().unwrap() as usize;
                                     let len = args[1].i32().unwrap() as usize;
                                     assert_eq!(
@@ -123,9 +113,7 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
                                         ORIGINAL_ERROR,
                                         "successful closure must preserve the original failure"
                                     );
-                                    if name == "fail" {
-                                        caller.data_mut().failed += 1;
-                                    }
+                                    caller.data_mut().failed += 1;
                                 }
                                 other => {
                                     return Err(wasmtime::format_err!(
@@ -160,13 +148,8 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
                 assert_eq!(store.data().failed, 0);
             } else {
                 outcome.unwrap();
-                assert_eq!(
-                    store.data().failed,
-                    usize::from(!matches!(abi, WorkflowAbi::AgentCapabilities))
-                );
-                if matches!(abi, WorkflowAbi::CliRunHttp) {
-                    assert_eq!(result[0].i32(), Some(1));
-                }
+                // Every role fails through its return value alone.
+                assert_eq!(store.data().failed, 1, "{abi:?}");
             }
         }
     }

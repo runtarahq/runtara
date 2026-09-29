@@ -12,6 +12,31 @@ mod root_tests;
 #[path = "signal_poll_tests.rs"]
 mod signal_poll_tests;
 
+/// Component-level declarations of the workflow entry, with `invoke` from
+/// core instance `code` and `memory`/`realloc` from core instance `mem`.
+fn entry_export(code: &str, mem: &str) -> String {
+    format!(
+        r#"(type $error (record (field "code" string) (field "message" string)
+        (field "category" string) (field "severity" string) (field "retryable" bool)
+        (field "retry-after-ms" (option u64)) (field "attributes" (option string))
+        (field "details" (option string))))
+      (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
+      (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+        (case "instances" string)))
+      (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+      (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
+      (func $invoke async (param "capability-id" string) (param "input" (list u8))
+        (result (result $outcome (error $error)))
+        (canon lift (core func ${code} "invoke") (memory ${mem} "memory")
+          (realloc (func ${mem} "realloc"))))
+      (instance $entry (export "error-info" (type $error)) (export "signal-wait" (type $signal))
+        (export "wake" (type $wake)) (export "suspension" (type $suspension))
+        (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
+      (export "{entry}" (instance $entry))"#,
+        entry = runtara_component_host::lifecycle::ENTRY_INTERFACE_NAME
+    )
+}
+
 struct Keys(&'static str);
 impl CheckpointAuthority for Keys {
     fn authorize(&self, key: &str) -> Result<(), String> {
@@ -74,7 +99,6 @@ impl Fixture {
             .spawn(move |cancel| async move {
                 let child = owner
                     .child(
-                        br#"{"instance_id":"forged","data":"child"}"#.to_vec(),
                         format!("parent/{}", prefix.trim_end_matches('/')),
                         Arc::new(Keys(prefix)),
                         cancel,
@@ -109,35 +133,29 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn scoped_runtime_terminal_callbacks_never_terminalize_root() {
+async fn scoped_runtime_terminal_never_terminalizes_root() {
+    use runtara_component_host::runtime_host::RunTerminal;
     let fx = Fixture::new().await;
     let (child, _) = fx.child().await;
     assert_eq!(child.instance_id().unwrap(), fx.id);
-    assert_eq!(
-        child.load_input().await.unwrap().unwrap(),
-        br#"{"instance_id":"forged","data":"child"}"#
-    );
     assert!(child.debug_mode_enabled().unwrap());
     assert!(child.now_ms().unwrap() > 0);
-    child.complete(b"child output".to_vec()).await.unwrap();
-    child.complete(b"child output".to_vec()).await.unwrap();
-    assert_eq!(
-        child.terminal().unwrap(),
-        Some(ChildTerminal::Complete(b"child output".to_vec()))
-    );
+    // A child's terminal is its invocation's exit; publishing one through the
+    // child host is a no-op that never reaches root terminal status.
+    child
+        .terminal(RunTerminal::Completed(b"child output".to_vec()))
+        .await
+        .unwrap();
     let (failed, _) = fx.child().await;
-    failed.fail(b"child error".to_vec()).await.unwrap();
-    assert_eq!(
-        failed.terminal().unwrap(),
-        Some(ChildTerminal::Fail(b"child error".to_vec()))
-    );
+    failed
+        .terminal(RunTerminal::Failed(b"child error".to_vec()))
+        .await
+        .unwrap();
     assert_eq!(fx.status().await, InstanceStatus::Running);
     let root = fx.persistence.get_instance(&fx.id).await.unwrap().unwrap();
     assert!(root.output.is_none());
-    assert!(child.fail(b"conflict".to_vec()).await.is_err());
-    assert!(child.terminal().is_err());
+    assert!(root.error.is_none());
     fx.close().await;
-    assert!(child.complete(vec![]).await.is_err());
     assert!(child.heartbeat().await.is_err());
     assert_eq!(
         fx.owner.apply_root_effects().await.unwrap(),
@@ -489,12 +507,10 @@ async fn scoped_runtime_wasm_imports_keep_child_completion_and_pause_off_root() 
         .insert_signal(&fx.id, CoreSignal::Pause, b"")
         .await
         .unwrap();
-    let wasm = wat::parse_str(r#"(component
-      (import "runtara:workflow-runtime/runtime@0.3.0" (instance $runtime
-        (export "complete" (func (param "output" (list u8)) (result (result (error string)))))
+    let wasm = wat::parse_str(format!(r#"(component
+      (import "runtara:workflow/runtime@1.0.0" (instance $runtime
         (export "get-checkpoint" (func (param "checkpoint-id" string) (result (result (option (list u8)) (error string)))))
         (export "check-signals" (func (result (result bool (error string)))))))
-      (alias export $runtime "complete" (func $complete))
       (alias export $runtime "get-checkpoint" (func $get))
       (alias export $runtime "check-signals" (func $signals))
       (core module $memory
@@ -504,30 +520,25 @@ async fn scoped_runtime_wasm_imports_keep_child_completion_and_pause_off_root() 
           (local $base i32) global.get $heap local.set $base
           global.get $heap local.get 3 i32.add i32.const 7 i32.add i32.const -8 i32.and global.set $heap local.get $base))
       (core instance $memory (instantiate $memory))
-      (core func $complete (canon lower (func $complete) (memory $memory "memory") (realloc (func $memory "realloc"))))
       (core func $get (canon lower (func $get) (memory $memory "memory") (realloc (func $memory "realloc"))))
       (core func $signals (canon lower (func $signals) (memory $memory "memory") (realloc (func $memory "realloc"))))
       (core module $code
         (import "memory" "memory" (memory 1))
-        (import "host" "complete" (func $complete (param i32 i32 i32)))
         (import "host" "get" (func $get (param i32 i32 i32)))
         (import "host" "signals" (func $signals (param i32)))
         (data (i32.const 1024) "wasm child")
         (data (i32.const 1040) "sibling/forbidden")
-        (func (export "run") (result i32)
+        (func (export "invoke") (param i32 i32 i32 i32) (result i32)
           (call $get (i32.const 1040) (i32.const 17) (i32.const 64))
           (if (i32.ne (i32.load8_u (i32.const 64)) (i32.const 1)) (then unreachable))
           (call $signals (i32.const 64))
           (if (i32.load8_u (i32.const 64)) (then unreachable))
           (if (i32.eqz (i32.load8_u (i32.const 68))) (then unreachable))
-          (call $complete (i32.const 1024) (i32.const 10) (i32.const 64))
-          (if (i32.load8_u (i32.const 64)) (then unreachable))
-          i32.const 0))
-      (core instance $host (export "complete" (func $complete)) (export "get" (func $get)) (export "signals" (func $signals)))
+          ;; A zeroed result area: `Ok(completed(""))`.
+          i32.const 2048))
+      (core instance $host (export "get" (func $get)) (export "signals" (func $signals)))
       (core instance $code (instantiate $code (with "host" (instance $host)) (with "memory" (instance $memory))))
-      (func $run (result (result)) (canon lift (core func $code "run")))
-      (instance $run-interface (export "run" (func $run)))
-      (export "wasi:cli/run@0.2.3" (instance $run-interface)))"#).unwrap();
+      {entry})"#, entry = entry_export("code", "memory"))).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scoped-runtime.wasm");
     std::fs::write(&path, wasm).unwrap();
@@ -543,8 +554,8 @@ async fn scoped_runtime_wasm_imports_keep_child_completion_and_pause_off_root() 
     let prepared = fx.executor.prepare_precompiled(component).await.unwrap();
     let result = fx
         .executor
-        .execute(
-            prepared.command().unwrap(),
+        .execute_prepared_invoke(
+            &prepared,
             runtara_component_host::WorkflowRunSpec {
                 trusted_instance: None,
                 trusted_tenant: None,
@@ -555,15 +566,15 @@ async fn scoped_runtime_wasm_imports_keep_child_completion_and_pause_off_root() 
                 limits: Default::default(),
                 runtime: Some(child.clone()),
             },
+            b"{}".to_vec(),
         )
         .await;
     assert!(
-        matches!(result.exit, runtara_component_host::WorkflowExit::Completed),
+        matches!(
+            result.exit,
+            runtara_component_host::InvokeExit::Completed(_)
+        ),
         "{result:?}"
-    );
-    assert_eq!(
-        child.terminal().unwrap(),
-        Some(ChildTerminal::Complete(b"wasm child".to_vec()))
     );
     assert_eq!(fx.status().await, InstanceStatus::Running);
     assert!(

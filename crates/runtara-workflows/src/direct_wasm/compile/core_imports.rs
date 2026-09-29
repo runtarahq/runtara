@@ -3,7 +3,7 @@
 //! Direct core WIT import indexing and import/export classifiers.
 //!
 //! Core Wasm calls functions by numeric index in declaration order, but the
-//! emitter wants to call them by meaning ("apply-mapping", "load-input"). This is
+//! emitter wants to call them by meaning ("apply-mapping", "complete"). This is
 //! the name-to-index binding layer: as the world's imports are walked,
 //! `import_core_function` declares each host/stdlib/per-agent WIT function and
 //! records its assigned index into `DirectCoreImportIndices`; `require_all` then
@@ -22,9 +22,6 @@ use super::abi::push_core_type;
 
 #[derive(Debug, Default)]
 pub(super) struct DirectCoreImportIndices {
-    runtime_load_input: Option<u32>,
-    runtime_complete: Option<u32>,
-    runtime_fail: Option<u32>,
     runtime_custom_event: Option<u32>,
     runtime_debug_mode_enabled: Option<u32>,
     runtime_breakpoint_pause: Option<u32>,
@@ -42,9 +39,7 @@ pub(super) struct DirectCoreImportIndices {
     runtime_checkpoint: Option<u32>,
     runtime_handle_checkpoint_signal: Option<u32>,
     runtime_record_retry_attempt: Option<u32>,
-    runtime_durable_sleep: Option<u32>,
     runtime_blocking_sleep: Option<u32>,
-    runtime_durable_sleep_checkpoint: Option<u32>,
     pub(super) connection_resolver_describe_async: Option<u32>,
     stdlib_init_manifest: Option<u32>,
     stdlib_value_store_retain_scoped: Option<u32>,
@@ -149,7 +144,6 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_agent_attempt_result_key: Option<u32>,
     stdlib_agent_attempt_envelope: Option<u32>,
     stdlib_agent_retry_delay_ms: Option<u32>,
-    stdlib_agent_error_info: Option<u32>,
     stdlib_agent_retry_error_info: Option<u32>,
     stdlib_agent_error: Option<u32>,
     stdlib_agent_error_from_info: Option<u32>,
@@ -180,12 +174,10 @@ pub(super) struct DirectCoreImportIndices {
 impl DirectCoreImportIndices {
     pub(super) fn require_all(
         self,
-        abi: crate::direct_wasm::component::WorkflowAbi,
+        abi: crate::direct_wasm::component::WorkflowRole,
         omit_runtime: bool,
         has_connections: bool,
     ) -> Result<DirectCoreFunctionIndices, DirectCompileError> {
-        let _stdlib_agent_error_info =
-            require_import(self.stdlib_agent_error_info, "stdlib.agent-error-info")?;
         Ok(DirectCoreFunctionIndices {
             cooperative_helpers: [None; super::cooperative_wait::HELPER_COUNT],
             cooperative_helper_body: false,
@@ -195,17 +187,6 @@ impl DirectCoreImportIndices {
                 self.connection_resolver_describe_async,
                 has_connections,
             )?,
-            runtime_load_input: require_runtime(
-                self.runtime_load_input,
-                "runtime.load-input",
-                omit_runtime,
-            )?,
-            runtime_complete: require_runtime(
-                self.runtime_complete,
-                "runtime.complete",
-                omit_runtime,
-            )?,
-            runtime_fail: require_runtime(self.runtime_fail, "runtime.fail", omit_runtime)?,
             runtime_custom_event: require_runtime(
                 self.runtime_custom_event,
                 "runtime.custom-event",
@@ -286,19 +267,9 @@ impl DirectCoreImportIndices {
                 "runtime.record-retry-attempt",
                 omit_runtime,
             )?,
-            runtime_durable_sleep: require_runtime(
-                self.runtime_durable_sleep,
-                "runtime.durable-sleep",
-                omit_runtime,
-            )?,
             runtime_blocking_sleep: require_runtime(
                 self.runtime_blocking_sleep,
                 "runtime.blocking-sleep",
-                omit_runtime,
-            )?,
-            runtime_durable_sleep_checkpoint: require_runtime(
-                self.runtime_durable_sleep_checkpoint,
-                "runtime.durable-sleep-checkpoint",
                 omit_runtime,
             )?,
             stdlib_init_manifest: require_import(
@@ -714,19 +685,13 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) cooperative_helper_body: bool,
     /// The top-level export shape the module is emitted against. Threaded
     /// through the indices because every lowerer already receives them, and
-    /// the return convention at fail sites depends on it (tag under
-    /// `wasi:cli/run`; result-area pointer under the invoke export).
-    pub(super) abi: crate::direct_wasm::component::WorkflowAbi,
-    /// When true, the component imports no runtime; the terminal `complete`/
-    /// `fail` are NOT lowered and the result travels solely via the invoke
-    /// return value. Runtime index fields hold a poison sentinel and must never
-    /// be called (see [`RUNTIME_OMITTED_POISON`]).
+    /// the return convention at fail and suspend sites depends on it.
+    pub(super) abi: crate::direct_wasm::component::WorkflowRole,
+    /// When true, the component imports no runtime. Runtime index fields hold
+    /// a poison sentinel and must never be called (see
+    /// [`RUNTIME_OMITTED_POISON`]).
     pub(super) omit_runtime: bool,
     pub(super) connection_resolver_describe_async: u32,
-    pub(super) runtime_load_input: u32,
-    // (see `report_terminal_status` below for when complete/fail lower)
-    pub(super) runtime_complete: u32,
-    pub(super) runtime_fail: u32,
     pub(super) runtime_custom_event: u32,
     pub(super) runtime_debug_mode_enabled: u32,
     pub(super) runtime_breakpoint_pause: u32,
@@ -744,9 +709,7 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) runtime_checkpoint: u32,
     pub(super) runtime_handle_checkpoint_signal: u32,
     pub(super) runtime_record_retry_attempt: u32,
-    pub(super) runtime_durable_sleep: u32,
     pub(super) runtime_blocking_sleep: u32,
-    pub(super) runtime_durable_sleep_checkpoint: u32,
     pub(super) stdlib_init_manifest: u32,
     pub(super) stdlib_value_store_retain_scoped: u32,
     pub(super) stdlib_value_store_scope: u32,
@@ -857,9 +820,8 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_step_debug_start: u32,
     pub(super) stdlib_step_debug_end: u32,
     pub(super) stdlib_step_debug_error: u32,
-    /// Every per-agent invoke import, keyed by agent and interface: a
-    /// suspending agent is imported through both `capabilities` and
-    /// `suspendable`, whose flat signatures are identical.
+    /// Every per-agent invoke import, keyed by agent and interface
+    /// (`capabilities`, or the private scoped interface).
     pub(super) agent_invokes: BTreeMap<AgentImportKey, DirectAgentInvokeImport>,
     /// Canonical yield, including runtime-free workflow-agent loop boundaries.
     pub(super) thread_yield: Option<u32>,
@@ -893,20 +855,11 @@ impl DirectCoreFunctionIndices {
         standard_agent_import(&self.agent_invokes_async, agent)
     }
 
-    /// The invoke import of one `(agent, interface)` pair.
-    pub(super) fn agent_import(
-        &self,
-        agent: &str,
-        interface: AgentInterface,
-    ) -> Option<&DirectAgentInvokeImport> {
-        self.agent_invokes.get(&(agent.to_string(), interface))
-    }
-
     /// The operation-scope imports, present only when a call site needs them.
     pub(super) fn operation_scope(&self) -> &DirectOperationScopeImports {
         self.operation_scope
             .as_ref()
-            .expect("an operation-scoped site imports runtara:workflow-operation/scope")
+            .expect("an operation-scoped site imports runtara:workflow/operation")
     }
 
     /// The instance-wait imports, present only when a WaitForInstances step
@@ -914,24 +867,7 @@ impl DirectCoreFunctionIndices {
     pub(super) fn wait_instances(&self) -> &DirectWaitInstancesImports {
         self.wait_instances
             .as_ref()
-            .expect("a WaitForInstances step imports runtara:workflow-wait/instances")
-    }
-
-    /// Whether the terminal `runtime.complete`/`runtime.fail` calls lower.
-    ///
-    /// Suppressed when the runtime is omitted (nothing to call) and under the
-    /// `AgentCapabilities` export. Production workflow-agents omit the runtime
-    /// after static non-suspending certification; the retained lower-level
-    /// runtime-importing test/migration shape shares the parent's instance, so
-    /// its terminal `complete` would finish the parent mid-flight. An agent
-    /// capability's terminal result is the return value; instance lifecycle
-    /// belongs to the caller.
-    pub(super) fn report_terminal_status(&self) -> bool {
-        !self.omit_runtime
-            && !matches!(
-                self.abi,
-                crate::direct_wasm::component::WorkflowAbi::AgentCapabilities
-            )
+            .expect("a WaitForInstances step imports runtara:workflow/waits")
     }
 }
 
@@ -942,9 +878,6 @@ pub(super) enum AgentInterface {
     Capabilities,
     /// `runtara:agent-<id>/scoped-capabilities-v3`: the private isolated invoke.
     ScopedV3,
-    /// `runtara:agent-<id>/suspendable`: returns a typed outcome. Called only
-    /// at suspending sites.
-    Suspendable,
 }
 
 impl AgentInterface {
@@ -953,20 +886,19 @@ impl AgentInterface {
         match self {
             Self::Capabilities => "capabilities",
             Self::ScopedV3 => "scoped-capabilities-v3",
-            Self::Suspendable => runtara_agent_suspension::SUSPENDABLE_INTERFACE,
         }
     }
 
     fn from_wit_name(name: &str) -> Option<Self> {
-        [Self::Capabilities, Self::ScopedV3, Self::Suspendable]
+        [Self::Capabilities, Self::ScopedV3]
             .into_iter()
             .find(|interface| interface.wit_name() == name)
     }
 }
 
-/// An invoke import is identified by the agent AND the interface: the two
-/// interfaces of a suspending agent are type-identical, so the agent id alone
-/// would bind a site to the wrong one.
+/// An invoke import is identified by the agent AND the interface: a legacy
+/// isolated fixture may import both an agent's `capabilities` and its scoped
+/// interface.
 pub(super) type AgentImportKey = (String, AgentInterface);
 
 fn standard_agent_import<'a>(
@@ -978,7 +910,7 @@ fn standard_agent_import<'a>(
         .find_map(|interface| imports.get(&(agent.to_string(), interface)))
 }
 
-/// Function indices of `runtara:workflow-operation/scope`.
+/// Function indices of `runtara:workflow/operation`.
 #[derive(Debug, Clone, Default)]
 pub(super) struct DirectOperationScopeImports {
     pub(super) enter: u32,
@@ -987,7 +919,7 @@ pub(super) struct DirectOperationScopeImports {
     pub(super) release: u32,
 }
 
-/// Function indices of `runtara:workflow-wait/instances`.
+/// Function indices of `runtara:workflow/waits`.
 #[derive(Debug, Clone, Default)]
 pub(super) struct DirectWaitInstancesImports {
     pub(super) register: u32,
@@ -1055,7 +987,7 @@ fn is_runtime_import(
     function.name == function_name
         && interface
             .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name.starts_with("runtara:workflow-runtime/runtime"))
+            .is_some_and(|name| name.starts_with("runtara:workflow/runtime"))
 }
 
 fn is_stdlib_import(
@@ -1079,11 +1011,11 @@ pub(super) fn is_connection_resolver_import(
     function.name == function_name
         && interface
             .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name.starts_with("runtara:connection-resolver/resolver"))
+            .is_some_and(|name| name.starts_with("runtara:host/connections"))
 }
 
 /// The `(agent, interface)` of a per-agent import such as
-/// `runtara:agent-crypto/capabilities@0.4.0`; `None` for anything else.
+/// `runtara:agent-crypto/capabilities@1.0.0`; `None` for anything else.
 pub(super) fn agent_import_for(
     resolve: &Resolve,
     interface: Option<&WorldKey>,
@@ -1106,7 +1038,7 @@ fn is_operation_scope_import(
     function.name == function_name
         && interface
             .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name == runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME)
+            .is_some_and(|name| name == runtara_wit::workflow::OPERATION)
 }
 
 fn is_wait_instances_import(
@@ -1118,31 +1050,7 @@ fn is_wait_instances_import(
     function.name == function_name
         && interface
             .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name == runtara_workflow_wit::WAIT_INSTANCES_INTERFACE_NAME)
-}
-
-pub(super) fn is_wasi_cli_run_export(
-    resolve: &Resolve,
-    interface: Option<&WorldKey>,
-    function: &WitFunction,
-) -> bool {
-    function.name == "run"
-        && interface
-            .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name.starts_with("wasi:cli/run"))
-}
-
-/// True for `runtara:workflow-lifecycle/lifecycle.invoke` — the entry export
-/// under [`WorkflowAbi::InvokeHostImports`].
-pub(super) fn is_lifecycle_invoke_export(
-    resolve: &Resolve,
-    interface: Option<&WorldKey>,
-    function: &WitFunction,
-) -> bool {
-    function.name == "invoke"
-        && interface
-            .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name.starts_with("runtara:workflow-lifecycle/lifecycle"))
+            .is_some_and(|name| name == runtara_wit::workflow::WAITS)
 }
 
 /// True for the workflow-as-agent capability export: an `invoke` in a
@@ -1185,17 +1093,10 @@ pub(super) fn import_core_function(
     imports.import(&module, &name, EntityType::Function(type_index));
 
     if function.name == "now"
-        && interface.is_some_and(|key| {
-            resolve.name_world_key(key) == runtara_agent_wit::WASI_MONOTONIC_CLOCK_INTERFACE
-        })
+        && interface
+            .is_some_and(|key| resolve.name_world_key(key) == runtara_wit::wasi::MONOTONIC_CLOCK)
     {
         import_indices.monotonic_now = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "load-input") {
-        import_indices.runtime_load_input = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "complete") {
-        import_indices.runtime_complete = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "fail") {
-        import_indices.runtime_fail = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "custom-event") {
         import_indices.runtime_custom_event = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "debug-mode-enabled") {
@@ -1230,12 +1131,8 @@ pub(super) fn import_core_function(
         import_indices.runtime_handle_checkpoint_signal = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "record-retry-attempt") {
         import_indices.runtime_record_retry_attempt = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "durable-sleep") {
-        import_indices.runtime_durable_sleep = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "blocking-sleep") {
         import_indices.runtime_blocking_sleep = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "durable-sleep-checkpoint") {
-        import_indices.runtime_durable_sleep_checkpoint = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "init-manifest") {
         import_indices.stdlib_init_manifest = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "value-store-scope") {
@@ -1452,8 +1349,6 @@ pub(super) fn import_core_function(
         import_indices.stdlib_agent_attempt_envelope = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-retry-delay-ms") {
         import_indices.stdlib_agent_retry_delay_ms = Some(function_index);
-    } else if is_stdlib_import(resolve, interface, function, "agent-error-info") {
-        import_indices.stdlib_agent_error_info = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-retry-error-info") {
         import_indices.stdlib_agent_retry_error_info = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-error") {

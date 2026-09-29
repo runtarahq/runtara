@@ -956,7 +956,7 @@ pub(super) fn emit_run_plan_mapping(
         DirectRunPlan::ImplicitFinish => {
             // No explicit Finish step: complete the workflow with a `null` output
             // (the generated compiler returns `Ok(Value::Null)` in this case).
-            // `runtime.complete` runs on `output_ptr/len` after the plan.
+            // The entry returns `output_ptr/len` after the plan.
             body.instruction(&Instruction::I32Const(static_data.output_null.offset));
             body.instruction(&Instruction::LocalSet(output_ptr_local));
             body.instruction(&Instruction::I32Const(static_data.output_null.len_i32()));

@@ -1,6 +1,6 @@
 //! Scope grace must cover work between Agent calls, including runtime imports.
 use super::*;
-use crate::direct_wasm::WorkflowAbi;
+use crate::direct_wasm::WorkflowRole;
 
 fn graph(split: bool) -> Value {
     let child = json!({"durable":true,"entryPoint":"done","steps":{
@@ -33,7 +33,7 @@ fn compile_graph(dir: &Path, graph: Value) -> anyhow::Result<DirectCompilationRe
             agent_catalog: None,
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )?;
     compose_direct_workflow(&mut result, std::env::var("RUNTARA_AGENT_COMPONENTS_DIR")?)?;
@@ -51,7 +51,7 @@ fn disabled_loop_budgets_do_not_add_alarm_imports() -> anyhow::Result<()> {
             !compiled
                 .component_artifacts
                 .world_wit
-                .contains("runtara:host-io/timers")
+                .contains("runtara:host/timers")
         );
         assert!(
             !compiled

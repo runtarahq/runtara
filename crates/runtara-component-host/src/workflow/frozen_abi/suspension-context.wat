@@ -1,9 +1,9 @@
-;; Frozen ABI fixture: a guest compiled against the released 0.1.0 WIT
+;; Frozen ABI fixture: a guest compiled against the released 1.0.0 WIT
 ;; (wit-component dummy guest, printed by wasm-tools 1.249.0). Never edit or
 ;; regenerate this file: it must keep linking for as long as the host runs
-;; artifacts built against 0.1.0. See runtara-workflow-wit's ABI rule.
+;; artifacts built against 1.0.0. See runtara-wit's versioning rule.
 (component
-  (type $ty-runtara:agent-suspension/context@0.1.0 (;0;)
+  (type $ty-runtara:agent/continuation@1.0.0 (;0;)
     (instance
       (type (;0;) (list u8))
       (type (;1;) (option 0))
@@ -11,12 +11,12 @@
       (export (;0;) "continuation" (func (type 2)))
     )
   )
-  (import "runtara:agent-suspension/context@0.1.0" (instance $runtara:agent-suspension/context@0.1.0 (;0;) (type $ty-runtara:agent-suspension/context@0.1.0)))
+  (import "runtara:agent/continuation@1.0.0" (instance $runtara:agent/continuation@1.0.0 (;0;) (type $ty-runtara:agent/continuation@1.0.0)))
   (core module $main (;0;)
     (type (;0;) (func (param i32)))
     (type (;1;) (func (param i32 i32 i32 i32) (result i32)))
     (type (;2;) (func))
-    (import "cm32p2|runtara:agent-suspension/context@0.1" "continuation" (func (;0;) (type 0)))
+    (import "cm32p2|runtara:agent/continuation@1" "continuation" (func (;0;) (type 0)))
     (memory (;0;) 0)
     (export "cm32p2_memory" (memory 0))
     (export "cm32p2_realloc" (func 1))
@@ -53,22 +53,22 @@
     )
   )
   (core instance $wit-component-shim-instance (;0;) (instantiate $wit-component-shim-module))
-  (alias core export $wit-component-shim-instance "0" (core func $indirect-cm32p2|runtara:agent-suspension/context@0.1-continuation (;0;)))
-  (core instance $cm32p2|runtara:agent-suspension/context@0.1 (;1;)
-    (export "continuation" (func $indirect-cm32p2|runtara:agent-suspension/context@0.1-continuation))
+  (alias core export $wit-component-shim-instance "0" (core func $indirect-cm32p2|runtara:agent/continuation@1-continuation (;0;)))
+  (core instance $cm32p2|runtara:agent/continuation@1 (;1;)
+    (export "continuation" (func $indirect-cm32p2|runtara:agent/continuation@1-continuation))
   )
   (core instance $main (;2;) (instantiate $main
-      (with "cm32p2|runtara:agent-suspension/context@0.1" (instance $cm32p2|runtara:agent-suspension/context@0.1))
+      (with "cm32p2|runtara:agent/continuation@1" (instance $cm32p2|runtara:agent/continuation@1))
     )
   )
   (alias core export $main "cm32p2_memory" (core memory $memory (;0;)))
   (alias core export $wit-component-shim-instance "$imports" (core table $"shim table" (;0;)))
-  (alias export $runtara:agent-suspension/context@0.1.0 "continuation" (func $continuation (;0;)))
+  (alias export $runtara:agent/continuation@1.0.0 "continuation" (func $continuation (;0;)))
   (alias core export $main "cm32p2_realloc" (core func $realloc (;1;)))
-  (core func $"#core-func2 indirect-cm32p2|runtara:agent-suspension/context@0.1-continuation" (@name "indirect-cm32p2|runtara:agent-suspension/context@0.1-continuation") (;2;) (canon lower (func $continuation) (memory $memory) (realloc $realloc)))
+  (core func $"#core-func2 indirect-cm32p2|runtara:agent/continuation@1-continuation" (@name "indirect-cm32p2|runtara:agent/continuation@1-continuation") (;2;) (canon lower (func $continuation) (memory $memory) (realloc $realloc)))
   (core instance $fixup-args (;3;)
     (export "$imports" (table $"shim table"))
-    (export "0" (func $"#core-func2 indirect-cm32p2|runtara:agent-suspension/context@0.1-continuation"))
+    (export "0" (func $"#core-func2 indirect-cm32p2|runtara:agent/continuation@1-continuation"))
   )
   (core instance $fixup (;4;) (instantiate $wit-component-fixup
       (with "" (instance $fixup-args))

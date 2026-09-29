@@ -15,26 +15,21 @@ use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, MemArg, Val
 
 use super::abi::{
     load_retptr_list, push_retptr_arg, push_retptr_i32_load, push_retptr_i64_load,
-    push_retptr_u8_load, push_segment_args, return_if_retptr_error,
+    push_retptr_u8_load, return_if_retptr_error,
 };
 use super::retry_park::emit_retry_park_until_deadline;
 use super::{
     DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL, DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL,
     DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL, DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
-    DIRECT_AGENT_RATE_LIMITED_LOCAL, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_LEN_OFFSET,
-    DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_PTR_OFFSET, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_TAG_OFFSET,
-    DIRECT_AGENT_RESULT_ERR_CATEGORY_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_CATEGORY_PTR_OFFSET,
-    DIRECT_AGENT_RESULT_ERR_CODE_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET,
-    DIRECT_AGENT_RESULT_ERR_MESSAGE_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_MESSAGE_PTR_OFFSET,
+    DIRECT_AGENT_RATE_LIMITED_LOCAL, DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET,
     DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET,
-    DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET, DIRECT_AGENT_RESULT_ERR_RETRYABLE_OFFSET,
-    DIRECT_AGENT_RESULT_ERR_SEVERITY_LEN_OFFSET, DIRECT_AGENT_RESULT_ERR_SEVERITY_PTR_OFFSET,
-    DIRECT_AGENT_RETRY_ATTEMPT_LOCAL, DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
-    DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL, DIRECT_AGENT_RETRY_INFO_PAYLOAD_LEN_OFFSET,
-    DIRECT_AGENT_RETRY_INFO_PAYLOAD_PTR_OFFSET, DIRECT_AGENT_RETRY_INFO_RATE_LIMITED_OFFSET,
-    DIRECT_AGENT_RETRY_INFO_RETRYABLE_OFFSET, DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL,
-    DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL, DIRECT_AGENT_RETRYABLE_LOCAL, DIRECT_RET_U64_OK_OFFSET,
-    DirectCoreFunctionIndices, DirectCoreStaticData,
+    DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET, DIRECT_AGENT_RETRY_ATTEMPT_LOCAL,
+    DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL, DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
+    DIRECT_AGENT_RETRY_INFO_PAYLOAD_LEN_OFFSET, DIRECT_AGENT_RETRY_INFO_PAYLOAD_PTR_OFFSET,
+    DIRECT_AGENT_RETRY_INFO_RATE_LIMITED_OFFSET, DIRECT_AGENT_RETRY_INFO_RETRYABLE_OFFSET,
+    DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL, DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL,
+    DIRECT_AGENT_RETRYABLE_LOCAL, DIRECT_RET_U64_OK_OFFSET, DIRECT_RUN_RETPTR_OFFSET,
+    DirectCoreFunctionIndices,
 };
 
 pub(super) fn emit_agent_retry_condition(
@@ -122,48 +117,13 @@ pub(super) fn emit_agent_retry_delay(
     body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn emit_agent_retry_sleep(
-    body: &mut WasmFunction,
-    indices: &DirectCoreFunctionIndices,
-    static_data: &DirectCoreStaticData,
-    durable_checkpoint: bool,
-    cache_key_ptr_local: u32,
-    cache_key_len_local: u32,
-    sleep_key_ptr_local: u32,
-    sleep_key_len_local: u32,
-) {
-    if !durable_checkpoint {
-        // Keep the invocation's stack alive while waiting. Root lifecycle
-        // signals and parent cancellation use the same standard wait/cleanup
-        // as an outbound Agent call.
-        body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
-        super::cooperative_wait::emit_timer_wait(body, indices);
-        return;
-    }
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL));
-    body.instruction(&Instruction::If(BlockType::Empty));
-    body.instruction(&Instruction::LocalGet(cache_key_ptr_local));
-    body.instruction(&Instruction::LocalGet(cache_key_len_local));
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_agent_retry_sleep_key));
-    return_if_retptr_error(body, indices);
-    load_retptr_list(body, sleep_key_ptr_local, sleep_key_len_local);
-
-    body.instruction(&Instruction::LocalGet(sleep_key_ptr_local));
-    body.instruction(&Instruction::LocalGet(sleep_key_len_local));
-    push_segment_args(body, &static_data.agent_rate_limit_wait);
+/// Non-durable retry backoff: keep the invocation's stack alive while
+/// waiting. Root lifecycle signals and parent cancellation use the same
+/// standard wait/cleanup as an outbound Agent call. Durable retries park
+/// instead (see [`emit_agent_retry_park`]).
+pub(super) fn emit_agent_retry_sleep(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
     body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_durable_sleep_checkpoint));
-    return_if_retptr_error(body, indices);
-    body.instruction(&Instruction::Else);
-    body.instruction(&Instruction::LocalGet(DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_durable_sleep));
-    return_if_retptr_error(body, indices);
-    body.instruction(&Instruction::End);
+    super::cooperative_wait::emit_timer_wait(body, indices);
 }
 
 /// Convert a lifecycle-ABI durable Agent retry into a store-freeing timed
@@ -226,20 +186,13 @@ pub(super) fn emit_agent_retry_error_info(
     output_ptr_local: u32,
     output_len_local: u32,
 ) {
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CODE_LEN_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_MESSAGE_PTR_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_MESSAGE_LEN_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CATEGORY_PTR_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_CATEGORY_LEN_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_SEVERITY_PTR_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_SEVERITY_LEN_OFFSET);
-    push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_RETRYABLE_OFFSET);
-    push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET);
-    push_retptr_i64_load(body, DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET);
-    push_retptr_u8_load(body, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_TAG_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_PTR_OFFSET);
-    push_retptr_i32_load(body, DIRECT_AGENT_RESULT_ERR_ATTRIBUTES_LEN_OFFSET);
+    // `agent-retry-error-info(error-info)` flattens past 16 values, so its
+    // argument passes by pointer: the error-info the Agent returned, in place
+    // at +8 of its result area. The host copies it before the stdlib runs,
+    // so the same area then receives the result.
+    body.instruction(&Instruction::I32Const(
+        DIRECT_RUN_RETPTR_OFFSET + DIRECT_AGENT_RESULT_ERR_CODE_PTR_OFFSET as i32,
+    ));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_agent_retry_error_info));
     return_if_retptr_error(body, indices);

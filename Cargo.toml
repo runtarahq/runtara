@@ -5,8 +5,6 @@ members = [
     # PostgreSQL implementation of core's Persistence contract
     "crates/runtara-store-postgres",
     "crates/runtara-environment",
-    "crates/runtara-sdk",
-    "crates/runtara-sdk-macros",
     # Workflow compilation library
     "crates/runtara-dsl",
     "crates/runtara-workflows",
@@ -15,7 +13,6 @@ members = [
     "crates/runtara-ai",
     "crates/runtara-http",
     "crates/runtara-workflow-stdlib",
-    "crates/runtara-workflow-runtime",
     "crates/runtara-agent-macro",
     # Shared character-encoding vocabulary + detection/decoding for WASM agents
     "crates/runtara-agent-encoding",
@@ -29,14 +26,16 @@ members = [
     "crates/runtara-object-store",
     "crates/runtara-object-model-core",
     "crates/runtara-database-contract",
-    # WASM Component Model migration
-    "crates/runtara-agent-wit",
+    # Every runtara WIT contract, and the per-agent package generator
+    "crates/runtara-wit",
+    # Guest helpers for trusted agents
     "crates/runtara-agent-trusted",
-    # Typed agent suspension contract (runtara:agent-suspension)
+    # Typed agent suspension: caps, layout and guest types
     "crates/runtara-agent-suspension",
     # Control service contract: caps, codes, capacity share, start schema
     "crates/runtara-control-contract",
-    "crates/runtara-workflow-wit",
+    # Isolated child-component package and invocation-path contract
+    "crates/runtara-invocation-contract",
     "crates/runtara-component-host",
     "crates/agents/runtara-agent-crypto",
     "crates/agents/runtara-agent-xml",

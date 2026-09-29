@@ -1,12 +1,11 @@
 //! Embedded execution of composed direct-workflow components.
 //!
 //! A composed workflow component (the direct pipeline's `workflow.wasm`)
-//! exports `wasi:cli/run@0.2.3` and imports only WASI cli/http interfaces —
-//! the stdlib/runtime/agent imports are satisfied internally by composition.
-//! This module is the in-process replacement for `wasmtime run --wasi http
-//! --wasi inherit-network <workflow.wasm>`: same env contract, same
-//! no-filesystem sandbox, but no process spawn and no per-run JIT (compiled
-//! components are cached per image path).
+//! exports the workflow entry ([`crate::lifecycle::ENTRY_INTERFACE_NAME`])
+//! and answers `invoke("run", input)` like an agent: the lifted return value
+//! is the run's terminal outcome. Preparation refuses any component without
+//! that export. Runs are in-process: no filesystem, no process spawn and no
+//! per-run JIT (compiled components are cached per image path).
 //!
 //! Interruption model, two rings:
 //! - epoch deadline callback: fires at guest branch points every
@@ -29,7 +28,6 @@ use async_trait::async_trait;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store, UpdateDeadline};
 use wasmtime_wasi::cli::OutputFile;
-use wasmtime_wasi::p2::bindings::CommandPre;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{
     WasiHttpCtx,
@@ -100,37 +98,6 @@ impl Default for WorkflowLimits {
     }
 }
 
-/// Why a workflow run ended.
-#[derive(Debug)]
-pub enum WorkflowExit {
-    /// `wasi:cli/run` returned `Ok(())` — the SDK has already reported the
-    /// final status to runtara-core over HTTP.
-    Completed,
-    /// `wasi:cli/run` returned `Err(())` — the guest signalled failure the
-    /// same way the CLI surfaces exit code 1. Details, if any, were reported
-    /// to runtara-core by the SDK before returning.
-    GuestError,
-    /// Instantiation failed or the guest trapped. The reason chain is the
-    /// closest equivalent of the CLI process's stderr.
-    Failed { reason: String },
-    /// The wall-clock budget elapsed.
-    Timeout,
-    /// The cancel flag was raised.
-    Cancelled,
-    /// Cleanup exceeded its grace; no cooperative acknowledgement is implied.
-    CleanupAborted,
-}
-
-/// Result of one embedded workflow run.
-#[derive(Debug)]
-pub struct WorkflowRunResult {
-    pub exit: WorkflowExit,
-    /// Largest single guest linear memory observed, in bytes. Exact (from the
-    /// resource limiter), unlike the RSS sampling the process runner reports.
-    pub memory_peak_bytes: u64,
-    pub duration: Duration,
-}
-
 /// Inputs for one run. `env` is the same merged map `WasmRunner::build_env`
 /// produces; `stderr` (when given) receives both guest stderr writes and the
 /// host-side failure reason, mirroring the per-run `stderr.log` contract.
@@ -144,11 +111,9 @@ pub struct WorkflowRunSpec {
     pub timeout: Duration,
     pub cancel: Option<Arc<AtomicBool>>,
     pub limits: WorkflowLimits,
-    /// Native runtime host for artifacts composed with
-    /// `RuntimeBinding::HostImport` (they import
-    /// `runtara:workflow-runtime/runtime` instead of carrying the composed
-    /// HTTP runtime component). `None` for legacy composed artifacts — a
-    /// HostImport artifact run without a host traps loudly on first use.
+    /// Native runtime host for the `runtara:workflow/runtime`
+    /// interface every composed workflow imports. An artifact that imports
+    /// it, run without a host, traps loudly on first use.
     pub runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
 }
 
@@ -159,6 +124,13 @@ pub struct CapabilityInvocation<'a> {
     pub capability: &'a str,
     pub input: Vec<u8>,
 }
+
+/// Every entry, a workflow's or an agent's: `invoke(capability-id, input) ->
+/// result<outcome, error-info>`.
+type InvokeFunc = wasmtime::component::TypedFunc<
+    (String, Vec<u8>),
+    (Result<crate::lifecycle::WorkflowOutcome, crate::lifecycle::WorkflowErrorInfo>,),
+>;
 
 enum InvocationEntry<'a> {
     Lifecycle {
@@ -244,7 +216,7 @@ impl WasiHttpHooks for WorkflowHooks {
         request: http::Request<HyperOutgoingBody>,
         config: OutgoingRequestConfig,
     ) -> HttpResult<HostFutureIncomingResponse> {
-        // Generated workflow and agent HTTP goes through `runtara:host-io`,
+        // Generated workflow and agent HTTP goes through `runtara:host/http`,
         // where a single absolute deadline and response cap are enforced.
         // The legacy raw wasi:http route must not remain as an ungoverned
         // fallback: it would bypass both protections.
@@ -286,8 +258,7 @@ pub struct WorkflowState {
     limiter: WorkflowLimiter,
     termination: Option<Termination>,
     cleanup_alarm: crate::cleanup_alarm::CleanupAlarmState,
-    /// Present when the artifact imports the runtime interface (HostImport
-    /// binding); `None` for legacy composed artifacts.
+    /// The run's native runtime host, when the caller configured one.
     runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
     execution: Option<Arc<ExecutionContext>>,
     pub(crate) outbound_http: Result<Arc<crate::outbound_http::RunOutboundHttp>, String>,
@@ -369,9 +340,6 @@ struct CachedComponent {
     source_digest: Option<[u8; 32]>,
     /// The linked component, export-shape-agnostic.
     instance_pre: Arc<wasmtime::component::InstancePre<WorkflowState>>,
-    /// Lazily-derived `wasi:cli/run` wrapper — present only once a legacy
-    /// (run-shaped) artifact has been loaded through [`WorkflowExecutor::load`].
-    command: Option<Arc<CommandPre<WorkflowState>>>,
     child_catalog: Option<Arc<PreparedChildCatalog>>,
     control: Option<Arc<crate::control_executor::ControlBinding>>,
 }
@@ -383,10 +351,12 @@ struct CachedComponent {
 /// execution. The child response binds the source digest and serialized
 /// component together, so the runner executes those exact prepared bytes
 /// without reopening the mutable artifact path before it accepts a run permit.
+///
+/// Preparation refuses a component that does not export the workflow entry,
+/// so every `PreparedWorkflow` runs through the invoke path.
 #[derive(Clone)]
 pub struct PreparedWorkflow {
     instance_pre: Arc<wasmtime::component::InstancePre<WorkflowState>>,
-    command: Option<Arc<CommandPre<WorkflowState>>>,
     child_catalog: Option<Arc<PreparedChildCatalog>>,
     control: Option<Arc<crate::control_executor::ControlBinding>>,
 }
@@ -403,12 +373,6 @@ impl PreparedWorkflow {
         self.child_catalog.as_ref()
     }
 
-    /// Whether this artifact uses the lifecycle `invoke` export rather than
-    /// the retired `wasi:cli/run` entrypoint.
-    pub fn is_lifecycle_invoke(&self, engine: &Arc<Engine>) -> bool {
-        crate::lifecycle::exports_lifecycle_invoke(&self.instance_pre, engine)
-    }
-
     /// Whether lifecycle persistence can be supervised through the native host.
     /// Internally composed HTTP runtimes cannot defer their terminal writes.
     pub fn supports_scoped_runtime(&self, engine: &Arc<Engine>) -> bool {
@@ -417,25 +381,13 @@ impl PreparedWorkflow {
         }
         let ty = self.instance_pre.component().component_type();
         let imports: Vec<_> = ty.imports(engine).map(|(name, _)| name).collect();
-        self.is_lifecycle_invoke(engine)
-            && [
-                runtara_workflow_wit::RUNTIME_INTERFACE_NAME,
-                runtara_workflow_wit::LEGACY_RUNTIME_INTERFACE_NAME,
-            ]
-            .iter()
-            .any(|name| imports.contains(name))
+        imports.contains(&runtara_wit::workflow::RUNTIME)
             && !imports.iter().any(|name| name.starts_with("wasi:http/"))
     }
 
-    /// The linked invoke-shaped component, when [`Self::is_lifecycle_invoke`]
-    /// is true.
+    /// The linked component; it exports the workflow entry.
     pub fn instance_pre(&self) -> &Arc<wasmtime::component::InstancePre<WorkflowState>> {
         &self.instance_pre
-    }
-
-    /// The linked legacy CLI wrapper, when this is a legacy artifact.
-    pub fn command(&self) -> Option<&Arc<CommandPre<WorkflowState>>> {
-        self.command.as_ref()
     }
 }
 
@@ -489,7 +441,7 @@ impl WorkflowExecutor {
         if component
             .component_type()
             .imports(&self.engine)
-            .any(|(name, _)| name == runtara_agent_trusted::EXECUTOR_INTERFACE)
+            .any(|(name, _)| name == runtara_wit::trusted::EXECUTOR)
         {
             anyhow::ensure!(
                 !pins.is_empty(),
@@ -547,10 +499,9 @@ impl WorkflowExecutor {
         let mut linker = Linker::<WorkflowState>::new(&engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
-        // Native runtime interface for HostImport-composed artifacts. Extra
-        // definitions are invisible to components that don't import them (the
-        // WASI surface above works the same way), so legacy composed artifacts
-        // are unaffected by this registration.
+        // Native runtime interface of composed workflows. Extra definitions
+        // are invisible to components that don't import them (the WASI surface
+        // above works the same way), so agents linked here are unaffected.
         crate::runtime_host::add_runtime_to_linker(&mut linker)?;
         crate::connection_resolver_host::add_connection_resolver_to_linker(&mut linker)?;
         crate::database_host::add_database_to_linker(&mut linker)?;
@@ -587,37 +538,10 @@ impl WorkflowExecutor {
         &self.engine
     }
 
-    /// Load (or fetch from cache) the composed component at `wasm_path`. The
-    /// cache key is the path; entries are revalidated against file mtime+len
-    /// so a re-deployed image at the same path recompiles.
-    pub async fn load(&self, wasm_path: &Path) -> Result<Arc<CommandPre<WorkflowState>>> {
-        let instance_pre = self.load_instance_pre(wasm_path).await?;
-        {
-            let mut cache = self.cache.lock().await;
-            if let Some(entry) = cache.get_mut(wasm_path) {
-                if let Some(command) = &entry.command {
-                    return Ok(Arc::clone(command));
-                }
-                let command = Arc::new(
-                    CommandPre::new(entry.instance_pre.as_ref().clone()).map_err(|e| {
-                        anyhow::anyhow!("workflow component does not export wasi:cli/run: {e:#}")
-                    })?,
-                );
-                entry.command = Some(Arc::clone(&command));
-                return Ok(command);
-            }
-        }
-        // The entry was evicted between the two locks — derive without caching.
-        Ok(Arc::new(
-            CommandPre::new(instance_pre.as_ref().clone()).map_err(|e| {
-                anyhow::anyhow!("workflow component does not export wasi:cli/run: {e:#}")
-            })?,
-        ))
-    }
-
-    /// Load (or fetch from cache) the linked component, export-shape-agnostic
-    /// — the entry point for invoke-shaped artifacts (which do not export
-    /// `wasi:cli/run` and therefore cannot go through [`Self::load`]).
+    /// Load (or fetch from cache) the linked component at `wasm_path`,
+    /// export-shape-agnostic: a workflow entry or an agent. The cache key is
+    /// the path; entries are revalidated against file mtime+len so a
+    /// re-deployed image at the same path recompiles.
     pub async fn load_instance_pre(
         &self,
         wasm_path: &Path,
@@ -666,7 +590,6 @@ impl WorkflowExecutor {
                 last_used: Instant::now(),
                 source_digest: None,
                 instance_pre: Arc::clone(&instance_pre),
-                command: None,
                 child_catalog: None,
                 control: None,
             },
@@ -726,7 +649,7 @@ impl WorkflowExecutor {
             .collect();
         if !imports
             .iter()
-            .any(|name| name == runtara_workflow_wit::CONTROL_EXECUTOR_INTERFACE_NAME)
+            .any(|name| name == runtara_wit::control::EXECUTOR)
         {
             return Ok(None);
         }
@@ -762,6 +685,14 @@ impl WorkflowExecutor {
         component: Component,
         control_importers: &std::collections::BTreeSet<String>,
     ) -> Result<PreparedWorkflow> {
+        // Fail closed before anything else: every prepared artifact runs
+        // through the workflow entry, and later code relies on it.
+        anyhow::ensure!(
+            crate::lifecycle::component_exports_workflow_entry(&component, &self.engine),
+            "workflow component does not export the workflow entry `{}`; rebuild or \
+             republish this workflow",
+            crate::lifecycle::ENTRY_INTERFACE_NAME
+        );
         let control = self.control_binding(&component, control_importers)?;
         let instance_pre = Arc::new(
             self.linker_with_trusted_pins(&component)?
@@ -770,19 +701,9 @@ impl WorkflowExecutor {
                     anyhow::anyhow!("link precompiled workflow component: {error:#}")
                 })?,
         );
-        let command = if crate::lifecycle::exports_lifecycle_invoke(&instance_pre, &self.engine) {
-            None
-        } else {
-            Some(Arc::new(
-                CommandPre::new(instance_pre.as_ref().clone()).map_err(|error| {
-                    anyhow::anyhow!("workflow component does not export wasi:cli/run: {error:#}")
-                })?,
-            ))
-        };
 
         Ok(PreparedWorkflow {
             instance_pre,
-            command,
             child_catalog: None,
             control,
         })
@@ -823,7 +744,7 @@ impl WorkflowExecutor {
             if component
                 .component_type()
                 .imports(&self.engine)
-                .any(|(name, _)| name == runtara_agent_trusted::EXECUTOR_INTERFACE)
+                .any(|(name, _)| name == runtara_wit::trusted::EXECUTOR)
             {
                 anyhow::ensure!(
                     !pins.is_empty(),
@@ -873,7 +794,6 @@ impl WorkflowExecutor {
         Some((
             PreparedWorkflow {
                 instance_pre: Arc::clone(&entry.instance_pre),
-                command: entry.command.clone(),
                 child_catalog: entry.child_catalog.clone(),
                 control: entry.control.clone(),
             },
@@ -907,7 +827,6 @@ impl WorkflowExecutor {
                 last_used: Instant::now(),
                 source_digest: Some(source_digest),
                 instance_pre: Arc::clone(&prepared.instance_pre),
-                command: prepared.command.clone(),
                 child_catalog: prepared.child_catalog.clone(),
                 control: prepared.control.clone(),
             },
@@ -917,216 +836,8 @@ impl WorkflowExecutor {
         }
     }
 
-    /// Execute one workflow instance to completion (or interruption).
-    pub async fn execute(
-        &self,
-        pre: &CommandPre<WorkflowState>,
-        spec: WorkflowRunSpec,
-    ) -> WorkflowRunResult {
-        self.execute_with_start_confirmation(pre, spec, None).await
-    }
-
-    /// Execute one CLI-shaped workflow after an optional durable handoff
-    /// confirmation at the exact pre-instantiation boundary.
-    pub async fn execute_with_start_confirmation(
-        &self,
-        pre: &CommandPre<WorkflowState>,
-        spec: WorkflowRunSpec,
-        start_confirmation: Option<Arc<dyn WorkflowStartConfirmation>>,
-    ) -> WorkflowRunResult {
-        // Keep the externally reported duration, but do not begin the active
-        // guest timeout until the runner has durably crossed its start gate.
-        let overall_started = Instant::now();
-
-        let mut builder = WasiCtxBuilder::new();
-        // No preopens, no stdin, stdout discarded — parity with
-        // `wasmtime run --wasi http` which grants no filesystem access and
-        // the runner's `Stdio::null()` stdout.
-        let mut env: Vec<(&String, &String)> = spec.env.iter().collect();
-        env.sort();
-        for (k, v) in env {
-            builder.env(k, v);
-        }
-        let host_stderr = match &spec.stderr {
-            Some(file) => match file.try_clone() {
-                Ok(clone) => {
-                    builder.stderr(OutputFile::new(clone));
-                    spec.stderr
-                }
-                Err(_) => spec.stderr,
-            },
-            None => None,
-        };
-
-        let initial_deadline = tokio::time::Instant::now() + spec.timeout;
-        let state = WorkflowState {
-            trusted: self
-                .trusted
-                .get()
-                .cloned()
-                .map(|executor| crate::trusted::TrustedCall {
-                    executor,
-                    tenant: spec.trusted_tenant.clone().unwrap_or_default(),
-                    deadline: tokio::time::Instant::now() + spec.timeout,
-                    pins: Some(self.trusted_pins(pre.instance_pre().component())),
-                    launch: trusted_launch(spec.runtime.as_ref()),
-                }),
-            // The retired `wasi:cli/run` entry cannot suspend.
-            control_executor: None,
-            operation: Default::default(),
-            instance_waits: Default::default(),
-            wasi: builder.build(),
-            http: WasiHttpCtx::new(),
-            table: ResourceTable::new(),
-            hooks: WorkflowHooks,
-            http_deadline: initial_deadline,
-            active_deadline: initial_deadline,
-            limiter: WorkflowLimiter {
-                max_memory_bytes: spec.limits.max_memory_bytes,
-                max_table_elements: spec.limits.max_table_elements,
-                memory_peak_bytes: 0,
-                denied_memory_grow: false,
-            },
-            termination: None,
-            cleanup_alarm: Default::default(),
-            runtime: spec.runtime.clone(),
-            execution: None,
-            outbound_http: crate::outbound_http::for_run(
-                self.outbound_http.get(),
-                spec.trusted_tenant.as_deref(),
-                spec.trusted_instance.as_deref(),
-            ),
-            database: crate::database_host::database_for_run(
-                self.database.get(),
-                spec.trusted_tenant.as_deref(),
-            ),
-            connection_resolver: crate::connection_resolver_host::resolver_for_run(
-                self.connection_resolver.get(),
-                spec.trusted_tenant.as_deref(),
-            ),
-        };
-
-        let mut store = Store::new(&self.engine, state);
-        store.limiter(|s| &mut s.limiter);
-
-        let timeout = spec.timeout;
-        let cancel = spec.cancel.clone();
-        store.epoch_deadline_callback(move |mut ctx| {
-            if ctx.data().cleanup_alarm.expired() {
-                ctx.data_mut().termination = Some(Termination::CleanupAborted);
-                return Ok(UpdateDeadline::Interrupt);
-            }
-            if let Some(flag) = &cancel
-                && flag.load(Ordering::Relaxed)
-            {
-                ctx.data_mut().termination = Some(Termination::Cancelled);
-                return Ok(UpdateDeadline::Interrupt);
-            }
-            if tokio::time::Instant::now() >= ctx.data().active_deadline {
-                ctx.data_mut().termination = Some(Termination::Timeout);
-                return Ok(UpdateDeadline::Interrupt);
-            }
-            Ok(UpdateDeadline::Yield(1))
-        });
-        store.set_epoch_deadline(1);
-
-        // Watchdog ring: catches the guest blocked in a host call, where the
-        // epoch callback can't fire. Cancellation = dropping the run future.
-        let cleanup_alarm = store.data().cleanup_alarm.clone();
-        let watchdog_cancel = spec.cancel.clone();
-        let run_ended = {
-            // Store/WASI setup is host work before guest execution. A closed
-            // durable gate must not burn the active execution budget; only a
-            // successful confirmation starts it.
-            let confirmation = async {
-                if let Some(confirmation) = start_confirmation.as_ref() {
-                    confirmation.confirm_before_instantiate().await?;
-                }
-                Ok::<(), anyhow::Error>(())
-            }
-            .await;
-
-            if let Err(error) = confirmation {
-                Ok(Err(error))
-            } else {
-                store.data_mut().begin_active_execution(timeout);
-                let active_started = Instant::now();
-                let run = async {
-                    let command = pre
-                        .instantiate_async(&mut store)
-                        .await
-                        .map_err(anyhow::Error::from)?;
-                    command
-                        .wasi_cli_run()
-                        .call_run(&mut store)
-                        .await
-                        .map_err(anyhow::Error::from)
-                };
-                tokio::pin!(run);
-                let watchdog = async {
-                    loop {
-                        tokio::time::sleep(EPOCH_TICK).await;
-                        if let Some(flag) = &watchdog_cancel
-                            && flag.load(Ordering::Relaxed)
-                        {
-                            return Termination::Cancelled;
-                        }
-                        if active_started.elapsed() >= timeout {
-                            return Termination::Timeout;
-                        }
-                    }
-                };
-                tokio::select! {
-                    result = &mut run => Ok(result),
-                    termination = watchdog => Err(termination),
-                    _ = cleanup_alarm.wait() => Err(Termination::CleanupAborted),
-                }
-            }
-        };
-
-        let data = store.data();
-        let exit = match run_ended {
-            Err(Termination::Timeout) => WorkflowExit::Timeout,
-            _ if data.cleanup_alarm.expired() => WorkflowExit::CleanupAborted,
-            Err(Termination::CleanupAborted) => WorkflowExit::CleanupAborted,
-            Err(Termination::Cancelled) => WorkflowExit::Cancelled,
-            Ok(Ok(Ok(()))) => WorkflowExit::Completed,
-            Ok(Ok(Err(()))) => WorkflowExit::GuestError,
-            Ok(Err(trap)) => match data.termination {
-                Some(Termination::Timeout) => WorkflowExit::Timeout,
-                Some(Termination::CleanupAborted) => WorkflowExit::CleanupAborted,
-                Some(Termination::Cancelled) => WorkflowExit::Cancelled,
-                None if data.limiter.denied_memory_grow => WorkflowExit::Failed {
-                    reason: format!(
-                        "guest memory limit exceeded ({} bytes)",
-                        data.limiter.max_memory_bytes
-                    ),
-                },
-                None => WorkflowExit::Failed {
-                    reason: format!("{trap:#}"),
-                },
-            },
-        };
-
-        // Mirror the CLI runner's stderr.log contract: the process's stderr
-        // carried trap/abort diagnostics; embedded, we append the reason.
-        if let Some(mut file) = host_stderr
-            && let WorkflowExit::Failed { reason } = &exit
-        {
-            let _ = writeln!(file, "workflow failed: {reason}");
-        }
-
-        WorkflowRunResult {
-            exit,
-            memory_peak_bytes: store.data().limiter.memory_peak_bytes,
-            duration: overall_started.elapsed(),
-        }
-    }
-
-    /// Execute one invoke-shaped workflow instance (the unified agent-shaped
-    /// export): `input` is passed as the call argument; the terminal result
-    /// is the lifted return value. Same sandbox, limits, and interruption
-    /// rings as [`Self::execute`].
+    /// Execute one workflow instance through its entry: `input` is passed as
+    /// the call argument; the terminal result is the lifted return value.
     pub async fn execute_invoke(
         &self,
         pre: &wasmtime::component::InstancePre<WorkflowState>,
@@ -1458,19 +1169,13 @@ impl WorkflowExecutor {
                             .ok_or_else(|| {
                                 anyhow::anyhow!("capability interface has no `invoke` export")
                             })?;
-                        type CapabilityFunc = wasmtime::component::TypedFunc<
-                            (String, Vec<u8>),
-                            (Result<Vec<u8>, crate::lifecycle::WorkflowErrorInfo>,),
-                        >;
-                        let invoke: CapabilityFunc =
+                        let invoke: InvokeFunc =
                             instance.get_typed_func(&mut store, invoke_index)?;
                         let (result,) = invoke
                             .call_async(&mut store, ((*capability).to_owned(), input))
                             .await?;
-                        return Ok(result.map(crate::lifecycle::WorkflowOutcome::Completed));
+                        return Ok(result);
                     }
-                    // v2 (0.2.0, async-typed invoke) is the current compile shape;
-                    // 0.1.0 (sync-typed) artifacts from before ABI v2 keep working.
                     let iface_idx = if let InvocationEntry::Lifecycle {
                         interface: Some(interface),
                     } = &entry
@@ -1478,33 +1183,34 @@ impl WorkflowExecutor {
                         instance
                             .get_export_index(&mut store, None, interface)
                             .ok_or_else(|| {
-                                anyhow::anyhow!("missing lifecycle interface `{interface}`")
+                                anyhow::anyhow!("missing workflow entry interface `{interface}`")
                             })?
                     } else {
-                        instance.get_export_index(&mut store, None, crate::lifecycle::LIFECYCLE_INTERFACE_NAME)
-                                .or_else(|| instance.get_export_index(&mut store, None, runtara_workflow_wit::LIFECYCLE_INTERFACE_NAME_V1))
-                                .ok_or_else(|| anyhow::anyhow!(
-                                    "workflow component does not export {} (or the 0.1.0 variant) — \
-                                     not an invoke-shaped artifact (use execute() for wasi:cli/run artifacts)",
-                                    crate::lifecycle::LIFECYCLE_INTERFACE_NAME
-                                ))?
+                        instance
+                            .get_export_index(
+                                &mut store,
+                                None,
+                                crate::lifecycle::ENTRY_INTERFACE_NAME,
+                            )
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "workflow component does not export the workflow entry `{}`",
+                                    crate::lifecycle::ENTRY_INTERFACE_NAME
+                                )
+                            })?
                     };
                     let invoke_idx = instance
                         .get_export_index(&mut store, Some(&iface_idx), "invoke")
                         .ok_or_else(|| {
-                            anyhow::anyhow!("lifecycle interface has no `invoke` export")
+                            anyhow::anyhow!("workflow entry interface has no `invoke` export")
                         })?;
-                    type InvokeFunc = wasmtime::component::TypedFunc<
-                        (Vec<u8>,),
-                        (
-                            Result<
-                                crate::lifecycle::WorkflowOutcome,
-                                crate::lifecycle::WorkflowErrorInfo,
-                            >,
-                        ),
-                    >;
                     let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
-                    let (result,) = invoke.call_async(&mut store, (input,)).await?;
+                    let (result,) = invoke
+                        .call_async(
+                            &mut store,
+                            (crate::lifecycle::ENTRY_CAPABILITY.to_owned(), input),
+                        )
+                        .await?;
                     // post-return is driven automatically by wasmtime 44's typed
                     // call path; the store is single-use anyway (fresh per run).
                     Ok::<_, anyhow::Error>(result)
@@ -1547,8 +1253,8 @@ impl WorkflowExecutor {
             Ok(Ok(Ok(crate::lifecycle::WorkflowOutcome::Completed(output)))) => {
                 InvokeExit::Completed(output)
             }
-            Ok(Ok(Ok(crate::lifecycle::WorkflowOutcome::Suspended(wakes)))) => {
-                InvokeExit::Suspended(wakes)
+            Ok(Ok(Ok(crate::lifecycle::WorkflowOutcome::Suspended(suspension)))) => {
+                InvokeExit::Suspended(suspension.wakes)
             }
             Ok(Ok(Err(error))) => InvokeExit::Failed(error),
             Ok(Err(trap)) => match data.termination {
@@ -1583,10 +1289,10 @@ impl WorkflowExecutor {
 
     /// Invoke a workflow-as-agent's `capabilities.invoke(capability-id, input,
     /// connection) -> result<list<u8>, error-info>` export directly, without a
-    /// catalog entry — for verifying the `AgentCapabilities` ABI. A pure,
+    /// catalog entry — for verifying the `PublishedAgent` ABI. A pure,
     /// agent-shaped workflow imports no runtime, so a runtime-less state
     /// suffices; `iface_name` is the fully-qualified capabilities interface
-    /// export (e.g. `runtara:agent-<id>/capabilities@0.3.0`).
+    /// export (e.g. `runtara:agent-<id>/capabilities@1.0.0`).
     /// The connection (if any) must already be injected into `input` under
     /// `_connection` by the caller — the invoke ABI has no connection argument.
     pub async fn invoke_capability(
@@ -1638,24 +1344,37 @@ impl WorkflowExecutor {
         let invoke_idx = instance
             .get_export_index(&mut store, Some(&iface_idx), "invoke")
             .ok_or_else(|| anyhow::anyhow!("interface `{iface_name}` has no `invoke` export"))?;
-        type InvokeFunc =
-            wasmtime::component::TypedFunc<(String, Vec<u8>), (Result<Vec<u8>, crate::ErrorInfo>,)>;
         let invoke: InvokeFunc = instance.get_typed_func(&mut store, invoke_idx)?;
         let (result,) = invoke
             .call_async(&mut store, (capability_id.to_string(), input))
             .await?;
-        Ok(result)
+        Ok(match result {
+            Ok(crate::lifecycle::WorkflowOutcome::Completed(output)) => Ok(output),
+            Ok(crate::lifecycle::WorkflowOutcome::Suspended(_)) => {
+                Err(crate::dispatcher::unexpected_suspend(capability_id))
+            }
+            Err(error) => Err(crate::ErrorInfo {
+                code: error.code,
+                message: error.message,
+                category: error.category,
+                severity: error.severity,
+                retryable: error.retryable,
+                retry_after_ms: error.retry_after_ms,
+                attributes: error.attributes,
+                details: error.details,
+            }),
+        })
     }
 }
 
-/// Why an invoke-shaped workflow run ended. Unlike [`WorkflowExit`], terminal
-/// output/error/suspension arrive in-band as the lifted return value — no
-/// out-of-band status read is needed.
+/// Why a workflow run ended. Terminal output/error/suspension arrive in-band
+/// as the lifted return value — no out-of-band status read is needed.
 #[derive(Debug)]
 pub enum InvokeExit {
     /// `Ok(outcome::completed(bytes))` — the terminal output.
     Completed(Vec<u8>),
-    /// `Ok(outcome::suspended(wakes))` — re-invoke when ANY wake fires.
+    /// `Ok(outcome::suspended(..))` — re-invoke when ANY wake fires. A
+    /// workflow's suspension state is always empty, so only the wakes remain.
     Suspended(Vec<crate::lifecycle::WorkflowWake>),
     /// `Err(error-info)` — the terminal failure.
     Failed(crate::lifecycle::WorkflowErrorInfo),
@@ -1675,10 +1394,12 @@ fn parked_waits(state: &WorkflowState) -> Vec<String> {
     state.instance_waits.pending().to_vec()
 }
 
-/// Result of one invoke-shaped workflow run.
+/// Result of one workflow run.
 #[derive(Debug)]
 pub struct InvokeRunResult {
     pub exit: InvokeExit,
+    /// Largest single guest linear memory observed, in bytes. Exact (from the
+    /// resource limiter), not an RSS sample.
     pub memory_peak_bytes: u64,
     pub duration: Duration,
     /// Instance-wait ids the run's WaitForInstances steps left pending. A
@@ -1758,47 +1479,17 @@ mod tests {
         assert!(!l.table_growing(0, 1001, None).unwrap());
     }
 
-    /// Shared fixture: one engine (ticker running) + executor + a minimal
-    /// `wasi:cli/run@0.2.3` component written to a temp file so `load()`'s
-    /// cache path is exercised. A `CommandPre` only instantiates against the
-    /// engine that compiled it, hence the bundled tuple.
-    struct Fixture {
-        executor: WorkflowExecutor,
-        wasm_path: PathBuf,
-        _dir: tempfile::TempDir,
-    }
-
-    fn fixture() -> &'static Fixture {
-        static ONCE: std::sync::OnceLock<Fixture> = std::sync::OnceLock::new();
+    /// One engine (ticker running) + executor shared by the tests below. A
+    /// linked component only instantiates against the engine that compiled it.
+    fn executor() -> &'static WorkflowExecutor {
+        static ONCE: std::sync::OnceLock<WorkflowExecutor> = std::sync::OnceLock::new();
         ONCE.get_or_init(|| {
             let engine = crate::engine::build_engine(&crate::engine::EngineConfig::default())
                 .expect("test engine");
             crate::engine::spawn_epoch_ticker(Arc::clone(&engine));
-            let executor = WorkflowExecutor::new(engine).expect("executor");
-            let dir = tempfile::tempdir().expect("tempdir");
-            let wasm_path = dir.path().join("minimal-run.wasm");
-            std::fs::write(&wasm_path, MINIMAL_RUN_COMPONENT_WAT).expect("write component");
-            Fixture {
-                executor,
-                wasm_path,
-                _dir: dir,
-            }
+            WorkflowExecutor::new(engine).expect("executor")
         })
     }
-
-    /// Smallest component exporting `wasi:cli/run@0.2.3`; `run` returns ok.
-    /// Parsed from WAT via the `wat` dev-feature on the wasmtime crate.
-    const MINIMAL_RUN_COMPONENT_WAT: &str = r#"
-        (component
-            (core module $m
-                (func (export "run") (result i32) (i32.const 0))
-            )
-            (core instance $i (instantiate $m))
-            (func $run (result (result)) (canon lift (core func $i "run")))
-            (instance $run_iface (export "run" (func $run)))
-            (export "wasi:cli/run@0.2.3" (instance $run_iface))
-        )
-    "#;
 
     pub(super) fn run_spec(timeout: Duration) -> WorkflowRunSpec {
         WorkflowRunSpec {
@@ -1813,65 +1504,88 @@ mod tests {
         }
     }
 
+    /// A workflow entry whose `invoke` runs `body` (leaving the result area's
+    /// address on the stack).
+    fn entry_component(body: &str) -> String {
+        format!(
+            r#"(component
+  (core module $m
+    (memory (export "memory") 1)
+    (data (i32.const 1024) "{{}}")
+    (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 4096)
+    (func (export "invoke") (param i32 i32 i32 i32) (result i32) {body}))
+  (core instance $m (instantiate $m))
+  {entry})"#,
+            entry = test_support::entry_export("m")
+        )
+    }
+
+    /// `Ok(completed("{}"))`.
+    const COMPLETE: &str = "(i32.store8 (i32.const 2048) (i32.const 0)) \
+        (i32.store8 (i32.const 2056) (i32.const 0)) \
+        (i32.store (i32.const 2060) (i32.const 1024)) \
+        (i32.store (i32.const 2064) (i32.const 2)) (i32.const 2048)";
+
+    /// Spins forever — the only way out is an interruption ring.
+    const SPIN: &str = "(loop $spin (br $spin)) (i32.const 0)";
+
+    async fn prepare(body: &str) -> PreparedWorkflow {
+        let executor = executor();
+        let component = Component::new(executor.engine(), entry_component(body)).expect("compile");
+        executor
+            .prepare_precompiled(component)
+            .await
+            .expect("prepare")
+    }
+
     #[tokio::test]
-    async fn executes_minimal_run_component_and_caches_it() {
-        let fx = fixture();
-        let pre = fx.executor.load(&fx.wasm_path).await.expect("load");
-        let result = fx
-            .executor
-            .execute(&pre, run_spec(Duration::from_secs(5)))
+    async fn executes_a_minimal_workflow_entry() {
+        let prepared = prepare(COMPLETE).await;
+        let result = executor()
+            .execute_prepared_invoke(&prepared, run_spec(Duration::from_secs(5)), b"{}".to_vec())
             .await;
         assert!(
-            matches!(result.exit, WorkflowExit::Completed),
+            matches!(&result.exit, InvokeExit::Completed(bytes) if bytes == b"{}"),
             "unexpected exit: {:?}",
             result.exit
         );
-
-        // Second load with unchanged mtime+len must hit the cache (same Arc).
-        let pre2 = fx.executor.load(&fx.wasm_path).await.expect("reload");
-        assert!(Arc::ptr_eq(&pre, &pre2), "expected component cache hit");
     }
 
-    /// Same shape, but `run` spins forever — the only way out is the epoch
-    /// deadline ring. Proves timeout + cancellation actually interrupt wasm.
-    const BUSY_LOOP_COMPONENT_WAT: &str = r#"
-        (component
-            (core module $m
-                (func (export "run") (result i32)
-                    (loop $spin (br $spin))
-                    (i32.const 0))
-            )
-            (core instance $i (instantiate $m))
-            (func $run (result (result)) (canon lift (core func $i "run")))
-            (instance $run_iface (export "run" (func $run)))
-            (export "wasi:cli/run@0.2.3" (instance $run_iface))
+    #[tokio::test]
+    async fn preparation_refuses_a_component_without_the_workflow_entry() {
+        let executor = executor();
+        let component = Component::new(
+            executor.engine(),
+            r#"(component
+                (core module $m (func (export "run") (result i32) (i32.const 0)))
+                (core instance $i (instantiate $m))
+                (func $run (result (result)) (canon lift (core func $i "run")))
+                (instance $api (export "run" (func $run)))
+                (export "wasi:cli/run@0.2.3" (instance $api)))"#,
         )
-    "#;
-
-    fn busy_loop_pre(fx: &Fixture) -> Arc<CommandPre<WorkflowState>> {
-        let path = fx.wasm_path.with_file_name("busy-loop.wasm");
-        if !path.exists() {
-            std::fs::write(&path, BUSY_LOOP_COMPONENT_WAT).expect("write busy loop");
-        }
-        futures_block_on(fx.executor.load(&path)).expect("load busy loop")
-    }
-
-    /// Tiny block_on shim so fixture helpers stay callable from async tests
-    /// without nesting runtimes.
-    fn futures_block_on<F: std::future::Future>(fut: F) -> F::Output {
-        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
+        .expect("compile");
+        let error = match executor.prepare_precompiled(component).await {
+            Ok(_) => panic!("a component without the workflow entry must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("does not export the workflow entry"),
+            "{error}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn timeout_interrupts_busy_loop() {
-        let fx = fixture();
-        let pre = busy_loop_pre(fx);
-        let result = fx
-            .executor
-            .execute(&pre, run_spec(Duration::from_millis(300)))
+        let prepared = prepare(SPIN).await;
+        let result = executor()
+            .execute_prepared_invoke(
+                &prepared,
+                run_spec(Duration::from_millis(300)),
+                b"{}".to_vec(),
+            )
             .await;
         assert!(
-            matches!(result.exit, WorkflowExit::Timeout),
+            matches!(result.exit, InvokeExit::Timeout),
             "unexpected exit: {:?}",
             result.exit
         );
@@ -1880,8 +1594,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cancel_interrupts_busy_loop() {
-        let fx = fixture();
-        let pre = busy_loop_pre(fx);
+        let prepared = prepare(SPIN).await;
         let cancel = Arc::new(AtomicBool::new(false));
         let mut spec = run_spec(Duration::from_secs(30));
         spec.cancel = Some(Arc::clone(&cancel));
@@ -1892,10 +1605,12 @@ mod tests {
                 cancel.store(true, Ordering::Relaxed);
             })
         };
-        let result = fx.executor.execute(&pre, spec).await;
+        let result = executor()
+            .execute_prepared_invoke(&prepared, spec, b"{}".to_vec())
+            .await;
         raise.await.expect("cancel raiser");
         assert!(
-            matches!(result.exit, WorkflowExit::Cancelled),
+            matches!(result.exit, InvokeExit::Cancelled),
             "unexpected exit: {:?}",
             result.exit
         );

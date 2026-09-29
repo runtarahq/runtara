@@ -15,10 +15,12 @@
 #      published child through the catalog overlay, composition finds its
 #      .wasm through the extra search dir, and execution returns the child's
 #      output through standard agent-output shaping.
-#   4. PARKING AGENTS — a workflow that sleeps or waits publishes under
-#      parks:1 and parks its caller rather than holding a runner: a sleep
+#   4. PARKING AGENTS — a workflow that sleeps or waits publishes and parks
+#      its caller rather than holding a runner: a sleep
 #      completes through the wake scheduler, and a wait is discoverable
 #      through pending-input and resumes on its signal.
+#   5. CONTROL AS THE CALLER — a workflow-agent's control start admits a child
+#      of its caller, which the caller may cancel.
 #
 # Prerequisites: Postgres + docker (isolated Valkey) and the agent / shared
 # workflow components in target/wasm32-wasip2/release
@@ -151,7 +153,7 @@ if [ ! -x "${RUNTARA_SERVER_BIN}" ]; then
     print_step "Building runtara-server (debug)..."
     SQLX_OFFLINE="${SQLX_OFFLINE}" cargo build -p runtara-server --bin runtara-server >&2
 fi
-for f in runtara_workflow_stdlib.wasm runtara_workflow_runtime.wasm; do
+for f in runtara_workflow_stdlib.wasm; do
     if [ ! -f "${COMPONENTS_DIR}/${f}" ]; then
         print_error "Missing component ${COMPONENTS_DIR}/${f} — run scripts/build-agent-components.sh"
         exit 1
@@ -307,10 +309,10 @@ execute_and_assert "${PARENT_ID}" '{"data":{"msg":"hello-live"}}' \
 
 #-------------------------------------------------------------------------
 print_step "4. A sleeping workflow publishes as a parking agent and completes through a parent..."
-# The capability ABI parks a Delay: the suspend sentinel carries the deadline
-# out, the parent parks in the child's place, and the wake scheduler relaunches
-# it. Publication therefore succeeds, stamped parks:1 rather than
-# non-suspending:1, and the parent completes after the sleep.
+# A Delay returns the `suspended` outcome with its deadline, the parent parks
+# in the child's place, and the wake scheduler relaunches it. The sidecar
+# carries only the workflow-agent tag, and the parent completes after the
+# sleep.
 RESP=$(api_post /workflows/create '{"name":"Durable Delay Echo","description":"parity e2e","slug":"durable-delay-echo"}')
 DURABLE_ID=$(echo "${RESP}" | jq -r '.data.id // empty')
 [ -n "${DURABLE_ID}" ] || { print_error "durable child create failed: ${RESP}"; exit 1; }
@@ -343,11 +345,9 @@ RESP=$(api_post "/workflows/${DURABLE_ID}/publish-agent" "" 900)
 META="${TEST_DATA_DIR}/workflow-agents/${TENANT}/runtara_agent_durable_delay_echo.meta.json"
 [ -f "${META}" ] || META=$(find "${TEST_DATA_DIR}" -name 'runtara_agent_durable_delay_echo.meta.json' | head -1)
 [ -n "${META}" ] && [ -f "${META}" ] || { print_error "published sidecar not staged"; exit 1; }
-jq -e '[.capabilities[].tags[]] | index("parks:1")' "${META}" >/dev/null \
-    || { print_error "a sleeping agent must be certified parks:1: $(cat "${META}")"; exit 1; }
-! jq -e '[.capabilities[].tags[]] | index("non-suspending:1")' "${META}" >/dev/null \
-    || { print_error "parks:1 and non-suspending:1 must never be stamped together"; exit 1; }
-echo "  sleeping workflow published, certified parks:1 ✓"
+jq -e '[.capabilities[].tags[]] == ["workflow-agent"] and ([.capabilities[].suspends] | all(. != true))' "${META}" >/dev/null \
+    || { print_error "a workflow-agent sidecar carries only its tag: $(cat "${META}")"; exit 1; }
+echo "  sleeping workflow published as a workflow-agent ✓"
 
 SLEEP_PARENT_GRAPH='{
   "name": "Parent Of Delay Echo",
@@ -666,4 +666,110 @@ OUT=$(echo "${RESP}" | jq -cS '.data.outputs')
 }
 echo "  resumed, signaled twice, and completed with both embedded outputs ✓"
 
-print_success "workflow<>agent parity: slug + synchronous publish + parent invoke + parking agents (sleep + wait) + embedded signal discovery + pause/resume, all green"
+#-------------------------------------------------------------------------
+print_step "8. A workflow-agent starts a run as its caller; the caller cancels it..."
+# A workflow-agent runs inside its caller's instance, so the run its control
+# start admits is the caller's child: the caller may cancel it, and control
+# reports the caller as its parent.
+SLEEPER_GRAPH='{
+  "name": "Long Sleeper",
+  "durable": true,
+  "steps": {
+    "nap": { "stepType": "Delay", "id": "nap",
+      "durationMs": { "valueType": "immediate", "value": 600000 } },
+    "finish": { "stepType": "Finish", "id": "finish" }
+  },
+  "entryPoint": "nap",
+  "executionPlan": [ { "fromStep": "nap", "toStep": "finish" } ],
+  "variables": {}, "inputSchema": {}, "outputSchema": {}
+}'
+SLEEPER_ID=$(create_and_compile "Long Sleeper" "${SLEEPER_GRAPH}")
+RESP=$(api_post /workflows/create '{"name":"Run Starter","description":"parity e2e","slug":"run-starter"}')
+STARTER_ID=$(echo "${RESP}" | jq -r '.data.id // empty')
+[ -n "${STARTER_ID}" ] || { print_error "starter create failed: ${RESP}"; exit 1; }
+STARTER_GRAPH='{
+  "name": "Run Starter",
+  "durable": true,
+  "steps": {
+    "start": { "stepType": "Agent", "id": "start", "agentId": "control", "capabilityId": "start",
+      "maxRetries": 0,
+      "inputMapping": {
+        "workflowId": { "valueType": "reference", "value": "data.child" },
+        "runLabel": { "valueType": "immediate", "value": "from-agent" },
+        "parentClosePolicy": { "valueType": "immediate", "value": "leave_running" },
+        "inputs": { "valueType": "immediate", "value": { "data": {}, "variables": {} } } } },
+    "finish": { "stepType": "Finish", "id": "finish",
+      "inputMapping": { "instanceId": { "valueType": "reference", "value": "steps.start.outputs.instanceId" } } }
+  },
+  "entryPoint": "start",
+  "executionPlan": [ { "fromStep": "start", "toStep": "finish" } ],
+  "variables": {},
+  "inputSchema": { "child": { "type": "string", "required": true } },
+  "outputSchema": {}
+}'
+RESP=$(api_post "/workflows/${STARTER_ID}/update" "{\"executionGraph\": ${STARTER_GRAPH}}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "starter update failed: ${RESP}"; exit 1; }
+RESP=$(api_post "/workflows/${STARTER_ID}/publish-agent" "" 900)
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "a workflow calling control must publish: ${RESP}"; tail -40 "${TEST_LOG}"; exit 1; }
+echo "  control-calling workflow published ✓"
+
+OWNER_GRAPH='{
+  "name": "Owner Of Started Run",
+  "durable": true,
+  "steps": {
+    "call": { "stepType": "Agent", "id": "call", "agentId": "run-starter", "capabilityId": "run",
+      "inputMapping": { "child": { "valueType": "reference", "value": "data.child" } } },
+    "stop": { "stepType": "Agent", "id": "stop", "agentId": "control", "capabilityId": "cancel",
+      "maxRetries": 0,
+      "inputMapping": {
+        "instanceId": { "valueType": "reference", "value": "steps.call.outputs.instanceId" },
+        "graceMs": { "valueType": "immediate", "value": 0 } } },
+    "look": { "stepType": "Agent", "id": "look", "agentId": "control", "capabilityId": "get",
+      "maxRetries": 0,
+      "inputMapping": { "instanceId": { "valueType": "reference", "value": "steps.call.outputs.instanceId" } } },
+    "finish": { "stepType": "Finish", "id": "finish",
+      "inputMapping": {
+        "started": { "valueType": "reference", "value": "steps.call.outputs.instanceId" },
+        "outcome": { "valueType": "reference", "value": "steps.stop.outputs.outcome" },
+        "parent": { "valueType": "reference", "value": "steps.look.outputs.instance.parentInstanceId" },
+        "status": { "valueType": "reference", "value": "steps.look.outputs.instance.status" } } }
+  },
+  "entryPoint": "call",
+  "executionPlan": [ { "fromStep": "call", "toStep": "stop" }, { "fromStep": "stop", "toStep": "look" },
+    { "fromStep": "look", "toStep": "finish" } ],
+  "variables": {},
+  "inputSchema": { "child": { "type": "string", "required": true } },
+  "outputSchema": {}
+}'
+OWNER_ID=$(create_and_compile "Owner Of Started Run" "${OWNER_GRAPH}")
+RESP=$(api_post "/workflows/${OWNER_ID}/execute" "{\"inputs\": {\"data\": {\"child\": \"${SLEEPER_ID}\"}}}")
+OWNER_INSTANCE=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
+[ -n "${OWNER_INSTANCE}" ] || { print_error "owner execute failed: ${RESP}"; exit 1; }
+OWNER_STATUS=""
+for _ in {1..90}; do
+    RESP=$(curl -sS "${API}/workflows/instances/${OWNER_INSTANCE}")
+    OWNER_STATUS=$(echo "${RESP}" | jq -r '.data.status // .status // empty')
+    case "${OWNER_STATUS}" in completed|failed|crashed|stopped) break ;; esac
+    sleep 2
+done
+[ "${OWNER_STATUS}" = "completed" ] || {
+    print_error "owner ended '${OWNER_STATUS}': $(echo "${RESP}" | jq -c '.data.error // empty')"
+    tail -40 "${TEST_LOG}"
+    exit 1
+}
+OUT=$(echo "${RESP}" | jq -c '.data.outputs')
+STARTED=$(echo "${OUT}" | jq -r '.started // empty')
+[ -n "${STARTED}" ] || { print_error "no started run: ${OUT}"; exit 1; }
+[ "$(echo "${OUT}" | jq -r '.parent')" = "${OWNER_INSTANCE}" ] \
+    || { print_error "the started run's parent must be the caller ${OWNER_INSTANCE}: ${OUT}"; exit 1; }
+case "$(echo "${OUT}" | jq -r '.outcome')" in
+    applied|requested) ;;
+    *) print_error "the caller must be able to cancel its workflow-agent's run: ${OUT}"; exit 1 ;;
+esac
+[ "$(echo "${OUT}" | jq -r '.status')" = "cancelled" ] \
+    || { print_error "the started run must be cancelled by its caller: ${OUT}"; exit 1; }
+echo "  run started by the workflow-agent belongs to the caller and was cancelled by it ✓"
+
+print_success "workflow<>agent parity: slug + synchronous publish + parent invoke + parking agents (sleep + wait) + embedded signal discovery + pause/resume + control as the caller, all green"

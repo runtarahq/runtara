@@ -91,8 +91,6 @@ pub enum StepContext {
     ConstantRunLabelInLoop,
     /// A control `start` whose `workflowId` is not a literal.
     DynamicStartTarget,
-    /// A workflow published as a workflow-agent.
-    PublishedWorkflowAgent,
 }
 
 /// What the rules decide for one kind in one context.
@@ -115,11 +113,6 @@ pub enum ContextVerdict {
         /// Error code.
         code: &'static str,
     },
-    /// Refused when publishing the workflow as a workflow-agent.
-    PublishRefused {
-        /// Stable feature key of the publish refusal.
-        feature: &'static str,
-    },
     /// The rule does not concern this kind.
     NotApplicable,
 }
@@ -131,7 +124,7 @@ impl ContextVerdict {
             Self::Serialized { code } | Self::Warned { code } | Self::Rejected { code } => {
                 Some(code)
             }
-            Self::Allowed | Self::PublishRefused { .. } | Self::NotApplicable => None,
+            Self::Allowed | Self::NotApplicable => None,
         }
     }
 
@@ -141,7 +134,6 @@ impl ContextVerdict {
             Self::Serialized { .. } => "serialized",
             Self::Warned { .. } => "warning",
             Self::Rejected { .. } => "rejected",
-            Self::PublishRefused { .. } => "publish-refused",
             Self::NotApplicable => "not-applicable",
         }
     }
@@ -175,7 +167,7 @@ impl StepContextRule {
     }
 }
 
-use ContextVerdict::{Allowed, NotApplicable, PublishRefused, Rejected, Serialized, Warned};
+use ContextVerdict::{Allowed, NotApplicable, Rejected, Serialized, Warned};
 
 /// The v1 matrix: every context an operation-scoped step is judged in.
 pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
@@ -315,20 +307,6 @@ pub const STEP_CONTEXT_RULES: &[StepContextRule] = &[
         control: Warned { code: "W077" },
         wait_for_instances: NotApplicable,
     },
-    StepContextRule {
-        context: StepContext::PublishedWorkflowAgent,
-        key: "published-workflow-agent",
-        description: "The workflow, or a workflow it embeds, is published as a workflow-agent.",
-        suspending: PublishRefused {
-            feature: "suspending-capability",
-        },
-        control: PublishRefused {
-            feature: "control-agent",
-        },
-        wait_for_instances: PublishRefused {
-            feature: "wait-for-instances",
-        },
-    },
 ];
 
 /// The rule for `context`.
@@ -358,9 +336,6 @@ pub fn step_context_rules_json() -> serde_json::Value {
         let mut value = serde_json::json!({ "verdict": verdict.key() });
         if let Some(code) = verdict.code() {
             value["code"] = code.into();
-        }
-        if let PublishRefused { feature } = verdict {
-            value["feature"] = feature.into();
         }
         value
     };
@@ -481,12 +456,6 @@ mod tests {
         ] {
             assert_eq!(verdict(context), NotApplicable);
         }
-        assert_eq!(
-            verdict(StepContext::PublishedWorkflowAgent),
-            PublishRefused {
-                feature: "wait-for-instances"
-            }
-        );
     }
 
     #[test]

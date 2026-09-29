@@ -1,39 +1,11 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Typed agent suspension contract, `runtara:agent-suspension@0.1.0`.
+//! Typed agent suspension: the Rust side of `runtara:agent/suspension`.
 //!
-//! The WIT is the artifact of this crate; the Rust surface is the shared
-//! vocabulary guest agents, the compiler and the host agree on: interface
-//! names, the per-agent `suspendable` interface text, the size caps, and the
-//! guest-side [`Suspendable`] / [`SuspendContext`] types. Natively this crate
-//! has no dependencies.
-
-/// WIT package name.
-pub const PACKAGE: &str = "runtara:agent-suspension@0.1.0";
-
-/// Component import name of the `types` interface.
-pub const TYPES_INTERFACE: &str = "runtara:agent-suspension/types@0.1.0";
-
-/// Component import name of the `context` interface. Only agents that declare
-/// a suspending capability may import it.
-pub const CONTEXT_INTERFACE: &str = "runtara:agent-suspension/context@0.1.0";
-
-/// WIT source of `runtara:agent-suspension@0.1.0`.
-pub const WIT: &str = include_str!("../wit/runtara-agent-suspension.wit");
-
-/// Name of the per-agent interface a suspending agent exports beside
-/// `capabilities`, inside its own `runtara:agent-<id>@0.4.0` package.
-pub const SUSPENDABLE_INTERFACE: &str = "suspendable";
-
-/// The per-agent `suspendable` interface, exactly as a suspending agent's
-/// package declares it. It is type-identical in its flat signature to
-/// `capabilities.invoke`; only the success payload differs.
-pub const SUSPENDABLE_INTERFACE_WIT: &str = "interface suspendable {
-    use runtara:agent/types@0.4.0.{error-info};
-    use runtara:agent-suspension/types@0.1.0.{outcome};
-    invoke: async func(capability-id: string, input: list<u8>) -> result<outcome, error-info>;
-}
-";
+//! The WIT lives in `runtara-wit`; this crate is the shared vocabulary guest
+//! agents, the compiler and the host agree on: the size caps, error codes,
+//! canonical layout, and the guest-side [`Suspendable`] / [`SuspendContext`]
+//! types. Natively this crate has no dependencies.
 
 /// Largest continuation (`suspension.state`) the host keeps per operation.
 pub const MAX_CONTINUATION_BYTES: usize = 64 * 1024;
@@ -58,17 +30,19 @@ pub const AGENT_INVALID_SUSPENSION: &str = "AGENT_INVALID_SUSPENSION";
 /// discards the continuation, so a retry starts the operation afresh.
 pub const AGENT_CONTINUATION_REJECTED: &str = "AGENT_CONTINUATION_REJECTED";
 
-/// A capability returned a suspension through a path that cannot park: a
-/// non-suspending capability, or the plain `capabilities.invoke` export.
+/// A capability returned the `suspended` outcome where nothing can park: from
+/// a capability that does not declare `suspends`, or on a direct call outside
+/// a workflow.
 pub const AGENT_UNEXPECTED_SUSPEND: &str = "AGENT_UNEXPECTED_SUSPEND";
 
 /// Canonical-ABI layout (wasm32) of the `types` interface: what the direct
-/// emitter reads from a `suspendable.invoke` result and what the host's
+/// emitter reads from a `capabilities.invoke` result and what the host's
 /// component-type mirrors must match. Pinned against `wit_parser::SizeAlign`
-/// by `runtara-workflow-wit`'s tests. Byte sizes and offsets.
+/// by this crate's tests. Byte sizes and offsets.
 pub mod layout {
-    /// `wake`: a u8 discriminant, the payload 8-aligned for `at(u64)`.
-    pub const WAKE_SIZE: u32 = 16;
+    /// `wake`: a u8 discriminant, the payload 8-aligned; the largest case is
+    /// `on-signal(signal-wait)` (a string and an `option<u64>`).
+    pub const WAKE_SIZE: u32 = 32;
     pub const WAKE_ALIGN: u32 = 8;
     pub const WAKE_PAYLOAD_OFFSET: u32 = 8;
     /// `suspension`: `wakes` then `state`, each a pointer and a length.
@@ -81,7 +55,7 @@ pub mod layout {
     pub const OUTCOME_SIZE: u32 = 20;
     pub const OUTCOME_ALIGN: u32 = 4;
     pub const OUTCOME_PAYLOAD_OFFSET: u32 = 4;
-    /// `result<outcome, error-info>` of `suspendable.invoke`: `error-info`
+    /// `result<outcome, error-info>` of `capabilities.invoke`: `error-info`
     /// holds an `option<u64>`, so both arms sit 8-aligned after the tag.
     pub const INVOKE_RESULT_PAYLOAD_OFFSET: u32 = 8;
 }
@@ -170,110 +144,137 @@ mod tests {
     use super::*;
     use wit_parser::{Resolve, TypeDefKind};
 
-    #[test]
-    fn package_parses_with_the_documented_shapes() {
-        let mut resolve = Resolve::default();
-        let id = resolve.push_str("agent-suspension.wit", WIT).unwrap();
-        let package = &resolve.packages[id];
-        assert_eq!(package.name.to_string(), PACKAGE);
-        let types = &resolve.interfaces[package.interfaces["types"]];
-        let TypeDefKind::Variant(wake) = &resolve.types[types.types["wake"]].kind else {
-            panic!("wake must be a variant");
-        };
-        assert_eq!(
-            wake.cases
-                .iter()
-                .map(|c| c.name.as_str())
-                .collect::<Vec<_>>(),
-            ["at", "instances"]
-        );
-        let TypeDefKind::Record(suspension) = &resolve.types[types.types["suspension"]].kind else {
-            panic!("suspension must be a record");
-        };
-        assert_eq!(
-            suspension
-                .fields
-                .iter()
-                .map(|f| f.name.as_str())
-                .collect::<Vec<_>>(),
-            ["wakes", "state"]
-        );
-        let TypeDefKind::Variant(outcome) = &resolve.types[types.types["outcome"]].kind else {
-            panic!("outcome must be a variant");
-        };
-        assert_eq!(
-            outcome
-                .cases
-                .iter()
-                .map(|c| c.name.as_str())
-                .collect::<Vec<_>>(),
-            ["completed", "suspended"]
-        );
-        let context = &resolve.interfaces[package.interfaces["context"]];
-        assert!(matches!(
-            context.functions["continuation"].kind,
-            wit_parser::FunctionKind::Freestanding
-        ));
+    fn resolve() -> Resolve {
+        runtara_wit::resolve().expect("runtara WIT resolves")
+    }
+
+    fn suspension_types(resolve: &Resolve) -> &wit_parser::Interface {
+        let id = resolve
+            .interfaces
+            .iter()
+            .find(|(id, _)| resolve.id_of(*id).as_deref() == Some(runtara_wit::agent::TYPES))
+            .map(|(id, _)| id)
+            .expect("runtara:agent/suspension");
+        &resolve.interfaces[id]
     }
 
     #[test]
-    fn suspendable_interface_text_is_a_valid_agent_interface() {
-        let mut resolve = Resolve::default();
-        resolve
-            .push_str(
-                "agent.wit",
-                "package runtara:agent@0.4.0;\ninterface types {\n record error-info { code: string, message: string, category: string, severity: string, retryable: bool, retry-after-ms: option<u64>, attributes: option<string> }\n}\n",
-            )
+    fn the_suspension_types_have_the_documented_shapes() {
+        let resolve = resolve();
+        let types = suspension_types(&resolve);
+        let cases = |name: &str| -> Vec<String> {
+            match &resolve.types[types.types[name]].kind {
+                TypeDefKind::Variant(variant) => {
+                    variant.cases.iter().map(|c| c.name.clone()).collect()
+                }
+                TypeDefKind::Record(record) => {
+                    record.fields.iter().map(|f| f.name.clone()).collect()
+                }
+                other => panic!("{name}: unexpected {other:?}"),
+            }
+        };
+        assert_eq!(cases("wake"), ["at", "on-signal", "on-resume", "instances"]);
+        assert_eq!(cases("suspension"), ["wakes", "state"]);
+        assert_eq!(cases("outcome"), ["completed", "suspended"]);
+    }
+
+    #[test]
+    fn the_generated_suspending_agent_imports_its_continuation() {
+        let mut resolve = resolve();
+        let shape = runtara_wit::AgentShape {
+            suspendable: true,
+            ..Default::default()
+        };
+        let id = resolve
+            .push_str("probe.wit", &runtara_wit::agent_package("probe", shape))
             .unwrap();
-        resolve.push_str("agent-suspension.wit", WIT).unwrap();
+        let package = &resolve.packages[id];
+        assert!(!package.interfaces.contains_key("suspendable"));
+        let world = &resolve.worlds[package.worlds["agent"]];
+        assert!(
+            world
+                .imports
+                .keys()
+                .any(|key| resolve.name_world_key(key) == runtara_wit::agent::CONTINUATION)
+        );
+    }
+
+    /// The canonical layout of the suspension types equals the constants the
+    /// emitter reads and the host mirrors ([`layout`]).
+    #[test]
+    fn layout_constants_match_the_wit_size_align() {
+        use wit_parser::{Int, SizeAlign, Type};
+
+        let mut resolve = resolve();
+        let shape = runtara_wit::AgentShape {
+            suspendable: true,
+            ..Default::default()
+        };
         let id = resolve
             .push_str(
                 "probe.wit",
-                &format!("package runtara:agent-probe@0.4.0;\n{SUSPENDABLE_INTERFACE_WIT}"),
+                &runtara_wit::agent_package("layout-probe", shape),
             )
             .unwrap();
-        let interface = &resolve.interfaces[resolve.packages[id].interfaces[SUSPENDABLE_INTERFACE]];
-        assert!(matches!(
-            interface.functions["invoke"].kind,
-            wit_parser::FunctionKind::AsyncFreestanding
-        ));
-    }
+        let mut sizes = SizeAlign::default();
+        sizes.fill(&resolve);
+        let bytes = |size: wit_parser::ArchitectureSize| size.size_wasm32() as u32;
+        let alignment = |ty: &Type| match sizes.align(ty) {
+            wit_parser::Alignment::Bytes(bytes) => bytes.get() as u32,
+            wit_parser::Alignment::Pointer => 4,
+        };
+        let types = suspension_types(&resolve);
+        let ty = |name: &str| Type::Id(types.types[name]);
+        let payload_offset = |name: &str| {
+            let TypeDefKind::Variant(variant) = &resolve.types[types.types[name]].kind else {
+                panic!("{name} must be a variant");
+            };
+            bytes(sizes.payload_offset(
+                variant.tag(),
+                variant.cases.iter().map(|case| case.ty.as_ref()),
+            ))
+        };
 
-    #[test]
-    fn the_suspending_agent_template_declares_the_documented_interface() {
-        let template = include_str!("../../runtara-agent-wit/templates/suspendable-agent.wit.in");
-        assert!(template.contains(SUSPENDABLE_INTERFACE_WIT), "{template}");
-        let mut resolve = Resolve::default();
-        resolve
-            .push_str(
-                "agent.wit",
-                "package runtara:agent@0.4.0;\ninterface types {\n record error-info { code: string, message: string, category: string, severity: string, retryable: bool, retry-after-ms: option<u64>, attributes: option<string> }\n}\n",
-            )
-            .unwrap();
-        resolve.push_str("agent-suspension.wit", WIT).unwrap();
-        let id = resolve
-            .push_str("probe.wit", &template.replace("{AGENT_ID}", "probe"))
-            .unwrap();
-        let world = &resolve.worlds[resolve.packages[id].worlds["agent"]];
-        let imports: Vec<_> = world
-            .imports
-            .keys()
-            .map(|key| resolve.name_world_key(key))
-            .collect();
-        assert!(
-            imports.contains(&CONTEXT_INTERFACE.to_string()),
-            "{imports:?}"
+        assert_eq!(bytes(sizes.size(&ty("wake"))), layout::WAKE_SIZE);
+        assert_eq!(alignment(&ty("wake")), layout::WAKE_ALIGN);
+        assert_eq!(payload_offset("wake"), layout::WAKE_PAYLOAD_OFFSET);
+
+        assert_eq!(
+            bytes(sizes.size(&ty("suspension"))),
+            layout::SUSPENSION_SIZE
         );
-        let exports: Vec<_> = world
-            .exports
-            .keys()
-            .map(|key| resolve.name_world_key(key))
+        assert_eq!(alignment(&ty("suspension")), layout::SUSPENSION_ALIGN);
+        let TypeDefKind::Record(suspension) = &resolve.types[types.types["suspension"]].kind else {
+            panic!("suspension must be a record");
+        };
+        let offsets: Vec<u32> = sizes
+            .field_offsets(suspension.fields.iter().map(|field| &field.ty))
+            .into_iter()
+            .map(|(offset, _)| bytes(offset))
             .collect();
-        assert!(
-            exports.contains(&format!(
-                "runtara:agent-probe/{SUSPENDABLE_INTERFACE}@0.4.0"
-            )),
-            "{exports:?}"
+        assert_eq!(
+            offsets,
+            [
+                layout::SUSPENSION_WAKES_OFFSET,
+                layout::SUSPENSION_STATE_OFFSET
+            ]
+        );
+
+        assert_eq!(bytes(sizes.size(&ty("outcome"))), layout::OUTCOME_SIZE);
+        assert_eq!(alignment(&ty("outcome")), layout::OUTCOME_ALIGN);
+        assert_eq!(payload_offset("outcome"), layout::OUTCOME_PAYLOAD_OFFSET);
+
+        let package = &resolve.packages[id];
+        let capabilities = &resolve.interfaces[package.interfaces["capabilities"]];
+        let Some(Type::Id(result)) = capabilities.functions["invoke"].result else {
+            panic!("capabilities.invoke returns a result");
+        };
+        let TypeDefKind::Result(result) = &resolve.types[result].kind else {
+            panic!("capabilities.invoke returns a result");
+        };
+        assert_eq!(
+            bytes(sizes.payload_offset(Int::U8, [result.ok.as_ref(), result.err.as_ref()])),
+            layout::INVOKE_RESULT_PAYLOAD_OFFSET
         );
     }
 

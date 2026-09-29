@@ -3,7 +3,7 @@
 //! End-to-end tests for the `runtara-compile` CLI binary.
 //!
 //! Validation and child-resolution behavior runs unconditionally. The full
-//! compile test composes against real stdlib/runtime components behind the
+//! compile test composes against the real stdlib component behind the
 //! explicit integration feature and fails if they are unavailable — point
 //! `RUNTARA_AGENT_COMPONENTS_DIR` at a built components dir or build
 //! `target/wasm32-wasip2/release` first.
@@ -34,16 +34,13 @@ fn workspace_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Components dir with real stdlib/runtime components.
+/// Components dir with the real stdlib component.
 #[cfg(feature = "direct-wasm-integration-tests")]
 fn shared_components_dir() -> PathBuf {
     let dir = std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace_root().join("target/wasm32-wasip2/release"));
-    let required = [
-        "runtara_workflow_stdlib.wasm",
-        "runtara_workflow_runtime.wasm",
-    ];
+    let required = ["runtara_workflow_stdlib.wasm"];
     assert!(
         required.iter().all(|f| dir.join(f).is_file()),
         "direct-wasm-integration-tests requires staged shared components at {}; run scripts/build-agent-components.sh",
@@ -308,14 +305,13 @@ fn workflow_agent_parent(dir: &std::path::Path) -> PathBuf {
 /// Stage the `reserved-code` fixture component with a certified workflow-agent
 /// sidecar in `dir`, the way the server publishes a workflow-agent.
 fn stage_workflow_agent(dir: &std::path::Path) {
-    let mut info = runtara_dsl::agent_meta::workflow_agent_info(
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
         "reserved-code",
         "Reserved Code",
         "",
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
     );
-    runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
     std::fs::write(
         dir.join("runtara_agent_reserved_code.meta.json"),
         serde_json::to_vec(&info).unwrap(),

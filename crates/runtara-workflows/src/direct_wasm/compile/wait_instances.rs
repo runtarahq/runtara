@@ -3,7 +3,7 @@
 //! WaitForInstances lowering for the direct workflow core emitter.
 //!
 //! The step parks its run on a durable instance wait
-//! (`runtara:workflow-wait/instances`) until direct child runs finish:
+//! (`runtara:workflow/waits`) until direct child runs finish:
 //!
 //! 1. Breakpoint, then the step's canonical v2 `wait-instances` key
 //!    (`stdlib.wait-instances-key`). The host hashes it into the wait id; the
@@ -19,7 +19,7 @@
 //!    persisted deadline (clamped by an enclosing loop deadline), or
 //!    `suspended([on-resume])` without one. The host attaches the pending
 //!    wait out of band (`InvokeRunResult::instance_waits`), so the runner
-//!    parks on it; the lifecycle ABI is unchanged. The relaunch replays to
+//!    parks on it. The relaunch replays to
 //!    this step and registers again, which now reads the settled wait.
 //! 5. A settled read is checkpointed, the wait is released (its row deleted)
 //!    and the ordinary output / source / debug / next-plan tail runs.
@@ -29,8 +29,8 @@
 //! the enclosing failure target, else failing the run. The host already closed
 //! the step's wait, so a retry of an enclosing region registers afresh.
 //!
-//! Only the lifecycle invoke ABI with the host-imported runtime reaches this
-//! lowering; `agent_suspend::check_sites` refuses every other target.
+//! Only a workflow with the host-imported runtime reaches this lowering;
+//! `agent_suspend::check_sites` refuses every other target.
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 

@@ -3,7 +3,7 @@ use super::*;
 use crate::direct_wasm::manifest::{
     DirectAgentManifest, DirectChildWorkflowGraphManifest, DirectGraphManifest,
 };
-use runtara_workflow_wit::isolation_package::{
+use runtara_invocation_contract::{
     AgentCallSite, CheckpointContract, InvocationCallSite, InvocationManifest,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -196,7 +196,7 @@ pub(super) fn build(
     }
     call_sites.sort_by_key(|site| site.token);
     Ok(InvocationManifest {
-        version: runtara_workflow_wit::isolation_package::INVOCATION_MANIFEST_VERSION,
+        version: runtara_invocation_contract::INVOCATION_MANIFEST_VERSION,
         call_durability,
         checkpoint_contracts,
         scope_paths,

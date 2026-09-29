@@ -96,7 +96,7 @@
     ;; Build `GET http://{{AUTHORITY}}/` and hand it to the raw outgoing
     ;; handler. The completed output is two bytes: the result discriminant
     ;; (1 = error) and the error-code case (15 = HTTP-request-denied).
-    (func (export "invoke") (param i32 i32) (result i32)
+    (func (export "invoke") (param i32 i32 i32 i32) (result i32)
       (local $request i32)
       (call $new-request (call $new-fields)) local.set $request
       (call $set-scheme (local.get $request) (i32.const 1) (i32.const 0) (i32.const 0) (i32.const 0))
@@ -119,13 +119,14 @@
       (export "set-scheme" (func $set-scheme)) (export "set-authority" (func $set-authority))
       (export "set-path" (func $set-path)) (export "handle" (func $handle))))))
   (type $error (record (field "code" string) (field "message" string) (field "category" string)
-    (field "severity" string) (field "retryable" bool) (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
+    (field "severity" string) (field "retryable" bool) (field "retry-after-ms" (option u64)) (field "attributes" (option string)) (field "details" (option string))))
   (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
-  (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")))
-  (type $outcome (variant (case "completed" (list u8)) (case "suspended" (list $wake))))
-  (func $invoke async (param "input" (list u8)) (result (result $outcome (error $error)))
+  (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume") (case "instances" string)))
+  (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+  (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
+  (func $invoke async (param "capability-id" string) (param "input" (list u8)) (result (result $outcome (error $error)))
     (canon lift (core func $code "invoke") (memory $mem "memory") (realloc (func $mem "realloc"))))
   (instance $lifecycle
     (export "error-info" (type $error)) (export "signal-wait" (type $signal)) (export "wake" (type $wake))
-    (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
-  (export "runtara:workflow-lifecycle/lifecycle@0.2.0" (instance $lifecycle)))
+    (export "suspension" (type $suspension)) (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
+  (export "runtara:agent-workflow-agent/capabilities@1.0.0" (instance $lifecycle)))

@@ -1,11 +1,11 @@
-//! Wasmtime-generated host bindings for the `runtara:agent` world.
+//! Wasmtime-generated host bindings for the `runtara:agent/agent` world.
 //!
 //! WASI imports are remapped to wasmtime-wasi's pre-generated bindings so the
 //! host doesn't have to re-implement them — `Linker::add_to_linker_async`
 //! from `wasmtime_wasi` and `wasmtime_wasi_http` satisfy them at link time.
 
 wasmtime::component::bindgen!({
-    path: "../runtara-agent-wit/wit",
+    path: "../runtara-wit/wit/agent",
     world: "agent",
     imports: { default: async | trappable },
     exports: { default: async },

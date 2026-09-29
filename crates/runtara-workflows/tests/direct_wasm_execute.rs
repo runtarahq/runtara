@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,10 +17,9 @@ use base64::Engine;
 use runtara_database_contract::*;
 use runtara_workflows::direct_wasm::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DirectArtifactMetadata, DirectCompilationInput,
-    DirectCompileError, RuntimeBinding, WorkflowAbi, analyze_direct_wasm_support,
-    compile_direct_workflow, compile_direct_workflow_composed,
-    compile_direct_workflow_composed_configured, compose_direct_workflow,
-    emit_direct_component_artifacts_with_binding,
+    DirectCompileError, WorkflowRole, analyze_direct_wasm_support, compile_direct_workflow,
+    compile_direct_workflow_composed, compile_direct_workflow_composed_configured,
+    compose_direct_workflow, emit_direct_component_artifacts,
 };
 use runtara_workflows::{
     CompilationInput, DirectWorkflowCompileOptions, ExecutionGraph, WorkflowCompilerMode,
@@ -375,16 +374,6 @@ const FANOUT_CROSS_BRANCH_REFERENCE: &str = r#"{
 }"#;
 
 #[derive(Debug)]
-struct Completed {
-    output_json: Value,
-}
-
-#[derive(Debug)]
-struct Failed {
-    error_json: Value,
-}
-
-#[derive(Debug)]
 struct RuntimeEvent {
     subtype: String,
     payload_json: Value,
@@ -446,8 +435,6 @@ struct CapturedRun {
 
 #[derive(Debug)]
 enum CapturedMessage {
-    Completed(Completed),
-    Failed(Failed),
     Event(RuntimeEvent),
     Sleep(SleepRequest),
     Checkpoint(CheckpointRequest),
@@ -562,7 +549,7 @@ fn shared_components_dir() -> PathBuf {
         b"embed-workflow-result",
         b"embed-workflow-output-from-result",
         b"embed-workflow-error",
-        b"__rt_on_signal__:user",
+        b"runtara:workflow-stdlib/json@1.0.0",
     ];
     assert!(
         required_stdlib_markers.iter().all(|marker| {
@@ -602,10 +589,13 @@ fn bundled_agents_satisfy_import_allowlist() {
                 .unwrap_or_else(|error| panic!("read the sidecar of {path:?}: {error}")),
         )
         .expect("bundled sidecar parses");
-        let suspends = meta["capabilities"]
-            .as_array()
-            .is_some_and(|capabilities| capabilities.iter().any(|c| c["suspends"] == true));
-        let grants = AgentImportGrants::for_agent(agent, suspends, true);
+        let declares = |flag: &str| {
+            meta["capabilities"]
+                .as_array()
+                .is_some_and(|capabilities| capabilities.iter().any(|c| c[flag] == true))
+        };
+        let grants =
+            AgentImportGrants::for_agent(agent, declares("suspends"), declares("trusted"), true);
         check_agent_component_imports(agent, &wasm, AgentImportKind::Agent, grants).unwrap_or_else(
             |error| panic!("bundled agent `{agent}` breaks the allowlist: {error}"),
         );
@@ -618,9 +608,8 @@ fn bundled_agents_satisfy_import_allowlist() {
 }
 
 /// The integration suite constructs staged workflow-agent sidecars directly,
-/// bypassing the server's publish preflight. Keep those fixture sidecars at
-/// the current staged-artifact contract; production certification is granted
-/// only after `publish_workflow_agent` runs the static safety analysis.
+/// bypassing the server's publish preflight, with the sidecar the server
+/// writes.
 fn certified_workflow_agent_info(
     slug: &str,
     name: &str,
@@ -628,147 +617,13 @@ fn certified_workflow_agent_info(
     input_schema: &HashMap<String, runtara_dsl::SchemaField>,
     output_schema: &HashMap<String, runtara_dsl::SchemaField>,
 ) -> runtara_dsl::agent_meta::AgentInfo {
-    let mut info = runtara_dsl::agent_meta::workflow_agent_info(
+    runtara_dsl::agent_meta::workflow_agent_info(
         slug,
         name,
         description,
         input_schema,
         output_schema,
-    );
-    runtara_dsl::agent_meta::certify_workflow_agent_non_suspending(&mut info);
-    info
-}
-
-/// Dev-tool lookup for the opt-in CLI reference mode: honor `WASMTIME_PATH`,
-/// then `~/.wasmtime/bin/wasmtime`, then PATH.
-fn wasmtime_binary() -> PathBuf {
-    if let Ok(path) = std::env::var("WASMTIME_PATH") {
-        return PathBuf::from(path);
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        let home_path = PathBuf::from(home)
-            .join(".wasmtime")
-            .join("bin")
-            .join("wasmtime");
-        if home_path.exists() {
-            return home_path;
-        }
-    }
-    PathBuf::from("wasmtime")
-}
-
-fn wasmtime_installed() -> bool {
-    Command::new(wasmtime_binary())
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-}
-
-// Serve one HTTP request from a *persistent* connection reader. The reader is
-// owned by the connection loop and reused across requests, NOT recreated here:
-// a `BufReader` reads ahead in blocks, so it routinely pulls the first bytes of
-// the *next* request past the current request's body. A per-request reader
-// (the previous design) discarded that read-ahead when it was dropped, so the
-// next request on a reused keep-alive connection began mid-stream — a desync the
-// client surfaced as `HttpProtocolError`. It only bit under load, when the SDK's
-// next request had already arrived by the time we read this one's body — i.e. on
-// long, many-request runs (AiAgent loops). Returns `Ok(true)` to keep the
-// connection, `Ok(false)`/`Err` to close it.
-fn handle_request(
-    reader: &mut BufReader<std::net::TcpStream>,
-    sink: &mpsc::Sender<CapturedMessage>,
-    server_state: &ServerState,
-    workflow_input: &[u8],
-) -> std::io::Result<bool> {
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line)? == 0 {
-        return Ok(false);
-    }
-    let parts: Vec<&str> = request_line.split_whitespace().collect();
-    if parts.len() < 3 {
-        return Ok(false);
-    }
-    let method = parts[0].to_string();
-    let path = parts[1].to_string();
-
-    let mut content_length = 0usize;
-    let mut chunked = false;
-    let mut connection_close = false;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
-            return Ok(false);
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            break;
-        }
-        let lower = trimmed.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("content-length:") {
-            content_length = rest.trim().parse().unwrap_or(0);
-        }
-        if let Some(rest) = lower.strip_prefix("transfer-encoding:")
-            && rest.trim() == "chunked"
-        {
-            chunked = true;
-        }
-        if lower.starts_with("connection:") && lower.contains("close") {
-            connection_close = true;
-        }
-    }
-
-    let body = if chunked {
-        read_chunked_body(reader)?
-    } else {
-        let mut buf = vec![0u8; content_length];
-        if content_length > 0 {
-            reader.read_exact(&mut buf)?;
-        }
-        buf
-    };
-
-    let (status, response_json) = route(&method, &path, &body, sink, server_state, workflow_input);
-    let response_bytes = response_json.to_string();
-    let response = format!(
-        "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nConnection: keep-alive\r\n\r\n{body}",
-        len = response_bytes.len(),
-        body = response_bytes,
-    );
-    // Write through the underlying stream. The BufReader only buffers reads, so
-    // its retained read-ahead survives across requests (full-duplex socket).
-    let stream = reader.get_mut();
-    stream.write_all(response.as_bytes())?;
-    stream.flush()?;
-
-    Ok(!connection_close)
-}
-
-fn read_chunked_body(reader: &mut BufReader<std::net::TcpStream>) -> std::io::Result<Vec<u8>> {
-    let mut out = Vec::new();
-    loop {
-        let mut size_line = String::new();
-        if reader.read_line(&mut size_line)? == 0 {
-            break;
-        }
-        let size_hex = size_line.trim().split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_hex, 16).unwrap_or(0);
-        if size == 0 {
-            let mut trailer = String::new();
-            while reader.read_line(&mut trailer)? > 0 {
-                if trailer.trim().is_empty() {
-                    break;
-                }
-                trailer.clear();
-            }
-            break;
-        }
-        let mut chunk = vec![0u8; size];
-        reader.read_exact(&mut chunk)?;
-        out.extend_from_slice(&chunk);
-        let mut crlf = [0u8; 2];
-        reader.read_exact(&mut crlf)?;
-    }
-    Ok(out)
+    )
 }
 
 struct FixtureConnectionResolver(Arc<ServerState>);
@@ -991,283 +846,12 @@ fn executor_with_connections(state: Arc<ServerState>) -> runtara_component_host:
     executor
 }
 
-fn route(
-    method: &str,
-    path: &str,
-    body: &[u8],
-    sink: &mpsc::Sender<CapturedMessage>,
-    server_state: &ServerState,
-    workflow_input: &[u8],
-) -> (u16, Value) {
-    let path = path.split('?').next().unwrap_or(path);
-
-    if method == "GET" && path == "/health" {
-        return (200, serde_json::json!({"ok": true}));
-    }
-
-    if let Some(rest) = path.strip_prefix("/api/v1/instances/") {
-        let mut iter = rest.splitn(2, '/');
-        let _instance_id = iter.next().unwrap_or("");
-        let endpoint = iter.next().unwrap_or("");
-
-        match (method, endpoint) {
-            ("POST", "register") => return (200, serde_json::json!({"success": true})),
-            ("GET", "input") => {
-                let input = base64::engine::general_purpose::STANDARD.encode(workflow_input);
-                return (200, serde_json::json!({ "input": input }));
-            }
-            ("POST", "completed") => {
-                capture_completed(body, sink);
-                return (200, serde_json::json!({"success": true}));
-            }
-            ("POST", "events") => {
-                capture_event(body, sink);
-                return (200, serde_json::json!({"success": true}));
-            }
-            ("POST", "checkpoint") => return checkpoint_response(body, sink, server_state),
-            // Lifecycle-signal poll (WaitForSignal loop's `check_signals`). No
-            // drain injected in these tests → no pending lifecycle signal.
-            ("GET", "signals") => {
-                return (
-                    200,
-                    serde_json::json!({"signal": null, "custom_signal": null}),
-                );
-            }
-            ("GET", ep) if ep.starts_with("signals/") => {
-                panic!("managed wait attempted raw HTTP signal polling: {ep}");
-            }
-            ("POST", ep @ ("inputs/register" | "inputs/poll" | "inputs/close")) => {
-                let request: Value = serde_json::from_slice(body).expect("managed request body");
-                let result = tokio::runtime::Runtime::new().unwrap().block_on(async {
-                    if ep == "inputs/register" {
-                        server_state
-                            .register_managed_input(
-                                serde_json::to_vec(&request["descriptor"]).unwrap(),
-                                request["deadline_ms"].as_u64(),
-                                request["requested_at_ms"].as_u64(),
-                            )
-                            .await?;
-                        return Ok(serde_json::json!({"success":true}));
-                    }
-                    let signal = request["signal_id"].as_str().ok_or("missing signal id")?;
-                    let state = if ep == "inputs/poll" {
-                        server_state.poll_managed_input(signal).await?
-                    } else {
-                        server_state.managed_inputs.close(signal).await?
-                    };
-                    use runtara_component_host::runtime_host::RuntimeInputState;
-                    Ok::<_, String>(match state {
-                        RuntimeInputState::Open => serde_json::json!({"state":"open"}),
-                        RuntimeInputState::Accepted(payload) => {
-                            serde_json::json!({"state":"accepted","value":payload})
-                        }
-                        RuntimeInputState::Closed(reason) => {
-                            serde_json::json!({"state":"closed","value":reason})
-                        }
-                    })
-                });
-                return match result {
-                    Ok(response) => (200, response),
-                    Err(error) => (409, serde_json::json!({"error":error})),
-                };
-            }
-            ("POST", "sleep") => {
-                capture_sleep(body, sink, server_state);
-                return (200, serde_json::json!({"success": true}));
-            }
-            ("POST", "failed") => {
-                capture_failed(body, sink);
-                return (200, serde_json::json!({"success": true}));
-            }
-            _ => {}
-        }
-    }
-
-    (200, serde_json::json!({"success": true}))
-}
-
-fn checkpoint_response(
-    body: &[u8],
-    sink: &mpsc::Sender<CapturedMessage>,
-    server_state: &ServerState,
-) -> (u16, Value) {
-    let Ok(parsed) = serde_json::from_slice::<Value>(body) else {
-        return (
-            400,
-            serde_json::json!({
-                "found": false,
-                "state": null,
-                "signal": null,
-                "custom_signal": null,
-            }),
-        );
-    };
-
-    let checkpoint_id = parsed
-        .get("checkpoint_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let state = parsed
-        .get("state")
-        .and_then(Value::as_str)
-        .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
-        .unwrap_or_default();
-    let _ = sink.send(CapturedMessage::Checkpoint(CheckpointRequest {
-        checkpoint_id: checkpoint_id.clone(),
-        state: state.clone(),
-    }));
-
-    let mut checkpoints = server_state
-        .checkpoints
-        .lock()
-        .expect("checkpoint state lock");
-    if let Some(existing) = checkpoints.get(&checkpoint_id) {
-        return (
-            200,
-            serde_json::json!({
-                "found": true,
-                "state": base64::engine::general_purpose::STANDARD.encode(existing),
-                "signal": null,
-                "custom_signal": null,
-            }),
-        );
-    }
-
-    if !state.is_empty() {
-        checkpoints.insert(checkpoint_id, state);
-    }
-
-    (
-        200,
-        serde_json::json!({
-            "found": false,
-            "state": null,
-            "signal": null,
-            "custom_signal": null,
-        }),
-    )
-}
-
-fn capture_completed(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
-    if let Ok(parsed) = serde_json::from_slice::<Value>(body)
-        && let Some(b64) = parsed.get("output").and_then(Value::as_str)
-        && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
-        && let Ok(output_json) = serde_json::from_slice::<Value>(&bytes)
-    {
-        let _ = sink.send(CapturedMessage::Completed(Completed { output_json }));
-    }
-}
-
-fn capture_failed(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
-    if let Ok(parsed) = serde_json::from_slice::<Value>(body)
-        && let Some(error) = parsed.get("error").and_then(Value::as_str)
-    {
-        let error_json =
-            serde_json::from_str::<Value>(error).unwrap_or_else(|_| Value::String(error.into()));
-        let _ = sink.send(CapturedMessage::Failed(Failed { error_json }));
-    }
-}
-
-fn capture_event(body: &[u8], sink: &mpsc::Sender<CapturedMessage>) {
-    if let Ok(parsed) = serde_json::from_slice::<Value>(body)
-        && parsed.get("event_type").and_then(Value::as_str) == Some("custom")
-        && let Some(subtype) = parsed.get("subtype").and_then(Value::as_str)
-        && let Some(b64) = parsed.get("payload").and_then(Value::as_str)
-        && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
-        && let Ok(payload_json) = serde_json::from_slice::<Value>(&bytes)
-    {
-        let _ = sink.send(CapturedMessage::Event(RuntimeEvent {
-            subtype: subtype.to_string(),
-            payload_json,
-        }));
-    }
-}
-
-/// Mirror production `handle_sleep`: persist the checkpoint, then (here) skip
-/// the sleep itself. See [`CapturingRuntimeHost::durable_sleep_checkpoint`] for
-/// why the save has to happen even though the wait does not.
-fn capture_sleep(body: &[u8], sink: &mpsc::Sender<CapturedMessage>, server_state: &ServerState) {
-    if let Ok(parsed) = serde_json::from_slice::<Value>(body)
-        && let Some(checkpoint_id) = parsed.get("checkpoint_id").and_then(Value::as_str)
-    {
-        let duration_ms = parsed
-            .get("duration_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        let state = parsed
-            .get("state")
-            .and_then(Value::as_str)
-            .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
-            .unwrap_or_default();
-        server_state
-            .checkpoints
-            .lock()
-            .expect("checkpoint state lock")
-            .insert(checkpoint_id.to_string(), state.clone());
-        let _ = sink.send(CapturedMessage::Sleep(SleepRequest {
-            checkpoint_id: checkpoint_id.to_string(),
-            duration_ms,
-            state,
-        }));
-    }
-}
-
-fn serve(
-    listener: TcpListener,
-    sink: mpsc::Sender<CapturedMessage>,
-    server_state: Arc<ServerState>,
-    stop: mpsc::Receiver<()>,
-    workflow_input: Arc<Vec<u8>>,
-) {
-    listener
-        .set_nonblocking(true)
-        .expect("set_nonblocking on listener");
-    loop {
-        if stop.try_recv().is_ok() {
-            return;
-        }
-        match listener.accept() {
-            Ok((stream, _)) => {
-                let sink = sink.clone();
-                let server_state = server_state.clone();
-                let workflow_input = workflow_input.clone();
-                thread::spawn(move || {
-                    // Accepted sockets can inherit the listener's non-blocking flag
-                    // (macOS); force blocking + a timeout so request parsing blocks
-                    // for the next keep-alive request rather than erroring, and a
-                    // dead peer eventually frees the thread.
-                    stream.set_nonblocking(false).ok();
-                    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-                    stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
-                    // ONE reader for the whole connection: its read-ahead buffer
-                    // must persist across requests (see `handle_request`).
-                    let mut reader = BufReader::new(stream);
-                    while let Ok(true) =
-                        handle_request(&mut reader, &sink, &server_state, workflow_input.as_slice())
-                    {
-                        // Keep serving the same connection while the SDK reuses it.
-                    }
-                });
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(20));
-            }
-            Err(_) => return,
-        }
-    }
-}
-
 fn direct_e2e_components_dir() -> PathBuf {
     // Composition is in-process via the `wac-graph` crate (see
     // `direct_wasm/compile.rs`) — the `wac` CLI is never invoked, so it must
     // not be required here. A stale `tool_installed("wac")` guard made the
     // whole suite panic in CI environments that stage the components but don't
     // install the (unused) CLI.
-    assert!(
-        embedded_executor_mode() || wasmtime_installed(),
-        "direct-wasm-integration-tests in CLI mode requires wasmtime"
-    );
     shared_components_dir()
 }
 
@@ -1344,7 +928,7 @@ fn run_direct_workflow_expect_failure(
     );
     assert!(
         !captured.status_success,
-        "direct Error workflow should return a failed wasi:cli/run result"
+        "direct Error workflow should return a failed result"
     );
     assert!(
         captured.output_json.is_none(),
@@ -1490,35 +1074,6 @@ fn run_direct_workflow_capture_full_sql(
     sql_script: Vec<Result<Value, DatabaseError>>,
     input_responses: Vec<Value>,
 ) -> CapturedRun {
-    let first = run_direct_workflow_capture_attempt(
-        components_dir,
-        workflow_id,
-        graph_json,
-        workflow_input,
-        track_events,
-        preloaded_checkpoints.clone(),
-        llm_script.clone(),
-        extra_env.clone(),
-        sql_script.clone(),
-        input_responses.clone(),
-        None,
-    );
-    // Under full-suite parallel load (16 threads × wasmtime spawns + ephemeral
-    // TCP listeners) a run occasionally dies before reaching the mock runtime
-    // at all: non-zero exit, EMPTY stderr, and zero captured traffic. That
-    // signature is infrastructure (spawn/connect), not workflow behavior —
-    // retry once so a 1-in-N-suites flake doesn't fail the suite. Real
-    // failures always leave stderr or a /failed capture and are NOT retried.
-    let infra_flake = !first.status_success
-        && first.stderr.trim().is_empty()
-        && first.output_json.is_none()
-        && first.error_json.is_none()
-        && first.events.is_empty()
-        && first.checkpoints.is_empty();
-    if !infra_flake {
-        return first;
-    }
-    eprintln!("retrying '{workflow_id}': wasmtime spawn/connect flake (empty stderr, no traffic)");
     run_direct_workflow_capture_attempt(
         components_dir,
         workflow_id,
@@ -1550,8 +1105,6 @@ fn run_direct_workflow_capture_attempt(
 ) -> CapturedRun {
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
-    let binding = runtime_binding_mode();
-    let abi = workflow_abi_mode();
     let compiled = compile_direct_workflow_composed_configured(
         DirectCompilationInput {
             workflow_id: workflow_id.to_string(),
@@ -1565,20 +1118,16 @@ fn run_direct_workflow_capture_attempt(
             agent_slug: None,
         },
         components_dir,
-        binding,
-        abi,
+        WorkflowRole::Root,
         // Runtime import kept — omit-runtime has its own dedicated test.
         false,
     )
     .expect("direct composed compile");
     assert_eq!(compiled.wasm_path, compiled.build_dir.join("workflow.wasm"));
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local_addr");
     let (capture_tx, capture_rx) = mpsc::channel::<CapturedMessage>();
-    let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let workflow_input = Arc::new(workflow_input.to_vec());
-    let server_state = Arc::new(ServerState {
+    let server_state_for_assertions = Arc::new(ServerState {
         checkpoints: Mutex::new(preloaded_checkpoints.into_iter().collect()),
         llm_responses: Mutex::new(llm_script),
         llm_requests: Mutex::new(Vec::new()),
@@ -1591,70 +1140,45 @@ fn run_direct_workflow_capture_attempt(
         accepted_input_polls: Mutex::new(0),
         slow_item_arrivals: Mutex::new(Vec::new()),
     });
-    let server_state_for_assertions = server_state.clone();
-    let capture_tx_for_host = capture_tx.clone();
-    let workflow_input_for_host = Arc::clone(&workflow_input);
-    let server_handle =
-        thread::spawn(move || serve(listener, capture_tx, server_state, stop_rx, workflow_input));
 
-    // The optional legacy runtime binding still uses HTTP; agents use native fixtures.
+    // Agents use native fixtures; the runtime interface is served in-process.
     let mut env_pairs: Vec<(String, String)> = vec![
-        ("RUNTARA_HTTP_URL".into(), format!("http://{addr}")),
-        ("RUNTARA_SERVER_ADDR".into(), addr.to_string()),
         ("RUNTARA_INSTANCE_ID".into(), workflow_id.to_string()),
         ("RUNTARA_TENANT_ID".into(), "direct-wasm-execute".into()),
         ("RUST_LOG".into(), "warn".into()),
     ];
     env_pairs.extend(extra_env.iter().cloned());
 
-    // Under HostImport, the runtime interface is served by the capturing host
-    // (same ServerState + capture sink as the mock server, so assertions see
-    // one uniform CapturedRun shape). Outbound calls use FixtureOutbound.
-    let runtime_host: Option<Arc<dyn runtara_component_host::runtime_host::RuntimeHost>> =
-        (binding == RuntimeBinding::HostImport).then(|| {
-            let debug_mode = env_pairs
-                .iter()
-                .any(|(key, value)| key == "DEBUG_MODE" && value == "true");
-            Arc::new(CapturingRuntimeHost {
-                instance_id: workflow_id.to_string(),
-                debug_mode,
-                input: Arc::clone(&workflow_input_for_host),
-                sink: Mutex::new(capture_tx_for_host.clone()),
-                state: server_state_for_assertions.clone(),
-            }) as Arc<dyn runtara_component_host::runtime_host::RuntimeHost>
+    // The runtime interface is served by the capturing host (sharing
+    // ServerState + the capture sink, so assertions see one uniform
+    // CapturedRun shape). Outbound calls use FixtureOutbound.
+    let debug_mode = env_pairs
+        .iter()
+        .any(|(key, value)| key == "DEBUG_MODE" && value == "true");
+    let runtime_host: Arc<dyn runtara_component_host::runtime_host::RuntimeHost> =
+        Arc::new(CapturingRuntimeHost {
+            instance_id: workflow_id.to_string(),
+            debug_mode,
+            sink: Mutex::new(capture_tx),
+            state: server_state_for_assertions.clone(),
         });
 
-    let (status_success, stderr, memory_peak_bytes) = if !embedded_executor_mode() {
-        let (ok, err) = execute_via_cli(&compiled.wasm_path, &env_pairs);
-        (ok, err, None)
-    } else if abi == WorkflowAbi::InvokeHostImports {
-        execute_via_embedded_invoke(
-            &compiled.wasm_path,
-            &env_pairs,
-            runtime_host.expect("invoke ABI requires the capturing host"),
-            workflow_input_for_host.as_ref().clone(),
-            server_state_for_assertions.clone(),
-        )
-    } else {
-        execute_via_embedded(
-            &compiled.wasm_path,
-            &env_pairs,
-            runtime_host,
-            Some(server_state_for_assertions.clone()),
-        )
-    };
-    let _ = stop_tx.send(());
-    let _ = server_handle.join();
+    let (status_success, stderr, memory_peak_bytes, terminal) = execute_via_embedded_invoke(
+        &compiled.wasm_path,
+        &env_pairs,
+        runtime_host,
+        workflow_input.as_ref().clone(),
+        server_state_for_assertions.clone(),
+    );
 
-    let mut output_json = None;
-    let mut error_json = None;
+    // The run's terminal is the entry's return value: the output bytes of a
+    // completed run, or the error payload a failed run records.
+    let (output_json, error_json) = captured_terminal(terminal);
     let mut events = Vec::new();
     let mut sleeps = Vec::new();
     let mut checkpoints = Vec::new();
     for message in capture_rx.try_iter() {
         match message {
-            CapturedMessage::Completed(completed) => output_json = Some(completed.output_json),
-            CapturedMessage::Failed(failed) => error_json = Some(failed.error_json),
             CapturedMessage::Event(event) => events.push(event),
             CapturedMessage::Sleep(sleep) => sleeps.push(sleep),
             CapturedMessage::Checkpoint(checkpoint) => checkpoints.push(checkpoint),
@@ -1705,53 +1229,30 @@ fn run_direct_workflow_capture_attempt(
     }
 }
 
-/// Battery-wide executor selection. The in-process WorkflowExecutor is the
-/// default (it is the only production runner); `RUNTARA_DIRECT_WASM_EXECUTOR=cli`
-/// opts into the reference wasmtime CLI for A/B cross-checks of the composed
-/// component against the upstream runtime.
-fn embedded_executor_mode() -> bool {
-    std::env::var("RUNTARA_DIRECT_WASM_EXECUTOR").as_deref() != Ok("cli")
-}
-
-/// Battery-wide runtime-binding selection. HostImport (the production
-/// default) satisfies the runtime interface natively via a capturing
-/// RuntimeHost; `RUNTARA_DIRECT_RUNTIME_BINDING=composed` re-runs the whole
-/// battery through the legacy composed runtime + mock HTTP core — the
-/// binding-differential axis. The CLI executor always forces Composed (the
-/// wasmtime CLI has no way to satisfy host imports).
-fn runtime_binding_mode() -> RuntimeBinding {
-    if !embedded_executor_mode() {
-        return RuntimeBinding::Composed;
-    }
-    match std::env::var("RUNTARA_DIRECT_RUNTIME_BINDING").as_deref() {
-        Ok("composed") => RuntimeBinding::Composed,
-        _ => RuntimeBinding::HostImport,
+/// The JSON views of a run's terminal: only JSON outputs are recorded, and a
+/// JSON error payload parses while any other payload is kept as a string.
+fn captured_terminal(
+    terminal: Option<runtara_component_host::runtime_host::RunTerminal>,
+) -> (Option<Value>, Option<Value>) {
+    use runtara_component_host::runtime_host::RunTerminal;
+    match terminal {
+        Some(RunTerminal::Completed(output)) => (serde_json::from_slice(&output).ok(), None),
+        Some(RunTerminal::Failed(error)) => {
+            let error_str = String::from_utf8_lossy(&error);
+            let error_json = serde_json::from_str::<Value>(&error_str)
+                .unwrap_or_else(|_| Value::String(error_str.clone().into_owned()));
+            (None, Some(error_json))
+        }
+        None => (None, None),
     }
 }
 
-/// Battery-wide export-shape selection, mirroring the production default:
-/// the invoke export (input as the call argument, terminal result in-band).
-/// `RUNTARA_DIRECT_WORKFLOW_ABI=cli-run` re-runs the whole battery through
-/// the legacy shape — the ABI-differential axis. The CLI executor and the
-/// Composed binding force the legacy shape (neither can drive host imports).
-fn workflow_abi_mode() -> WorkflowAbi {
-    if !embedded_executor_mode() || runtime_binding_mode() == RuntimeBinding::Composed {
-        return WorkflowAbi::CliRunHttp;
-    }
-    match std::env::var("RUNTARA_DIRECT_WORKFLOW_ABI").as_deref() {
-        Ok("cli-run") => WorkflowAbi::CliRunHttp,
-        _ => WorkflowAbi::InvokeHostImports,
-    }
-}
-
-/// RuntimeHost that mirrors the mock core server route-for-route, sharing the
-/// SAME `ServerState` and capture sink — so a HostImport run produces the
-/// exact `CapturedRun` shape a Composed run produces over HTTP, and every
-/// existing assertion applies unchanged to both bindings.
+/// RuntimeHost that stands in for core, recording every host call into the
+/// shared `ServerState` and capture sink so each run yields one uniform
+/// `CapturedRun` shape for the assertions.
 struct CapturingRuntimeHost {
     instance_id: String,
     debug_mode: bool,
-    input: Arc<Vec<u8>>,
     /// `mpsc::Sender` is `!Sync`; the host must be `Sync`.
     sink: Mutex<mpsc::Sender<CapturedMessage>>,
     state: Arc<ServerState>,
@@ -1765,30 +1266,11 @@ impl CapturingRuntimeHost {
 
 #[async_trait::async_trait]
 impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost {
-    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
-        Ok(Some(self.input.as_ref().clone()))
-    }
     fn instance_id(&self) -> Result<String, String> {
         Ok(self.instance_id.clone())
     }
-    async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
-        // Mirror capture_completed: only JSON outputs are recorded.
-        if let Ok(output_json) = serde_json::from_slice::<Value>(&output) {
-            self.send(CapturedMessage::Completed(Completed { output_json }));
-        }
-        Ok(())
-    }
-    async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
-        // Mirror capture_failed: JSON errors parse, everything else is a string.
-        let error_str = String::from_utf8_lossy(&error);
-        let error_json = serde_json::from_str::<Value>(&error_str)
-            .unwrap_or_else(|_| Value::String(error_str.clone().into_owned()));
-        self.send(CapturedMessage::Failed(Failed { error_json }));
-        Ok(())
-    }
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
-        // Mirror capture_event: only custom events with JSON payloads are
-        // recorded (every guest custom-event is event_type=custom over HTTP).
+        // Only custom events with JSON payloads are recorded.
         if let Ok(payload_json) = serde_json::from_slice::<Value>(&payload) {
             self.send(CapturedMessage::Event(RuntimeEvent {
                 subtype: kind,
@@ -1805,7 +1287,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         Ok(())
     }
     async fn heartbeat(&self) -> Result<(), String> {
-        // Mirror: heartbeat events are filtered out by capture_event.
+        // Heartbeats are not recorded.
         Ok(())
     }
     async fn poll_signal(
@@ -1817,7 +1299,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         Ok(false)
     }
     async fn check_signals(&self) -> Result<bool, String> {
-        // Mirror GET /signals: no drain is injected in these tests.
+        // No drain is injected in these tests.
         Ok(false)
     }
     async fn poll_custom_signal(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
@@ -1846,9 +1328,8 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         self.state.managed_inputs.close(&signal).await
     }
     async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
-        // The HTTP SDK routes get_checkpoint through POST /checkpoint with
-        // empty state, so the mock records an empty-state Checkpoint capture;
-        // mirror both the capture and the read-only lookup.
+        // Recorded as an empty-state Checkpoint capture, then a read-only
+        // lookup.
         self.send(CapturedMessage::Checkpoint(CheckpointRequest {
             checkpoint_id: checkpoint_id.clone(),
             state: Vec::new(),
@@ -1866,8 +1347,8 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         checkpoint_id: String,
         state: Vec<u8>,
     ) -> Result<runtara_component_host::runtime_host::RuntimeCheckpointResult, String> {
-        // Mirror checkpoint_response: always capture, hit returns the stored
-        // state, miss saves only non-empty state (the read-only-probe rule).
+        // Always capture; a hit returns the stored state, a miss saves only
+        // non-empty state (the read-only-probe rule).
         self.send(CapturedMessage::Checkpoint(CheckpointRequest {
             checkpoint_id: checkpoint_id.clone(),
             state: state.clone(),
@@ -1912,7 +1393,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         _attempt_number: u32,
         _error_message: Option<String>,
     ) -> Result<(), String> {
-        // Mirror: POST /retry falls to the mock's generic success catch-all.
+        // Retry attempts are not recorded.
         Ok(())
     }
     async fn durable_sleep_checkpoint(
@@ -1921,7 +1402,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
         state: Vec<u8>,
         ms: u64,
     ) -> Result<(), String> {
-        // Mirror POST /sleep, which mirrors production `handle_sleep`: SAVE the
+        // Mirror production `handle_sleep`: SAVE the
         // checkpoint, then sleep. The save is not optional the way it reads —
         // it moves the instance's current checkpoint — so a mock that skipped it
         // diverged from production on every durable Delay. The sleep itself is
@@ -1941,38 +1422,14 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
     }
 }
 
-/// CLI path: spawn `wasmtime run --wasi http` exactly as `WasmRunner` does.
-fn execute_via_cli(wasm_path: &Path, env_pairs: &[(String, String)]) -> (bool, String) {
-    let mut command = Command::new(wasmtime_binary());
-    command
-        .arg("run")
-        .arg("--wasi")
-        .arg("http")
-        .arg("--wasi")
-        .arg("inherit-network");
-    for (key, value) in env_pairs {
-        command.arg("--env").arg(format!("{key}={value}"));
-    }
-    let output = command
-        .arg(wasm_path)
-        .stderr(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .output()
-        .expect("spawn wasmtime");
-    (
-        output.status.success(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
-}
-
 /// Embedded path: same component, same env, executed in-process. Returns the
 /// status, the failure reason (empty on success/guest-error), and the exact guest
 /// linear-memory peak from the executor's limiter.
 /// Invoke-ABI path: same env and limits, but input travels as the call
 /// argument and the terminal result is the lifted return value. The captures
 /// keep flowing through the additive complete/fail recordings the
-/// CapturingRuntimeHost already mirrors — the CapturedRun shape is identical
-/// across all three execution paths.
+/// CapturingRuntimeHost already records — the CapturedRun shape is identical
+/// across both execution paths.
 /// Relaunch budget for a parked run on the invoke axis. A fixture parks at most
 /// once per durable step; four covers every fixture in the battery with room to
 /// spare, and bounds a lowering bug that parks in a loop.
@@ -1993,7 +1450,7 @@ fn earliest_timed_deadline_ms(
         .filter_map(|wake| match wake {
             WorkflowWake::At(ms) => Some(*ms),
             WorkflowWake::OnSignal(wait) => wait.deadline_ms,
-            WorkflowWake::OnResume => None,
+            WorkflowWake::OnResume | WorkflowWake::Instances(_) => None,
         })
         .min()
 }
@@ -2012,7 +1469,7 @@ fn scheduler_would_relaunch(wakes: &[runtara_component_host::lifecycle::Workflow
         && wakes.iter().all(|wake| match wake {
             WorkflowWake::At(_) => true,
             WorkflowWake::OnSignal(wait) => wait.deadline_ms.is_some(),
-            WorkflowWake::OnResume => false,
+            WorkflowWake::OnResume | WorkflowWake::Instances(_) => false,
         })
 }
 
@@ -2022,7 +1479,12 @@ fn execute_via_embedded_invoke(
     runtime_host: Arc<dyn runtara_component_host::runtime_host::RuntimeHost>,
     input: Vec<u8>,
     connections: Arc<ServerState>,
-) -> (bool, String, Option<u64>) {
+) -> (
+    bool,
+    String,
+    Option<u64>,
+    Option<runtara_component_host::runtime_host::RunTerminal>,
+) {
     let executor = executor_with_connections(connections);
     let mut limits = runtara_component_host::WorkflowLimits::default();
     if let Some(max) = env_pairs
@@ -2094,78 +1556,24 @@ fn execute_via_embedded_invoke(
         }
     });
     let peak = Some(result.memory_peak_bytes);
-    match result.exit {
-        runtara_component_host::InvokeExit::Completed(_) => (true, String::new(), peak),
-        // The additive fail recording carries the error payload for the
-        // assertions; status mirrors the legacy non-zero exit.
-        runtara_component_host::InvokeExit::Failed(_) => (false, String::new(), peak),
+    let terminal = runtara_component_host::runtime_host::RunTerminal::from_exit(&result.exit);
+    let (success, stderr) = match result.exit {
+        runtara_component_host::InvokeExit::Completed(_) => (true, String::new()),
+        // The returned error carries the payload for the assertions; status
+        // mirrors the legacy non-zero exit.
+        runtara_component_host::InvokeExit::Failed(_) => (false, String::new()),
         // A lifecycle suspension is the clean exit the legacy run reported as
         // Ok — the suspended status was recorded host-side by the ack.
-        runtara_component_host::InvokeExit::Suspended(_) => (true, String::new(), peak),
-        runtara_component_host::InvokeExit::Trapped { reason } => (false, reason, peak),
-        runtara_component_host::InvokeExit::Timeout => (false, "invoke timeout".to_string(), peak),
-        runtara_component_host::InvokeExit::Cancelled => {
-            (false, "invoke cancelled".to_string(), peak)
-        }
+        runtara_component_host::InvokeExit::Suspended(_) => (true, String::new()),
+        runtara_component_host::InvokeExit::Trapped { reason } => (false, reason),
+        runtara_component_host::InvokeExit::Timeout => (false, "invoke timeout".to_string()),
+        runtara_component_host::InvokeExit::Cancelled => (false, "invoke cancelled".to_string()),
         runtara_component_host::InvokeExit::CleanupAborted => (
             false,
             "cleanup grace expired; invocation aborted".to_string(),
-            peak,
         ),
-    }
-}
-
-fn execute_via_embedded(
-    wasm_path: &Path,
-    env_pairs: &[(String, String)],
-    runtime_host: Option<Arc<dyn runtara_component_host::runtime_host::RuntimeHost>>,
-    connections: Option<Arc<ServerState>>,
-) -> (bool, String, Option<u64>) {
-    let executor = executor_with_connections(connections.unwrap_or_default());
-    let mut limits = runtara_component_host::WorkflowLimits::default();
-    // Honor a per-run guest memory cap exactly as the production embedded runner
-    // does (runtara-environment's `limits_from_env`), so a test can exercise the
-    // guest OOM path without provisioning a full gigabyte of headroom.
-    if let Some(max) = env_pairs
-        .iter()
-        .find(|(key, _)| key == "RUNTARA_INSTANCE_MEMORY_MAX_BYTES")
-        .and_then(|(_, value)| value.parse::<usize>().ok())
-    {
-        limits.max_memory_bytes = max;
-    }
-    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let result = runtime.block_on(async {
-        let pre = executor
-            .load(wasm_path)
-            .await
-            .expect("load composed workflow component");
-        executor
-            .execute(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    trusted_instance: None,
-                    trusted_tenant: Some("direct-wasm-execute".into()),
-                    env: env_pairs.iter().cloned().collect(),
-                    stderr: None,
-                    timeout: Duration::from_secs(300),
-                    cancel: None,
-                    limits,
-                    runtime: runtime_host,
-                },
-            )
-            .await
-    });
-    eprintln!(
-        "embedded run: exit={:?} memory_peak_bytes={}",
-        result.exit, result.memory_peak_bytes
-    );
-    let peak = Some(result.memory_peak_bytes);
-    match result.exit {
-        runtara_component_host::WorkflowExit::Completed => (true, String::new(), peak),
-        runtara_component_host::WorkflowExit::GuestError => (false, String::new(), peak),
-        runtara_component_host::WorkflowExit::Failed { reason } => (false, reason, peak),
-        other => (false, format!("embedded run interrupted: {other:?}"), peak),
-    }
+    };
+    (success, stderr, peak, terminal)
 }
 
 fn non_durable_graph_json(graph_json: &str) -> String {
@@ -2339,7 +1747,7 @@ fn top_level_component_imports(bytes: &[u8]) -> Vec<String> {
 }
 
 /// Spike B of the agent/workflow unification: wac-graph must compose a
-/// workflow whose directly-declared `runtara:workflow-runtime/runtime` import
+/// workflow whose directly-declared `runtara:workflow/runtime` import
 /// is left unsatisfied (no runtime component instantiated), surfacing it as a
 /// component-level import — the same path WASI interfaces already ride. This
 /// is the load-bearing assumption of the host-import migration: proven here
@@ -2370,32 +1778,10 @@ fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
         .map(|component| component.agent_id.clone())
         .collect();
 
-    // Control: the legacy Composed binding satisfies the runtime interface
-    // internally — it must NOT appear among the composed artifact's imports.
-    result.component_artifacts =
-        emit_direct_component_artifacts_with_binding(&agent_ids, RuntimeBinding::Composed);
-    compose_direct_workflow(&mut result, &components_dir).expect("composed-binding compose");
-    let composed_bytes = fs::read(&result.wasm_path).expect("read composed artifact");
-    let composed_imports = top_level_component_imports(&composed_bytes);
-    assert!(
-        !composed_imports
-            .iter()
-            .any(|name| name.starts_with("runtara:workflow-runtime/runtime")),
-        "composed binding must satisfy runtime internally; imports: {composed_imports:?}"
-    );
-    assert!(
-        composed_imports
-            .iter()
-            .any(|name| name.starts_with("wasi:")),
-        "WASI must bubble as imports under both bindings; imports: {composed_imports:?}"
-    );
-
-    // Spike: re-emit the scaffolding under HostImport (the default) and
-    // recompose. wac must type-check + encode (validate: true inside compose)
+    // Spike: re-emit the scaffolding and recompose. wac must type-check + encode (validate: true inside compose)
     // with the runtime interface unbound, and the interface must surface as a
     // top-level import.
-    result.component_artifacts =
-        emit_direct_component_artifacts_with_binding(&agent_ids, RuntimeBinding::HostImport);
+    result.component_artifacts = emit_direct_component_artifacts(&agent_ids);
     compose_direct_workflow(&mut result, &components_dir).expect("host-import-binding compose");
 
     let host_import_bytes = fs::read(&result.wasm_path).expect("read host-import artifact");
@@ -2403,7 +1789,7 @@ fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
     assert!(
         host_imports
             .iter()
-            .any(|name| name == "runtara:workflow-runtime/runtime@0.4.0"),
+            .any(|name| name == "runtara:workflow/runtime@1.0.0"),
         "host-import binding must surface the runtime interface; imports: {host_imports:?}"
     );
     assert!(
@@ -2412,53 +1798,29 @@ fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
     );
 }
 
-/// In-memory RuntimeHost recording the lifecycle calls a HostImport-composed
-/// artifact makes. Input arrives from memory; output/error are captured from
-/// the return channel — no HTTP anywhere.
+/// In-memory RuntimeHost recording the host calls a HostImport-composed
+/// artifact makes. Input travels as the invoke argument and the outcome as its
+/// return value — no HTTP anywhere.
 struct RecordingRuntimeHost {
-    input: Vec<u8>,
     pending_signal: Option<runtara_component_host::runtime_host::RuntimeSignalInfo>,
     acknowledged_commands: Mutex<Vec<(String, String)>>,
-    completed: Mutex<Option<Vec<u8>>>,
-    failed: Mutex<Option<Vec<u8>>>,
-    /// Total `runtime.complete` calls — a composed workflow-agent child must
-    /// never fire one (the caller owns instance lifecycle), so a parent+child
-    /// run records exactly 1.
-    complete_calls: std::sync::atomic::AtomicU32,
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl RecordingRuntimeHost {
-    fn new(input: &[u8]) -> Self {
+    fn new() -> Self {
         Self {
-            input: input.to_vec(),
             pending_signal: None,
             checkpoints: Mutex::new(HashMap::new()),
             acknowledged_commands: Mutex::new(Vec::new()),
-            completed: Mutex::new(None),
-            failed: Mutex::new(None),
-            complete_calls: std::sync::atomic::AtomicU32::new(0),
         }
     }
 }
 
 #[async_trait::async_trait]
 impl runtara_component_host::runtime_host::RuntimeHost for RecordingRuntimeHost {
-    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
-        Ok(Some(self.input.clone()))
-    }
     fn instance_id(&self) -> Result<String, String> {
         Ok("host-import-e2e".to_string())
-    }
-    async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
-        self.complete_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        *self.completed.lock().unwrap() = Some(output);
-        Ok(())
-    }
-    async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
-        *self.failed.lock().unwrap() = Some(error);
-        Ok(())
     }
     async fn custom_event(&self, _kind: String, _payload: Vec<u8>) -> Result<(), String> {
         Ok(())
@@ -2554,7 +1916,6 @@ impl runtara_component_host::runtime_host::RuntimeHost for RecordingRuntimeHost 
 /// durable key HITs). Used to prove composed workflow-agent checkpoint
 /// namespacing: the ids are inspectable AND replay-stable.
 struct PersistingRuntimeHost {
-    input: Vec<u8>,
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
     /// Ids passed to `durable-sleep-checkpoint` (durable Delays), in order.
     sleep_ids: Mutex<Vec<String>>,
@@ -2563,9 +1924,6 @@ struct PersistingRuntimeHost {
     managed_inputs: direct_managed_inputs::ManagedInputs,
     /// Every managed wait address polled, in order (with repeats).
     polled_input_ids: Mutex<Vec<String>>,
-    completed: Mutex<Option<Vec<u8>>>,
-    failed: Mutex<Option<Vec<u8>>>,
-    complete_calls: std::sync::atomic::AtomicU32,
     /// When true, `check-signals` reports a lifecycle signal (a pause): the
     /// guest early-returns suspended from its wait poll loop — through the
     /// composed-agent sentinel when the wait lives inside a child.
@@ -2573,17 +1931,13 @@ struct PersistingRuntimeHost {
 }
 
 impl PersistingRuntimeHost {
-    fn new(input: &[u8]) -> Self {
+    fn new() -> Self {
         Self {
-            input: input.to_vec(),
             checkpoints: Mutex::new(HashMap::new()),
             sleep_ids: Mutex::new(Vec::new()),
             checkpoint_writes: Mutex::new(Vec::new()),
             managed_inputs: Default::default(),
             polled_input_ids: Mutex::new(Vec::new()),
-            completed: Mutex::new(None),
-            failed: Mutex::new(None),
-            complete_calls: std::sync::atomic::AtomicU32::new(0),
             suspend_requested: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -2598,21 +1952,8 @@ impl PersistingRuntimeHost {
 
 #[async_trait::async_trait]
 impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost {
-    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
-        Ok(Some(self.input.clone()))
-    }
     fn instance_id(&self) -> Result<String, String> {
         Ok("checkpoint-ns-e2e".to_string())
-    }
-    async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
-        self.complete_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        *self.completed.lock().unwrap() = Some(output);
-        Ok(())
-    }
-    async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
-        *self.failed.lock().unwrap() = Some(error);
-        Ok(())
     }
     async fn custom_event(&self, _kind: String, _payload: Vec<u8>) -> Result<(), String> {
         Ok(())
@@ -2685,7 +2026,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
             .lock()
             .unwrap()
             .push(checkpoint_id.clone());
-        // Mirror the production semantics (see `checkpoint_response`): an
+        // Mirror the production semantics (core `handle_checkpoint`): an
         // existing id is a HIT returning the stored state; otherwise store.
         let mut checkpoints = self.checkpoints.lock().unwrap();
         if let Some(existing) = checkpoints.get(&checkpoint_id) {
@@ -2742,95 +2083,13 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
     }
 }
 
-/// Phase-1 acceptance: a HostImport
-/// composition executes end-to-end through the in-process executor with the
-/// runtime interface satisfied by native host functions — input from memory,
-/// output captured from `complete` — zero HTTP. Instantiation type-checks the
-/// FULL host-bound interface (all funcs + the signal/checkpoint records)
-/// against the component's import, so success here proves the marshaling
-/// layer, not just the happy path.
-#[test]
-fn direct_wasm_execute_host_import_runtime_runs_without_http() {
-    let components_dir = direct_e2e_components_dir();
-    let graph: ExecutionGraph = serde_json::from_str(SIMPLE_PASSTHROUGH).expect("fixture parses");
-    let temp = tempfile::tempdir().expect("tempdir");
-
-    // This test pins the RUN-shaped (legacy-export) host-import path — the
-    // invoke shape has its own suite below.
-    let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
-        DirectCompilationInput {
-            workflow_id: "phase1-host-import-exec".to_string(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: graph,
-            child_workflows: vec![],
-            output_dir: temp.path().to_path_buf(),
-            track_events: false,
-            agent_catalog: None,
-            agent_slug: None,
-        },
-        WorkflowAbi::CliRunHttp,
-        false,
-    )
-    .expect("direct emit succeeds");
-    result.component_artifacts =
-        emit_direct_component_artifacts_with_binding(&[], RuntimeBinding::HostImport);
-    compose_direct_workflow(&mut result, &components_dir).expect("host-import compose");
-
-    let host = Arc::new(RecordingRuntimeHost::new(br#"{"input":"host-import"}"#));
-    let executor = embedded_executor();
-
-    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let run = runtime.block_on(async {
-        let pre = executor
-            .load(&result.wasm_path)
-            .await
-            .expect("load host-import artifact");
-        executor
-            .execute(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    trusted_instance: None,
-                    trusted_tenant: Some("direct-wasm-execute".into()),
-                    env: HashMap::new(),
-                    stderr: None,
-                    timeout: Duration::from_secs(60),
-                    cancel: None,
-                    limits: runtara_component_host::WorkflowLimits::default(),
-                    runtime: Some(host.clone()),
-                },
-            )
-            .await
-    });
-
-    assert!(
-        matches!(run.exit, runtara_component_host::WorkflowExit::Completed),
-        "unexpected exit: {:?} (failed: {:?})",
-        run.exit,
-        host.failed
-            .lock()
-            .unwrap()
-            .as_deref()
-            .map(String::from_utf8_lossy),
-    );
-    let output = host
-        .completed
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("workflow reported completion through the host import");
-    let output_json: Value = serde_json::from_slice(&output).expect("output is JSON");
-    assert_eq!(output_json, serde_json::json!({ "result": "host-import" }));
-    assert!(host.failed.lock().unwrap().is_none(), "no failure expected");
-}
-
 #[test]
 fn direct_wasm_checkpoint_ack_preserves_command_identity() {
     let components_dir = direct_e2e_components_dir();
     let result =
         compile_invoke_abi_artifact(&components_dir, "command-identity-abi", AGENT_CACHED_REPLAY);
 
-    let mut host = RecordingRuntimeHost::new(br#"{"value":"command-identity"}"#);
+    let mut host = RecordingRuntimeHost::new();
     host.pending_signal = Some(runtara_component_host::runtime_host::RuntimeSignalInfo {
         signal_type: "pause".into(),
         command_id: "receipt-39e0a768".into(),
@@ -2857,23 +2116,14 @@ fn direct_wasm_checkpoint_ack_preserves_command_identity() {
 
     assert!(
         matches!(run.exit, runtara_component_host::InvokeExit::Suspended(_)),
-        "unexpected exit: {:?} (failed: {:?})",
+        // A suspended exit is the whole outcome: the accepted pause returned
+        // before the workflow could complete.
+        "unexpected exit: {:?}",
         run.exit,
-        host.failed
-            .lock()
-            .unwrap()
-            .as_deref()
-            .map(String::from_utf8_lossy),
     );
     assert_eq!(
         *host.acknowledged_commands.lock().unwrap(),
         vec![("pause".into(), "receipt-39e0a768".into())]
-    );
-    assert_eq!(
-        host.complete_calls
-            .load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "accepted pause exits before workflow completion"
     );
 }
 
@@ -3594,8 +2844,8 @@ fn direct_wasm_execute_query_only_condition_operator_fails_loudly() {
         br#"{"text":"haystack with needle"}"#,
     );
 
-    // Unhandled stdlib errors surface through `runtime.fail` as a bare message
-    // string (not an Error-step envelope object).
+    // Unhandled stdlib errors surface as the returned error whose recorded
+    // payload is a bare message string (not an Error-step envelope object).
     let message = result.error_json.as_str().unwrap_or_default();
     assert!(
         message.contains("MATCH") && message.contains("object-model"),
@@ -4466,8 +3716,7 @@ const AI_LEAK_MEM_CAP_BYTES: usize = 96 * 1024 * 1024;
 /// without it the O(N^2) per-turn scratch balloons past the cap. Asserts the
 /// FIXED behavior — the loop completes all turns (no state corruption over a long
 /// conversation) AND the guest peak stays well under a cap the un-reset O(N^2)
-/// would exceed. Relies on the keep-alive-fixed mock server to sustain the
-/// hundreds of HTTP round-trips a 50-turn loop makes.
+/// would exceed.
 #[test]
 fn ai_agent_loop_long_conversation_stays_bounded() {
     let components_dir = direct_e2e_components_dir();
@@ -5113,7 +4362,7 @@ fn direct_wasm_execute_agent_source_edge_conditions_route_on_agent_output() {
 fn direct_wasm_execute_wait_timeout_routes_to_on_error() {
     let components_dir = direct_e2e_components_dir();
 
-    // GAP-14: the 1ms wait deadline expires (the mock runtime never delivers
+    // GAP-14: the 1ms wait deadline expires (the capturing runtime host never delivers
     // a signal) and the WAIT_TIMEOUT envelope routes to the onError handler,
     // which completes the workflow reading steps.__error.*.
     let captured = run_direct_workflow_capture(
@@ -5268,7 +4517,7 @@ fn direct_wasm_execute_durable_delay_parks_and_completes() {
     assert_eq!(result.output_json, serde_json::json!({ "waited": 0 }));
     assert!(
         result.sleeps.is_empty(),
-        "lifecycle invoke must park a durable delay instead of blocking: {:?}",
+        "the workflow entry must park a durable delay instead of blocking: {:?}",
         result.sleeps
     );
     let parked_deadlines: Vec<_> = result
@@ -5317,7 +4566,7 @@ fn direct_wasm_execute_sync_parallel_branches_diamond_runs_both_branches() {
 
     assert!(
         result.sleeps.is_empty(),
-        "lifecycle invoke must not block any branch delay: {:?}",
+        "the workflow entry must not block any branch delay: {:?}",
         result.sleeps
     );
     // Every branch's durable Delay persisted a deadline — both branches executed,
@@ -6237,7 +5486,7 @@ fn embedded_executor() -> &'static runtara_component_host::WorkflowExecutor {
 // iteration source (`build_source`); when the scope carries a large value, every
 // iteration leaks several multi-MB buffers, so guest heap climbs ~linearly with
 // iteration count and eventually crosses the per-instance memory cap — a guest
-// OOM trap surfaced as `WorkflowExit::Failed { "guest memory limit exceeded" }`.
+// OOM trap surfaced as `InvokeExit::Trapped { "guest memory limit exceeded" }`.
 //
 // Same graph, same iteration count, same cap: a large scope variable traps while
 // a tiny one completes — isolating the per-iteration scope buffers as the cause.
@@ -6329,7 +5578,7 @@ const SPLIT_LEAK_MEM_CAP_BYTES: usize = 64 * 1024 * 1024;
 /// copied into every Split iteration, and the workflow core module's bump
 /// allocator never frees (post-return is a no-op), so guest heap climbs without
 /// bound and the run dies mid-Split — as the silent
-/// `WorkflowExit::Failed { "guest memory limit exceeded" }` once the cap is
+/// `InvokeExit::Trapped { "guest memory limit exceeded" }` once the cap is
 /// crossed, or (at a higher cap) an `HttpProtocolError` once a runaway buffer
 /// breaks an outbound call. Both are the production regression.
 ///
@@ -6658,11 +5907,10 @@ const WHILE_ACC_MEM_CAP_BYTES: usize = 96 * 1024 * 1024;
 ///
 /// Like the Split scope-leak tests, this asserts on `memory_peak_bytes`, NOT
 /// completion: a While issues a per-iteration `heartbeat`/`check-signals`/`now-ms`
-/// HTTP round-trip to the mock runtime, and that path carries the harness's
-/// documented load-sensitive HTTP flake — so requiring the run to finish would make
-/// the test flaky (under load even the index-only While fails to complete). The
-/// peak is flake-immune in the right direction: an early HTTP death only *lowers*
-/// the peak (test still passes), while a GC regression (linear → O(N²)) drives the
+/// runtime call, and requiring the run to finish would couple this test to that
+/// path's load sensitivity (under load even the index-only While once failed to
+/// complete). The peak is flake-immune in the right direction: an early death
+/// only *lowers* the peak (test still passes), while a GC regression (linear → O(N²)) drives the
 /// peak past the cap and OOMs. The deterministic proof that the GC call is wired
 /// lives in `direct_core_emits_value_store_retain_for_loops`, the intern/materialize
 /// round-trip is covered by the stdlib `value_store_retain_*` and `lookup_resolves_*`
@@ -6875,9 +6123,9 @@ fn direct_wasm_sql_transport_failure_classification() {
 
 // ===========================================================================
 // Invoke ABI (Phase 3 of the agent/workflow unification): the workflow
-// exports lifecycle.invoke instead of wasi:cli/run — input as the call
-// argument, terminal result as the lifted return value. These are the Spike-E
-// acceptance tests: the emitter's param-fold + result-area writer, the WIT
+// exports the workflow entry's invoke — input as the call argument, terminal
+// result as the lifted return value. These are the Spike-E acceptance tests:
+// the emitter's param-fold + result-area writer, the WIT
 // world, ComponentEncoder validation, wac composition, and wasmtime's typed
 // lift all have to agree for a single byte to come back.
 // ===========================================================================
@@ -6913,8 +6161,7 @@ fn compile_invoke_abi_artifact_full(
             agent_slug: None,
         },
         components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         omit_runtime,
     )
     .expect("invoke-abi compile+compose succeeds");
@@ -6945,8 +6192,7 @@ fn compile_invoke_abi_artifact_with_children(
             agent_slug: None,
         },
         components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("child invoke-abi compile+compose succeeds");
@@ -6974,7 +6220,7 @@ const PURE_PASSTHROUGH: &str = r#"{
 }"#;
 
 /// Workflow-as-agent slice d: a PURE, non-durable, invoke-ABI workflow compiled
-/// with the omit-runtime gate drops the `runtara:workflow-runtime/runtime`
+/// with the omit-runtime gate drops the `runtara:workflow/runtime`
 /// import entirely and executes with NO runtime host attached — its terminal
 /// result travels solely in-band. This is the composition-safe, agent-shaped
 /// artifact the workflow-as-agent path builds on.
@@ -6997,13 +6243,13 @@ fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_ho
         !compiled
             .component_artifacts
             .world_wit
-            .contains("workflow-runtime/runtime"),
+            .contains("runtara:workflow/runtime"),
         "world must not import the runtime:\n{}",
         compiled.component_artifacts.world_wit
     );
 
     // Runtime-side proof: it executes with NO runtime host attached, completing
-    // in-band (no runtime.complete fires). Had any runtime.* call been emitted,
+    // in-band. Had any runtime.* call been emitted,
     // the composed artifact would reference a poisoned import index and fail
     // ComponentEncoder validation at compile — so reaching here already proves
     // zero runtime calls; running with `runtime: None` proves it at execution.
@@ -7052,7 +6298,7 @@ fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_ho
     assert!(
         kept.component_artifacts
             .world_wit
-            .contains("workflow-runtime/runtime"),
+            .contains("runtara:workflow/runtime"),
         "control artifact must keep the runtime import"
     );
 
@@ -7072,7 +6318,7 @@ fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_ho
         agentful
             .component_artifacts
             .world_wit
-            .contains("workflow-runtime/runtime")
+            .contains("runtara:workflow/runtime")
     );
 }
 
@@ -7096,9 +6342,8 @@ fn compile_agent_capabilities_artifact(
             agent_slug: None,
         },
         components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
-        // omit_runtime is forced true for AgentCapabilities by the compiler.
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
+        // omit_runtime is forced true for PublishedAgent by the compiler.
         false,
     )
     .expect("agent-capabilities compile+compose succeeds");
@@ -7107,7 +6352,7 @@ fn compile_agent_capabilities_artifact(
 }
 
 /// Workflow-as-agent slice a: a pure workflow compiled with the
-/// `AgentCapabilities` ABI exports `runtara:agent-<slug>/capabilities.invoke(
+/// `PublishedAgent` ABI exports `runtara:agent-<slug>/capabilities.invoke(
 /// capability-id, input) -> result<list<u8>, error-info>` — the exact agent
 /// shape — and is invocable AS an agent through a wasmtime typed call. With no
 /// explicit slug, the export id derives from the graph name via the shared
@@ -7120,17 +6365,14 @@ fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
         compile_agent_capabilities_artifact(&components_dir, "workflow-as-agent", PURE_PASSTHROUGH);
 
     // Shape: agent-shaped export under the derived slug, zero runtime imports.
-    assert!(
-        compiled.omit_runtime,
-        "AgentCapabilities implies omit-runtime"
-    );
+    assert!(compiled.omit_runtime, "PublishedAgent implies omit-runtime");
     let world = &compiled.component_artifacts.world_wit;
     assert!(
-        world.contains("export runtara:agent-pure-passthrough/capabilities@0.4.0"),
+        world.contains("export runtara:agent-pure-passthrough/capabilities@1.0.0"),
         "world must export the capabilities interface under the derived slug:\n{world}"
     );
     assert!(
-        !world.contains("workflow-runtime/runtime"),
+        !world.contains("runtara:workflow/runtime"),
         "agent-shaped workflow must import no runtime:\n{world}"
     );
 
@@ -7145,7 +6387,7 @@ fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
         executor
             .invoke_capability(
                 &pre,
-                "runtara:agent-pure-passthrough/capabilities@0.4.0",
+                "runtara:agent-pure-passthrough/capabilities@1.0.0",
                 "run",
                 br#"{"input":"as-agent"}"#.to_vec(),
             )
@@ -7184,8 +6426,7 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
             agent_slug: Some("delay-agent".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("a durable workflow now compiles as an agent");
@@ -7194,7 +6435,7 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
         compiled
             .component_artifacts
             .world_wit
-            .contains("import runtara:workflow-runtime/runtime@0.4.0;"),
+            .contains("import runtara:workflow/runtime@1.0.0;"),
         "durable agent must keep the runtime import:\n{}",
         compiled.component_artifacts.world_wit
     );
@@ -7202,7 +6443,7 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
         compiled
             .component_artifacts
             .world_wit
-            .contains("export runtara:agent-delay-agent/capabilities@0.4.0;")
+            .contains("export runtara:agent-delay-agent/capabilities@1.0.0;")
     );
 
     // 4a off-switch: durability is the ONLY runtime need of a plain transform
@@ -7240,8 +6481,7 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
                 agent_slug: Some(id.to_string()),
             },
             &components_dir,
-            RuntimeBinding::HostImport,
-            runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+            runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
             false,
         )
         .expect("agent compile succeeds")
@@ -7268,9 +6508,9 @@ fn direct_wasm_execute_invoke_abi_returns_completed_outcome_in_band() {
     let compiled =
         compile_invoke_abi_artifact(&components_dir, "invoke-abi-completed", SIMPLE_PASSTHROUGH);
 
-    // Input travels as the call argument — the RecordingRuntimeHost's
-    // load_input must never be consulted (poisoned input proves it).
-    let host = Arc::new(RecordingRuntimeHost::new(b"{\"input\":\"WRONG-PATH\"}"));
+    // Input travels only as the call argument; the runtime interface has no
+    // input call.
+    let host = Arc::new(RecordingRuntimeHost::new());
     let executor = embedded_executor();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let run = runtime.block_on(async {
@@ -7293,16 +6533,6 @@ fn direct_wasm_execute_invoke_abi_returns_completed_outcome_in_band() {
     };
     let output_json: Value = serde_json::from_slice(&output).expect("output is JSON");
     assert_eq!(output_json, serde_json::json!({ "result": "invoke-abi" }));
-
-    // runtime.complete still fires additively during the migration and must
-    // carry the SAME bytes the return value carried.
-    let recorded = host
-        .completed
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("complete fired additively");
-    assert_eq!(recorded, output, "in-band and recorded outputs must agree");
 }
 
 #[test]
@@ -7318,7 +6548,7 @@ fn direct_wasm_execute_invoke_abi_is_repeatable_across_runs() {
     // `execute_invoke` must create a new Store for every execution even when
     // the compiled component is reused across instances.
     for round in 0..2 {
-        let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+        let host = Arc::new(RecordingRuntimeHost::new());
         let run = runtime.block_on(executor.execute_invoke(
             &pre,
             runtara_component_host::WorkflowRunSpec {
@@ -7342,11 +6572,6 @@ fn direct_wasm_execute_invoke_abi_is_repeatable_across_runs() {
             serde_json::json!({ "result": "direct-finish" }),
             "round {round} output mismatch"
         );
-        assert_eq!(
-            host.completed.lock().unwrap().clone(),
-            Some(output),
-            "round {round} must report its own completion"
-        );
     }
 }
 
@@ -7356,7 +6581,7 @@ fn direct_wasm_execute_invoke_abi_returns_error_info_in_band() {
     let compiled =
         compile_invoke_abi_artifact(&components_dir, "invoke-abi-failed", ERROR_DIRECT_SIMPLE);
 
-    let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+    let host = Arc::new(RecordingRuntimeHost::new());
     let executor = embedded_executor();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let run = runtime.block_on(async {
@@ -7393,37 +6618,17 @@ fn direct_wasm_execute_invoke_abi_returns_error_info_in_band() {
         error.attributes
     );
 
-    // runtime.fail fired additively with the RAW envelope; the in-band
-    // error is its structured decomposition — same payload, richer shape.
-    let recorded = host
-        .failed
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("fail fired additively");
+    // `details` carries the RAW envelope the run records; the other fields
+    // are its structured decomposition — same payload, richer shape.
+    let recorded = runtara_component_host::runtime_host::error_payload(&error);
+    assert_eq!(
+        error.details.as_deref().map(str::as_bytes),
+        Some(&recorded[..])
+    );
     let recorded_json: Value =
         serde_json::from_slice(&recorded).expect("recorded error is the JSON envelope");
     assert_eq!(recorded_json["code"], "DIRECT_FAILURE");
     assert_eq!(recorded_json["message"], error.message);
-}
-
-#[test]
-fn direct_wasm_execute_invoke_abi_artifact_rejects_run_loader() {
-    let components_dir = direct_e2e_components_dir();
-    let compiled =
-        compile_invoke_abi_artifact(&components_dir, "invoke-abi-shape", SIMPLE_PASSTHROUGH);
-
-    let executor = embedded_executor();
-    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    // The legacy loader requires wasi:cli/run — an invoke-shaped artifact
-    // must be rejected loudly, not executed as a no-op.
-    match runtime.block_on(executor.load(&compiled.wasm_path)) {
-        Ok(_) => panic!("wasi:cli/run loader must reject an invoke-shaped artifact"),
-        Err(error) => assert!(
-            format!("{error:#}").contains("wasi:cli/run"),
-            "unexpected error: {error:#}"
-        ),
-    }
 }
 
 #[test]
@@ -7432,7 +6637,7 @@ fn direct_wasm_execute_invoke_abi_runs_durable_agent_step() {
     let compiled =
         compile_invoke_abi_artifact(&components_dir, "invoke-abi-agent", AGENT_CACHED_REPLAY);
 
-    let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+    let host = Arc::new(RecordingRuntimeHost::new());
     let executor = embedded_executor();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let run = runtime.block_on(async {
@@ -7831,12 +7036,10 @@ fn spawn_retry_http_provider(
 /// relaunching a parked instance. `sleeps` records blocking
 /// `durable-sleep-checkpoint` calls (never fired on the store-freeing path).
 struct CheckpointingRuntimeHost {
-    input: Vec<u8>,
     custom_events: Mutex<Vec<(String, Vec<u8>)>>,
     advance_clock_on_step_end: Mutex<Option<(String, u64)>>,
     delay_on_step_end: Mutex<Option<(String, u64)>>,
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
-    completed: Mutex<Option<Vec<u8>>>,
     sleeps: Mutex<Vec<String>>,
     managed_inputs: direct_managed_inputs::ManagedInputs,
     /// Milliseconds added to the wall clock for every `now-ms` the guest asks
@@ -7851,44 +7054,25 @@ struct CheckpointingRuntimeHost {
     pinned_clock_ms: Mutex<Option<u64>>,
     /// One caller response accepted after the next wait registers.
     next_input_response: Mutex<Option<Value>>,
-    /// When set, `durable-sleep-checkpoint` reports this message instead of
-    /// returning cleanly — the shape of a sleep whose request the client
-    /// deadline outlasted.
-    sleep_error: Mutex<Option<String>>,
-    /// What the guest reported through `runtime.fail`. `None` after a failed run
-    /// is the defect this captures: an error the lowering returned without ever
-    /// reporting it.
-    failed: Mutex<Option<Vec<u8>>>,
     /// A lifecycle signal that becomes visible on the next explicit poll. Retry
     /// parks use this after a due wake, before issuing their next attempt.
     pending_signal: std::sync::atomic::AtomicBool,
 }
 
 impl CheckpointingRuntimeHost {
-    fn new(input: &[u8]) -> Self {
+    fn new() -> Self {
         Self {
-            input: input.to_vec(),
             custom_events: Mutex::new(Vec::new()),
             advance_clock_on_step_end: Mutex::new(None),
             delay_on_step_end: Mutex::new(None),
             checkpoints: Mutex::new(HashMap::new()),
-            completed: Mutex::new(None),
             sleeps: Mutex::new(Vec::new()),
             managed_inputs: direct_managed_inputs::ManagedInputs::new("store-freeing-delay"),
             clock_offset_ms: Mutex::new(0),
             pinned_clock_ms: Mutex::new(None),
             next_input_response: Mutex::new(None),
-            sleep_error: Mutex::new(None),
-            failed: Mutex::new(None),
             pending_signal: std::sync::atomic::AtomicBool::new(false),
         }
-    }
-
-    /// Arm every `durable-sleep-checkpoint` to fail with `message`, standing in
-    /// for the composed binding's sleep request being aborted by the client's
-    /// own request deadline before core can answer it.
-    fn fail_sleeps_with(&self, message: &str) {
-        *self.sleep_error.lock().unwrap() = Some(message.to_string());
     }
 
     fn accept_response(&self, signal: &str, payload: &[u8]) {
@@ -7949,19 +7133,8 @@ impl CheckpointingRuntimeHost {
 
 #[async_trait::async_trait]
 impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeHost {
-    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
-        Ok(Some(self.input.clone()))
-    }
     fn instance_id(&self) -> Result<String, String> {
         Ok("store-freeing-delay".to_string())
-    }
-    async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
-        *self.completed.lock().unwrap() = Some(output);
-        Ok(())
-    }
-    async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
-        *self.failed.lock().unwrap() = Some(error);
-        Ok(())
     }
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
         let delay = self.delay_on_step_end.lock().unwrap().clone();
@@ -8117,12 +7290,6 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
                 .or_insert(state);
         }
         self.sleeps.lock().unwrap().push(checkpoint_id);
-        // Report the failure only AFTER the checkpoint and the key are recorded:
-        // core saves before it sleeps, so a sleep that dies on the client's
-        // deadline dies with its checkpoint already durable.
-        if let Some(message) = self.sleep_error.lock().unwrap().as_ref() {
-            return Err(message.clone());
-        }
         Ok(())
     }
 }
@@ -8243,7 +7410,7 @@ fn drive_wake_scheduler(
                         thread::sleep(Duration::from_millis(ms.saturating_sub(now_ms()) + 1));
                     }
                 }
-                WorkflowWake::OnResume => {}
+                WorkflowWake::OnResume | WorkflowWake::Instances(_) => {}
             }
         }
         let wakeable = wakes.iter().any(|wake| match wake {
@@ -8251,7 +7418,7 @@ fn drive_wake_scheduler(
             WorkflowWake::OnSignal(wait) => {
                 wait.deadline_ms.is_some() || host.has_accepted_response(&wait.checkpoint_id)
             }
-            WorkflowWake::OnResume => false,
+            WorkflowWake::OnResume | WorkflowWake::Instances(_) => false,
         });
         legs.push(ParkLeg::Parked(wakes));
         assert!(
@@ -8294,7 +7461,7 @@ fn direct_wasm_execute_invoke_one_millisecond_delay_parks_then_resumes_once() {
         "delay-park-one-millisecond",
         &store_freeing_delay_fixture(Some(duration_ms)),
     );
-    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
 
     let before = now_ms();
     let legs = drive_wake_scheduler(
@@ -8362,7 +7529,7 @@ fn direct_wasm_execute_invoke_rate_limited_agent_retry_parks_and_replays_once() 
     let input = serde_json::to_vec(&serde_json::json!({ "url": format!("{proxy_url}/item") }))
         .expect("retry input");
     let env = HashMap::new();
-    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
 
     let first = run_invoke_once_with_env(
         &artifact.wasm_path,
@@ -8450,7 +7617,7 @@ fn direct_wasm_execute_invoke_rate_limited_agent_retry_parks_and_replays_once() 
     proxy.join().expect("retry proxy joins");
 }
 
-/// Whole-Split retries park in the lifecycle ABI as well. This exercises the
+/// Whole-Split retries park through the workflow entry as well. This exercises the
 /// sequential Split path specifically; a Split that requests concurrency but
 /// carries retrying items degrades onto this same path (see
 /// `direct_wasm_execute_invoke_parallel_split_item_retry_parks_sequentially`).
@@ -8463,7 +7630,7 @@ fn direct_wasm_execute_invoke_sequential_split_retry_parks_before_second_attempt
         &lifecycle_retry_split_graph(),
     );
     let input = br#"{}"#.to_vec();
-    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
 
     let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
     let deadline = match first {
@@ -8525,7 +7692,7 @@ fn direct_wasm_execute_invoke_parallel_split_item_retry_parks_sequentially() {
     );
     let input = br#"{}"#.to_vec();
     let env = HashMap::new();
-    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
 
     let first = run_invoke_once_with_env(
         &artifact.wasm_path,
@@ -8600,7 +7767,7 @@ fn direct_wasm_execute_invoke_embed_workflow_retry_parks_before_second_attempt()
         }],
     );
     let input = br#"{}"#.to_vec();
-    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
 
     let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
     let deadline = match first {
@@ -8676,7 +7843,7 @@ fn direct_wasm_execute_embed_agent_error_preserves_durable_retry_replay() {
     let input =
         serde_json::to_vec(&serde_json::json!({"url":format!("{proxy_url}/item")})).unwrap();
     let env = HashMap::new();
-    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
     let first = run_invoke_once_with_env(
         &artifact.wasm_path,
         host.clone(),
@@ -8759,7 +7926,7 @@ fn direct_wasm_execute_invoke_retry_park_observes_signal_before_retrying() {
     let input = serde_json::to_vec(&serde_json::json!({ "url": format!("{proxy_url}/item") }))
         .expect("retry input");
     let env = HashMap::new();
-    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
 
     let first = run_invoke_once_with_env(
         &artifact.wasm_path,
@@ -8803,7 +7970,7 @@ fn direct_wasm_execute_invoke_dynamic_delay_always_parks() {
     );
 
     let short_input = br#"{"value":"short","waitMs":1}"#.to_vec();
-    let short_host = Arc::new(CheckpointingRuntimeHost::new(&short_input));
+    let short_host = Arc::new(CheckpointingRuntimeHost::new());
     let short_legs = drive_wake_scheduler(
         &artifact.wasm_path,
         short_host.clone(),
@@ -8834,7 +8001,7 @@ fn direct_wasm_execute_invoke_dynamic_delay_always_parks() {
     );
 
     let long_input = br#"{"value":"long","waitMs":3600000}"#.to_vec();
-    let long_host = Arc::new(CheckpointingRuntimeHost::new(&long_input));
+    let long_host = Arc::new(CheckpointingRuntimeHost::new());
     let long_legs = drive_wake_scheduler(
         &artifact.wasm_path,
         long_host.clone(),
@@ -8860,122 +8027,6 @@ fn direct_wasm_execute_invoke_dynamic_delay_always_parks() {
     );
 }
 
-/// The `wasi:cli/run` export blocks a long Delay even though the invoke export
-/// parks the identical graph. What survived the gate's deletion is a CAPABILITY
-/// check, not a policy one: `cli-run` has no success arm that can carry a wake,
-/// so it has nowhere to put a deadline and must block.
-#[test]
-fn direct_wasm_execute_cli_run_abi_blocks_a_long_delay() {
-    let components_dir = direct_e2e_components_dir();
-    let graph: ExecutionGraph = serde_json::from_str(&store_freeing_delay_fixture(Some(3_600_000)))
-        .expect("delay fixture parses");
-    let temp = tempfile::tempdir().expect("tempdir");
-    let compiled = compile_direct_workflow_composed_configured(
-        DirectCompilationInput {
-            workflow_id: "delay-cli-run-blocks".to_string(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: graph,
-            child_workflows: vec![],
-            output_dir: temp.path().to_path_buf(),
-            track_events: false,
-            agent_catalog: None,
-            agent_slug: None,
-        },
-        &components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::CliRunHttp,
-        false,
-    )
-    .expect("cli-run compile+compose succeeds");
-
-    let input = br#"{"value":"cli-run"}"#.to_vec();
-    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
-    let (ok, stderr, _) = execute_via_embedded(&compiled.wasm_path, &[], Some(host.clone()), None);
-    assert!(ok, "cli-run artifact must run to completion: {stderr}");
-
-    assert_eq!(
-        host.sleeps.lock().unwrap().as_slice(),
-        &[root_key(
-            "delay",
-            "delay-cli-run-blocks",
-            serde_json::json!(["delay"])
-        )],
-        "under cli-run even an hours-long Delay must block on durable-sleep-checkpoint"
-    );
-    // The blocking sleep leaves core's empty checkpoint behind, but never an
-    // 8-byte deadline: cli-run has no wake that could carry one.
-    assert_eq!(
-        host.checkpoints.lock().unwrap().get(&root_key(
-            "delay",
-            "delay-cli-run-blocks",
-            serde_json::json!(["delay"])
-        )),
-        Some(&Vec::new()),
-        "cli-run must record only the blocking sleep's empty checkpoint, never a deadline"
-    );
-}
-
-/// A durable sleep that fails must SAY so.
-///
-/// The blocking arm used to end its `durable-sleep-checkpoint` call with a bare
-/// `Err` return, which under `wasi:cli/run` is an exit code and nothing else: no
-/// `failed` event, no message. All an operator got was that the process had
-/// died — a report naming neither the sleep nor its cause, and pointing squarely
-/// at the wrong problem.
-///
-/// This is the arm where that matters. `cli-run` has no success arm able to
-/// carry a wake, so it can never park and always blocks; under the composed
-/// binding that block is an HTTP request held open for the sleep's whole
-/// duration, which the client's own request deadline outlasts for any sleep
-/// beyond it. Every one of those failures was mute.
-#[test]
-fn direct_wasm_execute_cli_run_reports_a_failed_durable_sleep() {
-    const SLEEP_FAILURE: &str =
-        "durable sleep of 3600000ms does not fit inside the 30000ms client request timeout";
-
-    let components_dir = direct_e2e_components_dir();
-    let graph: ExecutionGraph = serde_json::from_str(&store_freeing_delay_fixture(Some(3_600_000)))
-        .expect("delay fixture parses");
-    let temp = tempfile::tempdir().expect("tempdir");
-    let compiled = compile_direct_workflow_composed_configured(
-        DirectCompilationInput {
-            workflow_id: "delay-cli-run-sleep-failure".to_string(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: graph,
-            child_workflows: vec![],
-            output_dir: temp.path().to_path_buf(),
-            track_events: false,
-            agent_catalog: None,
-            agent_slug: None,
-        },
-        &components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::CliRunHttp,
-        false,
-    )
-    .expect("cli-run compile+compose succeeds");
-
-    let input = br#"{"value":"cli-run"}"#.to_vec();
-    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
-    host.fail_sleeps_with(SLEEP_FAILURE);
-    let (ok, _stderr, _) = execute_via_embedded(&compiled.wasm_path, &[], Some(host.clone()), None);
-
-    assert!(
-        !ok,
-        "a workflow whose durable sleep failed must not report success"
-    );
-    let reported = host.failed.lock().unwrap().clone().expect(
-        "the sleep failure must reach the operator through runtime.fail, not just an exit code",
-    );
-    assert!(
-        String::from_utf8_lossy(&reported).contains(SLEEP_FAILURE),
-        "the report must carry the sleep's own diagnosis; got {:?}",
-        String::from_utf8_lossy(&reported)
-    );
-}
-
 /// Relaunching a parked Delay BEFORE its deadline must not skip the wait: the
 /// guest re-reads the stored deadline and re-parks on the same absolute value.
 ///
@@ -8993,7 +8044,7 @@ fn direct_wasm_execute_invoke_early_relaunch_reparks_instead_of_skipping_the_del
         "delay-early-relaunch",
         &store_freeing_delay_fixture(Some(duration_ms)),
     );
-    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
 
     let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
     let first_deadline = match &first {
@@ -9028,10 +8079,7 @@ fn direct_wasm_execute_invoke_early_relaunch_reparks_instead_of_skipping_the_del
         "every re-park must carry the SAME absolute deadline — the wait is \
          neither shortened nor slid forward by having been relaunched; got {deadlines:?}"
     );
-    assert!(
-        host.completed.lock().unwrap().is_none(),
-        "an early relaunch must not complete the run"
-    );
+    // Every relaunch returned Suspended above, so none completed the run.
     assert!(
         host.sleeps.lock().unwrap().is_empty(),
         "re-parking must not fall back to a blocking sleep"
@@ -9064,7 +8112,7 @@ fn direct_wasm_execute_invoke_clock_skew_tolerance_is_bounded_on_both_sides() {
         "delay-skew-tolerance",
         &store_freeing_delay_fixture(Some(3_600_000)),
     );
-    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
 
     let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
     let deadline = match &first {
@@ -9136,7 +8184,7 @@ fn direct_wasm_execute_invoke_blocking_sleep_checkpoint_reads_as_a_served_wait()
         "delay-key-aliasing",
         &store_freeing_delay_fixture(Some(3_600_000)),
     );
-    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
     // Seed the key exactly as a prior BLOCKING pass through this step would
     // have, via core's handle_sleep.
     host.checkpoints.lock().unwrap().insert(
@@ -9231,61 +8279,6 @@ fn timed_wait_fixture(timeout_ms: u64) -> String {
     )
 }
 
-/// A wait that never PARKED gets no tolerance at all — which is the whole job
-/// of the resumed flag once the half-window clamp is in place.
-///
-/// Under `wasi:cli/run` a Wait cannot park (no success arm can carry a wake), so
-/// it polls in-process against one clock for its whole timeout. There is no
-/// database scan involved and therefore no skew to absorb, and the clamp does
-/// not help: it bounds the tolerance at half the window, so an ungated wait here
-/// would end its timeout up to HALF early for no reason at all.
-///
-/// Asserted on elapsed time, which can only fail in the safe direction — a
-/// loaded machine makes the run slower, never faster, so the floor cannot flake
-/// red. Ungated, this 400ms wait resolves at ~200ms.
-#[test]
-fn direct_wasm_execute_cli_run_wait_timeout_gets_no_skew_tolerance() {
-    let components_dir = direct_e2e_components_dir();
-    let graph: ExecutionGraph =
-        serde_json::from_str(&timed_wait_fixture(400)).expect("wait fixture parses");
-    let temp = tempfile::tempdir().expect("tempdir");
-    let compiled = compile_direct_workflow_composed_configured(
-        DirectCompilationInput {
-            workflow_id: "wait-cli-run-no-tolerance".to_string(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: graph,
-            child_workflows: vec![],
-            output_dir: temp.path().to_path_buf(),
-            track_events: false,
-            agent_catalog: None,
-            agent_slug: None,
-        },
-        &components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::CliRunHttp,
-        false,
-    )
-    .expect("cli-run compile+compose succeeds");
-
-    let input = br#"{}"#.to_vec();
-    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
-    let started = std::time::Instant::now();
-    let (ok, _stderr, _) = execute_via_embedded(&compiled.wasm_path, &[], Some(host.clone()), None);
-    let elapsed = started.elapsed();
-
-    assert!(
-        !ok,
-        "a wait with no signal must fail on its timeout under cli-run"
-    );
-    assert!(
-        elapsed >= std::time::Duration::from_millis(300),
-        "an in-process wait must serve its FULL 400ms window — no park happened, \
-         so there is no clock skew to absorb and the tolerance must stay off. \
-         Resolved after {elapsed:?}"
-    );
-}
-
 /// Guest clock skew cannot close a managed wait: persistence owns expiry.
 /// Even a replay whose local clock is beyond the deadline can still accept a
 /// response while the authoritative request is open.
@@ -9298,7 +8291,7 @@ fn direct_wasm_execute_invoke_wait_guest_clock_cannot_expire_an_open_request() {
         "wait-persistence-clock",
         &timed_wait_fixture(60_000),
     );
-    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
     let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
     let (signal, deadline) = match first {
         runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
@@ -9349,7 +8342,7 @@ fn direct_wasm_execute_invoke_wait_observes_persistence_expiry_with_guest_clock_
         "wait-persistence-expiry",
         &timed_wait_fixture(5_000),
     );
-    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
     let first = run_invoke_once(&artifact.wasm_path, host.clone(), input.clone());
     let (signal, deadline) = match first {
         runtara_component_host::InvokeExit::Suspended(wakes) => match &wakes[0] {
@@ -9408,7 +8401,7 @@ fn direct_wasm_execute_invoke_wait_parks_on_signal_then_resumes() {
     let input = br#"{}"#.to_vec();
 
     let artifact = compile_invoke_abi_artifact(&components_dir, "wait-park", STORE_FREEING_WAIT);
-    let host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
 
     let legs = drive_wake_scheduler(
         &artifact.wasm_path,
@@ -9457,7 +8450,7 @@ fn direct_wasm_execute_invoke_wait_parks_on_signal_then_resumes() {
     // poll finds the signal — and reaches the same output.
     let present =
         compile_invoke_abi_artifact(&components_dir, "wait-signal-present", STORE_FREEING_WAIT);
-    let present_host = Arc::new(CheckpointingRuntimeHost::new(&input));
+    let present_host = Arc::new(CheckpointingRuntimeHost::new());
     // The deterministic signal id is workflow-id-scoped, so pre-deliver for ANY
     // polled id.
     present_host.respond_to_next_request(br#"{"approved": true}"#);
@@ -9473,7 +8466,7 @@ fn direct_wasm_execute_invoke_wait_parks_on_signal_then_resumes() {
 }
 
 /// P5 full-parity loop, in process: a child workflow PUBLISHED as an agent
-/// (compiled with the AgentCapabilities ABI under its slug, staged under the
+/// (compiled with the PublishedAgent ABI under its slug, staged under the
 /// native-agent naming convention with a synthesized meta sidecar) is composed
 /// into a PARENT workflow like any native agent — targeted by an ordinary
 /// Agent step as `agentId: <slug>, capabilityId: "run"` — and the parent
@@ -9518,8 +8511,7 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
             agent_slug: Some("shout-echo".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("child agent compile+compose succeeds");
@@ -9527,7 +8519,7 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
         child
             .component_artifacts
             .world_wit
-            .contains("export runtara:agent-shout-echo/capabilities@0.4.0;"),
+            .contains("export runtara:agent-shout-echo/capabilities@1.0.0;"),
         "child must export under its slug:\n{}",
         child.component_artifacts.world_wit
     );
@@ -9598,7 +8590,7 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
             agent_catalog: Some(catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("parent compile succeeds");
@@ -9610,7 +8602,7 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
     .expect("parent compose finds the staged child in the extra search dir");
 
     // 4. Run the parent — the child executes composed-in like a native agent.
-    let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+    let host = Arc::new(RecordingRuntimeHost::new());
     let executor = embedded_executor();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let run = runtime.block_on(async {
@@ -9639,15 +8631,13 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
     std::mem::forget(temp);
 }
 
-/// A composed workflow-agent's Error step cannot forge the reserved sentinels.
+/// A composed workflow-agent's Error step cannot park its parent.
 ///
-/// `__rt_on_signal__` (a nested signal wait, route in `message`) and
-/// `__rt_suspended__` (a nested lifecycle suspend) are how a child's park
-/// crosses the capability boundary; the parent matches the code byte for byte
-/// and re-raises the park. A user-authored Error step carrying either code
-/// must reach the parent as an ordinary failure with the `:user` suffix — the
-/// parent routes `onError` (or fails without it), and never parks on a signal
-/// or suspends.
+/// A child's park crosses the capability boundary only as the `suspended` arm
+/// of the outcome, never as an error code. An Error step carrying the former
+/// reserved codes (`__rt_on_signal__`, `__rt_suspended__`) reaches the parent
+/// as an ordinary failure with that code unchanged: the parent routes
+/// `onError` (or fails without it), and never parks on a signal or suspends.
 #[test]
 fn workflow_agent_error_step_cannot_spoof_signal_park_or_suspend() {
     let components_dir = direct_e2e_components_dir();
@@ -9695,8 +8685,7 @@ fn workflow_agent_error_step_cannot_spoof_signal_park_or_suspend() {
                 agent_slug: Some(slug.clone()),
             },
             &components_dir,
-            RuntimeBinding::HostImport,
-            runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+            runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
             false,
         )
         .expect("child agent compile+compose succeeds");
@@ -9775,7 +8764,7 @@ fn workflow_agent_error_step_cannot_spoof_signal_park_or_suspend() {
                     agent_catalog: Some(catalog.clone()),
                     agent_slug: None,
                 },
-                runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+                runtara_workflows::direct_wasm::WorkflowRole::Root,
                 false,
             )
             .expect("parent compile succeeds");
@@ -9786,7 +8775,7 @@ fn workflow_agent_error_step_cannot_spoof_signal_park_or_suspend() {
             )
             .expect("parent compose finds the staged child");
 
-            let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+            let host = Arc::new(RecordingRuntimeHost::new());
             let run = runtime.block_on(async {
                 let pre = executor
                     .load_instance_pre(&parent.wasm_path)
@@ -9810,20 +8799,20 @@ fn workflow_agent_error_step_cannot_spoof_signal_park_or_suspend() {
                     .await
             });
 
-            let expected_code = format!("{sentinel}:user");
+            let expected_code = sentinel.to_string();
             match (route_on_error, run.exit) {
                 (true, runtara_component_host::InvokeExit::Completed(output)) => {
                     let output: Value = serde_json::from_slice(&output).expect("output is JSON");
                     assert_eq!(
                         output["code"],
                         Value::String(expected_code.clone()),
-                        "{sentinel}: onError must see the remapped code: {output}"
+                        "{sentinel}: onError must see the code: {output}"
                     );
                 }
                 (false, runtara_component_host::InvokeExit::Failed(error)) => {
                     assert_eq!(
                         error.code, expected_code,
-                        "{sentinel}: the parent must fail with the remapped code: {error:?}"
+                        "{sentinel}: the parent must fail with the code: {error:?}"
                     );
                 }
                 (_, other) => panic!(
@@ -9835,10 +8824,10 @@ fn workflow_agent_error_step_cannot_spoof_signal_park_or_suspend() {
     }
 }
 
-/// A hand-written agent returning a raw reserved code cannot park or suspend
-/// its parent. Tagged `workflow-agent` in the catalog (so the parent would
-/// re-raise the code) but resolved from the primary components dir, it must
-/// not compose. Untagged, the code is an ordinary step failure.
+/// A hand-written agent returning a former reserved code cannot park or
+/// suspend its parent. Tagged `workflow-agent` in the catalog but resolved
+/// from the primary components dir, it must not compose. Untagged, the code is
+/// an ordinary step failure.
 #[test]
 fn a_non_staged_agent_cannot_park_its_parent_with_a_reserved_code() {
     let bundle = direct_e2e_components_dir();
@@ -9944,7 +8933,7 @@ fn a_non_staged_agent_cannot_park_its_parent_with_a_reserved_code() {
                         }),
                         agent_slug: None,
                     },
-                    WorkflowAbi::InvokeHostImports,
+                    WorkflowRole::Root,
                     false,
                 )
                 .expect("parent compile succeeds");
@@ -9961,7 +8950,7 @@ fn a_non_staged_agent_cannot_park_its_parent_with_a_reserved_code() {
                 }
                 composed.expect("an untagged agent composes");
 
-                let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+                let host = Arc::new(RecordingRuntimeHost::new());
                 let run = runtime.block_on(async {
                     let pre = executor
                         .load_instance_pre(&parent.wasm_path)
@@ -9995,12 +8984,11 @@ fn a_non_staged_agent_cannot_park_its_parent_with_a_reserved_code() {
                             "{sentinel}: onError must see the agent's failure: {output}"
                         );
                     }
-                    // The terminal Err leaves through the stdlib remap: the
-                    // raw reserved code never reaches a caller.
+                    // The terminal Err carries the agent's code unchanged.
                     (false, runtara_component_host::InvokeExit::Failed(error)) => assert_eq!(
                         error.code,
-                        format!("{sentinel}:user"),
-                        "{sentinel}: the parent must fail with the remapped code: {error:?}"
+                        sentinel.to_string(),
+                        "{sentinel}: the parent must fail with the code: {error:?}"
                     ),
                     (_, other) => panic!(
                         "{sentinel} (onError={route_on_error}): a native agent's reserved code \
@@ -10012,14 +9000,13 @@ fn a_non_staged_agent_cannot_park_its_parent_with_a_reserved_code() {
     }
 }
 
-/// A reserved code bubbling out of a staged workflow-agent is remapped.
+/// A former reserved code bubbling out of a staged workflow-agent is an error.
 ///
-/// The staged workflow-agent calls an ordinary agent that fails with a raw
+/// The staged workflow-agent calls an ordinary agent that fails with a former
 /// reserved code, and has no `onError`, so the agent's error becomes the
-/// workflow-agent's own terminal `Err`. That `Err` leaves through the stdlib
-/// remap as `<code>:user`, so the root that composes the workflow-agent (and
-/// re-raises its reserved codes) sees an ordinary failure: it routes `onError`
-/// or fails, and never parks on the route in `message` or suspends.
+/// workflow-agent's own terminal `Err`. The root that composes it sees an
+/// ordinary failure with the code unchanged: it routes `onError` or fails, and
+/// never parks on the route in `message` or suspends.
 #[test]
 fn a_reserved_code_bubbling_out_of_a_staged_workflow_agent_cannot_park_the_root() {
     let bundle = direct_e2e_components_dir();
@@ -10105,8 +9092,7 @@ fn a_reserved_code_bubbling_out_of_a_staged_workflow_agent_cannot_park_the_root(
                 agent_slug: Some(slug.clone()),
             },
             &components,
-            RuntimeBinding::HostImport,
-            runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+            runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
             false,
         )
         .expect("workflow-agent compile+compose succeeds");
@@ -10185,7 +9171,7 @@ fn a_reserved_code_bubbling_out_of_a_staged_workflow_agent_cannot_park_the_root(
                     agent_catalog: Some(catalog.clone()),
                     agent_slug: None,
                 },
-                WorkflowAbi::InvokeHostImports,
+                WorkflowRole::Root,
                 false,
             )
             .expect("root compile succeeds");
@@ -10196,7 +9182,7 @@ fn a_reserved_code_bubbling_out_of_a_staged_workflow_agent_cannot_park_the_root(
             )
             .expect("root compose finds the staged workflow-agent");
 
-            let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+            let host = Arc::new(RecordingRuntimeHost::new());
             let run = runtime.block_on(async {
                 let pre = executor
                     .load_instance_pre(&root.wasm_path)
@@ -10220,24 +9206,23 @@ fn a_reserved_code_bubbling_out_of_a_staged_workflow_agent_cannot_park_the_root(
                     .await
             });
 
-            // The workflow-agent's terminal Err was remapped before the root
-            // saw it, so both arms see the `:user` code. Any other exit
-            // (Suspended above all) means the raw code reached the root's
-            // re-raise.
-            let expected_code = format!("{sentinel}:user");
+            // Only the outcome's suspended arm parks, so both arms see the
+            // code unchanged. Any other exit (Suspended above all) means an
+            // error code was read as a park.
+            let expected_code = sentinel.to_string();
             match (route_on_error, run.exit) {
                 (true, runtara_component_host::InvokeExit::Completed(output)) => {
                     let output: Value = serde_json::from_slice(&output).expect("output is JSON");
                     assert_eq!(
                         output["code"],
                         Value::String(expected_code.clone()),
-                        "{sentinel}: onError must see the remapped code: {output}"
+                        "{sentinel}: onError must see the code: {output}"
                     );
                 }
                 (false, runtara_component_host::InvokeExit::Failed(error)) => {
                     assert_eq!(
                         error.code, expected_code,
-                        "{sentinel}: the root must fail with the remapped code: {error:?}"
+                        "{sentinel}: the root must fail with the code: {error:?}"
                     );
                 }
                 (_, other) => panic!(
@@ -10257,10 +9242,10 @@ fn a_reserved_code_bubbling_out_of_a_staged_workflow_agent_cannot_park_the_root(
 /// P6 flagship: a DURABLE workflow published as an agent runs composed inside
 /// a parent. The child keeps the runtime import (a durable Delay checkpoints +
 /// sleeps through it); composition bubbles that import up to the composed
-/// artifact where the PARENT instance's runtime host satisfies it. Critically,
-/// the child's terminal `runtime.complete` is suppressed — exactly ONE
-/// complete fires for the whole run (the parent's) — because a child
-/// completing the shared instance would finish the parent mid-flight.
+/// artifact where the PARENT instance's runtime host satisfies it. The run's
+/// only terminal is the parent's returned outcome: the runtime interface has
+/// no terminal call, so the child cannot finish the shared instance
+/// mid-flight.
 #[test]
 fn parent_workflow_invokes_published_durable_workflow_agent() {
     let components_dir = direct_e2e_components_dir();
@@ -10301,8 +9286,7 @@ fn parent_workflow_invokes_published_durable_workflow_agent() {
             agent_slug: Some("durable-delay-echo".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("durable child publishes as an agent");
@@ -10369,7 +9353,7 @@ fn parent_workflow_invokes_published_durable_workflow_agent() {
             agent_catalog: Some(catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("parent compile succeeds");
@@ -10380,7 +9364,7 @@ fn parent_workflow_invokes_published_durable_workflow_agent() {
     )
     .expect("parent composes the durable child (runtime import bubbles up)");
 
-    let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+    let host = Arc::new(RecordingRuntimeHost::new());
     let executor = embedded_executor();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let run = runtime.block_on(async {
@@ -10406,16 +9390,9 @@ fn parent_workflow_invokes_published_durable_workflow_agent() {
         serde_json::json!({ "childEcho": "durable-hello" }),
         "the durable child's output must flow back through agent-output shaping"
     );
-    // Exactly ONE terminal complete — the parent's. The child's suppression is
-    // what keeps a shared-instance runtime coherent; two completes would mean
-    // the child finished the parent's instance mid-flight.
-    assert_eq!(
-        host.complete_calls
-            .load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "the composed child must never fire runtime.complete"
-    );
-    assert!(host.failed.lock().unwrap().is_none());
+    // The parent's returned outcome is the run's only terminal: the runtime
+    // interface has no terminal call, so the composed child cannot finish the
+    // parent's instance mid-flight.
     std::mem::forget(temp);
 }
 
@@ -10467,8 +9444,7 @@ fn composed_durable_child_checkpoints_are_namespaced_per_invocation_site() {
             agent_slug: Some("ns-delay-echo".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("durable child publishes as an agent");
@@ -10553,7 +9529,7 @@ fn composed_durable_child_checkpoints_are_namespaced_per_invocation_site() {
             agent_catalog: Some(catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("parent compile succeeds");
@@ -10564,7 +9540,7 @@ fn composed_durable_child_checkpoints_are_namespaced_per_invocation_site() {
     )
     .expect("parent composes the durable child");
 
-    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let host = Arc::new(PersistingRuntimeHost::new());
     let executor = embedded_executor();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let input = br#"{"items":[{"v":"a"},{"v":"b"},{"v":"c"}]}"#;
@@ -10637,13 +9613,8 @@ fn composed_durable_child_checkpoints_are_namespaced_per_invocation_site() {
         serde_json::from_slice::<Value>(&first_output).expect("first output json"),
         "replay must reproduce the run from checkpoints"
     );
-    assert_eq!(
-        host.complete_calls
-            .load(std::sync::atomic::Ordering::SeqCst),
-        2,
-        "exactly one terminal complete per run (the parent's)"
-    );
-    assert!(host.failed.lock().unwrap().is_none());
+    // Each run's terminal is the parent's returned outcome (both Completed
+    // above); the runtime interface has no terminal call a child could fire.
     std::mem::forget(temp);
 }
 
@@ -10692,8 +9663,7 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
             agent_slug: Some("ns-grandchild".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("grandchild publishes as an agent");
@@ -10757,7 +9727,7 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
             agent_catalog: Some(grandchild_catalog),
             agent_slug: Some("ns-mid".to_string()),
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("mid compiles as an agent");
@@ -10819,7 +9789,7 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
             agent_catalog: Some(mid_catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("top compile succeeds");
@@ -10830,7 +9800,7 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
     )
     .expect("top composes the mid agent");
 
-    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let host = Arc::new(PersistingRuntimeHost::new());
     let executor = embedded_executor();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let run = runtime.block_on(async {
@@ -10873,23 +9843,17 @@ fn nested_composed_workflow_agents_chain_checkpoint_namespaces() {
         )],
         "the grandchild sleep key must chain the full invocation path"
     );
-    assert_eq!(
-        host.complete_calls
-            .load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "neither composed child may fire runtime.complete"
-    );
-    assert!(host.failed.lock().unwrap().is_none());
+    // The run's terminal is the top workflow's returned outcome; the runtime
+    // interface has no terminal call either composed child could fire.
     std::mem::forget(temp);
 }
 
-/// Stale-artifact gate (plan §5): a DURABLE workflow-agent staged with a
-/// sidecar that predates checkpoint namespacing (no `checkpoint-scope:1`
-/// capability tag) must FAIL the parent's compose with a republish error —
-/// its `build_source` would silently drop the injected `_cache_key_prefix`
-/// and the checkpoint collision would return invisibly.
+/// A runtime-importing workflow-agent staged without its sidecar (a partial
+/// stage or a manual copy) must fail the parent's compose: without the
+/// sidecar nothing marks it as a workflow-agent, so its durable checkpoint ids
+/// would collide across invocation sites.
 #[test]
-fn stale_durable_workflow_agent_artifact_fails_compose() {
+fn a_runtime_importing_workflow_agent_without_a_sidecar_fails_compose() {
     let components_dir = direct_e2e_components_dir();
 
     const DURABLE_CHILD: &str = r#"{
@@ -10927,8 +9891,7 @@ fn stale_durable_workflow_agent_artifact_fails_compose() {
             agent_slug: Some("stale-durable".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("durable child compiles as an agent");
@@ -10944,8 +9907,6 @@ fn stale_durable_workflow_agent_artifact_fails_compose() {
         staging.join("runtara_agent_stale_durable.wasm"),
     )
     .expect("stage child wasm");
-    // Simulate a pre-namespacing publish: the synthesized meta WITHOUT the
-    // `checkpoint-scope:1` marker tag.
     let info = certified_workflow_agent_info(
         "stale-durable",
         "Stale Durable",
@@ -10953,16 +9914,6 @@ fn stale_durable_workflow_agent_artifact_fails_compose() {
         &child_graph.input_schema,
         &child_graph.output_schema,
     );
-    let mut stripped = serde_json::to_value(&info).expect("info to json");
-    let tags = stripped["capabilities"][0]["tags"]
-        .as_array_mut()
-        .expect("capability tags");
-    tags.retain(|tag| tag != "checkpoint-scope:1");
-    fs::write(
-        staging.join("runtara_agent_stale_durable.meta.json"),
-        serde_json::to_vec_pretty(&stripped).expect("meta serializes"),
-    )
-    .expect("stage stripped meta");
 
     const PARENT: &str = r#"{
       "name": "Parent Of Stale Agent",
@@ -10987,11 +9938,8 @@ fn stale_durable_workflow_agent_artifact_fails_compose() {
       "outputSchema": {}
     }"#;
     let parent_graph: ExecutionGraph = serde_json::from_str(PARENT).expect("parent parses");
-    // The catalog is what a server loading this stale sidecar would serve.
-    let stale_info: runtara_dsl::agent_meta::AgentInfo =
-        serde_json::from_value(stripped).expect("stripped info parses");
     let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
-        stale_info,
+        info,
     ]));
     let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
         DirectCompilationInput {
@@ -11005,26 +9953,11 @@ fn stale_durable_workflow_agent_artifact_fails_compose() {
             agent_catalog: Some(catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("parent compile itself succeeds");
-    let error = runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
-        &mut parent,
-        &components_dir,
-        std::slice::from_ref(&staging),
-    )
-    .expect_err("composing a stale DURABLE workflow-agent must fail");
-    let message = error.to_string();
-    assert!(
-        message.contains("predates checkpoint namespacing") && message.contains("stale-durable"),
-        "the error must name the stale slug and ask for a republish: {message}"
-    );
-
-    // Anomalous-branch variant: a runtime-importing staged wasm with NO
-    // sidecar at all (partial stage / manual copy) must also be refused —
-    // the wasm itself is the authority, not the sidecar's presence.
-    fs::remove_file(staging.join("runtara_agent_stale_durable.meta.json")).expect("remove sidecar");
+    // The wasm itself is the authority, not the sidecar's presence.
     let error = runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
         &mut parent,
         &components_dir,
@@ -11035,133 +9968,6 @@ fn stale_durable_workflow_agent_artifact_fails_compose() {
     assert!(
         message.contains("missing or unreadable"),
         "the error must name the missing sidecar: {message}"
-    );
-    std::mem::forget(temp);
-}
-
-/// A pure workflow-agent staged without the explicit non-suspending proof is
-/// refused too. Its bytes happen not to import the runtime, but the parent
-/// must not infer future publication safety from a missing marker.
-#[test]
-fn uncertified_pure_workflow_agent_artifact_fails_compose() {
-    let components_dir = direct_e2e_components_dir();
-
-    const PURE_CHILD: &str = r#"{
-      "name": "Stale Pure Child",
-      "durable": false,
-      "steps": {
-        "finish": {
-          "stepType": "Finish",
-          "id": "finish",
-          "inputMapping": { "echo": { "valueType": "reference", "value": "data.value" } }
-        }
-      },
-      "entryPoint": "finish",
-      "executionPlan": [],
-      "variables": {},
-      "inputSchema": { "value": { "type": "string", "required": true } },
-      "outputSchema": {}
-    }"#;
-    let child_graph: ExecutionGraph = serde_json::from_str(PURE_CHILD).expect("child parses");
-    let temp = tempfile::tempdir().expect("tempdir");
-    let child = compile_direct_workflow_composed_configured(
-        DirectCompilationInput {
-            workflow_id: "stale-pure-wf".to_string(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: child_graph.clone(),
-            child_workflows: vec![],
-            output_dir: temp.path().join("child-build"),
-            track_events: false,
-            agent_catalog: None,
-            agent_slug: Some("stale-pure".to_string()),
-        },
-        &components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
-        false,
-    )
-    .expect("pure child compiles as an agent");
-    assert!(child.omit_runtime, "pure child must not import the runtime");
-
-    let staging = temp.path().join("workflow-agents");
-    fs::create_dir_all(&staging).expect("staging dir");
-    fs::copy(
-        &child.wasm_path,
-        staging.join("runtara_agent_stale_pure.wasm"),
-    )
-    .expect("stage child wasm");
-    let info = certified_workflow_agent_info(
-        "stale-pure",
-        "Stale Pure",
-        "",
-        &child_graph.input_schema,
-        &child_graph.output_schema,
-    );
-    let mut stripped = serde_json::to_value(&info).expect("info to json");
-    stripped["capabilities"][0]["tags"]
-        .as_array_mut()
-        .expect("capability tags")
-        .retain(|tag| tag != "non-suspending:1");
-    fs::write(
-        staging.join("runtara_agent_stale_pure.meta.json"),
-        serde_json::to_vec_pretty(&stripped).expect("meta serializes"),
-    )
-    .expect("stage stripped meta");
-
-    const PARENT: &str = r#"{
-      "name": "Parent Of Stale Pure Agent",
-      "steps": {
-        "call": {
-          "stepType": "Agent",
-          "id": "call",
-          "agentId": "stale-pure",
-          "capabilityId": "run",
-          "inputMapping": { "value": { "valueType": "reference", "value": "data.msg" } }
-        },
-        "finish": {
-          "stepType": "Finish",
-          "id": "finish",
-          "inputMapping": { "echo": { "valueType": "reference", "value": "steps.call.outputs.echo" } }
-        }
-      },
-      "entryPoint": "call",
-      "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
-      "variables": {},
-      "inputSchema": { "msg": { "type": "string", "required": true } },
-      "outputSchema": {}
-    }"#;
-    let parent_graph: ExecutionGraph = serde_json::from_str(PARENT).expect("parent parses");
-    let stale_info: runtara_dsl::agent_meta::AgentInfo =
-        serde_json::from_value(stripped).expect("stripped info parses");
-    let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
-        stale_info,
-    ]));
-    let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
-        DirectCompilationInput {
-            workflow_id: "stale-pure-parent-wf".to_string(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: parent_graph,
-            child_workflows: vec![],
-            output_dir: temp.path().join("parent-build"),
-            track_events: false,
-            agent_catalog: Some(catalog),
-            agent_slug: None,
-        },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
-        false,
-    )
-    .expect("parent compile succeeds");
-    let error = runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
-        &mut parent,
-        &components_dir,
-        std::slice::from_ref(&staging),
-    )
-    .expect_err("a workflow-agent without the safety certificate must not compose");
-    assert!(
-        error.to_string().contains("non-suspending:1"),
-        "the parent must require an auditable safety certificate: {error}"
     );
     std::mem::forget(temp);
 }
@@ -11215,8 +10021,7 @@ fn composed_children_waiting_on_same_step_get_per_site_signal_ids() {
             agent_slug: Some("sig-approve-echo".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("waiting child publishes as an agent");
@@ -11293,7 +10098,7 @@ fn composed_children_waiting_on_same_step_get_per_site_signal_ids() {
             agent_catalog: Some(catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("parent compile succeeds");
@@ -11306,7 +10111,7 @@ fn composed_children_waiting_on_same_step_get_per_site_signal_ids() {
 
     // Script distinct managed responses for the two scoped waits. Registration
     // and acceptance must work with event tracking disabled.
-    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let host = Arc::new(PersistingRuntimeHost::new());
     let site1 = &expected_key(
         "wait",
         "sig-child-wf",
@@ -11462,14 +10267,14 @@ fn embedded_children_waiting_on_same_step_get_per_site_signal_ids() {
             agent_catalog: None,
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("embed parent compiles");
     runtara_workflows::direct_wasm::compose_direct_workflow(&mut parent, &components_dir)
         .expect("embed parent composes");
 
-    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let host = Arc::new(PersistingRuntimeHost::new());
     // Embedded children keep the PARENT's workflow id in the second segment;
     // the site scope disambiguates the third.
     let site1 = &expected_key(
@@ -11587,8 +10392,7 @@ fn scoped_signal_wait_survives_drain_and_resume() {
             agent_slug: Some("sig-drain-echo".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("waiting child publishes as an agent");
@@ -11651,7 +10455,7 @@ fn scoped_signal_wait_survives_drain_and_resume() {
             agent_catalog: Some(catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("parent compile succeeds");
@@ -11662,7 +10466,7 @@ fn scoped_signal_wait_survives_drain_and_resume() {
     )
     .expect("parent composes the waiting child");
 
-    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let host = Arc::new(PersistingRuntimeHost::new());
     let site = &expected_key(
         "wait",
         "sigdrain-child-wf",
@@ -11773,8 +10577,7 @@ fn pause_during_composed_child_wait_suspends_and_resumes() {
             agent_slug: Some("pause-approve-echo".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("waiting child publishes as an agent");
@@ -11837,7 +10640,7 @@ fn pause_during_composed_child_wait_suspends_and_resumes() {
             agent_catalog: Some(catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("parent compile succeeds");
@@ -11848,7 +10651,7 @@ fn pause_during_composed_child_wait_suspends_and_resumes() {
     )
     .expect("parent composes the waiting child");
 
-    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let host = Arc::new(PersistingRuntimeHost::new());
     let site = &expected_key(
         "wait",
         "pause-child-wf",
@@ -11898,12 +10701,10 @@ fn pause_during_composed_child_wait_suspends_and_resumes() {
                 "a lifecycle suspend re-raises as an on-resume wake, got {wakes:?}"
             );
         }
+        // Suspended (not Failed) is the whole outcome: the sentinel never
+        // surfaces as a failure.
         other => panic!("pause during the child's wait must SUSPEND the parent, got {other:?}"),
     }
-    assert!(
-        host.failed.lock().unwrap().is_none(),
-        "the sentinel must never surface as a failure"
-    );
     let deadline_writes = |host: &PersistingRuntimeHost| {
         host.checkpoint_writes
             .lock()
@@ -11957,12 +10758,8 @@ fn pause_during_composed_child_wait_suspends_and_resumes() {
         accepted_request.state,
         runtara_core::persistence::inputs::InputState::Accepted { .. }
     ));
-    assert_eq!(
-        host.complete_calls
-            .load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "exactly one terminal complete — the resumed parent's"
-    );
+    // The only terminal is the resumed parent's returned Completed; the paused
+    // run returned Suspended and the runtime interface has no terminal call.
     std::mem::forget(temp);
 }
 
@@ -12011,8 +10808,7 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
             agent_slug: Some("pause-grandchild".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("grandchild publishes as an agent");
@@ -12075,7 +10871,7 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
             agent_catalog: Some(grandchild_catalog),
             agent_slug: Some("pause-mid".to_string()),
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("mid compiles as an agent");
@@ -12137,7 +10933,7 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
             agent_catalog: Some(mid_catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("top compile succeeds");
@@ -12148,7 +10944,7 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
     )
     .expect("top composes the mid agent");
 
-    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let host = Arc::new(PersistingRuntimeHost::new());
     let site = &expected_key(
         "wait",
         "pause-gc-wf",
@@ -12194,7 +10990,6 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
         "a pause two boundaries deep must suspend the top-level run, got {:?}",
         first.exit
     );
-    assert!(host.failed.lock().unwrap().is_none());
 
     runtime
         .block_on(
@@ -12214,12 +11009,8 @@ fn pause_inside_nested_composed_agents_chains_the_suspend() {
         serde_json::json!({ "echo": "nested-approved" }),
         "the payload must flow back through both composed boundaries"
     );
-    assert_eq!(
-        host.complete_calls
-            .load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "neither composed child may fire runtime.complete"
-    );
+    // The top run's returned outcome is the only terminal; the runtime
+    // interface has no terminal call either composed child could fire.
     std::mem::forget(temp);
 }
 
@@ -12269,8 +11060,7 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
             agent_slug: Some("tool-delay-echo".to_string()),
         },
         &components_dir,
-        RuntimeBinding::HostImport,
-        runtara_workflows::direct_wasm::WorkflowAbi::AgentCapabilities,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
         false,
     )
     .expect("durable tool child publishes as an agent");
@@ -12335,7 +11125,7 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
             agent_catalog: Some(catalog),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::WorkflowAbi::InvokeHostImports,
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
         false,
     )
     .expect("parent compile succeeds");
@@ -12347,9 +11137,6 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
     .expect("parent composes the workflow-agent tool");
 
     // Hermetic LLM stub: the model requests the tool twice, then completes.
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let (capture_tx, _capture_rx) = mpsc::channel::<CapturedMessage>();
-    let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let server_state = Arc::new(ServerState::default());
     *server_state
         .llm_responses
@@ -12359,10 +11146,7 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
         llm_tool_call("wf_echo", r#"{"value":"second"}"#),
         llm_ok("done"),
     ];
-    let server_state_for_assertions = server_state.clone();
-    let input_arc = Arc::new(b"{}".to_vec());
-    let server_handle =
-        thread::spawn(move || serve(listener, capture_tx, server_state, stop_rx, input_arc));
+    let server_state_for_assertions = server_state;
 
     let mut env = HashMap::new();
     env.insert(
@@ -12371,7 +11155,7 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
     );
     env.insert("RUST_LOG".to_string(), "warn".to_string());
 
-    let host = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let host = Arc::new(PersistingRuntimeHost::new());
     let executor = executor_with_connections(server_state_for_assertions.clone());
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let run = runtime.block_on(async {
@@ -12381,8 +11165,6 @@ fn workflow_agent_tool_calls_get_per_call_checkpoint_scopes() {
             .expect("load parent artifact");
         invoke_replaying_parks_with_env(&executor, &pre, host.clone(), env, b"{}".to_vec()).await
     });
-    let _ = stop_tx.send(());
-    let _ = server_handle.join();
 
     let output = match run.exit {
         runtara_component_host::InvokeExit::Completed(output) => output,
@@ -13614,7 +12396,7 @@ fn direct_wasm_execute_parallel_split_pause_mid_window_resumes() {
     )
     .expect("parallel split compiles");
 
-    let host = Arc::new(PersistingRuntimeHost::new(br#"{"items":[1,2,3,4]}"#));
+    let host = Arc::new(PersistingRuntimeHost::new());
     let executor = embedded_executor();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let env = HashMap::new();
@@ -13651,12 +12433,9 @@ fn direct_wasm_execute_parallel_split_pause_mid_window_resumes() {
     let first = run_once(host.clone());
     match first.exit {
         runtara_component_host::InvokeExit::Suspended(_) => {}
+        // Suspended (not Failed): a lifecycle pause never surfaces as a failure.
         other => panic!("pause during the window must SUSPEND, got {other:?}"),
     }
-    assert!(
-        host.failed.lock().unwrap().is_none(),
-        "a lifecycle pause must not surface as a failure"
-    );
     let first_run_hits = hits.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         first_run_hits, 4,
@@ -13737,265 +12516,6 @@ fn direct_wasm_compiles_parallel_split_durable_retry_replay_shape() {
     assert_parallel_retry_backoff_compiles(
         "durable-backoff-replay",
         serde_json::from_value(graph).expect("graph parses"),
-    );
-}
-
-/// Chained durable Delays — the shape of the workflow in the SYN-606 report
-/// ("SYN-602 cancellable": ten 3s Delays, stopped ~3s in, which ran all the way
-/// to `completed`). Five is enough to tell "stopped at the first Delay" from
-/// "ignored the cancel and ran the lot".
-const CHAINED_DELAYS: &str = r#"{
-  "name": "Chained Delays",
-  "steps": {
-    "delay_1": { "stepType": "Delay", "id": "delay_1",
-      "durationMs": { "valueType": "immediate", "value": 3000 } },
-    "delay_2": { "stepType": "Delay", "id": "delay_2",
-      "durationMs": { "valueType": "immediate", "value": 3000 } },
-    "delay_3": { "stepType": "Delay", "id": "delay_3",
-      "durationMs": { "valueType": "immediate", "value": 3000 } },
-    "delay_4": { "stepType": "Delay", "id": "delay_4",
-      "durationMs": { "valueType": "immediate", "value": 3000 } },
-    "delay_5": { "stepType": "Delay", "id": "delay_5",
-      "durationMs": { "valueType": "immediate", "value": 3000 } },
-    "finish": { "stepType": "Finish", "id": "finish",
-      "inputMapping": { "ranToCompletion": { "valueType": "immediate", "value": true } } }
-  },
-  "entryPoint": "delay_1",
-  "executionPlan": [
-    { "fromStep": "delay_1", "toStep": "delay_2" },
-    { "fromStep": "delay_2", "toStep": "delay_3" },
-    { "fromStep": "delay_3", "toStep": "delay_4" },
-    { "fromStep": "delay_4", "toStep": "delay_5" },
-    { "fromStep": "delay_5", "toStep": "finish" }
-  ],
-  "variables": {},
-  "inputSchema": {},
-  "outputSchema": {}
-}"#;
-
-/// A runtime host that reports a pending lifecycle signal from the moment the
-/// first durable sleep returns — the in-process stand-in for a `stop_execution`
-/// landing while the instance is parked in a Delay.
-///
-/// `check_signals` answering `true` is what the guest acts on; the host has
-/// already consumed and acknowledged the signal by then, exactly as
-/// `PersistenceRuntimeHost` does.
-struct CancelDuringDelayHost {
-    input: Vec<u8>,
-    completed: Mutex<Option<Vec<u8>>>,
-    failed: Mutex<Option<Vec<u8>>>,
-    /// Sleep checkpoint ids, in order — one per Delay actually reached.
-    sleeps: Mutex<Vec<String>>,
-    /// Set once the first sleep returns; every later `check-signals` reports it.
-    cancel_pending: std::sync::atomic::AtomicBool,
-    /// How many times the guest asked. Zero is the bug: a chain of Delays used
-    /// to contain no poll site at all.
-    signal_polls: std::sync::atomic::AtomicU32,
-}
-
-impl CancelDuringDelayHost {
-    fn new(input: &[u8]) -> Self {
-        Self {
-            input: input.to_vec(),
-            completed: Mutex::new(None),
-            failed: Mutex::new(None),
-            sleeps: Mutex::new(Vec::new()),
-            cancel_pending: std::sync::atomic::AtomicBool::new(false),
-            signal_polls: std::sync::atomic::AtomicU32::new(0),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl runtara_component_host::runtime_host::RuntimeHost for CancelDuringDelayHost {
-    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
-        Ok(Some(self.input.clone()))
-    }
-    fn instance_id(&self) -> Result<String, String> {
-        Ok("syn606-cancel-during-delay".to_string())
-    }
-    async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
-        *self.completed.lock().unwrap() = Some(output);
-        Ok(())
-    }
-    async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
-        *self.failed.lock().unwrap() = Some(error);
-        Ok(())
-    }
-    async fn custom_event(&self, _kind: String, _payload: Vec<u8>) -> Result<(), String> {
-        Ok(())
-    }
-    fn debug_mode_enabled(&self) -> Result<bool, String> {
-        Ok(false)
-    }
-    async fn breakpoint_pause(&self) -> Result<(), String> {
-        Ok(())
-    }
-    async fn heartbeat(&self) -> Result<(), String> {
-        Ok(())
-    }
-    async fn poll_signal(
-        &self,
-    ) -> Result<Option<runtara_component_host::runtime_host::RuntimeSignalInfo>, String> {
-        Ok(None)
-    }
-    async fn is_cancelled(&self) -> Result<bool, String> {
-        Ok(self
-            .cancel_pending
-            .load(std::sync::atomic::Ordering::SeqCst))
-    }
-    async fn check_signals(&self) -> Result<bool, String> {
-        self.signal_polls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(self
-            .cancel_pending
-            .load(std::sync::atomic::Ordering::SeqCst))
-    }
-    async fn poll_custom_signal(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
-        Ok(None)
-    }
-    async fn get_checkpoint(&self, _checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
-        Ok(None)
-    }
-    async fn checkpoint(
-        &self,
-        _checkpoint_id: String,
-        _state: Vec<u8>,
-    ) -> Result<runtara_component_host::runtime_host::RuntimeCheckpointResult, String> {
-        Ok(
-            runtara_component_host::runtime_host::RuntimeCheckpointResult {
-                found: false,
-                state: Vec::new(),
-                pending_signal: None,
-                custom_signal: None,
-            },
-        )
-    }
-    async fn handle_checkpoint_signal(
-        &self,
-        _signal_type: String,
-        _command_id: String,
-    ) -> Result<bool, String> {
-        Ok(true)
-    }
-    async fn record_retry_attempt(
-        &self,
-        _checkpoint_id: String,
-        _attempt_number: u32,
-        _error_message: Option<String>,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-    async fn durable_sleep_checkpoint(
-        &self,
-        checkpoint_id: String,
-        _state: Vec<u8>,
-        _ms: u64,
-    ) -> Result<(), String> {
-        self.sleeps.lock().unwrap().push(checkpoint_id);
-        // Production's `handle_sleep` returns early once a cancel is pending;
-        // the mock does not sleep at all, so "the signal arrived during the
-        // first delay" is modelled by flipping the flag as it returns.
-        self.cancel_pending
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
-    }
-}
-
-/// SYN-606: `stop_execution` was a no-op against an instance parked in a durable
-/// Delay. The Delay lowering called `durable-sleep-checkpoint` and checked only
-/// for a retptr error — no `check-signals`, and no `emit_checkpoint_save` to fold
-/// signal handling into. A linear chain of Delays therefore contained ZERO poll
-/// sites, so a cancel written during the first delay was never observed and the
-/// run completed normally.
-///
-/// With the poll emitted after the sleep, the cancel is acted on at the very next
-/// step boundary: the run suspends after the first Delay instead of executing all
-/// five and reporting completion.
-#[test]
-fn direct_wasm_execute_delay_observes_cancel_and_suspends() {
-    let components_dir = direct_e2e_components_dir();
-    let graph: ExecutionGraph = serde_json::from_str(CHAINED_DELAYS).expect("fixture parses");
-    let temp = tempfile::tempdir().expect("tempdir");
-
-    let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
-        DirectCompilationInput {
-            workflow_id: "syn606-cancel-during-delay".to_string(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: graph,
-            child_workflows: vec![],
-            output_dir: temp.path().to_path_buf(),
-            track_events: false,
-            agent_catalog: None,
-            agent_slug: None,
-        },
-        WorkflowAbi::CliRunHttp,
-        false,
-    )
-    .expect("direct emit succeeds");
-    result.component_artifacts =
-        emit_direct_component_artifacts_with_binding(&[], RuntimeBinding::HostImport);
-    compose_direct_workflow(&mut result, &components_dir).expect("host-import compose");
-
-    let host = Arc::new(CancelDuringDelayHost::new(b"{}"));
-    let executor = embedded_executor();
-
-    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let run = runtime.block_on(async {
-        let pre = executor
-            .load(&result.wasm_path)
-            .await
-            .expect("load host-import artifact");
-        executor
-            .execute(
-                &pre,
-                runtara_component_host::WorkflowRunSpec {
-                    trusted_instance: None,
-                    trusted_tenant: Some("direct-wasm-execute".into()),
-                    env: HashMap::new(),
-                    stderr: None,
-                    timeout: Duration::from_secs(60),
-                    cancel: None,
-                    limits: runtara_component_host::WorkflowLimits::default(),
-                    runtime: Some(host.clone()),
-                },
-            )
-            .await
-    });
-
-    assert!(
-        matches!(run.exit, runtara_component_host::WorkflowExit::Completed),
-        "a suspended run exits cleanly; got {:?} (failed: {:?})",
-        run.exit,
-        host.failed
-            .lock()
-            .unwrap()
-            .as_deref()
-            .map(String::from_utf8_lossy),
-    );
-
-    let sleeps = host.sleeps.lock().unwrap().clone();
-    assert_eq!(
-        sleeps,
-        vec![root_key(
-            "delay",
-            "syn606-cancel-during-delay",
-            serde_json::json!(["delay_1"])
-        )],
-        "the run must stop at the Delay the cancel arrived during, not run the whole chain"
-    );
-    assert!(
-        host.signal_polls.load(std::sync::atomic::Ordering::SeqCst) > 0,
-        "a Delay must poll for lifecycle signals; zero polls is the SYN-606 bug"
-    );
-    assert!(
-        host.completed.lock().unwrap().is_none(),
-        "a cancelled run must NOT report completion (it reported one before the fix)"
-    );
-    assert!(
-        host.failed.lock().unwrap().is_none(),
-        "a cancel is a suspend, not a failure"
     );
 }
 
@@ -14161,7 +12681,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             agent_catalog: Some(dispatcher.catalog()),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )
     .unwrap();
@@ -14196,7 +12716,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
         .load_instance_pre(&compiled.wasm_path)
         .await
         .unwrap();
-    let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+    let host = Arc::new(RecordingRuntimeHost::new());
     let run = executor
         .execute_invoke(
             &pre,
@@ -14226,7 +12746,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
     );
     assert!(!output.to_string().contains("synthetic-test-secret"));
     // Durable replay returns the approved result without resolving credentials again.
-    let persisted = Arc::new(PersistingRuntimeHost::new(b"{}"));
+    let persisted = Arc::new(PersistingRuntimeHost::new());
     let before = resolves.load(std::sync::atomic::Ordering::SeqCst);
     let mut results = Vec::new();
     for _ in 0..2 {
@@ -14280,7 +12800,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             agent_catalog: Some(dispatcher.catalog()),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )
     .unwrap();
@@ -14289,7 +12809,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
         "{:x}",
         sha2::Sha256::digest(fs::read(components.join("runtara_agent_s3_storage.wasm")).unwrap())
     );
-    let package_limits = runtara_workflow_wit::isolation_package::PackageLimits {
+    let package_limits = runtara_invocation_contract::PackageLimits {
         total_bytes: 64 * 1024 * 1024,
         manifest_bytes: 1024 * 1024,
         artifacts: 16,
@@ -14304,7 +12824,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
     )
     .unwrap();
     let packaged = fs::read(&scoped.wasm_path).unwrap();
-    let parsed = runtara_workflow_wit::isolation_package::parse(&packaged, package_limits)
+    let parsed = runtara_invocation_contract::parse(&packaged, package_limits)
         .unwrap()
         .unwrap();
     assert!(
@@ -14337,7 +12857,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             agent_catalog: Some(dispatcher.catalog()),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )
     .unwrap();
@@ -14376,8 +12896,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             agent_slug: Some("trusted-wrapper".into()),
         },
         &components,
-        RuntimeBinding::HostImport,
-        WorkflowAbi::AgentCapabilities,
+        WorkflowRole::PublishedAgent,
         false,
     )
     .unwrap();
@@ -14415,7 +12934,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             )),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )
     .unwrap();
@@ -14530,7 +13049,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             agent_catalog: Some(dispatcher.catalog()),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )
     .unwrap();
@@ -14693,8 +13212,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             agent_slug: Some("trusted-wrapper".into()),
         },
         &upgraded_components,
-        RuntimeBinding::HostImport,
-        WorkflowAbi::AgentCapabilities,
+        WorkflowRole::PublishedAgent,
         false,
     )
     .unwrap();
@@ -14754,7 +13272,7 @@ async fn invoke_trusted_failure(
     executor: &runtara_component_host::WorkflowExecutor,
     pre: &wasmtime::component::InstancePre<runtara_component_host::WorkflowState>,
 ) -> (String, Arc<RecordingRuntimeHost>) {
-    let host = Arc::new(RecordingRuntimeHost::new(b"{}"));
+    let host = Arc::new(RecordingRuntimeHost::new());
     let run = executor
         .execute_invoke(
             pre,
@@ -14795,7 +13313,7 @@ async fn run_trusted_fixture(
                 timeout: Duration::from_secs(10),
                 cancel: None,
                 limits: runtara_component_host::WorkflowLimits::default(),
-                runtime: Some(Arc::new(RecordingRuntimeHost::new(b"{}"))),
+                runtime: Some(Arc::new(RecordingRuntimeHost::new())),
             },
             b"{}".to_vec(),
         )
@@ -14957,7 +13475,7 @@ async fn a_stale_trusted_pin_fails_only_its_own_agent_calls() {
                 agent_catalog: Some(dispatcher.catalog()),
                 agent_slug: None,
             },
-            WorkflowAbi::InvokeHostImports,
+            WorkflowRole::Root,
             false,
         )
         .unwrap();
@@ -15229,14 +13747,11 @@ async fn trusted_presigning_as_an_ai_tool_keeps_credentials_out_of_model_message
             agent_catalog: Some(dispatcher.catalog()),
             agent_slug: None,
         },
-        WorkflowAbi::InvokeHostImports,
+        WorkflowRole::Root,
         false,
     )
     .unwrap();
     compose_direct_workflow(&mut compiled, &components).unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let (sink, _events) = mpsc::channel();
-    let (stop, stop_rx) = mpsc::channel();
     let state = Arc::new(ServerState {
         llm_responses: Mutex::new(vec![
             llm_tool_call(
@@ -15246,16 +13761,6 @@ async fn trusted_presigning_as_an_ai_tool_keeps_credentials_out_of_model_message
             llm_ok("signed"),
         ]),
         ..Default::default()
-    });
-    let state_for_server = state.clone();
-    let server = thread::spawn(move || {
-        serve(
-            listener,
-            sink,
-            state_for_server,
-            stop_rx,
-            Arc::new(b"{}".to_vec()),
-        )
     });
     let executor =
         runtara_component_host::WorkflowExecutor::new(Arc::clone(embedded_executor().engine()))
@@ -15284,13 +13789,11 @@ async fn trusted_presigning_as_an_ai_tool_keeps_credentials_out_of_model_message
                 timeout: Duration::from_secs(10),
                 cancel: None,
                 limits: runtara_component_host::WorkflowLimits::default(),
-                runtime: Some(Arc::new(RecordingRuntimeHost::new(b"{}"))),
+                runtime: Some(Arc::new(RecordingRuntimeHost::new())),
             },
             b"{}".to_vec(),
         )
         .await;
-    let _ = stop.send(());
-    server.join().unwrap();
     let runtara_component_host::InvokeExit::Completed(output) = result.exit else {
         panic!("{:?}", result.exit)
     };
@@ -15306,4 +13809,168 @@ async fn trusted_presigning_as_an_ai_tool_keeps_credentials_out_of_model_message
         "model must receive the approved signed URL: {second}"
     );
     assert!(!second.contains("synthetic-test-secret"));
+}
+
+/// A workflow-agent's failure reaches its caller whole. The child's Error step
+/// returns its envelope in `error-info.details`; the root's step error keeps
+/// it as `childError`, the shape an embedded child's failure has, so the
+/// root's persisted error names the child's failing step. With retries the
+/// error goes through the retry classification, and the chain survives that
+/// path too.
+#[test]
+fn a_workflow_agent_failure_reaches_the_root_error_as_child_error() {
+    let components_dir = direct_e2e_components_dir();
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let slug = "failing-child".to_string();
+    let child_graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "name": "Failing Child",
+        "durable": false,
+        "steps": {
+            "fail": {
+                "stepType": "Error",
+                "id": "fail",
+                "name": "Fail",
+                "category": "permanent",
+                "code": "CHILD_BROKE",
+                "message": "the child failed",
+                "severity": "error"
+            }
+        },
+        "entryPoint": "fail",
+        "executionPlan": [],
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+    }))
+    .expect("child parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let child = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "failing-child-wf".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: child_graph.clone(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("child-build"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some(slug.clone()),
+        },
+        &components_dir,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
+        false,
+    )
+    .expect("child agent compile+compose succeeds");
+    let staging = temp.path().join("workflow-agents");
+    fs::create_dir_all(&staging).expect("staging dir");
+    fs::copy(
+        &child.wasm_path,
+        staging.join("runtara_agent_failing_child.wasm"),
+    )
+    .expect("stage child wasm");
+    let info = certified_workflow_agent_info(
+        &slug,
+        "Failing Child",
+        "",
+        &child_graph.input_schema,
+        &child_graph.output_schema,
+    );
+    fs::write(
+        staging.join("runtara_agent_failing_child.meta.json"),
+        serde_json::to_vec_pretty(&info).expect("meta serializes"),
+    )
+    .expect("stage child meta");
+    let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        info,
+    ]));
+
+    for max_retries in [0, 2] {
+        let parent_graph = serde_json::json!({
+            "name": "Parent Of Failing Child",
+            "steps": {
+                "call": {
+                    "stepType": "Agent",
+                    "id": "call",
+                    "agentId": slug,
+                    "capabilityId": "run",
+                    "maxRetries": max_retries,
+                    "retryDelay": 0,
+                    "inputMapping": {}
+                },
+                "finish": { "stepType": "Finish", "id": "finish" }
+            },
+            "entryPoint": "call",
+            "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        });
+        let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+            DirectCompilationInput {
+                workflow_id: format!("failing-child-parent-{max_retries}"),
+                version: 1,
+                source_checksum: None,
+                execution_graph: serde_json::from_value(parent_graph).expect("parent parses"),
+                child_workflows: vec![],
+                output_dir: temp.path().join(format!("parent-build-{max_retries}")),
+                track_events: false,
+                agent_catalog: Some(catalog.clone()),
+                agent_slug: None,
+            },
+            runtara_workflows::direct_wasm::WorkflowRole::Root,
+            false,
+        )
+        .expect("parent compile succeeds");
+        runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+            &mut parent,
+            &components_dir,
+            std::slice::from_ref(&staging),
+        )
+        .expect("parent compose finds the staged child");
+
+        let host = Arc::new(RecordingRuntimeHost::new());
+        let run = runtime.block_on(async {
+            let pre = executor
+                .load_instance_pre(&parent.wasm_path)
+                .await
+                .expect("load parent artifact");
+            executor
+                .execute_invoke(
+                    &pre,
+                    runtara_component_host::WorkflowRunSpec {
+                        trusted_instance: None,
+                        trusted_tenant: Some("direct-wasm-execute".into()),
+                        env: HashMap::new(),
+                        stderr: None,
+                        timeout: Duration::from_secs(60),
+                        cancel: None,
+                        limits: runtara_component_host::WorkflowLimits::default(),
+                        runtime: Some(host.clone()),
+                    },
+                    b"{}".to_vec(),
+                )
+                .await
+        });
+        let runtara_component_host::InvokeExit::Failed(error) = run.exit else {
+            panic!(
+                "maxRetries {max_retries}: the root must fail: {:?}",
+                run.exit
+            );
+        };
+        // What the host persists as the root's error.
+        let persisted: Value =
+            serde_json::from_slice(&runtara_component_host::runtime_host::error_payload(&error))
+                .expect("persisted error is the envelope");
+        assert_eq!(persisted["code"], "CHILD_BROKE", "{persisted}");
+        assert_eq!(persisted["stepId"], "call", "{persisted}");
+        assert_eq!(persisted["agentId"], slug, "{persisted}");
+        let child_error = &persisted["childError"];
+        assert_eq!(
+            child_error["stepId"], "fail",
+            "maxRetries {max_retries}: the child's failing step reaches the root: {persisted}"
+        );
+        assert_eq!(child_error["code"], "CHILD_BROKE", "{persisted}");
+        assert_eq!(child_error["message"], "the child failed", "{persisted}");
+    }
 }

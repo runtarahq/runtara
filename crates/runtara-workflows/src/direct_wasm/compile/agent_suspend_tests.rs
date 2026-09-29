@@ -1,10 +1,11 @@
 //! Spike S0.2 tracer proofs for typed agent suspension, through public
 //! compilation, in-process wac composition and the component host:
 //!
-//! (a) one agent instance satisfies both `capabilities` and `suspendable`, and
-//!     the dependency and dispatcher registries still see one agent;
-//! (b) each call site binds the right `(agent, interface)` import although the
-//!     two are type-identical, which only behaviour can show;
+//! (a) one agent instance serves its plain and suspending capabilities through
+//!     one `capabilities` export, and the dependency and dispatcher registries
+//!     see one agent;
+//! (b) each call site is lowered for its capability's kind, which only
+//!     behaviour can show;
 //! (c) the result offsets the emitter reads are the WIT's `SizeAlign` layout
 //!     (pinned hermetically in `operation_scoped_tests`);
 //! (d) a relaunch delivers the saved continuation (host `context` import);
@@ -35,7 +36,21 @@ fn components_dir() -> PathBuf {
 
 const ERROR_INFO: &str = r#"(type $error (record (field "code" string) (field "message" string)
     (field "category" string) (field "severity" string) (field "retryable" bool)
-    (field "retry-after-ms" (option u64)) (field "attributes" (option string))))"#;
+    (field "retry-after-ms" (option u64)) (field "attributes" (option string))
+    (field "details" (option string))))"#;
+
+/// `runtara:agent/types` `outcome` and the types it uses.
+const OUTCOME: &str = r#"(type $signal (record (field "checkpoint-id" string)
+    (field "deadline-ms" (option u64))))
+  (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+    (case "instances" string)))
+  (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+  (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))"#;
+
+/// An instance exporting `invoke` must also export every type its result names.
+const OUTCOME_EXPORTS: &str = r#"(export "error-info" (type $error))
+    (export "signal-wait" (type $signal)) (export "wake" (type $wake))
+    (export "suspension" (type $suspension)) (export "outcome" (type $outcome))"#;
 
 const MEMORY: &str = r#"(core module $memory
     (memory (export "memory") 1)
@@ -47,15 +62,14 @@ const MEMORY: &str = r#"(core module $memory
   (core instance $memory (instantiate $memory))"#;
 
 /// An ordinary suspending agent. `capabilities.invoke` answers `plain` with
-/// "capabilities"; `suspendable.invoke` reads its continuation through the
-/// host context and completes with it, or, without one, suspends until
-/// `PROBE_WAKE_AT` with `PROBE_STATE`. The two exports are type-identical in
-/// their flat signature, so only these answers tell which one a site bound.
+/// "capabilities"; `pause` reads its continuation through the host context
+/// and completes with it, or, without one, suspends until `PROBE_WAKE_AT`
+/// with `PROBE_STATE`.
 fn suspend_probe() -> Vec<u8> {
     probe_component("suspend-probe", Behaviour::Once)
 }
 
-/// How a probe's `suspendable.invoke` answers.
+/// How a probe's `pause` capability answers.
 #[derive(Clone, Copy)]
 enum Behaviour {
     /// Complete with the continuation; without one, suspend until
@@ -74,9 +88,9 @@ enum Behaviour {
     Reject,
 }
 
-/// The WAT of `suspendable.invoke` for `behaviour`. The result lives at 2048:
-/// ok tag, the outcome discriminant at +8, its payload at +12; the one wake at
-/// 1536 (discriminant, payload at +8). An error-info sits at +8.
+/// The WAT of the `pause` capability for `behaviour`. The result lives at
+/// 2048: ok tag, the outcome discriminant at +8, its payload at +12; the one
+/// wake at 1536 (discriminant, payload at +8). An error-info sits at +8.
 fn suspendable_body(behaviour: Behaviour) -> String {
     let suspend = |wake: &str| {
         format!(
@@ -104,7 +118,8 @@ fn suspendable_body(behaviour: Behaviour) -> String {
           (i32.store (i32.const 2080) (i32.const 1260)) (i32.store (i32.const 2084) (i32.const 5))
           (i32.store8 (i32.const 2088) (i32.const 1))
           (i32.store8 (i32.const 2096) (i32.const 0))
-          (i32.store8 (i32.const 2112) (i32.const 0))"#;
+          (i32.store8 (i32.const 2112) (i32.const 0))
+          (i32.store8 (i32.const 2124) (i32.const 0))"#;
     let once = suspend(&at(&PROBE_WAKE_AT.to_string()));
     let (with, without) = match behaviour {
         Behaviour::Once => (completed.to_string(), once),
@@ -119,13 +134,13 @@ fn suspendable_body(behaviour: Behaviour) -> String {
         }
         Behaviour::ForeignWait => {
             let foreign = suspend(
-                "(i32.store8 (i32.const 1536) (i32.const 1))                  (i32.store (i32.const 1544) (i32.const 1100))                  (i32.store (i32.const 1548) (i32.const 7))",
+                "(i32.store8 (i32.const 1536) (i32.const 3))                  (i32.store (i32.const 1544) (i32.const 1100))                  (i32.store (i32.const 1548) (i32.const 7))",
             );
             (foreign.clone(), foreign)
         }
     };
     format!(
-        r#"(func (export "suspendable") (param i32 i32 i32 i32) (result i32)
+        r#"(func $suspendable (result i32)
       (call $continuation (i32.const 3072))
       (i32.store8 (i32.const 2048) (i32.const 0))
       (if (i32.load8_u (i32.const 3072))
@@ -135,12 +150,12 @@ fn suspendable_body(behaviour: Behaviour) -> String {
     )
 }
 
-/// A suspending probe agent `agent` whose `suspendable.invoke` behaves as
+/// A suspending probe agent `agent` whose `pause` capability behaves as
 /// `behaviour` (see [`suspend_probe`] for the shape).
 fn probe_component(agent: &str, behaviour: Behaviour) -> Vec<u8> {
     wat::parse_str(format!(
         r#"(component
-  (import "runtara:agent-suspension/context@0.1.0" (instance $context
+  (import "runtara:agent/continuation@1.0.0" (instance $context
     (export "continuation" (func (result (option (list u8)))))))
   {MEMORY}
   (core func $continuation (canon lower (func $context "continuation")
@@ -155,31 +170,28 @@ fn probe_component(agent: &str, behaviour: Behaviour) -> Vec<u8> {
     (data (i32.const 1240) "stale")
     (data (i32.const 1250) "transient")
     (data (i32.const 1260) "error")
-    (func (export "plain") (param i32 i32 i32 i32) (result i32)
+    ;; `plain` and `pause` differ in their second byte.
+    (func (export "invoke") (param i32 i32 i32 i32) (result i32)
+      (if (i32.eq (i32.load8_u offset=1 (local.get 0)) (i32.const 0x6c))
+        (then (return (call $plain))))
+      (call $suspendable))
+    (func $plain (result i32)
       (i32.store8 (i32.const 2048) (i32.const 0))
-      (i32.store (i32.const 2056) (i32.const 1024))
-      (i32.store (i32.const 2060) (i32.const 14))
+      (i32.store8 (i32.const 2056) (i32.const 0))
+      (i32.store (i32.const 2060) (i32.const 1024))
+      (i32.store (i32.const 2064) (i32.const 14))
       (i32.const 2048))
     {body})
   (core instance $code (instantiate $code
     (with "m" (instance $memory))
     (with "h" (instance (export "continuation" (func $continuation))))))
   {ERROR_INFO}
-  (type $wake (variant (case "at" u64) (case "instances" string)))
-  (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
-  (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
-  (func $plain async (param "capability-id" string) (param "input" (list u8))
-    (result (result (list u8) (error $error)))
-    (canon lift (core func $code "plain") (memory $memory "memory") (realloc (func $memory "realloc"))))
-  (func $suspendable async (param "capability-id" string) (param "input" (list u8))
+  {OUTCOME}
+  (func $invoke async (param "capability-id" string) (param "input" (list u8))
     (result (result $outcome (error $error)))
-    (canon lift (core func $code "suspendable") (memory $memory "memory") (realloc (func $memory "realloc"))))
-  (instance $capabilities (export "error-info" (type $error)) (export "invoke" (func $plain)))
-  (instance $suspendable (export "error-info" (type $error)) (export "wake" (type $wake))
-    (export "suspension" (type $suspension)) (export "outcome" (type $outcome))
-    (export "invoke" (func $suspendable)))
-  (export "runtara:agent-{agent}/capabilities@0.4.0" (instance $capabilities))
-  (export "runtara:agent-{agent}/suspendable@0.4.0" (instance $suspendable)))"#,
+    (canon lift (core func $code "invoke") (memory $memory "memory") (realloc (func $memory "realloc"))))
+  (instance $capabilities {OUTCOME_EXPORTS} (export "invoke" (func $invoke)))
+  (export "runtara:agent-{agent}/capabilities@1.0.0" (instance $capabilities)))"#,
         body = suspendable_body(behaviour),
     ))
     .expect("suspend probe parses")
@@ -191,7 +203,7 @@ fn probe_component(agent: &str, behaviour: Behaviour) -> Vec<u8> {
 fn control_api_probe() -> Vec<u8> {
     wat::parse_str(format!(
         r#"(component
-  (import "runtara:control/api@0.1.0" (instance $api
+  (import "runtara:control/api@1.0.0" (instance $api
     (type $outcome-def (enum "requested" "applied" "unchanged" "already-terminal"))
     (export "command-outcome" (type $outcome (eq $outcome-def)))
     (type $result-def (record (field "instance-id" string) (field "outcome" $outcome)
@@ -224,18 +236,20 @@ fn control_api_probe() -> Vec<u8> {
       (if (i32.and
             (i32.eq (i32.load8_u (i32.const 3072)) (i32.const 1))
             (i32.eqz (i32.load8_u (i32.const 3080))))
-        (then (i32.store (i32.const 2056) (i32.const 1040)) (i32.store (i32.const 2060) (i32.const 8)))
-        (else (i32.store (i32.const 2056) (i32.const 1056)) (i32.store (i32.const 2060) (i32.const 9))))
+        (then (i32.store (i32.const 2060) (i32.const 1040)) (i32.store (i32.const 2064) (i32.const 8)))
+        (else (i32.store (i32.const 2060) (i32.const 1056)) (i32.store (i32.const 2064) (i32.const 9))))
+      (i32.store8 (i32.const 2056) (i32.const 0))
       (i32.const 2048)))
   (core instance $code (instantiate $code
     (with "m" (instance $memory))
     (with "h" (instance (export "pause" (func $pause-lower))))))
   {ERROR_INFO}
+  {OUTCOME}
   (func $invoke async (param "capability-id" string) (param "input" (list u8))
-    (result (result (list u8) (error $error)))
+    (result (result $outcome (error $error)))
     (canon lift (core func $code "invoke") (memory $memory "memory") (realloc (func $memory "realloc"))))
-  (instance $capabilities (export "error-info" (type $error)) (export "invoke" (func $invoke)))
-  (export "runtara:agent-api-probe/capabilities@0.4.0" (instance $capabilities)))"#
+  (instance $capabilities {OUTCOME_EXPORTS} (export "invoke" (func $invoke)))
+  (export "runtara:agent-api-probe/capabilities@1.0.0" (instance $capabilities)))"#
     ))
     .expect("control API probe parses")
 }
@@ -412,18 +426,17 @@ fn completed(result: &InvokeRunResult) -> Value {
     }
 }
 
-/// (a) One probe instance satisfies both of its interfaces, and the
-/// dependency registry still sees exactly one agent.
+/// (a) One probe instance serves both of its capabilities, and the dependency
+/// registry sees exactly one agent.
 #[test]
-fn one_agent_instance_satisfies_capabilities_and_suspendable() -> anyhow::Result<()> {
+fn one_agent_instance_serves_plain_and_suspending_capabilities() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let staging = stage_probe(dir.path())?;
     let compiled = compile_graph(dir.path(), probe_graph(), vec![probe_info()], &[staging])?;
     let artifacts = &compiled.component_artifacts;
     for import in [
-        "import runtara:agent-suspend-probe/capabilities@0.4.0;",
-        "import runtara:agent-suspend-probe/suspendable@0.4.0;",
-        "import runtara:workflow-operation/scope@0.1.0;",
+        "import runtara:agent-suspend-probe/capabilities@1.0.0;",
+        "import runtara:workflow/operation@1.0.0;",
     ] {
         assert!(
             artifacts.world_wit.contains(import),
@@ -437,7 +450,7 @@ fn one_agent_instance_satisfies_capabilities_and_suspendable() -> anyhow::Result
             .matches("= new runtara:agent-suspend-probe {")
             .count(),
         1,
-        "one instance serves both interfaces: {}",
+        "one instance serves both capabilities: {}",
         artifacts.wac_source
     );
     let imports = root_imports(&compiled.wasm_path)?;
@@ -445,11 +458,11 @@ fn one_agent_instance_satisfies_capabilities_and_suspendable() -> anyhow::Result
         !imports
             .iter()
             .any(|name| name.starts_with("runtara:agent-suspend-probe/")),
-        "wac wires both agent interfaces internally: {imports:?}"
+        "wac wires the agent internally: {imports:?}"
     );
     for bubbled in [
-        runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME,
-        runtara_agent_suspension::CONTEXT_INTERFACE,
+        runtara_wit::workflow::OPERATION,
+        runtara_wit::agent::CONTINUATION,
     ] {
         assert!(
             imports.iter().any(|name| name == bubbled),
@@ -475,8 +488,8 @@ fn a_control_step_binds_capabilities_and_pins_the_bundled_bytes() -> anyhow::Res
     let compiled = compile_graph(dir.path(), control_graph(), vec![control_info()?], &[])?;
     let artifacts = &compiled.component_artifacts;
     for import in [
-        "import runtara:agent-control/capabilities@0.4.0;",
-        "import runtara:workflow-operation/scope@0.1.0;",
+        "import runtara:agent-control/capabilities@1.0.0;",
+        "import runtara:workflow/operation@1.0.0;",
     ] {
         assert!(
             artifacts.world_wit.contains(import),
@@ -484,18 +497,11 @@ fn a_control_step_binds_capabilities_and_pins_the_bundled_bytes() -> anyhow::Res
             artifacts.world_wit
         );
     }
-    assert!(
-        !artifacts
-            .world_wit
-            .contains("runtara:agent-control/suspendable"),
-        "control never suspends: {}",
-        artifacts.world_wit
-    );
     let imports = root_imports(&compiled.wasm_path)?;
     for bubbled in [
-        runtara_workflow_wit::CONTROL_EXECUTOR_INTERFACE_NAME,
-        runtara_workflow_wit::CONTROL_API_INTERFACE_NAME,
-        runtara_workflow_wit::OPERATION_SCOPE_INTERFACE_NAME,
+        runtara_wit::control::EXECUTOR,
+        runtara_wit::control::API,
+        runtara_wit::workflow::OPERATION,
     ] {
         assert!(
             imports.iter().any(|name| name == bubbled),
@@ -505,7 +511,7 @@ fn a_control_step_binds_capabilities_and_pins_the_bundled_bytes() -> anyhow::Res
     assert!(
         !imports
             .iter()
-            .any(|name| name == runtara_agent_suspension::CONTEXT_INTERFACE),
+            .any(|name| name == runtara_wit::agent::CONTINUATION),
         "no continuation is delivered to control: {imports:?}"
     );
 
@@ -556,18 +562,17 @@ fn a_control_step_binds_capabilities_and_pins_the_bundled_bytes() -> anyhow::Res
     )?;
     assert_eq!(
         loaded.capabilities_iface,
-        "runtara:agent-control/capabilities@0.4.0"
+        "runtara:agent-control/capabilities@1.0.0"
     );
     Ok(())
 }
 
-/// (b) + (d) Both sites target the same probe instance through
-/// type-identical imports. The `plain` site must answer from `capabilities`
-/// and never suspend; the `pause` site must suspend through `suspendable`,
-/// park at the agent's wake, and complete on relaunch with the continuation
+/// (b) + (d) Both sites target the same probe instance through one import.
+/// The `plain` site must answer "capabilities" and never suspend; the `pause`
+/// site must suspend, park at the agent's wake, and complete on relaunch with the continuation
 /// the host saved and handed back through `context`.
 #[tokio::test(flavor = "multi_thread")]
-async fn each_site_binds_its_interface_and_a_relaunch_delivers_the_continuation()
+async fn each_site_is_lowered_for_its_kind_and_a_relaunch_delivers_the_continuation()
 -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let staging = stage_probe(dir.path())?;
@@ -876,7 +881,7 @@ async fn a_direct_control_api_call_is_denied_outside_the_executor() -> anyhow::R
     let dir = tempfile::tempdir()?;
     let probe = dir.path().join("api-probe.wasm");
     fs::write(&probe, control_api_probe())?;
-    let interface = "runtara:agent-api-probe/capabilities@0.4.0";
+    let interface = "runtara:agent-api-probe/capabilities@1.0.0";
 
     let fake = Arc::new(FakeControl::default());
     let root = workflow_executor(Some(control_executor(fake.clone())?))?;
@@ -908,18 +913,18 @@ async fn a_direct_control_api_call_is_denied_outside_the_executor() -> anyhow::R
     let invoke = instance
         .get_export_index(&mut store, Some(&exported), "invoke")
         .expect("invoke export");
+    use runtara_component_host::bindings::exports::runtara::agent::capabilities::Outcome;
     let invoke = instance
-        .get_typed_func::<(String, Vec<u8>), (Result<Vec<u8>, runtara_component_host::ErrorInfo>,)>(
+        .get_typed_func::<(String, Vec<u8>), (Result<Outcome, runtara_component_host::ErrorInfo>,)>(
             &mut store, invoke,
         )?;
     let (answer,) = invoke
         .call_async(&mut store, ("probe".into(), b"{}".to_vec()))
         .await?;
-    assert_eq!(
-        answer.map_err(|error| anyhow::anyhow!("{error:?}"))?,
-        b"\"denied\"",
-        "agent-linker store"
-    );
+    let Outcome::Completed(answer) = answer.map_err(|error| anyhow::anyhow!("{error:?}"))? else {
+        panic!("the probe never suspends");
+    };
+    assert_eq!(answer, b"\"denied\"", "agent-linker store");
     assert_eq!(
         *fake.pauses.lock().unwrap(),
         0,
@@ -1148,5 +1153,174 @@ async fn a_lost_result_checkpoint_replays_with_the_continuation() -> anyhow::Res
     let replay = launch(&compiled, host.clone(), None).await?;
     assert_eq!(completed(&replay), json!({"pause": "paused"}));
     assert!(host.continuations.lock().unwrap().is_empty());
+    Ok(())
+}
+
+/// Publish `graph` as workflow-agent `slug`, composed against `extra_dirs`,
+/// and stage it with the sidecar the server writes. Returns the staging dir
+/// and the catalog entry a parent compiles against.
+fn publish_workflow_agent(
+    dir: &Path,
+    slug: &str,
+    graph: Value,
+    agents: Vec<runtara_dsl::agent_meta::AgentInfo>,
+    extra_dirs: &[PathBuf],
+) -> anyhow::Result<(PathBuf, runtara_dsl::agent_meta::AgentInfo)> {
+    let mut child = crate::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: slug.into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(graph)?,
+            child_workflows: vec![],
+            output_dir: dir.join(slug),
+            track_events: false,
+            agent_catalog: Some(Arc::new(
+                runtara_dsl::agent_meta::AgentCatalog::from_agents(agents),
+            )),
+            agent_slug: Some(slug.into()),
+        },
+        crate::direct_wasm::WorkflowRole::PublishedAgent,
+        true,
+    )?;
+    assert!(
+        !child.omit_runtime,
+        "an operation-scoped site runs under the caller's runtime"
+    );
+    compose_direct_workflow_with_extra_dirs(
+        &mut child,
+        components_dir().to_str().expect("utf-8 components dir"),
+        extra_dirs,
+    )?;
+    let staging = dir.join("workflow-agents");
+    fs::create_dir_all(&staging)?;
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
+        slug,
+        slug,
+        "fixture",
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    let file = slug.replace('-', "_");
+    fs::copy(
+        &child.wasm_path,
+        staging.join(format!("runtara_agent_{file}.wasm")),
+    )?;
+    fs::write(
+        staging.join(format!("runtara_agent_{file}.meta.json")),
+        serde_json::to_vec(&info)?,
+    )?;
+    Ok((staging, info))
+}
+
+/// A root that calls workflow-agent `agent` once and finishes with its output.
+fn calls_workflow_agent(agent: &str) -> Value {
+    json!({"durable": true, "entryPoint": "call", "steps": {
+        "call": agent_step("call", agent, "run", json!({})),
+        "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
+            "result": {"valueType": "reference", "value": "steps.call.outputs"}}}},
+        "executionPlan": [{"fromStep": "call", "toStep": "finish"}]})
+}
+
+/// A published workflow-agent that calls a suspending capability parks its
+/// caller at the capability's wake. The continuation is saved under the
+/// workflow-agent's own operation, and a relaunch of the caller completes
+/// with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflow_agent_parks_its_caller_on_a_suspending_capability() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let probes = stage_probe(dir.path())?;
+    let child = json!({"durable": true, "entryPoint": "pause", "steps": {
+        "pause": agent_step("pause", "suspend-probe", "pause", json!({})),
+        "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
+            "pause": {"valueType": "reference", "value": "steps.pause.outputs"}}}},
+        "executionPlan": [{"fromStep": "pause", "toStep": "finish"}]});
+    let (staged, info) = publish_workflow_agent(
+        dir.path(),
+        "paused-flow",
+        child,
+        vec![probe_info()],
+        std::slice::from_ref(&probes),
+    )?;
+    let compiled = compile_graph(
+        dir.path(),
+        calls_workflow_agent("paused-flow"),
+        vec![info],
+        &[staged],
+    )?;
+    let host = Arc::new(Host::new());
+
+    let first = launch(&compiled, host.clone(), None).await?;
+    assert!(
+        matches!(&first.exit, InvokeExit::Suspended(wakes) if wakes == &[WorkflowWake::At(PROBE_WAKE_AT)]),
+        "the caller parks at the capability's wake: {:?}",
+        first.exit
+    );
+    let saved = saved(&host);
+    assert_eq!(saved, vec![(1, PROBE_STATE.to_vec())]);
+
+    let second = launch(&compiled, host.clone(), None).await?;
+    assert_eq!(completed(&second), json!({"result": {"pause": "paused"}}));
+    assert!(
+        host.continuations.lock().unwrap().is_empty(),
+        "the result checkpoint releases the continuation"
+    );
+    Ok(())
+}
+
+/// A published workflow-agent's control call runs under its caller's
+/// instance: the authority names the root run, and the operation is the
+/// workflow-agent's own site, namespaced under the caller's call site.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflow_agent_calls_control_as_its_caller() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let (staged, info) = publish_workflow_agent(
+        dir.path(),
+        "stopper",
+        control_graph(),
+        vec![control_info()?],
+        &[],
+    )?;
+    let compiled = compile_graph(
+        dir.path(),
+        calls_workflow_agent("stopper"),
+        vec![info],
+        &[staged],
+    )?;
+    let pin = crate::direct_wasm::bundled_builtin_pin(&components_dir(), "control")
+        .expect("the bundle ships control");
+    let imports = root_imports(&compiled.wasm_path)?;
+    let pins: Vec<_> = imports
+        .iter()
+        .filter(|name| name.starts_with(runtara_dsl::agent_meta::BUILTIN_ARTIFACTS_PREFIX))
+        .collect();
+    assert_eq!(
+        pins,
+        [&pin],
+        "the caller carries the workflow-agent's pin: {imports:?}"
+    );
+
+    let fake = Arc::new(FakeControl::default());
+    let host = Arc::new(Host::new());
+    let run = launch(
+        &compiled,
+        host.clone(),
+        Some(control_executor(fake.clone())?),
+    )
+    .await?;
+    assert_eq!(
+        completed(&run),
+        json!({"result": {"result": {"instanceId": "child-1", "outcome": "applied", "replayed": false}}})
+    );
+    let cancels = fake.cancels.lock().unwrap();
+    assert_eq!(cancels.len(), 1, "{cancels:?}");
+    let (authority, target) = &cancels[0];
+    assert_eq!(target, "child-1");
+    assert_eq!(authority.caller.as_deref(), Some("parent-1"));
+    assert_eq!(
+        authority.operation.as_deref().map(str::len),
+        Some(64),
+        "the workflow-agent's site is scoped"
+    );
     Ok(())
 }
