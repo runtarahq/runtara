@@ -2326,6 +2326,10 @@ impl ExecutionEngine {
                                     .unwrap_or("Step failed")
                                     .into(),
                                 retryable: detail.get("retryable").and_then(Value::as_bool),
+                                severity: detail
+                                    .get("severity")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned),
                             });
                     }
                 }

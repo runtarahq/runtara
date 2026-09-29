@@ -201,6 +201,46 @@ async fn answers_record_the_original_actor_and_keep_receipt_replay_compatible() 
         serde_json::from_slice(receipt.acceptance_context.as_ref().unwrap()).unwrap();
     assert_eq!(attribution["source"], "user");
     assert_eq!(attribution["principal"], "alice");
+    #[cfg(feature = "valkey-integration-tests")]
+    {
+        use runtara_server::api::services::session_queue::managed::*;
+        let config = runtara_server::valkey::ValkeyConfig::from_env().unwrap();
+        let mut conn = redis::aio::ConnectionManager::new(
+            redis::Client::open(config.connection_url()).unwrap(),
+        )
+        .await
+        .unwrap();
+        let scope = QueueScope::new(&fx.tenant, &Uuid::new_v4().to_string()).unwrap();
+        let target = InputTarget {
+            instance_id: id.clone(),
+            request_id: request.request_id.clone(),
+        };
+        let retained = enqueue_authenticated(
+            &mut conn,
+            &scope,
+            "session-replay",
+            "answer",
+            &payload,
+            &target,
+            &bob,
+        )
+        .await
+        .unwrap();
+        assert_eq!(retained.actor_id.as_deref(), Some("bob"));
+        let DeliveryOutcome::Accepted(accepted) =
+            deliver_to_instance(&mut conn, &scope, &fx.client)
+                .await
+                .unwrap()
+        else {
+            panic!("session receipt replay")
+        };
+        assert_eq!(
+            accepted.receipt_id.as_deref(),
+            Some(first.receipt_id.as_str())
+        );
+        // The queued retry did not answer originally: retain the receipt's actor.
+        assert_eq!(accepted.actor_id.as_deref(), Some("alice"));
+    }
     let events: Vec<(Option<String>, Value)> = sqlx::query_as("SELECT actor_user_id, payload FROM audit_events WHERE tenant_id=$1 AND event_type='input.answer'")
         .bind(&fx.tenant).fetch_all(&fx.server).await.unwrap();
     assert_eq!(events.len(), 2);

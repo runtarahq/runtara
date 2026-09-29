@@ -3208,6 +3208,7 @@ export interface OperationErrorSummary {
   code?: string | null;
   message: string;
   retryable?: boolean | null;
+  severity?: string | null;
 }
 
 export interface OperationProcess {

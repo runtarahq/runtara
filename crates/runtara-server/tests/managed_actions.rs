@@ -20,6 +20,7 @@ use runtara_server::{
             SubmitWorkflowActionRequest, list_instance_actions, list_workflow_actions,
         },
     },
+    auth::{AuthContext, AuthMethod},
     middleware::tenant_auth::OrgId,
     product_events::ProductEventSink,
     runtime_client::{RuntimeClient, RuntimeClientConfig},
@@ -118,6 +119,11 @@ async fn delivery_api_contract(
     let submit = |owner: &str, operation: &str, request_id: Option<&str>| {
         submit_event(
             OrgId(owner.into()),
+            Extension(AuthContext::new(
+                owner.into(),
+                "session-operator".into(),
+                AuthMethod::Unauthenticated,
+            )),
             State(Some(client.clone())),
             State(Some(conn.clone())),
             Path(session.into()),
@@ -162,6 +168,7 @@ async fn delivery_api_contract(
     else {
         panic!("targeted submission claim")
     };
+    assert_eq!(targeted.actor_id.as_deref(), Some("session-operator"));
     fail_targeted(&mut conn.clone(), &scope, &targeted).await;
     // A message retained before submit-time binding has no target at all.
     enqueue(
@@ -734,6 +741,7 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
         let worker = tokio::spawn(runtara_server::workers::session_delivery_worker::run(
             recovered.clone(),
             client.clone(),
+            pool.clone(),
             shutdown.clone(),
         ));
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {

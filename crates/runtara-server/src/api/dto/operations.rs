@@ -135,6 +135,7 @@ pub struct SavedOperationView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct OperationErrorSummary {
+    pub severity: Option<String>,
     pub code: Option<String>,
     pub category: Option<String>,
     pub message: String,

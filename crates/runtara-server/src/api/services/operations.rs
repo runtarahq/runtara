@@ -87,7 +87,7 @@ fn collect_action_keys(graph: &Value, keys: &mut BTreeMap<String, String>) {
                 });
             }
             collect_action_keys(step, keys);
-            for field in ["body", "graph", "workflow"] {
+            for field in ["subgraph"] {
                 if let Some(nested) = step.get(field) {
                     collect_action_keys(nested, keys);
                 }
@@ -183,4 +183,23 @@ pub fn validate_view(
         return Err("View configuration is too large".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn discovers_nested_graph_actions_without_reading_domain_data() {
+        let graph = serde_json::json!({"steps": {
+            "split": {"stepType": "Split", "subgraph": {"steps": {
+                "wait": {"stepType": "WaitForSignal", "name": "Review", "action": {"key": "review"}}
+            }}},
+            "input": {"stepType": "Agent", "inputMapping": {"steps": {
+                "fake": {"stepType": "WaitForSignal", "action": {"key": "fake"}}
+            }}}
+        }});
+        let mut keys = BTreeMap::new();
+        collect_action_keys(&graph, &mut keys);
+        assert_eq!(keys, BTreeMap::from([("review".into(), "Review".into())]));
+    }
 }
