@@ -1,5 +1,6 @@
 import { stateLabel } from '../state-label';
 import { useState } from 'react';
+import { Check } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import type {
   OperationViewConfig,
@@ -12,6 +13,7 @@ import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
 import { operationsRequest, message } from '../queries';
 import { type StateField } from './StateValue';
+import { RUN_STATUS_OPTIONS } from '@/features/invocation-history/status-options';
 
 export function ViewEditor({
   initial,
@@ -33,6 +35,10 @@ export function ViewEditor({
   const [revision] = useState(saved?.revision);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const statuses = (view.where?.status ?? '')
+    .split(',')
+    .map((status) => status.trim())
+    .filter(Boolean);
   const token = useToken();
   const client = useQueryClient();
   const fields = [
@@ -107,22 +113,51 @@ export function ViewEditor({
         </label>
       )}
       {!view.where?.openRequest && (
-        <label className="block max-w-lg text-sm">
-          Run status
-          <Input
-            placeholder="All statuses"
-            value={view.where?.status ?? ''}
-            onChange={(event) =>
-              update({
-                where: { ...view.where, status: event.target.value || null },
-              })
-            }
-          />
-          <span className="text-xs text-muted-foreground">
-            For example: running, suspended, failed, completed. Separate
-            multiple statuses with commas.
-          </span>
-        </label>
+        <fieldset className="max-w-2xl space-y-2 text-sm">
+          <legend className="mb-2">Run status</legend>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              bordered
+              className="rounded-full aria-pressed:border-primary aria-pressed:bg-primary/10"
+              aria-pressed={statuses.length === 0}
+              onClick={() =>
+                update({ where: { ...view.where, status: null } })
+              }
+            >
+              {statuses.length === 0 && <Check aria-hidden="true" />}
+              All statuses
+            </Button>
+            {RUN_STATUS_OPTIONS.map(({ value, label }) => {
+              const selected = statuses.includes(value);
+              return (
+                <Button
+                  key={value}
+                  type="button"
+                  variant="secondary"
+                  bordered
+                  className="rounded-full aria-pressed:border-primary aria-pressed:bg-primary/10"
+                  aria-pressed={selected}
+                  onClick={() => {
+                    const next = selected
+                      ? statuses.filter((status) => status !== value)
+                      : [...statuses, value];
+                    update({
+                      where: { ...view.where, status: next.join(',') || null },
+                    });
+                  }}
+                >
+                  {selected && <Check aria-hidden="true" />}
+                  {label}
+                </Button>
+              );
+            })}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Select one or more statuses. No selection includes all statuses.
+          </p>
+        </fieldset>
       )}
       <div className="flex flex-wrap items-end gap-4">
         <label className="text-sm">

@@ -1,6 +1,6 @@
-import { ExecutionStatus } from '@/generated/RuntaraRuntimeApi';
 import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 import { ExecutionHistoryFilters } from '../types';
+import { RUN_STATUS_OPTIONS } from '../status-options';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
 import {
@@ -60,19 +60,9 @@ const toDatetimeLocal = (isoString: string | undefined): string => {
   return `${year}-${month}-${day}T${hours}:${minutes}`;
 };
 
-const STATUS_OPTIONS: {
-  value: ExecutionStatus | typeof ALL_VALUE;
-  label: string;
-}[] = [
+const STATUS_OPTIONS = [
   { value: ALL_VALUE, label: 'All statuses' },
-  { value: 'queued', label: 'Queued' },
-  { value: 'compiling', label: 'Compiling' },
-  { value: 'timeout', label: 'Timeout' },
-  { value: 'running', label: 'Running' },
-  { value: 'suspended', label: 'Waiting (including paused)' },
-  { value: 'completed', label: 'Completed' },
-  { value: 'failed', label: 'Failed' },
-  { value: 'cancelled', label: 'Cancelled' },
+  ...RUN_STATUS_OPTIONS,
 ];
 
 /**

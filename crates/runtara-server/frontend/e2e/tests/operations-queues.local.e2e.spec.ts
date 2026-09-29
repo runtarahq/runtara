@@ -50,9 +50,12 @@ for (const width of [1440, 390]) {
       await page
         .getByRole('combobox', { name: 'Queue contents' })
         .selectOption('');
-      await page
-        .getByRole('textbox', { name: 'Run status', exact: false })
-        .fill('completed');
+      const statuses = page.getByRole('group', { name: 'Run status' });
+      await expect(
+        statuses.getByRole('button', { name: 'All statuses', exact: true })
+      ).toHaveAttribute('aria-pressed', 'true');
+      await statuses.getByRole('button', { name: 'Completed', exact: true }).click();
+      await statuses.getByRole('button', { name: 'Failed', exact: true }).click();
       await page
         .getByRole('button', { name: 'Save changes', exact: true })
         .click();
@@ -63,6 +66,28 @@ for (const width of [1440, 390]) {
       await expect(
         page.getByRole('heading', { name: `${name} edited`, exact: true })
       ).toBeVisible();
+      await page.getByRole('link', { name: 'Edit queue', exact: true }).click();
+      await expect(
+        statuses.getByRole('button', { name: 'Completed', exact: true })
+      ).toHaveAttribute('aria-pressed', 'true');
+      await expect(
+        statuses.getByRole('button', { name: 'Failed', exact: true })
+      ).toHaveAttribute('aria-pressed', 'true');
+      await statuses.getByRole('button', { name: 'Failed', exact: true }).click();
+      await expect(
+        statuses.getByRole('button', { name: 'Failed', exact: true })
+      ).toHaveAttribute('aria-pressed', 'false');
+      await statuses.getByRole('button', { name: 'All statuses', exact: true }).click();
+      await expect(
+        statuses.getByRole('button', { name: 'Completed', exact: true })
+      ).toHaveAttribute('aria-pressed', 'false');
+      await expect(
+        statuses.getByRole('button', { name: 'All statuses', exact: true })
+      ).toHaveAttribute('aria-pressed', 'true');
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth)
+      ).toBeLessThanOrEqual(width);
+      await page.getByRole('button', { name: 'Cancel', exact: true }).click();
       await page.goto(appPath('/operations/queues'));
       const item = page
         .getByRole('listitem')

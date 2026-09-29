@@ -313,3 +313,10 @@ Verification: 63 focused Operations and invocation-history tests, scoped ESLint,
 and production build passed. Seven browser checks passed, including complete
 create/edit/delete flows at desktop and mobile widths, persistence after reload,
 cancelled deletion, request metric destinations, and existing Operations layouts.
+
+Run status is a set of selectable tags using the same known statuses as Runs.
+Multiple tags can be selected; toggling a tag removes it and All statuses clears
+the filter. Existing saved status filters load into the selection. Desktop and
+mobile queue CRUD checks cover multiple selections, persistence after reload,
+deselection, and reset. Production build and four focused queue tests passed;
+scoped lint reported no errors and one pre-existing Fast Refresh warning.
