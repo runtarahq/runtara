@@ -106,7 +106,7 @@ export function operationsRunColumns(
       header: 'Actions',
       enableSorting: false,
       cell: ({ row }) => (
-        <div className="w-28">
+        <div className="min-w-28">
           <RunActions run={row.original} onReplay={onReplay} />
         </div>
       ),

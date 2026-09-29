@@ -69,14 +69,6 @@ export function RunContext({ run }: { run: ExecutionHistoryItem }) {
           {describeFailure(run).message}
         </p>
       )}
-      {run.status === 'suspended' && (
-        <Link
-          className="block text-xs text-primary-text"
-          to={`/operations/runs/${run.workflowId}/${run.instanceId}`}
-        >
-          Review run and requests
-        </Link>
-      )}
     </div>
   );
 }
@@ -174,7 +166,7 @@ export function RunActions({
   const iconClass =
     'h-8 w-8 rounded-lg p-2 text-muted-foreground transition-colors';
   return (
-    <div className="flex flex-wrap items-center gap-1">
+    <div className="flex w-max shrink-0 flex-nowrap items-center gap-1">
       {run.status === 'suspended' && (
         <WithTooltip
           label={

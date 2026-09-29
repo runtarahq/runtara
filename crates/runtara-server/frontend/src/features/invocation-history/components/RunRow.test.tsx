@@ -61,8 +61,8 @@ describe('operational run rows', () => {
       reason === 'paused'
     );
     expect(
-      screen.getByRole('link', { name: 'Review run and requests' })
-    ).toBeInTheDocument();
+      screen.queryByRole('link', { name: 'Review run and requests' })
+    ).not.toBeInTheDocument();
     expect(screen.queryByText(/Started/)).not.toBeInTheDocument();
     expect(screen.queryByText(/^Completed /)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument();
