@@ -598,7 +598,7 @@ fn shared_components_dir() -> PathBuf {
     let stdlib_bytes = fs::read(&stdlib_wasm)
         .unwrap_or_else(|error| panic!("read required {stdlib_wasm:?}: {error}"));
     for marker in [
-        b"agent-error-info".as_slice(),
+        b"state-local-restore".as_slice(),
         b"retry-sleep-key",
         b"retry-delay-ms",
         b"workflow-error-retryable",
