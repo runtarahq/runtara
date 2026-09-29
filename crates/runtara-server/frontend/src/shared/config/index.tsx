@@ -76,12 +76,12 @@ export const menu: MenuItem[] = [
     children: [
       { key: 'operations-overview', title: 'Overview', to: '/operations' },
       { key: 'operations-queues', title: 'Queues', to: '/operations/queues' },
-      { key: 'operations-runs', title: 'Runs', to: '/operations/runs' },
       {
         key: 'operations-monitor',
         title: 'Monitor',
         to: '/operations/monitor',
       },
+      { key: 'operations-runs', title: 'Runs', to: '/operations/runs' },
     ],
   },
   {

@@ -542,8 +542,8 @@ retained link to the original run.
 
 ## Implementation
 
-The Operations navigation contains **Overview**, **Queues**, **Runs**, and
-**Monitor**. Runs reuses the full invocation history at `/operations/runs`;
+The Operations navigation contains **Overview**, **Queues**, **Monitor**, and
+**Runs**. Runs reuses the full invocation history at `/operations/runs`;
 legacy `/invocation-history` links redirect there with filters preserved.
 Workflow-specific execution history and detailed execution links remain available.
 
