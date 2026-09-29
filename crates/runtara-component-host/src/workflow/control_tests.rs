@@ -463,3 +463,156 @@ async fn an_older_pin_runs_via_the_history_and_a_revoked_one_fails_the_call() ->
     assert!(fx.host.calls.lock().unwrap().is_empty());
     Ok(())
 }
+
+/// A root whose own code calls `runtara:control/api` (no executor).
+fn direct_root() -> Vec<u8> {
+    let root = section("DIRECT").replace("{{API}}", section("API"));
+    wat::parse_str(format!("(component {root})")).expect("direct root fixture parses")
+}
+
+fn completed(result: &InvokeRunResult) -> String {
+    match &result.exit {
+        InvokeExit::Completed(bytes) => String::from_utf8(bytes.clone()).unwrap(),
+        other => panic!("expected a completed run, got {other:?}"),
+    }
+}
+
+/// `"A"`: the fixture's spelling of a `denied` control error.
+const DENIED: &str = "\"A\"";
+
+fn direct_executor(fx: &Fixture, host: Option<Arc<dyn ControlHost>>) -> WorkflowExecutor {
+    let executor = WorkflowExecutor::new(fx.engine.clone()).unwrap();
+    if let Some(host) = host {
+        executor.set_control_host(host).unwrap();
+    }
+    executor
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_entry_calls_the_control_api_with_host_authority() -> anyhow::Result<()> {
+    let fx = Fixture::new()?;
+    let executor = direct_executor(&fx, Some(fx.host.clone()));
+    let prepared = executor
+        .prepare_path(&fx.write("direct.wasm", &direct_root()))
+        .await?;
+    let result =
+        bounded(executor.execute_prepared_invoke(&prepared, run_spec(), b"child-1".to_vec())).await;
+    assert_eq!(completed(&result), "\"paused\"");
+    assert_eq!(
+        fx.host.calls.lock().unwrap().as_slice(),
+        [ControlAuthority {
+            tenant: "tenant-a".into(),
+            caller: Some("run-1".into()),
+            operation: None,
+        }],
+        "tenant and caller come from the runner, not the guest environment"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_control_api_is_denied_outside_a_run_entry() -> anyhow::Result<()> {
+    let fx = Fixture::new()?;
+    let path = fx.write("direct.wasm", &direct_root());
+
+    // No control host configured.
+    let executor = direct_executor(&fx, None);
+    let prepared = executor.prepare_path(&path).await?;
+    let result =
+        bounded(executor.execute_prepared_invoke(&prepared, run_spec(), b"child-1".to_vec())).await;
+    assert_eq!(completed(&result), DENIED);
+
+    let executor = Arc::new(direct_executor(&fx, Some(fx.host.clone())));
+    let prepared = executor.prepare_path(&path).await?;
+
+    // A run without a host-supplied instance, or with an empty tenant.
+    for strip_instance in [true, false] {
+        let mut run = run_spec();
+        if strip_instance {
+            run.trusted_instance = None;
+        } else {
+            run.trusted_tenant = Some(String::new());
+        }
+        let result =
+            bounded(executor.execute_prepared_invoke(&prepared, run, b"child-1".to_vec())).await;
+        assert_eq!(completed(&result), DENIED);
+    }
+
+    // An unprepared load.
+    let pre = executor.load_instance_pre(&path).await?;
+    let result = bounded(executor.execute_invoke(&pre, run_spec(), b"child-1".to_vec())).await;
+    assert_eq!(completed(&result), DENIED);
+
+    // An isolated child workflow of the run.
+    let tasks = crate::isolated_tasks::IsolatedTasks::new(fx.engine.clone(), 4, 1 << 20)?;
+    let child = {
+        let executor = executor.clone();
+        let prepared = prepared.clone();
+        tasks.spawn(move |token| async move {
+            executor
+                .execute_isolated_workflow(
+                    prepared.instance_pre(),
+                    run_spec(),
+                    b"child-1".to_vec(),
+                    token,
+                    None,
+                )
+                .await
+                .exit
+        })?
+    };
+    match bounded(tasks.join(child)).await?.outcome() {
+        InvokeExit::Completed(bytes) => assert_eq!(bytes, DENIED.as_bytes()),
+        other => panic!("{other:?}"),
+    }
+
+    assert!(fx.host.calls.lock().unwrap().is_empty());
+    Ok(())
+}
+
+/// A control service that never answers `pause` in time.
+#[derive(Default)]
+struct Stalled {
+    finished: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl ControlHost for Stalled {
+    async fn pause(
+        &self,
+        _authority: &ControlAuthority,
+        instance_id: String,
+    ) -> Result<CommandResult, ControlError> {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        self.finished
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(CommandResult {
+            instance_id,
+            outcome: CommandOutcome::Applied,
+            replayed: false,
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_control_call_ends_at_the_run_deadline() -> anyhow::Result<()> {
+    let fx = Fixture::new()?;
+    let host = Arc::new(Stalled::default());
+    let executor = direct_executor(&fx, Some(host.clone()));
+    let prepared = executor
+        .prepare_path(&fx.write("direct.wasm", &direct_root()))
+        .await?;
+    let mut run = run_spec();
+    run.timeout = Duration::from_millis(500);
+    let result =
+        bounded(executor.execute_prepared_invoke(&prepared, run, b"child-1".to_vec())).await;
+    // The call's own bound (`timeout`, error index 18) or the run's deadline
+    // ends it first; the service call never completes.
+    match &result.exit {
+        InvokeExit::Completed(bytes) => assert_eq!(bytes, b"\"S\""),
+        InvokeExit::Timeout => {}
+        other => panic!("{other:?}"),
+    }
+    assert!(!host.finished.load(std::sync::atomic::Ordering::SeqCst));
+    Ok(())
+}

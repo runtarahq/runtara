@@ -747,6 +747,17 @@ impl EmbeddedWasmRunner {
         Ok(self)
     }
 
+    /// Attach the control service behind every run's `runtara:control/api`.
+    pub fn with_control_host(
+        self,
+        host: Arc<dyn runtara_component_host::control_host::ControlHost>,
+    ) -> Result<Self> {
+        self.executor
+            .set_control_host(host)
+            .map_err(|e| RunnerError::Other(e.to_string()))?;
+        Ok(self)
+    }
+
     /// Attach the durable instance wait service shared by all runs.
     pub fn with_instance_wait_host(
         self,

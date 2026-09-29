@@ -147,6 +147,10 @@ struct InvocationControl {
     trusted_pins: Option<Arc<std::collections::HashSet<String>>>,
     /// The audited control binding of a prepared artifact.
     control_binding: Option<Arc<crate::control_executor::ControlBinding>>,
+    /// Whether `runtara:control/api` is real for this entry: only the run's
+    /// own prepared entry. Isolated capabilities, isolated child workflows
+    /// and unprepared loads are `denied`.
+    control: bool,
     deadline: Option<Instant>,
     task_cancel: Option<crate::isolated_tasks::TaskCancellation>,
     abandoned: Option<Arc<AtomicBool>>,
@@ -238,6 +242,9 @@ pub struct WorkflowState {
     trusted: Option<crate::trusted::TrustedCall>,
     /// Forwarding target of `runtara:control/executor`, when configured.
     pub(crate) control_executor: Option<crate::control_executor::ControlCall>,
+    /// The run's control service behind `runtara:control/api`; `None` is
+    /// `denied`.
+    control_api: Option<crate::control_host::RunControl>,
     /// The operation a suspending call site entered.
     pub(crate) operation: crate::operation_scope_host::OperationScopeState,
     /// Durable instance waits of WaitForInstances steps.
@@ -276,6 +283,19 @@ impl ExecutionView for WorkflowState {
 
     fn execution_context(&self) -> Option<&Arc<ExecutionContext>> {
         self.execution.as_ref()
+    }
+}
+
+impl crate::control_host::ControlApiView for WorkflowState {
+    /// The authority is the run's host-supplied tenant and instance plus the
+    /// operation entered at call time, never anything the guest passes.
+    fn control_api(&self) -> Option<crate::control_host::ControlApiCall> {
+        let control = self.control_api.as_ref()?;
+        let operation = self
+            .operation
+            .current()
+            .map(|op| op.identity.op_hash.clone());
+        Some(control.call(operation, self.database_deadline()))
     }
 }
 
@@ -400,6 +420,7 @@ pub struct WorkflowExecutor {
     connection_resolver: std::sync::OnceLock<Arc<dyn crate::ConnectionResolverHost>>,
     trusted: std::sync::OnceLock<Arc<crate::trusted::TrustedExecutor>>,
     control: std::sync::OnceLock<Arc<crate::control_executor::ControlExecutor>>,
+    control_host: std::sync::OnceLock<Arc<dyn crate::control_host::ControlHost>>,
     instance_waits: std::sync::OnceLock<Arc<dyn crate::InstanceWaitHost>>,
     run_state: std::sync::OnceLock<Arc<dyn crate::RunStateHost>>,
     engine: Arc<Engine>,
@@ -489,6 +510,14 @@ impl WorkflowExecutor {
             .map_err(|_| anyhow::anyhow!("control executor already configured"))
     }
 
+    /// Serve every run's `runtara:control/api` with `host`. Without one, every
+    /// control call is `denied`.
+    pub fn set_control_host(&self, host: Arc<dyn crate::control_host::ControlHost>) -> Result<()> {
+        self.control_host
+            .set(host)
+            .map_err(|_| anyhow::anyhow!("control host already configured"))
+    }
+
     /// Serve every run's durable instance waits with `host`.
     pub fn set_instance_wait_host(&self, host: Arc<dyn crate::InstanceWaitHost>) -> Result<()> {
         self.instance_waits
@@ -523,12 +552,12 @@ impl WorkflowExecutor {
         crate::trusted::add_to_linker(&mut linker)?;
         // Typed agent suspension: the compiler-emitted operation scope, the
         // continuation context of ordinary suspending agents, the control
-        // executor the composed control copy forwards to, and `denied` for a
-        // direct control API call from anything composed into the root.
+        // executor the composed control copy forwards to, and the control API,
+        // real only for a run's own prepared entry.
         crate::operation_scope_host::add_operation_scope_to_linker(&mut linker)?;
         crate::operation_scope_host::add_suspension_context_to_linker(&mut linker)?;
         crate::control_executor::add_control_executor_to_linker(&mut linker)?;
-        crate::control_host::add_denied_control_api_to_linker(&mut linker)?;
+        crate::control_host::add_control_api_to_linker(&mut linker)?;
         // Durable instance waits of compiled WaitForInstances steps.
         crate::instance_wait_host::add_instance_waits_to_linker(&mut linker)?;
         // Queryable run state of compiled SetState / GetState steps.
@@ -536,6 +565,7 @@ impl WorkflowExecutor {
         Ok(Self {
             trusted: std::sync::OnceLock::new(),
             control: std::sync::OnceLock::new(),
+            control_host: std::sync::OnceLock::new(),
             instance_waits: std::sync::OnceLock::new(),
             run_state: std::sync::OnceLock::new(),
             outbound_http: std::sync::OnceLock::new(),
@@ -890,6 +920,7 @@ impl WorkflowExecutor {
             InvocationEntry::Lifecycle { interface: None },
             InvocationControl {
                 control_binding: prepared.control.clone(),
+                control: true,
                 ..Default::default()
             },
         )
@@ -1048,6 +1079,12 @@ impl WorkflowExecutor {
                     binding: control.control_binding.clone(),
                 }
             }),
+            control_api: crate::control_host::RunControl::for_run(
+                control.control,
+                self.control_host.get().cloned(),
+                spec.trusted_tenant.as_deref(),
+                spec.trusted_instance.as_deref(),
+            ),
             operation: Default::default(),
             instance_waits: crate::instance_wait_host::RunInstanceWaits::for_run(
                 self.instance_waits.get().cloned(),
@@ -1325,6 +1362,7 @@ impl WorkflowExecutor {
         let state = WorkflowState {
             trusted: None,
             control_executor: None,
+            control_api: None,
             operation: Default::default(),
             instance_waits: Default::default(),
             run_state: Default::default(),

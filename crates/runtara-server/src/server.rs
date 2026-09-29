@@ -1251,6 +1251,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         trusted_executor,
         control_boot,
         Some(instance_waits),
+        Some(native_control.clone() as Arc<dyn runtara_component_host::control_host::ControlHost>),
         connection_resolver,
         database,
         outbound_http,

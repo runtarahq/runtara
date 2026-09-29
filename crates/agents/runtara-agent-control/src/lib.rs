@@ -995,6 +995,7 @@ mod host {
             types::ErrorCode::AlreadyAnswered => ErrorCode::AlreadyAnswered,
             types::ErrorCode::NotPausable => ErrorCode::NotPausable,
             types::ErrorCode::NotPaused => ErrorCode::NotPaused,
+            types::ErrorCode::Timeout => ErrorCode::Timeout,
         };
         super::control_error(code, &error.message, error.retry_after_ms)
     }

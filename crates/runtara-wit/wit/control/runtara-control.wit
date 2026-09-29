@@ -76,6 +76,8 @@ interface types {
         not-pausable,
         /// `resume` of a run that is not explicitly paused.
         not-paused,
+        /// The call ran past its host bound (90 s or the step deadline).
+        timeout,
     }
 
     /// A failed control call.

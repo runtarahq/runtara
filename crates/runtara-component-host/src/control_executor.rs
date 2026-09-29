@@ -297,7 +297,11 @@ impl ControlExecutor {
                 Self::execute(
                     engine,
                     pre,
-                    ControlApiCall { host, authority },
+                    ControlApiCall {
+                        host,
+                        authority,
+                        deadline: None,
+                    },
                     &capability,
                     input,
                     deadline,

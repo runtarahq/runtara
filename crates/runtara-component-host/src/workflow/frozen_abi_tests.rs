@@ -52,8 +52,7 @@ fn fixtures_import_the_released_names() {
 }
 
 /// Workflow roots: the operation scope, the suspension context, the control
-/// executor forwarder, the `denied` control API and the instance waits all
-/// bind 1.0.0.
+/// executor forwarder, the control API and the instance waits all bind 1.0.0.
 #[test]
 fn workflow_stores_link_every_frozen_1_0_0_guest() {
     let engine = engine();
