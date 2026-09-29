@@ -8,6 +8,8 @@
 package runtara:workflow-stdlib@1.0.0;
 
 interface json {
+    use runtara:agent/types@1.0.0.{error-info};
+
     record agent-retry-error {
         payload: list<u8>,
         retryable: bool,
@@ -722,35 +724,20 @@ interface json {
         retry-after-ms: option<u64>,
     ) -> result<u64, string>;
 
-    agent-error-info: func(
-        code: string,
-        message: string,
-        category: string,
-        severity: string,
-        retryable: bool,
-        retry-after-ms: option<u64>,
-        attributes: option<string>,
-    ) -> result<list<u8>, string>;
-
+    // An Agent's error as the retry payload envelope plus its retry
+    // classification. A workflow-agent child's `details` ride in the envelope
+    // as `childError`. The record flattens past 16 values, so the caller
+    // passes a pointer to it: the error-info the Agent returned, in place.
     agent-retry-error-info: func(
-        code: string,
-        message: string,
-        category: string,
-        severity: string,
-        retryable: bool,
-        retry-after-ms: option<u64>,
-        attributes: option<string>,
+        error: error-info,
     ) -> result<agent-retry-error, string>;
 
+    // An Agent's error as the step's envelope, with its invocation context.
+    // `(agent-id, error)` lays out as the Agent's result area once its tag
+    // word holds the agent id, so the caller passes that area.
     agent-error: func(
         agent-id: u32,
-        code: string,
-        message: string,
-        category: string,
-        severity: string,
-        retryable: bool,
-        retry-after-ms: option<u64>,
-        attributes: option<string>,
+        error: error-info,
     ) -> result<list<u8>, string>;
 
     agent-error-from-info: func(

@@ -281,7 +281,6 @@ fn stdlib_exports_the_json_world() {
         "agent-attempt-result-key",
         "agent-attempt-envelope",
         "agent-retry-delay-ms",
-        "agent-error-info",
         "agent-retry-error-info",
         "agent-error",
         "agent-error-from-info",
@@ -295,7 +294,13 @@ fn stdlib_exports_the_json_world() {
         );
     }
     let world = &resolve.worlds[stdlib.worlds["workflow-stdlib"]];
-    assert!(world.imports.is_empty());
+    // Only the types `json` uses: the stdlib calls no host function.
+    let imports: Vec<_> = world
+        .imports
+        .keys()
+        .map(|key| resolve.name_world_key(key))
+        .collect();
+    assert_eq!(imports, [crate::agent::TYPES]);
     assert_eq!(world.exports.len(), 1);
     assert!(
         world

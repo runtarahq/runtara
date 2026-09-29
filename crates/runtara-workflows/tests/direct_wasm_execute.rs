@@ -13810,3 +13810,167 @@ async fn trusted_presigning_as_an_ai_tool_keeps_credentials_out_of_model_message
     );
     assert!(!second.contains("synthetic-test-secret"));
 }
+
+/// A workflow-agent's failure reaches its caller whole. The child's Error step
+/// returns its envelope in `error-info.details`; the root's step error keeps
+/// it as `childError`, the shape an embedded child's failure has, so the
+/// root's persisted error names the child's failing step. With retries the
+/// error goes through the retry classification, and the chain survives that
+/// path too.
+#[test]
+fn a_workflow_agent_failure_reaches_the_root_error_as_child_error() {
+    let components_dir = direct_e2e_components_dir();
+    let executor = embedded_executor();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let slug = "failing-child".to_string();
+    let child_graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "name": "Failing Child",
+        "durable": false,
+        "steps": {
+            "fail": {
+                "stepType": "Error",
+                "id": "fail",
+                "name": "Fail",
+                "category": "permanent",
+                "code": "CHILD_BROKE",
+                "message": "the child failed",
+                "severity": "error"
+            }
+        },
+        "entryPoint": "fail",
+        "executionPlan": [],
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+    }))
+    .expect("child parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let child = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "failing-child-wf".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: child_graph.clone(),
+            child_workflows: vec![],
+            output_dir: temp.path().join("child-build"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some(slug.clone()),
+        },
+        &components_dir,
+        runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
+        false,
+    )
+    .expect("child agent compile+compose succeeds");
+    let staging = temp.path().join("workflow-agents");
+    fs::create_dir_all(&staging).expect("staging dir");
+    fs::copy(
+        &child.wasm_path,
+        staging.join("runtara_agent_failing_child.wasm"),
+    )
+    .expect("stage child wasm");
+    let info = certified_workflow_agent_info(
+        &slug,
+        "Failing Child",
+        "",
+        &child_graph.input_schema,
+        &child_graph.output_schema,
+    );
+    fs::write(
+        staging.join("runtara_agent_failing_child.meta.json"),
+        serde_json::to_vec_pretty(&info).expect("meta serializes"),
+    )
+    .expect("stage child meta");
+    let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        info,
+    ]));
+
+    for max_retries in [0, 2] {
+        let parent_graph = serde_json::json!({
+            "name": "Parent Of Failing Child",
+            "steps": {
+                "call": {
+                    "stepType": "Agent",
+                    "id": "call",
+                    "agentId": slug,
+                    "capabilityId": "run",
+                    "maxRetries": max_retries,
+                    "retryDelay": 0,
+                    "inputMapping": {}
+                },
+                "finish": { "stepType": "Finish", "id": "finish" }
+            },
+            "entryPoint": "call",
+            "executionPlan": [{ "fromStep": "call", "toStep": "finish" }],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        });
+        let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+            DirectCompilationInput {
+                workflow_id: format!("failing-child-parent-{max_retries}"),
+                version: 1,
+                source_checksum: None,
+                execution_graph: serde_json::from_value(parent_graph).expect("parent parses"),
+                child_workflows: vec![],
+                output_dir: temp.path().join(format!("parent-build-{max_retries}")),
+                track_events: false,
+                agent_catalog: Some(catalog.clone()),
+                agent_slug: None,
+            },
+            runtara_workflows::direct_wasm::WorkflowRole::Root,
+            false,
+        )
+        .expect("parent compile succeeds");
+        runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+            &mut parent,
+            &components_dir,
+            std::slice::from_ref(&staging),
+        )
+        .expect("parent compose finds the staged child");
+
+        let host = Arc::new(RecordingRuntimeHost::new());
+        let run = runtime.block_on(async {
+            let pre = executor
+                .load_instance_pre(&parent.wasm_path)
+                .await
+                .expect("load parent artifact");
+            executor
+                .execute_invoke(
+                    &pre,
+                    runtara_component_host::WorkflowRunSpec {
+                        trusted_instance: None,
+                        trusted_tenant: Some("direct-wasm-execute".into()),
+                        env: HashMap::new(),
+                        stderr: None,
+                        timeout: Duration::from_secs(60),
+                        cancel: None,
+                        limits: runtara_component_host::WorkflowLimits::default(),
+                        runtime: Some(host.clone()),
+                    },
+                    b"{}".to_vec(),
+                )
+                .await
+        });
+        let runtara_component_host::InvokeExit::Failed(error) = run.exit else {
+            panic!(
+                "maxRetries {max_retries}: the root must fail: {:?}",
+                run.exit
+            );
+        };
+        // What the host persists as the root's error.
+        let persisted: Value =
+            serde_json::from_slice(&runtara_component_host::runtime_host::error_payload(&error))
+                .expect("persisted error is the envelope");
+        assert_eq!(persisted["code"], "CHILD_BROKE", "{persisted}");
+        assert_eq!(persisted["stepId"], "call", "{persisted}");
+        assert_eq!(persisted["agentId"], slug, "{persisted}");
+        let child_error = &persisted["childError"];
+        assert_eq!(
+            child_error["stepId"], "fail",
+            "maxRetries {max_retries}: the child's failing step reaches the root: {persisted}"
+        );
+        assert_eq!(child_error["code"], "CHILD_BROKE", "{persisted}");
+        assert_eq!(child_error["message"], "the child failed", "{persisted}");
+    }
+}

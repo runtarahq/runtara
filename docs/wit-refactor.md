@@ -680,10 +680,13 @@ below:
   `ScopedRootRuntime::publishable()`.
 - `RunTerminal::from_exit` and `runtime_host::error_payload` own the
   persistence rule.
-- A parent does not yet keep a workflow-agent child's `details` as the
-  `childError` of its own envelope. Adding a string to the agent-error stdlib
-  calls pushes them past 16 flat parameters, which changes their calling
-  convention. The child's flat fields reach the parent as before.
+- A parent keeps a workflow-agent child's `details` as the `childError` of
+  its own envelope, in a follow-up commit. `stdlib.agent-retry-error-info`
+  and `stdlib.agent-error` take the `error-info` record; it flattens past 16
+  values, so the argument passes by pointer, and the emitter hands over the
+  error-info the Agent returned in place (`agent-error` stores the agent id
+  over the result tag first). `agent-error-info` is deleted. The stdlib world
+  now imports `runtara:agent/types` for the record.
 - The staging and cross-checks of the second channel (`DeferredTerminal`,
   `ChildTerminal`, the child `outcome_check`) are deleted, not reworked, and
   so are their conflict and mismatch tests: with one channel there is nothing

@@ -7,8 +7,8 @@
 //! to assert structure rather than behaviour: the expected host/stdlib/agent
 //! imports are present, calls appear in the right order and position (e.g. a
 //! breakpoint check before its import), the manifest/support/ABI custom sections
-//! are embedded, `wasi:cli/run` is exported, and each supported graph shape lowers
-//! at all. They are the fast safety net that catches a malformed module without
+//! are embedded, the workflow entry is exported, and each supported graph shape
+//! lowers at all. They are the fast safety net that catches a malformed module without
 //! executing it — observable runtime parity with the generated compiler is the job
 //! of the separate A/B integration suite under `tests/`.
 
@@ -5486,7 +5486,8 @@ fn direct_core_lowers_non_durable_agent_call() {
     let mut saw_runtime_terminal = false;
     let mut saw_agent_ok_ptr_load = false;
     let mut saw_agent_ok_len_load = false;
-    let mut saw_agent_retry_after_value_load = false;
+    let mut saw_agent_error_in_place = false;
+    let mut agent_error_index = None;
     let mut agent_invoke_index = None;
     let mut agent_validate_input_index = None;
     let mut saw_validate_before_invoke = false;
@@ -5509,8 +5510,12 @@ fn direct_core_lowers_non_durable_agent_call() {
                         saw_agent_validate_input = true;
                         agent_validate_input_index = Some(next_function_index);
                     }
-                    saw_agent_error |= import.module.contains("runtara:workflow-stdlib/json")
-                        && import.name == "agent-error";
+                    if import.module.contains("runtara:workflow-stdlib/json")
+                        && import.name == "agent-error"
+                    {
+                        saw_agent_error = true;
+                        agent_error_index = Some(next_function_index);
+                    }
                     saw_agent_debug_error |= import.module.contains("runtara:workflow-stdlib/json")
                         && import.name == "agent-debug-error";
                     saw_runtime_terminal |= import.module.contains("runtara:workflow/runtime")
@@ -5523,8 +5528,27 @@ fn direct_core_lowers_non_durable_agent_call() {
             Payload::CodeSectionEntry(body) => {
                 if code_body_index == 0 {
                     let mut saw_validate_call = false;
+                    let mut recent: Vec<Operator> = Vec::new();
                     for operator in body.get_operators_reader().expect("operators").into_iter() {
-                        match operator.expect("operator") {
+                        let operator = operator.expect("operator");
+                        // `agent-error(agent-id, error-info)` passes by
+                        // pointer: the agent id stored over the result tag,
+                        // then the area as both the arguments and the result.
+                        if let Operator::Call { function_index } = operator
+                            && Some(function_index) == agent_error_index
+                        {
+                            saw_agent_error_in_place = matches!(
+                                recent.as_slice(),
+                                [
+                                    ..,
+                                    Operator::I32Store { memarg },
+                                    Operator::I32Const { value: args },
+                                    Operator::I32Const { value: result },
+                                ] if memarg.offset == 0 && *args == *result
+                            );
+                        }
+                        recent.push(operator.clone());
+                        match operator {
                             Operator::Call { function_index }
                                 if Some(function_index) == agent_validate_input_index =>
                             {
@@ -5544,12 +5568,6 @@ fn direct_core_lowers_non_durable_agent_call() {
                                 if memarg.offset == DIRECT_AGENT_RESULT_OK_LEN_OFFSET =>
                             {
                                 saw_agent_ok_len_load = true;
-                            }
-                            Operator::I64Load { memarg }
-                                if memarg.offset
-                                    == DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET =>
-                            {
-                                saw_agent_retry_after_value_load = true;
                             }
                             _ => {}
                         }
@@ -5588,8 +5606,8 @@ fn direct_core_lowers_non_durable_agent_call() {
         "Agent success should load list length from result payload offset 12"
     );
     assert!(
-        saw_agent_retry_after_value_load,
-        "Agent error path should pass retry-after-ms from error-info"
+        saw_agent_error_in_place,
+        "Agent error path should pass the returned error-info in place"
     );
     assert!(
         saw_validate_before_invoke,
@@ -5793,6 +5811,9 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
                             {
                                 saw_retry_info_after_invoke = saw_invoke_call;
                                 saw_retry_info_call = true;
+                                // The Agent's error-info passes by pointer;
+                                // the stdlib reads its `retryable`.
+                                saw_retryable_load = true;
                             }
                             Operator::Call { function_index }
                                 if Some(function_index) == agent_retry_delay_index =>
@@ -5818,11 +5839,6 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
                             Operator::Loop { .. } => saw_retry_loop = true,
                             Operator::Br { relative_depth: 2 } => {
                                 saw_retry_continue_branch = true;
-                            }
-                            Operator::I32Load8U { memarg }
-                                if memarg.offset == DIRECT_AGENT_RESULT_ERR_RETRYABLE_OFFSET =>
-                            {
-                                saw_retryable_load = true;
                             }
                             Operator::I32Load8U { memarg }
                                 if memarg.offset == DIRECT_AGENT_RETRY_INFO_RETRYABLE_OFFSET =>
@@ -6495,6 +6511,9 @@ fn direct_core_lowers_durable_agent_retry_loop() {
                             {
                                 saw_retry_info_after_invoke = saw_invoke_call;
                                 saw_retry_info_call = true;
+                                // The Agent's error-info passes by pointer;
+                                // the stdlib reads its `retryable`.
+                                saw_retryable_load = true;
                             }
                             Operator::Call { function_index }
                                 if Some(function_index) == agent_retry_delay_index =>
@@ -6530,11 +6549,6 @@ fn direct_core_lowers_durable_agent_retry_loop() {
                             Operator::Loop { .. } => saw_retry_loop = true,
                             Operator::Br { relative_depth: 2 } => {
                                 saw_retry_continue_branch = true;
-                            }
-                            Operator::I32Load8U { memarg }
-                                if memarg.offset == DIRECT_AGENT_RESULT_ERR_RETRYABLE_OFFSET =>
-                            {
-                                saw_retryable_load = true;
                             }
                             Operator::I32Load8U { memarg }
                                 if memarg.offset == DIRECT_AGENT_RETRY_INFO_RETRYABLE_OFFSET =>
@@ -10979,7 +10993,7 @@ fn abi_is_part_of_the_lowering_tag() {
 
     let tag = super::direct_lowering_tag();
     assert!(
-        tag.contains("abi=invoke-v4"),
+        tag.contains("abi=invoke-v5"),
         "the tag must name the ABI, or changing it cannot invalidate a cached image: {tag}"
     );
     assert!(

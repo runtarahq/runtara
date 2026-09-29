@@ -144,7 +144,6 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_agent_attempt_result_key: Option<u32>,
     stdlib_agent_attempt_envelope: Option<u32>,
     stdlib_agent_retry_delay_ms: Option<u32>,
-    stdlib_agent_error_info: Option<u32>,
     stdlib_agent_retry_error_info: Option<u32>,
     stdlib_agent_error: Option<u32>,
     stdlib_agent_error_from_info: Option<u32>,
@@ -179,8 +178,6 @@ impl DirectCoreImportIndices {
         omit_runtime: bool,
         has_connections: bool,
     ) -> Result<DirectCoreFunctionIndices, DirectCompileError> {
-        let _stdlib_agent_error_info =
-            require_import(self.stdlib_agent_error_info, "stdlib.agent-error-info")?;
         Ok(DirectCoreFunctionIndices {
             cooperative_helpers: [None; super::cooperative_wait::HELPER_COUNT],
             cooperative_helper_body: false,
@@ -1352,8 +1349,6 @@ pub(super) fn import_core_function(
         import_indices.stdlib_agent_attempt_envelope = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-retry-delay-ms") {
         import_indices.stdlib_agent_retry_delay_ms = Some(function_index);
-    } else if is_stdlib_import(resolve, interface, function, "agent-error-info") {
-        import_indices.stdlib_agent_error_info = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-retry-error-info") {
         import_indices.stdlib_agent_retry_error_info = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "agent-error") {
