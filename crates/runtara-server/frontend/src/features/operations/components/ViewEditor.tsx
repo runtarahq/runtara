@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type {
   OperationViewConfig,
+  OperationQueue,
   SavedOperationView,
   StateFilterDto,
 } from '@/generated/RuntaraRuntimeApi';
@@ -18,7 +19,9 @@ export function ViewEditor({
   schema,
   onSaved,
   onCancel,
+  requestSources,
 }: {
+  requestSources?: OperationQueue[];
   initial: OperationViewConfig;
   saved?: SavedOperationView;
   schema: Record<string, StateField>;
@@ -26,6 +29,8 @@ export function ViewEditor({
   onCancel: () => void;
 }) {
   const [view, setView] = useState(initial);
+  // Save against the revision this form was opened with, even if discovery refreshes.
+  const [revision] = useState(saved?.revision);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const token = useToken();
@@ -43,7 +48,7 @@ export function ViewEditor({
         token,
         `operations/views${saved ? `/${saved.id}` : ''}`,
         saved ? 'PUT' : 'POST',
-        { configuration: view, revision: saved?.revision }
+        { configuration: view, revision }
       );
       await client.invalidateQueries({ queryKey: ['operations'] });
       onSaved(result);
@@ -55,12 +60,10 @@ export function ViewEditor({
   }
   return (
     <section
-      aria-label="View settings"
+      aria-label="Queue settings"
       className="m-6 space-y-5 rounded-lg border bg-muted/20 p-5"
     >
-      <h2 className="text-lg font-semibold">
-        {saved ? 'Edit shared view' : 'Save a shared view'}
-      </h2>
+      <h2 className="text-lg font-semibold">Queue settings</h2>
       <label className="block max-w-lg text-sm">
         Name
         <Input
@@ -68,6 +71,100 @@ export function ViewEditor({
           onChange={(e) => update({ name: e.target.value })}
         />
       </label>
+      {requestSources && (
+        <label className="block max-w-lg text-sm">
+          Queue contents
+          <select
+            aria-label="Queue contents"
+            className="mt-1 block h-9 w-full rounded border bg-background px-3"
+            value={view.where?.openRequest ?? ''}
+            onChange={(event) =>
+              update({
+                where: {
+                  ...view.where,
+                  openRequest: event.target.value || null,
+                  status: undefined,
+                },
+                answers: { ...view.answers, inline: null, bulk: false },
+              })
+            }
+          >
+            <option value="">Workflow runs</option>
+            {view.where?.openRequest &&
+              !requestSources.some(
+                (source) => source.actionKey === view.where?.openRequest
+              ) && (
+                <option value={view.where.openRequest}>
+                  {view.where.openRequest} (older requests)
+                </option>
+              )}
+            {requestSources.map((source) => (
+              <option key={source.actionKey} value={source.actionKey}>
+                Requests: {source.name} ({source.actionKey})
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {!view.where?.openRequest && (
+        <label className="block max-w-lg text-sm">
+          Run status
+          <Input
+            placeholder="All statuses"
+            value={view.where?.status ?? ''}
+            onChange={(event) =>
+              update({
+                where: { ...view.where, status: event.target.value || null },
+              })
+            }
+          />
+          <span className="text-xs text-muted-foreground">
+            For example: running, suspended, failed, completed. Separate
+            multiple statuses with commas.
+          </span>
+        </label>
+      )}
+      <div className="flex flex-wrap items-end gap-4">
+        <label className="text-sm">
+          Sort field
+          <select
+            aria-label="Sort field"
+            className="mt-1 block h-9 rounded border bg-background px-3"
+            value={view.sort?.field ?? ''}
+            onChange={(event) =>
+              update({
+                sort: event.target.value
+                  ? {
+                      field: event.target.value,
+                      descending: view.sort?.descending ?? false,
+                    }
+                  : null,
+              })
+            }
+          >
+            <option value="">Default order</option>
+            {fields.map((field) => (
+              <option key={field} value={field}>
+                {stateLabel(field, schema[field])}
+              </option>
+            ))}
+          </select>
+        </label>
+        {view.sort && (
+          <label className="flex h-9 items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={view.sort.descending ?? false}
+              onChange={(event) =>
+                update({
+                  sort: { ...view.sort!, descending: event.target.checked },
+                })
+              }
+            />
+            Descending
+          </label>
+        )}
+      </div>
       <div className="grid gap-4 md:grid-cols-3">
         {(['key', 'stage', 'due'] as const).map((role) => (
           <label key={role} className="text-sm">
@@ -248,10 +345,13 @@ export function ViewEditor({
         </p>
       ) : null}
       <div className="flex gap-2">
-        <Button disabled={saving} onClick={() => void save()}>
-          {saving ? 'Saving…' : 'Save view'}
+        <Button
+          disabled={saving || !view.name.trim()}
+          onClick={() => void save()}
+        >
+          {saving ? 'Saving…' : saved ? 'Save changes' : 'Create queue'}
         </Button>
-        <Button variant="secondary" onClick={onCancel}>
+        <Button variant="secondary" disabled={saving} onClick={onCancel}>
           Cancel
         </Button>
       </div>

@@ -139,7 +139,7 @@ export function OverviewPage() {
           <Metric
             title="Waiting for a decision"
             value={waiting}
-            note={`Across ${queues.data?.filter((q) => q.count > 0).length ?? '…'} queues`}
+            note={`Across ${queues.data ? new Set(queues.data.filter((q) => q.count > 0).map((q) => q.workflowId)).size : '…'} workflows`}
             to="/operations/requests"
             action="View requests"
           />
@@ -149,7 +149,7 @@ export function OverviewPage() {
             note={
               overdueKnown
                 ? 'Past their configured due time'
-                : 'Choose a due field in a shared view'
+                : 'Choose a due field in a queue'
             }
             to="/operations/requests?filter=overdue"
             action="Review"

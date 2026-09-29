@@ -288,3 +288,28 @@ Pagination covers 132 requests across three queues, including multiple requests
 on the same run, partition boundaries and out-of-range pages. Five browser checks
 passed: the cards open the matching four waiting/two overdue requests at desktop
 and mobile widths, Overdue survives reload, and existing Operations layouts work.
+
+## Custom queue management
+
+Queues now lists only saved, user-created configurations. The automatic queue
+list and separate Shared views section are removed. Existing shared views remain
+available as queues without a migration; their previous `/operations/views/:id`
+links still work. The canonical destination is `/operations/queues/:id`.
+
+Create queue selects one workflow and either requests for an action key or
+workflow runs. Queue settings include name, state filters, run status, columns,
+sorting, display formats, field roles, and answer controls. Edit and delete are
+available on both the list and queue detail page under `workflow:update`.
+The workflow cannot change after creation, matching the existing API contract.
+Removed action keys remain selectable for an existing queue.
+
+Deletion confirms the named queue and removes only its saved configuration.
+Workflows, runs, and pending requests remain available. Edits and deletion retain
+the revision originally presented, allowing the API to reject concurrent changes.
+Waiting and Overdue still use internal request discovery independently of saved
+queues; the waiting metric describes workflows rather than automatic queues.
+
+Verification: 63 focused Operations and invocation-history tests, scoped ESLint,
+and production build passed. Seven browser checks passed, including complete
+create/edit/delete flows at desktop and mobile widths, persistence after reload,
+cancelled deletion, request metric destinations, and existing Operations layouts.

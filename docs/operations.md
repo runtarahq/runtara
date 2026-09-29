@@ -6,6 +6,14 @@ Phase 5 remains later work. See [Implementation](#implementation) for the
 concrete API and validation coverage.
 Monitor is consolidated into Runs; Overview no longer contains Processes.
 See [Runs consolidation](operations-runs-consolidation.md) for behavior and validation.
+Queues are now manually created, shared configurations, replacing the original
+automatic queue list and the separate “Shared views” section. Existing saved
+views appear as queues. Users with `workflow:update` can create, edit, and delete
+them; each queue selects one workflow and either a request action or workflow
+runs, with configurable columns, filters, ordering, and presentation. Automatic
+request discovery remains internal so Overview and request lists include work
+even when no queue has been configured. This decision supersedes the automatic
+queue UI described in the original plan below.
 The screenshots come from an interactive prototype and show sample data; what
 each screen needs from the platform is listed under [Screens](#screens).
 

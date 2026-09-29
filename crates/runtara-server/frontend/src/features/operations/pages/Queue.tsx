@@ -27,13 +27,15 @@ import {
 } from '../queries';
 import { StateValue, type StateField } from '../components/StateValue';
 import { QueueAnswer, type AnswerController } from '../components/QueueAnswer';
+import { DeleteQueue } from '../components/DeleteQueue';
 import { ViewEditor, StateFilters } from '../components/ViewEditor';
 import { OperationHeader, RunRows, RefreshControls } from './shared';
 
 const requestKey = (r: OperationRequest) =>
   JSON.stringify([r.instanceId, r.requestId]);
 export function QueuePage() {
-  const { workflowId, actionKey, viewId } = useParams();
+  const { workflowId, actionKey, viewId: legacyViewId, queueId } = useParams();
+  const viewId = queueId ?? legacyViewId;
   const { queues, views, processes } = useOperations();
   const saved = views.data?.find((v) => v.id === viewId);
   const queue = queues.data?.find(
@@ -60,15 +62,15 @@ export function QueuePage() {
   if (queues.error || views.error || processes.error)
     return (
       <p role="alert" className="p-6">
-        Could not load view. Refresh to try again.
+        Could not load queue. Refresh to try again.
       </p>
     );
   if (!initial)
     return (
       <div className="p-6">
         {queues.isPending || views.isPending || processes.isPending
-          ? 'Loading view…'
-          : 'View not found.'}
+          ? 'Loading queue…'
+          : 'Queue not found.'}
       </div>
     );
   return (
@@ -176,13 +178,27 @@ function QueueContent({
                   onRefresh={() => void query.refetch()}
                 />
                 <Can permission="workflow:update">
-                  <Button
-                    variant="secondary"
-                    bordered
-                    onClick={() => setEditing((v) => !v)}
-                  >
-                    {saved ? 'Edit view' : 'Save view'}
-                  </Button>
+                  {saved ? (
+                    <>
+                      <Button asChild variant="secondary" bordered>
+                        <Link to={`/operations/queues/${saved.id}/edit`}>
+                          Edit queue
+                        </Link>
+                      </Button>
+                      <DeleteQueue
+                        queue={saved}
+                        onDeleted={() => navigate('/operations/queues')}
+                      />
+                    </>
+                  ) : (
+                    <Button
+                      variant="secondary"
+                      bordered
+                      onClick={() => setEditing((value) => !value)}
+                    >
+                      Create queue
+                    </Button>
+                  )}
                 </Can>
               </>
             }
@@ -294,7 +310,7 @@ function QueueContent({
             onSaved={(result) => {
               setEditing(false);
               setView(result.configuration);
-              navigate(`/operations/views/${result.id}`);
+              navigate(`/operations/queues/${result.id}`);
             }}
           />
         </Can>

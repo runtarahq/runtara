@@ -34,7 +34,7 @@ export function RequestsPage() {
         title={overdue ? 'Overdue requests' : 'Waiting requests'}
         description={
           overdue
-            ? 'Open requests past the due time configured in their shared view.'
+            ? 'Open requests past the due time configured in their queue.'
             : 'Open requests requiring an answer across all workflows.'
         }
         actions={
