@@ -2984,6 +2984,13 @@ fn validate_mapping_value_references(
 ///
 /// `warn_on_self_reference` is off for edge conditions, which are attributed
 /// to the edge's source step and routinely read that step's own outputs.
+///
+/// Every reference the reference phase sees — input mappings, `connection_ref`,
+/// conditions, bare config values, edge conditions — passes through here, so
+/// this is also where a malformed path (one the tokenizer had to repair) is
+/// reported, once. Returns `false` for such a path so the caller skips its
+/// remaining checks; reference-root validation skips it too (see
+/// [`validate_reference_root`]), as its segments are not what was written.
 fn validate_step_reference(
     step_id: &str,
     ref_path: &str,
@@ -2991,7 +2998,16 @@ fn validate_step_reference(
     step_types: &HashMap<String, &'static str>,
     warn_on_self_reference: bool,
     result: &mut ValidationResult,
-) {
+) -> bool {
+    if let Some(reason) = malformed_path_reason(ref_path) {
+        result.errors.push(ValidationError::InvalidReferencePath {
+            step_id: step_id.to_string(),
+            reference_path: ref_path.to_string(),
+            reason: reason.to_string(),
+        });
+        return false;
+    }
+
     if ref_path == "__error" || ref_path.starts_with("__error.") {
         result.warnings.push(ValidationWarning::BareErrorReference {
             step_id: step_id.to_string(),
@@ -3001,7 +3017,7 @@ fn validate_step_reference(
     }
 
     let Some(referenced_step_id) = extract_step_id_from_reference(ref_path) else {
-        return;
+        return true;
     };
 
     // Check if step references itself (warning, not error)
@@ -3028,6 +3044,8 @@ fn validate_step_reference(
         // statically-shaped output (e.g. `steps.split.outputs.result`).
         validate_step_output_reference(step_id, ref_path, &referenced_step_id, step_type, result);
     }
+
+    true
 }
 
 fn validate_reference(
@@ -3038,24 +3056,16 @@ fn validate_reference(
     valid_variable_names: &HashSet<String>,
     result: &mut ValidationResult,
 ) {
-    // Reject a path the tokenizer had to repair. Dots inside a closed `[..]`
-    // body belong to the key (`data["a..b"]`) and are fine; leading/trailing
-    // dots are not caught here.
-    if let Some(reason) = malformed_path_reason(ref_path) {
-        result.errors.push(ValidationError::InvalidReferencePath {
-            step_id: step_id.to_string(),
-            reference_path: ref_path.to_string(),
-            reason: reason.to_string(),
-        });
-        return;
-    }
-
     // The captured onError envelope is exposed at `steps.__error.*` (alias
     // `steps.error.*`). Older docs advertised a bare `__error.*` root; the
     // runtime still mirrors it to the source root for back-compat (see
     // `build_source`), but the bare form bypasses step-id typo checking, so
     // steer authors to the canonical `steps.__error.*` path.
-    validate_step_reference(step_id, ref_path, valid_step_ids, step_types, true, result);
+    //
+    // A malformed path is reported there and nothing else is checked.
+    if !validate_step_reference(step_id, ref_path, valid_step_ids, step_types, true, result) {
+        return;
+    }
 
     // Check for variable references
     if let Some(variable_name) = extract_variable_name_from_reference(ref_path)
@@ -3658,9 +3668,10 @@ fn malformed_path_reason(path: &str) -> Option<&'static str> {
 fn defect_reason(defect: PathDefect) -> (u8, &'static str) {
     match defect {
         PathDefect::ConsecutiveDots => (0, "empty path segment (consecutive dots)"),
-        PathDefect::EmptyBracketKey => (1, "empty bracket key"),
-        PathDefect::UnterminatedBracket => (2, "unterminated bracket (missing `]`)"),
-        _ => (3, "malformed reference path"),
+        PathDefect::TrailingDot => (1, "empty path segment (trailing dot)"),
+        PathDefect::EmptyBracketKey => (2, "empty bracket key"),
+        PathDefect::UnterminatedBracket => (3, "unterminated bracket (missing `]`)"),
+        _ => (4, "malformed reference path"),
     }
 }
 
@@ -6000,6 +6011,15 @@ fn validate_reference_root(
     iteration_allowed: bool,
     result: &mut ValidationResult,
 ) {
+    // A malformed path was already reported, once, by the reference phase
+    // (`validate_step_reference`), which sees every reference this phase does.
+    // Its segments are the tokenizer's repair, not what was written, so
+    // checking them here would only add a misleading second error (an
+    // undefined field or variable named after the repaired key).
+    if malformed_path_reason(reference).is_some() {
+        return;
+    }
+
     match reference_root(reference) {
         "data" => {
             if parse_reference(reference).is_none() {
@@ -7975,6 +7995,176 @@ mod tests {
                 result.errors
             );
         }
+    }
+
+    /// A graph with `reference` placed in one location that never passes
+    /// through an input mapping. `data.a` is declared in the input schema.
+    fn graph_with_unmapped_reference(location: &str, reference: &str) -> ExecutionGraph {
+        let reference = serde_json::to_string(reference).unwrap();
+        let eq = format!(
+            r#"{{"type":"operation","op":"EQ","arguments":[
+                {{"valueType":"reference","value":{reference}}},
+                {{"valueType":"immediate","value":1}}]}}"#
+        );
+        let always = r#"{"type":"operation","op":"EQ","arguments":[
+                {"valueType":"immediate","value":1},{"valueType":"immediate","value":1}]}"#;
+        let (entry, step, edge_condition) = match location {
+            "conditional" => (
+                "check",
+                format!(r#""check": {{"id":"check","stepType":"Conditional","condition":{eq}}},"#),
+                None,
+            ),
+            "filter_condition" => (
+                "check",
+                format!(
+                    r#""check": {{"id":"check","stepType":"Filter","config":{{
+                        "value":{{"valueType":"immediate","value":[1]}},"condition":{eq}}}}},"#
+                ),
+                None,
+            ),
+            "filter_value" => (
+                "check",
+                format!(
+                    r#""check": {{"id":"check","stepType":"Filter","config":{{
+                        "value":{{"valueType":"reference","value":{reference}}},"condition":{always}}}}},"#
+                ),
+                None,
+            ),
+            "edge_condition" => (
+                "check",
+                r#""check": {"id":"check","stepType":"Log","message":"x","level":"info"},"#
+                    .to_string(),
+                Some(eq.clone()),
+            ),
+            other => panic!("unknown location {other}"),
+        };
+        let edge = match edge_condition {
+            Some(condition) => {
+                format!(r#"{{"fromStep":"check","toStep":"finish","condition":{condition}}}"#)
+            }
+            None => r#"{"fromStep":"check","toStep":"finish"}"#.to_string(),
+        };
+        let json = format!(
+            r#"{{
+              "entryPoint": "{entry}",
+              "executionPlan": [{edge}],
+              "steps": {{
+                {step}
+                "finish": {{"id":"finish","stepType":"Finish"}}
+              }},
+              "inputSchema": {{"a": {{"type": "string"}}}}
+            }}"#
+        );
+        serde_json::from_str(&json).unwrap_or_else(|e| panic!("{location}: {e}\n{json}"))
+    }
+
+    fn malformed_path_errors<'a>(
+        result: &'a ValidationResult,
+        reference: &str,
+    ) -> Vec<&'a ValidationError> {
+        result
+            .errors
+            .iter()
+            .filter(|error| {
+                matches!(
+                    error,
+                    ValidationError::InvalidReferencePath { reference_path, .. }
+                        if reference_path == reference
+                )
+            })
+            .collect()
+    }
+
+    /// Conditions, bare config values and edge conditions never pass through
+    /// an input mapping, and used to skip the malformed-path check entirely —
+    /// `data[""]` in a condition resolved to the whole `data` object.
+    #[test]
+    fn test_malformed_paths_are_rejected_outside_input_mappings() {
+        for location in [
+            "conditional",
+            "filter_condition",
+            "filter_value",
+            "edge_condition",
+        ] {
+            for reference in [r#"data[""]"#, "data[a", "steps..check", "data."] {
+                let graph = graph_with_unmapped_reference(location, reference);
+                let result = validate_workflow(&graph, &test_catalog());
+                assert_eq!(
+                    malformed_path_errors(&result, reference).len(),
+                    1,
+                    "{location}: `{reference}` must be rejected exactly once: {:?}",
+                    result.errors
+                );
+            }
+
+            let graph = graph_with_unmapped_reference(location, "data.a");
+            let result = validate_workflow(&graph, &test_catalog());
+            assert!(
+                malformed_path_errors(&result, "data.a").is_empty(),
+                "{location}: `data.a` is well-formed: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    /// A malformed path is reported once. The root checks used to run on the
+    /// tokenizer's repaired segments too, adding an undefined field/variable
+    /// error named after a key the author never wrote.
+    #[test]
+    fn test_malformed_mapping_reference_reports_a_single_error() {
+        for reference in [
+            "data[foo",
+            "variables[x",
+            r#"data[""]"#,
+            "data.",
+            "variables.x.",
+        ] {
+            let result = validate_data_reference_with_schema_key(reference, "a");
+            assert_eq!(
+                malformed_path_errors(&result, reference).len(),
+                1,
+                "`{reference}` must be rejected exactly once: {:?}",
+                result.errors
+            );
+            assert!(
+                !result.errors.iter().any(|error| matches!(
+                    error,
+                    ValidationError::UndefinedDataReference { .. }
+                        | ValidationError::UndefinedVariableReference { .. }
+                        | ValidationError::UnknownVariable { .. }
+                )),
+                "`{reference}` must not also report its repaired key: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    #[test]
+    fn test_trailing_dot_is_rejected() {
+        for reference in ["data.", "variables.x.", r#"data["a"]."#] {
+            let result = validate_data_reference_with_schema_key(reference, "a");
+            assert!(
+                result.errors.iter().any(|error| matches!(
+                    error,
+                    ValidationError::InvalidReferencePath { reference_path, reason, .. }
+                        if reference_path == reference
+                            && reason == "empty path segment (trailing dot)"
+                )),
+                "`{reference}` must be rejected: {:?}",
+                result.errors
+            );
+        }
+
+        // Inside a closed bracket the dot belongs to the key.
+        let result = validate_data_reference_with_schema_key(r#"data["a."]"#, "a.");
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::InvalidReferencePath { .. })),
+            "{:?}",
+            result.errors
+        );
     }
 
     /// Well-formed bracket keys — including a quoted blank key, which is a

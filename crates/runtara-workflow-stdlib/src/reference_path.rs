@@ -34,13 +34,17 @@ pub enum PathDefect {
     EmptyBracketKey,
     /// A `[` with no closing `]`; the rest of the path became its body.
     UnterminatedBracket,
+    /// The path ends in a dot outside any bracket body (`data.`,
+    /// `variables.x.`), so an empty final segment was dropped. A leading dot is
+    /// not reported: it leaves an empty root, which callers reject as such.
+    TrailingDot,
 }
 
 /// A reference path split into lookup segments, plus each distinct
 /// [`PathDefect`] met along the way (each kind is recorded at most once).
 ///
-/// Not every dropped segment is a defect: a leading or trailing dot (`.data`,
-/// `data.`) is dropped silently, as it always has been.
+/// Not every dropped segment is a defect: a leading dot (`.data`) is dropped
+/// silently, since it leaves an empty root that callers already reject.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TokenizedPath {
     pub segments: Vec<String>,
@@ -131,6 +135,10 @@ pub fn tokenize_reference(path: &str) -> TokenizedPath {
                 current.push(ch);
             }
         }
+    }
+
+    if previous_dot {
+        tokenized.record(PathDefect::TrailingDot);
     }
 
     if !current.is_empty() {
@@ -397,10 +405,21 @@ mod tests {
     }
 
     #[test]
-    fn leading_and_trailing_dots_are_dropped_without_a_defect() {
-        assert_eq!(defects(".data"), []);
-        assert_eq!(defects("steps.a.outputs."), []);
+    fn trailing_dot_is_reported_leading_dot_is_not() {
+        assert_eq!(defects("steps.a.outputs."), [PathDefect::TrailingDot]);
+        assert_eq!(defects("data."), [PathDefect::TrailingDot]);
+        assert_eq!(defects(r#"data["a"]."#), [PathDefect::TrailingDot]);
         assert_eq!(segments("steps.a.outputs."), ["steps", "a", "outputs"]);
+
+        // Inside a closed bracket the dot is part of the key.
+        assert_eq!(defects(r#"data["a."]"#), []);
+        // A leading dot leaves an empty root, which callers reject as such.
+        assert_eq!(defects(".data"), []);
+        // Consecutive dots at the end are both.
+        assert_eq!(
+            defects("data.."),
+            [PathDefect::ConsecutiveDots, PathDefect::TrailingDot]
+        );
     }
 
     #[test]
