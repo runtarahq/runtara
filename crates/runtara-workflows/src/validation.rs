@@ -3375,6 +3375,17 @@ fn collect_edge_condition_references(
 // ============================================================================
 
 /// Validate that step references only refer to steps that have already executed.
+/// The step a reference names, for execution-order checks — `None` for a
+/// malformed path. That path is already reported (once) by the reference
+/// phase, and the id here would come from the tokenizer's repair of it, so an
+/// ordering error on top would name a step the author never wrote.
+fn ordered_step_id(reference: &str) -> Option<String> {
+    if malformed_path_reason(reference).is_some() {
+        return None;
+    }
+    extract_step_id_from_reference(reference)
+}
+
 fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResult) {
     let adjacency = build_adjacency(graph);
 
@@ -3409,7 +3420,7 @@ fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResul
         // Same blind spot as the reference walk: a condition or bare config
         // value can name a step that exists but has not run yet.
         for reference in collect_unmapped_step_references(step) {
-            let Some(referenced_step_id) = extract_step_id_from_reference(&reference) else {
+            let Some(referenced_step_id) = ordered_step_id(&reference) else {
                 continue;
             };
             if referenced_step_id == *step_id {
@@ -3430,7 +3441,7 @@ fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResul
     // step and anything upstream of it — nothing downstream.
     for edge in collect_edge_condition_references(graph, extract_references_from_condition) {
         for reference in &edge.references {
-            let Some(referenced_step_id) = extract_step_id_from_reference(reference) else {
+            let Some(referenced_step_id) = ordered_step_id(reference) else {
                 continue;
             };
             if referenced_step_id == edge.from_step {
@@ -3668,10 +3679,11 @@ fn malformed_path_reason(path: &str) -> Option<&'static str> {
 fn defect_reason(defect: PathDefect) -> (u8, &'static str) {
     match defect {
         PathDefect::ConsecutiveDots => (0, "empty path segment (consecutive dots)"),
-        PathDefect::TrailingDot => (1, "empty path segment (trailing dot)"),
-        PathDefect::EmptyBracketKey => (2, "empty bracket key"),
-        PathDefect::UnterminatedBracket => (3, "unterminated bracket (missing `]`)"),
-        _ => (4, "malformed reference path"),
+        PathDefect::EmptyBracketKey => (1, "empty bracket key"),
+        PathDefect::UnterminatedBracket => (2, "unterminated bracket (missing `]`)"),
+        PathDefect::LeadingDot => (3, "empty path segment (leading dot)"),
+        PathDefect::TrailingDot => (4, "empty path segment (trailing dot)"),
+        _ => (5, "malformed reference path"),
     }
 }
 
@@ -5278,7 +5290,7 @@ fn extract_step_ids_from_mapping_value(value: &MappingValue) -> Vec<String> {
     let mut step_ids = Vec::new();
     match value {
         MappingValue::Reference(ref_value) => {
-            if let Some(step_id) = extract_step_id_from_reference(&ref_value.value) {
+            if let Some(step_id) = ordered_step_id(&ref_value.value) {
                 step_ids.push(step_id);
             }
         }
@@ -8165,6 +8177,225 @@ mod tests {
             "{:?}",
             result.errors
         );
+    }
+
+    /// One step of every type, with every reference-bearing field set to a
+    /// distinct reference built by `r(field)`. The `match` in
+    /// [`step_type_label`] is exhaustive, so a new step type does not compile
+    /// until it is added here.
+    fn one_step_of_every_type(r: impl Fn(&str) -> serde_json::Value) -> Vec<(String, Step)> {
+        let cond = |field: &str| {
+            serde_json::json!({"type":"operation","op":"EQ","arguments":[
+                r(field), {"valueType":"immediate","value":1}]})
+        };
+        let subgraph = serde_json::json!({
+            "entryPoint":"inner",
+            "steps":{"inner":{"id":"inner","stepType":"Finish"}}
+        });
+        [
+            serde_json::json!({"id":"finish","stepType":"Finish",
+                "inputMapping":{"o":r("finish.inputMapping")}}),
+            serde_json::json!({"id":"agent","stepType":"Agent","agentId":"transform",
+                "capabilityId":"extract",
+                "inputMapping":{"i":r("agent.inputMapping")},
+                "connectionRef":r("agent.connectionRef")}),
+            serde_json::json!({"id":"conditional","stepType":"Conditional",
+                "condition":cond("conditional.condition")}),
+            serde_json::json!({"id":"split","stepType":"Split","subgraph":subgraph,
+                "config":{"value":r("split.value"),"variables":{"v":r("split.variables")}}}),
+            serde_json::json!({"id":"switch","stepType":"Switch",
+                "config":{"value":r("switch.value"),"cases":[]}}),
+            serde_json::json!({"id":"embed","stepType":"EmbedWorkflow",
+                "childWorkflowId":"child","childVersion":"latest",
+                "inputMapping":{"i":r("embed.inputMapping")}}),
+            serde_json::json!({"id":"while","stepType":"While",
+                "condition":cond("while.condition"),"subgraph":subgraph,
+                "config":{"variables":{"v":r("while.variables")}}}),
+            serde_json::json!({"id":"log","stepType":"Log","message":"m",
+                "context":{"c":r("log.context")}}),
+            serde_json::json!({"id":"error","stepType":"Error","code":"E","message":"m",
+                "context":{"c":r("error.context")}}),
+            serde_json::json!({"id":"filter","stepType":"Filter",
+                "config":{"value":r("filter.value"),"condition":cond("filter.condition")}}),
+            serde_json::json!({"id":"groupby","stepType":"GroupBy",
+                "config":{"value":r("groupby.value"),"key":"k"}}),
+            serde_json::json!({"id":"delay","stepType":"Delay",
+                "durationMs":r("delay.durationMs")}),
+            serde_json::json!({"id":"waitsignal","stepType":"WaitForSignal",
+                "timeoutMs":r("waitsignal.timeoutMs"),
+                "action":{"correlation":{"c":r("waitsignal.correlation")},
+                          "context":{"c":r("waitsignal.context")}}}),
+            serde_json::json!({"id":"waitinstances","stepType":"WaitForInstances",
+                "instanceIds":r("waitinstances.instanceIds"),
+                "timeoutMs":r("waitinstances.timeoutMs")}),
+            serde_json::json!({"id":"setstate","stepType":"SetState",
+                "values":{"k":r("setstate.values")}}),
+            serde_json::json!({"id":"getstate","stepType":"GetState"}),
+            serde_json::json!({"id":"aiagent","stepType":"AiAgent",
+                "connectionRef":r("aiagent.connectionRef"),
+                "config":{"systemPrompt":r("aiagent.systemPrompt"),
+                          "userPrompt":r("aiagent.userPrompt"),
+                          "model":r("aiagent.model"),
+                          "temperature":r("aiagent.temperature"),
+                          "maxTokens":r("aiagent.maxTokens"),
+                          "memory":{"conversationId":r("aiagent.conversationId")}}}),
+        ]
+        .into_iter()
+        .map(|json| {
+            let id = json["id"].as_str().unwrap().to_string();
+            let step = serde_json::from_value::<Step>(json.clone())
+                .unwrap_or_else(|e| panic!("{e}: {json}"));
+            (id, step)
+        })
+        .collect()
+    }
+
+    fn step_type_label(step: &Step) -> &'static str {
+        match step {
+            Step::Finish(_) => "Finish",
+            Step::Agent(_) => "Agent",
+            Step::Conditional(_) => "Conditional",
+            Step::Split(_) => "Split",
+            Step::Switch(_) => "Switch",
+            Step::EmbedWorkflow(_) => "EmbedWorkflow",
+            Step::While(_) => "While",
+            Step::Log(_) => "Log",
+            Step::Error(_) => "Error",
+            Step::Filter(_) => "Filter",
+            Step::GroupBy(_) => "GroupBy",
+            Step::Delay(_) => "Delay",
+            Step::WaitForSignal(_) => "WaitForSignal",
+            Step::WaitForInstances(_) => "WaitForInstances",
+            Step::SetState(_) => "SetState",
+            Step::GetState(_) => "GetState",
+            Step::AiAgent(_) => "AiAgent",
+        }
+    }
+
+    /// References the reference phase passes to `validate_step_reference`.
+    fn reference_phase_references(step: &Step) -> HashSet<String> {
+        let mut refs = Vec::new();
+        for mapping in collect_step_mappings(step) {
+            extract_references_from_input_mapping(mapping, &mut refs);
+        }
+        let connection_ref = match step {
+            Step::Agent(agent_step) => agent_step.connection_ref.as_ref(),
+            Step::AiAgent(ai_step) => ai_step.connection_ref.as_ref(),
+            _ => None,
+        };
+        if let Some(value) = connection_ref {
+            extract_references_from_mapping_value(value, &mut refs);
+        }
+        refs.extend(collect_unmapped_step_references(step));
+        refs.into_iter().collect()
+    }
+
+    /// `validate_reference_root` skips a malformed path silently because the
+    /// reference phase has already reported it. That is only sound while the
+    /// reference phase sees every reference the root phase does — the two are
+    /// fed by separate collectors, so pin it here for every step type.
+    #[test]
+    fn test_root_phase_references_are_a_subset_of_the_reference_phase() {
+        let steps = one_step_of_every_type(
+            |field| serde_json::json!({"valueType":"reference","value":format!("data.{field}")}),
+        );
+        assert_eq!(steps.len(), 17, "one step per Step variant");
+
+        for (_, step) in &steps {
+            let reference_phase = reference_phase_references(step);
+            let (item_refs, loop_refs) = collect_step_scoped_references(step);
+            let root_phase: HashSet<String> = collect_references_from_step(step)
+                .into_iter()
+                .chain(item_refs)
+                .chain(loop_refs)
+                .collect();
+            let missing: Vec<_> = root_phase.difference(&reference_phase).collect();
+            assert!(
+                missing.is_empty(),
+                "{}: the root phase checks {missing:?}, which the reference phase never sees",
+                step_type_label(step)
+            );
+        }
+    }
+
+    /// Every reference-bearing field, end to end: a malformed path anywhere is
+    /// rejected exactly once.
+    #[test]
+    fn test_malformed_paths_are_rejected_once_in_every_step_field() {
+        let steps = one_step_of_every_type(
+            |field| serde_json::json!({"valueType":"reference","value":format!("data[\"\"].{field}")}),
+        );
+        let expected: Vec<String> = steps
+            .iter()
+            .flat_map(|(_, step)| reference_phase_references(step))
+            .collect();
+        assert_eq!(
+            expected.len(),
+            29,
+            "every field set in the fixture is walked: {expected:?}"
+        );
+
+        let mut graph = create_basic_graph(HashMap::new(), "finish");
+        for (id, step) in steps {
+            graph.steps.insert(id, step);
+        }
+        let result = validate_workflow(&graph, &test_catalog());
+        for reference in &expected {
+            assert_eq!(
+                malformed_path_errors(&result, reference).len(),
+                1,
+                "`{reference}` must be rejected exactly once: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    /// A malformed path naming a later step used to add a `StepNotYetExecuted`
+    /// for the tokenizer's repaired step id on top of the E011.
+    #[test]
+    fn test_malformed_path_to_later_step_reports_no_ordering_error() {
+        for reference in [
+            "steps..later.outputs",
+            "steps[later",
+            "steps.later.outputs.",
+        ] {
+            let json = format!(
+                r#"{{
+                  "entryPoint": "check",
+                  "executionPlan": [
+                    {{"fromStep":"check","toStep":"later"}},
+                    {{"fromStep":"check","toStep":"finish","condition":{{
+                      "type":"operation","op":"EQ","arguments":[
+                        {{"valueType":"reference","value":{reference_json}}},
+                        {{"valueType":"immediate","value":1}}]}}}}
+                  ],
+                  "steps": {{
+                    "check": {{"id":"check","stepType":"Conditional","condition":{{
+                      "type":"operation","op":"EQ","arguments":[
+                        {{"valueType":"reference","value":{reference_json}}},
+                        {{"valueType":"immediate","value":1}}]}}}},
+                    "later": {{"id":"later","stepType":"Finish","inputMapping":{{}}}},
+                    "finish": {{"id":"finish","stepType":"Finish"}}
+                  }}
+                }}"#,
+                reference_json = serde_json::to_string(reference).unwrap()
+            );
+            let graph: ExecutionGraph = serde_json::from_str(&json).unwrap();
+            let result = validate_workflow(&graph, &test_catalog());
+            assert!(
+                !malformed_path_errors(&result, reference).is_empty(),
+                "`{reference}`: {:?}",
+                result.errors
+            );
+            assert!(
+                !result
+                    .errors
+                    .iter()
+                    .any(|error| matches!(error, ValidationError::StepNotYetExecuted { .. })),
+                "`{reference}` must not also report an ordering error: {:?}",
+                result.errors
+            );
+        }
     }
 
     /// Well-formed bracket keys — including a quoted blank key, which is a
