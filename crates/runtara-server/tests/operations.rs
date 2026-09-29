@@ -656,6 +656,38 @@ async fn failed_run_lists_include_step_errors_and_host_fallback() {
     assert_eq!(summary.code.as_deref(), Some("HTTP_TIMEOUT"));
     assert_eq!(summary.category.as_deref(), Some("transient"));
     assert_eq!(summary.message, "Request timed out");
+    sqlx::query("DELETE FROM instance_events WHERE instance_id=$1")
+        .bind(&id)
+        .execute(&fx.runtime)
+        .await
+        .unwrap();
+    let terminal = json!({"code":"RETRYABLE", "category":"transient", "message":"Error step terminated", "severity":"warning"});
+    sqlx::query("UPDATE instances SET error=$2 WHERE instance_id=$1")
+        .bind(&id)
+        .bind(terminal.to_string())
+        .execute(&fx.runtime)
+        .await
+        .unwrap();
+    let page = fx
+        .engine
+        .list_all_executions(&fx.tenant, None, None, ExecutionFilters::default())
+        .await
+        .unwrap();
+    let summary = page.content[0].error_summary.as_ref().unwrap();
+    assert_eq!(summary.code.as_deref(), Some("RETRYABLE"));
+    assert_eq!(summary.severity.as_deref(), Some("warning"));
+    sqlx::query("UPDATE instances SET error='Runner exited' WHERE instance_id=$1")
+        .bind(&id)
+        .execute(&fx.runtime)
+        .await
+        .unwrap();
+    let page = fx
+        .engine
+        .list_all_executions(&fx.tenant, None, None, ExecutionFilters::default())
+        .await
+        .unwrap();
+    assert_eq!(page.content[0].error.as_deref(), Some("Runner exited"));
+    assert!(page.content[0].error_summary.is_none());
     assert!(
         fx.client
             .operation_failures("foreign", &[id])

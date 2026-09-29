@@ -2305,9 +2305,18 @@ impl ExecutionEngine {
             for instance in &mut instances {
                 if let Some(failure) = failures.remove(&instance.id) {
                     instance.error = failure.error;
+                    // Error steps may terminate with structured instance.error
+                    // without emitting a failed step_debug_end event.
                     if let Some(detail) = failure
                         .detail
-                        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                        .or_else(|| {
+                            instance
+                                .error
+                                .as_deref()
+                                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                        })
                     {
                         instance.error_summary =
                             Some(crate::api::dto::operations::OperationErrorSummary {
