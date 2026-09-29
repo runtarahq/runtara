@@ -245,3 +245,24 @@ This simplification passed all 43 invocation-history tests, scoped ESLint,
 production build, and five browser checks. Browser checks cover no expanders,
 copy-ID in the action cell, single-line waiting-run actions, optional columns,
 keyboard sorting, responsive layouts and refresh recovery.
+
+
+## Overview presentation follow-up
+
+Needs attention contains two distinct compact groups: Requests requiring input
+and Recent failures. Each group has its own total and destination link. Request
+rows show business label, request, workflow, due time and a review icon; overdue
+requests sort first, oldest due time first. Failure rows show business label,
+workflow, one-line error summary, completion age and eye/copy-ID/replay icons.
+Recent failures are sorted by completion time within the existing 24-hour range.
+
+Desktop columns align across rows, while narrow screens stack the same content.
+Redundant Waiting/Failed badges, large action buttons and inline error expansion
+are removed. Replay retains its permission and transient-error eligibility rules;
+its confirmation uses a dialog holding the selected run across list refreshes.
+Full errors remain on the execution details page.
+
+Verification: 55 focused Operations and invocation-history tests, scoped ESLint,
+production build and three browser layout checks passed. Browser checks cover
+1440/1000/390 widths, overdue priority, separate destinations, compact rows,
+action alignment and opening/cancelling Replay without submitting it.

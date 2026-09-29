@@ -1,9 +1,8 @@
 import { Link } from 'react-router';
 import { useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, ArrowRight } from 'lucide-react';
+import { ArrowRight } from 'lucide-react';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { useAuthStore } from '@/shared/stores/authStore';
-import { Button } from '@/shared/components/ui/button';
 import {
   useOperations,
   queryRuns,
@@ -12,13 +11,8 @@ import {
   defaultView,
   selectedFields,
 } from '../queries';
-import { StateValue } from '../components/StateValue';
-import {
-  OperationHeader,
-  OperationSection,
-  RefreshControls,
-  FailureRows,
-} from './shared';
+import { OverviewAttention } from '../components/OverviewAttention';
+import { OperationHeader, OperationSection, RefreshControls } from './shared';
 import type { OperationRequestPage } from '@/generated/RuntaraRuntimeApi';
 
 export function OverviewPage() {
@@ -32,6 +26,8 @@ export function OverviewPage() {
         status: 'failed,timeout',
         completedFrom: new Date(Date.now() - 86_400_000).toISOString(),
         size: 3,
+        sortBy: 'completedAt',
+        sortOrder: 'desc',
       }),
     refetchInterval: 30_000,
     placeholderData: undefined,
@@ -110,7 +106,27 @@ export function OverviewPage() {
   const items =
     attention.data
       ?.flatMap((group) => group.page.content.map((row) => ({ ...group, row })))
-      .sort((a, b) => a.row.requestedAt.localeCompare(b.row.requestedAt))
+      .map(({ row, queue, view }) => {
+        const value = view.roles?.due ? row.state?.[view.roles.due] : undefined;
+        const due =
+          typeof value === 'string' && Number.isFinite(Date.parse(value))
+            ? value
+            : undefined;
+        return {
+          row,
+          workflowName: queue.workflowName,
+          due,
+          isOverdue: !!due && Date.parse(due) < Date.now(),
+        };
+      })
+      .sort(
+        (a, b) =>
+          Number(b.isOverdue) - Number(a.isOverdue) ||
+          (a.isOverdue && b.isOverdue
+            ? Date.parse(a.due!) - Date.parse(b.due!)
+            : 0) ||
+          a.row.requestedAt.localeCompare(b.row.requestedAt)
+      )
       .slice(0, 6) ?? [];
   return (
     <div className="mx-auto min-h-full w-full max-w-[1600px] bg-background p-5 lg:px-10 lg:py-7">
@@ -183,91 +199,20 @@ export function OverviewPage() {
             action="View runs"
           />
         </div>
-        <div className="space-y-4">
-          <OperationSection
-            title="Needs attention"
-            aside={
-              <Link
-                className="font-medium text-primary-text"
-                to="/operations/queues"
-              >
-                See all {waiting ?? ''}
-              </Link>
+        <OperationSection title="Needs attention">
+          <OverviewAttention
+            requests={items}
+            requestCount={queues.error ? undefined : waiting}
+            requestsPending={attention.isPending}
+            requestsError={!!attention.error || !!queues.error || !!views.error}
+            failures={failures.data?.content ?? []}
+            failureCount={
+              failures.error ? undefined : failures.data?.totalElements
             }
-          >
-            {attention.isPending ? (
-              <p className="p-5 text-sm text-muted-foreground">
-                Loading requests…
-              </p>
-            ) : (
-              <ul className="divide-y">
-                {items.map(({ row, queue, view }) => {
-                  const due = view.roles?.due
-                    ? row.state?.[view.roles.due]
-                    : undefined;
-                  const isOverdue =
-                    typeof due === 'string' && Date.parse(due) < Date.now();
-                  return (
-                    <li
-                      key={`${row.instanceId}/${row.requestId}`}
-                      className="flex flex-wrap items-center gap-3 px-4 py-4 sm:flex-nowrap"
-                    >
-                      <span
-                        className={`rounded-full px-2 py-1 text-xs ${isOverdue ? 'bg-warning/10 text-warning' : 'bg-muted text-muted-foreground'}`}
-                      >
-                        {isOverdue ? (
-                          <span className="flex items-center gap-1 whitespace-nowrap">
-                            <AlertTriangle className="size-3" />
-                            Overdue
-                          </span>
-                        ) : (
-                          'Waiting'
-                        )}
-                      </span>
-                      <div className="min-w-0 flex-1 basis-44">
-                        <p className="break-words text-sm font-semibold">
-                          {row.label} ·{' '}
-                          {row.runLabel ?? row.instanceId.slice(0, 8)}
-                        </p>
-                        <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
-                          {row.message || queue.workflowName}
-                          {typeof due === 'string' ? (
-                            <>
-                              {' '}
-                              · Due{' '}
-                              <StateValue
-                                value={due}
-                                display={{ kind: 'relative' }}
-                              />
-                            </>
-                          ) : null}
-                        </p>
-                      </div>
-                      <Button asChild>
-                        <Link
-                          to={`/operations/runs/${row.workflowId}/${row.instanceId}`}
-                        >
-                          Review
-                        </Link>
-                      </Button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-            <FailureRows rows={failures.data?.content ?? []} />
-            {!attention.isPending &&
-            !failures.isPending &&
-            !attention.error &&
-            !failures.error &&
-            items.length === 0 &&
-            !failures.data?.totalElements ? (
-              <p className="p-5 text-sm text-muted-foreground">
-                Nothing needs attention right now.
-              </p>
-            ) : null}
-          </OperationSection>
-        </div>
+            failuresPending={failures.isPending}
+            failuresError={!!failures.error}
+          />
+        </OperationSection>
       </main>
     </div>
   );

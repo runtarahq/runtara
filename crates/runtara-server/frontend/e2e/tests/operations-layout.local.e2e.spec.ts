@@ -40,18 +40,65 @@ for (const width of [1440, 1000, 390]) {
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth)
       ).toBeLessThanOrEqual(width);
-      if (title === 'Overview')
+      if (title === 'Overview') {
         await expect(
           page.getByRole('heading', { name: 'Processes', exact: true })
         ).toHaveCount(0);
+        const requests = page.getByRole('list', {
+          name: 'Requests requiring input',
+        });
+        const failures = page.getByRole('list', { name: 'Recent failures' });
+        await expect(requests).toBeVisible();
+        await expect(failures).toBeVisible();
+        await expect(
+          page.getByRole('link', { name: 'View all requests' })
+        ).toHaveAttribute('href', appPath('/operations/queues'));
+        await expect(
+          page.getByRole('link', { name: 'View failed runs' })
+        ).toHaveAttribute('href', /dateBasis=completed/);
+        let sawNonOverdue = false;
+        for (const item of await requests.getByRole('listitem').all()) {
+          const overdue =
+            (await item.getByText('Overdue', { exact: true }).count()) > 0;
+          if (overdue) expect(sawNonOverdue).toBe(false);
+          else sawNonOverdue = true;
+          const review = item.getByRole('link', {
+            name: /^Review request for/,
+          });
+          await expect(review).toBeVisible();
+          if (width >= 1024)
+            expect((await item.boundingBox())!.height).toBeLessThan(90);
+        }
+        for (const item of await failures.getByRole('listitem').all()) {
+          const box = (await item.boundingBox())!;
+          const actionLinks = item.getByRole('link', {
+            name: 'Open execution',
+          });
+          const copy = item.getByRole('button', { name: 'Copy run ID' });
+          const eyeBox = (await actionLinks.boundingBox())!;
+          const copyBox = (await copy.boundingBox())!;
+          expect(eyeBox.y).toBe(copyBox.y);
+          expect(copyBox.x + copyBox.width).toBeLessThanOrEqual(
+            box.x + box.width
+          );
+          if (width >= 1024) expect(box.height).toBeLessThan(90);
+        }
+        await failures
+          .getByRole('button', { name: 'Replay', exact: true })
+          .first()
+          .click();
+        await expect(page.getByRole('dialog')).toContainText(
+          'repeats all side effects'
+        );
+        await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+        await expect(page.getByRole('dialog')).toHaveCount(0);
+      }
       if (title === 'Runs') {
         const items =
           width >= 1024
-            ? page
-                .getByRole('row')
-                .filter({
-                  has: page.getByRole('link', { name: 'Open execution' }),
-                })
+            ? page.getByRole('row').filter({
+                has: page.getByRole('link', { name: 'Open execution' }),
+              })
             : page.getByRole('article');
         expect(await items.count()).toBeGreaterThan(0);
         for (const item of await items.all()) {

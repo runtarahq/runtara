@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { Link, useNavigate } from 'react-router';
-import { Clock3, Copy, ExternalLink, RefreshCw } from 'lucide-react';
+import { Clock3, Copy, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import type {
   OperationViewConfig,
@@ -13,7 +13,7 @@ import { Can } from '@/shared/components/Can';
 import { useToken } from '@/shared/hooks';
 import { RunStatusPill } from '@/features/invocation-history/components/RunLinks';
 import { StateValue, type StateField } from '../components/StateValue';
-import { message, operationsRequest, describeFailure } from '../queries';
+import { message, operationsRequest } from '../queries';
 import { stateLabel } from '../state-label';
 
 export function OperationHeader({
@@ -186,70 +186,6 @@ export function ReplayButton({
         </Button>
       )}
     </Can>
-  );
-}
-export function FailureRows({ rows }: { rows: WorkflowInstanceDto[] }) {
-  return (
-    <ul className="divide-y" aria-label="Failed runs">
-      {rows.map((run) => {
-        const error = describeFailure(run);
-        return (
-          <li
-            key={run.id}
-            data-run-id={run.id}
-            className="flex flex-wrap items-center gap-x-4 gap-y-3 px-4 py-4"
-          >
-            <RunStatusPill status={run.status} />
-            <div className="min-w-0 flex-1 basis-64">
-              <Link
-                className="break-words text-sm font-semibold hover:text-primary-text"
-                to={`/operations/runs/${run.workflowId}/${run.id}`}
-              >
-                {run.workflowName ?? 'Workflow'} ·{' '}
-                {run.runLabel ?? run.id.slice(0, 8)}
-              </Link>
-              <p className="mt-0.5 break-words text-sm">{error.message}</p>
-              <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                <StateValue
-                  value={run.completedAt ?? run.created}
-                  display={{ kind: 'relative' }}
-                />
-                <span>
-                  · run{' '}
-                  <span className="font-mono" title={run.id}>
-                    {run.id.slice(0, 4)}…{run.id.slice(-4)}
-                  </span>
-                </span>
-                {error.code ? (
-                  <details className="basis-full">
-                    <summary className="cursor-pointer">Error details</summary>
-                    <span className="break-all font-mono">{error.code}</span>
-                    {error.category ? ` · ${error.category}` : ''}
-                  </details>
-                ) : null}
-              </div>
-            </div>
-            <div className="ml-auto flex min-w-0 shrink-0 flex-wrap items-center gap-2">
-              {error.category === 'transient' ? (
-                <ReplayButton run={run} />
-              ) : (
-                <Button asChild variant="secondary" bordered>
-                  <Link to={`/operations/runs/${run.workflowId}/${run.id}`}>
-                    Review
-                  </Link>
-                </Button>
-              )}
-              <Button asChild variant="secondary" bordered>
-                <Link to={`/workflows/${run.workflowId}/history/${run.id}`}>
-                  <ExternalLink />
-                  Open execution
-                </Link>
-              </Button>
-            </div>
-          </li>
-        );
-      })}
-    </ul>
   );
 }
 export function RunRows({
