@@ -215,3 +215,24 @@ notifications, infrastructure metrics or new saved-view schema in this change.
 
 The complete CI matrix and unrelated external-service E2E suites were not run
 locally. The waiting-duration work described above remains deferred.
+
+
+## Runs presentation follow-up
+
+The default table is Run, Status/context, Started, Duration and Actions. Business
+labels and workflow names occupy two lines, with copy-ID beside the label.
+Started uses relative time with an exact timestamp on hover. Duration is neutral;
+there are no arbitrary speed colors. Eye, Replay and applicable live-run actions
+remain visible.
+
+A row disclosure opens the full error and run metadata beneath the row, including
+completion time, parent and version. Auto-refresh pauses while any disclosure is
+open. The Columns menu can reveal Completed, Parent and Version; an incoming
+completion sort automatically reveals Completed. Desktop sorting uses accessible
+column headers; narrow screens retain a sort selector. Date basis and period are
+grouped in the time-range popover, with refresh controls together on the right.
+
+Follow-up verification: all 1,374 frontend tests, scoped ESLint and the production
+build passed. Five Chromium checks passed, covering 1440/1000/390 layouts, compact
+row heights, optional columns, keyboard sorting, expanding/collapsing details,
+URL context, refresh failures and recovery. No backend behavior changed.

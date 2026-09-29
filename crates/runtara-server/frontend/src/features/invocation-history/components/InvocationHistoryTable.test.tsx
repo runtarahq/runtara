@@ -10,6 +10,9 @@ vi.mock('../queries', () => ({ getAllExecutions: vi.fn() }));
 vi.mock('./OperationsRunColumns', () => ({ operationsRunColumns: () => [] }));
 vi.mock('./RunRow', () => ({
   RunIdentity: () => null,
+  RunDetails: () => null,
+  RunDetailsToggle: () => null,
+  RunTime: () => null,
   RunContext: () => null,
   RunActions: ({
     run,

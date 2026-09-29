@@ -52,19 +52,28 @@ test('Runs shares date bounds, keeps URL context and recovers from refresh failu
     .first();
   await expect(row).toBeVisible();
   await page.getByRole('button', { name: /^All \d/ }).click();
+  await page.getByRole('button', { name: 'Time range', exact: true }).click();
   await expect(page.getByLabel('Date basis')).toHaveValue('completed');
   await expect(page.getByLabel('Run time range')).toHaveValue('24h');
-  await expect(page.getByLabel('Run order')).toHaveValue('completedAt:asc');
+  await expect(page).toHaveURL(/sortBy=completedAt.*sortOrder=asc/);
+  await page.keyboard.press('Escape');
   await page.goBack();
   await expect(
     page.getByRole('button', { name: /^Failed \d/ })
   ).toHaveAttribute('aria-pressed', 'true');
   await page.reload();
-  await expect(page.getByLabel('Run order')).toHaveValue('completedAt:asc');
+  await expect(
+    page.getByRole('columnheader', { name: 'Completed' })
+  ).toBeVisible();
   await expect(row).toBeVisible();
 
-  await row.getByText('Error details', { exact: true }).click();
-  await expect(row.locator('details')).toHaveAttribute('open', '');
+  await row.getByRole('button', { name: /^Details for/ }).click();
+  await expect(
+    row.getByRole('button', { name: /^Details for/ })
+  ).toHaveAttribute('aria-expanded', 'true');
+  await expect(
+    page.getByRole('heading', { name: 'Error details', exact: true })
+  ).toBeVisible();
   await expect(page.getByRole('status')).toContainText('Auto-refresh paused');
 
   await page.route('**/api/runtime/executions?*', (route) =>
@@ -95,4 +104,58 @@ test('Runs shares date bounds, keeps URL context and recovers from refresh failu
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await expect(page.getByRole('alert')).toHaveCount(0);
   await expect(page.getByRole('button', { name: /^Failed \d/ })).toBeVisible();
+});
+
+test('Runs stays compact and exposes secondary information on demand', async ({
+  page,
+}) => {
+  test.skip(
+    !fixtureFile,
+    'Set E2E_OPERATIONS_FIXTURE to an isolated live fixture'
+  );
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(appPath('/operations/runs'));
+  const table = page.getByRole('table');
+  await expect(table.getByRole('columnheader')).toHaveText([
+    'Run',
+    'Status / context',
+    'Started',
+    'Duration',
+    'Actions',
+  ]);
+  const rows = table
+    .getByRole('row')
+    .filter({ has: page.getByRole('link', { name: 'Open execution' }) });
+  await expect(rows.first()).toBeVisible();
+  for (const row of await rows.all()) {
+    expect((await row.boundingBox())!.height).toBeLessThan(90);
+    await expect(row.getByText(/^Completed /)).toHaveCount(0);
+  }
+  await page.getByRole('button', { name: 'Columns', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Completed', exact: true }).check();
+  await page.keyboard.press('Escape');
+  await table
+    .getByRole('columnheader', { name: 'Completed', exact: true })
+    .click();
+  await expect(page).toHaveURL(/sortBy=completedAt/);
+  await table
+    .getByRole('button', { name: 'Completed', exact: true })
+    .press('Enter');
+  await expect(
+    table.getByRole('columnheader', { name: 'Completed', exact: true })
+  ).toHaveAttribute('aria-sort', 'ascending');
+  await rows
+    .first()
+    .getByRole('button', { name: /^Details for/ })
+    .click();
+  await expect(page.getByRole('status')).toContainText('Auto-refresh paused');
+  await expect(table.getByText('Run ID', { exact: true })).toBeVisible();
+  await rows
+    .first()
+    .getByRole('button', { name: /^Details for/ })
+    .click();
+  await expect(table.getByText('Run ID', { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByText('Auto-refresh paused while run details are open.')
+  ).toHaveCount(0);
 });

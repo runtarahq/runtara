@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   ColumnDef,
+  ExpandedState,
   flexRender,
   getCoreRowModel,
   getExpandedRowModel,
@@ -47,6 +48,8 @@ interface DataTableProps<TData, TValue> {
   setPagination?: OnChangeFn<PaginationState>;
   shouldRenderPagination?: boolean;
   isFetching?: boolean;
+  expanded?: ExpandedState;
+  onExpandedChange?: OnChangeFn<ExpandedState>;
   getRowCanExpand?: (row: Row<TData>) => boolean;
   SubComponent?: React.ComponentType<{ row: Row<TData> }>;
   isNested?: boolean;
@@ -86,6 +89,8 @@ export function DataTable<TData, TValue>({
   shouldRenderPagination = true,
   isFetching = false,
   getRowCanExpand = () => false,
+  expanded,
+  onExpandedChange,
   SubComponent,
   isNested = false,
   initialState,
@@ -115,6 +120,7 @@ export function DataTable<TData, TValue>({
       sorting:
         controlledSorting ??
         (initialState?.sorting ? initialState.sorting : []),
+      ...(expanded === undefined ? {} : { expanded }),
       rowSelection: enableRowSelection ? rowSelection : {},
     },
     enableSorting: true,
@@ -159,6 +165,7 @@ export function DataTable<TData, TValue>({
         setPagination(updatedPagination);
       }
     },
+    ...(onExpandedChange ? { onExpandedChange } : {}),
     getRowCanExpand,
     getRowId,
     getCoreRowModel: getCoreRowModel(),
@@ -213,11 +220,24 @@ export function DataTable<TData, TValue>({
                   const meta = header.column.columnDef.meta as any;
                   const alignRight = meta?.align === 'right';
                   const sorted = header.column.getIsSorted();
+                  const toggleSort = () =>
+                    onSortingChange?.([
+                      { id: header.column.id, desc: sorted !== 'desc' },
+                    ]);
 
                   return (
                     <TableHead
                       key={header.id}
                       style={styles}
+                      aria-sort={
+                        canSort
+                          ? sorted === 'asc'
+                            ? 'ascending'
+                            : sorted === 'desc'
+                              ? 'descending'
+                              : 'none'
+                          : undefined
+                      }
                       className={cn(
                         alignRight && 'text-right',
                         meta?.headerClassName
@@ -228,20 +248,22 @@ export function DataTable<TData, TValue>({
                           className={
                             canSort ? 'cursor-pointer select-none' : ''
                           }
-                          onClick={
+                          role={canSort ? 'button' : undefined}
+                          tabIndex={canSort ? 0 : undefined}
+                          onKeyDown={
                             canSort
-                              ? () => {
-                                  const currentSort =
-                                    header.column.getIsSorted();
-                                  // Cycle: false -> desc -> asc -> desc
-                                  const nextDesc =
-                                    currentSort === 'desc' ? false : true;
-                                  onSortingChange?.([
-                                    { id: header.column.id, desc: nextDesc },
-                                  ]);
+                              ? (event) => {
+                                  if (
+                                    event.key === 'Enter' ||
+                                    event.key === ' '
+                                  ) {
+                                    event.preventDefault();
+                                    toggleSort();
+                                  }
                                 }
                               : undefined
                           }
+                          onClick={canSort ? toggleSort : undefined}
                         >
                           <div
                             className={cn(

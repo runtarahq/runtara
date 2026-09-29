@@ -1,8 +1,15 @@
 import { Link } from 'react-router';
 import { toast } from 'sonner';
-import { Bug, CirclePlay, Copy, Eye, MessageSquare } from 'lucide-react';
+import {
+  Bug,
+  ChevronRight,
+  CirclePlay,
+  Copy,
+  Eye,
+  MessageSquare,
+} from 'lucide-react';
 import type { ExecutionHistoryItem } from '../types';
-import { RunStatusPill } from './RunLinks';
+import { ParentRunLink, RunStatusPill } from './RunLinks';
 import { describeFailure } from '@/features/operations/queries';
 import { StateValue } from '@/features/operations/components/StateValue';
 import { Can } from '@/shared/components/Can';
@@ -11,72 +18,56 @@ import { WithTooltip } from '@/shared/components/ui/tooltip';
 import { ResumeButton } from '@/features/workflows/components/ResumeButton';
 import { StopButton } from '@/features/workflows/components/StopButton';
 import { canResume } from '@/features/workflows/utils/suspension';
+import { formatDate } from '@/lib/utils';
 import { isActiveStatus } from '@/shared/utils/status-display';
 
 export function RunIdentity({ run }: { run: ExecutionHistoryItem }) {
   return (
-    <div className="min-w-0 space-y-1 whitespace-normal">
-      <Link
-        className="break-words font-medium text-primary-text"
-        to={`/operations/runs/${run.workflowId}/${run.instanceId}`}
+    <div className="min-w-0 space-y-1">
+      <div className="flex min-w-0 items-center gap-1.5">
+        <Link
+          className="truncate font-medium text-primary-text"
+          title={run.runLabel || run.instanceId}
+          to={`/operations/runs/${run.workflowId}/${run.instanceId}`}
+        >
+          {run.runLabel || run.instanceId.slice(0, 8)}
+        </Link>
+        <button
+          className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+          title={run.instanceId}
+          aria-label={`Copy run ID ${run.instanceId}`}
+          onClick={() =>
+            void navigator.clipboard
+              .writeText(run.instanceId)
+              .then(() => toast.success('Run ID copied'))
+              .catch(() => toast.error('Could not copy run ID'))
+          }
+        >
+          <Copy className="size-3" />
+        </button>
+      </div>
+      <p
+        className="truncate text-xs text-muted-foreground"
+        title={run.workflowName || run.workflowId}
       >
-        {run.runLabel || run.instanceId.slice(0, 8)}
-      </Link>
-      <p className="break-words text-xs text-muted-foreground">
         {run.workflowName || run.workflowId}
       </p>
-      <button
-        className="flex items-center gap-1 text-xs text-muted-foreground"
-        title={run.instanceId}
-        aria-label={`Copy run ID ${run.instanceId}`}
-        onClick={() =>
-          void navigator.clipboard
-            .writeText(run.instanceId)
-            .then(() => toast.success('Run ID copied'))
-            .catch(() => toast.error('Could not copy run ID'))
-        }
-      >
-        <Copy className="size-3" />
-        {run.instanceId.slice(0, 8)}…
-      </button>
     </div>
   );
 }
-export function RunContext({
-  run,
-  detailsOpen,
-  onDetailsChange,
-}: {
-  run: ExecutionHistoryItem;
-  detailsOpen?: boolean;
-  onDetailsChange?: (id: string, open: boolean) => void;
-}) {
+
+export function RunContext({ run }: { run: ExecutionHistoryItem }) {
   const failed = run.status === 'failed' || run.status === 'timeout';
-  const error = describeFailure(run);
   return (
-    <div className="space-y-2 whitespace-normal">
+    <div className="min-w-0 space-y-1">
       <RunStatusPill
         status={run.status}
         suspensionReason={run.suspensionReason}
       />
       {failed && (
-        <>
-          <p className="break-words text-sm">{error.message}</p>
-          {(error.code || error.category) && (
-            <details
-              className="text-xs text-muted-foreground"
-              open={detailsOpen}
-              onToggle={(event) =>
-                onDetailsChange?.(run.instanceId, event.currentTarget.open)
-              }
-            >
-              <summary className="cursor-pointer">Error details</summary>
-              <p className="break-all">
-                {[error.code, error.category].filter(Boolean).join(' · ')}
-              </p>
-            </details>
-          )}
-        </>
+        <p className="truncate text-xs text-muted-foreground">
+          {describeFailure(run).message}
+        </p>
       )}
       {run.status === 'suspended' && (
         <Link
@@ -86,16 +77,90 @@ export function RunContext({
           Review run and requests
         </Link>
       )}
-      <p className="text-xs text-muted-foreground" title={run.createdAt}>
-        Started{' '}
-        <StateValue value={run.createdAt} display={{ kind: 'relative' }} />
-      </p>
-      {!isActiveStatus(run.status) && run.completedAt && (
-        <p className="text-xs text-muted-foreground" title={run.completedAt}>
-          Completed{' '}
-          <StateValue value={run.completedAt} display={{ kind: 'relative' }} />
-        </p>
+    </div>
+  );
+}
+
+export function RunTime({ value }: { value: string }) {
+  return (
+    <span className="whitespace-nowrap text-sm" title={formatDate(value)}>
+      <StateValue value={value} display={{ kind: 'relative' }} />
+    </span>
+  );
+}
+
+export function RunDetailsToggle({
+  run,
+  open,
+  onChange,
+}: {
+  run: ExecutionHistoryItem;
+  open: boolean;
+  onChange: (id: string, open: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+      aria-label={`Details for ${run.runLabel || run.instanceId}`}
+      aria-expanded={open}
+      onClick={() => onChange(run.instanceId, !open)}
+    >
+      <ChevronRight
+        className={`size-4 transition-transform ${open ? 'rotate-90' : ''}`}
+      />
+    </button>
+  );
+}
+
+export function RunDetails({ run }: { run: ExecutionHistoryItem }) {
+  const failed = run.status === 'failed' || run.status === 'timeout';
+  const error = describeFailure(run);
+  return (
+    <div className="space-y-3 whitespace-normal text-sm">
+      {failed && (
+        <div className="space-y-1">
+          <h3 className="text-xs font-medium text-muted-foreground">
+            Error details
+          </h3>
+          <p className="whitespace-pre-wrap break-words">{error.message}</p>
+          {(error.code || error.category) && (
+            <p className="break-all text-xs text-muted-foreground">
+              {[error.code, error.category].filter(Boolean).join(' · ')}
+            </p>
+          )}
+        </div>
       )}
+      <dl className="flex flex-wrap gap-x-8 gap-y-3 text-xs">
+        <div>
+          <dt className="text-muted-foreground">Run ID</dt>
+          <dd className="mt-1 break-all font-mono">{run.instanceId}</dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">Started</dt>
+          <dd className="mt-1">{formatDate(run.createdAt)}</dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">Completed</dt>
+          <dd className="mt-1">
+            {!isActiveStatus(run.status) && run.completedAt
+              ? formatDate(run.completedAt)
+              : '—'}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground">Version</dt>
+          <dd className="mt-1">{run.version ?? '—'}</dd>
+        </div>
+        {run.parentInstanceId && (
+          <div>
+            <dt className="text-muted-foreground">Parent</dt>
+            <dd className="mt-1">
+              <ParentRunLink parentInstanceId={run.parentInstanceId} compact />
+            </dd>
+          </div>
+        )}
+      </dl>
     </div>
   );
 }

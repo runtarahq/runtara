@@ -3,7 +3,7 @@ import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useAuthStore } from '@/shared/stores/authStore';
 import type { ExecutionHistoryItem } from '../types';
-import { RunActions, RunContext, RunIdentity } from './RunRow';
+import { RunActions, RunContext, RunIdentity, RunDetails } from './RunRow';
 vi.mock('@/features/workflows/components/ResumeButton', () => ({
   ResumeButton: () => <button>Resume</button>,
 }));
@@ -63,7 +63,7 @@ describe('operational run rows', () => {
     expect(
       screen.getByRole('link', { name: 'Review run and requests' })
     ).toBeInTheDocument();
-    expect(screen.getByText(/Started/)).toBeInTheDocument();
+    expect(screen.queryByText(/Started/)).not.toBeInTheDocument();
     expect(screen.queryByText(/^Completed /)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument();
   });
@@ -98,4 +98,27 @@ describe('operational run rows', () => {
     );
     expect(screen.getByText(message!)).toBeInTheDocument();
   });
+});
+
+it('keeps full errors and completion metadata in expanded details', () => {
+  const message = 'A long error that must remain readable in full';
+  render(
+    <MemoryRouter>
+      <RunDetails
+        run={{
+          ...run,
+          error: JSON.stringify({
+            message,
+            code: 'TEMP',
+            category: 'transient',
+          }),
+          completedAt: '2026-09-29T10:01:14Z',
+        }}
+      />
+    </MemoryRouter>
+  );
+  expect(screen.getByText(message)).toBeInTheDocument();
+  expect(screen.getByText('TEMP · transient')).toBeInTheDocument();
+  expect(screen.getByText('Completed')).toBeInTheDocument();
+  expect(screen.getByText(run.instanceId)).toBeInTheDocument();
 });

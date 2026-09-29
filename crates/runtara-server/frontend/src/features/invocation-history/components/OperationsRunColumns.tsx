@@ -1,48 +1,112 @@
+import { formatRunDuration } from '../utils/run-duration';
 import type { ColumnDef } from '@tanstack/react-table';
 import type { ExecutionHistoryItem } from '../types';
-import { invocationHistoryColumns } from './InvocationHistoryColumns';
-import { RunIdentity, RunContext, RunActions } from './RunRow';
+import { isActiveStatus } from '@/shared/utils/status-display';
+import { ParentRunLink } from './RunLinks';
+import {
+  RunIdentity,
+  RunContext,
+  RunActions,
+  RunDetailsToggle,
+  RunTime,
+} from './RunRow';
+
+export type RunExtraColumn = 'completedAt' | 'parentInstanceId' | 'version';
 
 export function operationsRunColumns(
   onReplay: (run: ExecutionHistoryItem) => void,
-  expandedErrors: ReadonlySet<string>,
-  onDetailsChange: (id: string, open: boolean) => void
+  expanded: ReadonlySet<string>,
+  onDetailsChange: (id: string, open: boolean) => void,
+  extraColumns: ReadonlySet<RunExtraColumn>
 ): ColumnDef<ExecutionHistoryItem>[] {
-  const historical = invocationHistoryColumns.filter(
-    (column) =>
-      !['workflowId', 'status', 'actions'].includes(
-        column.id ?? ('accessorKey' in column ? String(column.accessorKey) : '')
-      )
-  );
   return [
     {
       id: 'identity',
       header: 'Run',
+      enableSorting: false,
       cell: ({ row }) => (
-        <div className="w-44 xl:w-56">
+        <div className="flex w-52 items-center gap-2 xl:w-64">
+          <RunDetailsToggle
+            run={row.original}
+            open={expanded.has(row.id)}
+            onChange={onDetailsChange}
+          />
           <RunIdentity run={row.original} />
         </div>
       ),
     },
     {
       id: 'context',
-      header: 'Status and context',
+      header: 'Status / context',
+      enableSorting: false,
       cell: ({ row }) => (
-        <div className="w-48 xl:w-64">
-          <RunContext
-            run={row.original}
-            detailsOpen={expandedErrors.has(row.original.instanceId)}
-            onDetailsChange={onDetailsChange}
-          />
+        <div className="w-48 xl:w-72">
+          <RunContext run={row.original} />
         </div>
       ),
     },
-    ...historical,
+    {
+      accessorKey: 'createdAt',
+      header: 'Started',
+      enableSorting: true,
+      cell: ({ row }) => <RunTime value={row.original.createdAt} />,
+    },
+    ...(extraColumns.has('completedAt')
+      ? [
+          {
+            accessorKey: 'completedAt',
+            header: 'Completed',
+            enableSorting: true,
+            cell: ({ row }) =>
+              !isActiveStatus(row.original.status) &&
+              row.original.completedAt ? (
+                <RunTime value={row.original.completedAt} />
+              ) : (
+                '—'
+              ),
+          } satisfies ColumnDef<ExecutionHistoryItem>,
+        ]
+      : []),
+    ...(extraColumns.has('parentInstanceId')
+      ? [
+          {
+            accessorKey: 'parentInstanceId',
+            header: 'Parent',
+            enableSorting: false,
+            cell: ({ row }) => (
+              <ParentRunLink
+                parentInstanceId={row.original.parentInstanceId}
+                compact
+              />
+            ),
+          } satisfies ColumnDef<ExecutionHistoryItem>,
+        ]
+      : []),
+    ...(extraColumns.has('version')
+      ? [
+          {
+            accessorKey: 'version',
+            header: 'Version',
+            enableSorting: false,
+          } satisfies ColumnDef<ExecutionHistoryItem>,
+        ]
+      : []),
+    {
+      accessorKey: 'executionDurationSeconds',
+      header: 'Duration',
+      enableSorting: false,
+      cell: ({ row }) => (
+        <span className="whitespace-nowrap tabular-nums text-muted-foreground">
+          {formatRunDuration(row.original.executionDurationSeconds)}
+        </span>
+      ),
+    },
     {
       id: 'actions',
       header: 'Actions',
+      enableSorting: false,
       cell: ({ row }) => (
-        <div className="w-32">
+        <div className="w-28">
           <RunActions run={row.original} onReplay={onReplay} />
         </div>
       ),

@@ -1,5 +1,6 @@
+import { formatRunDuration } from '../utils/run-duration';
 import { useMemo, useCallback, useEffect, useState } from 'react';
-import { SortingState } from '@tanstack/react-table';
+import { SortingState, Row } from '@tanstack/react-table';
 import { DataTable } from '@/shared/components/table';
 import {
   Breadcrumb,
@@ -18,9 +19,18 @@ import { getAllExecutions } from '../queries';
 import { queryRunSummary } from '@/features/operations/queries';
 import { resolveRunFilters, summaryFilters } from '../utils/run-filters';
 import { RunControls } from './RunControls';
-import { operationsRunColumns } from './OperationsRunColumns';
-import { RunIdentity, RunContext, RunActions } from './RunRow';
-import { ParentRunLink } from './RunLinks';
+import {
+  operationsRunColumns,
+  type RunExtraColumn,
+} from './OperationsRunColumns';
+import {
+  RunIdentity,
+  RunContext,
+  RunActions,
+  RunDetails,
+  RunDetailsToggle,
+  RunTime,
+} from './RunRow';
 import { ReplayButton } from '@/features/operations/pages/shared';
 import {
   Dialog,
@@ -53,11 +63,11 @@ export function InvocationHistoryTable({
   const tenant = useAuthStore((s) => s.orgId);
   const [refresh, setRefresh] = useState(true);
   const [replayRun, setReplayRun] = useState<ExecutionHistoryItem | null>(null);
-  const [expandedErrors, setExpandedErrors] = useState<ReadonlySet<string>>(
+  const [expandedDetails, setExpandedDetails] = useState<ReadonlySet<string>>(
     new Set()
   );
   const onDetailsChange = useCallback((id: string, open: boolean) => {
-    setExpandedErrors((previous) => {
+    setExpandedDetails((previous) => {
       if (previous.has(id) === open) return previous;
       const next = new Set(previous);
       if (open) next.add(id);
@@ -65,9 +75,28 @@ export function InvocationHistoryTable({
       return next;
     });
   }, []);
+  const [extraColumns, setExtraColumns] = useState<ReadonlySet<RunExtraColumn>>(
+    new Set()
+  );
+  // Show the active completion sort when arriving from Overview or a saved URL.
+  const visibleExtraColumns = useMemo(() => {
+    const next = new Set(extraColumns);
+    if (filters.sortBy === 'completedAt') next.add('completedAt');
+    return next;
+  }, [extraColumns, filters.sortBy]);
+  const expanded = useMemo(
+    () => Object.fromEntries([...expandedDetails].map((id) => [id, true])),
+    [expandedDetails]
+  );
   const columns = useMemo(
-    () => operationsRunColumns(setReplayRun, expandedErrors, onDetailsChange),
-    [expandedErrors, onDetailsChange]
+    () =>
+      operationsRunColumns(
+        setReplayRun,
+        expandedDetails,
+        onDetailsChange,
+        visibleExtraColumns
+      ),
+    [expandedDetails, onDetailsChange, visibleExtraColumns]
   );
   const { pagination, setPagination } = usePagination();
   const [search, setSearch] = useState(filters.search ?? '');
@@ -87,7 +116,7 @@ export function InvocationHistoryTable({
 
   // Convert filters to table sorting state
   const sorting = useMemo<SortingState>(() => {
-    if (!filters.sortBy) return [];
+    if (!filters.sortBy) return [{ id: 'createdAt', desc: true }];
     return [{ id: filters.sortBy, desc: filters.sortOrder === 'desc' }];
   }, [filters.sortBy, filters.sortOrder]);
 
@@ -119,7 +148,7 @@ export function InvocationHistoryTable({
       };
     },
     refetchInterval:
-      refresh && !replayRun && expandedErrors.size === 0 ? 30_000 : false,
+      refresh && !replayRun && expandedDetails.size === 0 ? 30_000 : false,
     refetchIntervalInBackground: false,
     placeholderData: undefined,
     staleTime: 0,
@@ -133,7 +162,7 @@ export function InvocationHistoryTable({
   // Reset to the first page whenever the active filters change
   useEffect(() => {
     setPagination((prev) => ({ ...prev, pageIndex: 0 }));
-    setExpandedErrors(new Set());
+    setExpandedDetails(new Set());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters]);
 
@@ -168,11 +197,11 @@ export function InvocationHistoryTable({
   const footerLeft = `${query.data ? totalElements : '—'} runs · ${data.length} on this page`;
 
   const handlePageChange = (page: number) => {
-    setExpandedErrors(new Set());
+    setExpandedDetails(new Set());
     setPagination((prev) => ({ ...prev, pageIndex: page }));
   };
   const handlePageSizeChange = (size: number) => {
-    setExpandedErrors(new Set());
+    setExpandedDetails(new Set());
     setPagination({ pageIndex: 0, pageSize: size });
   };
 
@@ -226,6 +255,8 @@ export function InvocationHistoryTable({
               }
             />
             <RunControls
+              extraColumns={visibleExtraColumns}
+              onExtraColumnsChange={setExtraColumns}
               filters={filters}
               onChange={onFiltersChange}
               summary={query.data?.summary}
@@ -237,16 +268,16 @@ export function InvocationHistoryTable({
               busy={isFetching}
               updatedAt={query.dataUpdatedAt}
               onRefresh={() => {
-                setExpandedErrors(new Set());
+                setExpandedDetails(new Set());
                 void query.refetch();
               }}
             />
-            {refresh && expandedErrors.size > 0 && (
+            {refresh && expandedDetails.size > 0 && (
               <p
                 role="status"
                 className="border-b px-4 py-2 text-xs text-muted-foreground"
               >
-                Auto-refresh paused while error details are open.
+                Auto-refresh paused while run details are open.
               </p>
             )}
             {(query.error || query.data?.countsUnavailable) && (
@@ -281,6 +312,9 @@ export function InvocationHistoryTable({
       >
         <div className="hidden lg:block">
           <DataTable
+            expanded={expanded}
+            getRowCanExpand={() => true}
+            SubComponent={RunDetailRow}
             columns={columns}
             data={data}
             pagination={{
@@ -307,32 +341,31 @@ export function InvocationHistoryTable({
               className="space-y-3 p-4"
               aria-label={run.runLabel || run.instanceId}
             >
-              <RunIdentity run={run} />
-              <RunContext
-                run={run}
-                detailsOpen={expandedErrors.has(run.instanceId)}
-                onDetailsChange={onDetailsChange}
-              />
-              <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
-                <span>Version {run.version}</span>
-                {run.executionDurationSeconds != null &&
-                  run.executionDurationSeconds >= 0 && (
-                    <span>
-                      Execution: {run.executionDurationSeconds.toLocaleString()}{' '}
-                      s
-                    </span>
-                  )}
-                {run.parentInstanceId && (
-                  <span>
-                    Parent:{' '}
-                    <ParentRunLink
-                      parentInstanceId={run.parentInstanceId}
-                      compact
-                    />
-                  </span>
-                )}
+              <div className="flex items-center gap-2">
+                <RunDetailsToggle
+                  run={run}
+                  open={expandedDetails.has(run.instanceId)}
+                  onChange={onDetailsChange}
+                />
+                <RunIdentity run={run} />
               </div>
-              <RunActions run={run} onReplay={setReplayRun} />
+              <RunContext run={run} />
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                  <span>
+                    Started <RunTime value={run.createdAt} />
+                  </span>
+                  <span>
+                    Duration {formatRunDuration(run.executionDurationSeconds)}
+                  </span>
+                </div>
+                <RunActions run={run} onReplay={setReplayRun} />
+              </div>
+              {expandedDetails.has(run.instanceId) && (
+                <div className="rounded-md bg-muted/30 p-3">
+                  <RunDetails run={run} />
+                </div>
+              )}
             </article>
           ))}
           {!data.length && (
@@ -374,4 +407,8 @@ export function InvocationHistoryTable({
       </Dialog>
     </>
   );
+}
+
+function RunDetailRow({ row }: { row: Row<ExecutionHistoryItem> }) {
+  return <RunDetails run={row.original} />;
 }
