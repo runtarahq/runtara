@@ -6,11 +6,10 @@
 # Finance and Legal approvals; one approval of the second parent is answered
 # before the upgrade. The server is stopped and release N+1 is started on the
 # same databases with a control agent whose digest differs (asserted). Both
-# parked parents keep their compiled packages and bound images, the old
-# control pin stays approved beside the new one, and both resume to their
-# results once their approvals are answered; each then makes a control:get
-# after the wake, which runs on the old pin through the approved history. A
-# parent started on N+1 runs too.
+# parked parents keep their compiled packages and bound images and resume to
+# their results once their approvals are answered; each then makes a
+# control:get after the wake, which runs the control bytes composed into its
+# own artifact (no pin, no approval). A parent started on N+1 runs too.
 #
 # N defaults to the current build and N+1 to the same binary with a forced
 # version bump of the control agent in a scratch copy of the bundle (the crate
@@ -251,8 +250,8 @@ expect_resumed() {
         || { print_error "The control call after the wake did not read ${finance}: ${out}"; exit 1; }
 }
 
-control_pin_of() {
-    echo "runtara:builtin-artifacts/control-h$(shasum -a 256 "$1/runtara_agent_control.wasm" | awk '{print $1}')-h$(shasum -a 256 "$1/runtara_agent_control.meta.json" | awk '{print $1}')@0.1.0"
+control_digest_of() {
+    shasum -a 256 < "$1/runtara_agent_control.wasm" | awk '{print $1}'
 }
 # The same control agent with a forced version bump: a `version` custom
 # section on the component and a `version` field in its sidecar.
@@ -300,11 +299,11 @@ else
     cp "${BUNDLE_DIR}"/*.wasm "${BUNDLE_DIR}"/*.meta.json "${NEXT_BUNDLE}/"
     bump_control_bundle "${NEXT_BUNDLE}" "999.0.0-upgrade"
 fi
-OLD_PIN=$(control_pin_of "${BUNDLE_DIR}")
-NEW_PIN=$(control_pin_of "${NEXT_BUNDLE}")
-[ "${OLD_PIN}" != "${NEW_PIN}" ] || { print_error "N and N+1 share the control digest ${OLD_PIN}; force a version bump"; exit 1; }
-echo "  N:   ${OLD_PIN}"
-echo "  N+1: ${NEW_PIN}"
+OLD_DIGEST=$(control_digest_of "${BUNDLE_DIR}")
+NEW_DIGEST=$(control_digest_of "${NEXT_BUNDLE}")
+[ "${OLD_DIGEST}" != "${NEW_DIGEST}" ] || { print_error "N and N+1 share the control digest ${OLD_DIGEST}; force a version bump"; exit 1; }
+echo "  N:   ${OLD_DIGEST}"
+echo "  N+1: ${NEW_DIGEST}"
 
 print_step "Starting isolated Valkey on :${TEST_VALKEY_PORT}..."
 VALKEY_CONTAINER=$(docker run -d --rm -p "${TEST_VALKEY_PORT}:6379" valkey/valkey:8-alpine)
@@ -361,16 +360,15 @@ sleep 2
 [ "$(instance_status "${P2}")" = "suspended" ] || { print_error "One answer woke an \`all\` wait: $(instance_row "${P2}")"; exit 1; }
 P1_IMAGE=$(bound_image "${P1}"); P2_IMAGE=$(bound_image "${P2}")
 [ -n "${P1_IMAGE}" ] && [ -n "${P2_IMAGE}" ] || { print_error "Parked parents have no bound image"; exit 1; }
-[ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM approved_builtin_artifacts WHERE pin = '${OLD_PIN}' AND revoked_at IS NULL")" = "1" ] \
-    || { print_error "Release N did not approve its control bytes"; exit 1; }
+[ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM approved_builtin_artifacts WHERE agent_id = 'control'")" = "0" ] \
+    || { print_error "Release N approved a control version"; exit 1; }
 
 print_step "Upgrading: stopping N, starting N+1 on the same databases..."
 stop_server
 rm -rf "${BUNDLE_DIR}" && mv "${NEXT_BUNDLE}" "${BUNDLE_DIR}"
 start_server "${RUNTARA_SERVER_BIN_NEXT}"
-[ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM approved_builtin_artifacts
-      WHERE pin IN ('${OLD_PIN}', '${NEW_PIN}') AND revoked_at IS NULL")" = "2" ] \
-    || { print_error "N+1 should approve its control bytes and keep N's in the history"; exit 1; }
+[ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM approved_builtin_artifacts WHERE agent_id = 'control'")" = "0" ] \
+    || { print_error "N+1 approved a control version"; exit 1; }
 for parent in "${P1}" "${P2}"; do
     [ "$(instance_status "${parent}")" = "suspended" ] || { print_error "Parent ${parent} did not stay parked: $(instance_row "${parent}")"; exit 1; }
 done

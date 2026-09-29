@@ -1,8 +1,9 @@
 # runtara-control-contract
 
 The numbers and names every side of the control service agrees on:
-`runtara-agent-control` (the guest), `runtara-component-host` (the executor)
-and `runtara-server` (the `NativeControl` service). The ABI itself is the WIT
+`runtara-agent-control` (the guest), `runtara-component-host` (the host
+binding of `runtara:control/api`) and `runtara-server` (the `NativeControl`
+service). The ABI itself is the WIT
 in `runtara-wit/wit/control` (`runtara:control@1.0.0`); this crate is
 serde-only so all three can depend on it.
 
@@ -10,8 +11,8 @@ serde-only so all three can depend on it.
 
 | Item | Value |
 |---|---|
-| Control call input / output / response | 1 MiB / 4 MiB / 4 MiB |
-| One control call | 90 s (`CONTROL_TIMEOUT`) |
+| Request JSON field (`start` inputs, `send-signal` payload) / response | 1 MiB / 4 MiB |
+| One control call | 90 s (`CONTROL_TIMEOUT`, permanent) |
 | `get` inlined output / error | 1 MiB / 64 KiB |
 | Page size | 1-100 |
 | Lineage depth (decision D6) | 16 |

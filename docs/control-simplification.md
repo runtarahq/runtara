@@ -1,7 +1,7 @@
 # Control agent simplification
 
-Status: plan, 2026-09-29, against main at a7a0e401 (after #278, queryable
-workflow state). Nothing here is implemented.
+Status: implemented 2026-09-29 (slices 1-4), planned against main at a7a0e401
+(after #278, queryable workflow state).
 
 Today the composed copy of the control agent only forwards. It calls
 `runtara:control/executor`, and the host's `ControlExecutor` runs the

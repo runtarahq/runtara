@@ -26,7 +26,7 @@ and an agent may only wake on `at`. Mentions of `wait` below are historical.
 
 ## Where the code differs from the brief
 1. Operation identity lives in `WorkflowState`; `CallContext` is off the production path.
-2. The host cannot tell which composed component called, so control runs approved host-loaded bytes in fresh stores (`denied` stubs elsewhere); D2 adds load and per-call checks.
+2. The host cannot tell which composed component called, so control runs approved host-loaded bytes in fresh stores (`denied` stubs elsewhere); D2 adds load and per-call checks. *Changed after this plan (2026-09-29):* control is an ordinary composed agent calling `runtara:control/api` in the run's own store, the compile-time allowlist is the only gate, and the executor, pin, control history and load audit are gone ([control-simplification.md](control-simplification.md)).
 3. No new lifecycle wake case (wasmtime 46 needs exact variants): the workflow parks `at(deadline)`, the host attaches waits.
 4. The signal id is the target's WaitForSignal step id, narrowed by `action.key` (not `InputRequestSpec.signal_id`).
 5. Admitted children lack a core row and expired `launching` requests can still launch; slices 7-8 add a fence and `queued`/`not-started`.
@@ -58,7 +58,7 @@ Slices land alone, V-fmt and V-gate green; 1-13 follow G0; if K1 is still open a
 ## Cross-cutting
 - **Generated:** `RuntaraRuntimeApi.ts` via `generate-api-runtime-offline` in slices 2-4, 6, 7, 13 (no CI drift check); control's committed `wit/agent.wit` from `build.rs`; `wit/deps`, agent catalog and `.sqlx` unchanged.
 - **CI:** `wit-package` covers the new WIT; `components-build` gains `control_component` (5), Valkey (7), `control_wait_runner_test` (10); new features join `GATE_FEATURES`; TS drift, live e2e and upgrade are manual.
-- **Security:** tenant, caller, operation only from `WorkflowState`/`CallContext`, never WIT args or input; `api` real only in `ControlExecutor` stores; allowlist, byte scan, per-call check (D2), reserved `control` slug. Authorization: reads tenant-wide; `wait`/`cancel`/`pause`/`resume` direct children; `send-signal` children, ancestors or `action.key` opt-ins (D1); no self-mutation; audit without payloads.
+- **Security:** tenant, caller, operation only from `WorkflowState`/`CallContext`, never WIT args or input; `api` real only in `ControlExecutor` stores; allowlist, byte scan, per-call check (D2), reserved `control` slug. *Changed after this plan (2026-09-29):* `api` is real only for a run's own prepared entry, and the allowlist alone gates control; the byte scan and per-call check are gone. Authorization: reads tenant-wide; `wait`/`cancel`/`pause`/`resume` direct children; `send-signal` children, ancestors or `action.key` opt-ins (D1); no self-mutation; audit without payloads.
 - **Migrations:** provisional numbers (core `032`-`042`); forward only, never edit, rename or `sed`; transactional; enum `ADD VALUE` alone; new CHECKs `NOT VALID` first; every new table has a removal path.
 
 ## Top risks
