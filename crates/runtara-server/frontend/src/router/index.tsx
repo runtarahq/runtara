@@ -3,6 +3,7 @@
 // Separating would require splitting the routing logic from its component references.
 import { createBrowserRouter, Navigate } from 'react-router';
 import { lazy, Suspense } from 'react';
+import { InvocationHistoryRedirect } from '@/router/InvocationHistoryRedirect';
 import { PrivateRoute } from '@/router/PrivateRoute';
 import { EntitlementRoute } from '@/router/EntitlementRoute';
 import { Layout } from '@/shared/layouts/layout';
@@ -119,11 +120,6 @@ const AnalyticsSystem = lazy(() =>
 const AnalyticsRateLimits = lazy(() =>
   import('@/features/analytics/pages/RateLimits').then((m) => ({
     default: m.RateLimits,
-  }))
-);
-const InvocationHistory = lazy(() =>
-  import('@/features/invocation-history/pages/InvocationHistory').then((m) => ({
-    default: m.InvocationHistory,
   }))
 );
 const Settings = lazy(() =>
@@ -420,9 +416,7 @@ export const router = createBrowserRouter(
           path: '/invocation-history',
           element: (
             <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <InvocationHistory />
-              </Suspense>
+              <InvocationHistoryRedirect />
             </PrivateRoute>
           ),
         },

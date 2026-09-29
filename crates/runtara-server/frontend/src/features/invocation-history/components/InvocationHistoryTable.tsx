@@ -128,7 +128,14 @@ export function InvocationHistoryTable({
     <ConsoleTableShell
       toolbar={
         <ConsoleToolbar
-          left={<Breadcrumb items={[{ label: 'Invocation History' }]} />}
+          left={
+            <Breadcrumb
+              items={[
+                { label: 'Operations', to: '/operations' },
+                { label: 'Runs' },
+              ]}
+            />
+          }
           search={
             <ToolbarSearch
               value={search}

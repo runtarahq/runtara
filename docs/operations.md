@@ -542,6 +542,11 @@ retained link to the original run.
 
 ## Implementation
 
+The Operations navigation contains **Overview**, **Queues**, **Runs**, and
+**Monitor**. Runs reuses the full invocation history at `/operations/runs`;
+legacy `/invocation-history` links redirect there with filters preserved.
+Workflow-specific execution history and detailed execution links remain available.
+
 The `/operations` UI provides Overview, request queues, plain workflow run
 views, saved shared views, run details and Monitor.
 The UI follows the screenshot structure: four Overview summaries with attention

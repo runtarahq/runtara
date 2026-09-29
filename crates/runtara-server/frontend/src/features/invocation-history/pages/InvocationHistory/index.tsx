@@ -5,7 +5,7 @@ import { InvocationHistoryTable } from '../../components/InvocationHistoryTable'
 import { ExecutionHistoryFilters } from '../../types';
 
 export function InvocationHistory() {
-  usePageTitle('Invocation History');
+  usePageTitle('Runs');
 
   const [searchParams, setSearchParams] = useSearchParams();
   const [filters, setFilters] = useState<ExecutionHistoryFilters>(() => ({

@@ -21,7 +21,6 @@ describe('filterMenu — entitlement gate', () => {
     expect(keys(out)).toEqual([
       'workflows',
       'operations',
-      'invocation-history',
       'objects',
       'triggers',
       'connections',
@@ -39,7 +38,7 @@ describe('filterMenu — entitlement gate', () => {
 
   it('always-on entries stay visible regardless of feature flags', () => {
     // Disabling every feature must not hide workflows / triggers /
-    // connections / analytics / invocation-history — those are tier-independent
+    // connections / analytics / operations — those are tier-independent
     // by design.
     const out = filterMenu(
       menu,
@@ -49,7 +48,6 @@ describe('filterMenu — entitlement gate', () => {
     expect(keys(out)).toEqual([
       'workflows',
       'operations',
-      'invocation-history',
       'triggers',
       'connections',
       'analytics',
