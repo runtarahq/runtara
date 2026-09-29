@@ -198,6 +198,7 @@ pub(crate) fn push_instance_filters(
             .push(" AND i.parent_instance_id = ")
             .push_bind(parent.clone());
     }
+    crate::state_filter::push_state_filters(query, &options.state_filters);
     if let Some(search) = options
         .search
         .as_deref()

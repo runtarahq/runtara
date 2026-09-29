@@ -462,7 +462,8 @@ pub(crate) fn control_agent_reference() -> serde_json::Value {
         "capabilities": {
             "start": "Durably admit a child run of another workflow and return {instanceId, workflowId, version, runLabel, replayed} once it is accepted, without waiting for it.",
             "get": "Read one run of the tenant: status, suspensionReason, parentInstanceId, output or error.",
-            "query": "Page runs of the tenant by createdAtMs or finishedAtMs; parentInstanceId or callerChildren lists children, including ones still queued in admission.",
+            "get-state": "Read one run's published state (what its SetState steps wrote) with its workflow version, without waking it: {instance, state, stateUpdatedAtMs}.",
+            "query": "Page runs of the tenant by createdAtMs or finishedAtMs; parentInstanceId or callerChildren lists children, including ones still queued in admission. state: [{field, op, value}] (op eq, ne, in, lt, lte, gt, gte, exists) keeps runs whose published state matches every filter; it never returns state.",
             "list-pending-signals": "List open WaitForSignal requests of one run, a workflow, or the calling run's children.",
             "send-signal": "Answer the one open request of a WaitForSignal step, validated against its response schema.",
             "cancel": "Cancel a direct child: cooperatively, forced after graceMs. A parked or queued child ends at once.",
@@ -470,7 +471,7 @@ pub(crate) fn control_agent_reference() -> serde_json::Value {
             "resume": "Resume an explicitly paused direct child (CONTROL_NOT_PAUSED otherwise). It never answers a WaitForSignal request."
         },
         "authorization": [
-            "Reads (get, query, list-pending-signals) see every run of the tenant. The caller-relative filters (query callerChildren, list-pending-signals children) need a calling run.",
+            "Reads (get, get-state, query, list-pending-signals) see every run of the tenant. The caller-relative filters (query callerChildren, list-pending-signals children) need a calling run.",
             "cancel, pause and resume reach direct children only: CONTROL_NOT_CHILD otherwise, CONTROL_DENIED for an ancestor.",
             "send-signal answers a child, an ancestor, or any run whose WaitForSignal request opted in with action.key when the step passes the same actionKey; anything else is CONTROL_DENIED.",
             "No mutation may target the calling run (CONTROL_INVALID). Tenant, caller and operation come from the host, never from step inputs."
@@ -525,7 +526,7 @@ pub(crate) fn control_agent_reference() -> serde_json::Value {
         "replay": {
             "identity": "Each control step call has an operation identity: the step plus its loop position. A retried attempt, a crash recovery and a resumed run replay the same identity.",
             "table": [
-                {"capability": "get, query, list-pending-signals", "onReplay": "A durable step returns its checkpointed result; a non-durable one reads again."},
+                {"capability": "get, get-state, query, list-pending-signals", "onReplay": "A durable step returns its checkpointed result; a non-durable one reads again."},
                 {"capability": "start", "onReplay": "Returns the same child (replayed: true), also after a crash between admission and the checkpoint. Other arguments are CONTROL_REPLAY_CONFLICT."},
                 {"capability": "send-signal, cancel, pause, resume", "onReplay": "Returns the receipt of the first call (replayed: true) without acting again. Other arguments are CONTROL_REPLAY_CONFLICT."}
             ],

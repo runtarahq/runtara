@@ -466,6 +466,117 @@ async fn test_list_instances() {
 }
 
 #[tokio::test]
+async fn test_list_instances_by_state() {
+    skip_if_no_db!();
+    let pool = get_pool().await.expect("Failed to connect to database");
+
+    let tenant_id = format!("test-tenant-state-{}", Uuid::new_v4());
+    let image_id = Uuid::new_v4().to_string();
+    create_test_image(&pool, &image_id, &tenant_id)
+        .await
+        .expect("Failed to create test image");
+    let ids: Vec<_> = (0..4).map(|_| Uuid::new_v4().to_string()).collect();
+    for id in &ids {
+        create_test_instance(&pool, id, &tenant_id, &image_id).await;
+    }
+    // Three runs with state; the fourth has none.
+    for (id, state) in ids.iter().zip([
+        serde_json::json!({"stage": "approval", "amount": 10, "dueAt": "2026-09-29T08:00:00.000Z"}),
+        serde_json::json!({"stage": "approval", "amount": 250, "dueAt": "2026-10-02T08:00:00.000Z"}),
+        serde_json::json!({"stage": "done", "amount": "n/a"}),
+    ]) {
+        sqlx::query("INSERT INTO instance_state (instance_id, state) VALUES ($1, $2)")
+            .bind(id)
+            .bind(state)
+            .execute(&pool)
+            .await
+            .expect("seed state");
+    }
+
+    let list = |filters: serde_json::Value| {
+        let pool = pool.clone();
+        let tenant_id = tenant_id.clone();
+        async move {
+            let options = ListInstancesOptions {
+                tenant_id: Some(tenant_id),
+                state_filters: runtara_environment::state_filter::parse_state_filters(
+                    filters.to_string().as_bytes(),
+                )
+                .expect("filters"),
+                limit: 100,
+                ..Default::default()
+            };
+            let page = InstanceRepository::new(pool)
+                .list(&options)
+                .await
+                .expect("list");
+            let mut found: Vec<String> = page
+                .instances
+                .into_iter()
+                .map(|instance| instance.instance_id)
+                .collect();
+            found.sort();
+            found
+        }
+    };
+    let sorted = |picked: &[usize]| {
+        let mut picked: Vec<String> = picked.iter().map(|&i| ids[i].clone()).collect();
+        picked.sort();
+        picked
+    };
+
+    use serde_json::json;
+    assert_eq!(
+        list(json!([{"field": "stage", "op": "eq", "value": "approval"}])).await,
+        sorted(&[0, 1])
+    );
+    // A range compares only values of the same type: "n/a" never matches.
+    assert_eq!(
+        list(json!([{"field": "amount", "op": "gt", "value": 5}])).await,
+        sorted(&[0, 1])
+    );
+    // Date-times compare in canonical UTC, whatever offset the caller uses.
+    assert_eq!(
+        list(json!([{"field": "dueAt", "op": "lt", "value": "2026-09-30T00:00:00+02:00"}])).await,
+        sorted(&[0])
+    );
+    assert_eq!(
+        list(json!([
+            {"field": "stage", "op": "eq", "value": "approval"},
+            {"field": "amount", "op": "gte", "value": 100}
+        ]))
+        .await,
+        sorted(&[1])
+    );
+    assert_eq!(
+        list(json!([{"field": "stage", "op": "in", "value": ["done", "nope"]}])).await,
+        sorted(&[2])
+    );
+    // A missing field never matches, except `exists: false`.
+    assert_eq!(
+        list(json!([{"field": "stage", "op": "ne", "value": "done"}])).await,
+        sorted(&[0, 1])
+    );
+    assert_eq!(
+        list(json!([{"field": "dueAt", "op": "exists", "value": false}])).await,
+        sorted(&[2, 3])
+    );
+
+    for id in &ids {
+        sqlx::query("DELETE FROM instances WHERE instance_id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+    sqlx::query("DELETE FROM images WHERE image_id = $1")
+        .bind(&image_id)
+        .execute(&pool)
+        .await
+        .ok();
+}
+
+#[tokio::test]
 async fn test_list_instances_by_multiple_statuses() {
     skip_if_no_db!();
     let pool = get_pool().await.expect("Failed to connect to database");

@@ -537,6 +537,7 @@ fn the_control_api_is_complete_and_frozen() {
     let expected: Vec<(String, Vec<String>)> = [
         ("start", "request"),
         ("get", "instance-id"),
+        ("get-state", "instance-id"),
         ("query", "request"),
         ("list-pending-signals", "request"),
         ("send-signal", "request"),
@@ -652,6 +653,25 @@ fn the_control_api_is_complete_and_frozen() {
             ],
         ),
         ("cancel-request", &["instance-id", "reason", "grace-ms"]),
+        ("state-read", &["instance", "state", "state-updated-at-ms"]),
+        (
+            "query-request",
+            &[
+                "workflow-id",
+                "run-label",
+                "statuses",
+                "parent",
+                "created-after-ms",
+                "created-before-ms",
+                "finished-after-ms",
+                "finished-before-ms",
+                "state",
+                "sort-by",
+                "order",
+                "page-size",
+                "page-token",
+            ],
+        ),
         ("command-result", &["instance-id", "outcome", "replayed"]),
     ] {
         assert_eq!(record_fields(&resolve, types, name), fields, "{name}");

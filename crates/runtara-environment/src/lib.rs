@@ -226,6 +226,9 @@ pub mod approved_builtins;
 /// Narrow, capped instance reads for the control service.
 pub mod control_reads;
 
+/// Filters over a run's published state.
+pub mod state_filter;
+
 /// In-process WASM execution backend.
 pub mod runner;
 

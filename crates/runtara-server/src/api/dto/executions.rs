@@ -58,6 +58,70 @@ pub struct ListAllExecutionsQuery {
     pub sort_order: Option<String>,
 }
 
+/// A filter on a run's published state (what its SetState steps wrote).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StateFilterDto {
+    /// A top-level state field.
+    pub field: String,
+    /// `eq`, `ne`, `in`, `lt`, `lte`, `gt`, `gte` or `exists`.
+    pub op: String,
+    /// A JSON string, number or boolean; an array of them for `in`; `true` or
+    /// `false` for `exists` (default `true`). A date-time string compares in
+    /// UTC. There is no `now`: pass the time you mean.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub value: serde_json::Value,
+}
+
+/// Body of `POST /api/runtime/executions/query`: the listing filters of
+/// `GET /api/runtime/executions`, plus filters on published state. Returns
+/// executions, never their state.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QueryExecutionsRequest {
+    pub search: Option<String>,
+    pub run_label: Option<String>,
+    pub parent_instance_id: Option<String>,
+    /// Page number (0-based, default 0).
+    pub page: Option<i32>,
+    /// Page size (default 20, max 100).
+    pub size: Option<i32>,
+    pub workflow_id: Option<String>,
+    /// Comma-separated statuses, as for the GET listing.
+    pub status: Option<String>,
+    pub created_from: Option<DateTime<Utc>>,
+    pub created_to: Option<DateTime<Utc>>,
+    pub completed_from: Option<DateTime<Utc>>,
+    pub completed_to: Option<DateTime<Utc>>,
+    pub sort_by: Option<String>,
+    pub sort_order: Option<String>,
+    /// All must hold; a run without the field does not match. At most 16.
+    #[serde(default)]
+    pub state: Vec<StateFilterDto>,
+}
+
+impl QueryExecutionsRequest {
+    /// The listing part, as the GET query.
+    pub fn listing(&self) -> ListAllExecutionsQuery {
+        ListAllExecutionsQuery {
+            search: self.search.clone(),
+            run_label: self.run_label.clone(),
+            parent_instance_id: self.parent_instance_id.clone(),
+            page: self.page,
+            size: self.size,
+            workflow_id: self.workflow_id.clone(),
+            status: self.status.clone(),
+            created_from: self.created_from,
+            created_to: self.created_to,
+            completed_from: self.completed_from,
+            completed_to: self.completed_to,
+            sort_by: self.sort_by.clone(),
+            sort_order: self.sort_order.clone(),
+        }
+    }
+}
+
 /// Response for listing all executions
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ListAllExecutionsResponse {
@@ -80,6 +144,8 @@ pub struct ExecutionFilters {
     pub completed_to: Option<DateTime<Utc>>,
     pub sort_by: String,
     pub sort_order: String,
+    /// Published-state filters, validated and canonical.
+    pub state_filters: Vec<runtara_environment::state_filter::StateFilter>,
 }
 
 impl Default for ExecutionFilters {
@@ -96,6 +162,7 @@ impl Default for ExecutionFilters {
             completed_to: None,
             sort_by: "completed_at".to_string(),
             sort_order: "DESC".to_string(),
+            state_filters: Vec::new(),
         }
     }
 }

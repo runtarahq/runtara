@@ -37,7 +37,7 @@ pub use bindings::runtara::control::types::{
     CancelRequest, CommandOutcome, CommandResult, ControlError, ErrorCode as ControlErrorCode,
     InstanceDetail, InstancePage, InstanceStatus, InstanceSummary, ParentClosePolicy, ParentFilter,
     PendingSignal, PendingSignalPage, PendingSignalsRequest, QueryRequest, SendSignalRequest,
-    SendSignalResult, SignalScope, SortField, SortOrder, StartRequest, StartResult,
+    SendSignalResult, SignalScope, SortField, SortOrder, StartRequest, StartResult, StateRead,
     SuspensionReason, TerminalResult,
 };
 
@@ -97,6 +97,15 @@ pub trait ControlHost: Send + Sync {
         _authority: &ControlAuthority,
         _instance_id: String,
     ) -> Result<InstanceDetail, ControlError> {
+        Err(ControlError::unsupported())
+    }
+
+    /// Read one instance's published state.
+    async fn get_state(
+        &self,
+        _authority: &ControlAuthority,
+        _instance_id: String,
+    ) -> Result<StateRead, ControlError> {
         Err(ControlError::unsupported())
     }
 
@@ -181,6 +190,7 @@ macro_rules! with_control_api {
         $link!($linker;
             "start" => start(StartRequest) -> StartResult,
             "get" => get(String) -> InstanceDetail,
+            "get-state" => get_state(String) -> StateRead,
             "query" => query(QueryRequest) -> InstancePage,
             "list-pending-signals" => list_pending_signals(PendingSignalsRequest) -> PendingSignalPage,
             "send-signal" => send_signal(SendSignalRequest) -> SendSignalResult,
@@ -200,7 +210,7 @@ macro_rules! api_names {
 }
 
 #[cfg(test)]
-pub(crate) const LINKED_API_FUNCTIONS: [&str; 8] = with_control_api!(api_names!(unused));
+pub(crate) const LINKED_API_FUNCTIONS: [&str; 9] = with_control_api!(api_names!(unused));
 
 /// Bind `runtara:control/api` to the store's [`ControlApiCall`]. Only the
 /// control executor's linker uses this; a store without one is `denied`.

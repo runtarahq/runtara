@@ -165,6 +165,9 @@ pub struct ListInstancesOptions {
     pub finished_after: Option<DateTime<Utc>>,
     /// Filter by finished_at < value.
     pub finished_before: Option<DateTime<Utc>>,
+    /// Filter by published state, normalised
+    /// ([`crate::state_filter::normalize_state_filters`]); AND-combined.
+    pub state_filters: Vec<crate::state_filter::StateFilter>,
     /// Order by field and direction.
     pub order_by: Option<String>,
     /// Maximum results to return.

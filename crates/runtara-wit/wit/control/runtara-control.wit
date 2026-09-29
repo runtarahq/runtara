@@ -161,6 +161,16 @@ interface types {
         terminal: terminal-result,
     }
 
+    /// `get-state`: the summary (with the run's workflow version) plus the
+    /// run's published state.
+    record state-read {
+        instance: instance-summary,
+        /// The state as a JSON object; none when the run published none.
+        state: option<list<u8>>,
+        /// When the state last changed.
+        state-updated-at-ms: option<u64>,
+    }
+
     /// `start` a child of the calling instance.
     record start-request {
         /// A workflow id, never a slug.
@@ -215,6 +225,10 @@ interface types {
         created-before-ms: option<u64>,
         finished-after-ms: option<u64>,
         finished-before-ms: option<u64>,
+        /// Published-state filters as a JSON array of `{field, op, value}`
+        /// (op `eq`, `ne`, `in`, `lt`, `lte`, `gt`, `gte` or `exists`), all of
+        /// which must hold. A run without the field does not match.
+        state: option<list<u8>>,
         sort-by: sort-field,
         order: sort-order,
         /// 1-100.
@@ -319,14 +333,15 @@ interface types {
 /// Host control operations. Real only in the fresh stores the host executor
 /// runs approved control bytes in; every other store links `denied` stubs.
 ///
-/// Reads (`get`, `query`, `list-pending-signals`) cover the caller's tenant.
+/// Reads (`get`, `get-state`, `query`, `list-pending-signals`) cover the
+/// caller's tenant.
 /// `send-signal` reaches the caller's children, its ancestors, and requests
 /// that opt in with `action.key`. `cancel`, `pause` and `resume` reach only
 /// direct children: an ancestor is `denied`, anything else `not-child`. No
 /// operation may target the caller itself (`invalid`).
 interface api {
     use types.{
-        control-error, instance-detail, start-request, start-result, query-request,
+        control-error, instance-detail, state-read, start-request, start-result, query-request,
         instance-page, pending-signals-request, pending-signal-page,
         send-signal-request, send-signal-result, cancel-request, command-result,
     };
@@ -344,6 +359,9 @@ interface api {
 
     /// Read one instance of the tenant, with its result once terminal.
     get: async func(instance-id: string) -> result<instance-detail, control-error>;
+
+    /// Read one instance's published state, without waking it.
+    get-state: async func(instance-id: string) -> result<state-read, control-error>;
 
     /// Find instances of the tenant, sorted by creation or finish time.
     query: async func(request: query-request) -> result<instance-page, control-error>;

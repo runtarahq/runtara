@@ -1630,7 +1630,22 @@ impl ExecutionEngine {
             )));
         }
 
-        Ok(runtara_info_to_dto(info))
+        let mut instance = runtara_info_to_dto(info);
+        // The run's published state; a failed read leaves it out rather than
+        // failing the whole lookup.
+        match client.get_run_state(tenant_id, instance_id).await {
+            Ok(Some(record)) => {
+                instance.state = Some(Value::Object(record.state));
+                instance.state_updated_at = Some(record.updated_at.to_rfc3339());
+            }
+            Ok(None) => {}
+            Err(error) => warn!(
+                instance_id = %instance_id,
+                error = %error,
+                "Reading the run's state failed"
+            ),
+        }
+        Ok(instance)
     }
 
     async fn find_recent_execution_summary(
@@ -2067,6 +2082,7 @@ impl ExecutionEngine {
 
         options.search = filters.search.clone();
         options.parent_instance_id = filters.parent_instance_id.clone();
+        options.state_filters = filters.state_filters.clone();
         options.run_label =
             runtara_dsl::run_label::normalize_run_label(filters.run_label.as_deref())
                 .map_err(ExecutionError::ValidationError)?;

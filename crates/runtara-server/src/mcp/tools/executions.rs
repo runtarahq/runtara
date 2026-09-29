@@ -51,6 +51,13 @@ pub struct ListExecutionsParams {
     pub sort_by: Option<String>,
     #[schemars(description = "Sort order: 'asc' or 'desc'")]
     pub sort_order: Option<String>,
+    /// Keep only executions whose published state (what their SetState steps
+    /// wrote) matches every filter: a JSON array of {field, op, value}, op
+    /// eq, ne, in, lt, lte, gt, gte or exists. A run without the field does
+    /// not match; date-times compare in UTC. State is never returned here;
+    /// get_execution shows one run's state.
+    #[schemars(schema_with = "crate::mcp::tools::internal_api::optional_json_array_schema")]
+    pub state: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -131,8 +138,34 @@ pub async fn list_executions(
     server: &SmoMcpServer,
     params: ListExecutionsParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
-    let qs = list_executions_query_string(&params);
-    let mut result = api_get(server, &format!("/api/runtime/executions{}", qs)).await?;
+    let mut result = match &params.state {
+        // State filters need the POST query form: they do not fit in a query
+        // string.
+        Some(state) => {
+            let state = normalize_json_arg(state.clone(), "state")?;
+            api_post(
+                server,
+                "/api/runtime/executions/query",
+                Some(json!({
+                    "search": params.search,
+                    "runLabel": params.run_label,
+                    "parentInstanceId": params.parent_instance_id,
+                    "workflowId": params.workflow_id,
+                    "status": params.status,
+                    "page": params.page,
+                    "size": params.size,
+                    "sortBy": params.sort_by,
+                    "sortOrder": params.sort_order,
+                    "state": state,
+                })),
+            )
+            .await?
+        }
+        None => {
+            let qs = list_executions_query_string(&params);
+            api_get(server, &format!("/api/runtime/executions{}", qs)).await?
+        }
+    };
 
     // Strip verbose fields from execution listings to keep responses compact.
     // Use get_execution for full details on a specific instance.
@@ -2236,6 +2269,7 @@ mod tests {
             size: Some(50),
             sort_by: Some("createdAt".to_string()),
             sort_order: Some("desc".to_string()),
+            state: None,
         });
 
         assert!(query.contains("workflowId=workflow%2Fneeds%20encoding"));

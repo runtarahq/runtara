@@ -38,6 +38,7 @@ use runtime_client::RuntimeClient;
     paths(
         // Execution endpoints
         api::handlers::executions::list_all_executions_handler,
+        api::handlers::executions::query_executions_handler,
         // Workflow endpoints (refactored)
         api::handlers::workflows::create_workflow_handler,
         api::handlers::workflows::update_workflow_handler,
@@ -214,6 +215,8 @@ use runtime_client::RuntimeClient;
             api::dto::workflows::ValidationErrorDto,
             api::dto::workflows::WorkflowValidationErrorResponse,
             api::dto::executions::ListAllExecutionsResponse,
+            api::dto::executions::QueryExecutionsRequest,
+            api::dto::executions::StateFilterDto,
             api::dto::operators::ListAgentsResponse,
             // DSL types from runtara-dsl (with utoipa feature enabled)
             runtara_dsl::Workflow,
@@ -1700,6 +1703,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/runtime/executions",
             get(api::handlers::executions::list_all_executions_handler),
+        )
+        .route(
+            "/api/runtime/executions/query",
+            post(api::handlers::executions::query_executions_handler),
         )
         // Workflow endpoints (refactored - using 3-layer architecture)
         .route(
