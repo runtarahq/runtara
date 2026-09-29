@@ -72,6 +72,8 @@ pub(crate) fn step_id(step: &Step) -> &str {
         Step::Delay(step) => &step.id,
         Step::WaitForSignal(step) => &step.id,
         Step::WaitForInstances(step) => &step.id,
+        Step::SetState(step) => &step.id,
+        Step::GetState(step) => &step.id,
         Step::AiAgent(step) => &step.id,
     }
 }

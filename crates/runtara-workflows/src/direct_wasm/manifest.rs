@@ -1449,6 +1449,9 @@ fn step_manifest(
         }
         // The stdlib reads instanceIds, mode and timeoutMs from the step body.
         Step::WaitForInstances(_) => {}
+        // The stdlib reads SetState values from the step body; GetState has
+        // no configuration.
+        Step::SetState(_) | Step::GetState(_) => {}
     }
 
     Ok(DirectStepManifest {
@@ -1741,6 +1744,8 @@ fn step_name(step: &Step) -> Option<&str> {
         Step::Delay(step) => step.name.as_deref(),
         Step::WaitForSignal(step) => step.name.as_deref(),
         Step::WaitForInstances(step) => step.name.as_deref(),
+        Step::SetState(step) => step.name.as_deref(),
+        Step::GetState(step) => step.name.as_deref(),
         Step::AiAgent(step) => step.name.as_deref(),
     }
 }
@@ -1761,6 +1766,8 @@ fn step_type_name(step: &Step) -> &'static str {
         Step::Delay(_) => "Delay",
         Step::WaitForSignal(_) => "WaitForSignal",
         Step::WaitForInstances(_) => "WaitForInstances",
+        Step::SetState(_) => "SetState",
+        Step::GetState(_) => "GetState",
         Step::AiAgent(_) => "AiAgent",
     }
 }

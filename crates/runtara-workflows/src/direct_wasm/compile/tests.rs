@@ -217,6 +217,8 @@ fn enable_step_breakpoint(graph: &mut ExecutionGraph, step_id: &str) {
         runtara_dsl::Step::Delay(step) => step.breakpoint = Some(true),
         runtara_dsl::Step::WaitForSignal(step) => step.breakpoint = Some(true),
         runtara_dsl::Step::WaitForInstances(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::SetState(step) => step.breakpoint = Some(true),
+        runtara_dsl::Step::GetState(step) => step.breakpoint = Some(true),
         runtara_dsl::Step::AiAgent(step) => step.breakpoint = Some(true),
     }
 }

@@ -673,6 +673,19 @@ impl ValidationErrorDto {
                 Some(field.clone()),
                 None,
             ),
+            ValidationError::StateStepWithoutStateSchema { step_id, .. } => {
+                (error.to_string(), Some(step_id.clone()), None, None)
+            }
+            ValidationError::UndeclaredStateField {
+                step_id,
+                field_name,
+                ..
+            } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some(format!("values.{field_name}")),
+                None,
+            ),
         };
 
         Self {

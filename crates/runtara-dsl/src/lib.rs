@@ -74,6 +74,9 @@ pub mod condition_eval;
 // Canonical schema-driven form model shared by connections, workflows, and reports.
 pub mod form;
 
+// Checking and canonicalising run state against a workflow's stateSchema.
+pub mod state;
+
 // Step type metadata registry. Gated behind `json-schema` because it
 // generates `schemars::RootSchema` for each step type. WASM consumers
 // of `runtara-dsl` opt out of this feature to keep `schemars` out of their
@@ -883,7 +886,7 @@ mod tests {
 
     #[test]
     fn test_dsl_version() {
-        assert_eq!(DSL_VERSION, "3.4.0");
+        assert_eq!(DSL_VERSION, "3.5.0");
     }
 
     #[test]

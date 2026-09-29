@@ -610,6 +610,33 @@ pub(crate) fn wait_for_instances_step_shape() -> serde_json::Value {
     })
 }
 
+/// The SetState/GetState reference advertised in the authoring schema.
+fn run_state_step_shapes() -> serde_json::Value {
+    serde_json::json!({
+        "SetState": {
+            "required": ["id", "stepType", "values"],
+            "values": "Map of stateSchema field name to MappingValue. The merge is shallow: a given field replaces its value, null clears it, arrays are replaced; fields not given are kept.",
+            "rules": "Every field must be declared in the root graph's stateSchema (E134 without one, E135 for an undeclared field); immediate values are type, format and enum checked (E023/E024), every value again at run time (STATE_INVALID_VALUE). Datetimes are stored as UTC. A write applies once, so a replay changes nothing. No outputs.",
+            "ignored": "In a non-durable workflow (W082), and when the workflow runs embedded (W083) or as a published workflow-agent: state belongs to the outer run.",
+            "example": {
+                "id": "markApproved",
+                "stepType": "SetState",
+                "values": {
+                    "stage": {"valueType": "immediate", "value": "approved"},
+                    "decidedBy": {"valueType": "reference", "value": "steps.approve.outputs.user"}
+                }
+            }
+        },
+        "GetState": {
+            "required": ["id", "stepType"],
+            "outputs": "steps.<id>.outputs is the state object; steps.<id>.outputs.<field> for a declared field (absent until written).",
+            "replay": "The read is checkpointed: a replay sees what the first execution read, so read-modify-write loops are replay-safe.",
+            "example": {"id": "current", "stepType": "GetState"}
+        },
+        "readingOtherRuns": "Other workflows read a run's state with the control agent: get-state for one run, query with a state filter to list runs. Neither wakes the run."
+    })
+}
+
 /// Build the canonical workflow-authoring schema returned by
 /// `get_workflow_authoring_schema`. Extracted as a pure function so the advertised
 /// condition-operator enum can be drift-tested against `ConditionOperator`
@@ -628,7 +655,7 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                 "steps": {
                     "stepId": {
                         "id": "stepId",
-                        "stepType": "Agent | Conditional | Finish | Split | Switch | EmbedWorkflow | While | Log | Error | Filter | GroupBy | Delay | WaitForSignal | WaitForInstances | AiAgent",
+                        "stepType": "Agent | Conditional | Finish | Split | Switch | EmbedWorkflow | While | Log | Error | Filter | GroupBy | Delay | WaitForSignal | WaitForInstances | SetState | GetState | AiAgent",
                         "name": "Human label",
                         "stepSpecificFields": "Use stepShapes below or get_step_type_schema. inputMapping is not a universal step field."
                     }
@@ -650,7 +677,7 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                 "Error steps do not accept inputMapping; put static error fields directly on the step and dynamic mappings in context",
                 "executionPlan edges use fromStep/toStep",
                 "Conditional outgoing edges must use label 'true' or 'false'; do not put condition on those edges",
-                "stateSchema (optional, root graph only) declares the typed state a run exposes, as SchemaField rows with label, format (string: date, datetime, email, url, ...; number/integer: currency) and enum. It is a declaration only: runs do not write state yet. State starts empty and is written by steps, so required, default and visibleWhen have no effect (W081). Edit it with get_state_schema/set_state_schema."
+                "stateSchema (optional, root graph only) declares the typed state a run exposes, as SchemaField rows with label, format (string: date, datetime, email, url, ...; number/integer: currency) and enum. State starts empty and is written by SetState steps (read back with GetState; see stepShapes), so required, default and visibleWhen have no effect (W081). Edit it with get_state_schema/set_state_schema."
             ]
         },
         "stepShapes": {
@@ -696,7 +723,10 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                     "rethrowSemantics": "An Error step emits a new error envelope. Referencing steps.__error from context preserves the original as metadata; it does not replace the new error's top-level static code or message."
                 }
             },
-            "WaitForInstances": wait_for_instances_step_shape()
+            "WaitForInstances": wait_for_instances_step_shape(),
+            "SetState": run_state_step_shapes()["SetState"],
+            "GetState": run_state_step_shapes()["GetState"],
+            "runState": run_state_step_shapes()["readingOtherRuns"]
         },
         "mappingValue": {
             "reference": {"valueType": "reference", "value": "data.foo"},

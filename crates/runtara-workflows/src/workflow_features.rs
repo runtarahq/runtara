@@ -65,6 +65,8 @@ pub enum WorkflowFeature {
     WaitForSignal,
     /// A workflow step waits for child runs to finish.
     WaitForInstances,
+    /// A workflow step reads or writes the run's queryable state.
+    RunState,
     /// A workflow step can suspend and resume later.
     SuspendResume,
     /// A workflow step references a connection id.
@@ -448,6 +450,12 @@ impl FeatureAnalyzer {
                     self.summary.features.insert(WorkflowFeature::Timeout);
                 }
             }
+            Step::SetState(_) | Step::GetState(_) => {
+                self.summary.features.insert(WorkflowFeature::RunState);
+                if graph_durable {
+                    self.summary.features.insert(WorkflowFeature::Durability);
+                }
+            }
             Step::AiAgent(step) => {
                 self.summary.features.insert(WorkflowFeature::AiAgent);
                 if let Some(connection_id) = &step.connection_id {
@@ -489,6 +497,8 @@ fn step_has_breakpoint(step: &Step) -> bool {
         Step::Delay(step) => step.breakpoint.unwrap_or(false),
         Step::WaitForSignal(step) => step.breakpoint.unwrap_or(false),
         Step::WaitForInstances(step) => step.breakpoint.unwrap_or(false),
+        Step::SetState(step) => step.breakpoint.unwrap_or(false),
+        Step::GetState(step) => step.breakpoint.unwrap_or(false),
         Step::AiAgent(step) => step.breakpoint.unwrap_or(false),
     }
 }
@@ -509,6 +519,8 @@ pub(crate) fn step_type_name(step: &Step) -> &'static str {
         Step::Delay(_) => "Delay",
         Step::WaitForSignal(_) => "WaitForSignal",
         Step::WaitForInstances(_) => "WaitForInstances",
+        Step::SetState(_) => "SetState",
+        Step::GetState(_) => "GetState",
         Step::AiAgent(_) => "AiAgent",
     }
 }

@@ -113,6 +113,33 @@ pub fn get_dsl_changelog() -> Value {
         "version": DSL_VERSION,
         "changes": [
             {
+                "version": "3.5.0",
+                "date": "2026-09-29",
+                "breaking": false,
+                "changes": [
+                    {
+                        "type": "added",
+                        "component": "step-type",
+                        "description": "SetState: merge values into the run's state (shallow; null clears a field). Every field must be declared in stateSchema. A write applies once per step, so a replay changes nothing. Ignored in non-durable workflows, embedded children and published workflow-agents."
+                    },
+                    {
+                        "type": "added",
+                        "component": "step-type",
+                        "description": "GetState: read the run's state as of that point; the output is the state object. The read is checkpointed, so a replay sees what the first execution read."
+                    },
+                    {
+                        "type": "changed",
+                        "component": "execution-graph",
+                        "description": "stateSchema is compiled: SetState writes are checked against it at validation and at run time."
+                    },
+                    {
+                        "type": "added",
+                        "component": "validation",
+                        "description": "E134: a state step in a workflow without stateSchema. E135: a SetState field not declared in stateSchema. W082: state steps in a non-durable workflow, which are ignored. W083: an embedded child workflow with state steps, which are ignored when embedded."
+                    }
+                ]
+            },
+            {
                 "version": "3.4.0",
                 "date": "2026-09-28",
                 "breaking": false,

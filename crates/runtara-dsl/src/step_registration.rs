@@ -12,8 +12,8 @@
 use crate::agent_meta::StepTypeMeta;
 use crate::{
     AgentStep, AiAgentStep, ConditionalStep, DelayStep, EmbedWorkflowStep, ErrorStep, FilterStep,
-    FinishStep, GroupByStep, LogStep, SplitStep, SwitchStep, WaitForInstancesStep,
-    WaitForSignalStep, WhileStep,
+    FinishStep, GetStateStep, GroupByStep, LogStep, SetStateStep, SplitStep, SwitchStep,
+    WaitForInstancesStep, WaitForSignalStep, WhileStep,
 };
 
 // ========================================================================
@@ -70,6 +70,14 @@ fn schema_wait_for_signal_step() -> schemars::Schema {
 
 fn schema_wait_for_instances_step() -> schemars::Schema {
     schemars::schema_for!(WaitForInstancesStep)
+}
+
+fn schema_set_state_step() -> schemars::Schema {
+    schemars::schema_for!(SetStateStep)
+}
+
+fn schema_get_state_step() -> schemars::Schema {
+    schemars::schema_for!(GetStateStep)
 }
 
 fn schema_ai_agent_step() -> schemars::Schema {
@@ -188,6 +196,22 @@ static WAIT_FOR_INSTANCES_STEP_META: StepTypeMeta = StepTypeMeta {
     schema_fn: schema_wait_for_instances_step,
 };
 
+static SET_STATE_STEP_META: StepTypeMeta = StepTypeMeta {
+    id: "SetState",
+    display_name: "Set State",
+    description: "Merge values into the run's queryable state, declared by the workflow's stateSchema",
+    category: "utility",
+    schema_fn: schema_set_state_step,
+};
+
+static GET_STATE_STEP_META: StepTypeMeta = StepTypeMeta {
+    id: "GetState",
+    display_name: "Get State",
+    description: "Read the run's queryable state as of this point in the run",
+    category: "utility",
+    schema_fn: schema_get_state_step,
+};
+
 static AI_AGENT_STEP_META: StepTypeMeta = StepTypeMeta {
     id: "AiAgent",
     display_name: "AI Agent",
@@ -218,6 +242,8 @@ pub(crate) static STEP_TYPES: &[&StepTypeMeta] = &[
     &GROUP_BY_STEP_META,
     &WAIT_FOR_SIGNAL_STEP_META,
     &WAIT_FOR_INSTANCES_STEP_META,
+    &SET_STATE_STEP_META,
+    &GET_STATE_STEP_META,
     &AI_AGENT_STEP_META,
     &DELAY_STEP_META,
 ];

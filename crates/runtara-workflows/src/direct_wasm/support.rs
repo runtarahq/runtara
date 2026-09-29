@@ -403,13 +403,17 @@ fn collect_workflow_agent_step_safety(
             );
             child_stack.pop();
         }
+        // A published workflow-agent ignores its state steps: state belongs
+        // to the outer run.
         Step::Finish(_)
         | Step::Conditional(_)
         | Step::Switch(_)
         | Step::Log(_)
         | Step::Error(_)
         | Step::Filter(_)
-        | Step::GroupBy(_) => {}
+        | Step::GroupBy(_)
+        | Step::SetState(_)
+        | Step::GetState(_) => {}
     }
 }
 
@@ -1925,6 +1929,12 @@ fn collect_step_support(
             unsupported,
         ),
         Step::WaitForInstances(_) => {}
+        Step::SetState(_) | Step::GetState(_) => unsupported_step(
+            step,
+            "run-state",
+            "SetState and GetState steps are not compiled yet",
+            unsupported,
+        ),
         Step::AiAgent(ai_step)
             if supports_ai_agent_step_baseline(graph, ai_step, child_workflows) => {}
         Step::AiAgent(_) => unsupported_step(
@@ -2078,6 +2088,8 @@ fn step_type_name(step: &Step) -> &'static str {
         Step::Delay(_) => "Delay",
         Step::WaitForSignal(_) => "WaitForSignal",
         Step::WaitForInstances(_) => "WaitForInstances",
+        Step::SetState(_) => "SetState",
+        Step::GetState(_) => "GetState",
         Step::AiAgent(_) => "AiAgent",
     }
 }
