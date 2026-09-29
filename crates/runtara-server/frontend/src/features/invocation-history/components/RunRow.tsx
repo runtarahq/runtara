@@ -1,12 +1,13 @@
 import { Link } from 'react-router';
 import { toast } from 'sonner';
-import { Copy } from 'lucide-react';
+import { Bug, CirclePlay, Copy, Eye, MessageSquare } from 'lucide-react';
 import type { ExecutionHistoryItem } from '../types';
 import { RunStatusPill } from './RunLinks';
 import { describeFailure } from '@/features/operations/queries';
 import { StateValue } from '@/features/operations/components/StateValue';
 import { Can } from '@/shared/components/Can';
 import { Button } from '@/shared/components/ui/button';
+import { WithTooltip } from '@/shared/components/ui/tooltip';
 import { ResumeButton } from '@/features/workflows/components/ResumeButton';
 import { StopButton } from '@/features/workflows/components/StopButton';
 import { canResume } from '@/features/workflows/utils/suspension';
@@ -85,14 +86,6 @@ export function RunContext({
           Review run and requests
         </Link>
       )}
-      {run.hasPendingInput && (
-        <Link
-          className="block text-xs text-primary-text"
-          to={`/workflows/${run.workflowId}/chat/${run.instanceId}`}
-        >
-          Continue chat
-        </Link>
-      )}
       <p className="text-xs text-muted-foreground" title={run.createdAt}>
         Started{' '}
         <StateValue value={run.createdAt} display={{ kind: 'relative' }} />
@@ -113,32 +106,93 @@ export function RunActions({
   run: ExecutionHistoryItem;
   onReplay: (run: ExecutionHistoryItem) => void;
 }) {
+  const iconClass =
+    'h-8 w-8 rounded-lg p-2 text-muted-foreground transition-colors';
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <Link
-        className="text-xs text-primary-text"
-        to={`/workflows/${run.workflowId}/history/${run.instanceId}`}
-      >
-        Open execution
-      </Link>
+    <div className="flex flex-wrap items-center gap-1">
       {run.status === 'suspended' && (
-        <Link
-          className="text-xs text-primary-text"
-          to={`/workflows/${run.workflowId}?attachInstance=${run.instanceId}`}
+        <WithTooltip
+          label={
+            canResume(run)
+              ? 'Open in editor — resume debugging'
+              : 'Open in editor'
+          }
         >
-          Open in editor
-        </Link>
+          <Button
+            asChild
+            variant="secondary"
+            size="icon"
+            className={`${iconClass} hover:bg-warning/10 hover:text-warning`}
+          >
+            <Link
+              aria-label="Open in editor"
+              to={`/workflows/${run.workflowId}?attachInstance=${run.instanceId}`}
+            >
+              <Bug className="size-4" />
+            </Link>
+          </Button>
+        </WithTooltip>
       )}
+      {run.hasPendingInput && (
+        <WithTooltip label="Continue chat">
+          <Button
+            asChild
+            variant="secondary"
+            size="icon"
+            className={`${iconClass} hover:bg-warning/10 hover:text-warning`}
+          >
+            <Link
+              aria-label="Continue chat"
+              to={`/workflows/${run.workflowId}/chat/${run.instanceId}`}
+            >
+              <MessageSquare className="size-4" />
+            </Link>
+          </Button>
+        </WithTooltip>
+      )}
+      <WithTooltip label="Open execution">
+        <Button
+          asChild
+          variant="secondary"
+          size="icon"
+          className={`${iconClass} hover:bg-primary/10 hover:text-primary`}
+        >
+          <Link
+            aria-label="Open execution"
+            to={`/workflows/${run.workflowId}/history/${run.instanceId}`}
+          >
+            <Eye className="size-4" />
+          </Link>
+        </Button>
+      </WithTooltip>
       <Can permission="workflow:execute">
         {canResume(run) && (
-          <ResumeButton instanceId={run.instanceId} size="sm" />
+          <ResumeButton
+            instanceId={run.instanceId}
+            variant="secondary"
+            size="icon"
+            className={`${iconClass} hover:bg-primary/10 hover:text-primary`}
+          />
         )}
         {isActiveStatus(run.status) ? (
-          <StopButton instanceId={run.instanceId} size="sm" />
+          <StopButton
+            instanceId={run.instanceId}
+            variant="secondary"
+            size="icon"
+            className={`${iconClass} hover:bg-destructive/10 hover:text-destructive`}
+          />
         ) : (
-          <Button size="sm" onClick={() => onReplay(run)}>
-            Replay
-          </Button>
+          <WithTooltip label="Replay">
+            <Button
+              variant="secondary"
+              size="icon"
+              className={`${iconClass} hover:bg-success/10 hover:text-success`}
+              aria-label="Replay"
+              onClick={() => onReplay(run)}
+            >
+              <CirclePlay className="size-4" />
+            </Button>
+          </WithTooltip>
         )}
       </Can>
     </div>
