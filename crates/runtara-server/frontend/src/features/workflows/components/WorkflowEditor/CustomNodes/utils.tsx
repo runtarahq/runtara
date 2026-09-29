@@ -1658,6 +1658,20 @@ function cleanNodeData(steps: Record<string, any>) {
         }
       }
     }
+
+    // SetState: the mapping rows are the state fields it writes, saved as
+    // `values` (deny_unknown_fields, no inputMapping). GetState has no
+    // configuration. Neither takes a durable flag.
+    if (restData.stepType === 'SetState') {
+      cleaned[id].values = cleaned[id].inputMapping ?? {};
+      delete cleaned[id].inputMapping;
+      delete cleaned[id].durable;
+    }
+    if (restData.stepType === 'GetState') {
+      delete cleaned[id].inputMapping;
+      delete cleaned[id].values;
+      delete cleaned[id].durable;
+    }
   }
 
   return cleaned;
@@ -1744,7 +1758,18 @@ function normalizeNodesAndEdges(
   // nodes
   for (const [id, step] of Object.entries(steps)) {
     const { subgraph, ...data } = step;
-    const { inputMapping = {} } = data;
+    // A SetState step's `values` edit like an input mapping: one row per
+    // state field it writes. The raw key leaves node.data so a save rebuilds
+    // it from the rows.
+    const setStateValues =
+      (step.stepType as string) === 'SetState'
+        ? ((data as Record<string, unknown>).values as
+            Record<string, unknown> | undefined)
+        : undefined;
+    if (setStateValues !== undefined) {
+      delete (data as Record<string, unknown>).values;
+    }
+    const { inputMapping = setStateValues ?? {} } = data;
 
     // WaitForSignal `onWait` is a nested ExecutionGraph (DSL field name
     // differs from `subgraph`, machinery is identical). A non-empty onWait

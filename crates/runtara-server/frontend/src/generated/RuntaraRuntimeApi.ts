@@ -2214,9 +2214,9 @@ export interface ExecutionGraph {
   /**
    * Schema declaring the typed state a run of this workflow exposes.
    * Keys are state field names, values define the field type, label and
-   * display format. State starts empty and is written by steps, so
-   * `required`, `default` and `visibleWhen` have no effect here. This is a
-   * declaration only: it is not compiled into the workflow.
+   * display format. State starts empty and is written by `SetState`
+   * steps, so `required`, `default` and `visibleWhen` have no effect here.
+   * Only the root graph's declaration is used.
    */
   stateSchema?: Partial<Record<string, SchemaField>>;
   /** Map of step IDs to step definitions */
@@ -2551,6 +2551,29 @@ export interface GetRateLimitStatusResponse {
 export interface GetSchemaResponse {
   schema: Schema;
   success: boolean;
+}
+
+/**
+ * Read the run's state as of this point in the run.
+ *
+ * The output is the state object, so its fields are
+ * `steps.<id>.outputs.<field>` (a field never written is absent). The read
+ * is checkpointed: a replay gets back what the first execution read, so a
+ * read-modify-write loop takes the same path. A workflow running embedded,
+ * as a published workflow-agent or non-durably reads its local state.
+ *
+ * Example:
+ * ```json
+ * { "stepType": "GetState", "id": "current" }
+ * ```
+ */
+export interface GetStateStep {
+  /** When true, execution pauses before this step in debug mode */
+  breakpoint?: boolean | null;
+  /** Unique step identifier */
+  id: string;
+  /** Human-readable step name */
+  name?: string | null;
 }
 
 /** Response for get step events endpoint */
@@ -3222,6 +3245,42 @@ export interface Position {
   y: number;
 }
 
+/**
+ * Body of `POST /api/runtime/executions/query`: the listing filters of
+ * `GET /api/runtime/executions`, plus filters on published state. Returns
+ * executions, never their state.
+ */
+export interface QueryExecutionsRequest {
+  /** @format date-time */
+  completedFrom?: string | null;
+  /** @format date-time */
+  completedTo?: string | null;
+  /** @format date-time */
+  createdFrom?: string | null;
+  /** @format date-time */
+  createdTo?: string | null;
+  /**
+   * Page number (0-based, default 0).
+   * @format int32
+   */
+  page?: number | null;
+  parentInstanceId?: string | null;
+  runLabel?: string | null;
+  search?: string | null;
+  /**
+   * Page size (default 20, max 100).
+   * @format int32
+   */
+  size?: number | null;
+  sortBy?: string | null;
+  sortOrder?: string | null;
+  /** All must hold; a run without the field does not match. At most 16. */
+  state?: StateFilterDto[];
+  /** Comma-separated statuses, as for the GET listing. */
+  status?: string | null;
+  workflowId?: string | null;
+}
+
 /** Rate limit configuration stored in PostgreSQL */
 export interface RateLimitConfigDto {
   /**
@@ -3605,6 +3664,48 @@ export interface ScoreExpression {
 }
 
 /**
+ * Merge values into the run's state, declared by the workflow's
+ * `stateSchema`.
+ *
+ * The merge is shallow: each given field replaces its value, a field set to
+ * `null` is cleared and arrays are replaced; fields not given are kept. Every
+ * field must be declared in `stateSchema`, and each value must match its
+ * declaration. Other workflows read the state with the control agent
+ * (`get-state`, or `query` filtered by state) without waking the run.
+ *
+ * A write applies once: a replayed step changes nothing. Only the outer run
+ * publishes state. When the workflow runs embedded in another or as a
+ * published workflow-agent, and in a non-durable workflow, its state is
+ * local: SetState and GetState work the same, but readers never see it. The
+ * step's output is the values it wrote, in canonical form.
+ *
+ * Example:
+ * ```json
+ * {
+ *   "stepType": "SetState",
+ *   "id": "markApproved",
+ *   "values": {
+ *     "stage": { "valueType": "immediate", "value": "approved" },
+ *     "decidedAt": { "valueType": "reference", "value": "steps.now.outputs" }
+ *   }
+ * }
+ * ```
+ */
+export interface SetStateStep {
+  /** When true, execution pauses before this step in debug mode */
+  breakpoint?: boolean | null;
+  /** Unique step identifier */
+  id: string;
+  /** Human-readable step name */
+  name?: string | null;
+  /**
+   * The state fields to write, each declared in `stateSchema`. A `null`
+   * value clears the field.
+   */
+  values: HashMap;
+}
+
+/**
  * Configuration for a Split step.
  * Defines the array to iterate over and execution options.
  */
@@ -3796,6 +3897,20 @@ export type SqlResultColumn = ColumnType & {
   nullable?: boolean;
 };
 
+/** A filter on a run's published state (what its SetState steps wrote). */
+export interface StateFilterDto {
+  /** A top-level state field. */
+  field: string;
+  /** `eq`, `ne`, `in`, `lt`, `lte`, `gt`, `gte` or `exists`. */
+  op: string;
+  /**
+   * A JSON string, number or boolean; an array of them for `in`; `true` or
+   * `false` for `exists` (default `true`). A date-time string compares in
+   * UTC. There is no `now`: pass the time you mean.
+   */
+  value?: object;
+}
+
 /** Union of all step types, discriminated by stepType field */
 export type Step =
   | (FinishStep & {
@@ -3839,6 +3954,12 @@ export type Step =
     })
   | (WaitForInstancesStep & {
       stepType: "WaitForInstances";
+    })
+  | (SetStateStep & {
+      stepType: "SetState";
+    })
+  | (GetStateStep & {
+      stepType: "GetState";
     })
   | (AiAgentStep & {
       stepType: "AiAgent";
@@ -4780,6 +4901,14 @@ export interface WorkflowInstanceDto {
   queueDurationSeconds?: number | null;
   /** Optional immutable label supplied when the execution starts. */
   runLabel?: string | null;
+  /**
+   * The run's published state, as its SetState steps wrote it (declared by
+   * the workflow's `stateSchema`). Only on the single-run endpoints; lists
+   * filter by state but never return it.
+   */
+  state?: any;
+  /** When the published state last changed (RFC 3339). */
+  stateUpdatedAt?: string | null;
   /** Current execution status */
   status: ExecutionStatus;
   steps?: WorkflowStepDto[];
@@ -5971,6 +6100,27 @@ export class Api<
         path: `/api/runtime/executions`,
         method: "GET",
         query: query,
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags executions-controller
+     * @name QueryExecutionsHandler
+     * @summary List executions filtered by published state (plus the GET listing's filters). Returns executions, never their state.
+     * @request POST:/api/runtime/executions/query
+     */
+    queryExecutionsHandler: (
+      data: QueryExecutionsRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<ListAllExecutionsResponse, any>({
+        path: `/api/runtime/executions/query`,
+        method: "POST",
+        body: data,
+        type: "application/json",
         format: "json",
         ...params,
       }),

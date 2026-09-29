@@ -284,7 +284,10 @@ function getStepIcon(stepType: string) {
     case 'WaitForInstances':
       return Pause;
     case 'Log':
+    case 'SetState':
       return PenLine;
+    case 'GetState':
+      return Workflow;
     case 'Error':
       return AlertCircle;
     default:
