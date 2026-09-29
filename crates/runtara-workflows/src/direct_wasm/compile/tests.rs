@@ -495,7 +495,9 @@ fn collect_run_plan_ids(
             }
         }
         DirectRunPlan::Delay { next_plan, .. }
-        | DirectRunPlan::WaitForInstances { next_plan, .. } => {
+        | DirectRunPlan::WaitForInstances { next_plan, .. }
+        | DirectRunPlan::SetState { next_plan, .. }
+        | DirectRunPlan::GetState { next_plan, .. } => {
             collect_run_plan_ids(next_plan, condition_ids, mapping_ids);
         }
         DirectRunPlan::WaitForSignal {
@@ -831,6 +833,8 @@ fn direct_run_plan_breakpoint(run_plan: &DirectRunPlan) -> Option<bool> {
         | DirectRunPlan::Delay { breakpoint, .. }
         | DirectRunPlan::WaitForSignal { breakpoint, .. }
         | DirectRunPlan::WaitForInstances { breakpoint, .. }
+        | DirectRunPlan::SetState { breakpoint, .. }
+        | DirectRunPlan::GetState { breakpoint, .. }
         | DirectRunPlan::Log { breakpoint, .. }
         | DirectRunPlan::Agent { breakpoint, .. }
         | DirectRunPlan::AiAgent { breakpoint, .. }

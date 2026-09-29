@@ -31,8 +31,32 @@ use crate::workflow_features::{
 
 /// Current direct workflow manifest schema version.
 /// Version 3 opts into structured durable keys; version 4 adds graph-qualified
-/// runtime configuration lookup.
-pub const DIRECT_WORKFLOW_MANIFEST_VERSION: u32 = 4;
+/// runtime configuration lookup; version 5 carries each workflow's
+/// `stateSchema`.
+pub const DIRECT_WORKFLOW_MANIFEST_VERSION: u32 = 5;
+
+/// How a graph's SetState and GetState steps keep their state. Decided per
+/// compile ([`DirectWorkflowManifest::configure_run_state`]), never
+/// serialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectStateMode {
+    /// The outer durable run's published state, through the host's
+    /// `runtara:workflow/state`.
+    Published,
+    /// State local to the invocation, kept by the stdlib. `checkpoint` when
+    /// the run can replay (durable, with the runtime): the steps then
+    /// checkpoint what they wrote and read.
+    Local {
+        /// Whether the steps checkpoint what they wrote and read.
+        checkpoint: bool,
+    },
+}
+
+impl Default for DirectStateMode {
+    fn default() -> Self {
+        Self::Local { checkpoint: false }
+    }
+}
 
 /// Versioned, deterministic manifest for a workflow graph.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -138,6 +162,45 @@ impl DirectWorkflowManifest {
         any(&self.graph) || self.child_workflows.iter().any(|child| any(&child.graph))
     }
 
+    /// Decide how every graph keeps state: the root graph and its bodies
+    /// publish when `publish` (a top-level compile of a durable workflow);
+    /// everything else, embedded children included, keeps local state,
+    /// checkpointed in durable graphs when `runtime` is imported.
+    pub fn configure_run_state(&mut self, publish: bool, runtime: bool) {
+        fn set(graph: &mut DirectGraphManifest, publish: bool, runtime: bool) {
+            graph.state_mode = if publish {
+                DirectStateMode::Published
+            } else {
+                DirectStateMode::Local {
+                    checkpoint: runtime && graph.durable,
+                }
+            };
+            for step in &mut graph.steps {
+                for nested in &mut step.nested_graphs {
+                    set(&mut nested.graph, publish, runtime);
+                }
+            }
+        }
+        let publish = publish && self.graph.durable;
+        set(&mut self.graph, publish, runtime);
+        for child in &mut self.child_workflows {
+            set(&mut child.graph, false, runtime);
+        }
+    }
+
+    /// Whether a SetState or GetState step publishes state. Only then does
+    /// the workflow import `runtara:workflow/state`.
+    pub fn publishes_state(&self) -> bool {
+        fn any(graph: &DirectGraphManifest) -> bool {
+            graph.steps.iter().any(|step| {
+                (graph.state_mode == DirectStateMode::Published
+                    && matches!(step.step_type.as_str(), "SetState" | "GetState"))
+                    || step.nested_graphs.iter().any(|nested| any(&nested.graph))
+            })
+        }
+        any(&self.graph)
+    }
+
     /// Whether a WaitForInstances step sits anywhere in the root graph, its
     /// nested graphs or its embedded children. Only then does the workflow
     /// import `runtara:workflow/waits`.
@@ -232,6 +295,14 @@ pub struct DirectGraphManifest {
     pub agents: Vec<DirectAgentManifest>,
     /// Execution-plan edges in deterministic routing order.
     pub edges: Vec<DirectEdgeManifest>,
+    /// The workflow's `stateSchema` as canonical JSON; only on a workflow's
+    /// own graph (the root and each embedded child), when declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_schema: Option<serde_json::Value>,
+    /// How this graph's state steps keep state; see
+    /// [`DirectWorkflowManifest::configure_run_state`].
+    #[serde(skip)]
+    pub state_mode: DirectStateMode,
 }
 
 /// Deterministic manifest for one DSL step.
@@ -897,6 +968,12 @@ fn graph_manifest(
         errors: collections.errors,
         agents: collections.agents,
         edges,
+        state_schema: if graph.state_schema.is_empty() {
+            None
+        } else {
+            Some(canonical_json(&graph.state_schema)?)
+        },
+        state_mode: DirectStateMode::default(),
     })
 }
 

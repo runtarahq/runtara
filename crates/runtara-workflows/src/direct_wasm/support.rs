@@ -1075,7 +1075,7 @@ fn supports_direct_control_step_inner(
                 include_on_error,
             )
         }
-        Step::WaitForInstances(_) => {
+        Step::WaitForInstances(_) | Step::SetState(_) | Step::GetState(_) => {
             supports_normal_flow_step(
                 graph,
                 child_workflows,
@@ -1581,6 +1581,7 @@ fn edge_condition_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -
         Step::Filter(_) | Step::GroupBy(_) | Step::Log(_) => {}
         Step::Agent(_) => {}
         Step::Delay(_) | Step::WaitForSignal(_) | Step::WaitForInstances(_) => {}
+        Step::SetState(_) | Step::GetState(_) => {}
         Step::Switch(step)
             if !step
                 .config
@@ -1629,6 +1630,8 @@ fn on_error_route_shape_supported(graph: &ExecutionGraph, step_id: &str) -> bool
         Step::AiAgent(_) => {}
         // A failed WaitForInstances registration routes to the handler.
         Step::WaitForInstances(_) => {}
+        // A refused state value or write routes to the handler.
+        Step::SetState(_) | Step::GetState(_) => {}
         // WaitForSignal failures (timeout expiry) route to the handler
         // (GAP-14).
         Step::WaitForSignal(step)
@@ -1929,12 +1932,7 @@ fn collect_step_support(
             unsupported,
         ),
         Step::WaitForInstances(_) => {}
-        Step::SetState(_) | Step::GetState(_) => unsupported_step(
-            step,
-            "run-state",
-            "SetState and GetState steps are not compiled yet",
-            unsupported,
-        ),
+        Step::SetState(_) | Step::GetState(_) => {}
         Step::AiAgent(ai_step)
             if supports_ai_agent_step_baseline(graph, ai_step, child_workflows) => {}
         Step::AiAgent(_) => unsupported_step(

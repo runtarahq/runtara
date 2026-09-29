@@ -90,6 +90,18 @@ mod component {
         static MANIFEST: RefCell<Option<DirectJsonManifest>> = const { RefCell::new(None) };
     }
 
+    fn with_manifest<T>(
+        call: impl FnOnce(&DirectJsonManifest) -> Result<T, String>,
+    ) -> Result<T, String> {
+        MANIFEST.with(|slot| {
+            let slot = slot.borrow();
+            let manifest = slot
+                .as_ref()
+                .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+            call(manifest)
+        })
+    }
+
     impl Guest for Component {
         fn init_manifest(manifest: Vec<u8>) -> Result<(), String> {
             // Start each run with an empty interning arena so a reused component
@@ -771,6 +783,42 @@ mod component {
                     .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
                 manifest.wait_instances_error(&step_id, &error)
             })
+        }
+
+        fn state_key(step_id: String, source: Vec<u8>, local: bool) -> Result<String, String> {
+            with_manifest(|manifest| manifest.state_key(&step_id, &source, local))
+        }
+
+        fn state_patch(step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            with_manifest(|manifest| manifest.state_patch(&step_id, &source))
+        }
+
+        fn state_local_set(step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            with_manifest(|manifest| manifest.state_local_set(&step_id, &source))
+        }
+
+        fn state_local_get(step_id: String, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            with_manifest(|manifest| manifest.state_local_get(&step_id, &source))
+        }
+
+        fn state_local_restore(
+            step_id: String,
+            value: Vec<u8>,
+            source: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            with_manifest(|manifest| manifest.state_local_restore(&step_id, &value, &source))
+        }
+
+        fn state_output(
+            step_id: String,
+            value: Vec<u8>,
+            source: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            with_manifest(|manifest| manifest.state_output(&step_id, &value, &source))
+        }
+
+        fn state_error(step_id: String, error: Vec<u8>) -> Result<Vec<u8>, String> {
+            with_manifest(|manifest| manifest.state_error(&step_id, &error))
         }
 
         fn ai_wait_tool_signal_id(

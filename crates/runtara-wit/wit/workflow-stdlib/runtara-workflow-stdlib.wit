@@ -384,6 +384,61 @@ interface json {
         error: list<u8>,
     ) -> result<list<u8>, string>;
 
+    // SetState / GetState: the step's canonical v2 key. Published state uses
+    // `state` / `state-read` (the host keys the write by it); local state
+    // `state-local` / `state-read-local` (a checkpoint key only).
+    state-key: func(
+        step-id: string,
+        source: list<u8>,
+        local: bool,
+    ) -> result<string, string>;
+
+    // SetState, published: the resolved values, checked and canonicalised
+    // against the workflow's `stateSchema`, as a JSON patch. The error is a
+    // state error JSON (`{code, message}`), like the host's.
+    state-patch: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // SetState, local: check the values like `state-patch` and merge them into
+    // the invocation's local state. Returns the record to checkpoint:
+    // `{patch, state}`. The error is a state error JSON.
+    state-local-set: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // GetState, local: the invocation's local state as a JSON object.
+    state-local-get: func(
+        step-id: string,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // SetState / GetState, local: make a checkpointed record (SetState) or
+    // read (GetState) the invocation's local state, and return the step's
+    // output value: the patch, or the state.
+    state-local-restore: func(
+        step-id: string,
+        value: list<u8>,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // SetState / GetState: store `value` (the patch written, or the state
+    // read; empty bytes are `{}`) as the step's outputs; returns the steps
+    // context.
+    state-output: func(
+        step-id: string,
+        value: list<u8>,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    // SetState / GetState: a state error JSON as the step's structured error.
+    state-error: func(
+        step-id: string,
+        error: list<u8>,
+    ) -> result<list<u8>, string>;
+
     // Build the per-call signal id for a WaitForSignal step used as an AiAgent
     // tool: `{instance}/{workflow}/{step}.tool.{label}.{call}{indices}`, matching
     // the generated `emit_wait_for_signal_tool_arm`.

@@ -29,7 +29,8 @@ use std::rc::Rc;
 use super::error::DirectCompileError;
 use super::manifest::{
     DirectAgentManifest, DirectChildWorkflowGraphManifest, DirectDelayManifest, DirectEdgeManifest,
-    DirectGraphManifest, DirectSplitManifest, DirectStepManifest, DirectWorkflowManifest,
+    DirectGraphManifest, DirectSplitManifest, DirectStateMode, DirectStepManifest,
+    DirectWorkflowManifest,
 };
 
 #[derive(Debug, Clone)]
@@ -145,6 +146,25 @@ pub(super) enum DirectRunPlan {
         log_id: u32,
         breakpoint: bool,
         next_plan: Box<DirectRunPlan>,
+    },
+    /// Merge values into the run's state: published through the host, or
+    /// local to the invocation (see [`DirectStateMode`]).
+    SetState {
+        step_id: String,
+        breakpoint: bool,
+        mode: DirectStateMode,
+        next_plan: Box<DirectRunPlan>,
+        /// A value that does not match `stateSchema`, or a refused write,
+        /// dispatches here instead of failing the workflow.
+        error_plan: Option<DirectErrorRoutePlan>,
+    },
+    /// Read the run's state; checkpointed wherever the run can replay.
+    GetState {
+        step_id: String,
+        breakpoint: bool,
+        mode: DirectStateMode,
+        next_plan: Box<DirectRunPlan>,
+        error_plan: Option<DirectErrorRoutePlan>,
     },
     Agent {
         step_id: String,
@@ -469,8 +489,8 @@ pub(super) fn direct_run_plan(
 
     match entry.step_type.as_str() {
         "Finish" | "Filter" | "Switch" | "GroupBy" | "Split" | "While" | "Delay"
-        | "EmbedWorkflow" | "WaitForSignal" | "WaitForInstances" | "Log" | "Agent" | "AiAgent"
-        | "Error" | "Conditional" => step_run_plan(
+        | "EmbedWorkflow" | "WaitForSignal" | "WaitForInstances" | "SetState" | "GetState"
+        | "Log" | "Agent" | "AiAgent" | "Error" | "Conditional" => step_run_plan(
             &manifest.graph,
             &manifest.child_workflows,
             &manifest.graph.entry_point,
@@ -898,6 +918,46 @@ fn step_run_plan_inner(
                 } else {
                     None
                 },
+            })
+        }
+        "SetState" | "GetState" => {
+            let next_plan = normal_flow_plan(
+                graph,
+                child_workflows,
+                step_id,
+                stack,
+                include_on_error,
+                stop_at,
+                region_root,
+                orders,
+            )?;
+            let error_plan = if include_on_error {
+                on_error_plan(graph, child_workflows, step_id, stack, orders)?
+            } else {
+                None
+            };
+            let (step_id, breakpoint, mode, next_plan) = (
+                step_id.to_string(),
+                step_breakpoint_enabled(graph, step),
+                graph.state_mode,
+                Box::new(next_plan),
+            );
+            Ok(if step.step_type == "SetState" {
+                DirectRunPlan::SetState {
+                    step_id,
+                    breakpoint,
+                    mode,
+                    next_plan,
+                    error_plan,
+                }
+            } else {
+                DirectRunPlan::GetState {
+                    step_id,
+                    breakpoint,
+                    mode,
+                    next_plan,
+                    error_plan,
+                }
             })
         }
         "Log" => {
@@ -2022,6 +2082,12 @@ fn chain_step_ids(plan: &DirectRunPlan, out: &mut Vec<String>) {
             }
             | DirectRunPlan::WaitForInstances {
                 step_id, next_plan, ..
+            }
+            | DirectRunPlan::SetState {
+                step_id, next_plan, ..
+            }
+            | DirectRunPlan::GetState {
+                step_id, next_plan, ..
             } => {
                 // Collect only the loop's OWN step_id; its tool-target steps (Wait /
                 // Embed) are reached via tool edges, off the normal-flow graph
@@ -2154,6 +2220,16 @@ pub(super) fn plan_contains_operation_scoped(plan: &DirectRunPlan) -> bool {
             next_plan,
             error_plan,
             ..
+        }
+        | P::SetState {
+            next_plan,
+            error_plan,
+            ..
+        }
+        | P::GetState {
+            next_plan,
+            error_plan,
+            ..
         } => plan_contains_operation_scoped(next_plan) || error_route(error_plan),
         P::Finish { .. } | P::Error { .. } | P::Join | P::ImplicitFinish => false,
         P::Filter { next_plan, .. }
@@ -2264,6 +2340,8 @@ pub(super) fn node_has_breakpoint(node: &DirectRunPlan) -> bool {
         | P::Delay { breakpoint, .. }
         | P::WaitForSignal { breakpoint, .. }
         | P::WaitForInstances { breakpoint, .. }
+        | P::SetState { breakpoint, .. }
+        | P::GetState { breakpoint, .. }
         | P::Log { breakpoint, .. }
         | P::Agent { breakpoint, .. }
         | P::AiAgent { breakpoint, .. }
@@ -2293,6 +2371,16 @@ pub(super) fn plan_contains_suspension(plan: &DirectRunPlan) -> bool {
             ..
         }
         | P::AiAgent {
+            next_plan,
+            error_plan,
+            ..
+        }
+        | P::SetState {
+            next_plan,
+            error_plan,
+            ..
+        }
+        | P::GetState {
             next_plan,
             error_plan,
             ..
@@ -3427,6 +3515,24 @@ mod tests {
                 ..
             } => {
                 out.push(format!("WaitForInstances:{step_id}"));
+                collect_plan_steps(next_plan, out);
+                if let Some(error_plan) = error_plan {
+                    collect_error_plan(step_id, error_plan, out);
+                }
+            }
+            DirectRunPlan::SetState {
+                step_id,
+                next_plan,
+                error_plan,
+                ..
+            }
+            | DirectRunPlan::GetState {
+                step_id,
+                next_plan,
+                error_plan,
+                ..
+            } => {
+                out.push(format!("State:{step_id}"));
                 collect_plan_steps(next_plan, out);
                 if let Some(error_plan) = error_plan {
                     collect_error_plan(step_id, error_plan, out);

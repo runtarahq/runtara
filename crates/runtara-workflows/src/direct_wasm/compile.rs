@@ -60,6 +60,7 @@ mod retry_park;
 mod split;
 mod split_parallel;
 mod split_retry;
+mod state;
 mod step_context;
 mod step_error;
 mod switch_route;
@@ -1173,7 +1174,7 @@ fn compile_direct_workflow_inner(
             execution_graph: &child.execution_graph,
         })
         .collect::<Vec<_>>();
-    let manifest = build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
+    let mut manifest = build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
         &input.execution_graph,
         &child_manifest_inputs,
         agent_catalog,
@@ -1257,6 +1258,10 @@ fn compile_direct_workflow_inner(
         &scoped_agents,
         agent_catalog.is_some(),
     )?;
+    // Only a top-level run publishes its state; a published workflow-agent
+    // runs inside its caller's instance and keeps local state, like an
+    // embedded child.
+    manifest.configure_run_state(abi == super::component::WorkflowRole::Root, !omit_runtime);
     let manifest_json = manifest.to_canonical_json()?;
     let support_json = serde_json::to_vec(&support_report)?;
     let (wasm, parallel_pools) = emit_direct_artifact(
@@ -1292,7 +1297,8 @@ fn compile_direct_workflow_inner(
         super::plan::needs_cooperative_timers(&manifest),
         super::manifest::needs_monotonic_clock(&manifest.graph, &manifest.child_workflows),
     )
-    .with_wait_instances(manifest.has_wait_for_instances());
+    .with_wait_instances(manifest.has_wait_for_instances())
+    .with_run_state(manifest.publishes_state());
 
     let build_dir = input.output_dir.join(format!(
         "{}-v{}-direct",
@@ -1463,6 +1469,7 @@ fn emit_direct_component(
         super::plan::needs_cooperative_timers(manifest),
         core_config.static_data.needs_monotonic_clock(),
         manifest.has_wait_for_instances(),
+        manifest.publishes_state(),
     )?;
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
@@ -1559,6 +1566,7 @@ fn build_direct_component_resolve_scoped(
         needs_timers,
         needs_monotonic_clock,
         false,
+        false,
     )
 }
 
@@ -1578,6 +1586,7 @@ fn build_direct_component_resolve_with_waits(
     needs_timers: bool,
     needs_monotonic_clock: bool,
     wait_instances: bool,
+    run_state: bool,
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
     // Control sites need the scope without any suspending agent.
     let operation_scope = operation_scope || !suspending_agents.is_empty();
@@ -1655,6 +1664,9 @@ fn build_direct_component_resolve_with_waits(
     }
     if wait_instances {
         workflow_wit.push_str(&format!("    import {};\n", runtara_wit::workflow::WAITS));
+    }
+    if run_state {
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::workflow::STATE));
     }
     for agent in agents {
         let interface = if scoped_agents.contains(agent) {
@@ -1769,6 +1781,9 @@ mod tests;
 
 #[cfg(test)]
 mod retry_bounds_tests;
+
+#[cfg(test)]
+mod state_tests;
 
 #[cfg(test)]
 mod operation_scoped_tests;

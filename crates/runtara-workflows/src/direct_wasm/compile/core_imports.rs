@@ -95,6 +95,13 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_wait_instances_state: Option<u32>,
     stdlib_wait_instances_output: Option<u32>,
     stdlib_wait_instances_error: Option<u32>,
+    stdlib_state_key: Option<u32>,
+    stdlib_state_patch: Option<u32>,
+    stdlib_state_local_set: Option<u32>,
+    stdlib_state_local_get: Option<u32>,
+    stdlib_state_local_restore: Option<u32>,
+    stdlib_state_output: Option<u32>,
+    stdlib_state_error: Option<u32>,
     stdlib_ai_wait_tool_signal_id: Option<u32>,
     stdlib_ai_wait_tool_result: Option<u32>,
     stdlib_embed_workflow_cache_key: Option<u32>,
@@ -169,6 +176,7 @@ pub(super) struct DirectCoreImportIndices {
     pub(super) agent_invokes_async: BTreeMap<AgentImportKey, DirectAgentInvokeImport>,
     pub(super) operation_scope: Option<DirectOperationScopeImports>,
     pub(super) wait_instances: Option<DirectWaitInstancesImports>,
+    pub(super) run_state: Option<DirectRunStateImports>,
 }
 
 impl DirectCoreImportIndices {
@@ -440,6 +448,22 @@ impl DirectCoreImportIndices {
                 self.stdlib_wait_instances_error,
                 "stdlib.wait-instances-error",
             )?,
+            stdlib_state_key: require_import(self.stdlib_state_key, "stdlib.state-key")?,
+            stdlib_state_patch: require_import(self.stdlib_state_patch, "stdlib.state-patch")?,
+            stdlib_state_local_set: require_import(
+                self.stdlib_state_local_set,
+                "stdlib.state-local-set",
+            )?,
+            stdlib_state_local_get: require_import(
+                self.stdlib_state_local_get,
+                "stdlib.state-local-get",
+            )?,
+            stdlib_state_local_restore: require_import(
+                self.stdlib_state_local_restore,
+                "stdlib.state-local-restore",
+            )?,
+            stdlib_state_output: require_import(self.stdlib_state_output, "stdlib.state-output")?,
+            stdlib_state_error: require_import(self.stdlib_state_error, "stdlib.state-error")?,
             stdlib_ai_wait_tool_signal_id: require_import(
                 self.stdlib_ai_wait_tool_signal_id,
                 "stdlib.ai-wait-tool-signal-id",
@@ -673,6 +697,7 @@ impl DirectCoreImportIndices {
             agent_invokes_async: self.agent_invokes_async,
             operation_scope: self.operation_scope,
             wait_instances: self.wait_instances,
+            run_state: self.run_state,
         })
     }
 }
@@ -764,6 +789,13 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_wait_instances_state: u32,
     pub(super) stdlib_wait_instances_output: u32,
     pub(super) stdlib_wait_instances_error: u32,
+    pub(super) stdlib_state_key: u32,
+    pub(super) stdlib_state_patch: u32,
+    pub(super) stdlib_state_local_set: u32,
+    pub(super) stdlib_state_local_get: u32,
+    pub(super) stdlib_state_local_restore: u32,
+    pub(super) stdlib_state_output: u32,
+    pub(super) stdlib_state_error: u32,
     pub(super) stdlib_ai_wait_tool_signal_id: u32,
     pub(super) stdlib_ai_wait_tool_result: u32,
     pub(super) stdlib_embed_workflow_cache_key: u32,
@@ -841,6 +873,8 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) operation_scope: Option<DirectOperationScopeImports>,
     /// Present when the workflow has a WaitForInstances step.
     pub(super) wait_instances: Option<DirectWaitInstancesImports>,
+    /// Present when a SetState or GetState step publishes state.
+    pub(super) run_state: Option<DirectRunStateImports>,
 }
 
 impl DirectCoreFunctionIndices {
@@ -868,6 +902,13 @@ impl DirectCoreFunctionIndices {
         self.wait_instances
             .as_ref()
             .expect("a WaitForInstances step imports runtara:workflow/waits")
+    }
+
+    /// The run-state imports, present only when a state step publishes.
+    pub(super) fn run_state(&self) -> &DirectRunStateImports {
+        self.run_state
+            .as_ref()
+            .expect("a published state step imports runtara:workflow/state")
     }
 }
 
@@ -917,6 +958,13 @@ pub(super) struct DirectOperationScopeImports {
     pub(super) suspend: u32,
     pub(super) exit: u32,
     pub(super) release: u32,
+}
+
+/// Function indices of `runtara:workflow/state`.
+#[derive(Debug, Clone, Default)]
+pub(super) struct DirectRunStateImports {
+    pub(super) set: u32,
+    pub(super) get: u32,
 }
 
 /// Function indices of `runtara:workflow/waits`.
@@ -1039,6 +1087,18 @@ fn is_operation_scope_import(
         && interface
             .map(|key| resolve.name_world_key(key))
             .is_some_and(|name| name == runtara_wit::workflow::OPERATION)
+}
+
+fn is_run_state_import(
+    resolve: &Resolve,
+    interface: Option<&WorldKey>,
+    function: &WitFunction,
+    function_name: &str,
+) -> bool {
+    function.name == function_name
+        && interface
+            .map(|key| resolve.name_world_key(key))
+            .is_some_and(|name| name == runtara_wit::workflow::STATE)
 }
 
 fn is_wait_instances_import(
@@ -1241,6 +1301,20 @@ pub(super) fn import_core_function(
         import_indices.stdlib_wait_instances_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-instances-error") {
         import_indices.stdlib_wait_instances_error = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "state-key") {
+        import_indices.stdlib_state_key = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "state-patch") {
+        import_indices.stdlib_state_patch = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "state-local-set") {
+        import_indices.stdlib_state_local_set = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "state-local-get") {
+        import_indices.stdlib_state_local_get = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "state-local-restore") {
+        import_indices.stdlib_state_local_restore = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "state-output") {
+        import_indices.stdlib_state_output = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "state-error") {
+        import_indices.stdlib_state_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-wait-tool-signal-id") {
         import_indices.stdlib_ai_wait_tool_signal_id = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-wait-tool-result") {
@@ -1383,6 +1457,16 @@ pub(super) fn import_core_function(
             .operation_scope
             .get_or_insert_with(Default::default)
             .release = function_index;
+    } else if is_run_state_import(resolve, interface, function, "set") {
+        import_indices
+            .run_state
+            .get_or_insert_with(Default::default)
+            .set = function_index;
+    } else if is_run_state_import(resolve, interface, function, "get") {
+        import_indices
+            .run_state
+            .get_or_insert_with(Default::default)
+            .get = function_index;
     } else if is_wait_instances_import(resolve, interface, function, "register") {
         import_indices
             .wait_instances

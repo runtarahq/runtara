@@ -564,6 +564,50 @@ pub(super) fn emit_run_plan_mapping(
                 handled_target,
             );
         }
+        DirectRunPlan::SetState {
+            step_id,
+            breakpoint,
+            mode,
+            next_plan,
+            error_plan,
+        }
+        | DirectRunPlan::GetState {
+            step_id,
+            breakpoint,
+            mode,
+            next_plan,
+            error_plan,
+        } => {
+            super::state::emit_state_plan(
+                body,
+                indices,
+                static_data,
+                track_events,
+                variables,
+                super::state::StateStep {
+                    step_id,
+                    write: matches!(run_plan, DirectRunPlan::SetState { .. }),
+                    mode: *mode,
+                    breakpoint: *breakpoint,
+                },
+                next_plan,
+                error_plan.as_ref(),
+                data_ptr_local,
+                data_len_local,
+                steps_ptr_local,
+                steps_len_local,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                route_ptr_local,
+                route_len_local,
+                workflow_log_kind,
+                workflow_error_kind,
+                failure_target,
+                handled_target,
+            );
+        }
         DirectRunPlan::Log {
             step_id,
             log_id,
