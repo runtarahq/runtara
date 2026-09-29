@@ -20,7 +20,7 @@ use super::{ValidationError, ValidationResult, ValidationWarning};
 /// - E134: a state step in a workflow without `stateSchema`;
 /// - E135: a SetState field that `stateSchema` does not declare;
 /// - E023/E024: an immediate value of the wrong type, format or enum value;
-/// - W082: a state step in a non-durable workflow, where state is ignored.
+/// - W082: a state step in a non-durable workflow, whose state is local.
 pub(super) fn validate_state_steps(graph: &ExecutionGraph, result: &mut ValidationResult) {
     let durable = graph.durable.unwrap_or(true);
     visit_state_steps(graph, &mut |step| {
@@ -41,7 +41,7 @@ pub(super) fn validate_state_steps(graph: &ExecutionGraph, result: &mut Validati
         if !durable {
             result
                 .warnings
-                .push(ValidationWarning::StateIgnoredInNonDurableWorkflow {
+                .push(ValidationWarning::NonDurableStateIsLocal {
                     step_id: step_id.clone(),
                     step_type: step_type.to_string(),
                 });
@@ -110,7 +110,7 @@ fn check_set_state_values(
 }
 
 /// Warn when the root graph embeds a child workflow that has state steps
-/// (W083): they are ignored when the child runs embedded.
+/// (W083): the child's state is local to the embedded run.
 pub(super) fn validate_embedded_state_steps(
     graph: &ExecutionGraph,
     children: &HashMap<String, ExecutionGraph>,
@@ -130,7 +130,7 @@ pub(super) fn validate_embedded_state_steps(
     for (step_id, child_workflow_id) in embeds {
         result
             .warnings
-            .push(ValidationWarning::EmbeddedChildStateIgnored {
+            .push(ValidationWarning::EmbeddedChildStateIsLocal {
                 step_id,
                 child_workflow_id,
             });
@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn non_durable_workflows_warn_that_state_is_ignored() {
+    fn non_durable_workflows_warn_that_state_is_local() {
         let graph = state_graph(
             schema(),
             serde_json::json!({ "stage": { "valueType": "immediate", "value": "approval" } }),
@@ -461,7 +461,7 @@ mod tests {
             .map(ToString::to_string)
             .collect();
         assert_eq!(w082.len(), 2, "{w082:?}");
-        assert!(w082[1].starts_with("[W082] SetState step 'set' has no effect"));
+        assert!(w082[1].starts_with("[W082] SetState step 'set' keeps local state"));
     }
 
     #[test]
@@ -544,7 +544,7 @@ mod tests {
         assert_eq!(
             w083,
             vec![
-                "[W083] EmbedWorkflow step 'embed' embeds 'child', whose SetState and GetState steps are ignored when it runs embedded: state belongs to the outer run."
+                "[W083] EmbedWorkflow step 'embed' embeds 'child', whose SetState and GetState steps keep state local to the embedded run: only the outer run publishes state."
             ]
         );
     }

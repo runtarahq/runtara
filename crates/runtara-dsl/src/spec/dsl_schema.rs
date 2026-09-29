@@ -120,7 +120,7 @@ pub fn get_dsl_changelog() -> Value {
                     {
                         "type": "added",
                         "component": "step-type",
-                        "description": "SetState: merge values into the run's state (shallow; null clears a field). Every field must be declared in stateSchema. A write applies once per step, so a replay changes nothing. Ignored in non-durable workflows, embedded children and published workflow-agents."
+                        "description": "SetState: merge values into the run's state (shallow; null clears a field). Every field must be declared in stateSchema. A write applies once per step, so a replay changes nothing. Only the outer run publishes state; embedded children, published workflow-agents and non-durable workflows keep local state that readers never see."
                     },
                     {
                         "type": "added",
@@ -135,7 +135,7 @@ pub fn get_dsl_changelog() -> Value {
                     {
                         "type": "added",
                         "component": "validation",
-                        "description": "E134: a state step in a workflow without stateSchema. E135: a SetState field not declared in stateSchema. W082: state steps in a non-durable workflow, which are ignored. W083: an embedded child workflow with state steps, which are ignored when embedded."
+                        "description": "E134: a state step in a workflow without stateSchema. E135: a SetState field not declared in stateSchema. W082: state steps in a non-durable workflow, whose state is local and not published. W083: an embedded child workflow with state steps, whose state is local to the embedded run."
                     }
                 ]
             },

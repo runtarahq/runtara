@@ -10,14 +10,14 @@
       (type (;2;) (func (param "key" string) (param "patch" 0) (result 1)))
       (export (;0;) "set" (func (type 2)))
       (type (;3;) (result 0 (error string)))
-      (type (;4;) (func (result 3)))
+      (type (;4;) (func (param "key" string) (result 3)))
       (export (;1;) "get" (func (type 4)))
     )
   )
   (import "runtara:workflow/state@1.0.0" (instance $runtara:workflow/state@1.0.0 (;0;) (type $ty-runtara:workflow/state@1.0.0)))
   (core module $main (;0;)
     (type (;0;) (func (param i32 i32 i32 i32 i32)))
-    (type (;1;) (func (param i32)))
+    (type (;1;) (func (param i32 i32 i32)))
     (type (;2;) (func (param i32 i32 i32 i32) (result i32)))
     (type (;3;) (func))
     (import "cm32p2|runtara:workflow/state@1" "set" (func (;0;) (type 0)))
@@ -36,7 +36,7 @@
   )
   (core module $wit-component-shim-module (;1;)
     (type (;0;) (func (param i32 i32 i32 i32 i32)))
-    (type (;1;) (func (param i32)))
+    (type (;1;) (func (param i32 i32 i32)))
     (table (;0;) 2 2 funcref)
     (export "0" (func 0))
     (export "1" (func 1))
@@ -50,8 +50,10 @@
       i32.const 0
       call_indirect (type 0)
     )
-    (func (;1;) (type 1) (param i32)
+    (func (;1;) (type 1) (param i32 i32 i32)
       local.get 0
+      local.get 1
+      local.get 2
       i32.const 1
       call_indirect (type 1)
     )
@@ -61,7 +63,7 @@
   )
   (core module $wit-component-fixup (;2;)
     (type (;0;) (func (param i32 i32 i32 i32 i32)))
-    (type (;1;) (func (param i32)))
+    (type (;1;) (func (param i32 i32 i32)))
     (import "" "0" (func (;0;) (type 0)))
     (import "" "1" (func (;1;) (type 1)))
     (import "" "$imports" (table (;0;) 2 2 funcref))

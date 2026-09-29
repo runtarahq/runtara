@@ -1533,12 +1533,12 @@ pub enum ValidationWarning {
         /// The ineffective settings, in DSL spelling.
         settings: Vec<String>,
     },
-    /// A SetState or GetState step in a non-durable workflow, where state is
-    /// ignored.
-    StateIgnoredInNonDurableWorkflow { step_id: String, step_type: String },
-    /// An EmbedWorkflow step embeds a child with state steps, which are
-    /// ignored when the child runs embedded.
-    EmbeddedChildStateIgnored {
+    /// A SetState or GetState step in a non-durable workflow, whose state is
+    /// local to the run and not published.
+    NonDurableStateIsLocal { step_id: String, step_type: String },
+    /// An EmbedWorkflow step embeds a child with state steps, whose state is
+    /// local to the embedded run and not published.
+    EmbeddedChildStateIsLocal {
         step_id: String,
         child_workflow_id: String,
     },
@@ -1569,8 +1569,8 @@ impl ValidationWarning {
             Self::DynamicControlStartTarget { .. } => "W077",
             Self::WaitTimeoutBelowDeadlineMargin { .. } => "W078",
             Self::IneffectiveStateSchemaSetting { .. } => "W081",
-            Self::StateIgnoredInNonDurableWorkflow { .. } => "W082",
-            Self::EmbeddedChildStateIgnored { .. } => "W083",
+            Self::NonDurableStateIsLocal { .. } => "W082",
+            Self::EmbeddedChildStateIsLocal { .. } => "W083",
         }
     }
 }
@@ -1805,17 +1805,17 @@ impl std::fmt::Display for ValidationWarning {
                 field_name,
                 settings.join(", ")
             ),
-            ValidationWarning::StateIgnoredInNonDurableWorkflow { step_id, step_type } => write!(
+            ValidationWarning::NonDurableStateIsLocal { step_id, step_type } => write!(
                 f,
-                "[W082] {} step '{}' has no effect: a non-durable workflow keeps no state. Make the workflow durable or remove the step.",
+                "[W082] {} step '{}' keeps local state: a non-durable workflow does not publish its state to readers. Make the workflow durable to publish it.",
                 step_type, step_id
             ),
-            ValidationWarning::EmbeddedChildStateIgnored {
+            ValidationWarning::EmbeddedChildStateIsLocal {
                 step_id,
                 child_workflow_id,
             } => write!(
                 f,
-                "[W083] EmbedWorkflow step '{}' embeds '{}', whose SetState and GetState steps are ignored when it runs embedded: state belongs to the outer run.",
+                "[W083] EmbedWorkflow step '{}' embeds '{}', whose SetState and GetState steps keep state local to the embedded run: only the outer run publishes state.",
                 step_id, child_workflow_id
             ),
         }

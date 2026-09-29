@@ -237,7 +237,7 @@ pub fn step_output_shape(step_type: &str) -> Option<StepOutputShape> {
             siblings: &[],
         },
         "SetState" => StepOutputShape {
-            summary: "Writes the run's state; writes no referenceable `outputs`.",
+            summary: "`outputs` is the values the step wrote to the run's state, in canonical form (datetimes in UTC; a cleared field is null).",
             outputs: OutputsShape::Dynamic,
             siblings: &[],
         },

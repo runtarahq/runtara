@@ -616,8 +616,8 @@ fn run_state_step_shapes() -> serde_json::Value {
         "SetState": {
             "required": ["id", "stepType", "values"],
             "values": "Map of stateSchema field name to MappingValue. The merge is shallow: a given field replaces its value, null clears it, arrays are replaced; fields not given are kept.",
-            "rules": "Every field must be declared in the root graph's stateSchema (E134 without one, E135 for an undeclared field); immediate values are type, format and enum checked (E023/E024), every value again at run time (STATE_INVALID_VALUE). Datetimes are stored as UTC. A write applies once, so a replay changes nothing. No outputs.",
-            "ignored": "In a non-durable workflow (W082), and when the workflow runs embedded (W083) or as a published workflow-agent: state belongs to the outer run.",
+            "rules": "Every field must be declared in the workflow's stateSchema (E134 without one, E135 for an undeclared field); immediate values are type, format and enum checked (E023/E024), every value again at run time (STATE_INVALID_VALUE). Datetimes are stored as UTC. A write applies once, so a replay changes nothing. The output is the values written.",
+            "local": "Only the outer durable run publishes state. A workflow running embedded (W083) or as a published workflow-agent, and a non-durable workflow (W082), keeps local state: SetState and GetState work the same, scoped to that invocation, but readers never see it.",
             "example": {
                 "id": "markApproved",
                 "stepType": "SetState",

@@ -1295,10 +1295,11 @@ impl WaitForInstancesMode {
 /// declaration. Other workflows read the state with the control agent
 /// (`get-state`, or `query` filtered by state) without waking the run.
 ///
-/// A write applies once: a replayed step changes nothing. State is ignored in
-/// a non-durable workflow, and when the workflow runs embedded in another or
-/// as a published workflow-agent (state belongs to the outer run). The step
-/// has no outputs.
+/// A write applies once: a replayed step changes nothing. Only the outer run
+/// publishes state. When the workflow runs embedded in another or as a
+/// published workflow-agent, and in a non-durable workflow, its state is
+/// local: SetState and GetState work the same, but readers never see it. The
+/// step's output is the values it wrote, in canonical form.
 ///
 /// Example:
 /// ```json
@@ -1338,9 +1339,8 @@ pub struct SetStateStep {
 /// The output is the state object, so its fields are
 /// `steps.<id>.outputs.<field>` (a field never written is absent). The read
 /// is checkpointed: a replay gets back what the first execution read, so a
-/// read-modify-write loop takes the same path. The state is empty in a
-/// non-durable workflow and when the workflow runs embedded or as a
-/// published workflow-agent.
+/// read-modify-write loop takes the same path. A workflow running embedded,
+/// as a published workflow-agent or non-durably reads its local state.
 ///
 /// Example:
 /// ```json

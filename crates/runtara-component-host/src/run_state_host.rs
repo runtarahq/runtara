@@ -90,12 +90,23 @@ const DURABLE_KEY_V2_PREFIX: &str = "runtara:v2:";
 
 /// Key kind of a SetState step.
 pub const STATE_KEY_KIND: &str = "state";
+/// Key kind of a GetState step.
+pub const STATE_READ_KEY_KIND: &str = "state-read";
 
 /// The write identity of a SetState step: the operation hash of its canonical
 /// v2 `state` key (`runtara:v2:["state", workflow, namespace, loop-path,
 /// [step]]`), so it differs per loop iteration and is the same on every
 /// replay. Fails closed on any other key.
 pub fn state_operation_id(key: &str) -> Result<String, String> {
+    check_state_key(key, STATE_KEY_KIND)?;
+    Ok(crate::operation_scope_host::operation_hash(key))
+}
+
+/// Check a canonical v2 state key of `kind`. Only the outer run has state
+/// here: a key with namespace frames comes from a workflow running inside the
+/// run (an embedded child or a published workflow-agent), which keeps its
+/// state local in the guest and never reaches the host, so it is refused.
+fn check_state_key(key: &str, kind: &str) -> Result<(), String> {
     let malformed = || "a state key must be a canonical v2 state key".to_string();
     if key.is_empty() || key.len() > crate::operation_scope_host::MAX_OPERATION_KEY_BYTES {
         return Err(malformed());
@@ -117,10 +128,19 @@ pub fn state_operation_id(key: &str) -> Result<String, String> {
         [Value::String(step)] if !step.is_empty() => Some(step),
         _ => None,
     });
-    if parts[0].as_str() != Some(STATE_KEY_KIND) || step.is_none() {
+    if parts[0].as_str() != Some(kind) || step.is_none() {
         return Err(malformed());
     }
-    Ok(crate::operation_scope_host::operation_hash(key))
+    if parts[2]
+        .as_array()
+        .is_none_or(|namespace| !namespace.is_empty())
+    {
+        return Err(
+            "only the outer run publishes state; a workflow running inside it keeps local state"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Per-run access to the state service: the host-installed service and the
@@ -209,8 +229,11 @@ pub(crate) fn add_run_state_to_linker(
     )?;
     state.func_wrap_async(
         "get",
-        |store: StoreContextMut<'_, WorkflowState>, (): ()| {
+        move |store: StoreContextMut<'_, WorkflowState>, (key,): (String,)| {
             Box::new(async move {
+                if let Err(error) = check_state_key(&key, STATE_READ_KEY_KIND) {
+                    return Ok((Err(invalid(error)),));
+                }
                 let (host, authority) = match store.data().run_state.service() {
                     Ok(service) => service,
                     Err(error) => return Ok((Err(error.json()),)),
@@ -265,10 +288,38 @@ mod tests {
             key(serde_json::json!(["state", "root", [], [], []])),
             key(serde_json::json!(["state", "root", [], [], ["a", "b"]])),
             key(serde_json::json!(["state", "root", [], []])),
+            key(serde_json::json!(["state-read", "root", [], [], ["get"]])),
+            key(serde_json::json!([
+                "state",
+                "child",
+                [["child", "root", [], ["embed"]]],
+                [],
+                ["set"]
+            ])),
             "runtara:v2:[\"state\", \"root\", [], [], [\"set\"]]".to_string(),
         ] {
             assert!(state_operation_id(&bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn reads_take_a_get_state_key_of_the_outer_run() {
+        let read = key(serde_json::json!(["state-read", "root", [], [], ["get"]]));
+        assert!(check_state_key(&read, STATE_READ_KEY_KIND).is_ok());
+        let write = key(serde_json::json!(["state", "root", [], [], ["set"]]));
+        assert!(check_state_key(&write, STATE_READ_KEY_KIND).is_err());
+        let nested = key(serde_json::json!([
+            "state-read",
+            "child",
+            [["child", "root", [], ["embed"]]],
+            [],
+            ["get"]
+        ]));
+        assert!(
+            check_state_key(&nested, STATE_READ_KEY_KIND)
+                .unwrap_err()
+                .contains("outer run")
+        );
     }
 
     #[test]

@@ -188,13 +188,26 @@ state-schema settings.
     that does not match fails the step.
 - **No step-level durability.** State steps have no `durable` field; they
   follow the workflow's durability.
-- **Outer workflow only.** State belongs to the workflow that owns the run. A
-  workflow running as an inline-embedded child (EmbedWorkflow) or as a
-  published workflow-agent runs inside its parent's instance, so its state
-  steps are ignored there: `SetState` does nothing and `GetState` returns an
-  empty state. The compiler decides this; the child never imports the state
-  interface. A parent that embeds a child with state steps gets a warning
-  (W083).
+- **Only the outer run publishes.** A workflow running as an inline-embedded
+  child (EmbedWorkflow) or as a published workflow-agent runs inside its
+  parent's instance, so it must not write the parent's state. Its state steps
+  still work, on *local* state: scoped to that invocation (its call site and
+  the parent's loop iteration), validated against the child's own
+  `stateSchema`, and never seen by readers. The same holds for a non-durable
+  workflow. So a child's own read-modify-write logic behaves the same whether
+  it runs embedded or on its own. A parent that embeds a child with state
+  steps gets a warning (W083).
+
+  Local state lives in guest memory and never reaches the host, which
+  refuses a state key with namespace frames. It is made replay-safe with
+  checkpoints: a local SetState checkpoints the state it produced and a local
+  GetState what it read, and a replay restores them. Replay also skips
+  regions whose result is checkpointed (a Split result, a completed While),
+  so their SetState steps never run again; a Split or While whose body writes
+  local state therefore checkpoints a snapshot of the local state beside its
+  result and restores it when replay takes the result from the checkpoint.
+  An embedded child's result needs no snapshot: the parent never reads the
+  child's local state.
 
 ### Durability
 
@@ -220,10 +233,18 @@ if it read live state, a replayed read-modify-write loop would see writes from
 later steps and take a different path. So `GetState` checkpoints its result
 under its key, and a replay gets back what the first execution read.
 
-**Non-durable workflows** (`durable: false`). State is ignored: the compiler
-lowers `SetState` to nothing and `GetState` to an empty state, and reads return
-no state for the workflow's runs. Validation warns the author (W082). The
-platform does not make the workflow or its steps durable on its own.
+**Non-durable workflows** (`durable: false`). State is local: the steps work,
+but readers see no state for the workflow's runs. Validation warns the author
+(W082). The platform does not make the workflow or its steps durable on its
+own.
+
+**Referencing state in mappings.** There is no `state.*` reference root. A
+reference resolves when a step's inputs are built, and that read is not
+checkpointed: a replay could see writes the first execution made later and
+take another path. The sound form is a checkpointed read, which is what
+`GetState` is; reference its output (`steps.<id>.outputs.<field>`). A
+`state.*` root could later be sugar the compiler lowers into the same
+checkpointed read before the referencing step.
 
 **Parallel branches.** `SetState` runs in parallel branches like any step. Each
 write merges its fields, so branches writing different fields keep both. For
@@ -390,7 +411,7 @@ Settled on 2026-09-28:
 | Initial state | Empty |
 | Merge | Shallow; `null` clears a field; arrays are replaced |
 | Parallel branches | Shallow merge; for the same field the last write wins |
-| Non-durable workflows | State ignored, W082 warning; nothing made durable automatically |
+| Non-durable workflows | Local state, W082 warning; nothing made durable automatically |
 | Retention | State lives and is deleted with its run |
 | Filtering | Every top-level scalar state field is filterable; values are literals (no `now`) |
 | Visibility | Any workflow in the tenant can read any workflow's state |
@@ -402,14 +423,15 @@ Approved on 2026-09-29:
 
 | Topic | Proposal |
 |---|---|
-| Runtime interface | New `state` interface in `runtara:workflow@1.0.0` (`set(key, patch)`, `get()`) |
+| Runtime interface | New `state` interface in `runtara:workflow@1.0.0` (`set(key, patch)`, `get(key)`) |
 | Write identity | Hash of a v2 `state` key, keyed in `instance_state_writes` |
 | Write unit | One transaction: write-log insert, then merge only if inserted |
 | `GetState` on replay | Checkpoints its result; state steps have no `durable` field |
 | Typing | E134/E135 plus E023/E024 at validation; the stdlib checks and canonicalises against the manifest's `stateSchema` at run time |
-| Embedded children and workflow-agents | State steps are ignored (compile-time no-op); W083 on embed |
+| Embedded children and workflow-agents | Local state per invocation in guest memory, checkpointed (Split/While snapshots); W083 on embed |
 | Storage | `instance_state` and `instance_state_writes` tables; 64 KiB constant cap; canonical values |
 | Pruning | Keeps `instance_state`, deletes `instance_state_writes` |
+| `state.*` references | Not now; GetState plus `steps.<id>.outputs.<field>` |
 | Filtering scope | Top-level fields only; fixed operators, AND only; a missing field does not match |
 | Control changes | `get-state` and the `query` state filter in `runtara:control@1.0.0`, in place |
 | Executions API | Single-run endpoint returns state; the list filters by it through a `POST` query endpoint |
