@@ -76,7 +76,7 @@ export function OverviewPage() {
                     </p>
                   </div>
                   <span className="rounded-full bg-muted px-3 py-1 text-sm">
-                    {queue.count} requests
+                    {queue.count} {queue.count === 1 ? 'request' : 'requests'}
                   </span>
                 </Link>
               ))}
@@ -176,7 +176,8 @@ function ProcessCard({
       {stage ? (
         <>
           <p className="mt-2 text-xs text-muted-foreground">
-            {stateLabel(stage, schema[stage])} · {total} runs
+            {stateLabel(stage, schema[stage])} · {total}{' '}
+            {total === 1 ? 'run' : 'runs'}
           </p>
           {counts.error ? (
             <p role="alert">Stage counts unavailable.</p>

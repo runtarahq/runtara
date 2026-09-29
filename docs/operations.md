@@ -1,7 +1,9 @@
 # Operations
 
-Status: design direction, checked against `main` at `708286b5` (#279),
-2026-09-29. Nothing Operations-specific is implemented.
+Status: phases 1–4 implemented on `feat/operations`, 2026-09-29.
+The original baseline was checked against `main` at `708286b5` (#279).
+Phase 5 remains later work. See [Implementation](#implementation) for the
+concrete API and validation coverage.
 The screenshots come from an interactive prototype and show sample data; what
 each screen needs from the platform is listed under [Screens](#screens).
 
@@ -20,7 +22,7 @@ reporting platform.
 - [AI review with a person in the loop](#ai-review-with-a-person-in-the-loop)
 - [Work needed](#work-needed)
 - [Phases](#phases)
-- [Open questions](#open-questions)
+- [Implementation](#implementation)
 - [Out of scope](#out-of-scope)
 
 ## Principles
@@ -38,7 +40,7 @@ reporting platform.
 
 ## Agreed decisions
 
-Agreed 2026-09-29; these describe planned behavior, not existing capabilities.
+Agreed 2026-09-29; implemented for phases 1–4 below.
 
 - **Approval queues have one row per request.** A run with several matching
   requests appears several times. Monitoring and plain run views retain one
@@ -82,6 +84,9 @@ Agreed 2026-09-29; these describe planned behavior, not existing capabilities.
   controls or business rules.
 
 ## What exists today
+
+This section records the original `708286b5` baseline. The implementation
+section below supersedes its descriptions of missing Operations features.
 
 Paths are relative to `crates/`.
 
@@ -429,6 +434,9 @@ links to the documents and the text the AI quoted.
 
 ## Work needed
 
+Original work breakdown: W1–W8 and W12–W14 are implemented; W9–W11
+and distinct-person enforcement remain deferred.
+
 Backend:
 
 - **W1. Gate `POST /executions/query`.** It has no entry in `permission_for`
@@ -532,17 +540,67 @@ bulk selections, and competing answers from people and workflows. Replay
 verification covers labeled and unlabeled runs, the new run ID, and the
 retained link to the original run.
 
-## Open questions
+## Implementation
 
-1. **Request query API (W2).** Specify the endpoint and response envelope for
-   request rows while preserving the existing run-list contract.
-2. **Answer option labels.** `enum` holds bare values; humanised values work
-   until `SchemaField` has display labels (`FormControl.options` has them, but
-   schema maps do not reach it).
-3. **Old-version state display.** Queue retention and request-schema selection
-   are settled above. Runs can still carry different state shapes or no action
-   key; missing columns stay empty. Specify how state display labels and
-   formats are chosen when a field changes between versions.
+The `/operations` UI provides Overview, request queues, plain workflow run
+views, saved shared views, run details and Monitor. Defaults discover action
+keys in current workflow graphs (including nested Split graphs) and retain
+removed keys while actionable requests remain. Request forms always use their
+registered schema. Queue display metadata comes from the current workflow,
+with explicit view labels and formats taking precedence; the run state card
+uses the run's executed workflow version. Missing columns render empty.
+
+All HTTP paths below are under `/api/runtime` and use the standard `{data}`
+response envelope:
+
+- `GET /operations/queues` and `/operations/processes` discover work and
+  current state schemas.
+- `POST /operations/requests/query` accepts `{workflowId, actionKey, query}`
+  and returns request-level `content`, `totalElements`, `totalPages`, `number`
+  and `size`. Filters and counts apply before pagination.
+- Both the request query and `POST /executions/query` accept `stateFields`
+  (up to 32 top-level field names) and `stateSort: {field, descending}`.
+  Omitted state selection returns no state. Sorting uses typed JSON values,
+  missing values last, and a stable ID tie-breaker.
+- `GET/POST /operations/views` and `PUT/DELETE /operations/views/{id}` persist
+  tenant-scoped views. Updates and deletion require the current `revision`;
+  stale writes receive 409. Each view belongs to exactly one workflow.
+- Answers reuse `/signals`; authenticated session API answers also retain
+  their original actor through queued delivery and receipt retries.
+
+View `formats` contain only generic display options: `kind` (`text`, `number`,
+`date`, `datetime`, `relative`), `decimals`, `prefix`, and `suffix`. For example,
+`{kind: "number", decimals: 2, prefix: "$"}` is literal presentation of an
+ordinary number. There is no currency model, conversion or currency-aware
+validation. A workflow can instead publish already formatted text. Relative
+state filters use `{relative: "now", offsetSeconds: -3600}` and are resolved
+again by the UI on each poll.
+
+Read permissions use `invocation_history:read`, shared-view authoring uses
+`workflow:update`, and answers and Replay use `workflow:execute`. Answer
+controls retain independent validation and submission state per request.
+Blank optional controls are omitted from submissions; conditional requirements
+remain validated against each request's schema. Bare enum option values are
+humanised until the DSL adds explicit option labels.
+
+Validation includes Rust schema/form tests, role-gate tests, database-backed
+Operations tests, managed session delivery tests, frontend unit tests, and the
+production frontend build. `e2e/test_operations.py` creates real workflows on
+an isolated local server and checks state projection/sorting, schema validation,
+resume, idempotent receipts, old-version queues, shared views and Replay labels.
+The frontend `operations.local.e2e.spec.ts` uses its fixture to exercise bulk
+row editing, independent validation, approval, state display and Monitor Replay.
+Run it with `E2E_OPERATIONS_FIXTURE`, `PLAYWRIGHT_BASE_URL`, and the `local-ui`
+Playwright project. Neither test deletes services or databases.
+
+Verified locally on 2026-09-29: 1,354 frontend tests; production frontend
+build; frontend lint (zero errors, 29 existing warnings); 55 authorization
+tests; six Operations database integration tests; managed session delivery;
+nested queue discovery; the live API acceptance script; and the Chromium
+Operations browser scenario. Commit hooks ran workspace formatting and Clippy.
+The full CI matrix and external-service E2E suites were not run. Local E2E
+used isolated PostgreSQL/Valkey services and real compiled WASM workflows.
+
 
 ## Out of scope
 
