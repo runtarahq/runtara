@@ -2984,6 +2984,13 @@ fn validate_mapping_value_references(
 ///
 /// `warn_on_self_reference` is off for edge conditions, which are attributed
 /// to the edge's source step and routinely read that step's own outputs.
+///
+/// Every reference the reference phase sees — input mappings, `connection_ref`,
+/// conditions, bare config values, edge conditions — passes through here, so
+/// this is also where a malformed path (one the tokenizer had to repair) is
+/// reported, once. Returns `false` for such a path so the caller skips its
+/// remaining checks; reference-root validation skips it too (see
+/// [`validate_reference_root`]), as its segments are not what was written.
 fn validate_step_reference(
     step_id: &str,
     ref_path: &str,
@@ -2991,7 +2998,16 @@ fn validate_step_reference(
     step_types: &HashMap<String, &'static str>,
     warn_on_self_reference: bool,
     result: &mut ValidationResult,
-) {
+) -> bool {
+    if let Some(reason) = malformed_path_reason(ref_path) {
+        result.errors.push(ValidationError::InvalidReferencePath {
+            step_id: step_id.to_string(),
+            reference_path: ref_path.to_string(),
+            reason: reason.to_string(),
+        });
+        return false;
+    }
+
     if ref_path == "__error" || ref_path.starts_with("__error.") {
         result.warnings.push(ValidationWarning::BareErrorReference {
             step_id: step_id.to_string(),
@@ -3001,7 +3017,7 @@ fn validate_step_reference(
     }
 
     let Some(referenced_step_id) = extract_step_id_from_reference(ref_path) else {
-        return;
+        return true;
     };
 
     // Check if step references itself (warning, not error)
@@ -3028,6 +3044,8 @@ fn validate_step_reference(
         // statically-shaped output (e.g. `steps.split.outputs.result`).
         validate_step_output_reference(step_id, ref_path, &referenced_step_id, step_type, result);
     }
+
+    true
 }
 
 fn validate_reference(
@@ -3038,24 +3056,16 @@ fn validate_reference(
     valid_variable_names: &HashSet<String>,
     result: &mut ValidationResult,
 ) {
-    // Reject a path the tokenizer had to repair. Dots inside a closed `[..]`
-    // body belong to the key (`data["a..b"]`) and are fine; leading/trailing
-    // dots are not caught here.
-    if let Some(reason) = malformed_path_reason(ref_path) {
-        result.errors.push(ValidationError::InvalidReferencePath {
-            step_id: step_id.to_string(),
-            reference_path: ref_path.to_string(),
-            reason: reason.to_string(),
-        });
-        return;
-    }
-
     // The captured onError envelope is exposed at `steps.__error.*` (alias
     // `steps.error.*`). Older docs advertised a bare `__error.*` root; the
     // runtime still mirrors it to the source root for back-compat (see
     // `build_source`), but the bare form bypasses step-id typo checking, so
     // steer authors to the canonical `steps.__error.*` path.
-    validate_step_reference(step_id, ref_path, valid_step_ids, step_types, true, result);
+    //
+    // A malformed path is reported there and nothing else is checked.
+    if !validate_step_reference(step_id, ref_path, valid_step_ids, step_types, true, result) {
+        return;
+    }
 
     // Check for variable references
     if let Some(variable_name) = extract_variable_name_from_reference(ref_path)
@@ -3365,6 +3375,17 @@ fn collect_edge_condition_references(
 // ============================================================================
 
 /// Validate that step references only refer to steps that have already executed.
+/// The step a reference names, for execution-order checks — `None` for a
+/// malformed path. That path is already reported (once) by the reference
+/// phase, and the id here would come from the tokenizer's repair of it, so an
+/// ordering error on top would name a step the author never wrote.
+fn ordered_step_id(reference: &str) -> Option<String> {
+    if malformed_path_reason(reference).is_some() {
+        return None;
+    }
+    extract_step_id_from_reference(reference)
+}
+
 fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResult) {
     let adjacency = build_adjacency(graph);
 
@@ -3399,7 +3420,7 @@ fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResul
         // Same blind spot as the reference walk: a condition or bare config
         // value can name a step that exists but has not run yet.
         for reference in collect_unmapped_step_references(step) {
-            let Some(referenced_step_id) = extract_step_id_from_reference(&reference) else {
+            let Some(referenced_step_id) = ordered_step_id(&reference) else {
                 continue;
             };
             if referenced_step_id == *step_id {
@@ -3420,7 +3441,7 @@ fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResul
     // step and anything upstream of it — nothing downstream.
     for edge in collect_edge_condition_references(graph, extract_references_from_condition) {
         for reference in &edge.references {
-            let Some(referenced_step_id) = extract_step_id_from_reference(reference) else {
+            let Some(referenced_step_id) = ordered_step_id(reference) else {
                 continue;
             };
             if referenced_step_id == edge.from_step {
@@ -3660,7 +3681,9 @@ fn defect_reason(defect: PathDefect) -> (u8, &'static str) {
         PathDefect::ConsecutiveDots => (0, "empty path segment (consecutive dots)"),
         PathDefect::EmptyBracketKey => (1, "empty bracket key"),
         PathDefect::UnterminatedBracket => (2, "unterminated bracket (missing `]`)"),
-        _ => (3, "malformed reference path"),
+        PathDefect::LeadingDot => (3, "empty path segment (leading dot)"),
+        PathDefect::TrailingDot => (4, "empty path segment (trailing dot)"),
+        _ => (5, "malformed reference path"),
     }
 }
 
@@ -5267,7 +5290,7 @@ fn extract_step_ids_from_mapping_value(value: &MappingValue) -> Vec<String> {
     let mut step_ids = Vec::new();
     match value {
         MappingValue::Reference(ref_value) => {
-            if let Some(step_id) = extract_step_id_from_reference(&ref_value.value) {
+            if let Some(step_id) = ordered_step_id(&ref_value.value) {
                 step_ids.push(step_id);
             }
         }
@@ -6000,6 +6023,15 @@ fn validate_reference_root(
     iteration_allowed: bool,
     result: &mut ValidationResult,
 ) {
+    // A malformed path was already reported, once, by the reference phase
+    // (`validate_step_reference`), which sees every reference this phase does.
+    // Its segments are the tokenizer's repair, not what was written, so
+    // checking them here would only add a misleading second error (an
+    // undefined field or variable named after the repaired key).
+    if malformed_path_reason(reference).is_some() {
+        return;
+    }
+
     match reference_root(reference) {
         "data" => {
             if parse_reference(reference).is_none() {
@@ -7972,6 +8004,395 @@ mod tests {
                         if reference_path == reference && reason == expected
                 )),
                 "`{reference}` must be rejected with `{expected}`: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    /// A graph with `reference` placed in one location that never passes
+    /// through an input mapping. `data.a` is declared in the input schema.
+    fn graph_with_unmapped_reference(location: &str, reference: &str) -> ExecutionGraph {
+        let reference = serde_json::to_string(reference).unwrap();
+        let eq = format!(
+            r#"{{"type":"operation","op":"EQ","arguments":[
+                {{"valueType":"reference","value":{reference}}},
+                {{"valueType":"immediate","value":1}}]}}"#
+        );
+        let always = r#"{"type":"operation","op":"EQ","arguments":[
+                {"valueType":"immediate","value":1},{"valueType":"immediate","value":1}]}"#;
+        let (entry, step, edge_condition) = match location {
+            "conditional" => (
+                "check",
+                format!(r#""check": {{"id":"check","stepType":"Conditional","condition":{eq}}},"#),
+                None,
+            ),
+            "filter_condition" => (
+                "check",
+                format!(
+                    r#""check": {{"id":"check","stepType":"Filter","config":{{
+                        "value":{{"valueType":"immediate","value":[1]}},"condition":{eq}}}}},"#
+                ),
+                None,
+            ),
+            "filter_value" => (
+                "check",
+                format!(
+                    r#""check": {{"id":"check","stepType":"Filter","config":{{
+                        "value":{{"valueType":"reference","value":{reference}}},"condition":{always}}}}},"#
+                ),
+                None,
+            ),
+            "edge_condition" => (
+                "check",
+                r#""check": {"id":"check","stepType":"Log","message":"x","level":"info"},"#
+                    .to_string(),
+                Some(eq.clone()),
+            ),
+            other => panic!("unknown location {other}"),
+        };
+        let edge = match edge_condition {
+            Some(condition) => {
+                format!(r#"{{"fromStep":"check","toStep":"finish","condition":{condition}}}"#)
+            }
+            None => r#"{"fromStep":"check","toStep":"finish"}"#.to_string(),
+        };
+        let json = format!(
+            r#"{{
+              "entryPoint": "{entry}",
+              "executionPlan": [{edge}],
+              "steps": {{
+                {step}
+                "finish": {{"id":"finish","stepType":"Finish"}}
+              }},
+              "inputSchema": {{"a": {{"type": "string"}}}}
+            }}"#
+        );
+        serde_json::from_str(&json).unwrap_or_else(|e| panic!("{location}: {e}\n{json}"))
+    }
+
+    fn malformed_path_errors<'a>(
+        result: &'a ValidationResult,
+        reference: &str,
+    ) -> Vec<&'a ValidationError> {
+        result
+            .errors
+            .iter()
+            .filter(|error| {
+                matches!(
+                    error,
+                    ValidationError::InvalidReferencePath { reference_path, .. }
+                        if reference_path == reference
+                )
+            })
+            .collect()
+    }
+
+    /// Conditions, bare config values and edge conditions never pass through
+    /// an input mapping, and used to skip the malformed-path check entirely —
+    /// `data[""]` in a condition resolved to the whole `data` object.
+    #[test]
+    fn test_malformed_paths_are_rejected_outside_input_mappings() {
+        for location in [
+            "conditional",
+            "filter_condition",
+            "filter_value",
+            "edge_condition",
+        ] {
+            for reference in [r#"data[""]"#, "data[a", "steps..check", "data."] {
+                let graph = graph_with_unmapped_reference(location, reference);
+                let result = validate_workflow(&graph, &test_catalog());
+                assert_eq!(
+                    malformed_path_errors(&result, reference).len(),
+                    1,
+                    "{location}: `{reference}` must be rejected exactly once: {:?}",
+                    result.errors
+                );
+            }
+
+            let graph = graph_with_unmapped_reference(location, "data.a");
+            let result = validate_workflow(&graph, &test_catalog());
+            assert!(
+                malformed_path_errors(&result, "data.a").is_empty(),
+                "{location}: `data.a` is well-formed: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    /// A malformed path is reported once. The root checks used to run on the
+    /// tokenizer's repaired segments too, adding an undefined field/variable
+    /// error named after a key the author never wrote.
+    #[test]
+    fn test_malformed_mapping_reference_reports_a_single_error() {
+        for reference in [
+            "data[foo",
+            "variables[x",
+            r#"data[""]"#,
+            "data.",
+            "variables.x.",
+        ] {
+            let result = validate_data_reference_with_schema_key(reference, "a");
+            assert_eq!(
+                malformed_path_errors(&result, reference).len(),
+                1,
+                "`{reference}` must be rejected exactly once: {:?}",
+                result.errors
+            );
+            assert!(
+                !result.errors.iter().any(|error| matches!(
+                    error,
+                    ValidationError::UndefinedDataReference { .. }
+                        | ValidationError::UndefinedVariableReference { .. }
+                        | ValidationError::UnknownVariable { .. }
+                )),
+                "`{reference}` must not also report its repaired key: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    #[test]
+    fn test_trailing_dot_is_rejected() {
+        for reference in ["data.", "variables.x.", r#"data["a"]."#] {
+            let result = validate_data_reference_with_schema_key(reference, "a");
+            assert!(
+                result.errors.iter().any(|error| matches!(
+                    error,
+                    ValidationError::InvalidReferencePath { reference_path, reason, .. }
+                        if reference_path == reference
+                            && reason == "empty path segment (trailing dot)"
+                )),
+                "`{reference}` must be rejected: {:?}",
+                result.errors
+            );
+        }
+
+        // Inside a closed bracket the dot belongs to the key.
+        let result = validate_data_reference_with_schema_key(r#"data["a."]"#, "a.");
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::InvalidReferencePath { .. })),
+            "{:?}",
+            result.errors
+        );
+    }
+
+    /// One step of every type, with every reference-bearing field set to a
+    /// distinct reference built by `r(field)`. The `match` in
+    /// [`step_type_label`] is exhaustive, so a new step type does not compile
+    /// until it is added here.
+    fn one_step_of_every_type(r: impl Fn(&str) -> serde_json::Value) -> Vec<(String, Step)> {
+        let cond = |field: &str| {
+            serde_json::json!({"type":"operation","op":"EQ","arguments":[
+                r(field), {"valueType":"immediate","value":1}]})
+        };
+        let subgraph = serde_json::json!({
+            "entryPoint":"inner",
+            "steps":{"inner":{"id":"inner","stepType":"Finish"}}
+        });
+        [
+            serde_json::json!({"id":"finish","stepType":"Finish",
+                "inputMapping":{"o":r("finish.inputMapping")}}),
+            serde_json::json!({"id":"agent","stepType":"Agent","agentId":"transform",
+                "capabilityId":"extract",
+                "inputMapping":{"i":r("agent.inputMapping")},
+                "connectionRef":r("agent.connectionRef")}),
+            serde_json::json!({"id":"conditional","stepType":"Conditional",
+                "condition":cond("conditional.condition")}),
+            serde_json::json!({"id":"split","stepType":"Split","subgraph":subgraph,
+                "config":{"value":r("split.value"),"variables":{"v":r("split.variables")}}}),
+            serde_json::json!({"id":"switch","stepType":"Switch",
+                "config":{"value":r("switch.value"),"cases":[]}}),
+            serde_json::json!({"id":"embed","stepType":"EmbedWorkflow",
+                "childWorkflowId":"child","childVersion":"latest",
+                "inputMapping":{"i":r("embed.inputMapping")}}),
+            serde_json::json!({"id":"while","stepType":"While",
+                "condition":cond("while.condition"),"subgraph":subgraph,
+                "config":{"variables":{"v":r("while.variables")}}}),
+            serde_json::json!({"id":"log","stepType":"Log","message":"m",
+                "context":{"c":r("log.context")}}),
+            serde_json::json!({"id":"error","stepType":"Error","code":"E","message":"m",
+                "context":{"c":r("error.context")}}),
+            serde_json::json!({"id":"filter","stepType":"Filter",
+                "config":{"value":r("filter.value"),"condition":cond("filter.condition")}}),
+            serde_json::json!({"id":"groupby","stepType":"GroupBy",
+                "config":{"value":r("groupby.value"),"key":"k"}}),
+            serde_json::json!({"id":"delay","stepType":"Delay",
+                "durationMs":r("delay.durationMs")}),
+            serde_json::json!({"id":"waitsignal","stepType":"WaitForSignal",
+                "timeoutMs":r("waitsignal.timeoutMs"),
+                "action":{"correlation":{"c":r("waitsignal.correlation")},
+                          "context":{"c":r("waitsignal.context")}}}),
+            serde_json::json!({"id":"waitinstances","stepType":"WaitForInstances",
+                "instanceIds":r("waitinstances.instanceIds"),
+                "timeoutMs":r("waitinstances.timeoutMs")}),
+            serde_json::json!({"id":"setstate","stepType":"SetState",
+                "values":{"k":r("setstate.values")}}),
+            serde_json::json!({"id":"getstate","stepType":"GetState"}),
+            serde_json::json!({"id":"aiagent","stepType":"AiAgent",
+                "connectionRef":r("aiagent.connectionRef"),
+                "config":{"systemPrompt":r("aiagent.systemPrompt"),
+                          "userPrompt":r("aiagent.userPrompt"),
+                          "model":r("aiagent.model"),
+                          "temperature":r("aiagent.temperature"),
+                          "maxTokens":r("aiagent.maxTokens"),
+                          "memory":{"conversationId":r("aiagent.conversationId")}}}),
+        ]
+        .into_iter()
+        .map(|json| {
+            let id = json["id"].as_str().unwrap().to_string();
+            let step = serde_json::from_value::<Step>(json.clone())
+                .unwrap_or_else(|e| panic!("{e}: {json}"));
+            (id, step)
+        })
+        .collect()
+    }
+
+    fn step_type_label(step: &Step) -> &'static str {
+        match step {
+            Step::Finish(_) => "Finish",
+            Step::Agent(_) => "Agent",
+            Step::Conditional(_) => "Conditional",
+            Step::Split(_) => "Split",
+            Step::Switch(_) => "Switch",
+            Step::EmbedWorkflow(_) => "EmbedWorkflow",
+            Step::While(_) => "While",
+            Step::Log(_) => "Log",
+            Step::Error(_) => "Error",
+            Step::Filter(_) => "Filter",
+            Step::GroupBy(_) => "GroupBy",
+            Step::Delay(_) => "Delay",
+            Step::WaitForSignal(_) => "WaitForSignal",
+            Step::WaitForInstances(_) => "WaitForInstances",
+            Step::SetState(_) => "SetState",
+            Step::GetState(_) => "GetState",
+            Step::AiAgent(_) => "AiAgent",
+        }
+    }
+
+    /// References the reference phase passes to `validate_step_reference`.
+    fn reference_phase_references(step: &Step) -> HashSet<String> {
+        let mut refs = Vec::new();
+        for mapping in collect_step_mappings(step) {
+            extract_references_from_input_mapping(mapping, &mut refs);
+        }
+        let connection_ref = match step {
+            Step::Agent(agent_step) => agent_step.connection_ref.as_ref(),
+            Step::AiAgent(ai_step) => ai_step.connection_ref.as_ref(),
+            _ => None,
+        };
+        if let Some(value) = connection_ref {
+            extract_references_from_mapping_value(value, &mut refs);
+        }
+        refs.extend(collect_unmapped_step_references(step));
+        refs.into_iter().collect()
+    }
+
+    /// `validate_reference_root` skips a malformed path silently because the
+    /// reference phase has already reported it. That is only sound while the
+    /// reference phase sees every reference the root phase does — the two are
+    /// fed by separate collectors, so pin it here for every step type.
+    #[test]
+    fn test_root_phase_references_are_a_subset_of_the_reference_phase() {
+        let steps = one_step_of_every_type(
+            |field| serde_json::json!({"valueType":"reference","value":format!("data.{field}")}),
+        );
+        assert_eq!(steps.len(), 17, "one step per Step variant");
+
+        for (_, step) in &steps {
+            let reference_phase = reference_phase_references(step);
+            let (item_refs, loop_refs) = collect_step_scoped_references(step);
+            let root_phase: HashSet<String> = collect_references_from_step(step)
+                .into_iter()
+                .chain(item_refs)
+                .chain(loop_refs)
+                .collect();
+            let missing: Vec<_> = root_phase.difference(&reference_phase).collect();
+            assert!(
+                missing.is_empty(),
+                "{}: the root phase checks {missing:?}, which the reference phase never sees",
+                step_type_label(step)
+            );
+        }
+    }
+
+    /// Every reference-bearing field, end to end: a malformed path anywhere is
+    /// rejected exactly once.
+    #[test]
+    fn test_malformed_paths_are_rejected_once_in_every_step_field() {
+        let steps = one_step_of_every_type(
+            |field| serde_json::json!({"valueType":"reference","value":format!("data[\"\"].{field}")}),
+        );
+        let expected: Vec<String> = steps
+            .iter()
+            .flat_map(|(_, step)| reference_phase_references(step))
+            .collect();
+        assert_eq!(
+            expected.len(),
+            29,
+            "every field set in the fixture is walked: {expected:?}"
+        );
+
+        let mut graph = create_basic_graph(HashMap::new(), "finish");
+        for (id, step) in steps {
+            graph.steps.insert(id, step);
+        }
+        let result = validate_workflow(&graph, &test_catalog());
+        for reference in &expected {
+            assert_eq!(
+                malformed_path_errors(&result, reference).len(),
+                1,
+                "`{reference}` must be rejected exactly once: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    /// A malformed path naming a later step used to add a `StepNotYetExecuted`
+    /// for the tokenizer's repaired step id on top of the E011.
+    #[test]
+    fn test_malformed_path_to_later_step_reports_no_ordering_error() {
+        for reference in [
+            "steps..later.outputs",
+            "steps[later",
+            "steps.later.outputs.",
+        ] {
+            let json = format!(
+                r#"{{
+                  "entryPoint": "check",
+                  "executionPlan": [
+                    {{"fromStep":"check","toStep":"later"}},
+                    {{"fromStep":"check","toStep":"finish","condition":{{
+                      "type":"operation","op":"EQ","arguments":[
+                        {{"valueType":"reference","value":{reference_json}}},
+                        {{"valueType":"immediate","value":1}}]}}}}
+                  ],
+                  "steps": {{
+                    "check": {{"id":"check","stepType":"Conditional","condition":{{
+                      "type":"operation","op":"EQ","arguments":[
+                        {{"valueType":"reference","value":{reference_json}}},
+                        {{"valueType":"immediate","value":1}}]}}}},
+                    "later": {{"id":"later","stepType":"Finish","inputMapping":{{}}}},
+                    "finish": {{"id":"finish","stepType":"Finish"}}
+                  }}
+                }}"#,
+                reference_json = serde_json::to_string(reference).unwrap()
+            );
+            let graph: ExecutionGraph = serde_json::from_str(&json).unwrap();
+            let result = validate_workflow(&graph, &test_catalog());
+            assert!(
+                !malformed_path_errors(&result, reference).is_empty(),
+                "`{reference}`: {:?}",
+                result.errors
+            );
+            assert!(
+                !result
+                    .errors
+                    .iter()
+                    .any(|error| matches!(error, ValidationError::StepNotYetExecuted { .. })),
+                "`{reference}` must not also report an ordering error: {:?}",
                 result.errors
             );
         }
