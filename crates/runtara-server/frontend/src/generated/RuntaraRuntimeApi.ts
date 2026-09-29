@@ -3643,6 +3643,11 @@ export interface SchemaField {
   properties?: Partial<Record<string, SchemaField>> | null;
   /** Whether this field is required */
   required?: boolean;
+  /**
+   * Require this field when a sibling field matches the condition.
+   * Enforced on submitted inputs as well as in schema-driven forms.
+   */
+  requiredWhen?: null | VisibleWhen;
   /** Field type (string, integer, number, boolean, array, object) */
   type: SchemaFieldType;
   /**

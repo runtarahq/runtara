@@ -143,7 +143,10 @@ fn dsl_schema_to_json_schema(schema: &Value) -> Value {
             None => continue,
         };
 
-        let mut prop = serde_json::Map::new();
+        let mut prop = field_obj.clone();
+        // DSL `required` is a boolean on a field; JSON Schema requires an
+        // array on the containing object. Preserve the remaining constraints.
+        prop.remove("required");
         if let Some(t) = field_obj.get("type") {
             // Map DSL-specific types to valid JSON Schema types.
             // "file" is a DSL type representing a FileData object (content, filename, mimeType)
@@ -161,7 +164,28 @@ fn dsl_schema_to_json_schema(schema: &Value) -> Value {
             prop.insert("default".to_string(), default.clone());
         }
         if let Some(items) = field_obj.get("items") {
-            prop.insert("items".to_string(), items.clone());
+            prop.insert("items".to_string(), convert_field(items));
+        }
+        if let Some(fields) = field_obj.get("properties") {
+            let nested = dsl_schema_to_json_schema(fields);
+            for key in ["properties", "required"] {
+                if let Some(value) = nested.get(key) {
+                    prop.insert(key.into(), value.clone());
+                }
+            }
+        }
+        for (source, number_key, string_key) in [
+            ("min", "minimum", "minLength"),
+            ("max", "maximum", "maxLength"),
+        ] {
+            if let Some(value) = field_obj.get(source) {
+                let key = if field_obj.get("type").and_then(Value::as_str) == Some("string") {
+                    string_key
+                } else {
+                    number_key
+                };
+                prop.insert(key.into(), value.clone());
+            }
         }
 
         properties.insert(field_name.clone(), Value::Object(prop));
@@ -183,6 +207,11 @@ fn dsl_schema_to_json_schema(schema: &Value) -> Value {
     }
 
     Value::Object(json_schema)
+}
+
+fn convert_field(field: &Value) -> Value {
+    // Reuse object conversion for array items, including nested required fields.
+    dsl_schema_to_json_schema(&serde_json::json!({"item": field}))["properties"]["item"].clone()
 }
 
 /// Validate inputs against a workflow input schema.
@@ -242,8 +271,74 @@ fn validate_value(value: &Value, schema: &Value, path: &str, errors: &mut Vec<St
         && let Some(object) = value.as_object()
     {
         for (field, field_schema) in properties {
+            if let Some(condition) = field_schema.get("requiredWhen") {
+                match serde_json::from_value::<crate::VisibleWhen>(condition.clone()) {
+                    Ok(condition) => {
+                        let sibling = object.get(&condition.field);
+                        let applies = sibling.is_some()
+                            && (condition.equals.is_some() || condition.not_equals.is_some())
+                            && condition
+                                .equals
+                                .as_ref()
+                                .is_none_or(|expected| sibling == Some(expected))
+                            && condition
+                                .not_equals
+                                .as_ref()
+                                .is_none_or(|excluded| sibling != Some(excluded));
+                        let missing = object.get(field).is_none_or(|value| {
+                            value.is_null()
+                                || value.as_str().is_some_and(|text| text.trim().is_empty())
+                        });
+                        if applies && missing {
+                            errors.push(format!("{} is required", join_path(path, field)));
+                        }
+                    }
+                    Err(_) => errors.push(format!(
+                        "{} has an invalid requiredWhen condition",
+                        join_path(path, field)
+                    )),
+                }
+            }
             if let Some(field_value) = object.get(field) {
                 validate_value(field_value, field_schema, &join_path(path, field), errors);
+            }
+        }
+    }
+
+    if let Some(number) = value.as_f64() {
+        for (key, is_minimum) in [("minimum", true), ("maximum", false)] {
+            if let Some(bound) = schema_obj.get(key).and_then(Value::as_f64)
+                && if is_minimum {
+                    number < bound
+                } else {
+                    number > bound
+                }
+            {
+                errors.push(format!("{} violates {key} {bound}", display_path(path)));
+            }
+        }
+    }
+    if let Some(text) = value.as_str() {
+        let length = text.chars().count() as f64;
+        for (key, is_minimum) in [("minLength", true), ("maxLength", false)] {
+            if let Some(bound) = schema_obj.get(key).and_then(Value::as_f64)
+                && if is_minimum {
+                    length < bound
+                } else {
+                    length > bound
+                }
+            {
+                errors.push(format!("{} violates {key} {bound}", display_path(path)));
+            }
+        }
+        if let Some(pattern) = schema_obj.get("pattern").and_then(Value::as_str) {
+            match regex::Regex::new(pattern) {
+                Ok(regex) if regex.is_match(text) => {}
+                Ok(_) => errors.push(format!("{} does not match its pattern", display_path(path))),
+                Err(_) => errors.push(format!(
+                    "{} has an invalid validation pattern",
+                    display_path(path)
+                )),
             }
         }
     }
@@ -312,6 +407,88 @@ fn display_path(path: &str) -> &str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn managed_answers_enforce_enum_pattern_and_bounds_recursively() {
+        let schema = json!({
+            "decision": {"type":"string","enum":["approve","reject"],"required":true},
+            "correction": {"type":"object","properties":{
+                "amount":{"type":"number","min":0,"max":100,"required":true},
+                "reference":{"type":"string","pattern":"^ORDER-[0-9]+$","min":7,"max":12}
+            }},
+            "lines": {"type":"array","items":{"type":"object","properties":{
+                "quantity":{"type":"integer","min":1,"required":true}
+            }}}
+        });
+        let valid = json!({"decision":"approve","correction":{"amount":100,"reference":"ORDER-1"},"lines":[{"quantity":1}]});
+        assert!(validate_inputs(&valid, &schema).is_ok());
+        for invalid in [
+            json!({"decision":"invented"}),
+            json!({"decision":"approve","correction":{}}),
+            json!({"decision":"approve","correction":{"amount":-1}}),
+            json!({"decision":"approve","correction":{"amount":101}}),
+            json!({"decision":"approve","correction":{"amount":1,"reference":"WRONG-1"}}),
+            json!({"decision":"approve","correction":{"amount":1,"reference":"ORDER-123456789"}}),
+            json!({"decision":"approve","lines":[{}]}),
+            json!({"decision":"approve","lines":[{"quantity":0}]}),
+        ] {
+            assert!(
+                validate_inputs(&invalid, &schema).is_err(),
+                "accepted {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn standard_schema_constraints_and_invalid_patterns_are_enforced() {
+        let schema = json!({"type":"object","properties":{
+            "text":{"type":"string","minLength":2,"maxLength":3,"pattern":"^[éx]+$"},
+            "score":{"type":"number","minimum":0,"maximum":1}
+        }});
+        assert!(validate_inputs(&json!({"text":"éé","score":0.5}), &schema).is_ok());
+        for invalid in [
+            json!({"text":"é"}),
+            json!({"text":"xxxx"}),
+            json!({"text":"ab"}),
+            json!({"score":2}),
+        ] {
+            assert!(validate_inputs(&invalid, &schema).is_err());
+        }
+        assert!(
+            validate_inputs(
+                &json!({"text":"ok"}),
+                &json!({"text":{"type":"string","pattern":"["}})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn conditional_reason_matches_schema_driven_form_validation() {
+        let schema = json!({
+            "decision":{"type":"string","required":true,"enum":["approve","reject"]},
+            "reason":{"type":"string","requiredWhen":{"field":"decision","equals":"reject"}}
+        });
+        let fields = serde_json::from_value(schema.clone()).unwrap();
+        let form = crate::form::schema_fields_form_definition(&fields);
+        for (answer, valid) in [
+            (json!({"decision":"approve"}), true),
+            (json!({"decision":"reject"}), false),
+            (json!({"decision":"reject","reason":"  "}), false),
+            (json!({"decision":"reject","reason":"Limit exceeded"}), true),
+        ] {
+            assert_eq!(
+                validate_inputs(&answer, &schema).is_ok(),
+                valid,
+                "server {answer}"
+            );
+            assert_eq!(
+                crate::form::analyze_form(&form, &answer).valid,
+                valid,
+                "form {answer}"
+            );
+        }
+    }
 
     // =========================================================================
     // is_empty_schema tests
