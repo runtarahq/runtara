@@ -101,6 +101,27 @@ fn push_projection(query: &mut QueryBuilder<'_, Postgres>, fields: &[String]) {
 }
 
 impl InstanceRepository {
+    /// Aggregate the same tenant-scoped predicates as listing, without row enrichment.
+    pub async fn execution_counts(
+        &self,
+        options: &ListInstancesOptions,
+    ) -> crate::error::Result<Vec<(runtara_core::domain::InstanceStatus, i64)>> {
+        let mut query = QueryBuilder::new(
+            "SELECT i.status::text, COUNT(*) FROM instances i LEFT JOIN instance_images ii ON i.instance_id=ii.instance_id LEFT JOIN images img ON ii.image_id=img.image_id",
+        );
+        crate::db::push_instance_filters(&mut query, options);
+        query.push(" GROUP BY i.status");
+        let rows: Vec<(String, i64)> = query.build_query_as().fetch_all(self.pool()).await?;
+        rows.into_iter()
+            .map(|(status, count)| {
+                Ok((
+                    runtara_store_postgres::encoding::status_from_str(&status)?,
+                    count,
+                ))
+            })
+            .collect()
+    }
+
     /// Query one workflow and action key, applying filters before pagination.
     pub async fn operation_requests(
         &self,

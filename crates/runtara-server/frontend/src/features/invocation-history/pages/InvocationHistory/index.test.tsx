@@ -30,40 +30,40 @@ describe('InvocationHistory page', () => {
   });
 });
 
-it('preserves bookmarked history filters and fragments when redirecting to Operations Runs', () => {
-  function Runs() {
-    const location = useLocation();
-    return (
-      <>
-        <output>{location.pathname + location.search + location.hash}</output>
-        <InvocationHistory />
-      </>
+it.each(['/invocation-history', '/operations/monitor'])(
+  'preserves bookmarked %s filters and fragments when redirecting to Operations Runs',
+  (legacyPath) => {
+    function Runs() {
+      const location = useLocation();
+      return (
+        <>
+          <output>{location.pathname + location.search + location.hash}</output>
+          <InvocationHistory />
+        </>
+      );
+    }
+    render(
+      <MemoryRouter
+        initialEntries={[
+          `${legacyPath}?parentInstanceId=p-1&workflowId=w-1&status=failed&runLabel=ORDER-123#results`,
+        ]}
+      >
+        <Routes>
+          <Route path={legacyPath} element={<InvocationHistoryRedirect />} />
+          <Route path="/operations/runs" element={<Runs />} />
+        </Routes>
+      </MemoryRouter>
     );
+    expect(
+      screen.getByText(
+        '/operations/runs?parentInstanceId=p-1&workflowId=w-1&status=failed&runLabel=ORDER-123#results'
+      )
+    ).toBeTruthy();
+    expect(table.mock.lastCall![0].filters).toMatchObject({
+      parentInstanceId: 'p-1',
+      workflowId: 'w-1',
+      status: 'failed',
+      runLabel: 'ORDER-123',
+    });
   }
-  render(
-    <MemoryRouter
-      initialEntries={[
-        '/invocation-history?parentInstanceId=p-1&workflowId=w-1&status=failed&runLabel=ORDER-123#results',
-      ]}
-    >
-      <Routes>
-        <Route
-          path="/invocation-history"
-          element={<InvocationHistoryRedirect />}
-        />
-        <Route path="/operations/runs" element={<Runs />} />
-      </Routes>
-    </MemoryRouter>
-  );
-  expect(
-    screen.getByText(
-      '/operations/runs?parentInstanceId=p-1&workflowId=w-1&status=failed&runLabel=ORDER-123#results'
-    )
-  ).toBeTruthy();
-  expect(table.mock.lastCall![0].filters).toMatchObject({
-    parentInstanceId: 'p-1',
-    workflowId: 'w-1',
-    status: 'failed',
-    runLabel: 'ORDER-123',
-  });
-});
+);

@@ -103,25 +103,34 @@ test('Operations: edit separate bulk answers in place, resume runs, and inspect 
   );
   await page.getByRole('button', { name: 'Approve', exact: true }).click();
   await expect(page.getByText('Answered', { exact: true })).toBeVisible();
-  await page.goto(appPath('/operations/monitor'));
+  await page.goto(
+    appPath(
+      `/operations/runs?status=failed,timeout&workflowId=${fixture.failureWorkflow}`
+    )
+  );
   await expect(
-    page.getByRole('heading', { name: 'Monitor', exact: true })
+    page.getByRole('heading', { name: 'Runs', exact: true })
   ).toBeVisible();
-  await expect(
-    page.getByRole('heading', { name: 'Failed runs', exact: true })
-  ).toBeVisible();
-  const failed = page.locator(`[data-run-id="${fixture.failureRun}"]`);
+  const failed = page
+    .getByRole('row')
+    .filter({
+      has: page.getByRole('button', {
+        name: `Copy run ID ${fixture.failureRun}`,
+        exact: true,
+      }),
+    });
   await expect(
     failed.getByText('Intentional E2E failure to verify Replay', {
       exact: true,
     })
   ).toBeVisible();
   await page.screenshot({
-    path: testInfo.outputPath('monitor.png'),
+    path: testInfo.outputPath('runs.png'),
     fullPage: true,
   });
   await failed.getByRole('button', { name: 'Replay', exact: true }).click();
-  await failed
+  await page
+    .getByRole('dialog')
     .getByRole('button', { name: 'Confirm Replay', exact: true })
     .click();
   await expect(page).toHaveURL(

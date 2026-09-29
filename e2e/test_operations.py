@@ -26,7 +26,12 @@ def api(path, body=None, method=None, expected=200):
         with urllib.request.urlopen(request, timeout=120) as response:
             status, payload = response.status, json.load(response)
     except urllib.error.HTTPError as error:
-        status, payload = error.code, json.load(error)
+        status = error.code
+        body = error.read().decode()
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            payload = {'error': body}
     assert status == expected, (path, status, payload)
     return payload
 
@@ -146,8 +151,8 @@ assert replay['runLabel'] == 'ORDER-123' and replay['id'] != runs[0]
 assert replay['usedVersion'] == new_version
 assert requests('new_approval')['content'][0]['inputSchema']['reason']['min'] == 8
 print('Validated shared views, stale edit refusal, old queues, registered schemas, and Replay labels', flush=True)
-# A real structured failure exercises Monitor and its Replay affordance.
-failure_workflow = api('/workflows/create', {'name': name + ' failure', 'description': 'Monitor Replay acceptance'})['data']['id']
+# A real structured failure exercises Runs and its Replay affordance.
+failure_workflow = api('/workflows/create', {'name': name + ' failure', 'description': 'Runs Replay acceptance'})['data']['id']
 failure_graph = {'name': name + ' failure', 'entryPoint': 'fail', 'steps': {'fail': {'id': 'fail', 'stepType': 'Error', 'code': 'TEMPORARY_FAILURE', 'message': 'Intentional E2E failure to verify Replay', 'category': 'transient', 'severity': 'warning'}}, 'executionPlan': []}
 save_and_compile(failure_graph, failure_workflow)
 failure_label = 'RETRY-' + uuid.uuid4().hex[:8]
@@ -155,6 +160,11 @@ failure_run = api(f'/workflows/{failure_workflow}/execute', {'runLabel': failure
 poll(lambda: instance(failure_run), lambda r: r['status'] == 'failed', 'structured failure')
 failure_page = api('/executions/query', {'workflowId': failure_workflow, 'status': 'failed'})['data']
 assert failure_page['content'][0]['errorSummary']['code'] == 'TEMPORARY_FAILURE', failure_page
+summary = api('/executions/summary', {'workflowId': failure_workflow})['data']
+assert summary['total'] == failure_page['totalElements'] == 1
+assert summary['counts']['failed'] == 1
+api('/executions/summary', {'status': 'failed'}, expected=422)
+print('Validated execution summary and unsupported-filter rejection', flush=True)
 result = {'failureWorkflow': failure_workflow, 'failureRun': failure_run, 'failureLabel': failure_label, 'workflow': workflow, 'runs': runs, 'replay': replayed, 'view': view['id'], 'baseUrl': args.base_url}
 if args.output:
     Path(args.output).write_text(json.dumps(result, indent=2) + '\n')

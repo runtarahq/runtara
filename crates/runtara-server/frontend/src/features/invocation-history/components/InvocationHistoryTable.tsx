@@ -10,12 +10,25 @@ import {
   TableStatusFooter,
   ToolbarSearch,
 } from '@/shared/components/console';
-import { useTableQuery } from '@/shared/hooks/api';
+import { useCustomQuery } from '@/shared/hooks/api';
+import { useAuthStore } from '@/shared/stores/authStore';
 import { usePagination } from '@/shared/hooks/usePagination';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { getAllExecutions } from '../queries';
-import { ExecutionHistoryFilters } from '../types';
-import { invocationHistoryColumns } from './InvocationHistoryColumns';
+import { queryRunSummary } from '@/features/operations/queries';
+import { resolveRunFilters, summaryFilters } from '../utils/run-filters';
+import { RunControls } from './RunControls';
+import { operationsRunColumns } from './OperationsRunColumns';
+import { RunIdentity, RunContext, RunActions } from './RunRow';
+import { ParentRunLink } from './RunLinks';
+import { ReplayButton } from '@/features/operations/pages/shared';
+import {
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  DialogDescription,
+} from '@/shared/components/ui/dialog';
+import { ExecutionHistoryFilters, ExecutionHistoryItem } from '../types';
 import {
   InvocationHistoryFilters,
   countActiveInvocationFilters,
@@ -37,6 +50,25 @@ export function InvocationHistoryTable({
   filters,
   onFiltersChange,
 }: InvocationHistoryTableProps) {
+  const tenant = useAuthStore((s) => s.orgId);
+  const [refresh, setRefresh] = useState(true);
+  const [replayRun, setReplayRun] = useState<ExecutionHistoryItem | null>(null);
+  const [expandedErrors, setExpandedErrors] = useState<ReadonlySet<string>>(
+    new Set()
+  );
+  const onDetailsChange = useCallback((id: string, open: boolean) => {
+    setExpandedErrors((previous) => {
+      if (previous.has(id) === open) return previous;
+      const next = new Set(previous);
+      if (open) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
+  const columns = useMemo(
+    () => operationsRunColumns(setReplayRun, expandedErrors, onDetailsChange),
+    [expandedErrors, onDetailsChange]
+  );
   const { pagination, setPagination } = usePagination();
   const [search, setSearch] = useState(filters.search ?? '');
   useEffect(() => {
@@ -59,19 +91,49 @@ export function InvocationHistoryTable({
     return [{ id: filters.sortBy, desc: filters.sortOrder === 'desc' }];
   }, [filters.sortBy, filters.sortOrder]);
 
-  const { data, totalPages, totalElements, isFetching } = useTableQuery({
-    queryKey: queryKeys.executions.list({
-      pageIndex: pagination.pageIndex,
-      pageSize: pagination.pageSize,
-      filters,
-    }),
-    queryFn: getAllExecutions,
+  const query = useCustomQuery({
+    queryKey: [
+      ...queryKeys.executions.lists(),
+      tenant,
+      { ...pagination, filters },
+    ],
+    queryFn: async (token: string) => {
+      const resolved = resolveRunFilters(filters, Date.now());
+      const [page, summary] = await Promise.allSettled([
+        getAllExecutions(token, {
+          queryKey: [
+            {
+              pageIndex: pagination.pageIndex,
+              pageSize: pagination.pageSize,
+              filters: resolved,
+            },
+          ],
+        }),
+        queryRunSummary(token, summaryFilters(resolved)),
+      ]);
+      if (page.status === 'rejected') throw page.reason;
+      return {
+        ...page.value,
+        summary: summary.status === 'fulfilled' ? summary.value : undefined,
+        countsUnavailable: summary.status === 'rejected',
+      };
+    },
+    refetchInterval:
+      refresh && !replayRun && expandedErrors.size === 0 ? 30_000 : false,
+    refetchIntervalInBackground: false,
+    placeholderData: undefined,
     staleTime: 0,
+    retry: false,
   });
+  const data = query.data?.content ?? [];
+  const totalPages = query.data?.totalPages ?? 0;
+  const totalElements = query.data?.totalElements ?? 0;
+  const isFetching = query.isFetching;
 
   // Reset to the first page whenever the active filters change
   useEffect(() => {
     setPagination((prev) => ({ ...prev, pageIndex: 0 }));
+    setExpandedErrors(new Set());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters]);
 
@@ -103,12 +165,16 @@ export function InvocationHistoryTable({
     [filters, onFiltersChange]
   );
 
-  const footerLeft = `${totalElements} executions · ${data.length} on this page`;
+  const footerLeft = `${query.data ? totalElements : '—'} runs · ${data.length} on this page`;
 
-  const handlePageChange = (page: number) =>
+  const handlePageChange = (page: number) => {
+    setExpandedErrors(new Set());
     setPagination((prev) => ({ ...prev, pageIndex: page }));
-  const handlePageSizeChange = (size: number) =>
+  };
+  const handlePageSizeChange = (size: number) => {
+    setExpandedErrors(new Set());
     setPagination({ pageIndex: 0, pageSize: size });
+  };
 
   const activeFilterCount = countActiveInvocationFilters(filters);
   const handleClearFilters = () =>
@@ -122,74 +188,190 @@ export function InvocationHistoryTable({
       createdTo: undefined,
       completedFrom: undefined,
       completedTo: undefined,
+      range: 'all',
     });
 
   return (
-    <ConsoleTableShell
-      toolbar={
-        <ConsoleToolbar
-          left={
-            <Breadcrumb
-              items={[
-                { label: 'Operations', to: '/operations' },
-                { label: 'Runs' },
-              ]}
+    <>
+      <ConsoleTableShell
+        toolbar={
+          <>
+            <ConsoleToolbar
+              left={
+                <Breadcrumb
+                  items={[
+                    { label: 'Operations', to: '/operations' },
+                    { label: 'Runs' },
+                  ]}
+                />
+              }
+              search={
+                <ToolbarSearch
+                  value={search}
+                  onChange={setSearch}
+                  placeholder="Search runs…"
+                  className="w-56"
+                />
+              }
+              filter={
+                <FilterPopover
+                  activeCount={activeFilterCount}
+                  onClear={handleClearFilters}
+                >
+                  <InvocationHistoryFilters
+                    filters={filters}
+                    onFiltersChange={onFiltersChange}
+                  />
+                </FilterPopover>
+              }
             />
-          }
-          search={
-            <ToolbarSearch
-              value={search}
-              onChange={setSearch}
-              placeholder="Search executions…"
-              className="w-56"
+            <RunControls
+              filters={filters}
+              onChange={onFiltersChange}
+              summary={query.data?.summary}
+              countsUnavailable={
+                !!query.error || !!query.data?.countsUnavailable
+              }
+              refresh={refresh}
+              setRefresh={setRefresh}
+              busy={isFetching}
+              updatedAt={query.dataUpdatedAt}
+              onRefresh={() => {
+                setExpandedErrors(new Set());
+                void query.refetch();
+              }}
             />
-          }
-          filter={
-            <FilterPopover
-              activeCount={activeFilterCount}
-              onClear={handleClearFilters}
-            >
-              <InvocationHistoryFilters
-                filters={filters}
-                onFiltersChange={onFiltersChange}
+            {refresh && expandedErrors.size > 0 && (
+              <p
+                role="status"
+                className="border-b px-4 py-2 text-xs text-muted-foreground"
+              >
+                Auto-refresh paused while error details are open.
+              </p>
+            )}
+            {(query.error || query.data?.countsUnavailable) && (
+              <p
+                role="alert"
+                className="border-b px-4 py-2 text-sm text-destructive"
+              >
+                {query.error
+                  ? query.data
+                    ? 'Could not refresh runs. Showing stale data.'
+                    : 'Could not load runs.'
+                  : 'Status counts unavailable.'}{' '}
+                Try Refresh.
+              </p>
+            )}
+          </>
+        }
+        footer={
+          <TableStatusFooter
+            left={footerLeft}
+            right={
+              <TablePagination
+                pageIndex={pagination.pageIndex}
+                pageSize={pagination.pageSize}
+                pageCount={totalPages ?? 1}
+                onPageChange={handlePageChange}
+                onPageSizeChange={handlePageSizeChange}
               />
-            </FilterPopover>
-          }
-        />
-      }
-      footer={
-        <TableStatusFooter
-          left={footerLeft}
-          right={
-            <TablePagination
-              pageIndex={pagination.pageIndex}
-              pageSize={pagination.pageSize}
-              pageCount={totalPages ?? 1}
-              onPageChange={handlePageChange}
-              onPageSizeChange={handlePageSizeChange}
-            />
-          }
-        />
-      }
-    >
-      <DataTable
-        columns={invocationHistoryColumns}
-        data={data}
-        pagination={{
-          ...pagination,
-          onPageChange: handlePageChange,
-          onPageSizeChange: handlePageSizeChange,
+            }
+          />
+        }
+      >
+        <div className="hidden lg:block">
+          <DataTable
+            columns={columns}
+            data={data}
+            pagination={{
+              ...pagination,
+              onPageChange: handlePageChange,
+              onPageSizeChange: handlePageSizeChange,
+            }}
+            totalPages={totalPages}
+            setPagination={setPagination}
+            isFetching={isFetching}
+            sorting={sorting}
+            onSortingChange={handleSortingChange}
+            manualSorting
+            stickyHeader
+            shouldRenderPagination={false}
+            getRowId={(row) => row.instanceId}
+            getRowClassName={() => 'group'}
+          />
+        </div>
+        <div className="divide-y lg:hidden">
+          {data.map((run) => (
+            <article
+              key={run.instanceId}
+              className="space-y-3 p-4"
+              aria-label={run.runLabel || run.instanceId}
+            >
+              <RunIdentity run={run} />
+              <RunContext
+                run={run}
+                detailsOpen={expandedErrors.has(run.instanceId)}
+                onDetailsChange={onDetailsChange}
+              />
+              <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+                <span>Version {run.version}</span>
+                {run.executionDurationSeconds != null &&
+                  run.executionDurationSeconds >= 0 && (
+                    <span>
+                      Execution: {run.executionDurationSeconds.toLocaleString()}{' '}
+                      s
+                    </span>
+                  )}
+                {run.parentInstanceId && (
+                  <span>
+                    Parent:{' '}
+                    <ParentRunLink
+                      parentInstanceId={run.parentInstanceId}
+                      compact
+                    />
+                  </span>
+                )}
+              </div>
+              <RunActions run={run} onReplay={setReplayRun} />
+            </article>
+          ))}
+          {!data.length && (
+            <p className="p-4 text-sm text-muted-foreground">
+              {isFetching
+                ? 'Loading runs…'
+                : query.error
+                  ? 'Runs unavailable.'
+                  : 'No runs match these filters.'}
+            </p>
+          )}
+        </div>
+      </ConsoleTableShell>
+      <Dialog
+        open={!!replayRun}
+        onOpenChange={(open) => {
+          if (!open) setReplayRun(null);
         }}
-        totalPages={totalPages}
-        setPagination={setPagination}
-        isFetching={isFetching}
-        sorting={sorting}
-        onSortingChange={handleSortingChange}
-        manualSorting
-        stickyHeader
-        shouldRenderPagination={false}
-        getRowClassName={() => 'group'}
-      />
-    </ConsoleTableShell>
+      >
+        <DialogContent>
+          <DialogTitle>
+            Replay {replayRun?.runLabel || replayRun?.instanceId.slice(0, 8)}
+          </DialogTitle>
+          <DialogDescription>
+            Start a new run with the original input.
+          </DialogDescription>
+          {replayRun && (
+            <ReplayButton
+              run={{
+                id: replayRun.instanceId,
+                workflowId: replayRun.workflowId,
+                runLabel: replayRun.runLabel,
+              }}
+              initiallyConfirm
+              onClose={() => setReplayRun(null)}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

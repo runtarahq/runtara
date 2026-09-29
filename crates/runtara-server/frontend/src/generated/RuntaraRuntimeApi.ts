@@ -2393,6 +2393,37 @@ export interface ExecutionPlanEdge {
   toStep: string;
 }
 
+export interface ExecutionSummary {
+  /**
+   * Counts by displayed status. Filter aliases (compiling/timeout) are not
+   * counted twice: their rows display as queued/failed in execution lists.
+   */
+  counts: Partial<Record<string, number>>;
+  /** @format int64 */
+  total: number;
+}
+
+/** Non-status predicates for status totals. Counts deliberately ignore pagination. */
+export interface ExecutionSummaryRequest {
+  /** @format date-time */
+  completedFrom?: string | null;
+  /** @format date-time */
+  completedTo?: string | null;
+  /** @format date-time */
+  createdFrom?: string | null;
+  /** @format date-time */
+  createdTo?: string | null;
+  parentInstanceId?: string | null;
+  runLabel?: string | null;
+  search?: string | null;
+  workflowId?: string | null;
+}
+
+export interface ExecutionSummaryResponse {
+  data: ExecutionSummary;
+  success: boolean;
+}
+
 /**
  * API-compatible field type info.
  * Describes the type of a field, including nested structures.
@@ -6342,6 +6373,26 @@ export class Api<
     ) =>
       this.request<ListAllExecutionsResponse, any>({
         path: `/api/runtime/executions/query`,
+        method: "POST",
+        body: data,
+        type: "application/json",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags executions-controller
+     * @name ExecutionSummaryHandler
+     * @request POST:/api/runtime/executions/summary
+     */
+    executionSummaryHandler: (
+      data: ExecutionSummaryRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<ExecutionSummaryResponse, any>({
+        path: `/api/runtime/executions/summary`,
         method: "POST",
         body: data,
         type: "application/json",

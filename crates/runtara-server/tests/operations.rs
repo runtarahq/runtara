@@ -696,3 +696,136 @@ async fn failed_run_lists_include_step_errors_and_host_fallback() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn execution_summary_matches_filtered_lists_without_double_counting_aliases() {
+    use runtara_server::api::dto::executions::ExecutionFilters;
+    let fx = Fixture::new().await;
+    let at = chrono::DateTime::parse_from_rfc3339("2026-09-29T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    for (status, label) in [
+        ("pending", "SUMMARY-1"),
+        ("running", "SUMMARY-2"),
+        ("suspended", "SUMMARY-3"),
+        ("failed", "SUMMARY-4"),
+        ("completed", "SUMMARY-5"),
+    ] {
+        let id = fx.run(Some(label)).await;
+        sqlx::query("UPDATE instances SET status=$2::instance_status, created_at=$3, finished_at=CASE WHEN $2 IN ('failed','completed','suspended') THEN $3 ELSE NULL END WHERE instance_id=$1")
+            .bind(&id).bind(status).bind(at).execute(&fx.runtime).await.unwrap();
+    }
+    fx.run(Some("OUTSIDE")).await;
+    let filters = ExecutionFilters {
+        workflow_id: Some(fx.workflow.clone()),
+        search: Some("SUMMARY-".into()),
+        created_from: Some(at),
+        created_to: Some(at),
+        ..Default::default()
+    };
+    let summary = fx
+        .engine
+        .execution_summary(&fx.tenant, filters.clone())
+        .await
+        .unwrap();
+    assert_eq!(summary.total, 5);
+    assert_eq!(summary.counts["queued"], 1);
+    assert_eq!(summary.counts["failed"], 1);
+    assert!(!summary.counts.contains_key("pending"));
+    for (statuses, expected) in [
+        (vec!["queued", "compiling"], 1),
+        (vec!["failed", "timeout"], 1),
+        (vec!["running", "suspended"], 2),
+    ] {
+        let list = fx
+            .engine
+            .list_all_executions(
+                &fx.tenant,
+                Some(0),
+                Some(1),
+                ExecutionFilters {
+                    statuses: Some(statuses.into_iter().map(str::to_owned).collect()),
+                    ..filters.clone()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.total_elements, expected);
+    }
+    let completed = fx
+        .engine
+        .execution_summary(
+            &fx.tenant,
+            ExecutionFilters {
+                completed_from: Some(at),
+                completed_to: Some(at),
+                ..filters.clone()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(completed.total, 2);
+    let completed_list = fx
+        .engine
+        .list_all_executions(
+            &fx.tenant,
+            None,
+            None,
+            ExecutionFilters {
+                completed_from: Some(at),
+                completed_to: Some(at),
+                ..filters.clone()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(completed_list.total_elements, completed.total);
+    assert!(
+        completed_list
+            .content
+            .iter()
+            .all(|run| run.status.is_terminal())
+    );
+    let exact = fx
+        .engine
+        .execution_summary(
+            &fx.tenant,
+            ExecutionFilters {
+                run_label: Some("SUMMARY-4".into()),
+                ..filters.clone()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(exact.total, 1);
+    let parent = fx
+        .engine
+        .execution_summary(
+            &fx.tenant,
+            ExecutionFilters {
+                parent_instance_id: Some("missing-parent".into()),
+                ..filters.clone()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(parent.total, 0);
+    let other = fx
+        .engine
+        .execution_summary("different-tenant", filters.clone())
+        .await
+        .unwrap();
+    assert_eq!(other.total, 0);
+    let wrong_workflow = fx
+        .engine
+        .execution_summary(
+            &fx.tenant,
+            ExecutionFilters {
+                workflow_id: Some(Uuid::new_v4().to_string()),
+                ..filters
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_workflow.total, 0);
+}

@@ -86,6 +86,19 @@ impl std::fmt::Debug for EnvironmentClient {
 }
 
 impl EnvironmentClient {
+    pub async fn execution_counts(
+        &self,
+        options: &ListInstancesOptions,
+    ) -> Result<Vec<(InstanceStatus, i64)>> {
+        Ok(self
+            .instances()
+            .execution_counts(&list_instances_options(options))
+            .await?
+            .into_iter()
+            .map(|(status, count)| (instance_status_from_core(status), count))
+            .collect())
+    }
+
     pub async fn operation_failures(
         &self,
         tenant: &str,

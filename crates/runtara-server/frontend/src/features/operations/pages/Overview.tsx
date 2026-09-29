@@ -4,29 +4,25 @@ import { AlertTriangle, ArrowRight } from 'lucide-react';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { useAuthStore } from '@/shared/stores/authStore';
 import { Button } from '@/shared/components/ui/button';
-import type {
-  OperationProcess,
-  OperationViewConfig,
-} from '@/generated/RuntaraRuntimeApi';
 import {
   useOperations,
   queryRuns,
+  queryRunSummary,
   operationsRequest,
   defaultView,
   selectedFields,
 } from '../queries';
-import { StateValue, type StateField } from '../components/StateValue';
+import { StateValue } from '../components/StateValue';
 import {
   OperationHeader,
   OperationSection,
   RefreshControls,
   FailureRows,
 } from './shared';
-import { stateLabel } from '../state-label';
 import type { OperationRequestPage } from '@/generated/RuntaraRuntimeApi';
 
 export function OverviewPage() {
-  const { queues, views, processes } = useOperations();
+  const { queues, views } = useOperations({ includeProcesses: false });
   const tenant = useAuthStore((s) => s.orgId);
   const client = useQueryClient();
   const failures = useCustomQuery({
@@ -42,8 +38,7 @@ export function OverviewPage() {
   });
   const running = useCustomQuery({
     queryKey: ['operations', tenant, 'running-count'],
-    queryFn: (token: string) =>
-      queryRuns(token, { status: 'running', size: 1 }),
+    queryFn: (token: string) => queryRunSummary(token, {}),
     refetchInterval: 30_000,
     placeholderData: undefined,
   });
@@ -121,7 +116,7 @@ export function OverviewPage() {
     <div className="mx-auto min-h-full w-full max-w-[1600px] bg-background p-5 lg:px-10 lg:py-7">
       <OperationHeader
         title="Overview"
-        description="Work that needs a person, and how your processes are running."
+        description="Requests to answer and recent failures to review."
         actions={
           <RefreshControls
             updatedAt={queues.dataUpdatedAt}
@@ -136,7 +131,6 @@ export function OverviewPage() {
       />
       <main className="space-y-6">
         {queues.error ||
-        processes.error ||
         views.error ||
         failures.error ||
         attention.error ||
@@ -170,19 +164,26 @@ export function OverviewPage() {
           />
           <Metric
             title="Failed in the last 24 h"
-            value={failures.data?.totalElements}
+            value={failures.error ? undefined : failures.data?.totalElements}
             note="Runs that need attention"
-            to="/operations/monitor"
-            action="Monitor"
+            to="/operations/runs?status=failed,timeout&range=24h&dateBasis=completed&sortBy=completedAt&sortOrder=desc"
+            action="View runs"
             danger
           />
           <Metric
             title="Running now"
-            value={running.data?.totalElements}
-            note="Across all workflows"
+            value={
+              running.error
+                ? undefined
+                : (running.data?.counts.running ??
+                  (running.data ? 0 : undefined))
+            }
+            note="Across all workflows · all time"
+            to="/operations/runs?status=running"
+            action="View runs"
           />
         </div>
-        <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
+        <div className="space-y-4">
           <OperationSection
             title="Needs attention"
             aside={
@@ -254,48 +255,17 @@ export function OverviewPage() {
                 })}
               </ul>
             )}
-            <FailureRows
-              rows={(failures.data?.content ?? []).map((run) => ({
-                ...run,
-                workflowName:
-                  processes.data?.find((p) => p.workflowId === run.workflowId)
-                    ?.name ?? run.workflowName,
-              }))}
-            />
+            <FailureRows rows={failures.data?.content ?? []} />
             {!attention.isPending &&
             !failures.isPending &&
+            !attention.error &&
+            !failures.error &&
             items.length === 0 &&
             !failures.data?.totalElements ? (
               <p className="p-5 text-sm text-muted-foreground">
                 Nothing needs attention right now.
               </p>
             ) : null}
-          </OperationSection>
-          <OperationSection title="Processes" aside="All runs">
-            <div className="divide-y">
-              {processes.data?.map((process) => (
-                <ProcessCard
-                  key={process.workflowId}
-                  process={process}
-                  view={
-                    views.data?.find(
-                      (v) =>
-                        v.configuration.workflow === process.workflowId &&
-                        v.configuration.roles?.stage
-                    )?.configuration
-                  }
-                />
-              ))}
-              {processes.isPending ? (
-                <p className="p-4 text-sm text-muted-foreground">
-                  Loading processes…
-                </p>
-              ) : !processes.data?.length ? (
-                <p className="p-4 text-sm text-muted-foreground">
-                  No workflows yet.
-                </p>
-              ) : null}
-            </div>
           </OperationSection>
         </div>
       </main>
@@ -339,99 +309,6 @@ function Metric({
           </Link>
         ) : null}
       </div>
-    </div>
-  );
-}
-function ProcessCard({
-  process,
-  view,
-}: {
-  process: OperationProcess;
-  view?: OperationViewConfig;
-}) {
-  const schema = process.stateSchema as Record<string, StateField>;
-  const stage =
-    view?.roles?.stage ??
-    Object.keys(schema).find((field) => schema[field]?.enum?.length);
-  const values = (stage ? (schema[stage]?.enum ?? []) : []).slice(0, 32);
-  const tenant = useAuthStore((s) => s.orgId);
-  const counts = useCustomQuery({
-    queryKey: [
-      'operations',
-      tenant,
-      'stages',
-      process.workflowId,
-      stage,
-      values,
-    ],
-    queryFn: async (token: string) =>
-      Promise.all(
-        values.map(async (value) => ({
-          value,
-          count: (
-            await queryRuns(token, {
-              workflowId: process.workflowId,
-              size: 1,
-              state: [{ field: stage!, op: 'eq', value: value as never }],
-            })
-          ).totalElements,
-        }))
-      ),
-    enabled: values.length > 0,
-    refetchInterval: 10_000,
-    placeholderData: undefined,
-  });
-  const total = counts.data?.reduce((n, s) => n + s.count, 0) ?? 0;
-  return (
-    <div className="p-4">
-      <Link
-        to={`/operations/processes/${process.workflowId}`}
-        className="text-sm font-semibold hover:text-primary-text"
-      >
-        {process.name}
-      </Link>
-      {stage ? (
-        <>
-          <p className="mt-2 text-xs text-muted-foreground">
-            {stateLabel(stage, schema[stage])} ·{' '}
-            {counts.isPending ? '…' : total} {total === 1 ? 'run' : 'runs'}
-          </p>
-          {counts.isPending ? (
-            <p className="py-3 text-xs text-muted-foreground">
-              Loading stages…
-            </p>
-          ) : counts.error ? (
-            <p role="alert">Stage counts unavailable.</p>
-          ) : (
-            <>
-              <div className="my-2 flex h-2 overflow-hidden rounded-sm bg-muted">
-                {counts.data?.map((s, index) => (
-                  <div
-                    key={JSON.stringify(s.value)}
-                    title={`${String(s.value)}: ${s.count}`}
-                    style={{
-                      width: `${total ? (s.count / total) * 100 : 0}%`,
-                      opacity: 0.35 + (index % 5) * 0.13,
-                    }}
-                    className="bg-primary"
-                  />
-                ))}
-              </div>
-              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
-                {counts.data?.map((s) => (
-                  <span key={JSON.stringify(s.value)}>
-                    {stateLabel(String(s.value))} <strong>{s.count}</strong>
-                  </span>
-                ))}
-              </div>
-            </>
-          )}
-        </>
-      ) : (
-        <p className="mt-2 text-sm text-muted-foreground">
-          View runs and configure a shared view.
-        </p>
-      )}
     </div>
   );
 }

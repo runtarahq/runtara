@@ -4,6 +4,7 @@
 
 import {
   ExecutionStatus,
+  OperationErrorSummary,
   SuspensionReason,
   TerminationType,
 } from '@/generated/RuntaraRuntimeApi';
@@ -13,6 +14,8 @@ import {
  */
 export interface ExecutionHistoryItem {
   instanceId: string;
+  error?: string | null;
+  errorSummary?: OperationErrorSummary | null;
   workflowId: string;
   workflowName?: string;
   runLabel?: string;
@@ -37,6 +40,8 @@ export interface ExecutionHistoryItem {
  * Filter options for the invocation history table.
  */
 export interface ExecutionHistoryFilters {
+  range?: '24h' | '7d' | 'all' | 'custom';
+  dateBasis?: 'started' | 'completed';
   search?: string;
   runLabel?: string;
   /** Only the children of this run (started by its `control:start` steps). */

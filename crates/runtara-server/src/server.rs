@@ -39,6 +39,7 @@ use runtime_client::RuntimeClient;
         // Execution endpoints
         api::handlers::executions::list_all_executions_handler,
         api::handlers::executions::query_executions_handler,
+        api::handlers::executions::execution_summary_handler,
         api::handlers::operations::operation_queues,
         api::handlers::operations::operation_processes,
         api::handlers::operations::list_operation_views,
@@ -223,6 +224,9 @@ use runtime_client::RuntimeClient;
             api::dto::workflows::WorkflowValidationErrorResponse,
             api::dto::executions::ListAllExecutionsResponse,
             api::dto::executions::QueryExecutionsRequest,
+            api::dto::executions::ExecutionSummaryRequest,
+            api::dto::executions::ExecutionSummary,
+            api::dto::executions::ExecutionSummaryResponse,
             api::dto::executions::StateFilterDto,
             api::dto::executions::StateSortDto,
             api::dto::operations::QueryOperationRequests,
@@ -1753,6 +1757,10 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/runtime/executions/query",
             post(api::handlers::executions::query_executions_handler),
+        )
+        .route(
+            "/api/runtime/executions/summary",
+            post(api::handlers::executions::execution_summary_handler),
         )
         // Workflow endpoints (refactored - using 3-layer architecture)
         .route(

@@ -5,7 +5,7 @@ import { appPath } from '../utils/app-path';
 // Read-only layout regression against the same isolated fixture as the answer test.
 const fixtureFile = process.env.E2E_OPERATIONS_FIXTURE;
 for (const width of [1440, 1000, 390]) {
-  test(`Operations layout fits ${width}px and keeps Monitor actions aligned`, async ({
+  test(`Operations layout fits ${width}px and keeps Runs actions aligned`, async ({
     page,
   }, testInfo) => {
     test.skip(
@@ -26,7 +26,7 @@ for (const width of [1440, 1000, 390]) {
     });
     for (const [route, title] of [
       ['/operations', 'Overview'],
-      ['/operations/monitor', 'Monitor'],
+      ['/operations/runs?status=failed,timeout', 'Runs'],
       [`/operations/views/${fixture.view}`, null],
       [`/operations/runs/${fixture.workflow}/${fixture.runs[0]}`, 'ORDER-123'],
     ] as const) {
@@ -40,11 +40,19 @@ for (const width of [1440, 1000, 390]) {
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth)
       ).toBeLessThanOrEqual(width);
-      if (title === 'Monitor') {
+      if (title === 'Overview')
         await expect(
-          page.getByRole('table', { name: 'Process health' })
-        ).toBeVisible();
-        const items = page.locator('[data-run-id]');
+          page.getByRole('heading', { name: 'Processes', exact: true })
+        ).toHaveCount(0);
+      if (title === 'Runs') {
+        const items =
+          width >= 1024
+            ? page
+                .getByRole('row')
+                .filter({
+                  has: page.getByRole('link', { name: 'Open execution' }),
+                })
+            : page.getByRole('article');
         expect(await items.count()).toBeGreaterThan(0);
         for (const item of await items.all()) {
           const button = item.getByRole('link', { name: 'Open execution' });

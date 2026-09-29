@@ -192,3 +192,68 @@ impl From<&StateSortDto> for runtara_environment::operations::StateSort {
         }
     }
 }
+
+/// Non-status predicates for status totals. Counts deliberately ignore pagination.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionSummaryRequest {
+    pub search: Option<String>,
+    pub run_label: Option<String>,
+    pub parent_instance_id: Option<String>,
+    pub workflow_id: Option<String>,
+    pub created_from: Option<DateTime<Utc>>,
+    pub created_to: Option<DateTime<Utc>>,
+    pub completed_from: Option<DateTime<Utc>>,
+    pub completed_to: Option<DateTime<Utc>>,
+}
+
+impl ExecutionSummaryRequest {
+    pub fn listing(self) -> QueryExecutionsRequest {
+        QueryExecutionsRequest {
+            search: self.search,
+            run_label: self.run_label,
+            parent_instance_id: self.parent_instance_id,
+            workflow_id: self.workflow_id,
+            created_from: self.created_from,
+            created_to: self.created_to,
+            completed_from: self.completed_from,
+            completed_to: self.completed_to,
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionSummary {
+    pub total: i64,
+    /// Counts by displayed status. Filter aliases (compiling/timeout) are not
+    /// counted twice: their rows display as queued/failed in execution lists.
+    pub counts: std::collections::BTreeMap<String, i64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ExecutionSummaryResponse {
+    pub success: bool,
+    pub data: ExecutionSummary,
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+    #[test]
+    fn summary_rejects_status_and_pagination_instead_of_silently_changing_totals() {
+        for key in ["status", "page", "size", "sortBy", "unexpected"] {
+            assert!(
+                serde_json::from_value::<ExecutionSummaryRequest>(serde_json::json!({key: "x"}))
+                    .is_err()
+            );
+        }
+        assert!(
+            serde_json::from_value::<ExecutionSummaryRequest>(
+                serde_json::json!({"search":"order", "workflowId":"workflow"})
+            )
+            .is_ok()
+        );
+    }
+}

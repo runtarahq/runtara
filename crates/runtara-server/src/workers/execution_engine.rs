@@ -2144,6 +2144,31 @@ impl ExecutionEngine {
         Ok(options)
     }
 
+    /// Status totals over exactly the listing predicates, without fetching rows.
+    pub async fn execution_summary(
+        &self,
+        tenant_id: &str,
+        mut filters: ExecutionFilters,
+    ) -> Result<crate::api::dto::executions::ExecutionSummary, ExecutionError> {
+        filters.statuses = None;
+        let options = self
+            .execution_listing_options(tenant_id, 0, 1, &filters)
+            .await?;
+        let rows = self
+            .require_runtime_client()?
+            .execution_counts(&options)
+            .await
+            .map_err(|e| ExecutionError::DatabaseError(e.to_string()))?;
+        let mut counts = std::collections::BTreeMap::new();
+        let mut total = 0;
+        for (status, count) in rows {
+            let status = super::runtara_dto::runtara_status_to_execution_status(status).to_string();
+            *counts.entry(status).or_insert(0) += count;
+            total += count;
+        }
+        Ok(crate::api::dto::executions::ExecutionSummary { total, counts })
+    }
+
     /// List all executions across all workflows with filtering, sorting, and pagination.
     pub async fn list_all_executions(
         &self,

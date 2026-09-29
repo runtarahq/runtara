@@ -1,4 +1,6 @@
 import { useState, type ReactNode } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import { queryKeys } from '@/shared/queries/query-keys';
 import { Link, useNavigate } from 'react-router';
 import { Clock3, Copy, ExternalLink, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
@@ -39,9 +41,7 @@ export function OperationHeader({
             <span>/</span>
             <Link
               to={
-                section === 'Queues'
-                  ? '/operations/queues'
-                  : '/operations/monitor'
+                section === 'Queues' ? '/operations/queues' : '/operations/runs'
               }
             >
               {section}
@@ -116,8 +116,17 @@ export function RefreshControls({
     </>
   );
 }
-export function ReplayButton({ run }: { run: WorkflowInstanceDto }) {
-  const [confirm, setConfirm] = useState(false);
+export function ReplayButton({
+  run,
+  initiallyConfirm = false,
+  onClose,
+}: {
+  run: Pick<WorkflowInstanceDto, 'id' | 'workflowId' | 'runLabel'>;
+  initiallyConfirm?: boolean;
+  onClose?: () => void;
+}) {
+  const client = useQueryClient();
+  const [confirm, setConfirm] = useState(initiallyConfirm);
   const [busy, setBusy] = useState(false);
   const token = useToken();
   const navigate = useNavigate();
@@ -130,7 +139,12 @@ export function ReplayButton({ run }: { run: WorkflowInstanceDto }) {
         'POST',
         {}
       );
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['operations'] }),
+        client.invalidateQueries({ queryKey: queryKeys.executions.lists() }),
+      ]);
       toast.success(`Replay queued for ${run.runLabel ?? 'run'}`);
+      onClose?.();
       if (result.instanceId)
         navigate(`/operations/runs/${run.workflowId}/${result.instanceId}`);
       setConfirm(false);
@@ -155,7 +169,11 @@ export function ReplayButton({ run }: { run: WorkflowInstanceDto }) {
             <Button
               variant="secondary"
               bordered
-              onClick={() => setConfirm(false)}
+              disabled={busy}
+              onClick={() => {
+                setConfirm(false);
+                onClose?.();
+              }}
             >
               Cancel
             </Button>

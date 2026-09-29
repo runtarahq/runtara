@@ -5,9 +5,28 @@ import type { ExecutionHistoryFilters } from '../types';
 import { InvocationHistoryTable } from './InvocationHistoryTable';
 
 const query = vi.hoisted(() => vi.fn());
-vi.mock('@/shared/hooks/api', () => ({ useTableQuery: query }));
+vi.mock('@/shared/hooks/api', () => ({ useCustomQuery: query }));
 vi.mock('../queries', () => ({ getAllExecutions: vi.fn() }));
-vi.mock('./InvocationHistoryColumns', () => ({ invocationHistoryColumns: [] }));
+vi.mock('./OperationsRunColumns', () => ({ operationsRunColumns: () => [] }));
+vi.mock('./RunRow', () => ({
+  RunIdentity: () => null,
+  RunContext: () => null,
+  RunActions: ({
+    run,
+    onReplay,
+  }: {
+    run: { instanceId: string };
+    onReplay: (run: unknown) => void;
+  }) => <button onClick={() => onReplay(run)}>Open replay</button>,
+}));
+vi.mock('@/features/operations/pages/shared', () => ({
+  ReplayButton: ({ run }: { run: { id: string } }) => (
+    <p>Replay snapshot: {run.id}</p>
+  ),
+  RefreshControls: ({ onRefresh }: { onRefresh: () => void }) => (
+    <button onClick={onRefresh}>Refresh</button>
+  ),
+}));
 vi.mock('./InvocationHistoryFilters', () => ({
   InvocationHistoryFilters: () => null,
   countActiveInvocationFilters: () => 0,
@@ -80,16 +99,18 @@ function Harness() {
 describe('execution search pagination', () => {
   it('sends search in the query key, resets a later page, and trusts the server results and totals', async () => {
     query.mockImplementation(() => ({
-      data: [{ instanceId: 'server-result' }],
-      totalPages: 8,
-      totalElements: 73,
+      data: {
+        content: [{ instanceId: 'server-result' }],
+        totalPages: 8,
+        totalElements: 73,
+      },
       isFetching: false,
     }));
     render(<Harness />);
     fireEvent.click(screen.getByText('Next page'));
     const params = () => query.mock.lastCall![0].queryKey.at(-1);
     expect(params().pageIndex).toBe(1);
-    fireEvent.change(screen.getByPlaceholderText('Search executions…'), {
+    fireEvent.change(screen.getByPlaceholderText('Search runs…'), {
       target: { value: 'Order/12 [done]' },
     });
     await waitFor(() =>
@@ -98,18 +119,14 @@ describe('execution search pagination', () => {
     expect(params().pageIndex).toBe(0);
     // No second client-side filter should discard a backend match.
     expect(screen.getByText('server-result')).toBeInTheDocument();
-    expect(
-      screen.getByText('73 executions · 1 on this page')
-    ).toBeInTheDocument();
+    expect(screen.getByText('73 runs · 1 on this page')).toBeInTheDocument();
     fireEvent.click(screen.getByText('Next page'));
     expect(params().pageIndex).toBe(1);
     expect(params().filters.search).toBe('Order/12 [done]');
   });
   it('restores search when navigation changes the URL filters', async () => {
     query.mockImplementation(() => ({
-      data: [],
-      totalPages: 0,
-      totalElements: 0,
+      data: { content: [], totalPages: 0, totalElements: 0 },
       isFetching: false,
     }));
     const onFiltersChange = vi.fn();
@@ -125,10 +142,88 @@ describe('execution search pagination', () => {
         onFiltersChange={onFiltersChange}
       />
     );
-    expect(screen.getByPlaceholderText('Search executions…')).toHaveValue(
+    expect(screen.getByPlaceholderText('Search runs…')).toHaveValue(
       'Restored/12'
     );
     await new Promise((resolve) => setTimeout(resolve, 350));
     expect(onFiltersChange).not.toHaveBeenCalled();
   });
+});
+
+it('keeps stale rows visible, makes counts unavailable and allows manual refresh', () => {
+  const refetch = vi.fn();
+  query.mockReturnValue({
+    data: {
+      content: [{ instanceId: 'last-success' }],
+      totalPages: 1,
+      totalElements: 1,
+      summary: { total: 1, counts: { failed: 1 } },
+    },
+    error: new Error('offline'),
+    refetch,
+  });
+  render(<Harness />);
+  expect(screen.getByText('last-success')).toBeInTheDocument();
+  expect(screen.getByRole('alert')).toHaveTextContent('Showing stale data');
+  expect(screen.getByRole('button', { name: 'Failed —' })).toBeInTheDocument();
+  fireEvent.click(screen.getByText('Refresh'));
+  expect(refetch).toHaveBeenCalledOnce();
+  fireEvent.click(screen.getByRole('switch'));
+  expect(query.mock.lastCall![0].refetchInterval).toBe(false);
+});
+
+it('keeps results when only counts fail and selecting a quick filter preserves the context', () => {
+  query.mockReturnValue({
+    data: {
+      content: [],
+      totalPages: 0,
+      totalElements: 0,
+      countsUnavailable: true,
+    },
+  });
+  const onChange = vi.fn();
+  render(
+    <InvocationHistoryTable
+      filters={{
+        workflowId: 'w',
+        range: '24h',
+        dateBasis: 'completed',
+        sortBy: 'completedAt',
+      }}
+      onFiltersChange={onChange}
+    />
+  );
+  expect(screen.getByRole('alert')).toHaveTextContent(
+    'Status counts unavailable'
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Waiting —' }));
+  expect(onChange).toHaveBeenCalledWith({
+    workflowId: 'w',
+    range: '24h',
+    dateBasis: 'completed',
+    sortBy: 'completedAt',
+    status: 'suspended',
+  });
+});
+
+it('keeps Replay attached to its original run when refreshed rows change', () => {
+  const filters = {};
+  const row = {
+    instanceId: 'original-run',
+    workflowId: 'workflow',
+    runLabel: 'ORDER-123',
+  };
+  query.mockReturnValue({ data: { content: [row], totalElements: 1 } });
+  const { rerender } = render(
+    <InvocationHistoryTable filters={filters} onFiltersChange={vi.fn()} />
+  );
+  fireEvent.click(screen.getByText('Open replay'));
+  expect(query.mock.lastCall![0].refetchInterval).toBe(false);
+  query.mockReturnValue({ data: { content: [], totalElements: 0 } });
+  rerender(
+    <InvocationHistoryTable filters={filters} onFiltersChange={vi.fn()} />
+  );
+  expect(screen.getByRole('dialog')).toHaveTextContent(
+    'Replay snapshot: original-run'
+  );
 });

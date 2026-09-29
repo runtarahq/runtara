@@ -4,6 +4,8 @@ Status: phases 1–4 implemented on `feat/operations`, 2026-09-29.
 The original baseline was checked against `main` at `708286b5` (#279).
 Phase 5 remains later work. See [Implementation](#implementation) for the
 concrete API and validation coverage.
+Monitor is consolidated into Runs; Overview no longer contains Processes.
+See [Runs consolidation](operations-runs-consolidation.md) for behavior and validation.
 The screenshots come from an interactive prototype and show sample data; what
 each screen needs from the platform is listed under [Screens](#screens).
 
@@ -278,13 +280,15 @@ numbered in [Work needed](#work-needed).
 
 ### Overview
 
-What needs a person across all queues, failures, and a stage bar per process.
+Requests to answer and recent failures to review, with concise totals linking
+to Queues and filtered Runs. The Processes area and its stage bars from the
+original prototype below have been removed.
 
 ![Overview](operations/overview.jpg)
 
-- Reads: the request count of each queue (`totalElements` of a page of size
-  1), failed runs from the run list, one run count per stage for stage bars.
-- Lacks: counts of open requests by action key (W2).
+- Reads: actionable queue counts, request previews with configured due fields,
+  recent failures, and aggregate running counts. There are no per-process or
+  per-stage count requests.
 
 ### Queue
 
@@ -317,23 +321,25 @@ on the existing run page, which this screen links to.
 - Lacks: a read-only renderer for state values (W5). The "message to the run"
   box needs messages (W9) and stays hidden until they exist.
 
-### Monitor
+### Runs (replaces Monitor)
 
-How each process is running, failed runs with a readable error, and the runs
-waiting longest.
+One paginated run list with status quick filters, workflow/search/date filters,
+readable failure summaries, waiting reasons, execution links and run actions.
+Counts use the same filters as the list except status and pagination. Automatic
+refresh is optional; failed background refreshes retain the last successful rows.
+Waiting ages remain labelled as time since the run started.
 
-![Monitor](operations/monitor.jpg)
+The original Monitor prototype below is historical. Its error context and refresh
+controls now live in Runs; its Processes table is not retained on Overview.
 
-- Reads: `GET /executions?status=failed,timeout`; the failed step's error from
-  step summaries; replay.
-- Lacks: an error summary on list rows (W6). The action is **Replay** (a new
-  run from the start, which repeats every side effect), not a retry of the
-  failed step. It is offered when the error category is transient, and
-  **Review** opens the run otherwise. Replay must preserve the original
-  business label while assigning a new run ID (W14).
+![Original Monitor prototype](operations/monitor.jpg)
 
-Pipeline health (queues, pools, throughput) is not a Monitor concern: it is
-exported through OpenTelemetry (`docs/pipeline-monitoring.md`).
+Replay starts a new run from the beginning and repeats side effects. It preserves
+the business label and assigns a new run ID. Operations asks for confirmation;
+retryability metadata does not restrict otherwise valid Replay actions.
+
+Pipeline health (queues, pools, throughput) is exported through OpenTelemetry
+(`docs/pipeline-monitoring.md`).
 
 ## Patterns
 
@@ -469,7 +475,7 @@ Backend:
   query. The existing run query sorts only by created or completed time,
   status and workflow today.
 - **W6. Error summary on list rows:** the failed step's `code`, `category` and
-  message, so the Monitor needs no call per run.
+  message, so Runs needs no failure-detail call per run.
 - **W7. Record who answered.** Put the user in `acceptance_context` for
   answers from the UI and API (control already records its caller), and write
   `audit_events`. Derive identity from authenticated context, never from the
@@ -542,20 +548,20 @@ retained link to the original run.
 
 ## Implementation
 
-The Operations navigation contains **Overview**, **Queues**, **Monitor**, and
-**Runs**. Runs reuses the full invocation history at `/operations/runs`;
-legacy `/invocation-history` links redirect there with filters preserved.
-Workflow-specific execution history and detailed execution links remain available.
+The Operations navigation contains **Overview**, **Queues**, and **Runs**.
+Runs extends the full invocation history at `/operations/runs`; both legacy
+`/invocation-history` and `/operations/monitor` links redirect with filters and
+fragments preserved. Workflow-specific history and detailed execution links remain.
 
-The `/operations` UI provides Overview, request queues, plain workflow run
-views, saved shared views, run details and Monitor.
-The UI follows the screenshot structure: four Overview summaries with attention
-rows beside process stages; a compact queue toolbar and table; a Run decision
-panel beside state and activity; and Monitor process totals above compact failed
-and waiting-run lists. Queue navigation also exposes saved views. Monitor's time
-range applies to process starts and failure completion times; waiting runs are
-ordered by run start time because the API does not expose a stable wait-start
-timestamp. The UI labels that distinction explicitly.
+Overview contains concise totals and Needs attention, without a Processes area.
+Runs combines a paginated history with status counts, explicit started/completed
+time filters, readable failure context, waiting reasons and 30-second refresh.
+Its query context and sorting survive reload and browser navigation. Failed
+refreshes retain stale rows and show unavailable counts rather than zero.
+The Queue and Run detail layouts retain the documented structure. Queue
+navigation also exposes saved workflow-specific views. Elapsed waiting-run ages
+are explicitly labelled as time since run creation, since no stable wait-start
+timestamp is available.
  Defaults discover action
 keys in current workflow graphs (including nested Split graphs) and retain
 removed keys while actionable requests remain. Request forms always use their
@@ -566,6 +572,9 @@ uses the run's executed workflow version. Missing columns render empty.
 All HTTP paths below are under `/api/runtime` and use the standard `{data}`
 response envelope:
 
+- `POST /executions/summary` returns total and disjoint public-status counts
+  using the list filters, excluding status, sorting and pagination. It reuses
+  tenant-scoped database predicates and status mapping without loading run rows.
 - `GET /operations/queues` and `/operations/processes` discover work and
   current state schemas.
 - `POST /operations/requests/query` accepts `{workflowId, actionKey, query}`
@@ -602,15 +611,15 @@ production frontend build. `e2e/test_operations.py` creates real workflows on
 an isolated local server and checks state projection/sorting, schema validation,
 resume, idempotent receipts, old-version queues, shared views and Replay labels.
 The frontend `operations.local.e2e.spec.ts` uses its fixture to exercise bulk
-row editing, independent validation, approval, state display and Monitor Replay.
+row editing, independent validation, approval, state display and Runs Replay.
 Run it with `E2E_OPERATIONS_FIXTURE`, `PLAYWRIGHT_BASE_URL`, and the `local-ui`
 Playwright project. Neither test deletes services or databases.
 
-Verified locally on 2026-09-29: 1,355 frontend tests; production frontend
-build; frontend lint (zero errors, 29 existing warnings); 55 authorization
-tests; six Operations database integration tests; managed session delivery;
-nested queue discovery; the live API acceptance script; and the Chromium
-Operations browser scenario. Layout checks additionally exercise all four screens
+Verified locally on 2026-09-29: 1,373 frontend tests; production frontend
+build; frontend lint (zero errors, 29 existing warnings); 57 authorization
+tests; seven Operations database integration tests; managed session delivery;
+nested queue discovery; the live API acceptance script; and five Chromium
+Operations browser scenarios (including Runs consolidation). Layout checks additionally exercise all four screens
 at 1440, 1000 and 390 pixels, checking page overflow, action alignment and API
 errors. Locally generated acceptance workflows use an `[E2E test]` name prefix
 and deliberately fail to verify Replay. Commit hooks ran workspace formatting and Clippy.

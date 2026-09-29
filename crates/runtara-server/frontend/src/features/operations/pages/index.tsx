@@ -4,7 +4,7 @@ import { ManagedInputScope } from '@/features/workflows/components/ManagedInputS
 import { OverviewPage } from './Overview';
 import { QueuesPage } from './Queues';
 import { QueuePage } from './Queue';
-import { MonitorPage } from './Monitor';
+import { InvocationHistoryRedirect } from '@/router/InvocationHistoryRedirect';
 import { RunPage } from './Run';
 const RunsPage = lazy(() =>
   import('@/features/invocation-history/pages/InvocationHistory').then((m) => ({
@@ -22,7 +22,7 @@ export function Operations() {
         <Route path="processes/:workflowId" element={<QueuePage />} />
         <Route path="views/:viewId" element={<QueuePage />} />
         <Route path="runs" element={<RunsPage />} />
-        <Route path="monitor" element={<MonitorPage />} />
+        <Route path="monitor" element={<InvocationHistoryRedirect />} />
         <Route path="runs/:workflowId/:instanceId" element={<RunPage />} />
       </Routes>
     </ManagedInputScope>

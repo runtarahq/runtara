@@ -26,7 +26,7 @@ export async function operationsRequest<T>(
   });
   return response.data.data;
 }
-export function useOperations() {
+export function useOperations({ includeProcesses = true } = {}) {
   const tenant = useAuthStore((s) => s.orgId);
   const queues = useCustomQuery({
     queryKey: ['operations', tenant, 'queues'],
@@ -43,6 +43,7 @@ export function useOperations() {
   });
   const processes = useCustomQuery({
     queryKey: ['operations', tenant, 'processes'],
+    enabled: includeProcesses,
     queryFn: (token: string) =>
       operationsRequest<OperationProcess[]>(token, 'operations/processes'),
     placeholderData: undefined,
@@ -196,4 +197,13 @@ export function describeFailure(
     /* Host failures may be plain text. */
   }
   return { message: run.error || 'No error details recorded' };
+}
+
+export async function queryRunSummary(
+  token: string,
+  filters: import('@/generated/RuntaraRuntimeApi').ExecutionSummaryRequest
+) {
+  return operationsRequest<
+    import('@/generated/RuntaraRuntimeApi').ExecutionSummary
+  >(token, 'executions/summary', 'POST', filters);
 }

@@ -180,6 +180,11 @@ pub(crate) fn push_instance_filters(
             .push(" AND img.name LIKE ")
             .push_bind(format!("{}%", escape_like_literal(prefix)));
     }
+    // A suspension can leave a finished_at timestamp, but it is not a
+    // completed run. Completion-time filters include only terminal instances.
+    if options.finished_after.is_some() || options.finished_before.is_some() {
+        query.push(" AND i.status IN ('completed', 'failed', 'cancelled')");
+    }
     for (column, value) in [
         ("i.created_at >= ", options.created_after),
         ("i.created_at < ", options.created_before),

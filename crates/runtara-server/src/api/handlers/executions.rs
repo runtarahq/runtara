@@ -118,6 +118,39 @@ pub async fn query_executions_handler(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/runtime/executions/summary",
+    request_body = crate::api::dto::executions::ExecutionSummaryRequest,
+    responses(
+        (status = 200, description = "Execution status totals", body = crate::api::dto::executions::ExecutionSummaryResponse),
+        (status = 400, description = "Invalid filters", body = Value)
+    ),
+    tag = "executions-controller"
+)]
+pub async fn execution_summary_handler(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(engine): State<Arc<ExecutionEngine>>,
+    Json(request): Json<crate::api::dto::executions::ExecutionSummaryRequest>,
+) -> (StatusCode, Json<Value>) {
+    let filters = match parse_query(&request.listing()) {
+        Ok(filters) => filters,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"success": false, "error": error})),
+            );
+        }
+    };
+    match engine.execution_summary(&tenant_id, filters).await {
+        Ok(data) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"success": true, "data": data})),
+        ),
+        Err(error) => execution_error_response(&error),
+    }
+}
+
 /// Parse and validate query parameters into filters
 pub(crate) fn parse_filters(query: &ListAllExecutionsQuery) -> Result<ExecutionFilters, String> {
     // Parse statuses from comma-separated string

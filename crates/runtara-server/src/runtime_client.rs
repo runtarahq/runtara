@@ -942,6 +942,16 @@ impl RuntimeClient {
     /// * `tenant_id` - The tenant to list instances for
     /// * `status_filter` - Optional status filter (e.g., Running, Pending)
     /// * `limit` - Maximum number of instances to return
+    pub async fn execution_counts(
+        &self,
+        options: &ListInstancesOptions,
+    ) -> Result<Vec<(crate::runtime_types::InstanceStatus, i64)>, RuntimeError> {
+        self.client
+            .execution_counts(options)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
     pub async fn operation_failures(
         &self,
         tenant: &str,
