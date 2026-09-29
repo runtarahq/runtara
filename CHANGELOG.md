@@ -48,20 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (larger values are flagged omitted, with their size); `query` pages runs by
   creation or finish time (page size 1-100); `list-pending-signals` lists open
   WaitForSignal requests of a run or a workflow. Failures carry `CONTROL_*`
-  codes. Control runs only the installed control bytes in fresh host stores:
-  a compiled workflow pins those bytes (`runtara:builtin-artifacts/control-…`),
-  the host audits every composed component that imports `runtara:control`
-  when the artifact is prepared, and every call re-checks both against the
-  approved history. The server approves its bundles' control bytes at boot
-  (runtime table `approved_builtin_artifacts`, migration
-  `20260927000000`); an operator revokes a version by setting `revoked_at`,
-  which takes effect at the next boot, after which calls through it are
-  `CONTROL_DENIED` and workflows pinning it no longer become ready. Runs
-  already parked on a revoked version still load and fail at their next
-  control call, and a run pinned to an older, still approved version keeps
-  working after the control agent is upgraded. Composed artifacts that import
-  a component or core module, or whose agents import
-  `runtara:workflow-operation`, are now refused at preparation.
+  codes; a control call is bounded by the step's deadline and 90 s
+  (`CONTROL_TIMEOUT`), and `CONTROL_UNAVAILABLE` is retryable. Control is an
+  ordinary composed agent: it calls the host's control service from the run's
+  own store, and only the built-in control agent may import `runtara:control`,
+  which the compiler enforces. A run parked across an upgrade keeps the control
+  version composed into it; a new version reaches existing workflows when they
+  recompile. The runtime table `approved_builtin_artifacts` (migration
+  `20260927000000`) holds the approved history of trusted built-ins.
 
 - **The `control` agent answers signals and pauses, resumes and cancels
   runs from a workflow.** `send-signal` answers the one open request of a
@@ -182,11 +176,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps the compiled package of a parked run and of a child its parent still
   pins, and a parent parked on a WaitForInstances step resumes after the
   server binary or the control agent bundle is upgraded, its later control
-  calls running on its older, still approved control pin: every shipped host
+  calls running on the control agent composed into it: every shipped host
   interface version stays linked (the released `runtara:control`,
   `runtara:workflow-operation`, `runtara:workflow-wait` and
-  `runtara:agent-suspension` 0.1.0 interfaces are frozen and tested), and
-  approved control versions are only ever revoked, never deleted.
+  `runtara:agent-suspension` 0.1.0 interfaces are frozen and tested).
 - **Control and suspension across the surfaces.** The executions API reports
   `WorkflowInstanceDto.suspensionReason` (`paused`, `waiting_signal`,
   `waiting_instances` for a WaitForInstances step, `sleeping` or `shutdown`)

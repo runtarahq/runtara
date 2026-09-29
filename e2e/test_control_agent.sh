@@ -7,10 +7,8 @@
 #   1  READS    a workflow calls control:get, control:query and
 #              control:list-pending-signals on other runs of the tenant and
 #              gets their state, output and open requests; failures carry
-#              CONTROL_* codes. The control bytes are pinned and approved at
-#              boot; after an operator revokes that approval and the server
-#              restarts, control calls are denied and the pinned workflow no
-#              longer becomes ready.
+#              CONTROL_* codes. The compiled workflow pins no control version
+#              and boot approves none: control is an ordinary composed agent.
 #
 #   2  MUTATIONS a workflow's send-signal step answers another run's open
 #              WaitForSignal request that opted in with action.key; the
@@ -66,13 +64,9 @@
 #              the control agent bundle is swapped for a version-bumped one
 #              (its digest differs; asserted); the restart's cleanup pass
 #              removes a stale unused image but keeps the parent's package,
-#              the old control pin stays approved beside the new one, and
-#              after the wake the parent's control:get runs on the old pin
-#              through the approved history. The original bundle is
+#              and after the wake the parent's control:get runs on the control
+#              bytes composed into its own artifact. The original bundle is
 #              restored afterwards.
-#
-# Stage 1 ends by revoking the control approval, so it runs after every
-# other stage.
 #
 # Usage:  STAGES=1,2,3,4,5,6 ./e2e/test_control_agent.sh
 #
@@ -309,11 +303,10 @@ if stage_enabled 1; then
     # -----------------------------------------------------------------------
     # Stage 1: reads.
     # -----------------------------------------------------------------------
-    print_step "Stage 1: boot approved the installed control bytes..."
+    print_step "Stage 1: boot approved no control version..."
     APPROVED=$(psql_quiet -d "${TEST_DB_RUNTIME}" -c \
-        "SELECT pin FROM approved_builtin_artifacts WHERE agent_id = 'control' AND revoked_at IS NULL")
-    case "${APPROVED}" in runtara:builtin-artifacts/control-h*) ;; *) print_error "No approved control pin: '${APPROVED}'"; exit 1 ;; esac
-    echo "  approved: ${APPROVED}"
+        "SELECT count(*) FROM approved_builtin_artifacts WHERE agent_id = 'control'")
+    [ "${APPROVED}" = "0" ] || { print_error "Boot approved a control version: ${APPROVED} rows"; exit 1; }
 
     print_step "Creating the runs control will read..."
     DONE_GRAPH=$(jq -n '{
@@ -367,7 +360,7 @@ if stage_enabled 1; then
         }')
     read -r READER_WF READER_V <<< "$(make_workflow control-reader "${READER_GRAPH}")"
     PINS=$(compiled_pins "${READER_WF}" "${READER_V}")
-    echo "${PINS}" | grep -q "${APPROVED}" || { print_error "The reader does not record the approved control pin: ${PINS}"; exit 1; }
+    case "${PINS}" in *builtin-artifacts*) print_error "The reader records a control pin: ${PINS}"; exit 1 ;; esac
     DATA=$(jq -nc --arg done "${DONE}" --arg wf "${DONE_WF}" --arg waiting "${WAITING}" \
         '{done: $done, doneWorkflow: $wf, waiting: $waiting}')
     READER=$(launch "${READER_WF}" "${DATA}")
@@ -1256,8 +1249,8 @@ if stage_enabled 6; then
     # -----------------------------------------------------------------------
     # Stage 6: package retention and a control upgrade while parked.
     # -----------------------------------------------------------------------
-    control_pin_of() {
-        echo "runtara:builtin-artifacts/control-h$(shasum -a 256 "$1/runtara_agent_control.wasm" | awk '{print $1}')-h$(shasum -a 256 "$1/runtara_agent_control.meta.json" | awk '{print $1}')@0.1.0"
+    control_digest_of() {
+        shasum -a 256 < "$1/runtara_agent_control.wasm" | awk '{print $1}'
     }
     # The same control agent with a forced version bump: a `version` custom
     # section on the component and a `version` field in its sidecar. The
@@ -1291,9 +1284,10 @@ PYEOF
     # resumed run makes a control call on the pin it was compiled with.
     read -r UPGRADE_WF UPGRADE_V <<< "$(make_workflow control-approvals-upgrade \
         "$(approvals_graph control-approvals-upgrade cancel all false true)")"
-    OLD_PIN=$(control_pin_of "${BUNDLE_DIR}")
-    compiled_pins "${UPGRADE_WF}" "${UPGRADE_V}" | grep -q "${OLD_PIN}" \
-        || { print_error "The upgrade parent does not pin ${OLD_PIN}: $(compiled_pins "${UPGRADE_WF}" "${UPGRADE_V}")"; exit 1; }
+    OLD_DIGEST=$(control_digest_of "${BUNDLE_DIR}")
+    case "$(compiled_pins "${UPGRADE_WF}" "${UPGRADE_V}")" in
+        *builtin-artifacts*) print_error "The upgrade parent records a control pin: $(compiled_pins "${UPGRADE_WF}" "${UPGRADE_V}")"; exit 1 ;;
+    esac
     read -r PARENT FINANCE LEGAL <<< "$(parked_parent "${UPGRADE_WF}" "${APPROVER_DATA}")"
     parked_or_exit "${PARENT:-}" "${FINANCE:-}" "${LEGAL:-}"
     read -r PARENT_IMAGE PARENT_PACKAGE <<< "$(psql_quiet -d "${TEST_DB_RUNTIME}" -F ' ' -c \
@@ -1318,12 +1312,10 @@ PYEOF
     rm -rf "${ORIGINAL_BUNDLE}" && cp -R "${BUNDLE_DIR}" "${ORIGINAL_BUNDLE}"
     stop_server
     bump_control_bundle "${BUNDLE_DIR}" "999.0.0-stage6"
-    NEW_PIN=$(control_pin_of "${BUNDLE_DIR}")
-    [ "${NEW_PIN}" != "${OLD_PIN}" ] || { print_error "The bumped bundle kept the control digest ${OLD_PIN}"; exit 1; }
-    [ "$(shasum -a 256 < "${BUNDLE_DIR}/runtara_agent_control.wasm")" != "$(shasum -a 256 < "${ORIGINAL_BUNDLE}/runtara_agent_control.wasm")" ] \
-        || { print_error "The bumped control component has the same bytes"; exit 1; }
-    echo "  old: ${OLD_PIN}"
-    echo "  new: ${NEW_PIN}"
+    NEW_DIGEST=$(control_digest_of "${BUNDLE_DIR}")
+    [ "${NEW_DIGEST}" != "${OLD_DIGEST}" ] || { print_error "The bumped bundle kept the control digest ${OLD_DIGEST}"; exit 1; }
+    echo "  old: ${OLD_DIGEST}"
+    echo "  new: ${NEW_DIGEST}"
     SERVER_EXTRA_ENV="RUNTARA_IMAGE_CLEANUP_MAX_AGE_DAYS=1" start_server
 
     # The boot's eager cleanup pass removes the stale image...
@@ -1337,9 +1329,8 @@ PYEOF
     [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM images WHERE image_id = '${PARENT_IMAGE}'")" = "1" ] \
         || { print_error "Image cleanup deleted the parked parent's image ${PARENT_IMAGE}"; exit 1; }
     [ -f "${PARENT_PACKAGE}" ] || { print_error "Image cleanup deleted the parked parent's package"; exit 1; }
-    [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM approved_builtin_artifacts
-          WHERE pin IN ('${OLD_PIN}', '${NEW_PIN}') AND revoked_at IS NULL")" = "2" ] \
-        || { print_error "Both control versions should be approved after the upgrade"; exit 1; }
+    [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM approved_builtin_artifacts WHERE agent_id = 'control'")" = "0" ] \
+        || { print_error "The upgrade approved a control version"; exit 1; }
     [ "$(instance_status "${PARENT}")" = "suspended" ] || { print_error "The parent did not stay parked: $(instance_row "${PARENT}")"; exit 1; }
 
     answer "${FINANCE}" true
@@ -1352,48 +1343,12 @@ PYEOF
         || { print_error "The control call after the wake did not read finance: ${OUT}"; exit 1; }
     [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT image_id FROM instance_images WHERE instance_id = '${PARENT}'")" = "${PARENT_IMAGE}" ] \
         || { print_error "The parent was rebound to another image"; exit 1; }
-    print_success "The parked parent's package survived cleanup, and after the wake its control call ran on the old, still approved pin ✓"
+    print_success "The parked parent's package survived cleanup, and after the wake its control call ran on its own composed control bytes ✓"
 
     print_step "Stage 6: restoring the original bundle..."
     stop_server
     rm -rf "${BUNDLE_DIR}" && mv "${ORIGINAL_BUNDLE}" "${BUNDLE_DIR}"
     start_server
-fi
-
-if stage_enabled 1; then
-    print_step "Revoking the approved control digest and restarting..."
-    psql_quiet -d "${TEST_DB_RUNTIME}" -c \
-        "UPDATE approved_builtin_artifacts SET revoked_at = now(), revoked_reason = 'e2e' WHERE pin = '${APPROVED}'" >/dev/null
-    stop_server
-    start_server
-    [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM approved_builtin_artifacts WHERE pin = '${APPROVED}' AND revoked_at IS NOT NULL")" = "1" ] \
-        || { print_error "Boot undid the revocation"; exit 1; }
-    CODE=$(test_control get "{\"instanceId\": \"${DONE}\"}" | error_code)
-    [ "${CODE}" = "CONTROL_DENIED" ] || { print_error "Revoked control should be denied, got '${CODE}'"; exit 1; }
-    RESP=$(api_post "/workflows/${READER_WF}/execute" "{\"inputs\": {\"data\": ${DATA}, \"variables\": {}}}")
-    INST=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
-    if [ -n "${INST}" ]; then
-        ST=""
-        for _ in {1..60}; do
-            ST=$(request_state "${INST}")
-            case "${ST}" in terminal*) break ;; esac
-            case "$(instance_status "${INST}")" in completed) print_error "A revoked control artifact ran to completion"; exit 1 ;; failed) ST="failed"; break ;; esac
-            sleep 2
-        done
-        case "${ST}" in terminal*|failed) ;; *) print_error "The pinned reader should not run after revocation, got '${ST}'"; exit 1 ;; esac
-        echo "  reader launch after revocation: ${ST}"
-        [ -z "$(instance_row "${INST}")" ] || { print_error "A run started on a revoked control artifact: $(instance_row "${INST}")"; exit 1; }
-    else
-        echo "  reader launch refused: $(echo "${RESP}" | head -c 300)"
-    fi
-    # Not ready: the recompile pins the same revoked bytes, and that is recorded
-    # as a terminal failure carrying the pin.
-    COMPILED=$(psql_quiet -d "${TEST_DB_SERVER}" -c \
-        "SELECT compilation_status || '|' || COALESCE(array_to_string(trusted_pins, ','),'')
-         FROM workflow_compilations WHERE tenant_id = '${TENANT}' AND workflow_id = '${READER_WF}' AND version = ${READER_V}")
-    echo "  reader compilation: $(echo "${COMPILED}" | cut -c1-120)"
-    case "${COMPILED}" in failed*"${APPROVED}"*) ;; *) print_error "The revoked pin should leave the reader not ready: ${COMPILED}"; exit 1 ;; esac
-    print_success "Revoked digest: control calls denied, the pinned workflow no longer runs ✓"
 fi
 
 echo

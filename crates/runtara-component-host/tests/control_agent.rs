@@ -1,14 +1,13 @@
-//! The real control agent under the host executor, against a fake control
-//! service: the reads map the WIT records to their JSON outputs, errors
-//! surface as `CONTROL_*` codes, a test invocation has the tenant but no
-//! calling run, and the composed-copy forwarders never run a capability
-//! body themselves. Run `scripts/build-agent-components.sh` first.
+//! The real control agent in the dispatcher, against a fake control service:
+//! the reads map the WIT records to their JSON outputs, errors surface as
+//! `CONTROL_*` codes, a test invocation has the tenant but no calling run,
+//! and outside the dispatcher's control linker every control call is
+//! `denied`. Run `scripts/build-agent-components.sh` first.
 
 mod common;
 
 use std::sync::{Arc, Mutex};
 
-use runtara_component_host::control_executor::control_pin;
 use runtara_component_host::control_host::*;
 use runtara_component_host::{ComponentDispatcherService, TestCapabilityRequest};
 use serde_json::{Value, json};
@@ -226,20 +225,8 @@ async fn harness() -> Harness {
         "component-integration-tests requires the control agent; run scripts/build-agent-components.sh"
     );
     let dispatcher = ComponentDispatcherService::from_dir(&dir).await.unwrap();
-    let control = dispatcher
-        .control_executor()
-        .expect("the bundle ships control");
-    assert_eq!(
-        control.pin(),
-        control_pin(
-            &std::fs::read(dir.join("runtara_agent_control.wasm")).unwrap(),
-            &std::fs::read(dir.join("runtara_agent_control.meta.json")).unwrap(),
-        ),
-        "the executor pins exactly the installed bytes"
-    );
     let fake = Arc::new(FakeControl::default());
-    control.set_host(fake.clone()).unwrap();
-    control.set_approved_pins([control.pin().to_owned()]);
+    dispatcher.set_control_host(fake.clone()).unwrap();
     Harness { dispatcher, fake }
 }
 
@@ -356,19 +343,25 @@ async fn errors_surface_as_control_codes() {
         code(&test(&harness, "query", json!({"callerChildren": true})).await),
         "CONTROL_REQUIRES_INSTANCE"
     );
+}
 
-    // Revoked at boot: the executor's own bytes are refused per call.
-    harness
-        .dispatcher
-        .control_executor()
-        .unwrap()
-        .set_approved_pins(Vec::<String>::new());
-    let before = harness.fake.calls.lock().unwrap().len();
-    assert_eq!(
-        code(&test(&harness, "get", json!({"instanceId": "run-7"})).await),
-        "CONTROL_DENIED"
-    );
-    assert_eq!(harness.fake.calls.lock().unwrap().len(), before);
+/// Without a control service configured, a test invocation is `denied`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dispatcher_without_a_control_service_denies_control() {
+    let dispatcher = ComponentDispatcherService::from_dir(&common::bundle_dir())
+        .await
+        .unwrap();
+    let result = dispatcher
+        .test_capability(TestCapabilityRequest {
+            tenant_id: "tenant-a".into(),
+            agent_id: "control".into(),
+            capability_id: "get".into(),
+            input: json!({"instanceId": "run-7"}),
+            connection: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(code(&result), "CONTROL_DENIED");
 }
 
 /// The mutations validate their arguments before the host, and reach the
@@ -426,12 +419,11 @@ async fn mutations_validate_then_need_a_run() {
         }));
 }
 
-/// The forwarding exports of a plain agent instance (the linker the
-/// dispatcher and every composed copy use) never run a capability body:
-/// `capabilities.invoke` forwards to the executor, which is `denied` outside
-/// a workflow store.
+/// On the plain agent linker (every agent but the dispatcher's control agent)
+/// the control agent runs its capability bodies, and every control call they
+/// make is `denied`.
 #[tokio::test(flavor = "multi_thread")]
-async fn plain_agent_instances_only_forward() {
+async fn the_control_api_is_denied_outside_the_control_linker() {
     let harness = harness().await;
     let dir = common::bundle_dir();
     let engine = runtara_component_host::build_engine(&Default::default()).unwrap();
@@ -485,33 +477,4 @@ async fn plain_agent_instances_only_forward() {
     assert_eq!(call("get").await, "CONTROL_DENIED");
     assert_eq!(call("pause").await, "CONTROL_DENIED");
     assert!(harness.fake.calls.lock().unwrap().is_empty());
-}
-
-/// The host executor runs a call with exactly the authority it is given,
-/// the caller operation included, and answers the capability's JSON output.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_executor_calls_the_service_with_the_given_authority() {
-    let harness = harness().await;
-    let control = harness.dispatcher.control_executor().unwrap();
-    let authority = ControlAuthority {
-        tenant: "tenant-a".into(),
-        caller: Some("parent".into()),
-        operation: Some("op-1".into()),
-    };
-    let output = control
-        .invoke(
-            authority.clone(),
-            "pause",
-            br#"{"instanceId":"child"}"#.to_vec(),
-            tokio::time::Instant::now() + std::time::Duration::from_secs(30),
-        )
-        .await
-        .unwrap();
-    let output: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(output["instanceId"], "child");
-    assert_eq!(output["outcome"], "applied");
-    assert_eq!(
-        harness.fake.calls.lock().unwrap().as_slice(),
-        [("pause".to_string(), authority)]
-    );
 }

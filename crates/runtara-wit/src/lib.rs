@@ -126,12 +126,8 @@ pub mod control {
     /// Interface-name prefix of every control interface.
     pub const PREFIX: &str = "runtara:control/";
     pub const TYPES: &str = concat!("runtara:control/types@", v!());
-    /// Host control operations: real only in control executor stores.
+    /// Host control operations: real only for a run's own entry.
     pub const API: &str = concat!("runtara:control/api@", v!());
-    /// What the composed control copy forwards to.
-    pub const EXECUTOR: &str = concat!("runtara:control/executor@", v!());
-    /// Exported by the control agent, called only by the host executor.
-    pub const EXECUTION: &str = concat!("runtara:control/execution@", v!());
     pub const WIT: &str = include_str!("../wit/control/runtara-control.wit");
 }
 
@@ -184,8 +180,7 @@ pub struct AgentShape {
     pub suspendable: bool,
     /// Also export `runtara:trusted/execution`.
     pub trusted: bool,
-    /// Import the control executor and API, and export
-    /// `runtara:control/execution`.
+    /// The control agent: import `runtara:control/api`.
     pub control: bool,
 }
 
@@ -227,15 +222,11 @@ pub fn agent_package(id: &str, shape: AgentShape) -> String {
         wit.push_str(&format!("    import {};\n", agent::CONTINUATION));
     }
     if shape.control {
-        wit.push_str(&format!("    import {};\n", control::EXECUTOR));
         wit.push_str(&format!("    import {};\n", control::API));
     }
     wit.push_str(&format!("    export {interface};\n"));
     if shape.trusted {
         wit.push_str(&format!("    export {};\n", trusted::EXECUTION));
-    }
-    if shape.control {
-        wit.push_str(&format!("    export {};\n", control::EXECUTION));
     }
     wit.push_str("}\n");
     wit

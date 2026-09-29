@@ -322,7 +322,6 @@ async fn scoped_child_presigning_keeps_root_authority_and_exact_artifact_version
             .unwrap_or_default();
         Ok(
             runtara_component_host::precompile::CompiledWorkflowPackage {
-                control_importers: Default::default(),
                 root: Component::new(&engine, minimal_entry(&import))?,
                 artifacts: BTreeMap::from([(child_digest.clone(), child.clone())]),
                 bindings: vec![runtara_invocation_contract::Binding {
@@ -529,7 +528,6 @@ async fn one_stale_trusted_pin_fails_only_its_own_agent_calls() -> anyhow::Resul
             .collect();
         let root = Component::new(&engine, minimal_entry(&imports))?;
         let package = runtara_component_host::precompile::CompiledWorkflowPackage {
-            control_importers: Default::default(),
             root,
             artifacts: members
                 .iter()
@@ -759,7 +757,6 @@ async fn approved_earlier_pin_presigns_only_when_a_parked_run_continues() -> any
             executor
                 .prepare_precompiled_package(
                     runtara_component_host::precompile::CompiledWorkflowPackage {
-                        control_importers: Default::default(),
                         root: root?,
                         artifacts: BTreeMap::from([(digest.clone(), child)]),
                         bindings: vec![runtara_invocation_contract::Binding {

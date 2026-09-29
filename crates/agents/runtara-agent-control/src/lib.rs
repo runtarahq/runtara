@@ -2,12 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Control agent: coordinate child runs from a workflow.
 //!
-//! The composed copy of this component, inside a workflow, never runs a
-//! capability body. Its `capabilities` export forwards to
-//! `runtara:control/executor`; the host then runs `runtara:control/execution`
-//! on its own approved copy of these bytes, in a fresh store where
-//! `runtara:control/api` is real and the caller's tenant, instance and
-//! operation come from the host. Everywhere else `api` is linked `denied`.
+//! An ordinary composed agent: each capability validates its input, makes
+//! exactly one `runtara:control/api` call and shapes the result. The host
+//! makes `api` real in the run's own store, with the caller's tenant, instance
+//! and operation from the host, and links it `denied` everywhere else. The
+//! compiler grants `runtara:control` to this agent alone.
 //!
 //! Reads: `get`, `get-state`, `query` and `list-pending-signals` cover the
 //! caller's tenant; identity and caller-relative filters need a calling
@@ -969,7 +968,7 @@ pub async fn start(input: StartInput) -> Result<StartOutput, String> {
     host::start(input, args).await
 }
 
-/// Host control calls. Real only in the host executor's store.
+/// Host control calls. Real only for a run's own entry.
 #[cfg(target_arch = "wasm32")]
 mod host {
     use super::ErrorCode;
@@ -995,6 +994,7 @@ mod host {
             types::ErrorCode::AlreadyAnswered => ErrorCode::AlreadyAnswered,
             types::ErrorCode::NotPausable => ErrorCode::NotPausable,
             types::ErrorCode::NotPaused => ErrorCode::NotPaused,
+            types::ErrorCode::Timeout => ErrorCode::Timeout,
         };
         super::control_error(code, &error.message, error.retry_after_ms)
     }
@@ -1242,7 +1242,7 @@ mod host {
 }
 
 /// Natively there is no control host: the capability runs only as a
-/// component under the host executor.
+/// component.
 #[cfg(not(target_arch = "wasm32"))]
 mod host {
     fn unavailable() -> String {
@@ -1389,7 +1389,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 
 runtara_agent_macro::agent_component!(
     agent = "control",
-    control_executor = true,
+    control = true,
     capabilities = [
         get,
         query,
@@ -1406,6 +1406,35 @@ runtara_agent_macro::agent_component!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every capability makes exactly one `runtara:control/api` call, so the
+    /// host's per-call bound and the operation it reads at the call are the
+    /// capability's own. A second call would get its own 90 s and reuse the
+    /// capability's operation for a second mutation.
+    #[test]
+    fn every_capability_makes_exactly_one_api_call() {
+        let source = include_str!("lib.rs");
+        let host_start = source
+            .find("#[cfg(target_arch = \"wasm32\")]\nmod host {")
+            .expect("the wasm host module");
+        let host_end = host_start + source[host_start..].find("\n}\n").expect("its end");
+        let host = &source[host_start..host_end];
+        let host_fns: Vec<&str> = host.split("pub(super) async fn ").skip(1).collect();
+        assert_eq!(host_fns.len(), agent_info().capabilities.len());
+        for body in host_fns {
+            let name = &body[..body.find('(').unwrap()];
+            assert_eq!(body.matches("api::").count(), 1, "host::{name}");
+        }
+        let capabilities: Vec<&str> = source[..host_start]
+            .split("pub async fn ")
+            .skip(1)
+            .collect();
+        assert_eq!(capabilities.len(), agent_info().capabilities.len());
+        for body in capabilities {
+            let name = &body[..body.find('(').unwrap()];
+            assert_eq!(body.matches("host::").count(), 1, "{name}");
+        }
+    }
 
     #[test]
     fn metadata_lists_every_capability_and_none_suspends() {

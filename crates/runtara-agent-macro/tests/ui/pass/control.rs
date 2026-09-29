@@ -23,7 +23,7 @@ async fn cancel(input: Input) -> Result<Output, String> {
 
 runtara_agent_macro::agent_component!(
     agent = "control",
-    control_executor = true,
+    control = true,
     capabilities = [get, cancel],
 );
 

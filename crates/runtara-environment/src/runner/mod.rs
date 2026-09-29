@@ -41,10 +41,8 @@ pub struct HostServices {
     pub database: Option<std::sync::Arc<dyn runtara_component_host::DatabaseHost>>,
     /// Credential-aware outbound HTTP.
     pub outbound_http: Option<std::sync::Arc<dyn runtara_component_host::OutboundHttpHost>>,
-    /// Host executor of the approved control agent. Its approved history
-    /// must be installed ([`crate::approved_builtins::ApprovedBuiltins`])
-    /// before the environment starts waking or recovering runs.
-    pub control: Option<std::sync::Arc<runtara_component_host::control_executor::ControlExecutor>>,
+    /// The control service behind every run's `runtara:control/api`.
+    pub control_host: Option<std::sync::Arc<dyn runtara_component_host::control_host::ControlHost>>,
     /// Durable instance waits of every run.
     pub instance_waits: Option<std::sync::Arc<dyn runtara_component_host::InstanceWaitHost>>,
 }
@@ -80,8 +78,8 @@ pub fn build_runner_configured(
     if let Some(connections) = services.connections {
         runner = runner.with_connection_resolver(connections)?;
     }
-    if let Some(control) = services.control {
-        runner = runner.with_control_executor(control)?;
+    if let Some(host) = services.control_host {
+        runner = runner.with_control_host(host)?;
     }
     if let Some(waits) = services.instance_waits {
         runner = runner.with_instance_wait_host(waits)?;

@@ -18,10 +18,6 @@ pub struct CompiledWorkflowPackage {
     pub artifacts: BTreeMap<String, Component>,
     pub bindings: Vec<Binding>,
     pub invocations: Option<InvocationManifest>,
-    /// Audited composed components of the root that import `runtara:control/`
-    /// (see [`super::audit_control_importers`]). Empty when there are none,
-    /// or when the bytes did not come through the worker.
-    pub control_importers: BTreeSet<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -40,9 +36,10 @@ struct Index {
     bindings: Vec<Binding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     invocations: Option<InvocationManifest>,
-    /// [`super::ControlAudit::importers`] of the root.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    control_importers: BTreeSet<String>,
+    /// Written by hosts that audited control importers at preparation; read
+    /// and ignored, so packages they cached still load.
+    #[serde(default, rename = "control_importers", skip_serializing)]
+    _control_importers: serde::de::IgnoredAny,
 }
 
 pub(super) fn is_bundle(bytes: &[u8]) -> bool {
@@ -58,26 +55,13 @@ pub(super) fn precompile(engine: &Engine, source: &[u8]) -> Result<Vec<u8>> {
         artifacts: MAX_PRECOMPILE_COMPONENT_BYTES / 8,
         bindings: MAX_PRECOMPILE_COMPONENT_BYTES / 8,
     };
-    let package = parse(source, limits)?;
-    // The control audit reads source bytes, which only this worker has; the
-    // native index carries its result to the host (decision D2).
-    let audit = super::audit_control_importers(package.as_ref().map_or(source, |p| p.root))?;
-    let Some(package) = package else {
-        let root = engine
+    let Some(package) = parse(source, limits)? else {
+        return engine
             .precompile_component(source)
-            .map_err(|error| anyhow::anyhow!("precompile workflow component: {error:#}"))?;
-        if audit.importers.is_empty() {
-            return Ok(root);
-        }
-        return encode(root, Vec::new(), Vec::new(), None, audit.importers);
+            .map_err(|error| anyhow::anyhow!("precompile workflow component: {error:#}"));
     };
     let mut members = Vec::new();
     for (digest, source) in package.artifacts() {
-        let child = super::audit_control_importers(source)?;
-        ensure!(
-            child.importers.is_empty() && !child.root_imports_control,
-            "an isolated dependency imports runtara:control"
-        );
         members.push((digest.clone(), engine.precompile_component(source)?));
     }
     encode(
@@ -85,7 +69,6 @@ pub(super) fn precompile(engine: &Engine, source: &[u8]) -> Result<Vec<u8>> {
         members,
         package.bindings().values().cloned().collect(),
         package.invocations().cloned(),
-        audit.importers,
     )
 }
 
@@ -94,7 +77,6 @@ fn encode(
     members: Vec<(String, Vec<u8>)>,
     bindings: Vec<Binding>,
     invocations: Option<InvocationManifest>,
-    control_importers: BTreeSet<String>,
 ) -> Result<Vec<u8>> {
     let root_length = root.len();
     ensure!(
@@ -127,7 +109,7 @@ fn encode(
         members: index_members,
         bindings,
         invocations,
-        control_importers,
+        _control_importers: serde::de::IgnoredAny,
     })?;
     ensure!(
         index.len() <= MAX_PRECOMPILE_COMPONENT_BYTES,
@@ -153,7 +135,6 @@ struct View<'a> {
     members: BTreeMap<String, &'a [u8]>,
     bindings: Vec<Binding>,
     invocations: Option<InvocationManifest>,
-    control_importers: BTreeSet<String>,
 }
 
 fn decode(bytes: &[u8]) -> Result<View<'_>> {
@@ -243,7 +224,6 @@ fn decode(bytes: &[u8]) -> Result<View<'_>> {
         members,
         bindings: index.bindings,
         invocations: index.invocations,
-        control_importers: index.control_importers,
     })
 }
 
@@ -256,7 +236,6 @@ pub(super) unsafe fn deserialize(engine: &Engine, bytes: &[u8]) -> Result<Compil
             artifacts: BTreeMap::new(),
             bindings: Vec::new(),
             invocations: None,
-            control_importers: BTreeSet::new(),
         });
     }
     let view = decode(bytes)?;
@@ -272,7 +251,6 @@ pub(super) unsafe fn deserialize(engine: &Engine, bytes: &[u8]) -> Result<Compil
         artifacts,
         bindings: view.bindings,
         invocations: view.invocations,
-        control_importers: view.control_importers,
     })
 }
 

@@ -7,7 +7,7 @@ recorded in the implementation plan,
 | # | Decision | Decided |
 |---|---|---|
 | D1 | Can a workflow answer another process's pending approval? | Only its own children, its ancestors, and requests that opt in with `action.key`. |
-| D2 | Host verification that only the approved control agent can call control | In v1: check the composed bytes at load and on each call. |
+| D2 | Host verification that only the approved control agent can call control | Revised 2026-09-29: only the canonical control agent from the primary components dir may import `runtara:control/*`, enforced by the compile-time import allowlist; the host verifies nothing further, and `runtara:control/api` is real only in a workflow store with a run identity. Was: check the composed bytes at load and on each call. See [control-simplification.md](control-simplification.md). |
 | D3 | Running children when the parent ends | The author chooses `cancel` or `leave_running`, and the editor preselects `cancel`. Cancel fires on any parent ending, with a 5 s grace. |
 | D4 | Pausing a waiting run | It pauses immediately, in control and in the public API. This needs a release note. |
 | D5 | Pricing and capacity | Control is available on every tier. Children count against the tenant concurrency limit, which counts only starting or running runs: a parked run gives its slot back. At the limit, `start` returns a retryable capacity error. Control-started children may hold at most `max(1, floor(0.8 × limit))` slots, so outside triggers keep headroom. |

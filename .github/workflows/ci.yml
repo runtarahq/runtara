@@ -666,10 +666,11 @@ jobs:
           RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/agent-components
           VALKEY_HOST: localhost
           VALKEY_PORT: "6379"
-        # Compiles a workflow calling control:get, checks the composed control
-        # copy is the installed bytes verbatim, and runs it through the
-        # environment runner and the host control executor. The start test
-        # admits a child through NativeControl and launches it for real.
+        # Compiles workflows calling control, checks they carry no control pin,
+        # and runs them through the environment runner, where the composed
+        # control agent calls the control API in the run's own store. The
+        # start test admits a child through NativeControl and launches it for
+        # real.
         run: |
           psql -h localhost -U postgres -d postgres -c 'CREATE DATABASE control_component_test;'
           psql -h localhost -U postgres -d postgres -c 'CREATE DATABASE control_component_server_test;'

@@ -15,14 +15,13 @@ use serde_json::{Value, json};
 const KIB: usize = 1024;
 const MIB: usize = 1024 * KIB;
 
-/// Largest agent input the control executor accepts.
+/// Largest JSON field of a control request (`start` inputs, `send-signal`
+/// payload).
 pub const MAX_INPUT_BYTES: usize = MIB;
-/// Largest output one control execution returns.
-pub const MAX_OUTCOME_BYTES: usize = 4 * MIB;
 /// Largest response of one control service call.
 pub const MAX_RESPONSE_BYTES: usize = 4 * MIB;
-/// Hard cap on one control execution, below the step's own deadline.
-pub const EXECUTION_TIME_LIMIT_MS: u64 = 90_000;
+/// Hard cap on one control call, below the step's own deadline.
+pub const CALL_TIME_LIMIT_MS: u64 = 90_000;
 
 /// `get` inlines a terminal output up to this size, else omits it.
 pub const GET_OUTPUT_INLINE_BYTES: usize = MIB;
@@ -102,10 +101,8 @@ pub fn parent_close_reason(parent_instance_id: &str, parent_status: Option<&str>
 /// [`CONTROL_REQUIRES_INSTANCE`].
 pub const REQUIRES_RUN_TAG: &str = "runtime:requires-run";
 
-/// The control executor ran past its deadline.
+/// `timeout`: a control call ran past its host bound.
 pub const CONTROL_TIMEOUT: &str = "CONTROL_TIMEOUT";
-/// The control executor failed outside the capability (trap, limits).
-pub const CONTROL_EXECUTION_FAILED: &str = "CONTROL_EXECUTION_FAILED";
 
 /// `capacity` with a retry hint: the control share is full for now.
 pub const CONTROL_CAPACITY_RATE_LIMITED: &str = "CONTROL_CAPACITY_RATE_LIMITED";
@@ -136,11 +133,12 @@ pub enum ErrorCode {
     AlreadyAnswered,
     NotPausable,
     NotPaused,
+    Timeout,
 }
 
 impl ErrorCode {
     /// Every code, in WIT declaration order.
-    pub const ALL: [ErrorCode; 18] = [
+    pub const ALL: [ErrorCode; 19] = [
         Self::Denied,
         Self::Invalid,
         Self::NotFound,
@@ -159,6 +157,7 @@ impl ErrorCode {
         Self::AlreadyAnswered,
         Self::NotPausable,
         Self::NotPaused,
+        Self::Timeout,
     ];
 
     /// The WIT case name.
@@ -182,6 +181,7 @@ impl ErrorCode {
             Self::AlreadyAnswered => "already-answered",
             Self::NotPausable => "not-pausable",
             Self::NotPaused => "not-paused",
+            Self::Timeout => "timeout",
         }
     }
 
@@ -209,6 +209,7 @@ impl ErrorCode {
             Self::AlreadyAnswered => "CONTROL_ALREADY_ANSWERED",
             Self::NotPausable => "CONTROL_NOT_PAUSABLE",
             Self::NotPaused => "CONTROL_NOT_PAUSED",
+            Self::Timeout => CONTROL_TIMEOUT,
         }
     }
 
@@ -224,12 +225,10 @@ impl ErrorCode {
     }
 
     /// Every agent error code a control capability can surface, including
-    /// both `capacity` spellings and the executor's own codes.
+    /// both `capacity` spellings.
     pub fn all_agent_codes() -> Vec<&'static str> {
         let mut codes: Vec<_> = Self::ALL.iter().map(|code| code.agent_code(None)).collect();
         codes.push(CONTROL_CAPACITY_RATE_LIMITED);
-        codes.push(CONTROL_TIMEOUT);
-        codes.push(CONTROL_EXECUTION_FAILED);
         codes
     }
 }
@@ -391,6 +390,7 @@ mod tests {
         assert!(!ErrorCode::Capacity.retryable(None));
         assert!(ErrorCode::Unavailable.retryable(None));
         assert!(!ErrorCode::NotFound.retryable(Some(1)));
+        assert!(!ErrorCode::Timeout.retryable(None));
     }
 
     #[test]

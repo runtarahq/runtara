@@ -5,11 +5,11 @@ struct AgentComponentArgs {
     agent: String,
     #[darling(default)]
     trusted: bool,
-    /// The built-in control agent: its composed copy forwards every call to
-    /// `runtara:control/executor`, and the host runs `runtara:control/execution`
-    /// on approved bytes in a fresh store where `runtara:control/api` is real.
+    /// The built-in control agent: an ordinary agent that also imports
+    /// `runtara:control/api`, which the host makes real only for a run's own
+    /// entry and the compiler grants only to the canonical control agent.
     #[darling(default)]
-    control_executor: bool,
+    control: bool,
     /// Capabilities that suspend (`#[capability(suspends = true)]`). The one
     /// `capabilities.invoke` answers them with their continuation and may
     /// return `suspended`.
@@ -54,17 +54,10 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
         )
         .into_compile_error();
     }
-    if args.trusted && (args.control_executor || args.suspending.is_some()) {
+    if args.trusted && (args.control || args.suspending.is_some()) {
         return syn::Error::new_spanned(
             &args.capabilities,
-            "a trusted agent can neither suspend nor be the control executor",
-        )
-        .into_compile_error();
-    }
-    if args.control_executor && args.suspending.is_some() {
-        return syn::Error::new_spanned(
-            &args.capabilities,
-            "the control executor cannot declare suspending capabilities",
+            "a trusted agent can neither suspend nor be the control agent",
         )
         .into_compile_error();
     }
@@ -79,7 +72,7 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     let shape = runtara_wit::AgentShape {
         suspendable: args.suspending.is_some(),
         trusted: args.trusted,
-        control: args.control_executor,
+        control: args.control,
         ..Default::default()
     };
     let package = runtara_wit::agent_package(agent, shape);
@@ -87,16 +80,16 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     if args.trusted {
         dirs.push(format!("{}/trusted", runtara_wit::WIT_DIR));
     }
-    if args.control_executor {
+    if args.control {
         dirs.push(format!("{}/control", runtara_wit::WIT_DIR));
     }
     let wit_paths = quote! { path: [#(#dirs),*], inline: #package };
     let trusted_export = format!("export:{}#invoke", runtara_wit::trusted::EXECUTION);
     let async_exports = if args.trusted {
         quote! { [#export, #trusted_export] }
-    } else if args.control_executor {
-        // Every function in the control world is async-typed; the forwarding
-        // imports are awaited, never blocked on.
+    } else if args.control {
+        // Every `runtara:control/api` function is async-typed; capability
+        // bodies await it, never block on it.
         quote! { true }
     } else {
         quote! { [#export] }
@@ -109,7 +102,7 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     let mut arms = Vec::new();
     let mut seen = std::collections::HashSet::new();
     // `(module path, function name)` of every listed capability, for the
-    // control-executor glue and the suspension metadata assertions.
+    // suspension metadata assertions.
     let mut listed = Vec::new();
     for capability in &args.capabilities.elems {
         let syn::Expr::Path(path) = capability else {
@@ -140,9 +133,6 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
         let invoke = format_ident!("__invoke_{name}");
         arms.push(quote! { #(#module::)* #id => #(#module::)* #invoke(value).await, });
         listed.push((quote!(#path).to_string(), path.clone()));
-    }
-    if args.control_executor {
-        return control_executor(&args, agent, &interface, &world, &wit_paths, &listed);
     }
     let (suspension, suspending_dispatch) = match ordinary_suspension(&args, agent, &listed) {
         Ok(tokens) => tokens,
@@ -417,130 +407,6 @@ fn ordinary_suspension(
     Ok((glue, dispatch))
 }
 
-/// Glue for the control agent. The composed copy never runs a capability body:
-/// `capabilities.invoke` forwards to the host executor, which runs
-/// `execution.invoke` on approved bytes in a fresh store. No control
-/// capability suspends; that is checked against the metadata at compile time.
-fn control_executor(
-    args: &AgentComponentArgs,
-    agent: &str,
-    interface: &syn::Ident,
-    world: &str,
-    wit_paths: &proc_macro2::TokenStream,
-    listed: &[(String, syn::ExprPath)],
-) -> proc_macro2::TokenStream {
-    let mut assertions = Vec::new();
-    let mut execution_arms = Vec::new();
-    for (key, path) in listed {
-        let segments = &path.path.segments;
-        let name = &segments.last().expect("validated capability path").ident;
-        let module: Vec<_> = segments.iter().take(segments.len() - 1).collect();
-        let id = format_ident!("__CAPABILITY_ID_{}", name.to_string().to_uppercase());
-        let invoke = format_ident!("__invoke_{name}");
-        let suspends = format_ident!("__CAPABILITY_SUSPENDS_{}", name.to_string().to_uppercase());
-        let message = format!(
-            "`{key}` is #[capability(suspends = true)], and no control capability may suspend"
-        );
-        assertions.push(quote! {
-            const _: () = assert!(!#(#module::)* #suspends, #message);
-        });
-        execution_arms.push(quote! {
-            #(#module::)* #id => #(#module::)* #invoke(value)
-                .await
-                .and_then(|value| serde_json::to_vec(&value).map_err(|e| e.to_string())),
-        });
-    }
-    let decode_input = args
-        .decode_input
-        .as_ref()
-        .map(|path| quote! { #path(&input) })
-        .unwrap_or_else(|| quote! { serde_json::from_slice(&input) });
-    quote! {
-        #(#assertions)*
-
-        #[cfg(target_arch = "wasm32")]
-        #[allow(warnings)]
-        mod bindings {
-            wit_bindgen::generate!({
-                #wit_paths,
-                world: #world,
-                async: true,
-                generate_all,
-            });
-        }
-        #[cfg(target_arch = "wasm32")]
-        use bindings::exports::runtara::#interface::capabilities::{ErrorInfo, Outcome as __Outcome};
-        #[cfg(target_arch = "wasm32")]
-        struct Component;
-
-        #[cfg(target_arch = "wasm32")]
-        fn __control_error(code: &str, message: String) -> ErrorInfo {
-            ErrorInfo {
-                code: code.into(),
-                message,
-                category: "permanent".into(),
-                severity: "error".into(),
-                retryable: false,
-                retry_after_ms: None,
-                attributes: None,
-                details: None,
-            }
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        impl bindings::exports::runtara::#interface::capabilities::Guest for Component {
-            async fn invoke(capability_id: String, input: Vec<u8>) -> Result<__Outcome, ErrorInfo> {
-                bindings::runtara::control::executor::invoke(capability_id, input)
-                    .await
-                    .map(__Outcome::Completed)
-            }
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        impl bindings::exports::runtara::control::execution::Guest for Component {
-            async fn invoke(capability_id: String, input: Vec<u8>) -> Result<Vec<u8>, ErrorInfo> {
-                let value: serde_json::Value = #decode_input.map_err(|e| {
-                    __control_error("INPUT_DESERIALIZATION_ERROR", e.to_string())
-                })?;
-                let result = match capability_id.as_str() {
-                    #(#execution_arms)*
-                    other => return Err(__control_error(
-                        "UNKNOWN_CAPABILITY",
-                        format!("{} agent has no capability `{other}`", #agent),
-                    )),
-                };
-                result.map_err(error_string_to_error_info)
-            }
-        }
-
-        /// Parse a `#[capability]` JSON error envelope into `ErrorInfo`.
-        #[cfg(target_arch = "wasm32")]
-        fn error_string_to_error_info(s: String) -> ErrorInfo {
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&s) else {
-                return __control_error("CAPABILITY_ERROR", s);
-            };
-            let field = |key: &str| value.get(key).and_then(|v| v.as_str()).map(str::to_string);
-            let category = field("category").unwrap_or_else(|| "permanent".into());
-            ErrorInfo {
-                code: field("code").unwrap_or_else(|| "CAPABILITY_ERROR".into()),
-                message: field("message").unwrap_or_else(|| s.clone()),
-                retryable: value
-                    .get("retryable")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(category == "transient"),
-                category,
-                severity: field("severity").unwrap_or_else(|| "error".into()),
-                retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
-                attributes: value.get("attributes").map(|v| v.to_string()),
-                details: None,
-            }
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        bindings::export!(Component with_types_in bindings);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::expand_tokens;
@@ -557,35 +423,26 @@ mod tests {
     }
 
     #[test]
-    fn the_control_executor_forwards_capabilities_and_runs_execution() {
+    fn the_control_agent_is_an_ordinary_agent_importing_the_control_api() {
         let glue = expand(quote! {
             agent = "control",
-            control_executor = true,
+            control = true,
             capabilities = [get, commands::cancel],
         });
-        // The composed copy runs no capability body: `capabilities` forwards
-        // to the host executor.
-        assert_eq!(
-            glue.matches("bindings::runtara::control::executor::invoke(capability_id,input)")
-                .count(),
-            1,
+        // Capabilities run in the composed copy itself: no forwarding, no
+        // second export.
+        assert!(
+            glue.contains(
+                "implbindings::exports::runtara::agent_control::capabilities::GuestforComponent"
+            ),
             "{glue}"
         );
-        for export in [
-            "implbindings::exports::runtara::agent_control::capabilities::GuestforComponent",
-            "implbindings::exports::runtara::control::execution::GuestforComponent",
-        ] {
-            assert!(glue.contains(export), "missing {export}");
-        }
-        // Execution is a plain call: no suspension glue, no continuation.
-        assert!(!glue.contains("suspendable"), "{glue}");
-        assert!(!glue.contains("agent_suspension"), "{glue}");
-        assert!(!glue.contains("continuation"), "{glue}");
+        assert!(!glue.contains("control::executor"), "{glue}");
+        assert!(!glue.contains("control::execution"), "{glue}");
         assert!(glue.contains("__invoke_get(value)"));
         assert!(glue.contains("commands::__invoke_cancel(value)"));
-        // No control capability may suspend, checked at compile time.
-        assert!(glue.contains("const_:()=assert!(!__CAPABILITY_SUSPENDS_GET,"));
-        assert!(glue.contains("const_:()=assert!(!commands::__CAPABILITY_SUSPENDS_CANCEL,"));
+        // The control API is async-typed throughout.
+        assert!(glue.contains("async:true"), "{glue}");
         assert!(glue.contains(r#"world:"runtara:agent-control/agent""#));
         let agent_dir = format!("{}/agent", runtara_wit::WIT_DIR);
         let control_dir = format!("{}/control", runtara_wit::WIT_DIR);
@@ -593,10 +450,7 @@ mod tests {
             glue.contains(&format!(r#"path:["{agent_dir}","{control_dir}"]"#)),
             "{glue}"
         );
-        assert!(
-            glue.contains("inline:\"packageruntara:agent-control@"),
-            "{glue}"
-        );
+        assert!(glue.contains("importruntara:control/api@"), "{glue}");
     }
 
     #[test]
@@ -632,8 +486,8 @@ mod tests {
         assert!(!glue.contains("__suspend_plain"));
         assert!(glue.contains("const_:()=assert!(waits::__CAPABILITY_SUSPENDS_PAUSE==true"));
         assert!(glue.contains("const_:()=assert!(__CAPABILITY_SUSPENDS_PLAIN==false"));
-        // No control forwarding outside the control agent.
-        assert!(!glue.contains("control::executor"));
+        // No control import outside the control agent.
+        assert!(!glue.contains("runtara:control/api"));
     }
 
     #[test]
@@ -660,17 +514,10 @@ mod tests {
             ),
             (
                 quote! {
-                    agent = "control", control_executor = true,
-                    capabilities = [get, wait], suspending = [wait]
-                },
-                "the control executor cannot declare suspending capabilities",
-            ),
-            (
-                quote! {
-                    agent = "signer", trusted = true, control_executor = true,
+                    agent = "signer", trusted = true, control = true,
                     capabilities = [sign]
                 },
-                "a trusted agent can neither suspend nor be the control executor",
+                "a trusted agent can neither suspend nor be the control agent",
             ),
         ] {
             let tokens = expand_tokens(input).to_string();

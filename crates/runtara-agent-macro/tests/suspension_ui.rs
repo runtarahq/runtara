@@ -1,4 +1,4 @@
-//! Suspension and control-executor declarations are checked at compile time:
+//! Suspension declarations are checked at compile time:
 //! the `suspending` list must match `#[capability(suspends = true)]`, and a
 //! suspending capability must take `&SuspendContext` and return
 //! `Result<Suspendable<O>, E>`.

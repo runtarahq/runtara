@@ -9,12 +9,11 @@
 //! (c) the result offsets the emitter reads are the WIT's `SizeAlign` layout
 //!     (pinned hermetically in `operation_scoped_tests`);
 //! (d) a relaunch delivers the saved continuation (host `context` import);
-//! (e) the composed control copy forwards to the host executor under the
-//!     step's operation, while a direct control API call from a root store, or
-//!     from any agent-linker store, is `denied`.
+//! (e) the composed control agent calls the host's control API under the
+//!     step's operation, while a control API call outside a run's prepared
+//!     entry, or from any agent-linker store, is `denied`.
 use super::*;
 use runtara_component_host::InvokeRunResult;
-use runtara_component_host::control_executor::ControlExecutor;
 use runtara_component_host::control_host::{
     CancelRequest, CommandOutcome, CommandResult, ControlAuthority, ControlError, ControlErrorCode,
     ControlHost,
@@ -212,7 +211,7 @@ fn control_api_probe() -> Vec<u8> {
     (type $code-def (enum "denied" "invalid" "not-found" "not-runnable" "not-child"
       "requires-instance" "requires-operation" "capacity" "replay-conflict" "label-conflict"
       "too-large" "unavailable" "unsupported" "not-waiting" "ambiguous" "already-answered"
-      "not-pausable" "not-paused"))
+      "not-pausable" "not-paused" "timeout"))
     (export "error-code" (type $code (eq $code-def)))
     (type $error-def (record (field "code" $code) (field "message" string)
       (field "retry-after-ms" (option u64))))
@@ -368,13 +367,13 @@ fn control_graph() -> Value {
 }
 
 fn workflow_executor(
-    control: Option<Arc<ControlExecutor>>,
+    control: Option<Arc<dyn ControlHost>>,
 ) -> anyhow::Result<runtara_component_host::WorkflowExecutor> {
     let local = WorkflowExecutor::new(Arc::clone(executor().engine()))?;
     local.set_connection_resolver(Arc::new(FixtureConnections))?;
     local.set_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))?;
     if let Some(control) = control {
-        local.set_control_executor(control)?;
+        local.set_control_host(control)?;
     }
     Ok(local)
 }
@@ -384,7 +383,7 @@ fn workflow_executor(
 async fn launch(
     compiled: &DirectCompilationResult,
     host: Arc<Host>,
-    control: Option<Arc<ControlExecutor>>,
+    control: Option<Arc<dyn ControlHost>>,
 ) -> anyhow::Result<InvokeRunResult> {
     let local = workflow_executor(control)?;
     let prepared = local.prepare_path(&compiled.wasm_path).await?;
@@ -480,10 +479,10 @@ fn one_agent_instance_serves_plain_and_suspending_capabilities() -> anyhow::Resu
 }
 
 /// The control copy is a plain agent: a control step binds only its
-/// `capabilities`, and the root pins and audits exactly the bundled bytes
-/// (decision D2), which the dispatcher registry loads as one agent.
+/// `capabilities`, leaves the control API to the host, and pins nothing
+/// (decision D2, revised); the dispatcher registry loads it as one agent.
 #[test]
-fn a_control_step_binds_capabilities_and_pins_the_bundled_bytes() -> anyhow::Result<()> {
+fn a_control_step_binds_capabilities_and_pins_nothing() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let compiled = compile_graph(dir.path(), control_graph(), vec![control_info()?], &[])?;
     let artifacts = &compiled.component_artifacts;
@@ -498,11 +497,7 @@ fn a_control_step_binds_capabilities_and_pins_the_bundled_bytes() -> anyhow::Res
         );
     }
     let imports = root_imports(&compiled.wasm_path)?;
-    for bubbled in [
-        runtara_wit::control::EXECUTOR,
-        runtara_wit::control::API,
-        runtara_wit::workflow::OPERATION,
-    ] {
+    for bubbled in [runtara_wit::control::API, runtara_wit::workflow::OPERATION] {
         assert!(
             imports.iter().any(|name| name == bubbled),
             "{bubbled} is left to the host: {imports:?}"
@@ -529,26 +524,17 @@ fn a_control_step_binds_capabilities_and_pins_the_bundled_bytes() -> anyhow::Res
         Some(sha256_hex(&fs::read(&control_wasm)?).as_str())
     );
 
-    // Decision D2: the root pins exactly the bundled control bytes, and the
-    // one composed component importing control is those bytes verbatim.
-    let pin = crate::direct_wasm::bundled_builtin_pin(&components_dir(), "control")
-        .expect("the bundle ships control");
-    let pins: Vec<_> = imports
-        .iter()
-        .filter(|name| name.starts_with(runtara_dsl::agent_meta::BUILTIN_ARTIFACTS_PREFIX))
-        .collect();
-    assert_eq!(pins, [&pin], "{imports:?}");
+    // No executor, and no pin: readiness records nothing for control.
     assert!(
-        crate::direct_wasm::trusted_artifact_pins(&fs::read(&compiled.wasm_path)?)?.contains(&pin),
-        "readiness records the control pin with the trusted ones"
+        !imports
+            .iter()
+            .any(|name| name.starts_with("runtara:control/executor")
+                || name.starts_with(runtara_dsl::agent_meta::BUILTIN_ARTIFACTS_PREFIX)),
+        "{imports:?}"
     );
-    let audit = runtara_component_host::precompile::audit_control_importers(&fs::read(
-        &compiled.wasm_path,
-    )?)?;
-    assert_eq!(
-        audit.importers,
-        std::collections::BTreeSet::from([sha256_hex(&fs::read(&control_wasm)?)]),
-        "wac keeps the nested control bytes verbatim"
+    assert!(
+        crate::direct_wasm::trusted_artifact_pins(&fs::read(&compiled.wasm_path)?)?.is_empty(),
+        "a control artifact pins nothing"
     );
 
     // The dispatcher registry loads the same bytes through the agent linker
@@ -678,34 +664,22 @@ impl ControlHost for FakeControl {
     }
 }
 
-fn control_executor(fake: Arc<FakeControl>) -> anyhow::Result<Arc<ControlExecutor>> {
-    let dir = components_dir();
-    let control = ControlExecutor::new(
-        Arc::clone(executor().engine()),
-        &fs::read(dir.join("runtara_agent_control.wasm"))?,
-        &fs::read(dir.join("runtara_agent_control.meta.json"))?,
-    )?;
-    control.set_host(fake)?;
-    control.set_approved_pins([control.pin().to_owned()]);
-    Ok(Arc::new(control))
+fn control_host(fake: Arc<FakeControl>) -> Arc<dyn ControlHost> {
+    fake
 }
 
-/// (e) The composed control copy forwards to the host executor, which runs
-/// the host-loaded bytes with a real `api` and the caller's authority: the
-/// tenant and run from the runner, the operation from the step's scope.
+/// (e) The composed control agent calls the control API in the run's own
+/// store with the run's authority: the tenant and run from the runner, the
+/// operation from the step's scope.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_composed_control_copy_forwards_to_the_host_executor() -> anyhow::Result<()> {
+async fn the_composed_control_agent_calls_the_api_under_the_steps_operation() -> anyhow::Result<()>
+{
     let dir = tempfile::tempdir()?;
     let compiled = compile_graph(dir.path(), control_graph(), vec![control_info()?], &[])?;
     let fake = Arc::new(FakeControl::default());
     let host = Arc::new(Host::new());
 
-    let run = launch(
-        &compiled,
-        host.clone(),
-        Some(control_executor(fake.clone())?),
-    )
-    .await?;
+    let run = launch(&compiled, host.clone(), Some(control_host(fake.clone()))).await?;
     assert_eq!(
         completed(&run),
         json!({"result": {"instanceId": "child-1", "outcome": "applied", "replayed": false}})
@@ -801,7 +775,7 @@ async fn operation_keys_are_distinct_per_iteration_and_embed_and_stable_on_retry
     let run = launch(
         &compiled,
         Arc::new(Host::new()),
-        Some(control_executor(fake.clone())?),
+        Some(control_host(fake.clone())),
     )
     .await?;
     assert!(
@@ -850,18 +824,13 @@ async fn a_fault_replay_reuses_the_operation_key() -> anyhow::Result<()> {
         skip: 1,
         remaining: 1,
     });
-    let first = launch(
-        &compiled,
-        host.clone(),
-        Some(control_executor(fake.clone())?),
-    )
-    .await?;
+    let first = launch(&compiled, host.clone(), Some(control_host(fake.clone()))).await?;
     assert!(
         !matches!(first.exit, InvokeExit::Completed(_)),
         "the lost result checkpoint fails the run: {:?}",
         first.exit
     );
-    let second = launch(&compiled, host, Some(control_executor(fake.clone())?)).await?;
+    let second = launch(&compiled, host, Some(control_host(fake.clone()))).await?;
     assert!(
         matches!(second.exit, InvokeExit::Completed(_)),
         "{:?}",
@@ -873,18 +842,19 @@ async fn a_fault_replay_reuses_the_operation_key() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// (e) Anything else that calls `runtara:control/api` directly gets `denied`:
-/// a component in a workflow root store, even with a control executor
-/// configured, and one in an agent-linker store (dispatcher, trusted).
+/// (e) A control API call outside a run's prepared entry gets `denied`: a
+/// component invoked on its own in a workflow store, even with a control
+/// service configured, and one in an agent-linker store (dispatcher,
+/// trusted).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_direct_control_api_call_is_denied_outside_the_executor() -> anyhow::Result<()> {
+async fn a_control_api_call_is_denied_outside_a_run_entry() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let probe = dir.path().join("api-probe.wasm");
     fs::write(&probe, control_api_probe())?;
     let interface = "runtara:agent-api-probe/capabilities@1.0.0";
 
     let fake = Arc::new(FakeControl::default());
-    let root = workflow_executor(Some(control_executor(fake.clone())?))?;
+    let root = workflow_executor(Some(control_host(fake.clone())))?;
     let pre = root.load_instance_pre(&probe).await?;
     let answer = root
         .invoke_capability(&pre, interface, "probe", b"{}".to_vec())
@@ -1287,27 +1257,21 @@ async fn a_workflow_agent_calls_control_as_its_caller() -> anyhow::Result<()> {
         vec![info],
         &[staged],
     )?;
-    let pin = crate::direct_wasm::bundled_builtin_pin(&components_dir(), "control")
-        .expect("the bundle ships control");
     let imports = root_imports(&compiled.wasm_path)?;
-    let pins: Vec<_> = imports
-        .iter()
-        .filter(|name| name.starts_with(runtara_dsl::agent_meta::BUILTIN_ARTIFACTS_PREFIX))
-        .collect();
-    assert_eq!(
-        pins,
-        [&pin],
-        "the caller carries the workflow-agent's pin: {imports:?}"
+    assert!(
+        imports.iter().any(|name| name == runtara_wit::control::API),
+        "the workflow-agent leaves the control API to its caller's host: {imports:?}"
+    );
+    assert!(
+        !imports
+            .iter()
+            .any(|name| name.starts_with(runtara_dsl::agent_meta::BUILTIN_ARTIFACTS_PREFIX)),
+        "no control pin: {imports:?}"
     );
 
     let fake = Arc::new(FakeControl::default());
     let host = Arc::new(Host::new());
-    let run = launch(
-        &compiled,
-        host.clone(),
-        Some(control_executor(fake.clone())?),
-    )
-    .await?;
+    let run = launch(&compiled, host.clone(), Some(control_host(fake.clone()))).await?;
     assert_eq!(
         completed(&run),
         json!({"result": {"result": {"instanceId": "child-1", "outcome": "applied", "replayed": false}}})

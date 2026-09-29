@@ -404,8 +404,8 @@ pub enum AgentImportKind {
     /// AND resolved from an extra (staging) component dir, never the primary
     /// components dir. The server compiled it and it runs under its caller's
     /// instance, so it skips the list: it imports the workflow runtime, and
-    /// whatever the agents it composed left to the host. Control additionally
-    /// needs the control artifact pin.
+    /// whatever the agents it composed left to the host (control included,
+    /// wired only into the control agent composed inside it).
     StagedWorkflowAgent,
 }
 
@@ -426,13 +426,11 @@ pub const AGENT_IMPORT_ALLOWLIST: &[&str] = &[
     runtara_wit::host::SQL,
 ];
 
-/// Control interfaces the canonical `control` agent may import. Its own
-/// `runtara:control/execution` is an export, never an import.
-pub const CONTROL_AGENT_IMPORTS: &[&str] = &[
-    runtara_wit::control::TYPES,
-    runtara_wit::control::API,
-    runtara_wit::control::EXECUTOR,
-];
+/// Control interfaces the canonical `control` agent may import. This grant is
+/// the only gate on control (decision D2): the host makes `api` real for a
+/// run's own entry and checks nothing further.
+pub const CONTROL_AGENT_IMPORTS: &[&str] =
+    &[runtara_wit::control::TYPES, runtara_wit::control::API];
 
 /// What an ordinary agent's metadata and location entitle it to import beyond
 /// [`AGENT_IMPORT_ALLOWLIST`].
@@ -556,11 +554,9 @@ pub fn check_agent_component_imports(
     let imports = component_root_imports(wasm).map_err(|error| {
         DirectCompileError::Component(format!("agent component `{agent_id}`: {error}"))
     })?;
-    // Control is granted only to the component the host executor can run:
-    // one that exports `runtara:control/execution`.
+    // The trusted executor: only a component whose `execution` the host
+    // executor can run may forward to it.
     let mut grants = grants;
-    // Likewise the trusted executor: only a component whose `execution` the
-    // host executor can run may forward to it.
     if grants.trusted {
         grants.trusted = component_root_exports(wasm)
             .map_err(|error| {
@@ -568,31 +564,6 @@ pub fn check_agent_component_imports(
             })?
             .iter()
             .any(|export| export == runtara_wit::trusted::EXECUTION);
-    }
-    if grants.control {
-        grants.control = component_root_exports(wasm)
-            .map_err(|error| {
-                DirectCompileError::Component(format!("agent component `{agent_id}`: {error}"))
-            })?
-            .iter()
-            .any(|export| export == runtara_wit::control::EXECUTION);
-    }
-    // A staged workflow-agent that calls control composed the bundled control
-    // agent and carries its pin; composition checks the pin names the bundled
-    // version, and the host that it is approved.
-    if kind == AgentImportKind::StagedWorkflowAgent
-        && imports
-            .iter()
-            .any(|import| import.starts_with(runtara_wit::control::PREFIX))
-        && !imports.iter().any(|import| {
-            runtara_dsl::agent_meta::parse_builtin_artifact_import(import)
-                .is_some_and(|(agent, _)| agent == runtara_dsl::agent_meta::CONTROL_AGENT_ID)
-        })
-    {
-        return Err(DirectCompileError::Component(format!(
-            "workflow-agent `{agent_id}` imports control without the control artifact pin; \
-             republish it"
-        )));
     }
     for import in imports {
         let allowed = match kind {
@@ -1138,12 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn a_staged_workflow_agent_skips_the_list_but_needs_a_pin_for_control() {
-        let pin = runtara_dsl::agent_meta::builtin_artifact_import(
-            "control",
-            &"a".repeat(64),
-            &"b".repeat(64),
-        );
+    fn a_staged_workflow_agent_skips_the_list() {
         resolve_fixture_agent_in(
             FixtureDir::Staging,
             &[
@@ -1154,23 +1120,10 @@ mod tests {
                 runtara_wit::workflow::WAITS,
                 runtara_wit::agent::CONTINUATION,
                 runtara_wit::control::API,
-                runtara_wit::control::EXECUTOR,
-                &pin,
             ],
             STAGED_TAGS,
         )
         .expect("a staged workflow-agent parks, waits and calls control under its caller");
-
-        let error = resolve_fixture_agent_in(
-            FixtureDir::Staging,
-            &["runtara:workflow/runtime@1.0.0", runtara_wit::control::API],
-            STAGED_TAGS,
-        )
-        .expect_err("control without the control pin");
-        assert!(
-            error.to_string().contains("control artifact pin"),
-            "{error}"
-        );
 
         resolve_fixture_agent_in(
             FixtureDir::Staging,
@@ -1188,12 +1141,7 @@ mod tests {
         imports: &[&str],
         suspends: bool,
     ) -> Result<(), DirectCompileError> {
-        let exports: &[&str] = if agent_id == "control" {
-            &[runtara_wit::control::EXECUTION]
-        } else {
-            &[]
-        };
-        resolve_declared_agent_exporting(agent_id, location, imports, exports, suspends)
+        resolve_declared_agent_exporting(agent_id, location, imports, &[], suspends)
     }
 
     fn resolve_declared_agent_exporting(
@@ -1356,7 +1304,7 @@ mod tests {
     #[test]
     fn control_interfaces_are_admitted_only_for_the_canonical_control_agent() {
         resolve_declared_agent("control", FixtureDir::Primary, CONTROL_AGENT_IMPORTS, false)
-            .expect("the bundled control agent forwards to the executor");
+            .expect("the bundled control agent calls the control API");
         // Control no longer suspends, so it gets no suspension interface.
         let import = runtara_wit::agent::CONTINUATION;
         let error = resolve_declared_agent("control", FixtureDir::Primary, &[import], false)
@@ -1374,10 +1322,10 @@ mod tests {
                 assert!(error.to_string().contains(import), "{agent}: {error}");
             }
         }
-        // The control agent exports `execution`; importing it (or any other
-        // control interface) is refused even for the control agent.
+        // Any other control interface, another version, or a workflow
+        // interface is refused even for the control agent.
         for import in [
-            runtara_wit::control::EXECUTION,
+            "runtara:control/executor@1.0.0",
             "runtara:control/api@0.2.0",
             runtara_wit::workflow::OPERATION,
         ] {
@@ -1386,20 +1334,6 @@ mod tests {
                 "{import}"
             );
         }
-        // Only a component the host executor can run gets control: one that
-        // exports `runtara:control/execution`.
-        let error = resolve_declared_agent_exporting(
-            "control",
-            FixtureDir::Primary,
-            &[runtara_wit::control::API],
-            &[],
-            true,
-        )
-        .expect_err("a control agent without the execution export gets no control");
-        assert!(
-            error.to_string().contains(runtara_wit::control::API),
-            "{error}"
-        );
     }
 
     #[test]
@@ -1648,7 +1582,7 @@ mod tests {
                 panic!("allowlisted `{entry}` does not link against build_linker: {error:#}");
             }
         }
-        // Granted imports link too: `denied` control stubs and a context
+        // Granted imports link too: the control API and a context
         // without a continuation, so the full bundle loads in the dispatcher.
         for entry in CONTROL_AGENT_IMPORTS.iter().chain(&[
             runtara_wit::agent::CONTINUATION,

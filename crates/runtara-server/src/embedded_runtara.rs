@@ -53,16 +53,6 @@ pub struct EmbeddedRuntara {
     environment: EnvironmentRuntime,
     #[allow(dead_code)]
     persistence: Arc<dyn Persistence>,
-    approved_builtins: runtara_environment::approved_builtins::ApprovedBuiltins,
-}
-
-/// The control executor and the control pins to approve at boot: the
-/// executor's own bytes and the compile bundle's, which may differ.
-pub struct ControlBoot {
-    /// Host executor of the installed control agent.
-    pub executor: Arc<runtara_component_host::control_executor::ControlExecutor>,
-    /// `runtara:builtin-artifacts/control-…` pins to approve.
-    pub approve: Vec<String>,
 }
 
 impl EmbeddedRuntara {
@@ -77,8 +67,8 @@ impl EmbeddedRuntara {
     pub async fn start(
         config: EmbeddedRuntaraConfig,
         trusted: Option<Arc<runtara_component_host::trusted::TrustedExecutor>>,
-        control: Option<ControlBoot>,
         instance_waits: Option<Arc<dyn runtara_component_host::InstanceWaitHost>>,
+        control_host: Option<Arc<dyn runtara_component_host::control_host::ControlHost>>,
         connections: Arc<dyn runtara_component_host::ConnectionResolverHost>,
         database: Arc<dyn runtara_component_host::DatabaseHost>,
         outbound_http: Arc<dyn runtara_component_host::OutboundHttpHost>,
@@ -86,25 +76,12 @@ impl EmbeddedRuntara {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         info!("Starting embedded Runtara servers...");
 
-        // Decision D2: approve the installed control bytes and load the
-        // approved history before anything can wake or recover a run.
-        // Revocations (set by an operator) apply from this boot on.
-        let approved_builtins = match &control {
-            Some(boot) => {
-                runtara_environment::approved_builtins::ApprovedBuiltins::install(
-                    &config.pool,
-                    &boot.executor,
-                    &boot.approve,
-                )
-                .await?
-            }
-            None => Default::default(),
-        };
         // Trusted pins, option B: record the installed trusted built-ins in
-        // the same history and hand the approved, non-revoked trusted pins to
-        // the executor, so a parked run pinned to an earlier approved version
-        // keeps presigning on wake or resume (on the installed bytes). Starts
-        // never use the history; readiness stays installed-only.
+        // the approved history and hand the approved, non-revoked trusted pins
+        // to the executor before anything can wake or recover a run, so a
+        // parked run pinned to an earlier approved version keeps presigning on
+        // wake or resume (on the installed bytes). Starts never use the
+        // history; readiness stays installed-only.
         if let Some(trusted) = &trusted {
             runtara_environment::approved_builtins::ApprovedBuiltins::install_trusted(
                 &config.pool,
@@ -148,7 +125,7 @@ impl EmbeddedRuntara {
                     .map(|policy| policy.runner_config()),
                 runtara_environment::runner::HostServices {
                     trusted,
-                    control: control.map(|boot| boot.executor),
+                    control_host,
                     instance_waits,
                     connections: Some(connections),
                     database: Some(database),
@@ -181,13 +158,7 @@ impl EmbeddedRuntara {
             core,
             environment,
             persistence,
-            approved_builtins,
         })
-    }
-
-    /// The approved built-in artifact history loaded at boot.
-    pub fn approved_builtins(&self) -> &runtara_environment::approved_builtins::ApprovedBuiltins {
-        &self.approved_builtins
     }
 
     /// The environment's shared handler state, for callers that drive it
@@ -337,8 +308,8 @@ pub async fn create_runtara_pool(
 #[allow(clippy::too_many_arguments)]
 pub async fn maybe_start_embedded(
     trusted: Option<Arc<runtara_component_host::trusted::TrustedExecutor>>,
-    control: Option<ControlBoot>,
     instance_waits: Option<Arc<dyn runtara_component_host::InstanceWaitHost>>,
+    control_host: Option<Arc<dyn runtara_component_host::control_host::ControlHost>>,
     connections: Arc<dyn runtara_component_host::ConnectionResolverHost>,
     database: Arc<dyn runtara_component_host::DatabaseHost>,
     outbound_http: Arc<dyn runtara_component_host::OutboundHttpHost>,
@@ -414,8 +385,8 @@ pub async fn maybe_start_embedded(
     let runtara = EmbeddedRuntara::start(
         config,
         trusted,
-        control,
         instance_waits,
+        control_host,
         connections,
         database,
         outbound_http,

@@ -158,7 +158,7 @@ A step type, next to WaitForSignal, displayed as "Wait for Instances":
 
 | Limit | Value |
 |---|---|
-| Control call input | 1 MiB |
+| Control call input (`start` inputs, `send-signal` payload) | 1 MiB |
 | `get` inlined output / error | 1 MiB / 64 KiB, else `outputOmitted`/`errorOmitted` with the size |
 | Page size (`query`, `list-pending-signals`) | 1-100, default 20 |
 | WaitForInstances targets | 1000 |
@@ -225,35 +225,33 @@ as the `suspended` outcome. The full context matrix is
   is terminal (one level deep), then follows normal retention.
 - Cancellation is not rollback of the child's business side effects.
 
-### Executor model
+### Execution model
 
-The copy of the control agent composed into a workflow only forwards: its
-calls go to `runtara:control/executor`, which the host binds to its
-`ControlExecutor`. The executor instantiates the host-installed control bytes
-(never the composed copy, never tenant bytes) in a fresh restricted store per
-call (64 MiB memory, 90 s, at most 16 at once) where `runtara:control/api` is
-real; everywhere else that interface is `denied`. Tenant, caller and step
-operation come from the calling workflow's store, never from the agent's
-input.
+The control agent is an ordinary composed agent. Its capability bodies call
+`runtara:control/api`, which the host binds to the native control service in
+the workflow's own store, and only for the run's own prepared entry: isolated
+capabilities, isolated child workflows, unprepared loads and every
+agent-linker store get `denied`. Tenant, caller and step operation come from
+the run's store (the operation is the one entered at the call), never from the
+agent's input. Each call is bounded by the run's deadline and 90 s
+(`CONTROL_TIMEOUT`). A test invocation (`test_capability`) runs the installed
+control agent with the tenant and no calling run.
 
-Decision D2 is enforced twice. When an artifact is prepared, the precompile
-worker audits every composed component that imports `runtara:control/*`; the
-artifact binds its one `runtara:builtin-artifacts/control-…` pin plus those
-digests. Every call re-checks that binding and the executor's own bytes
-against the approved history. The server approves its bundle's control bytes
-at boot (`approved_builtin_artifacts`, never deleted); an operator revokes a
-version by setting `revoked_at`, effective at the next boot. After that, calls
-through the revoked version are `CONTROL_DENIED`, new launches of workflows
-pinning it are not ready, and runs already parked on it still load and fail at
-their next control call. A run pinned to an older, still approved version
-keeps working after an upgrade.
+Decision D2 (revised 2026-09-29): only the canonical control agent from the
+primary components dir may import `runtara:control/*`, which the compiler's
+import allowlist enforces; the host checks nothing further. An artifact pins no
+control version, and a run parked across an upgrade keeps running the control
+bytes composed into it, like any agent. A new control version reaches existing
+workflows when they recompile. See
+[control-simplification.md](control-simplification.md).
 
-Trusted built-ins (S3, Azure presigning) share that history (trusted pins,
-option B). Boot records the installed `runtara:trusted-artifacts/…` pins in
-`approved_builtin_artifacts` too. A trusted call from a workflow whose
-artifact pins an older version of that agent is admitted only when the run
-continues a parked run, that is its launch is a wake or a resume (paused
-waits included), and only if that older pin is approved and not revoked; it
+Trusted built-ins (S3, Azure presigning) keep an approved history of their
+pins (trusted pins, option B). Boot records the installed
+`runtara:trusted-artifacts/…` pins in `approved_builtin_artifacts`. A trusted
+call from a workflow whose artifact pins an older version of that agent is
+admitted only when the run continues a parked run, that is its launch is a
+wake or a resume (paused waits included), and only if that older pin is
+approved and not revoked; it
 then runs the installed bytes. A start under an older pin, and any launch
 under a revoked or never approved pin, fails with `TRUSTED_VERSION_REQUIRED`
 before any credential is resolved. The launch kind comes from the durable
@@ -263,8 +261,9 @@ runs recompile. Why this is safe: the pin never chooses the bytes (only
 installed, operator-approved bytes run), credentials are still resolved by
 tenant, connection and type for the calling run, a start can never use the
 history, and revocation (effective at the next boot) is the operator's switch
-to cut off runs parked on a version. Composed artifacts whose other agents import
-`runtara:control` or `runtara:workflow-operation` are refused at preparation.
+to cut off runs parked on a version. No agent other than the control agent may
+import `runtara:control`, and none may import `runtara:workflow/*`; the
+compiler refuses them.
 
 Mutations run inside a compiler-emitted operation scope
 (`runtara:workflow-operation`), which gives each call site its operation
@@ -327,8 +326,7 @@ WaitForInstances or suspending steps compile to the same bytes as before.
 - Operator tables: `execution_requests` (server database: admission,
   `parent_instance_id`, per-parent labels), `instance_waits` and
   `instance_wait_targets` (open waits and their targets),
-  `instance_external_outcomes` (never-launched children),
-  `approved_builtin_artifacts` (the approved control history).
+  `instance_external_outcomes` (never-launched children).
 
 ## Proposed capabilities
 
@@ -599,10 +597,9 @@ This composes with existing replay: a completed step's result is checkpointed,
 so replay does not call the host again, and a crash between the host call and
 the checkpoint is caught by the host-side idempotency key.
 
-Link `runtara:control` only into the operator-installed, digest-pinned
-built-in control agent, as the trusted executor restricts itself to approved
-built-ins. Other agents, including third-party ones, must not be able to start
-or control instances.
+Only the built-in control agent from the primary components dir may import
+`runtara:control`; the compiler's import allowlist refuses it to every other
+agent, including third-party ones, so they cannot start or control instances.
 
 Waiting is not a blocking host function: that would hold the Store and worker
 slot for the whole wait. The host function only checks or registers the wait;
@@ -782,7 +779,8 @@ does not matter, and both `all` and `any` can be expressed.
 
 See [control-agent-decisions.md](control-agent-decisions.md) (2026-09-26):
 - cross-lineage `send-signal` requires opt-in via `action.key`;
-- host verification of composed bytes ships in v1;
+- only the built-in control agent may import control, enforced at compile
+  time (revised 2026-09-29; it was host verification of composed bytes);
 - a parent-close policy is required, with `cancel` preselected;
 - pausing a waiting run pauses it immediately;
 - control is on every tier; its children count against the concurrency limit (parked runs don't), with at most 80% of it usable by control;

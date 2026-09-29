@@ -51,8 +51,6 @@ fn every_name_constant_names_a_real_interface() {
         crate::trusted::EXECUTION,
         crate::control::TYPES,
         crate::control::API,
-        crate::control::EXECUTOR,
-        crate::control::EXECUTION,
     ] {
         assert!(names.contains(name), "{name} is not a runtara interface");
         assert!(name.ends_with(&format!("@{}", crate::VERSION)));
@@ -135,9 +133,8 @@ fn agent_package_resolves_for_every_shape() {
                     let has = |names: &[String], name: &str| names.iter().any(|n| n == name);
                     assert_eq!(has(&imports, crate::agent::CONTINUATION), suspendable);
                     assert_eq!(has(&imports, crate::control::API), control);
-                    assert_eq!(has(&imports, crate::control::EXECUTOR), control);
                     assert_eq!(has(&exports, crate::trusted::EXECUTION), trusted);
-                    assert_eq!(has(&exports, crate::control::EXECUTION), control);
+                    assert_eq!(exports.len(), 1 + usize::from(trusted), "{exports:?}");
                 }
             }
         }
@@ -437,33 +434,9 @@ fn workflow_package_declares_the_workflow_abi() {
 }
 
 #[test]
-fn control_forwarding_is_a_plain_call_and_takes_no_identity() {
+fn the_control_api_takes_no_identity() {
     let resolve = resolve();
     let package = package(&resolve, crate::control::PACKAGE);
-    let params = |interface: &str| -> Vec<String> {
-        resolve.interfaces[package.interfaces[interface]].functions["invoke"]
-            .params
-            .iter()
-            .map(|param| param.name.clone())
-            .collect()
-    };
-    assert_eq!(params("executor"), ["capability-id", "input"]);
-    assert_eq!(params("execution"), ["capability-id", "input"]);
-    for interface in ["executor", "execution"] {
-        let invoke = &resolve.interfaces[package.interfaces[interface]].functions["invoke"];
-        let Some(wit_parser::Type::Id(result)) = invoke.result else {
-            panic!("{interface}.invoke returns a result");
-        };
-        let TypeDefKind::Result(result) = &resolve.types[result].kind else {
-            panic!("{interface}.invoke returns a result");
-        };
-        assert!(
-            matches!(result.ok, Some(wit_parser::Type::Id(list))
-                if matches!(resolve.types[list].kind,
-                    TypeDefKind::List(wit_parser::Type::U8))),
-            "{interface}.invoke answers the capability's JSON output"
-        );
-    }
     let api = &resolve.interfaces[package.interfaces["api"]];
     for function in api.functions.values() {
         assert!(matches!(function.kind, FunctionKind::AsyncFreestanding));
@@ -478,18 +451,20 @@ fn control_forwarding_is_a_plain_call_and_takes_no_identity() {
             function.name
         );
     }
-    for (world, name) in [
-        ("control-client", crate::control::EXECUTOR),
-        ("control-agent-host", crate::control::API),
-    ] {
-        let world = &resolve.worlds[package.worlds[world]];
-        assert!(
-            world
-                .imports
-                .keys()
-                .any(|key| resolve.name_world_key(key) == name)
-        );
-    }
+    // The host's world links exactly `api`; the package has no other world
+    // and no other interface an agent could import or export.
+    assert_eq!(package.worlds.keys().collect::<Vec<_>>(), ["control-host"]);
+    assert_eq!(
+        package.interfaces.keys().collect::<Vec<_>>(),
+        ["types", "api"]
+    );
+    let world = &resolve.worlds[package.worlds["control-host"]];
+    assert!(
+        world
+            .imports
+            .keys()
+            .any(|key| resolve.name_world_key(key) == crate::control::API)
+    );
 }
 
 fn enum_cases(resolve: &Resolve, types: &wit_parser::Interface, name: &str) -> Vec<String> {
@@ -560,7 +535,7 @@ fn the_control_api_is_complete_and_frozen() {
         .iter()
         .map(|code| code.wit_name().to_string())
         .collect();
-    assert_eq!(codes.len(), 18);
+    assert_eq!(codes.len(), 19);
     assert_eq!(
         enum_cases(&resolve, types, "error-code"),
         codes,

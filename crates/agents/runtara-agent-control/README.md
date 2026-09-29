@@ -10,7 +10,7 @@ It is available on every pricing tier, whatever the agent allowlist says.
 
 | Capability | Kind |
 |---|---|
-| `get`, `query`, `list-pending-signals` | Reads, tenant-wide |
+| `get`, `get-state`, `query`, `list-pending-signals` | Reads, tenant-wide |
 | `start` | Admit a child run (`parentClosePolicy` required) |
 | `send-signal` | Answer a WaitForSignal request (children, ancestors, `action.key` opt-ins) |
 | `cancel`, `pause`, `resume` | Direct children only |
@@ -23,13 +23,11 @@ lifecycle) is "As built" in
 
 ## How it runs
 
-The copy composed into a workflow only forwards to
-`runtara:control/executor`. The host's `ControlExecutor` runs the installed
-bytes of this crate in a fresh store per call, where `runtara:control/api` is
-real, and checks the workflow's control pin against the approved history
-(`approved_builtin_artifacts`) on every call. Mutations run in a
-compiler-emitted `runtara:workflow/operation` scope, so a replayed step never
-applies twice.
+An ordinary composed agent: each capability makes one `runtara:control/api`
+call, which the host makes real in the run's own store (and `denied` anywhere
+else), bounded by the step's deadline and 90 s. The compiler grants
+`runtara:control` to this agent alone. Mutations run in a compiler-emitted
+`runtara:workflow/operation` scope, so a replayed step never applies twice.
 
 ## Building
 
@@ -39,9 +37,8 @@ applies twice.
 
 The `agent_component!` macro generates its `runtara:agent-control@1.0.0`
 package from `runtara_wit::agent_package`; there is no WIT file to edit. The
-component imports `runtara:control/executor@1.0.0` and
-`runtara:control/api@1.0.0`, and exports `capabilities` and
-`runtara:control/execution@1.0.0`. Output:
+component imports `runtara:control/api@1.0.0` and exports `capabilities`.
+Output:
 `target/wasm32-wasip2/release/runtara_agent_control.wasm` and its
 `.meta.json` sidecar.
 
@@ -51,4 +48,4 @@ Unit tests in `src/lib.rs` pin metadata, tags and error codes. Host and
 end-to-end coverage: `runtara-component-host/tests/control_agent.rs`,
 `runtara-server/tests/control_component.rs`,
 `runtara-environment/tests/wait_for_instances_runner_test.rs` (a control call
-after a parked wake, across upgrades) and `e2e/test_control_agent.sh`.
+after a parked wake) and `e2e/test_control_agent.sh`.

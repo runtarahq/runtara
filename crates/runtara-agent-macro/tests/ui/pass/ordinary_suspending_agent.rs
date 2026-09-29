@@ -1,4 +1,4 @@
-//! An ordinary agent (not the control executor) with a suspending capability:
+//! An ordinary agent with a suspending capability:
 //! the glue answers it with the `suspended` outcome and reads the continuation
 //! from the host's `runtara:agent/continuation`.
 use runtara_agent_macro::{CapabilityInput, capability};

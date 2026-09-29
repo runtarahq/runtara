@@ -736,13 +736,13 @@ impl EmbeddedWasmRunner {
         Ok(self)
     }
 
-    /// Attach the host executor of the approved control agent.
-    pub fn with_control_executor(
+    /// Attach the control service behind every run's `runtara:control/api`.
+    pub fn with_control_host(
         self,
-        executor: Arc<runtara_component_host::control_executor::ControlExecutor>,
+        host: Arc<dyn runtara_component_host::control_host::ControlHost>,
     ) -> Result<Self> {
         self.executor
-            .set_control_executor(executor)
+            .set_control_host(host)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
         Ok(self)
     }

@@ -436,6 +436,7 @@ fn code_name(code: ControlErrorCode) -> &'static str {
         C::AlreadyAnswered => "already-answered",
         C::NotPausable => "not-pausable",
         C::NotPaused => "not-paused",
+        C::Timeout => "timeout",
     }
 }
 
@@ -1245,6 +1246,18 @@ fn check_id(field: &str, value: &str) -> Result<(), ControlError> {
     Ok(())
 }
 
+/// A JSON byte field of a request (`start` input, `send-signal` payload) is
+/// at most [`contract::MAX_INPUT_BYTES`] (`too-large`).
+fn check_input_size(field: &str, bytes: &[u8]) -> Result<(), ControlError> {
+    if bytes.len() > contract::MAX_INPUT_BYTES {
+        return Err(ControlError::new(
+            ControlErrorCode::TooLarge,
+            format!("{field} exceeds {} bytes", contract::MAX_INPUT_BYTES),
+        ));
+    }
+    Ok(())
+}
+
 fn check_page_size(page_size: u32) -> Result<i64, ControlError> {
     if !(contract::PAGE_SIZE_MIN..=contract::PAGE_SIZE_MAX).contains(&page_size) {
         return Err(invalid(format!(
@@ -1574,6 +1587,7 @@ impl ControlHost for NativeControl {
     ) -> Result<StartResult, ControlError> {
         let tenant = self.tenant(authority)?;
         let (caller, operation) = mutation_identity(authority, "start")?;
+        check_input_size("input", &request.input)?;
         let start = execution_engine::normalize_start(
             &request.workflow_id,
             request.version,
@@ -1974,6 +1988,7 @@ impl ControlHost for NativeControl {
                 check_id(field, value)?;
             }
         }
+        check_input_size("payload", &request.payload)?;
         let payload: Value = serde_json::from_slice(&request.payload)
             .map_err(|_| invalid("payload must be JSON"))?;
         let target = request.instance_id.clone();
@@ -2297,6 +2312,212 @@ mod tests {
         assert_eq!(page_offset(None).unwrap(), 0);
         assert_eq!(page_offset(Some("40")).unwrap(), 40);
         assert!(page_offset(Some("next")).is_err());
+    }
+
+    /// The control agent validates for early, friendly errors; the host is
+    /// authoritative. Every input the agent rejects is rejected here too,
+    /// before the service touches the engine or the runtime (which would
+    /// answer `unavailable` in this uninstalled service).
+    #[tokio::test]
+    async fn the_host_rejects_every_input_the_agent_rejects() {
+        use ControlErrorCode as C;
+        let control = NativeControl::with_install_wait(Some("tenant".into()), Duration::ZERO);
+        let reads = authority(None);
+        let writes = scoped(Some("run-1"), Some("op"));
+        let start =
+            |workflow_id: &str, version, input: &[u8], run_label: Option<String>| StartRequest {
+                workflow_id: workflow_id.into(),
+                version,
+                input: input.to_vec(),
+                run_label,
+                parent_close_policy:
+                    runtara_component_host::control_host::ParentClosePolicy::Cancel,
+            };
+        let inputs = br#"{"data":{},"variables":{}}"#;
+        let too_big = vec![b' '; contract::MAX_INPUT_BYTES + 1];
+        let long_label = "x".repeat(contract::MAX_RUN_LABEL_BYTES + 1);
+        let signal = |instance_id: &str, signal_id: &str, payload: &[u8]| SendSignalRequest {
+            instance_id: instance_id.into(),
+            signal_id: signal_id.into(),
+            action_key: None,
+            request_id: None,
+            payload: payload.to_vec(),
+        };
+        let query = |page_size| QueryRequest {
+            workflow_id: None,
+            run_label: None,
+            statuses: Vec::new(),
+            parent: None,
+            created_after_ms: None,
+            created_before_ms: None,
+            finished_after_ms: None,
+            finished_before_ms: None,
+            state: None,
+            sort_by: SortField::CreatedAt,
+            order: SortOrder::Descending,
+            page_size,
+            page_token: None,
+        };
+        let cancel = |grace_ms, reason: Option<String>| CancelRequest {
+            instance_id: "child-1".into(),
+            reason,
+            grace_ms,
+        };
+        let cases: Vec<(&str, C, Result<(), ControlError>)> = vec![
+            (
+                "start: empty workflowId",
+                C::Invalid,
+                control
+                    .start(&writes, start("", None, inputs, None))
+                    .await
+                    .map(drop),
+            ),
+            (
+                "start: version 0",
+                C::Invalid,
+                control
+                    .start(&writes, start("wf", Some(0), inputs, None))
+                    .await
+                    .map(drop),
+            ),
+            (
+                "start: empty runLabel",
+                C::Invalid,
+                control
+                    .start(&writes, start("wf", None, inputs, Some(String::new())))
+                    .await
+                    .map(drop),
+            ),
+            (
+                "start: runLabel over its cap",
+                C::Invalid,
+                control
+                    .start(&writes, start("wf", None, inputs, Some(long_label)))
+                    .await
+                    .map(drop),
+            ),
+            (
+                "start: inputs not JSON",
+                C::Invalid,
+                control
+                    .start(&writes, start("wf", None, b"{", None))
+                    .await
+                    .map(drop),
+            ),
+            (
+                "start: inputs over 1 MiB",
+                C::TooLarge,
+                control
+                    .start(&writes, start("wf", None, &too_big, None))
+                    .await
+                    .map(drop),
+            ),
+            (
+                "get: empty instanceId",
+                C::Invalid,
+                control.get(&reads, String::new()).await.map(drop),
+            ),
+            (
+                "get-state: empty instanceId",
+                C::Invalid,
+                control.get_state(&reads, String::new()).await.map(drop),
+            ),
+            (
+                "query: pageSize 0",
+                C::Invalid,
+                control.query(&reads, query(0)).await.map(drop),
+            ),
+            (
+                "query: pageSize 101",
+                C::Invalid,
+                control.query(&reads, query(101)).await.map(drop),
+            ),
+            (
+                "list-pending-signals: pageSize 0",
+                C::Invalid,
+                control
+                    .list_pending_signals(
+                        &reads,
+                        PendingSignalsRequest {
+                            scope: SignalScope::Children,
+                            signal_id: None,
+                            action_key: None,
+                            page_size: 0,
+                            page_token: None,
+                        },
+                    )
+                    .await
+                    .map(drop),
+            ),
+            (
+                "send-signal: empty instanceId",
+                C::Invalid,
+                control
+                    .send_signal(&writes, signal("", "approve", b"{}"))
+                    .await
+                    .map(drop),
+            ),
+            (
+                "send-signal: empty signalId",
+                C::Invalid,
+                control
+                    .send_signal(&writes, signal("child-1", "", b"{}"))
+                    .await
+                    .map(drop),
+            ),
+            (
+                "send-signal: payload not JSON",
+                C::Invalid,
+                control
+                    .send_signal(&writes, signal("child-1", "approve", b"{"))
+                    .await
+                    .map(drop),
+            ),
+            (
+                "send-signal: payload over 1 MiB",
+                C::TooLarge,
+                control
+                    .send_signal(&writes, signal("child-1", "approve", &too_big))
+                    .await
+                    .map(drop),
+            ),
+            (
+                "cancel: grace over its cap",
+                C::Invalid,
+                control
+                    .cancel(
+                        &writes,
+                        cancel(Some(contract::MAX_CANCEL_GRACE_MS + 1), None),
+                    )
+                    .await
+                    .map(drop),
+            ),
+            (
+                "cancel: reason over its cap",
+                C::Invalid,
+                control
+                    .cancel(
+                        &writes,
+                        cancel(None, Some("x".repeat(MAX_REASON_BYTES + 1))),
+                    )
+                    .await
+                    .map(drop),
+            ),
+            (
+                "pause: empty instanceId",
+                C::Invalid,
+                control.pause(&writes, String::new()).await.map(drop),
+            ),
+            (
+                "resume: empty instanceId",
+                C::Invalid,
+                control.resume(&writes, String::new()).await.map(drop),
+            ),
+        ];
+        for (case, expected, result) in cases {
+            let error = result.expect_err(case);
+            assert_eq!(error.code, expected, "{case}: {}", error.message);
+        }
     }
 
     #[tokio::test]

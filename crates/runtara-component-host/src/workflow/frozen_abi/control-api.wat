@@ -14,7 +14,7 @@
       (export (;6;) "start-request" (type (eq 5)))
       (type (;7;) (record (field "instance-id" string) (field "workflow-id" string) (field "version" u32) (field "run-label" 4) (field "replayed" bool)))
       (export (;8;) "start-result" (type (eq 7)))
-      (type (;9;) (enum "denied" "invalid" "not-found" "not-runnable" "not-child" "requires-instance" "requires-operation" "capacity" "replay-conflict" "label-conflict" "too-large" "unavailable" "unsupported" "not-waiting" "ambiguous" "already-answered" "not-pausable" "not-paused"))
+      (type (;9;) (enum "denied" "invalid" "not-found" "not-runnable" "not-child" "requires-instance" "requires-operation" "capacity" "replay-conflict" "label-conflict" "too-large" "unavailable" "unsupported" "not-waiting" "ambiguous" "already-answered" "not-pausable" "not-paused" "timeout"))
       (export (;10;) "error-code" (type (eq 9)))
       (type (;11;) (option u64))
       (type (;12;) (record (field "code" 10) (field "message" string) (field "retry-after-ms" 11)))
