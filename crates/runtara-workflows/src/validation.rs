@@ -2977,14 +2977,14 @@ fn validate_reference(
     valid_variable_names: &HashSet<String>,
     result: &mut ValidationResult,
 ) {
-    // Reject consecutive dots outside a closed `[..]` body. Dots inside one
-    // belong to the key (`data["a..b"]`). Leading/trailing dots and empty
-    // bracket keys are not caught here.
-    if tokenize_reference(ref_path).has_defect(PathDefect::ConsecutiveDots) {
+    // Reject a path the tokenizer had to repair. Dots inside a closed `[..]`
+    // body belong to the key (`data["a..b"]`) and are fine; leading/trailing
+    // dots are not caught here.
+    if let Some(reason) = malformed_path_reason(ref_path) {
         result.errors.push(ValidationError::InvalidReferencePath {
             step_id: step_id.to_string(),
             reference_path: ref_path.to_string(),
-            reason: "empty path segment (consecutive dots)".to_string(),
+            reason: reason.to_string(),
         });
         return;
     }
@@ -3571,6 +3571,29 @@ struct TemplateStaticReferenceContext<'a> {
     adjacency: &'a HashMap<String, Vec<String>>,
 }
 
+/// Why a reference path is malformed, if it is — judged from the defects the
+/// shared tokenizer reports, so the validator never disagrees with how the
+/// runtime splits the path. Each of these would otherwise resolve silently to
+/// something other than what was written: the tokenizer drops an empty dot
+/// segment or an empty bracket key, and reads an unterminated bracket's
+/// remainder as one key.
+fn malformed_path_reason(path: &str) -> Option<&'static str> {
+    let tokenized = tokenize_reference(path);
+    [
+        (
+            PathDefect::ConsecutiveDots,
+            "empty path segment (consecutive dots)",
+        ),
+        (PathDefect::EmptyBracketKey, "empty bracket key"),
+        (
+            PathDefect::UnterminatedBracket,
+            "unterminated bracket (missing `]`)",
+        ),
+    ]
+    .into_iter()
+    .find_map(|(defect, reason)| tokenized.has_defect(defect).then_some(reason))
+}
+
 fn validate_template_static_reference(
     step_id: &str,
     reference: &str,
@@ -3578,13 +3601,8 @@ fn validate_template_static_reference(
     context: &TemplateStaticReferenceContext<'_>,
     result: &mut ValidationResult,
 ) {
-    if tokenize_reference(reference).has_defect(PathDefect::ConsecutiveDots) {
-        push_template_reference_issue(
-            result,
-            step_id,
-            reference,
-            "empty path segment (consecutive dots)",
-        );
+    if let Some(reason) = malformed_path_reason(reference) {
+        push_template_reference_issue(result, step_id, reference, reason);
         return;
     }
 
@@ -7822,6 +7840,80 @@ mod tests {
                 .any(|reason| reason.contains("consecutive dots")),
             "{dotted:?}"
         );
+
+        assert_eq!(check(r#"data[""]"#), ["empty bracket key"]);
+        assert_eq!(check("data[a"), ["unterminated bracket (missing `]`)"]);
+    }
+
+    /// An empty bracket key yields no segment, so `data[""]` used to resolve
+    /// to the whole `data` object while skipping the schema check entirely.
+    #[test]
+    fn test_empty_bracket_key_is_rejected() {
+        for reference in [
+            "data[]",
+            r#"data[""]"#,
+            "data['']",
+            r#"data[ "" ]"#,
+            "variables['']",
+            "steps.agent.outputs[ ]",
+            "data[].a",
+        ] {
+            let result = validate_data_reference_with_schema_key(reference, "a");
+            assert!(
+                result.errors.iter().any(|error| matches!(
+                    error,
+                    ValidationError::InvalidReferencePath { reference_path, reason, .. }
+                        if reference_path == reference && reason == "empty bracket key"
+                )),
+                "`{reference}` must be rejected: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    /// An unterminated `[` swallows the rest of the path as one key, so
+    /// `data[a` is a malformed path rather than a reference to key `a`.
+    #[test]
+    fn test_unterminated_bracket_is_rejected() {
+        for (reference, expected) in [
+            ("data[a", "unterminated bracket (missing `]`)"),
+            ("data[", "unterminated bracket (missing `]`)"),
+            (r#"data["a"#, "unterminated bracket (missing `]`)"),
+            // Consecutive dots take precedence, as before.
+            ("data[a..b", "empty path segment (consecutive dots)"),
+        ] {
+            let result = validate_data_reference_with_schema_key(reference, "a");
+            assert!(
+                result.errors.iter().any(|error| matches!(
+                    error,
+                    ValidationError::InvalidReferencePath { reference_path, reason, .. }
+                        if reference_path == reference && reason == expected
+                )),
+                "`{reference}` must be rejected with `{expected}`: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    /// Well-formed bracket keys — including a quoted blank key, which is a
+    /// real key — stay accepted.
+    #[test]
+    fn test_well_formed_bracket_keys_are_not_malformed() {
+        for (reference, key) in [
+            (r#"data[" "]"#, " "),
+            ("data['a']", "a"),
+            (r#"data["a..b"]"#, "a..b"),
+        ] {
+            let result = validate_data_reference_with_schema_key(reference, key);
+            assert!(
+                !result
+                    .errors
+                    .iter()
+                    .any(|error| matches!(error, ValidationError::InvalidReferencePath { .. })),
+                "`{reference}` is well-formed: {:?}",
+                result.errors
+            );
+        }
     }
 
     /// A `connection_ref` referencing a nonexistent step must fail at save
