@@ -153,8 +153,8 @@ const COMPLETE: &str = "i32.const 42 return";
 /// runtime call still refuses to start once the cleanup alarm expired.
 #[tokio::test]
 async fn expired_cleanup_alarm_rejects_new_runtime_calls() {
-    // Use the ordinary executor, without the legacy child registry: the
-    // runtime import itself must reject this.
+    // Use the ordinary executor, without a child registry: the runtime
+    // import itself must reject this.
     for version in [runtara_wit::VERSION] {
         {
             for expired in [false, true] {
@@ -183,6 +183,8 @@ async fn expired_cleanup_alarm_rejects_new_runtime_calls() {
                   (core module $mem
                     (memory (export "memory") 1)
                     (data (i32.const 128) "42")
+                    ;; The entry's result area: `Ok(completed("42"))`.
+                    (data (i32.const 2060) "\80\00\00\00\02\00\00\00")
                     (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 4096))
                   (core instance $mem (instantiate $mem))
                   (core func $expire (canon lower (func $expire)))
@@ -191,15 +193,14 @@ async fn expired_cleanup_alarm_rejects_new_runtime_calls() {
                   (core module $code
                     (import "h" "expire" (func $expire))
                     (import "h" "publish" (func $publish (param i32 i32 i32 i32 i32)))
-                    (func (export "run") (result i32)
+                    (func (export "invoke") (param i32 i32 i32 i32) (result i32)
                       call $expire
                       (call $publish (i32.const 128) (i32.const 1) (i32.const 128) (i32.const 2) (i32.const 512))
-                      i32.const 0))
+                      i32.const 2048))
                   (core instance $code (instantiate $code (with "h" (instance
                     (export "expire" (func $expire)) (export "publish" (func $publish))))))
-                  (func $run (result (result)) (canon lift (core func $code "run")))
-                  (instance $cli (export "run" (func $run)))
-                  (export "wasi:cli/run@0.2.3" (instance $cli)))"#,
+                  {entry})"#,
+                    entry = crate::workflow::test_support::entry_export_split("code", "mem"),
                 );
                 let prepared = executor
                     .prepare_precompiled(Component::new(&engine, wat).unwrap())
@@ -208,10 +209,12 @@ async fn expired_cleanup_alarm_rejects_new_runtime_calls() {
                 let publication = Arc::new(Publication::default());
                 let mut config = spec();
                 config.runtime = Some(publication.clone());
-                let result = bounded(executor.execute(prepared.command().unwrap(), config)).await;
+                let result =
+                    bounded(executor.execute_prepared_invoke(&prepared, config, b"{}".to_vec()))
+                        .await;
                 if expired {
                     assert!(
-                        matches!(result.exit, WorkflowExit::CleanupAborted),
+                        matches!(result.exit, InvokeExit::CleanupAborted),
                         "{result:?}"
                     );
                     assert!(publication.calls.lock().unwrap().is_empty());
@@ -221,7 +224,10 @@ async fn expired_cleanup_alarm_rejects_new_runtime_calls() {
                     );
                     let _ = version;
                 } else {
-                    assert!(matches!(result.exit, WorkflowExit::Completed), "{result:?}");
+                    assert!(
+                        matches!(&result.exit, InvokeExit::Completed(bytes) if bytes == b"42"),
+                        "{result:?}"
+                    );
                     assert_eq!(*publication.calls.lock().unwrap(), vec![b"42".to_vec()]);
                 }
             }

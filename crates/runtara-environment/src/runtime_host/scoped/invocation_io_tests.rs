@@ -458,7 +458,6 @@ async fn failed_input_abandonment_is_closed_by_production_exit_monitor() {
             instance_id: fx.id.clone(),
             tenant_id: lease.tenant_id.clone(),
             wasm_path: "/fixture/failed-workflow.wasm".into(),
-            requires_workflow_entry: true,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,

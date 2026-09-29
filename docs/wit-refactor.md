@@ -511,9 +511,9 @@ Differences from the text below:
 5e: stale sentinel and lifecycle prose is rewritten, and the
 `*lifecycle_invoke*` identifiers are renamed `*workflow_entry*`. A publish the
 author must fix (an unpublishable graph, a reserved slug) answers 422 with
-code `WORKFLOW_AGENT_NOT_PUBLISHABLE`. The host's `wasi:cli/run` path for
-images not registered as compiled workflows stays: it serves generic
-components, not workflows.
+code `WORKFLOW_AGENT_NOT_PUBLISHABLE`. The host's `wasi:cli/run` path is
+removed: preparation refuses a component without the workflow entry, and
+every image must export it before launch.
 
 **5a. WIT (`runtara-wit`)**
 - Replace `runtara:agent/types` and `suspension` with the unified `types`

@@ -171,24 +171,33 @@ async fn latched_cleanup_abort_rejects_a_late_successful_return() -> Result<()> 
     run(Cleanup::ReturnAfterAlarmFires).await
 }
 
-const ALARM_LOOP: &str = r#"(component
+/// Arms the host cleanup alarm, then spins; exported both as the workflow
+/// entry and as a bare `probe` for the agent dispatcher.
+fn alarm_loop() -> String {
+    format!(
+        r#"(component
   (import "runtara:host/timers@1.0.0" (instance $timers
     (export "abort-after" (func async (param "ms" u64)))))
   (core func $alarm (canon lower (func $timers "abort-after") async))
   (core module $m
     (import "h" "alarm" (func $alarm (param i64) (result i32)))
-    (func (export "run") (result i32)
+    (memory (export "memory") 1)
+    (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 4096)
+    (func $body (result i32)
       (drop (call $alarm (i64.const 100)))
       (loop $spin (br $spin))
-      (i32.const 0)))
+      (i32.const 0))
+    (func (export "run") (result i32) (call $body))
+    (func (export "invoke") (param i32 i32 i32 i32) (result i32) (call $body)))
   (core instance $m (instantiate $m (with "h" (instance (export "alarm" (func $alarm))))))
-  (func $run (result (result)) (canon lift (core func $m "run")))
-  (instance $cli (export "run" (func $run)))
-  (export "wasi:cli/run@0.2.3" (instance $cli))
-  (func (export "probe") async (result u32) (canon lift (core func $m "run"))))"#;
+  {entry}
+  (func (export "probe") async (result u32) (canon lift (core func $m "run"))))"#,
+        entry = test_support::entry_export("m")
+    )
+}
 
 #[tokio::test]
-async fn production_alarm_also_bounds_command_execution() -> Result<()> {
+async fn production_alarm_also_bounds_workflow_entry_execution() -> Result<()> {
     let engine = crate::engine::build_engine(&crate::engine::EngineConfig {
         cache_dir: None,
         enable_epoch_interruption: true,
@@ -196,18 +205,19 @@ async fn production_alarm_also_bounds_command_execution() -> Result<()> {
     let _ticker = test_support::Ticker::new(engine.clone());
     let executor = WorkflowExecutor::new(engine.clone())?;
     let prepared = executor
-        .prepare_precompiled(Component::new(&engine, ALARM_LOOP)?)
+        .prepare_precompiled(Component::new(&engine, alarm_loop())?)
         .await?;
     let result = tokio::time::timeout(
         Duration::from_secs(4),
-        executor.execute(
-            prepared.command().unwrap(),
+        executor.execute_prepared_invoke(
+            &prepared,
             tests::run_spec(Duration::from_secs(3)),
+            b"{}".to_vec(),
         ),
     )
     .await?;
     assert!(
-        matches!(result.exit, WorkflowExit::CleanupAborted),
+        matches!(result.exit, InvokeExit::CleanupAborted),
         "{:?}",
         result.exit
     );
@@ -226,7 +236,7 @@ async fn production_alarm_also_bounds_dispatcher_execution() -> Result<()> {
         &engine,
         crate::HostState::new(Arc::new(crate::CallContext::placeholder_for_metadata())),
     );
-    let component = Component::new(&engine, ALARM_LOOP)?;
+    let component = Component::new(&engine, alarm_loop())?;
     let instance = linker.instantiate_async(&mut store, &component).await?;
     let probe = instance.get_typed_func::<(), (u32,)>(&mut store, "probe")?;
     let outcome = tokio::time::timeout(

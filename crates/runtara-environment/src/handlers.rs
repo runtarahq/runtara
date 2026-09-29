@@ -616,9 +616,9 @@ pub async fn handle_start_instance(
         ));
     }
 
-    // A compiled workflow must export the workflow entry before we
-    // create a pending instance. This keeps a retired `wasi:cli/run` artifact
-    // from ever taking a runner permit or consuming admission while it waits.
+    // Every image must export the workflow entry before we create a pending
+    // instance. This keeps any other artifact from ever taking a runner permit
+    // or consuming admission while it waits.
     if let Err(error) = require_current_workflow_entrypoint(&image).await {
         warn!(
             image_id = %request.image_id,

@@ -212,7 +212,6 @@ impl Harness {
             instance_id: id,
             tenant_id: "scoped-runner-test".into(),
             wasm_path: wasm.to_owned(),
-            requires_workflow_entry: true,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,

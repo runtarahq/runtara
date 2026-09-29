@@ -147,11 +147,19 @@ async fn catalog(
         deserialize_trusted_precompiled_component, precompile_artifact_with_engine,
     };
     let dir = tempfile::tempdir().unwrap();
-    let root_wat = r#"(component (core module $m (func (export "run") (result i32) i32.const 0))
-        (core instance $m (instantiate $m)) (func $run (result (result)) (canon lift (core func $m "run")))
-        (instance $api (export "run" (func $run))) (export "wasi:cli/run@0.2.3" (instance $api)))"#;
+    // The smallest workflow entry: `invoke` returns `Ok(completed(""))` from
+    // a zeroed result area.
+    let root_wat = format!(
+        r#"(component
+      (core module $m (memory (export "memory") 1)
+        (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 4096)
+        (func (export "invoke") (param i32 i32 i32 i32) (result i32) i32.const 2048))
+      (core instance $m (instantiate $m))
+      {entry})"#,
+        entry = super::entry_export("m", "m")
+    );
     let mut compiled = Vec::new();
-    for (name, source) in [("root", root_wat.to_owned()), ("child", child_wat())] {
+    for (name, source) in [("root", root_wat), ("child", child_wat())] {
         let path = dir.path().join(format!("{name}.wasm"));
         std::fs::write(&path, wat::parse_str(source).unwrap()).unwrap();
         let request = PrecompileRequest::for_artifact(fixture_nonce(), path).unwrap();

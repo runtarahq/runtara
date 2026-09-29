@@ -41,8 +41,8 @@ use runtara_component_host::precompile::{
     validate_precompile_response, write_precompile_request_async,
 };
 use runtara_component_host::{
-    EngineConfig, PreparedWorkflow, WorkflowExecutor, WorkflowExit, WorkflowLimits,
-    WorkflowRunSpec, WorkflowStartConfirmation, build_engine, spawn_epoch_ticker,
+    EngineConfig, PreparedWorkflow, WorkflowExecutor, WorkflowLimits, WorkflowRunSpec,
+    WorkflowStartConfirmation, build_engine, spawn_epoch_ticker,
 };
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
 
@@ -819,11 +819,8 @@ impl EmbeddedWasmRunner {
         WorkflowRunSpec,
         Arc<crate::runtime_host::PersistenceRuntimeHost>,
     ) {
-        // Always attach the native runtime host. A HostImport-composed
-        // artifact consumes it; a legacy composed artifact satisfies the
-        // runtime interface internally (HTTP loopback) and never calls it —
-        // that indifference is the dual-ABI story: old workflows run
-        // unchanged, without a rebuild, through the same spec.
+        // Always attach the native runtime host; a workflow that imports the
+        // runtime interface calls it, one that does not ignores it.
         let debug_mode = env.get("DEBUG_MODE").is_some_and(|value| value == "true");
         let mut host = crate::runtime_host::PersistenceRuntimeHost::new(
             Arc::clone(&self.handler_state),
@@ -919,12 +916,8 @@ impl EmbeddedWasmRunner {
     /// guest permit.
     async fn prepare_embedded_launch(&self, options: &LaunchOptions) -> Result<PreparedLaunch> {
         let preparation_slot = self.try_take_preparation_slot()?;
+        // Preparation refuses a component without the workflow entry.
         let workflow = self.precompiler.prepare(&self.executor, options).await?;
-        if options.requires_workflow_entry && !workflow.is_workflow_entry(self.executor.engine()) {
-            return Err(RunnerError::StartFailed(
-                "generated workflow image does not export the workflow entry".to_string(),
-            ));
-        }
 
         scoped::admit(&workflow, &self.executor, self.scoped_agents.as_deref())?;
 
@@ -1067,10 +1060,9 @@ fn map_precompile_error(wasm_path: &Path, error: anyhow::Error) -> RunnerError {
 
 /// Match the child-read digest to the immutable direct-workflow metadata.
 ///
-/// Generic components intentionally have no required checksum and keep their
-/// established ABI. Generated direct workflows cannot take that fallback:
-/// their image metadata is the source-of-truth identity and a changed file is
-/// terminalized before it reaches a guest permit.
+/// When the image metadata records a checksum it is the source-of-truth
+/// identity, and a changed file is terminalized before it reaches a guest
+/// permit. Images registered without one have nothing to compare.
 fn validate_expected_workflow_checksum(
     options: &LaunchOptions,
     actual: [u8; PRECOMPILE_NONCE_BYTES],
@@ -1463,14 +1455,6 @@ fn invoke_metrics_of(result: &runtara_component_host::InvokeRunResult) -> Contai
     }
 }
 
-fn metrics_of(result: &runtara_component_host::WorkflowRunResult) -> ContainerMetrics {
-    ContainerMetrics {
-        memory_peak_bytes: Some(result.memory_peak_bytes),
-        memory_current_bytes: Some(result.memory_peak_bytes),
-        ..Default::default()
-    }
-}
-
 #[async_trait]
 impl Runner for EmbeddedWasmRunner {
     fn runner_type(&self) -> &'static str {
@@ -1657,144 +1641,101 @@ impl Runner for EmbeddedWasmRunner {
                 );
                 return;
             }
-            if workflow.is_workflow_entry(executor.engine()) {
-                // The verified component and persisted input were both prepared
-                // before the run permit. Only guest invocation remains after
-                // the durable gate confirmation.
-                if !supervisor_owns_lifecycle {
-                    mark_running(persistence.as_ref(), &instance_id).await;
-                }
-                let run = if let Some(authority) = scoped_authority {
-                    scoped::execute(
-                        &executor,
+            // The verified component and persisted input were both prepared
+            // before the run permit. Only guest invocation remains after
+            // the durable gate confirmation.
+            if !supervisor_owns_lifecycle {
+                mark_running(persistence.as_ref(), &instance_id).await;
+            }
+            let run = if let Some(authority) = scoped_authority {
+                scoped::execute(
+                    &executor,
+                    &workflow,
+                    spec,
+                    runtime_host,
+                    input,
+                    start_confirmation.clone(),
+                    authority,
+                    scoped_config.as_ref().expect("admitted scoped policy"),
+                    persistence.clone(),
+                    &invocation_owner,
+                )
+                .await
+            } else {
+                let run = executor
+                    .execute_prepared_invoke_with_start_confirmation(
                         &workflow,
                         spec,
-                        runtime_host,
                         input,
                         start_confirmation.clone(),
-                        authority,
-                        scoped_config.as_ref().expect("admitted scoped policy"),
-                        persistence.clone(),
-                        &invocation_owner,
+                    )
+                    .await;
+                // The return value is the run's only terminal channel:
+                // persist it once, here, before the completion guard drops
+                // and the monitor would record a still-running run as
+                // crashed. (A scoped root publishes after its cleanup.)
+                if let Some(terminal) =
+                    runtara_component_host::runtime_host::RunTerminal::from_exit(&run.exit)
+                    && let Err(error) = runtara_component_host::runtime_host::RuntimeHost::terminal(
+                        runtime_host.as_ref(),
+                        terminal,
                     )
                     .await
-                } else {
-                    let run = executor
-                        .execute_prepared_invoke_with_start_confirmation(
-                            &workflow,
-                            spec,
-                            input,
-                            start_confirmation.clone(),
-                        )
-                        .await;
-                    // The return value is the run's only terminal channel:
-                    // persist it once, here, before the completion guard drops
-                    // and the monitor would record a still-running run as
-                    // crashed. (A scoped root publishes after its cleanup.)
-                    if let Some(terminal) =
-                        runtara_component_host::runtime_host::RunTerminal::from_exit(&run.exit)
-                        && let Err(error) =
-                            runtara_component_host::runtime_host::RuntimeHost::terminal(
-                                runtime_host.as_ref(),
-                                terminal,
-                            )
-                            .await
-                    {
-                        error!(instance_id = %instance_id, %error, "Terminal write failed");
-                    }
-                    run
-                };
                 {
-                    let mut guard = metrics_for_task.lock().await;
-                    *guard = invoke_metrics_of(&run);
+                    error!(instance_id = %instance_id, %error, "Terminal write failed");
                 }
-                use runtara_component_host::InvokeExit;
-                match &run.exit {
-                    InvokeExit::Completed(_) => {
-                        info!(instance_id = %instance_id, "Embedded workflow run completed");
-                    }
-                    InvokeExit::Suspended(wakes) => {
-                        info!(instance_id = %instance_id, ?wakes, "Embedded workflow run suspended");
-                        // Store-freeing durable sleep: the guest exited with a
-                        // timed wake instead of blocking; park it so the wake
-                        // scheduler relaunches at the deadline.
-                        park_invoke_suspend(
-                            persistence.as_ref(),
-                            &instance_id,
-                            wakes,
-                            &run.instance_waits,
-                        )
-                        .await;
-                    }
-                    InvokeExit::Failed(_) => {
-                        warn!(instance_id = %instance_id, "Embedded workflow run returned error");
-                    }
-                    InvokeExit::Trapped { reason } => {
-                        error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
-                    }
-                    InvokeExit::Timeout => {
-                        warn!(instance_id = %instance_id, "Embedded workflow run timed out");
-                    }
-                    InvokeExit::Cancelled => {
-                        warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
-                    }
-                    InvokeExit::CleanupAborted => {
-                        record_cleanup_aborted_exit(&persistence, &instance_id).await;
-                    }
+                run
+            };
+            {
+                let mut guard = metrics_for_task.lock().await;
+                *guard = invoke_metrics_of(&run);
+            }
+            use runtara_component_host::InvokeExit;
+            match &run.exit {
+                InvokeExit::Completed(_) => {
+                    info!(instance_id = %instance_id, "Embedded workflow run completed");
                 }
-                if matches!(&run.exit, InvokeExit::Suspended(_)) {
-                    // A cancel may arrive after the guest's last poll but before
-                    // it parks. Resolve it now; the scheduler recovers this if
-                    // the process stops before reaching this point.
-                    if let Err(error) = persistence
-                        .cancel_suspended_instances(Some(&instance_id), 1)
-                        .await
-                    {
-                        warn!(instance_id, %error, "Parked cancellation deferred to scheduler recovery");
-                    }
-                } else {
-                    record_unacknowledged_cancel_exit(&persistence, &instance_id).await;
-                }
-            } else if let Some(pre) = workflow.command() {
-                // Generic non-workflow components retain their established
-                // wasi:cli/run ABI. Generated direct workflows were rejected
-                // during preparation if they lack the workflow entry.
-                if !supervisor_owns_lifecycle {
-                    mark_running(persistence.as_ref(), &instance_id).await;
-                }
-                let run = executor
-                    .execute_with_start_confirmation(pre, spec, start_confirmation.clone())
+                InvokeExit::Suspended(wakes) => {
+                    info!(instance_id = %instance_id, ?wakes, "Embedded workflow run suspended");
+                    // Store-freeing durable sleep: the guest exited with a
+                    // timed wake instead of blocking; park it so the wake
+                    // scheduler relaunches at the deadline.
+                    park_invoke_suspend(
+                        persistence.as_ref(),
+                        &instance_id,
+                        wakes,
+                        &run.instance_waits,
+                    )
                     .await;
+                }
+                InvokeExit::Failed(_) => {
+                    warn!(instance_id = %instance_id, "Embedded workflow run returned error");
+                }
+                InvokeExit::Trapped { reason } => {
+                    error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
+                }
+                InvokeExit::Timeout => {
+                    warn!(instance_id = %instance_id, "Embedded workflow run timed out");
+                }
+                InvokeExit::Cancelled => {
+                    warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
+                }
+                InvokeExit::CleanupAborted => {
+                    record_cleanup_aborted_exit(&persistence, &instance_id).await;
+                }
+            }
+            if matches!(&run.exit, InvokeExit::Suspended(_)) {
+                // A cancel may arrive after the guest's last poll but before
+                // it parks. Resolve it now; the scheduler recovers this if
+                // the process stops before reaching this point.
+                if let Err(error) = persistence
+                    .cancel_suspended_instances(Some(&instance_id), 1)
+                    .await
                 {
-                    let mut guard = metrics_for_task.lock().await;
-                    *guard = metrics_of(&run);
+                    warn!(instance_id, %error, "Parked cancellation deferred to scheduler recovery");
                 }
-                match &run.exit {
-                    WorkflowExit::Completed => {
-                        info!(instance_id = %instance_id, "Embedded workflow run completed");
-                    }
-                    WorkflowExit::GuestError => {
-                        warn!(instance_id = %instance_id, "Embedded workflow run returned error");
-                    }
-                    WorkflowExit::Failed { reason } => {
-                        error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
-                    }
-                    WorkflowExit::Timeout => {
-                        warn!(instance_id = %instance_id, "Embedded workflow run timed out");
-                    }
-                    WorkflowExit::Cancelled => {
-                        warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
-                    }
-                    WorkflowExit::CleanupAborted => {
-                        record_cleanup_aborted_exit(&persistence, &instance_id).await;
-                    }
-                }
-                record_unacknowledged_cancel_exit(&persistence, &instance_id).await;
             } else {
-                error!(
-                    instance_id = %instance_id,
-                    "Prepared generic component has no wasi:cli/run entrypoint"
-                );
+                record_unacknowledged_cancel_exit(&persistence, &instance_id).await;
             }
         });
 
@@ -2248,7 +2189,6 @@ mod tests {
             instance_id: "instance-env".into(),
             tenant_id: "tenant-env".into(),
             wasm_path: std::path::PathBuf::from("/unused/workflow.wasm"),
-            requires_workflow_entry: true,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,

@@ -1080,8 +1080,8 @@ fn omit_runtime_from_raw(raw: Option<&str>) -> bool {
 
 /// Reject the removed direct-workflow ABI switch.
 ///
-/// Production direct workflows always export the workflow entry;
-/// the legacy `wasi:cli/run` shape no longer exists. A stale environment that
+/// Production direct workflows always export the workflow entry; no other
+/// export shape exists. A stale environment that
 /// still sets `RUNTARA_DIRECT_WORKFLOW_ABI` to anything else fails loudly
 /// instead of being silently ignored.
 fn ensure_supported_production_workflow_abi() -> Result<(), DirectCompileError> {

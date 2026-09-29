@@ -1212,19 +1212,7 @@ impl LaunchDispatcher {
             .map_err(|error| format!("failed to read image: {error}"))?
             .ok_or_else(|| "launch image no longer exists".to_string())?;
         self.validate_image(&image, launch)?;
-        let expected_workflow_checksum = if image.requires_workflow_entry() {
-            Some(
-                image
-                    .workflow_binary_checksum()
-                    .ok_or_else(|| {
-                        "generated workflow image is missing its immutable binary checksum"
-                            .to_string()
-                    })?
-                    .to_string(),
-            )
-        } else {
-            None
-        };
+        let expected_workflow_checksum = image.workflow_binary_checksum()?.map(str::to_owned);
         let timeout = self
             .execution_timeout_policy
             .resolve_persisted(binding.timeout_seconds)
@@ -1237,13 +1225,11 @@ impl LaunchDispatcher {
         let input = serde_json::from_slice(input_bytes)
             .map_err(|error| format!("invalid persisted instance input: {error}"))?;
 
-        let requires_workflow_entry = image.requires_workflow_entry();
         Ok(LaunchOptions {
             launch_id: launch.launch_id.clone(),
             instance_id: launch.instance_id.clone(),
             tenant_id: launch.tenant_id.clone(),
             wasm_path: image.binary_path.into(),
-            requires_workflow_entry,
             expected_workflow_checksum,
             preparation_attempt: Some(launch.attempt_count),
             preparation_deadline,

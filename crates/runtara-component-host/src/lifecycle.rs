@@ -124,17 +124,14 @@ pub enum WorkflowOutcome {
 
 /// The top-level execution export discovered in a workflow component.
 ///
-/// This deliberately describes only workflow entrypoints. A generic agent can
-/// have neither export and remains valid in the component dispatcher; callers
-/// that require [`LifecycleInvoke`](Self::LifecycleInvoke) decide that from
-/// their image kind rather than treating all components as workflows.
+/// An agent component does not export the workflow entry and remains valid in
+/// the component dispatcher; only launches and registrations of workflows
+/// require [`LifecycleInvoke`](Self::LifecycleInvoke).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowEntrypoint {
     /// The component exports the workflow entry's `capabilities.invoke`.
     LifecycleInvoke,
-    /// The component exports the retired direct-workflow `wasi:cli/run` entry.
-    LegacyCliRun,
-    /// Neither known workflow entrypoint is exported.
+    /// The workflow entry is not exported.
     Other,
 }
 
@@ -143,8 +140,8 @@ pub enum WorkflowEntrypoint {
 /// launch takes a runner permit.
 ///
 /// A component can contain nested components with their own exports, so only
-/// depth-zero sections count. A nested legacy component inside a correctly
-/// composed invoke artifact does not make the final artifact legacy.
+/// depth-zero sections count: a nested workflow entry does not make the final
+/// artifact a workflow.
 pub fn inspect_workflow_entrypoint_file(
     path: impl AsRef<Path>,
 ) -> anyhow::Result<WorkflowEntrypoint> {
@@ -160,7 +157,6 @@ pub fn inspect_workflow_entrypoint_file(
 pub fn inspect_workflow_entrypoint(wasm: &[u8]) -> anyhow::Result<WorkflowEntrypoint> {
     let mut depth = 0usize;
     let mut lifecycle = false;
-    let mut cli_run = false;
 
     for payload in wasmparser::Parser::new(0).parse_all(wasm) {
         match payload? {
@@ -170,12 +166,8 @@ pub fn inspect_workflow_entrypoint(wasm: &[u8]) -> anyhow::Result<WorkflowEntryp
             wasmparser::Payload::ComponentExportSection(reader) if depth == 0 => {
                 for export in reader {
                     let export = export?;
-                    let name = export.name.0;
-                    if name == ENTRY_INTERFACE_NAME {
+                    if export.name.0 == ENTRY_INTERFACE_NAME {
                         lifecycle = true;
-                    }
-                    if name == "wasi:cli/run@0.2.3" || name.starts_with("wasi:cli/run@") {
-                        cli_run = true;
                     }
                 }
             }
@@ -185,38 +177,30 @@ pub fn inspect_workflow_entrypoint(wasm: &[u8]) -> anyhow::Result<WorkflowEntryp
 
     Ok(if lifecycle {
         WorkflowEntrypoint::LifecycleInvoke
-    } else if cli_run {
-        WorkflowEntrypoint::LegacyCliRun
     } else {
         WorkflowEntrypoint::Other
     })
 }
 
-/// Require the current direct-workflow entrypoint before registration. This is
-/// intentionally separate from [`inspect_workflow_entrypoint_file`]: launch
-/// paths use the classifier to report a useful legacy-artifact error, whereas
-/// registration must reject everything that is not invoke-shaped.
+/// Require the workflow entry in the component at `path`, before registration
+/// or launch.
 pub fn require_workflow_entry_file(path: impl AsRef<Path>) -> anyhow::Result<()> {
     match inspect_workflow_entrypoint_file(path)? {
         WorkflowEntrypoint::LifecycleInvoke => Ok(()),
-        WorkflowEntrypoint::LegacyCliRun => Err(anyhow::anyhow!(
-            "unsupported_legacy_abi: compiled workflows must export the workflow entry; rebuild or republish this workflow"
-        )),
         WorkflowEntrypoint::Other => Err(anyhow::anyhow!(
-            "compiled workflow does not export the workflow entry"
+            "compiled workflow does not export the workflow entry `{ENTRY_INTERFACE_NAME}`; \
+             rebuild or republish this workflow"
         )),
     }
 }
 
-/// True when the loaded component exports the lifecycle interface — i.e. it
-/// is an invoke-shaped artifact that must run through
-/// [`crate::workflow::WorkflowExecutor::execute_invoke`] rather than the
-/// legacy `wasi:cli/run` path. The runner's dual-ABI dispatch keys off this.
-pub fn exports_workflow_entry(
-    pre: &wasmtime::component::InstancePre<crate::workflow::WorkflowState>,
+/// True when the compiled component exports the workflow entry. Workflow
+/// preparation refuses a component for which this is false.
+pub fn component_exports_workflow_entry(
+    component: &wasmtime::component::Component,
     engine: &wasmtime::Engine,
 ) -> bool {
-    pre.component()
+    component
         .component_type()
         .exports(engine)
         .any(|(name, _)| name == ENTRY_INTERFACE_NAME)
@@ -236,18 +220,6 @@ mod tests {
         )
     "#;
 
-    const LEGACY_COMPONENT: &str = r#"
-        (component
-            (core module $m
-                (func (export "run") (result i32) (i32.const 0))
-            )
-            (core instance $i (instantiate $m))
-            (func $run (result (result)) (canon lift (core func $i "run")))
-            (instance $run-interface (export "run" (func $run)))
-            (export "wasi:cli/run@0.2.3" (instance $run-interface))
-        )
-    "#;
-
     #[test]
     fn recognizes_the_workflow_entry_from_actual_component_exports() {
         let wasm = wat::parse_str(INVOKE_COMPONENT).expect("valid component fixture");
@@ -257,19 +229,6 @@ mod tests {
         );
         let fixture = write_fixture(&wasm);
         require_workflow_entry_file(fixture.path()).expect("invoke component accepted");
-    }
-
-    #[test]
-    fn rejects_legacy_cli_run_from_actual_component_exports() {
-        let wasm = wat::parse_str(LEGACY_COMPONENT).expect("valid component fixture");
-        assert_eq!(
-            inspect_workflow_entrypoint(&wasm).expect("inspect component"),
-            WorkflowEntrypoint::LegacyCliRun
-        );
-        let fixture = write_fixture(&wasm);
-        let error = require_workflow_entry_file(fixture.path())
-            .expect_err("legacy component must be rejected");
-        assert!(error.to_string().contains("unsupported_legacy_abi"));
     }
 
     #[test]
@@ -286,6 +245,14 @@ mod tests {
         assert_eq!(
             inspect_workflow_entrypoint(&wasm).expect("inspect component"),
             WorkflowEntrypoint::Other
+        );
+        let fixture = write_fixture(&wasm);
+        let error = require_workflow_entry_file(fixture.path())
+            .expect_err("a component without the workflow entry must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("does not export the workflow entry")
         );
     }
 

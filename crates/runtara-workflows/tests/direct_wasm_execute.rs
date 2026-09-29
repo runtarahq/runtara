@@ -5486,7 +5486,7 @@ fn embedded_executor() -> &'static runtara_component_host::WorkflowExecutor {
 // iteration source (`build_source`); when the scope carries a large value, every
 // iteration leaks several multi-MB buffers, so guest heap climbs ~linearly with
 // iteration count and eventually crosses the per-instance memory cap — a guest
-// OOM trap surfaced as `WorkflowExit::Failed { "guest memory limit exceeded" }`.
+// OOM trap surfaced as `InvokeExit::Trapped { "guest memory limit exceeded" }`.
 //
 // Same graph, same iteration count, same cap: a large scope variable traps while
 // a tiny one completes — isolating the per-iteration scope buffers as the cause.
@@ -5578,7 +5578,7 @@ const SPLIT_LEAK_MEM_CAP_BYTES: usize = 64 * 1024 * 1024;
 /// copied into every Split iteration, and the workflow core module's bump
 /// allocator never frees (post-return is a no-op), so guest heap climbs without
 /// bound and the run dies mid-Split — as the silent
-/// `WorkflowExit::Failed { "guest memory limit exceeded" }` once the cap is
+/// `InvokeExit::Trapped { "guest memory limit exceeded" }` once the cap is
 /// crossed, or (at a higher cap) an `HttpProtocolError` once a runaway buffer
 /// breaks an outbound call. Both are the production regression.
 ///
@@ -6123,9 +6123,9 @@ fn direct_wasm_sql_transport_failure_classification() {
 
 // ===========================================================================
 // Invoke ABI (Phase 3 of the agent/workflow unification): the workflow
-// exports lifecycle.invoke instead of wasi:cli/run — input as the call
-// argument, terminal result as the lifted return value. These are the Spike-E
-// acceptance tests: the emitter's param-fold + result-area writer, the WIT
+// exports the workflow entry's invoke — input as the call argument, terminal
+// result as the lifted return value. These are the Spike-E acceptance tests:
+// the emitter's param-fold + result-area writer, the WIT
 // world, ComponentEncoder validation, wac composition, and wasmtime's typed
 // lift all have to agree for a single byte to come back.
 // ===========================================================================
@@ -6629,25 +6629,6 @@ fn direct_wasm_execute_invoke_abi_returns_error_info_in_band() {
         serde_json::from_slice(&recorded).expect("recorded error is the JSON envelope");
     assert_eq!(recorded_json["code"], "DIRECT_FAILURE");
     assert_eq!(recorded_json["message"], error.message);
-}
-
-#[test]
-fn direct_wasm_execute_invoke_abi_artifact_rejects_run_loader() {
-    let components_dir = direct_e2e_components_dir();
-    let compiled =
-        compile_invoke_abi_artifact(&components_dir, "invoke-abi-shape", SIMPLE_PASSTHROUGH);
-
-    let executor = embedded_executor();
-    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    // The legacy loader requires wasi:cli/run — an invoke-shaped artifact
-    // must be rejected loudly, not executed as a no-op.
-    match runtime.block_on(executor.load(&compiled.wasm_path)) {
-        Ok(_) => panic!("wasi:cli/run loader must reject an invoke-shaped artifact"),
-        Err(error) => assert!(
-            format!("{error:#}").contains("wasi:cli/run"),
-            "unexpected error: {error:#}"
-        ),
-    }
 }
 
 #[test]

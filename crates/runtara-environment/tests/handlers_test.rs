@@ -59,13 +59,47 @@ fn create_test_state(pool: PgPool, data_dir: PathBuf) -> EnvironmentHandlerState
     EnvironmentHandlerState::new(pool, persistence, runner, data_dir)
 }
 
-/// A real, cross-platform file for MockRunner image records. Start preflight
-/// validates that the registered artifact exists before reserving an ID.
+/// A real workflow component for MockRunner image records. Start preflight
+/// validates that the registered artifact exists and exports the workflow
+/// entry before reserving an ID.
 fn test_artifact_path() -> String {
-    std::env::current_exe()
-        .expect("the running test binary must have a path")
-        .to_string_lossy()
-        .into_owned()
+    static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let path = std::env::temp_dir().join(format!(
+            "runtara-handlers-test-{}-workflow.wasm",
+            std::process::id()
+        ));
+        let wasm = wat::parse_str(format!(
+            r#"(component
+  (core module $m
+    (memory (export "memory") 1)
+    (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 4096)
+    (func (export "invoke") (param i32 i32 i32 i32) (result i32) i32.const 2048))
+  (core instance $i (instantiate $m))
+  (type $error (record (field "code" string) (field "message" string)
+    (field "category" string) (field "severity" string) (field "retryable" bool)
+    (field "retry-after-ms" (option u64)) (field "attributes" (option string))
+    (field "details" (option string))))
+  (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
+  (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+    (case "instances" string)))
+  (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+  (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
+  (func $invoke async (param "capability-id" string) (param "input" (list u8))
+    (result (result $outcome (error $error)))
+    (canon lift (core func $i "invoke") (memory $i "memory") (realloc (func $i "realloc"))))
+  (instance $entry (export "error-info" (type $error)) (export "signal-wait" (type $signal))
+    (export "wake" (type $wake)) (export "suspension" (type $suspension))
+    (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
+  (export "{}" (instance $entry)))"#,
+            runtara_component_host::lifecycle::ENTRY_INTERFACE_NAME
+        ))
+        .expect("workflow entry fixture");
+        std::fs::write(&path, wasm).expect("write workflow entry fixture");
+        path
+    })
+    .to_string_lossy()
+    .into_owned()
 }
 
 async fn active_launch(
@@ -1003,7 +1037,6 @@ async fn running_stop_fixture(
             instance_id: instance_id.clone(),
             tenant_id: "test-tenant".into(),
             wasm_path: PathBuf::from(test_artifact_path()),
-            requires_workflow_entry: false,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,
@@ -2143,7 +2176,6 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
             wasm_path: PathBuf::from("/test/workflow.wasm"),
-            requires_workflow_entry: false,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,
@@ -2256,7 +2288,6 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
             wasm_path: PathBuf::from("/test/workflow.wasm"),
-            requires_workflow_entry: false,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,
@@ -2354,7 +2385,6 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
             wasm_path: PathBuf::from("/test/workflow.wasm"),
-            requires_workflow_entry: false,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,
@@ -2565,7 +2595,6 @@ async fn test_wait_for_exit_default_impl_returns_on_not_running() {
             instance_id: instance_id.clone(),
             tenant_id: tenant_id.to_string(),
             wasm_path: PathBuf::from("/test/workflow.wasm"),
-            requires_workflow_entry: false,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,

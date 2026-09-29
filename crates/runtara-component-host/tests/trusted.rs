@@ -98,6 +98,36 @@ async fn dispatcher_with_credentials(
     Ok((bundle, dispatcher))
 }
 
+/// The smallest workflow entry, after `imports`: `invoke` returns
+/// `Ok(completed(""))` from a zeroed result area.
+fn minimal_entry(imports: &str) -> String {
+    format!(
+        r#"(component {imports}
+  (core module $m
+    (memory (export "memory") 1)
+    (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 4096)
+    (func (export "invoke") (param i32 i32 i32 i32) (result i32) i32.const 2048))
+  (core instance $m (instantiate $m))
+  (type $error (record (field "code" string) (field "message" string)
+    (field "category" string) (field "severity" string) (field "retryable" bool)
+    (field "retry-after-ms" (option u64)) (field "attributes" (option string))
+    (field "details" (option string))))
+  (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
+  (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+    (case "instances" string)))
+  (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+  (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
+  (func $invoke async (param "capability-id" string) (param "input" (list u8))
+    (result (result $outcome (error $error)))
+    (canon lift (core func $m "invoke") (memory $m "memory") (realloc (func $m "realloc"))))
+  (instance $entry (export "error-info" (type $error)) (export "signal-wait" (type $signal))
+    (export "wake" (type $wake)) (export "suspension" (type $suspension))
+    (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
+  (export "{entry}" (instance $entry)))"#,
+        entry = runtara_wit::workflow::ENTRY
+    )
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ordinary_invocation_forwards_to_isolated_signer_without_http() -> anyhow::Result<()> {
     let (_bundle, dispatcher, credentials) = dispatcher().await?;
@@ -293,17 +323,7 @@ async fn scoped_child_presigning_keeps_root_authority_and_exact_artifact_version
         Ok(
             runtara_component_host::precompile::CompiledWorkflowPackage {
                 control_importers: Default::default(),
-                root: Component::new(
-                    &engine,
-                    format!(
-                        r#"(component {import}
-                (core module $m (func (export "run") (result i32) i32.const 0))
-                (core instance $m (instantiate $m))
-                (func $run (result (result)) (canon lift (core func $m "run")))
-                (instance $api (export "run" (func $run)))
-                (export "wasi:cli/run@0.2.3" (instance $api)))"#
-                    ),
-                )?,
+                root: Component::new(&engine, minimal_entry(&import))?,
                 artifacts: BTreeMap::from([(child_digest.clone(), child.clone())]),
                 bindings: vec![runtara_invocation_contract::Binding {
                     id: "s3".into(),
@@ -355,10 +375,10 @@ async fn scoped_child_presigning_keeps_root_authority_and_exact_artifact_version
     // A root that imports the trusted executor must pin what it calls.
     let unpinned_root = Component::new(
         &engine,
-        format!(
-            r#"(component (import "{}" (instance)))"#,
+        minimal_entry(&format!(
+            r#"(import "{}" (instance))"#,
             runtara_wit::trusted::EXECUTOR
-        ),
+        )),
     )?;
     let error = rejection(executor.prepare_precompiled(unpinned_root).await);
     assert!(
@@ -507,17 +527,7 @@ async fn one_stale_trusted_pin_fails_only_its_own_agent_calls() -> anyhow::Resul
             .iter()
             .map(|pin| format!("(import \"{pin}\" (instance))"))
             .collect();
-        let root = Component::new(
-            &engine,
-            format!(
-                r#"(component {imports}
-            (core module $m (func (export "run") (result i32) i32.const 0))
-            (core instance $m (instantiate $m))
-            (func $run (result (result)) (canon lift (core func $m "run")))
-            (instance $api (export "run" (func $run)))
-            (export "wasi:cli/run@0.2.3" (instance $api)))"#
-            ),
-        )?;
+        let root = Component::new(&engine, minimal_entry(&imports))?;
         let package = runtara_component_host::precompile::CompiledWorkflowPackage {
             control_importers: Default::default(),
             root,
@@ -740,14 +750,7 @@ async fn approved_earlier_pin_presigns_only_when_a_parked_run_continues() -> any
     let prepare = |root_pin: &str| {
         let root = Component::new(
             &engine,
-            format!(
-                r#"(component (import "{root_pin}" (instance))
-            (core module $m (func (export "run") (result i32) i32.const 0))
-            (core instance $m (instantiate $m))
-            (func $run (result (result)) (canon lift (core func $m "run")))
-            (instance $api (export "run" (func $run)))
-            (export "wasi:cli/run@0.2.3" (instance $api)))"#
-            ),
+            minimal_entry(&format!(r#"(import "{root_pin}" (instance))"#)),
         );
         let executor = executor.clone();
         let child = child.clone();

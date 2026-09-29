@@ -30,33 +30,22 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}-{}", Uuid::new_v4())
 }
 
-/// `wasi:cli/run` returning ok — the embedded analogue of exit code 0.
-const RUN_OK_WAT: &str = r#"
-    (component
-        (core module $m
-            (func (export "run") (result i32) (i32.const 0))
-        )
-        (core instance $i (instantiate $m))
-        (func $run (result (result)) (canon lift (core func $i "run")))
-        (instance $run_iface (export "run" (func $run)))
-        (export "wasi:cli/run@0.2.3" (instance $run_iface))
-    )
-"#;
+/// `invoke` body returning `Ok(completed("{\"ok\":1}"))`.
+const COMPLETED: &str = r#"(i32.store8 (i32.const 2048) (i32.const 0))
+      (i32.store8 (i32.const 2056) (i32.const 0))
+      (i32.store (i32.const 2060) (i32.const 1088)) (i32.store (i32.const 2064) (i32.const 8))
+      (i32.const 2048)"#;
 
-/// `wasi:cli/run` spinning forever — only stop()/timeout can end it.
-const RUN_SPIN_WAT: &str = r#"
-    (component
-        (core module $m
-            (func (export "run") (result i32)
-                (loop $spin (br $spin))
-                (i32.const 0))
-        )
-        (core instance $i (instantiate $m))
-        (func $run (result (result)) (canon lift (core func $i "run")))
-        (instance $run_iface (export "run" (func $run)))
-        (export "wasi:cli/run@0.2.3" (instance $run_iface))
-    )
-"#;
+/// A workflow entry that completes — the embedded analogue of exit code 0.
+fn run_ok() -> String {
+    entry_wat(COMPLETED)
+}
+
+/// A workflow entry whose `invoke` spins forever — only stop()/timeout can
+/// end it.
+fn run_spin() -> String {
+    entry_wat("(loop $spin (br $spin)) (i32.const 2048)")
+}
 
 struct Harness {
     runner: Arc<EmbeddedWasmRunner>,
@@ -99,21 +88,15 @@ async fn harness() -> Harness {
     }
 }
 
-/// Unlike a looping `run`, this never reaches an exported function. Emergency
-/// grace must cover instantiation as well as a non-cooperative invocation.
-const INITIALIZER_SPIN_WAT: &str = r#"
-    (component
-        (core module $m
-            (func $init (loop $spin (br $spin)))
-            (start $init)
-            (func (export "run") (result i32) (i32.const 0))
-        )
-        (core instance $i (instantiate $m))
-        (func $run (result (result)) (canon lift (core func $i "run")))
-        (instance $run_iface (export "run" (func $run)))
-        (export "wasi:cli/run@0.2.3" (instance $run_iface))
+/// Unlike a looping `invoke`, this never reaches an exported function.
+/// Emergency grace must cover instantiation as well as a non-cooperative
+/// invocation.
+fn initializer_spin() -> String {
+    entry_core_wat(
+        "(func $init (loop $spin (br $spin))) (start $init)",
+        COMPLETED,
     )
-"#;
+}
 
 async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: bool) {
     use runtara_core::domain::InstanceStatus;
@@ -280,7 +263,7 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
 
     // A fresh invocation in this runner remains healthy after forced teardown.
     let next_id = unique("after-public-stop");
-    let next_wasm = write_component(h.dir.path(), "next.wasm", RUN_OK_WAT);
+    let next_wasm = write_component(h.dir.path(), "next.wasm", &run_ok());
     seed_detached_instance(&h, &next_id).await;
     let next = h
         .runner
@@ -298,27 +281,27 @@ async fn public_stop_aborts_non_cooperative_guest(wat: &str, grace: u64, peer: b
 
 #[tokio::test(flavor = "multi_thread")]
 async fn public_stop_grace_aborts_spinning_invocation() {
-    public_stop_aborts_non_cooperative_guest(RUN_SPIN_WAT, 1, false).await;
+    public_stop_aborts_non_cooperative_guest(&run_spin(), 1, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn public_stop_grace_aborts_infinite_initializer() {
-    public_stop_aborts_non_cooperative_guest(INITIALIZER_SPIN_WAT, 1, false).await;
+    public_stop_aborts_non_cooperative_guest(&initializer_spin(), 1, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn public_stop_zero_grace_aborts_spinning_invocation() {
-    public_stop_aborts_non_cooperative_guest(RUN_SPIN_WAT, 0, false).await;
+    public_stop_aborts_non_cooperative_guest(&run_spin(), 0, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn peer_stop_grace_aborts_spinning_invocation() {
-    public_stop_aborts_non_cooperative_guest(RUN_SPIN_WAT, 1, true).await;
+    public_stop_aborts_non_cooperative_guest(&run_spin(), 1, true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn peer_stop_zero_grace_aborts_infinite_initializer() {
-    public_stop_aborts_non_cooperative_guest(INITIALIZER_SPIN_WAT, 0, true).await;
+    public_stop_aborts_non_cooperative_guest(&initializer_spin(), 0, true).await;
 }
 
 fn write_component(dir: &Path, name: &str, wat: &str) -> PathBuf {
@@ -334,7 +317,6 @@ fn options(instance_id: &str, wasm_path: &Path) -> LaunchOptions {
         instance_id: instance_id.to_string(),
         tenant_id: "embedded-test".to_string(),
         wasm_path: wasm_path.to_path_buf(),
-        requires_workflow_entry: false,
         expected_workflow_checksum: None,
         preparation_attempt: None,
         preparation_deadline: None,
@@ -358,7 +340,7 @@ async fn blocked_lease_database_cannot_keep_a_physical_guest_running() {
     };
     let h = harness().await;
     let id = unique("lease-database-blocked");
-    let wasm = write_component(h.dir.path(), "spin.wasm", RUN_SPIN_WAT);
+    let wasm = write_component(h.dir.path(), "spin.wasm", &run_spin());
     seed_detached_instance(&h, &id).await;
     let handle = h
         .runner
@@ -434,7 +416,7 @@ async fn blocked_lease_database_cannot_keep_a_physical_guest_running() {
 async fn retired_handle_cannot_control_a_reused_durable_launch() {
     let h = harness().await;
     let id = unique("reused-launch");
-    let wasm = write_component(h.dir.path(), "spin.wasm", RUN_SPIN_WAT);
+    let wasm = write_component(h.dir.path(), "spin.wasm", &run_spin());
     seed_detached_instance(&h, &id).await;
     let options = options(&id, &wasm);
     let old = h.runner.try_launch_detached(&options).await.unwrap();
@@ -484,7 +466,7 @@ async fn retired_handle_cannot_control_a_reused_durable_launch() {
 async fn overlapping_handoffs_keep_separate_physical_handles_and_occupancy() {
     let h = harness().await;
     let id = unique("overlapping-handoff");
-    let wasm = write_component(h.dir.path(), "ok.wasm", RUN_OK_WAT);
+    let wasm = write_component(h.dir.path(), "ok.wasm", &run_ok());
     seed_detached_instance(&h, &id).await;
     let mut first_options = options(&id, &wasm);
     let first_gate = StartGate::new(Duration::from_secs(30));
@@ -563,7 +545,7 @@ impl StartGateConfirmation for BlockingGateConfirmation {
 async fn try_launch_detached_completes_and_clears_registry() {
     let h = harness().await;
     let inst_id = unique("inst-detached");
-    let wasm = write_component(h.dir.path(), "ok.wasm", RUN_OK_WAT);
+    let wasm = write_component(h.dir.path(), "ok.wasm", &run_ok());
     seed_detached_instance(&h, inst_id.as_str()).await;
 
     let handle = h
@@ -588,7 +570,7 @@ async fn try_launch_detached_completes_and_clears_registry() {
 async fn stop_cancels_spinning_instance_without_faking_cleanup() {
     let h = harness().await;
     let inst_id = unique("inst-spin");
-    let wasm = write_component(h.dir.path(), "spin.wasm", RUN_SPIN_WAT);
+    let wasm = write_component(h.dir.path(), "spin.wasm", &run_spin());
     seed_detached_instance(&h, inst_id.as_str()).await;
 
     let handle = h
@@ -652,7 +634,7 @@ async fn detached_gate_allows_preparation_but_blocks_guest_instantiation() {
     // dispatcher has already compiled and linked this component before it
     // reserves a scarce guest run permit; only guest instantiation remains
     // protected by the start gate.
-    let wasm = write_component(h.dir.path(), "gated-spin.wasm", RUN_SPIN_WAT);
+    let wasm = write_component(h.dir.path(), "gated-spin.wasm", &run_spin());
     seed_detached_instance(&h, inst_id.as_str()).await;
     let confirmation_release = Arc::new(tokio::sync::Notify::new());
     let confirmation_calls = Arc::new(AtomicUsize::new(0));
@@ -740,6 +722,11 @@ async fn missing_component_is_binary_not_found() {
 /// the result area's address on the stack), with no runtime import: the
 /// return value is the run's only terminal channel.
 fn entry_wat(result: &str) -> String {
+    entry_core_wat("", result)
+}
+
+/// [`entry_wat`] with `core_items` added to its core module.
+fn entry_core_wat(core_items: &str, result: &str) -> String {
     format!(
         r#"(component
   (core module $m
@@ -749,6 +736,7 @@ fn entry_wat(result: &str) -> String {
     (data (i32.const 1056) "{{\"stepId\":\"s\"}}")
     (data (i32.const 1088) "{{\"ok\":1}}")
     (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 4096)
+    {core_items}
     (func (export "invoke") (param i32 i32 i32 i32) (result i32)
       {result}))
   (core instance $i (instantiate $m))

@@ -1838,7 +1838,6 @@ async fn owned_mock_execution(
             instance_id: fixture.instance_id.clone(),
             tenant_id: fixture.tenant_id.clone(),
             wasm_path: std::env::current_exe().unwrap(),
-            requires_workflow_entry: false,
             expected_workflow_checksum: None,
             preparation_attempt: None,
             preparation_deadline: None,
