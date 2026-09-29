@@ -2,12 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Control agent: coordinate child runs from a workflow.
 //!
-//! The composed copy of this component, inside a workflow, never runs a
-//! capability body. Its `capabilities` export forwards to
-//! `runtara:control/executor`; the host then runs `runtara:control/execution`
-//! on its own approved copy of these bytes, in a fresh store where
-//! `runtara:control/api` is real and the caller's tenant, instance and
-//! operation come from the host. Everywhere else `api` is linked `denied`.
+//! An ordinary composed agent: each capability validates its input, makes
+//! exactly one `runtara:control/api` call and shapes the result. The host
+//! makes `api` real in the run's own store, with the caller's tenant, instance
+//! and operation from the host, and links it `denied` everywhere else. The
+//! compiler grants `runtara:control` to this agent alone.
 //!
 //! Reads: `get`, `get-state`, `query` and `list-pending-signals` cover the
 //! caller's tenant; identity and caller-relative filters need a calling
@@ -969,7 +968,7 @@ pub async fn start(input: StartInput) -> Result<StartOutput, String> {
     host::start(input, args).await
 }
 
-/// Host control calls. Real only in the host executor's store.
+/// Host control calls. Real only for a run's own entry.
 #[cfg(target_arch = "wasm32")]
 mod host {
     use super::ErrorCode;
@@ -1243,7 +1242,7 @@ mod host {
 }
 
 /// Natively there is no control host: the capability runs only as a
-/// component under the host executor.
+/// component.
 #[cfg(not(target_arch = "wasm32"))]
 mod host {
     fn unavailable() -> String {

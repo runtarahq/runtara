@@ -521,7 +521,7 @@ pub(crate) fn control_agent_reference() -> serde_json::Value {
             "cancelGraceMs": format!("0-{} (default {})", c::MAX_CANCEL_GRACE_MS, c::DEFAULT_CANCEL_GRACE_MS),
             "parentCloseGraceMs": c::PARENT_CLOSE_GRACE_MS,
             "continuationBytes": format!("{} KiB of suspension state per step operation and attempt", kib(MAX_CONTINUATION_BYTES)),
-            "controlCallMs": format!("{} ms per control call, below the step's own timeout (CONTROL_TIMEOUT)", c::EXECUTION_TIME_LIMIT_MS)
+            "controlCallMs": format!("{} ms per control call, below the step's own timeout (CONTROL_TIMEOUT)", c::CALL_TIME_LIMIT_MS)
         },
         "replay": {
             "identity": "Each control step call has an operation identity: the step plus its loop position. A retried attempt, a crash recovery and a resumed run replay the same identity.",

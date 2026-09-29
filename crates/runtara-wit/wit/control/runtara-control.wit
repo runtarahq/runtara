@@ -26,8 +26,8 @@ interface types {
     /// Why a control call failed.
     enum error-code {
         /// Not authorized: a target outside the rules of the operation, or
-        /// any call that does not come through the approved control agent in
-        /// a host executor store.
+        /// any call outside a run's own entry (the host makes `api` real only
+        /// there).
         denied,
         /// Malformed or out-of-range arguments, a payload that does not match
         /// the request's response schema, a command aimed at the caller
@@ -332,8 +332,9 @@ interface types {
     }
 }
 
-/// Host control operations. Real only in the fresh stores the host executor
-/// runs approved control bytes in; every other store links `denied` stubs.
+/// Host control operations. Real only for a run's own entry (and the
+/// dispatcher's test invocations of the control agent); every other store
+/// links `denied` stubs.
 ///
 /// Reads (`get`, `get-state`, `query`, `list-pending-signals`) cover the
 /// caller's tenant.
@@ -387,27 +388,7 @@ interface api {
     resume: async func(instance-id: string) -> result<command-result, control-error>;
 }
 
-/// What the composed copy of the control agent forwards to. The result is
-/// the capability's JSON output.
-interface executor {
-    use runtara:agent/types@1.0.0.{error-info};
-
-    invoke: async func(capability-id: string, input: list<u8>) -> result<list<u8>, error-info>;
-}
-
-/// Exported by the control agent and called only by the host executor, in a
-/// fresh store where `api` is real.
-interface execution {
-    use runtara:agent/types@1.0.0.{error-info};
-
-    invoke: async func(capability-id: string, input: list<u8>) -> result<list<u8>, error-info>;
-}
-
-world control-client {
-    import executor;
-}
-
-world control-agent-host {
+/// The host's view: it links `api`.
+world control-host {
     import api;
-    export execution;
 }

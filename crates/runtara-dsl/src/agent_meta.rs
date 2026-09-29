@@ -2983,10 +2983,10 @@ pub fn trusted_artifact_import_agent_id(import: &str) -> Option<&str> {
 /// Prefix of every [`builtin_artifact_import`] name.
 pub const BUILTIN_ARTIFACTS_PREFIX: &str = "runtara:builtin-artifacts/";
 
-/// Content-bound import that pins the exact built-in bytes a workflow composed
-/// for a host-executed built-in (the control agent). The host runs a call only
-/// while this pin, and every composed copy it audited, is in its approved
-/// history.
+/// The content pin artifacts carried for the control agent before it became an
+/// ordinary composed agent. Nothing produces one any more; it is kept so the
+/// compiler and readiness recognise legacy artifacts (and workflow-agents)
+/// that still carry it, and treat them as stale.
 pub fn builtin_artifact_import(agent_id: &str, wasm_sha256: &str, metadata_sha256: &str) -> String {
     format!(
         "{BUILTIN_ARTIFACTS_PREFIX}{}-h{wasm_sha256}-h{metadata_sha256}@0.1.0",

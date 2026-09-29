@@ -2,13 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Host side of `runtara:control`.
 //!
-//! The host cannot tell which composed component made a call, so
-//! `runtara:control/api` is real only in the fresh stores the
-//! [`ControlExecutor`](crate::control_executor::ControlExecutor) runs approved
-//! control bytes in. Every other store — workflow roots and the agent linker
-//! used by the dispatcher and the trusted executor — links `denied` stubs for
-//! both `api` and `executor`, so no component, composed or not, reaches the
-//! control service except through the host executor.
+//! `runtara:control/api` is real in a workflow store only for the run's own
+//! prepared entry ([`RunControl`]), and in the dispatcher only for its own
+//! control agent's test invocations. Every other store gets `denied`. The
+//! host cannot tell which composed component made a call; the compiler's
+//! import allowlist, which grants control only to the canonical control agent,
+//! is what keeps other components away from it (decision D2).
 //!
 //! The tenant, caller instance and operation of a call come from the store
 //! ([`ControlAuthority`]), never from WIT arguments.
@@ -18,15 +17,14 @@ use std::sync::Arc;
 use wasmtime::component::Linker;
 
 mod bindings {
-    // Types only: the host links `api` by hand below and calls `execution`
-    // through a typed function, so every type is generated from the WIT
-    // itself and cannot drift from it.
+    // Types only: the host links `api` by hand below, so every type is
+    // generated from the WIT itself and cannot drift from it.
     wasmtime::component::bindgen!({
         path: [
             "../runtara-wit/wit/agent",
             "../runtara-wit/wit/control",
         ],
-        world: "runtara:control/control-agent-host",
+        world: "runtara:control/control-host",
         imports: { default: async | trappable },
         exports: { default: async },
         additional_derives: [PartialEq, Eq],
@@ -187,7 +185,7 @@ impl ControlApiView for crate::host_state::HostState {
 
 /// The host bound of one control call.
 pub(crate) const CALL_TIME_LIMIT: std::time::Duration =
-    std::time::Duration::from_millis(runtara_control_contract::EXECUTION_TIME_LIMIT_MS);
+    std::time::Duration::from_millis(runtara_control_contract::CALL_TIME_LIMIT_MS);
 
 /// A run's control service: the host plus the run's host-supplied identity.
 /// Present only in a store invoked as the run's own prepared entry.
@@ -358,8 +356,8 @@ pub(crate) fn add_control_api_to_linker<T: ControlApiView + Send + 'static>(
     Ok(())
 }
 
-/// Link `denied` stubs for `runtara:control/api`, for every store that is not
-/// a control executor store.
+/// Link `denied` stubs for `runtara:control/api`, for the agent linker every
+/// agent but the dispatcher's control agent uses.
 pub(crate) fn add_denied_control_api_to_linker<T: Send + 'static>(
     linker: &mut Linker<T>,
 ) -> anyhow::Result<()> {
@@ -372,42 +370,6 @@ pub(crate) fn add_denied_control_api_to_linker<T: Send + 'static>(
         )*};
     }
     with_control_api!(link_denied!(api));
-    Ok(())
-}
-
-/// The `error-info` a `denied` control executor call returns.
-pub(crate) fn denied_error_info(message: &str) -> crate::ErrorInfo {
-    control_error_info("CONTROL_DENIED", message)
-}
-
-/// A permanent, non-retryable `error-info`.
-pub(crate) fn control_error_info(code: &str, message: &str) -> crate::ErrorInfo {
-    crate::ErrorInfo {
-        code: code.into(),
-        message: message.into(),
-        category: "permanent".into(),
-        severity: "error".into(),
-        retryable: false,
-        retry_after_ms: None,
-        attributes: None,
-        details: None,
-    }
-}
-
-/// Link a `denied` stub for `runtara:control/executor`: the agent linker (its
-/// stores are never a workflow's) and the executor's own stores (no nesting).
-pub(crate) fn add_denied_control_executor_to_linker<T: Send + 'static>(
-    linker: &mut Linker<T>,
-) -> anyhow::Result<()> {
-    linker
-        .instance(runtara_wit::control::EXECUTOR)?
-        .func_wrap_concurrent("invoke", |_, (_, _): (String, Vec<u8>)| {
-            Box::pin(async {
-                Ok((Err::<Vec<u8>, _>(denied_error_info(
-                    "control executor calls are not available in this context",
-                )),))
-            })
-        })?;
     Ok(())
 }
 

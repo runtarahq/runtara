@@ -1227,7 +1227,6 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         native_control.instance_waits();
     let embedded_runtara = match embedded_runtara::maybe_start_embedded(
         trusted_executor,
-        None,
         Some(instance_waits),
         Some(native_control.clone() as Arc<dyn runtara_component_host::control_host::ControlHost>),
         connection_resolver,

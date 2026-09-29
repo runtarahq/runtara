@@ -133,8 +133,10 @@ pub fn staged_dependency_is_stale(
 }
 
 /// The built-in agent `pin` names, and the pin of that agent's version in
-/// `components_dir` (`None` when the bundle does not ship it). `None` for a
-/// string that is no trusted or control pin.
+/// `components_dir` (`None` when the bundle does not ship it). A legacy
+/// control pin (`runtara:builtin-artifacts/…`, from before control became an
+/// ordinary composed agent) is never bundled. `None` for a string that is no
+/// trusted or legacy control pin.
 fn pinned_and_bundled<'a>(
     components_dir: &std::path::Path,
     pin: &'a str,
@@ -143,7 +145,7 @@ fn pinned_and_bundled<'a>(
         return Some((agent, bundled_trusted_pin(components_dir, agent)));
     }
     let (agent, _) = runtara_dsl::agent_meta::parse_builtin_artifact_import(pin)?;
-    Some((agent, bundled_builtin_pin(components_dir, agent)))
+    Some((agent, None))
 }
 
 /// The `runtara:trusted-artifacts/*` pin of the version of trusted built-in
@@ -160,23 +162,11 @@ pub fn bundled_trusted_pin(components_dir: &std::path::Path, agent: &str) -> Opt
     ))
 }
 
-/// The `runtara:builtin-artifacts/*` pin of host-executed built-in `agent`
-/// (the control agent) in `components_dir`, or `None` when the bundle does
-/// not ship it. This is the pin a workflow compiled against that bundle
-/// records, and the one a server approves at boot.
-pub fn bundled_builtin_pin(components_dir: &std::path::Path, agent: &str) -> Option<String> {
-    let component = crate::direct_wasm::component::agent_component(agent);
-    let wasm = std::fs::read(components_dir.join(&component.bundle_wasm_filename)).ok()?;
-    let meta = std::fs::read(components_dir.join(&component.bundle_meta_filename)).ok()?;
-    Some(runtara_dsl::agent_meta::builtin_artifact_import(
-        agent,
-        &super::sha256_hex(&wasm),
-        &super::sha256_hex(&meta),
-    ))
-}
-
 /// The approved built-in versions an artifact pins: its top-level
-/// `runtara:trusted-artifacts/*` and `runtara:builtin-artifacts/*` imports. An isolated package's catalog is a
+/// `runtara:trusted-artifacts/*` imports, and the legacy control
+/// `runtara:builtin-artifacts/*` ones of artifacts built before control became
+/// an ordinary composed agent (no host installs those, so such an artifact is
+/// never ready and recompiles). An isolated package's catalog is a
 /// trailing custom section, so the root's pins are read the same way.
 pub fn trusted_artifact_pins(
     wasm: &[u8],

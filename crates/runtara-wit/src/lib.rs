@@ -126,12 +126,8 @@ pub mod control {
     /// Interface-name prefix of every control interface.
     pub const PREFIX: &str = "runtara:control/";
     pub const TYPES: &str = concat!("runtara:control/types@", v!());
-    /// Host control operations: real only in control executor stores.
+    /// Host control operations: real only for a run's own entry.
     pub const API: &str = concat!("runtara:control/api@", v!());
-    /// What the composed control copy forwards to.
-    pub const EXECUTOR: &str = concat!("runtara:control/executor@", v!());
-    /// Exported by the control agent, called only by the host executor.
-    pub const EXECUTION: &str = concat!("runtara:control/execution@", v!());
     pub const WIT: &str = include_str!("../wit/control/runtara-control.wit");
 }
 

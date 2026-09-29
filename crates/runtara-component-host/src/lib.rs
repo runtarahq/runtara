@@ -13,7 +13,6 @@ mod outbound_test_fixture;
 pub mod bindings;
 mod cleanup_alarm;
 pub mod connection_resolver_host;
-pub mod control_executor;
 pub mod control_host;
 pub mod database_host;
 pub use database_host::DatabaseHost;

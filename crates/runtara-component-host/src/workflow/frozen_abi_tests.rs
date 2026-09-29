@@ -9,7 +9,6 @@
 use super::*;
 
 const CONTROL_API: &str = include_str!("frozen_abi/control-api.wat");
-const CONTROL_EXECUTOR: &str = include_str!("frozen_abi/control-executor.wat");
 const OPERATION_SCOPE: &str = include_str!("frozen_abi/operation-scope.wat");
 const SUSPENSION_CONTEXT: &str = include_str!("frozen_abi/suspension-context.wat");
 const WORKFLOW_WAIT: &str = include_str!("frozen_abi/workflow-wait.wat");
@@ -34,7 +33,6 @@ fn fixtures_import_the_released_names() {
     let engine = engine();
     for (wat, name) in [
         (CONTROL_API, "runtara:control/api@1.0.0"),
-        (CONTROL_EXECUTOR, "runtara:control/executor@1.0.0"),
         (OPERATION_SCOPE, "runtara:workflow/operation@1.0.0"),
         (SUSPENSION_CONTEXT, "runtara:agent/continuation@1.0.0"),
         (WORKFLOW_WAIT, "runtara:workflow/waits@1.0.0"),
@@ -52,14 +50,13 @@ fn fixtures_import_the_released_names() {
 }
 
 /// Workflow roots: the operation scope, the suspension context, the control
-/// executor forwarder, the control API and the instance waits all bind 1.0.0.
+/// API and the instance waits all bind 1.0.0.
 #[test]
 fn workflow_stores_link_every_frozen_1_0_0_guest() {
     let engine = engine();
     let executor = WorkflowExecutor::new(engine.clone()).expect("workflow executor");
     for (name, wat) in [
         ("control/api", CONTROL_API),
-        ("control/executor", CONTROL_EXECUTOR),
         ("workflow/operation", OPERATION_SCOPE),
         ("agent/continuation", SUSPENSION_CONTEXT),
         ("workflow/waits", WORKFLOW_WAIT),
@@ -73,14 +70,13 @@ fn workflow_stores_link_every_frozen_1_0_0_guest() {
 }
 
 /// Agent stores (dispatcher, trusted, isolated capabilities): the context
-/// and the `denied` control stubs bind 1.0.0.
+/// and the `denied` control API bind 1.0.0.
 #[test]
 fn agent_stores_link_the_frozen_1_0_0_guests() {
     let engine = engine();
     let linker = crate::registry::build_linker(&engine).expect("agent linker");
     for (name, wat) in [
         ("control/api", CONTROL_API),
-        ("control/executor", CONTROL_EXECUTOR),
         ("agent/continuation", SUSPENSION_CONTEXT),
     ] {
         linker
@@ -89,14 +85,13 @@ fn agent_stores_link_the_frozen_1_0_0_guests() {
     }
 }
 
-/// The control executor's fresh stores bind the real 1.0.0 API.
+/// The dispatcher's control agent binds the real 1.0.0 API.
 #[test]
-fn control_executor_stores_link_the_frozen_1_0_0_api() {
+fn the_control_linker_links_the_frozen_1_0_0_api() {
     let engine = engine();
-    let linker = crate::control_executor::control_linker(&engine).expect("control linker");
+    let linker = crate::registry::build_control_linker(&engine).expect("control linker");
     for (name, wat) in [
         ("control/api", CONTROL_API),
-        ("control/executor", CONTROL_EXECUTOR),
         ("agent/continuation", SUSPENSION_CONTEXT),
     ] {
         linker
@@ -113,8 +108,8 @@ fn a_drifted_1_0_0_shape_does_not_link() {
     let engine = engine();
     let drifted = Component::new(
         &engine,
-        r#"(component (import "runtara:control/executor@1.0.0" (instance
-            (export "invoke" (func async (param "capability-id" string) (param "extra" u32))))))"#,
+        r#"(component (import "runtara:control/api@1.0.0" (instance
+            (export "pause" (func async (param "instance-id" string) (param "extra" u32))))))"#,
     )
     .expect("drifted guest compiles");
     let executor = WorkflowExecutor::new(engine.clone()).expect("workflow executor");
@@ -133,7 +128,7 @@ fn agent_stores_do_not_link_instance_waits() {
         let guest = fixture(&engine, name, wat);
         let linker = crate::registry::build_linker(&engine).expect("agent linker");
         assert!(linker.instantiate_pre(&guest).is_err(), "{name}");
-        let linker = crate::control_executor::control_linker(&engine).expect("control linker");
+        let linker = crate::registry::build_control_linker(&engine).expect("control linker");
         assert!(linker.instantiate_pre(&guest).is_err(), "{name}");
     }
 }

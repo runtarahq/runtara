@@ -338,7 +338,6 @@ fn compiled_package(
 ) -> crate::precompile::CompiledWorkflowPackage {
     crate::precompile::CompiledWorkflowPackage {
         invocations: None,
-        control_importers: Default::default(),
         root: Component::new(fx.executor.engine(), test_support::minimal_entry()).unwrap(),
         artifacts: std::collections::BTreeMap::from([(
             "fixture-digest".into(),
