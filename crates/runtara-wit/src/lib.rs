@@ -184,8 +184,7 @@ pub struct AgentShape {
     pub suspendable: bool,
     /// Also export `runtara:trusted/execution`.
     pub trusted: bool,
-    /// Import the control executor and API, and export
-    /// `runtara:control/execution`.
+    /// The control agent: import `runtara:control/api`.
     pub control: bool,
 }
 
@@ -227,15 +226,11 @@ pub fn agent_package(id: &str, shape: AgentShape) -> String {
         wit.push_str(&format!("    import {};\n", agent::CONTINUATION));
     }
     if shape.control {
-        wit.push_str(&format!("    import {};\n", control::EXECUTOR));
         wit.push_str(&format!("    import {};\n", control::API));
     }
     wit.push_str(&format!("    export {interface};\n"));
     if shape.trusted {
         wit.push_str(&format!("    export {};\n", trusted::EXECUTION));
-    }
-    if shape.control {
-        wit.push_str(&format!("    export {};\n", control::EXECUTION));
     }
     wit.push_str("}\n");
     wit

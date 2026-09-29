@@ -32,35 +32,13 @@ pub(super) fn pin_trusted_dependencies(
         // cannot lift their transitive imports into the root. Preserve those
         // version requirements explicitly before appending the child package.
         let component_bytes = std::fs::read(&dep.wasm_path)?;
-        // A staged workflow-agent that calls control carries the control pin
-        // it was composed with; the import allowlist refuses a pin anywhere
-        // else. Either kind must name the version in the bundle.
+        // A staged workflow-agent carries the pins it was composed with. Each
+        // must name the version in the bundle; a control pin (from a
+        // workflow-agent published before control became an ordinary agent)
+        // never does, so it asks for a republish.
         for pin in artifact_pins(&component_bytes)? {
             require_bundled_version(components_dir, agent_id, &dep.wasm_path, &pin)?;
             pins.insert(pin);
-        }
-        // The host runs control only for the exact control bytes a workflow
-        // composed, from the primary components dir (decision D2).
-        if runtara_dsl::agent_meta::canonical_agent_id(agent_id)
-            == runtara_dsl::agent_meta::CONTROL_AGENT_ID
-        {
-            let artifact = dep.metadata.wasm.as_ref().ok_or_else(|| {
-                DirectCompileError::Component("missing control artifact identity".into())
-            })?;
-            if dep.wasm_path.parent() != Some(components_dir)
-                || super::sha256_hex(&component_bytes) != artifact.sha256
-            {
-                return Err(DirectCompileError::Component(
-                    "the control agent must be the one in the components dir, unchanged during \
-                     composition"
-                        .into(),
-                ));
-            }
-            pins.insert(runtara_dsl::agent_meta::builtin_artifact_import(
-                agent_id,
-                &artifact.sha256,
-                &meta.file.sha256,
-            ));
         }
         let info: serde_json::Value = serde_json::from_slice(&bytes)?;
         if info

@@ -135,9 +135,9 @@ fn agent_package_resolves_for_every_shape() {
                     let has = |names: &[String], name: &str| names.iter().any(|n| n == name);
                     assert_eq!(has(&imports, crate::agent::CONTINUATION), suspendable);
                     assert_eq!(has(&imports, crate::control::API), control);
-                    assert_eq!(has(&imports, crate::control::EXECUTOR), control);
+                    assert!(!has(&imports, crate::control::EXECUTOR));
                     assert_eq!(has(&exports, crate::trusted::EXECUTION), trusted);
-                    assert_eq!(has(&exports, crate::control::EXECUTION), control);
+                    assert!(!has(&exports, crate::control::EXECUTION));
                 }
             }
         }
@@ -560,7 +560,7 @@ fn the_control_api_is_complete_and_frozen() {
         .iter()
         .map(|code| code.wit_name().to_string())
         .collect();
-    assert_eq!(codes.len(), 18);
+    assert_eq!(codes.len(), 19);
     assert_eq!(
         enum_cases(&resolve, types, "error-code"),
         codes,

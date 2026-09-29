@@ -1033,7 +1033,7 @@ pub fn direct_lowering_tag() -> String {
     // their run permits until the execution timeout, and recompiling reported
     // success without rebuilding anything.
     format!(
-        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v24,agent-composition=standard-v1,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,trusted-artifacts=v1,on-signal-remap=v1,wide-result-errors=v1,omit_runtime={}",
+        "abi={}-v{},durable-delay-parking=v1,cooperative-waits=shared-v24,agent-composition=standard-v1,parent-cancel=v1,loop-cooperation=v1,retry-cooperation=v4,structured-agent-errors=v1,plain-child-errors=v1,trusted-artifacts=v1,on-signal-remap=v1,wide-result-errors=v1,control-api=direct-v1,omit_runtime={}",
         workflow_abi_tag(super::component::WorkflowRole::Root),
         DIRECT_WORKFLOW_INVOKE_ABI_VERSION,
         omit_runtime_from_env()

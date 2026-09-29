@@ -1,9 +1,8 @@
-//! A compiled workflow calls `control:get` on another run end to end: DSL ->
-//! composed WASM (pinned, audited) -> environment runner -> host control
-//! executor -> native control service -> runtime persistence. The composed
-//! control copy must be the installed bytes verbatim (decision D2), and a
-//! history without its pin refuses the same artifact at load (a pin revoked
-//! since still loads; its calls are denied).
+//! A compiled workflow calls control on other runs end to end: DSL -> composed
+//! WASM -> environment runner -> the composed control agent calling
+//! `runtara:control/api` in the run's own store -> native control service ->
+//! runtime persistence. The artifact carries no control pin and needs no
+//! approval (decision D2, revised 2026-09-29).
 //!
 //! Requires staged components (`scripts/build-agent-components.sh`) and an
 //! isolated `TEST_RUNTARA_DATABASE_URL`.
@@ -15,7 +14,6 @@ use std::time::Duration;
 use runtara_component_host::ComponentDispatcherService;
 use runtara_core::domain::InstanceStatus;
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
-use runtara_environment::approved_builtins::ApprovedBuiltins;
 use runtara_environment::handlers::EnvironmentHandlerState;
 use runtara_environment::runner::{
     EmbeddedWasmRunner, LaunchOptions, MockRunner, Runner, WorkflowRunnerConfig,
@@ -25,7 +23,6 @@ use runtara_server::runtime_client::{RuntimeClient, RuntimeClientConfig};
 use runtara_store_postgres::PostgresPersistence;
 use runtara_workflows::direct_wasm::{DirectCompilationInput, compile_direct_workflow_composed};
 use serde_json::{Value, json};
-use sha2::Digest;
 use uuid::Uuid;
 
 fn components() -> PathBuf {
@@ -46,15 +43,13 @@ fn graph() -> Value {
         "executionPlan": [{"fromStep": "get", "toStep": "finish"}]})
 }
 
-/// The host side of a control test: the dispatcher bundle's control bytes,
-/// the native service over an isolated runtime database, the approved
-/// history, and an embedded runner.
+/// The host side of a control test: the native service over an isolated
+/// runtime database, and an embedded runner that serves it to every run.
 struct Harness {
     persistence: Arc<PostgresPersistence>,
     pool: sqlx::PgPool,
     tenant: String,
     dispatcher: ComponentDispatcherService,
-    control: Arc<runtara_component_host::control_executor::ControlExecutor>,
     dir: tempfile::TempDir,
     runner: EmbeddedWasmRunner,
     native: Arc<NativeControl>,
@@ -63,15 +58,14 @@ struct Harness {
 
 impl Harness {
     async fn new() -> anyhow::Result<Self> {
-        Self::new_with(|native, _| native).await
+        Self::new_with(|native| native).await
     }
 
     /// Like [`Self::new`], with the control service `wrap` builds around the
-    /// native one (it also gets the executor, to revoke approvals mid-run).
+    /// native one.
     async fn new_with(
         wrap: impl FnOnce(
             Arc<NativeControl>,
-            Arc<runtara_component_host::control_executor::ControlExecutor>,
         ) -> Arc<dyn runtara_component_host::control_host::ControlHost>,
     ) -> anyhow::Result<Self> {
         let url = std::env::var("TEST_RUNTARA_DATABASE_URL")
@@ -82,9 +76,6 @@ impl Harness {
         let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
         let tenant = format!("control-component-{}", Uuid::new_v4());
         let dispatcher = ComponentDispatcherService::from_dir(&components()).await?;
-        let control = dispatcher
-            .control_executor()
-            .expect("the bundle ships the control agent");
         let native = Arc::new(NativeControl::new(Some(tenant.clone())));
         let runtime = Arc::new(RuntimeClient::new(
             Arc::new(EnvironmentHandlerState::new(
@@ -96,16 +87,13 @@ impl Harness {
             RuntimeClientConfig::new(Default::default()),
         ));
         native.install(runtime.clone());
-        control.set_host(wrap(native.clone(), control.clone()))?;
-        ApprovedBuiltins::install(&pool, &control, &[control.pin().to_owned()]).await?;
         let dir = tempfile::tempdir()?;
-        let runner = runner(dir.path(), &persistence, &control)?;
+        let runner = runner(dir.path(), &persistence, wrap(native.clone()))?;
         Ok(Self {
             persistence,
             pool,
             tenant,
             dispatcher,
-            control,
             dir,
             runner,
             native,
@@ -231,7 +219,7 @@ impl Harness {
 fn runner(
     dir: &std::path::Path,
     persistence: &Arc<PostgresPersistence>,
-    control: &Arc<runtara_component_host::control_executor::ControlExecutor>,
+    control: Arc<dyn runtara_component_host::control_host::ControlHost>,
 ) -> anyhow::Result<EmbeddedWasmRunner> {
     Ok(EmbeddedWasmRunner::new(
         WorkflowRunnerConfig {
@@ -242,13 +230,13 @@ fn runner(
         persistence.clone(),
     )?
     .with_in_process_precompiler_for_tests()
-    .with_control_executor(control.clone())?)
+    .with_control_host(control)?)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_composed_control_get_reads_another_run() -> anyhow::Result<()> {
     let harness = Harness::new().await?;
-    let (persistence, tenant, control) = (&harness.persistence, &harness.tenant, &harness.control);
+    let (persistence, tenant) = (&harness.persistence, &harness.tenant);
 
     // The target run.
     let target = format!("{tenant}-target");
@@ -264,16 +252,18 @@ async fn a_composed_control_get_reads_another_run() -> anyhow::Result<()> {
 
     let wasm_path = harness.compile(graph())?;
     let wasm = std::fs::read(&wasm_path)?;
-    let installed = std::fs::read(components().join("runtara_agent_control.wasm"))?;
-    let audit = runtara_component_host::precompile::audit_control_importers(&wasm)?;
-    assert_eq!(
-        audit.importers,
-        [format!("{:x}", sha2::Sha256::digest(&installed))].into(),
-        "wac keeps the nested control bytes verbatim"
-    );
     assert!(
-        runtara_workflows::direct_wasm::trusted_artifact_pins(&wasm)?.contains(control.pin()),
-        "the root pins exactly the executor's bytes"
+        runtara_workflows::direct_wasm::trusted_artifact_pins(&wasm)?.is_empty(),
+        "a control artifact pins nothing"
+    );
+    let names = |name: &str| {
+        wasm.windows(name.len())
+            .any(|bytes| bytes == name.as_bytes())
+    };
+    assert!(names("runtara:control/api@1.0.0"));
+    assert!(
+        !names("runtara:control/executor"),
+        "the composed control agent calls the API itself"
     );
 
     let run = harness
@@ -290,19 +280,6 @@ async fn a_composed_control_get_reads_another_run() -> anyhow::Result<()> {
     assert_eq!(read["instance"]["status"], "completed");
     assert_eq!(read["output"], json!({"total": 42}));
     assert_eq!(read["outputOmitted"], false);
-
-    // Outside the approved history (never approved): it no longer loads.
-    control.set_approved_pins(Vec::<String>::new());
-    let error = harness
-        .launch(
-            &wasm_path,
-            &format!("{tenant}-revoked"),
-            json!({"target": target}),
-        )
-        .await
-        .expect_err("an unapproved control artifact is refused at load")
-        .to_string();
-    assert!(error.contains("not approved"), "{error}");
     Ok(())
 }
 
@@ -662,36 +639,11 @@ fn two_reads_graph() -> Value {
             {"fromStep": "again", "toStep": "finish"}]})
 }
 
-/// Revokes the control approvals right after the run's first control call.
-struct RevokeAfterFirstCall {
-    native: Arc<NativeControl>,
-    control: Arc<runtara_component_host::control_executor::ControlExecutor>,
-}
-
-#[async_trait::async_trait]
-impl runtara_component_host::control_host::ControlHost for RevokeAfterFirstCall {
-    async fn get(
-        &self,
-        authority: &runtara_component_host::control_host::ControlAuthority,
-        instance_id: String,
-    ) -> Result<
-        runtara_component_host::control_host::InstanceDetail,
-        runtara_component_host::control_host::ControlError,
-    > {
-        let result = self.native.get(authority, instance_id).await;
-        self.control.set_approved_pins(Vec::<String>::new());
-        result
-    }
-}
-
-/// Decision D2: approval is re-checked on every call, so a control version
-/// revoked while a run is live fails its next call with `denied` before the
-/// service is reached.
+/// Two control calls in one run each reach the service, under the run's own
+/// authority.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_revoked_control_digest_is_denied_at_the_call() -> anyhow::Result<()> {
-    let harness =
-        Harness::new_with(|native, control| Arc::new(RevokeAfterFirstCall { native, control }))
-            .await?;
+async fn consecutive_control_calls_each_reach_the_service() -> anyhow::Result<()> {
+    let harness = Harness::new().await?;
     let wasm = harness.compile(two_reads_graph())?;
     let parent = format!("{}-parent", harness.tenant);
     let children = [format!("{parent}-child")];
@@ -703,29 +655,20 @@ async fn a_revoked_control_digest_is_denied_at_the_call() -> anyhow::Result<()> 
         )
         .await;
     let run = harness.run(&wasm, &parent, input).await?;
-    assert_eq!(run.status, InstanceStatus::Failed);
-    assert!(
-        run.error
-            .as_deref()
-            .is_some_and(|error| error.contains("CONTROL_DENIED")),
-        "{:?}",
-        run.error
-    );
-    assert!(
-        run.error
-            .as_deref()
-            .is_some_and(|error| error.contains("again")),
-        "the second call is the denied one: {:?}",
-        run.error
+    assert_eq!(run.status, InstanceStatus::Completed, "{:?}", run.error);
+    let output: Value = serde_json::from_slice(run.output.as_deref().unwrap())?;
+    assert_eq!(output["result"]["instance"]["instanceId"], children[0]);
+    assert_eq!(
+        output["result"]["instance"]["parentInstanceId"],
+        parent.as_str()
     );
     Ok(())
 }
 
-/// Decision D2 at readiness: an artifact whose control pin is not in the
-/// approved history is not ready, so it never launches; approving it makes
-/// the same compilation ready.
+/// Readiness needs no control approval: a control artifact pins nothing, so
+/// it is ready with no installed pins at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unapproved_control_digest_leaves_the_image_not_ready() -> anyhow::Result<()> {
+async fn a_control_artifact_is_ready_without_any_approved_pin() -> anyhow::Result<()> {
     use runtara_server::api::repositories::workflows::{
         WorkflowRepository, set_installed_trusted_pins, workflow_definition_checksum,
     };
@@ -741,7 +684,7 @@ async fn an_unapproved_control_digest_leaves_the_image_not_ready() -> anyhow::Re
         runtara_workflows::direct_wasm::trusted_artifact_pins(&std::fs::read(&wasm)?)?
             .into_iter()
             .collect();
-    assert!(pins.contains(&harness.control.pin().to_owned()));
+    assert!(pins.is_empty(), "{pins:?}");
     let workflow = format!("reader-{}", Uuid::new_v4());
     let definition = two_reads_graph();
     let image = Uuid::new_v4().to_string();
@@ -785,20 +728,11 @@ async fn an_unapproved_control_digest_leaves_the_image_not_ready() -> anyhow::Re
     assert_eq!(
         repository
             .get_fresh_registered_image_id(&harness.tenant, &workflow, 1)
-            .await?,
-        None,
-        "an unapproved control pin leaves the image not ready"
-    );
-    set_installed_trusted_pins(pins.clone());
-    assert_eq!(
-        repository
-            .get_fresh_registered_image_id(&harness.tenant, &workflow, 1)
             .await?
             .as_deref(),
         Some(image.as_str()),
-        "the approved pin makes the same compilation ready"
+        "a control artifact is ready with no installed pins"
     );
-    set_installed_trusted_pins(Vec::<String>::new());
     Ok(())
 }
 

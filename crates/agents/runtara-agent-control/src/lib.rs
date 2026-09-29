@@ -1390,7 +1390,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
 
 runtara_agent_macro::agent_component!(
     agent = "control",
-    control_executor = true,
+    control = true,
     capabilities = [
         get,
         query,
@@ -1407,6 +1407,35 @@ runtara_agent_macro::agent_component!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every capability makes exactly one `runtara:control/api` call, so the
+    /// host's per-call bound and the operation it reads at the call are the
+    /// capability's own. A second call would get its own 90 s and reuse the
+    /// capability's operation for a second mutation.
+    #[test]
+    fn every_capability_makes_exactly_one_api_call() {
+        let source = include_str!("lib.rs");
+        let host_start = source
+            .find("#[cfg(target_arch = \"wasm32\")]\nmod host {")
+            .expect("the wasm host module");
+        let host_end = host_start + source[host_start..].find("\n}\n").expect("its end");
+        let host = &source[host_start..host_end];
+        let host_fns: Vec<&str> = host.split("pub(super) async fn ").skip(1).collect();
+        assert_eq!(host_fns.len(), agent_info().capabilities.len());
+        for body in host_fns {
+            let name = &body[..body.find('(').unwrap()];
+            assert_eq!(body.matches("api::").count(), 1, "host::{name}");
+        }
+        let capabilities: Vec<&str> = source[..host_start]
+            .split("pub async fn ")
+            .skip(1)
+            .collect();
+        assert_eq!(capabilities.len(), agent_info().capabilities.len());
+        for body in capabilities {
+            let name = &body[..body.find('(').unwrap()];
+            assert_eq!(body.matches("host::").count(), 1, "{name}");
+        }
+    }
 
     #[test]
     fn metadata_lists_every_capability_and_none_suspends() {
