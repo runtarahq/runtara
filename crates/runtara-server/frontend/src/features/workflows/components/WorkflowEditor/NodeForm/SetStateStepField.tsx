@@ -8,6 +8,7 @@ import {
 } from '@/shared/components/ui/form';
 import { Button } from '@/shared/components/ui/button';
 import { NodeFormContext } from './NodeFormContext';
+import { SchemaField } from '../EditorSidebar/SchemaFieldsEditor';
 import {
   MappingValueInput,
   ValueMode,
@@ -26,6 +27,27 @@ type StateField = {
   enum?: unknown[];
 };
 
+/**
+ * The workflow's declared state fields: the editor's (possibly staged)
+ * fields when it has them, otherwise the saved graph's `stateSchema`.
+ */
+function declaredStateFields(
+  stateSchemaFields: SchemaField[] | undefined,
+  executionGraph: unknown
+): Record<string, StateField> {
+  if (stateSchemaFields) {
+    return Object.fromEntries(
+      stateSchemaFields
+        .filter((field) => field.name)
+        .map((field) => [field.name, field])
+    );
+  }
+  return (
+    (executionGraph as { stateSchema?: Record<string, StateField> } | null)
+      ?.stateSchema ?? {}
+  );
+}
+
 /** Mapping rows of a SetState step: one per state field it writes. */
 type Row = { type: string; value: unknown; valueType?: ValueMode };
 
@@ -42,7 +64,7 @@ const VALUE_MODES: readonly ValueMode[] = [
  */
 export function SetStateStepField({ name }: SetStateStepFieldProps) {
   const form = useFormContext();
-  const { executionGraph } = useContext(NodeFormContext);
+  const { executionGraph, stateSchemaFields } = useContext(NodeFormContext);
   const stepType = useWatch({ name: 'stepType', control: form.control });
   const rows: Row[] = useWatch({
     name,
@@ -54,12 +76,7 @@ export function SetStateStepField({ name }: SetStateStepFieldProps) {
     return null;
   }
 
-  const stateSchema =
-    (
-      executionGraph as {
-        stateSchema?: Record<string, StateField>;
-      } | null
-    )?.stateSchema ?? {};
+  const stateSchema = declaredStateFields(stateSchemaFields, executionGraph);
   const fields = Object.entries(stateSchema).sort(([a], [b]) =>
     a.localeCompare(b)
   );

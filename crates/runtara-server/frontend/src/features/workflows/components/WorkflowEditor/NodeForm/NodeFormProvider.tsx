@@ -50,6 +50,8 @@ interface Props {
   outputSchemaFields?: SchemaField[];
   /** Workflow input schema fields for variable suggestions */
   inputSchemaFields?: SchemaField[];
+  /** Workflow state fields, for the SetState step editor */
+  stateSchemaFields?: SchemaField[];
   /** Workflow variables (constants) for variable suggestions */
   variables?: SimpleVariable[];
   children: React.ReactNode;
@@ -97,6 +99,7 @@ export const NodeFormProvider = ({
   isAddingBefore,
   outputSchemaFields,
   inputSchemaFields,
+  stateSchemaFields,
   variables,
 }: Props) => {
   // Pass the entitlement allowlist into getAgents so the HTTP fallback path
@@ -305,6 +308,7 @@ export const NodeFormProvider = ({
       previousSteps,
       outputSchemaFields,
       inputSchemaFields,
+      stateSchemaFields,
       variables,
       isInsideWhileLoop,
       isInsideSplit,
@@ -322,6 +326,7 @@ export const NodeFormProvider = ({
       isLoading,
       outputSchemaFields,
       inputSchemaFields,
+      stateSchemaFields,
       variables,
       isInsideWhileLoop,
       isInsideSplit,

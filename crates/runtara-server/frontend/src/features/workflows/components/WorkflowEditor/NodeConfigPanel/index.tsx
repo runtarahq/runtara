@@ -47,6 +47,8 @@ interface NodeConfigPanelProps {
   outputSchemaFields?: SchemaField[];
   /** Workflow input schema fields for variable suggestions */
   inputSchemaFields?: SchemaField[];
+  /** Workflow state fields, for the SetState step editor */
+  stateSchemaFields?: SchemaField[];
   /** Workflow variables (constants) for variable suggestions */
   variables?: SimpleVariable[];
   onSave: (
@@ -130,6 +132,7 @@ export function NodeConfigPanel({
   originalNodeData,
   outputSchemaFields,
   inputSchemaFields,
+  stateSchemaFields,
   variables,
   onSave,
   onStagedChange,
@@ -346,6 +349,7 @@ export function NodeConfigPanel({
             createContainerId={createContainerId}
             outputSchemaFields={outputSchemaFields}
             inputSchemaFields={inputSchemaFields}
+            stateSchemaFields={stateSchemaFields}
             variables={variables}
           >
             <NodeForm

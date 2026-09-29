@@ -289,6 +289,16 @@ type WorkflowEditorProps = {
       description: string;
       nullable?: boolean;
     }>;
+    stateSchemaFields?: Array<{
+      name: string;
+      type: string;
+      required: boolean;
+      description: string;
+      nullable?: boolean;
+      label?: string;
+      format?: string;
+      enum?: unknown[];
+    }>;
     executionTimeoutSeconds?: number;
     rateLimitBudgetMs?: number;
     durable?: boolean | null;
@@ -2177,6 +2187,7 @@ function WorkflowEditorContent({
           originalNodeData={editingNodeData.originalData}
           outputSchemaFields={workflow.outputSchemaFields}
           inputSchemaFields={workflow.inputSchemaFields}
+          stateSchemaFields={workflow.stateSchemaFields}
           variables={workflow.variables}
           onSave={handleNodeSave}
           onStagedChange={onStagedNodeChange}
@@ -2197,6 +2208,7 @@ function WorkflowEditorContent({
           originalNodeData={pendingNewNode.data as unknown as form.SchemaType}
           outputSchemaFields={workflow.outputSchemaFields}
           inputSchemaFields={workflow.inputSchemaFields}
+          stateSchemaFields={workflow.stateSchemaFields}
           variables={workflow.variables}
           onSave={handlePendingNodeSave}
           isCreate

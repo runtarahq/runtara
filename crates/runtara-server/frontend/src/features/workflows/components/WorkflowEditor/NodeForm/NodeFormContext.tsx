@@ -25,6 +25,8 @@ export interface NodeFormContextContextData {
   outputSchemaFields?: SchemaField[];
   /** Workflow input schema fields for variable suggestions */
   inputSchemaFields?: SchemaField[];
+  /** Workflow state fields, for the SetState step editor */
+  stateSchemaFields?: SchemaField[];
   /** Workflow variables (constants) for variable suggestions */
   variables?: SimpleVariable[];
   /** Whether this step is inside a While loop (or the While condition itself) */
