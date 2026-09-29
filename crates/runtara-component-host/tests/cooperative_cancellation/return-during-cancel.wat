@@ -4,7 +4,7 @@
   (import "request" (func $request async (result u32)))
   (type $error (record (field "code" string) (field "message" string)
     (field "category" string) (field "severity" string) (field "retryable" bool)
-    (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
+    (field "retry-after-ms" (option u64)) (field "attributes" (option string)) (field "details" (option string))))
   (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
   (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
     (case "instances" string)))
@@ -33,18 +33,18 @@
     (import "h" "drop-set" (func $drop-set (param i32)))
     (import "h" "cancel" (func $cancel (param i32) (result i32)))
     (import "h" "drop" (func $drop (param i32)))
-    (import "h" "return" (func $return (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i64 i32 i32 i32)))
+    (import "h" "return" (func $return (param i32)))
     (global $handle (mut i32) (i32.const 0))
     (global $set (mut i32) (i32.const 0))
     (data (i32.const 1024) "{\22status_code\22:200,\22body\22:\22ok\22}")
     (func $finish
-      ;; The canonical result flattens to 15 values: ok tag, `completed` tag and
-      ;; list pointer/length, followed by zero padding for the inactive
-      ;; alternatives (the suspension and the error-info).
-      (call $return (i32.const 0) (i32.const 0) (i32.const 1024) (i32.const 31)
-        (i32.const 0) (i32.const 0) (i32.const 0)
-        (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)
-        (i64.const 0) (i32.const 0) (i32.const 0) (i32.const 0)))
+      ;; The result has more than 16 flat values, so `task.return` takes it by
+      ;; pointer: ok tag @0, `completed` tag @8, list pointer/length @12/@16.
+      (i32.store8 (i32.const 2048) (i32.const 0))
+      (i32.store8 (i32.const 2056) (i32.const 0))
+      (i32.store (i32.const 2060) (i32.const 1024))
+      (i32.store (i32.const 2064) (i32.const 31))
+      (call $return (i32.const 2048)))
     (func (export "invoke") (param i32 i32 i32 i32) (result i32) (local $status i32)
       (local.set $status (call $request (i32.const 64)))
       (if (i32.eq (i32.and (local.get $status) (i32.const 15)) (i32.const 2))

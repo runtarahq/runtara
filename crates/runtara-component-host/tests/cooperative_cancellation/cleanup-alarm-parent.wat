@@ -60,7 +60,7 @@
         (export "trace" (func $trace)) (export "cancel" (func $cancel)) (export "drop" (func $drop))))))
     (type $error (record (field "code" string) (field "message" string) (field "category" string)
       (field "severity" string) (field "retryable" bool) (field "retry-after-ms" (option u64))
-      (field "attributes" (option string))))
+      (field "attributes" (option string)) (field "details" (option string))))
     (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
     (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
       (case "instances" string)))

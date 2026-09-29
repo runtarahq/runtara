@@ -158,7 +158,7 @@ fn wide_result_offsets_match_the_wit_layout() {
             "{function}"
         );
     }
-    assert_eq!(err_offset(runtime, "runtime", "load-input"), 4);
+    assert_eq!(err_offset(runtime, "runtime", "instance-id"), 4);
 }
 
 fn runtara_package(resolve: &wit_parser::Resolve, name: &str) -> wit_parser::PackageId {

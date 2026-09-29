@@ -342,9 +342,6 @@ async fn split_preparation_survivor(preparation: Preparation) -> anyhow::Result<
         if root_cancel {
             *host.cancel_cleanup.lock().unwrap() = Some(Arc::new(tokio::sync::Notify::new()));
         }
-        if parent_timeout {
-            *host.failure_cleanup.lock().unwrap() = Some(Arc::new(tokio::sync::Notify::new()));
-        }
         let exit = invoke_with_connections(
             &compiled,
             host.clone(),
@@ -357,10 +354,12 @@ async fn split_preparation_survivor(preparation: Preparation) -> anyhow::Result<
                 anyhow::bail!("{exit:?}");
             };
             assert_eq!(error.code, "SPLIT_TIMEOUT");
-            assert!(host.failure_observed.load(Ordering::SeqCst));
+            // The returned failure is the only report, persisted after
+            // teardown. The fixture observes the peer's cleanup
+            // asynchronously, so let its task finish before counting.
+            tokio::time::timeout(Duration::from_secs(2), &mut server.task).await???;
             assert_eq!(server.children.load(Ordering::SeqCst), 1);
             assert_eq!(server.closed.load(Ordering::SeqCst), 1);
-            tokio::time::timeout(Duration::from_secs(2), &mut server.task).await???;
             continue;
         }
         if root_cancel {

@@ -102,8 +102,8 @@ impl CompiledWait {
     }
 }
 
-/// All IO is real except the failing poll and captured terminal callback. The
-/// latter models a child whose failure is handled without terminating its root.
+/// All IO is real except the failing poll. The executor never publishes a
+/// terminal result here (the runner does), so the root stays running.
 struct PollFailureHost {
     runtime: PersistenceRuntimeHost,
     fail_close: bool,
@@ -111,17 +111,8 @@ struct PollFailureHost {
 
 #[async_trait::async_trait]
 impl RuntimeHost for PollFailureHost {
-    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
-        self.runtime.load_input().await
-    }
     fn instance_id(&self) -> Result<String, String> {
         self.runtime.instance_id()
-    }
-    async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
-        self.runtime.complete(output).await
-    }
-    async fn fail(&self, _error: Vec<u8>) -> Result<(), String> {
-        Ok(())
     }
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
         self.runtime.custom_event(kind, payload).await

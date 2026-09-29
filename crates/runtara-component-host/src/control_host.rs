@@ -258,6 +258,7 @@ pub(crate) fn control_error_info(code: &str, message: &str) -> crate::ErrorInfo 
         retryable: false,
         retry_after_ms: None,
         attributes: None,
+        details: None,
     }
 }
 

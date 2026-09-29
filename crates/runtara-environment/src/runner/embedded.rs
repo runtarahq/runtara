@@ -815,7 +815,6 @@ impl EmbeddedWasmRunner {
         stderr: Option<std::fs::File>,
         timeout: Duration,
         cancel: Option<CancelToken>,
-        prepared_input: Option<Vec<u8>>,
     ) -> (
         WorkflowRunSpec,
         Arc<crate::runtime_host::PersistenceRuntimeHost>,
@@ -831,10 +830,6 @@ impl EmbeddedWasmRunner {
             options.instance_id.clone(),
             debug_mode,
         )
-        // A guest that asks for its input through the host interface gets the
-        // same bytes the launch already has, rather than a second read of what
-        // was just written. Unset on wake/resume, so those still read the store.
-        .with_prepersisted_input(prepared_input)
         // Host authority for trusted calls under an earlier approved pin:
         // only a wake or resume of a parked run may make them.
         .with_trusted_launch(trusted_launch(options.launch_kind));
@@ -1374,8 +1369,8 @@ async fn record_cleanup_aborted_exit(persistence: &Arc<dyn Persistence>, instanc
 ///   `status=suspended` inline via their ack, and stamping `sleep_until` would
 ///   wrongly schedule an immediate wake.
 ///
-/// The park is `if_running`-guarded (a guest that already reported a terminal
-/// complete/fail must not be resurrected as suspended — the same race guard
+/// The park is `if_running`-guarded (a run already terminal must not be
+/// resurrected as suspended — the same race guard
 /// `handle_instance_event`'s suspend path uses), and stamps a
 /// `termination_reason` marker naming the wake shape: `waiting_instances` for
 /// parks on instance waits, `waiting_signal` for on-signal parks (the ONLY
@@ -1604,7 +1599,6 @@ impl Runner for EmbeddedWasmRunner {
             None,
             options.timeout,
             Some(cancel),
-            Some(input.clone()),
         );
 
         let executor = Arc::clone(&self.executor);
@@ -1685,14 +1679,30 @@ impl Runner for EmbeddedWasmRunner {
                     )
                     .await
                 } else {
-                    executor
+                    let run = executor
                         .execute_prepared_invoke_with_start_confirmation(
                             &workflow,
                             spec,
                             input,
                             start_confirmation.clone(),
                         )
-                        .await
+                        .await;
+                    // The return value is the run's only terminal channel:
+                    // persist it once, here, before the completion guard drops
+                    // and the monitor would record a still-running run as
+                    // crashed. (A scoped root publishes after its cleanup.)
+                    if let Some(terminal) =
+                        runtara_component_host::runtime_host::RunTerminal::from_exit(&run.exit)
+                        && let Err(error) =
+                            runtara_component_host::runtime_host::RuntimeHost::terminal(
+                                runtime_host.as_ref(),
+                                terminal,
+                            )
+                            .await
+                    {
+                        error!(instance_id = %instance_id, %error, "Terminal write failed");
+                    }
+                    run
                 };
                 {
                     let mut guard = metrics_for_task.lock().await;
@@ -1748,7 +1758,7 @@ impl Runner for EmbeddedWasmRunner {
             } else if let Some(pre) = workflow.command() {
                 // Generic non-workflow components retain their established
                 // wasi:cli/run ABI. Generated direct workflows were rejected
-                // during preparation if they lack lifecycle.invoke.
+                // during preparation if they lack the workflow entry.
                 if !supervisor_owns_lifecycle {
                     mark_running(persistence.as_ref(), &instance_id).await;
                 }

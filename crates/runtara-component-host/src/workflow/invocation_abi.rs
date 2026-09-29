@@ -92,6 +92,7 @@ fn error_info(ty: &Type) -> bool {
             ("retryable", boolean),
             ("retry-after-ms", optional_u64),
             ("attributes", optional_string),
+            ("details", optional_string),
         ],
     )
 }

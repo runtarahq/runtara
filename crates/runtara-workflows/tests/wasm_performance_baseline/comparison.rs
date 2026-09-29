@@ -270,7 +270,7 @@ fn measure(
             .unwrap();
         link_times.push(micros(start));
         assert_eq!(pre.child_catalog().is_some(), isolated);
-        let (host, _rx) = host(&input);
+        let (host, _rx) = host();
         let result = runtime.block_on(execute(executor, &pre, host, &input, false));
         cold_times.push(micros(total));
         validate(case, &result.bytes);
@@ -308,7 +308,7 @@ fn measure(
         } else {
             [true, false]
         } {
-            let (host, rx) = host(&input);
+            let (host, rx) = host();
             let start = Instant::now();
             let result =
                 runtime.block_on(execute(executor, &pre, host.clone(), &input, instrument));

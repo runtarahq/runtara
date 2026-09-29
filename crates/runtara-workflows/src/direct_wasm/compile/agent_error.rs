@@ -581,13 +581,8 @@ fn emit_terminal_run_plan_mapping(
     if let Some(DirectHandledTarget { branch_depth }) = handled_target {
         body.instruction(&Instruction::Br(branch_depth));
     } else {
-        // Terminal completion from an onError handler — same exit
-        // shape as the entry function's own tail, including the terminal-status
-        // suppression (omit-runtime, and PublishedAgent where the caller
-        // owns instance lifecycle).
-        if indices.report_terminal_status() {
-            super::core_module::emit_complete(body, indices, output_ptr_local, output_len_local);
-        }
+        // Terminal completion from an onError handler — same exit shape as
+        // the entry function's own tail.
         super::deadline_scope::close_alarm(body, indices);
         super::core_module::emit_invoke_ok_completed_return(
             body,

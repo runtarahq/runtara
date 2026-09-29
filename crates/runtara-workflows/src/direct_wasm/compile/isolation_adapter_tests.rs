@@ -106,6 +106,7 @@ async fn isolated_adapter_preserves_every_error_field_and_raw_success_bytes() {
         retryable: true,
         retry_after_ms: Some(u64::MAX),
         attributes: Some("{\"detail\":\"unicode 🦀\"}".into()),
+        details: Some("{\"code\":\"E_TEST\",\"stepId\":\"🦀\"}".into()),
     };
     let result = invoke(Some(InvokeExit::Failed(error.clone()))).await;
     let InvokeExit::Failed(actual) = result.outcome() else {

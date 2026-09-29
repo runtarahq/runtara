@@ -1644,6 +1644,7 @@ impl WorkflowExecutor {
                 retryable: error.retryable,
                 retry_after_ms: error.retry_after_ms,
                 attributes: error.attributes,
+                details: error.details,
             }),
         })
     }
@@ -1853,7 +1854,11 @@ mod tests {
     fn busy_loop_pre(fx: &Fixture) -> Arc<CommandPre<WorkflowState>> {
         let path = fx.wasm_path.with_file_name("busy-loop.wasm");
         if !path.exists() {
-            std::fs::write(&path, BUSY_LOOP_COMPONENT_WAT).expect("write busy loop");
+            // Publish atomically: a concurrent caller must never read the
+            // file between its creation and its write.
+            let staged = path.with_extension(format!("{:?}.tmp", std::thread::current().id()));
+            std::fs::write(&staged, BUSY_LOOP_COMPONENT_WAT).expect("write busy loop");
+            std::fs::rename(&staged, &path).expect("publish busy loop");
         }
         futures_block_on(fx.executor.load(&path)).expect("load busy loop")
     }

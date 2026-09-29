@@ -2,12 +2,12 @@
 ;;-- TYPES
   (type $error (record (field "code" string) (field "message" string)
     (field "category" string) (field "severity" string) (field "retryable" bool)
-    (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
+    (field "retry-after-ms" (option u64)) (field "attributes" (option string)) (field "details" (option string))))
 ;;-- EXECUTOR
   (import "runtara:control/executor@1.0.0" (instance $exec
     (type $error-def (record (field "code" string) (field "message" string)
       (field "category" string) (field "severity" string) (field "retryable" bool)
-      (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
+      (field "retry-after-ms" (option u64)) (field "attributes" (option string)) (field "details" (option string))))
     (export "error-info" (type $e (eq $error-def)))
     (export "invoke" (func async (param "capability-id" string) (param "input" (list u8))
       (result (result (list u8) (error $e)))))))
@@ -116,7 +116,7 @@
     (with "h" (instance (export "invoke" (func $invoke-lower))))))
   (type $lerror (record (field "code" string) (field "message" string)
     (field "category" string) (field "severity" string) (field "retryable" bool)
-    (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
+    (field "retry-after-ms" (option u64)) (field "attributes" (option string)) (field "details" (option string))))
   (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
   (type $lwake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
     (case "instances" string)))

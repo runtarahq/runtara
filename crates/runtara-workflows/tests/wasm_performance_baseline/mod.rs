@@ -113,7 +113,7 @@ fn cases() -> Vec<Case> {
     cases
 }
 
-pub(super) fn host(input: &[u8]) -> (Arc<CapturingRuntimeHost>, mpsc::Receiver<CapturedMessage>) {
+pub(super) fn host() -> (Arc<CapturingRuntimeHost>, mpsc::Receiver<CapturedMessage>) {
     let (tx, rx) = mpsc::channel();
     let state = ServerState {
         checkpoints: Mutex::new(HashMap::new()),
@@ -131,7 +131,6 @@ pub(super) fn host(input: &[u8]) -> (Arc<CapturingRuntimeHost>, mpsc::Receiver<C
         Arc::new(CapturingRuntimeHost {
             instance_id: "baseline".into(),
             debug_mode: false,
-            input: Arc::new(input.to_vec()),
             sink: Mutex::new(tx),
             state: Arc::new(state),
         }),
@@ -279,7 +278,7 @@ fn workflow_performance_baseline() {
                 .block_on(executor.prepare_precompiled(component.clone()))
                 .unwrap();
             prepare_times.push(micros(start));
-            let (host, _rx) = host(&input);
+            let (host, _rx) = host();
             let (out, _) = runtime.block_on(run(&executor, pre.instance_pre(), host, &input));
             cold_times.push(micros(total));
             validate(&case, &out);
@@ -318,7 +317,7 @@ fn workflow_performance_baseline() {
         let mut event_count = 0;
         let mut output_bytes = 0;
         for i in 0..n + 5 {
-            let (host, rx) = host(&input);
+            let (host, rx) = host();
             let start = Instant::now();
             let (out, peak) =
                 runtime.block_on(run(&executor, pre.instance_pre(), host.clone(), &input));

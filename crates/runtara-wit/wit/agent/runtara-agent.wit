@@ -17,6 +17,11 @@ interface types {
         retryable: bool,
         retry-after-ms: option<u64>,
         attributes: option<string>,  // JSON object
+        /// The producer's full structured error as JSON, when it has more to
+        /// say than the fields above (a workflow's failing step, agent and
+        /// child-run chain). Hosts persist it verbatim as the run's error.
+        /// Agents leave it none.
+        details: option<string>,
     }
 
     /// A pending WaitForSignal: the deterministic signal id (the wait's

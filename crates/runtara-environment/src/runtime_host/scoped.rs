@@ -75,19 +75,17 @@ impl ScopedRuntimeOwner {
     /// Create a child with host-approved checkpoint authority and its real task token.
     pub fn child(
         self: &Arc<Self>,
-        input: Vec<u8>,
         path: String,
         checkpoints: Arc<dyn CheckpointAuthority>,
         cancel: TaskCancellation,
     ) -> Result<Arc<ScopedRuntimeHost>, String> {
-        self.child_inner(input, path, checkpoints, cancel, None)
+        self.child_inner(path, checkpoints, cancel, None)
     }
 
     /// Bind an already-admitted durable attempt. Install the same `io` as the
     /// prepared task's lifecycle so caught failures cannot publish success.
     pub fn child_fenced(
         self: &Arc<Self>,
-        input: Vec<u8>,
         checkpoints: Arc<dyn CheckpointAuthority>,
         cancel: TaskCancellation,
         io: Arc<InvocationIo>,
@@ -97,18 +95,11 @@ impl ScopedRuntimeOwner {
         {
             return Err("invocation IO belongs to another runtime owner".into());
         }
-        self.child_inner(
-            input,
-            io.fence().path.clone(),
-            checkpoints,
-            cancel,
-            Some(io),
-        )
+        self.child_inner(io.fence().path.clone(), checkpoints, cancel, Some(io))
     }
 
     fn child_inner(
         self: &Arc<Self>,
-        input: Vec<u8>,
         path: String,
         checkpoints: Arc<dyn CheckpointAuthority>,
         cancel: TaskCancellation,
@@ -120,12 +111,10 @@ impl ScopedRuntimeOwner {
         }
         Ok(Arc::new(ScopedRuntimeHost {
             owner: self.clone(),
-            input,
             path,
             checkpoints,
             cancel,
             io,
-            terminal: Mutex::new(ChildTerminalState::default()),
             breakpoint_recorded: AtomicBool::new(false),
         }))
     }
@@ -287,29 +276,15 @@ impl ScopedRuntimeOwner {
     }
 }
 
-/// Captured child terminal payload; never written to root terminal status.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ChildTerminal {
-    /// Child success bytes.
-    Complete(Vec<u8>),
-    /// Child failure bytes.
-    Fail(Vec<u8>),
-}
-#[derive(Default)]
-struct ChildTerminalState {
-    value: Option<ChildTerminal>,
-    conflict: bool,
-}
-
-/// Runtime interface for one child invocation; lifecycle effects belong to its owner.
+/// Runtime interface for one child invocation; lifecycle effects belong to its
+/// owner. Its terminal result is the invocation's exit, which never reaches
+/// root terminal status.
 pub struct ScopedRuntimeHost {
     owner: Arc<ScopedRuntimeOwner>,
-    input: Vec<u8>,
     path: String,
     checkpoints: Arc<dyn CheckpointAuthority>,
     cancel: TaskCancellation,
     io: Option<Arc<InvocationIo>>,
-    terminal: Mutex<ChildTerminalState>,
     breakpoint_recorded: AtomicBool,
 }
 impl ScopedRuntimeHost {
@@ -327,37 +302,6 @@ impl ScopedRuntimeHost {
     fn key(&self, checkpoint_id: &str) -> Result<(), String> {
         self.live()?;
         self.checkpoints.authorize(checkpoint_id)
-    }
-    /// Inspect the child callback after its execution has stopped.
-    pub fn terminal(&self) -> Result<Option<ChildTerminal>, String> {
-        let terminal = self
-            .terminal
-            .lock()
-            .map_err(|_| "child terminal state poisoned")?;
-        if terminal.conflict {
-            Err("conflicting child terminal callbacks".into())
-        } else {
-            Ok(terminal.value.clone())
-        }
-    }
-    fn finish(&self, terminal: ChildTerminal) -> Result<(), String> {
-        self.live()?;
-        let mut current = self
-            .terminal
-            .lock()
-            .map_err(|_| "child terminal state poisoned")?;
-        if current.conflict {
-            return Err("conflicting child terminal callbacks".into());
-        }
-        if let Some(previous) = &current.value {
-            if previous != &terminal {
-                current.conflict = true;
-                return Err("conflicting child terminal callbacks".into());
-            }
-        } else {
-            current.value = Some(terminal);
-        }
-        Ok(())
     }
     async fn event(
         &self,
@@ -379,10 +323,6 @@ impl ScopedRuntimeHost {
 
 #[async_trait::async_trait]
 impl RuntimeHost for ScopedRuntimeHost {
-    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
-        self.live()?;
-        Ok(Some(self.input.clone()))
-    }
     fn trusted_launch(&self) -> runtara_component_host::trusted::TrustedLaunch {
         self.owner.root.trusted_launch()
     }
@@ -390,12 +330,6 @@ impl RuntimeHost for ScopedRuntimeHost {
     fn instance_id(&self) -> Result<String, String> {
         self.live()?;
         Ok(self.owner.root.instance_id.clone())
-    }
-    async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
-        self.finish(ChildTerminal::Complete(output))
-    }
-    async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
-        self.finish(ChildTerminal::Fail(error))
     }
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
         self.event(InstanceEventType::EventCustom, payload, Some(kind))

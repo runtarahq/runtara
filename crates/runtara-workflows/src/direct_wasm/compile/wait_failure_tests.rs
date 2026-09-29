@@ -8,6 +8,8 @@ use wasmtime::{ExternType, Linker, Val};
 #[derive(Default)]
 struct Calls {
     closed: usize,
+    /// Failed returns: `invoke-error-fields` decomposing the run's error into
+    /// its returned `Err(error-info)`.
     failed: usize,
     after_close: Vec<String>,
 }
@@ -103,7 +105,7 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
                                     // A successful closure returns InputState::Closed.
                                     response[4] = 2;
                                 }
-                                "fail" | "invoke-error-fields" => {
+                                "invoke-error-fields" => {
                                     let address = args[0].i32().unwrap() as usize;
                                     let len = args[1].i32().unwrap() as usize;
                                     assert_eq!(
@@ -111,9 +113,7 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
                                         ORIGINAL_ERROR,
                                         "successful closure must preserve the original failure"
                                     );
-                                    if name == "fail" {
-                                        caller.data_mut().failed += 1;
-                                    }
+                                    caller.data_mut().failed += 1;
                                 }
                                 other => {
                                     return Err(wasmtime::format_err!(
@@ -148,10 +148,8 @@ fn managed_wait_close_error_cannot_return_a_recoverable_guest_error() {
                 assert_eq!(store.data().failed, 0);
             } else {
                 outcome.unwrap();
-                assert_eq!(
-                    store.data().failed,
-                    usize::from(!matches!(abi, WorkflowRole::PublishedAgent))
-                );
+                // Every role fails through its return value alone.
+                assert_eq!(store.data().failed, 1, "{abi:?}");
             }
         }
     }

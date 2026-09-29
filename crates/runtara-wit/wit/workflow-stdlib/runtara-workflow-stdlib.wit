@@ -33,6 +33,7 @@ interface json {
         retryable: bool,
         retry-after-ms: option<u64>,
         attributes: option<string>,
+        details: option<string>,
     }
 
     init-manifest: func(manifest: list<u8>) -> result<_, string>;

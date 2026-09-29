@@ -36,7 +36,8 @@ fn components_dir() -> PathBuf {
 
 const ERROR_INFO: &str = r#"(type $error (record (field "code" string) (field "message" string)
     (field "category" string) (field "severity" string) (field "retryable" bool)
-    (field "retry-after-ms" (option u64)) (field "attributes" (option string))))"#;
+    (field "retry-after-ms" (option u64)) (field "attributes" (option string))
+    (field "details" (option string))))"#;
 
 /// `runtara:agent/types` `outcome` and the types it uses.
 const OUTCOME: &str = r#"(type $signal (record (field "checkpoint-id" string)
@@ -117,7 +118,8 @@ fn suspendable_body(behaviour: Behaviour) -> String {
           (i32.store (i32.const 2080) (i32.const 1260)) (i32.store (i32.const 2084) (i32.const 5))
           (i32.store8 (i32.const 2088) (i32.const 1))
           (i32.store8 (i32.const 2096) (i32.const 0))
-          (i32.store8 (i32.const 2112) (i32.const 0))"#;
+          (i32.store8 (i32.const 2112) (i32.const 0))
+          (i32.store8 (i32.const 2124) (i32.const 0))"#;
     let once = suspend(&at(&PROBE_WAKE_AT.to_string()));
     let (with, without) = match behaviour {
         Behaviour::Once => (completed.to_string(), once),

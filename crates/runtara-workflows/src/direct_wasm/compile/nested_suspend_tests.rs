@@ -491,8 +491,8 @@ fn breakpointed_graph() -> Value {
 /// A breakpoint does not survive publication as an agent.
 ///
 /// Pausing is an instance-level action and the instance belongs to the caller,
-/// which is why a composed child already never fires `runtime.complete` or
-/// `runtime.fail`. A breakpoint left in a reusable agent would halt whichever
+/// which is why a composed child's outcome is only its return value to that
+/// caller. A breakpoint left in a reusable agent would halt whichever
 /// workflow invoked it, for every caller and every run.
 ///
 /// The proof is the artifact, not a flag: the emitted component must contain no

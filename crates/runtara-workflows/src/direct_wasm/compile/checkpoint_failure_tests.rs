@@ -320,8 +320,6 @@ async fn live_peer_server_preparation(
                     cleanup.fetch_add(1, Ordering::SeqCst);
                     observations.lock().unwrap().push(json!({"event":"target_closed","requests":count.load(Ordering::SeqCst)}));
                     target_closed.notify_one();
-                    if !matches!(preparation, Some(Preparation::ParentSecond(_)))
-                        && let Some(done) = host.failure_cleanup.lock().unwrap().as_ref() { done.notify_one(); }
                     if let Some(done) = host.recovery_cleanup.lock().unwrap().as_ref() { done.notify_one(); }
                 } else {
                     // Release success only once the sibling is waiting for headers/body.
@@ -344,11 +342,6 @@ async fn live_peer_server_preparation(
             tokio::time::timeout(Duration::from_secs(2), lookup_cleaned.notified()).await?;
         }
         if let Some(done) = host.cancel_cleanup.lock().unwrap().as_ref() {
-            done.notify_one();
-        }
-        if matches!(preparation, Some(Preparation::ParentSecond(_)))
-            && let Some(done) = host.failure_cleanup.lock().unwrap().as_ref()
-        {
             done.notify_one();
         }
         Ok(())
@@ -384,16 +377,22 @@ async fn checkpoint_failure_resolves_live_parallel_io_before_reporting() -> anyh
     for body in [false, true] {
         let host = Arc::new(Host::new());
         host.fail_checkpoints("runtara:v2:[\"agent\",", true);
-        *host.failure_cleanup.lock().unwrap() = Some(Arc::new(tokio::sync::Notify::new()));
         let mut server = live_peer_server(host.clone(), body, false).await?;
         let exit = invoke_with_outbound(&compiled, host.clone(), server.outbound()).await?;
         server.check().await?;
         assert_storage_error(exit, true);
         assert_eq!(server.children.load(Ordering::SeqCst), 2);
+        // The failure is the returned exit, which the embedding persists only
+        // after the invocation and its teardown finished; there is no earlier
+        // guest failure report that could precede the peer's cleanup. The
+        // fixture observes that close asynchronously.
+        tokio::time::timeout(FIXTURE_WATCHDOG, async {
+            while server.closed.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
         assert_eq!(server.closed.load(Ordering::SeqCst), 1);
-        // runtime.fail is called before the Store is dropped. Store teardown
-        // alone cannot satisfy this acknowledgment from the server's socket.
-        assert!(host.failure_observed.load(Ordering::SeqCst));
     }
     Ok(())
 }

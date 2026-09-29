@@ -529,6 +529,7 @@ mod component {
                 retryable: fields.retryable,
                 retry_after_ms: fields.retry_after_ms,
                 attributes: fields.attributes,
+                details: fields.details,
             })
         }
 

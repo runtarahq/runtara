@@ -323,7 +323,8 @@ pub(super) fn emit_adapter_configured(
             emit(
                 &mut body,
                 [
-                    Instruction::I32Const(72),
+                    // error-info: 80 bytes.
+                    Instruction::I32Const(80),
                     Instruction::MemoryCopy {
                         src_mem: 0,
                         dst_mem: 0,

@@ -3,7 +3,7 @@ use super::invocation_admission::InvocationAdmission;
 use super::*;
 use runtara_component_host::execution_host::{ExecutionContext, ExecutionError, StartRequest};
 use runtara_component_host::{
-    ChildInvocationScope, ChildInvocationSpec, InvocationScopeFactory, InvokeExit, WorkflowLimits,
+    ChildInvocationScope, ChildInvocationSpec, InvocationScopeFactory, WorkflowLimits,
     WorkflowRunSpec,
 };
 use runtara_core::persistence::invocations::{InvocationLease, validate_identity};
@@ -181,7 +181,6 @@ impl ScopedInvocationFactory {
         };
         let owner = self.owner.clone();
         let settings = self.settings.clone();
-        let input = request.input.clone();
         let path = request.context.path.clone();
         Ok(ChildInvocationScope {
             lifecycle: io
@@ -203,8 +202,8 @@ impl ScopedInvocationFactory {
                     None => io,
                 };
                 let runtime = match io {
-                    Some(io) => owner.child_fenced(input, authorized.checkpoints, cancel, io)?,
-                    None => owner.child(input, path, authorized.checkpoints, cancel)?,
+                    Some(io) => owner.child_fenced(authorized.checkpoints, cancel, io)?,
+                    None => owner.child(path, authorized.checkpoints, cancel)?,
                 };
                 Ok(ChildInvocationSpec {
                     deadline: Some(settings.deadline),
@@ -218,7 +217,7 @@ impl ScopedInvocationFactory {
                         limits: settings.limits.clone(),
                         runtime: Some(runtime.clone()),
                     },
-                    outcome_check: Some(Box::new(move |exit| check_terminal(&runtime, exit))),
+                    outcome_check: None,
                 })
             }),
             execution: authorized.execution,
@@ -232,27 +231,5 @@ impl InvocationScopeFactory for ScopedInvocationFactory {
         request: &StartRequest,
     ) -> Result<ChildInvocationScope, ExecutionError> {
         self.prepare(request, None)
-    }
-}
-
-fn check_terminal(runtime: &ScopedRuntimeHost, exit: &InvokeExit) -> Result<(), String> {
-    // A trap, cancellation, timeout or suspension cannot publish a staged
-    // completion. Preserve that typed control outcome instead of replacing it
-    // with a callback mismatch. The callback bytes never reach root persistence.
-    if !matches!(exit, InvokeExit::Completed(_) | InvokeExit::Failed(_)) {
-        return Ok(());
-    }
-    match (runtime.terminal()?, exit) {
-        (None, _) => Ok(()),
-        (Some(ChildTerminal::Complete(expected)), InvokeExit::Completed(actual))
-            if &expected == actual =>
-        {
-            Ok(())
-        }
-        // Runtime failure payloads can contain additional metadata beyond the
-        // exported error-info record. Preserve the exported typed error, as the
-        // root's deferred terminal wrapper does, without parsing/re-encoding it.
-        (Some(ChildTerminal::Fail(_)), InvokeExit::Failed(_)) => Ok(()),
-        _ => Err("child terminal callback disagrees with invocation outcome".into()),
     }
 }

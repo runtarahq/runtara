@@ -50,7 +50,7 @@ async fn run_loop_with_scenario(
     scenario: Scenario,
 ) -> anyhow::Result<()> {
     let host = Arc::new(Host {
-        inner: PersistingRuntimeHost::new(b"{}"),
+        inner: PersistingRuntimeHost::new(),
         requested: AtomicBool::new(cancel && !published),
         requests: AtomicUsize::new(0),
         closed: Notify::new(),
@@ -178,7 +178,6 @@ async fn run_loop_with_scenario(
                 result.exit
             );
             anyhow::ensure!(host.acknowledged.load(Ordering::SeqCst));
-            anyhow::ensure!(host.inner.completed.lock().unwrap().is_none());
         } else {
             let runtara_component_host::InvokeExit::Completed(output) = result.exit else {
                 anyhow::bail!("loop did not complete: {:?}", result.exit)
@@ -201,7 +200,6 @@ async fn run_loop_with_scenario(
             };
             anyhow::ensure!(serde_json::from_slice::<Value>(&output)? == expected);
         }
-        anyhow::ensure!(host.inner.failed.lock().unwrap().is_none());
         anyhow::ensure!(host.requests.load(Ordering::SeqCst) == usize::from(cancel && published));
         anyhow::Ok(())
     }

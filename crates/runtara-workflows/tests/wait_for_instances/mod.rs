@@ -183,17 +183,8 @@ struct Host {
 
 #[async_trait::async_trait]
 impl RuntimeHost for Host {
-    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
-        Ok(Some(br#"{"data":{},"variables":{}}"#.to_vec()))
-    }
     fn instance_id(&self) -> Result<String, String> {
         Ok(PARENT.into())
-    }
-    async fn complete(&self, _: Vec<u8>) -> Result<(), String> {
-        Ok(())
-    }
-    async fn fail(&self, _: Vec<u8>) -> Result<(), String> {
-        Ok(())
     }
     async fn custom_event(&self, _: String, _: Vec<u8>) -> Result<(), String> {
         Ok(())

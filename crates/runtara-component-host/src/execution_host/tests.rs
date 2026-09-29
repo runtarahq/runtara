@@ -126,6 +126,7 @@ impl InvocationLauncher for Launcher {
                             retryable: true,
                             retry_after_ms: Some(1234),
                             attributes: Some("{}".into()),
+                            details: None,
                         })
                     }
                     Entry::Workflow => InvokeExit::Suspended(vec![

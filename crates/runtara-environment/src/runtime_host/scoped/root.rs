@@ -94,10 +94,6 @@ impl RootExecutionCoordinator for ScopedRootRuntime {
 
 #[async_trait::async_trait]
 impl RuntimeHost for ScopedRootRuntime {
-    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
-        self.owner.ensure_open()?;
-        self.owner.root.load_input().await
-    }
     fn trusted_launch(&self) -> runtara_component_host::trusted::TrustedLaunch {
         self.owner.root.trusted_launch()
     }
@@ -106,13 +102,12 @@ impl RuntimeHost for ScopedRootRuntime {
         self.owner.ensure_open()?;
         self.owner.root.instance_id()
     }
-    async fn complete(&self, output: Vec<u8>) -> Result<(), String> {
+    async fn terminal(
+        &self,
+        terminal: runtara_component_host::runtime_host::RunTerminal,
+    ) -> Result<(), String> {
         self.publishable()?;
-        self.owner.root.complete(output).await
-    }
-    async fn fail(&self, error: Vec<u8>) -> Result<(), String> {
-        self.publishable()?;
-        self.owner.root.fail(error).await
+        self.owner.root.terminal(terminal).await
     }
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String> {
         self.owner.ensure_open()?;

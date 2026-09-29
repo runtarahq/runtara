@@ -131,21 +131,75 @@ pub struct RuntimeCheckpointResult {
 ///   `result`'s err arm). Host misconfiguration and unconfirmed managed-input
 ///   abandonment trap: the guest must not recover past a failed mandatory close.
 ///
-/// Scoped child hosts capture terminal callbacks locally and report lifecycle
+/// A run finishes through its entry's return value, which the embedding
+/// persists once through [`RuntimeHost::terminal`]; the guest has no terminal
+/// call. Scoped child hosts report lifecycle
 /// receipts to a root-owned coordinator instead of applying root transitions.
 /// The embedding finalizes those effects after invocation teardown; it must
 /// supply explicit checkpoint authority and persistent attempt fencing.
+/// A run's terminal result, persisted once from the entry's return value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunTerminal {
+    /// Terminal success with the output payload.
+    Completed(Vec<u8>),
+    /// Terminal failure with the error payload the run records.
+    Failed(Vec<u8>),
+}
+
+impl RunTerminal {
+    /// The terminal of an invocation that completed or failed; `None` when
+    /// it parked, trapped, timed out or was cancelled, which the embedding
+    /// records its own way.
+    pub fn from_exit(exit: &crate::workflow::InvokeExit) -> Option<Self> {
+        match exit {
+            crate::workflow::InvokeExit::Completed(output) => Some(Self::Completed(output.clone())),
+            crate::workflow::InvokeExit::Failed(error) => Some(Self::Failed(error_payload(error))),
+            _ => None,
+        }
+    }
+}
+
+/// The bytes a run records for its error: `details` verbatim when the
+/// workflow supplied them (the stdlib's envelope, so a failure records what it
+/// always did); else the plain `message` when there is no `code`; else JSON
+/// built from the fields.
+pub fn error_payload(error: &crate::lifecycle::WorkflowErrorInfo) -> Vec<u8> {
+    if let Some(details) = &error.details {
+        return details.clone().into_bytes();
+    }
+    if error.code.is_empty() {
+        return error.message.clone().into_bytes();
+    }
+    let mut object = serde_json::Map::new();
+    object.insert("code".into(), error.code.clone().into());
+    object.insert("message".into(), error.message.clone().into());
+    object.insert("category".into(), error.category.clone().into());
+    object.insert("severity".into(), error.severity.clone().into());
+    object.insert("retryable".into(), error.retryable.into());
+    if let Some(retry_after_ms) = error.retry_after_ms {
+        object.insert("retryAfterMs".into(), retry_after_ms.into());
+    }
+    if let Some(attributes) = &error.attributes {
+        object.insert(
+            "attributes".into(),
+            serde_json::from_str(attributes).unwrap_or_else(|_| attributes.clone().into()),
+        );
+    }
+    serde_json::Value::Object(object).to_string().into_bytes()
+}
+
 #[async_trait::async_trait]
 pub trait RuntimeHost: Send + Sync {
-    /// Persisted input for this instance; `None` when the record has no input
-    /// (the glue substitutes the `{}` envelope).
-    async fn load_input(&self) -> Result<Option<Vec<u8>>, String>;
     /// This run's instance id.
     fn instance_id(&self) -> Result<String, String>;
-    /// Report terminal success with the output payload.
-    async fn complete(&self, output: Vec<u8>) -> Result<(), String>;
-    /// Report terminal failure with the error payload.
-    async fn fail(&self, error: Vec<u8>) -> Result<(), String>;
+    /// Persist the run's terminal result. The embedding calls it once, after
+    /// the entry returned and cleanup finished; it is never bound for the
+    /// guest. A host that does not own the instance's terminal state (a
+    /// scoped child, most test doubles) keeps the default no-op.
+    async fn terminal(&self, terminal: RunTerminal) -> Result<(), String> {
+        let _ = terminal;
+        Ok(())
+    }
     /// Emit a custom event (`kind` becomes the event subtype).
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String>;
     /// Whether step-level debug instrumentation is enabled for this run.
@@ -323,43 +377,10 @@ pub fn add_runtime_to_linker(linker: &mut Linker<WorkflowState>) -> anyhow::Resu
     )?;
 
     inst.func_wrap_async(
-        "load-input",
-        |mut store: StoreContextMut<'_, WorkflowState>, (): ()| {
-            let host = require_host(&mut store);
-            Box::new(async move {
-                let host = host?;
-                // Absent input loads as the empty JSON envelope, never as an
-                // error.
-                let result = host
-                    .load_input()
-                    .await
-                    .map(|input| input.unwrap_or_else(|| b"{}".to_vec()));
-                Ok((result,))
-            })
-        },
-    )?;
-
-    inst.func_wrap_async(
         "instance-id",
         |mut store: StoreContextMut<'_, WorkflowState>, (): ()| {
             let host = require_host(&mut store);
             Box::new(async move { Ok((host?.instance_id(),)) })
-        },
-    )?;
-
-    inst.func_wrap_async(
-        "complete",
-        |mut store: StoreContextMut<'_, WorkflowState>, (output,): (Vec<u8>,)| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.complete(output).await,)) })
-        },
-    )?;
-
-    inst.func_wrap_async(
-        "fail",
-        |mut store: StoreContextMut<'_, WorkflowState>, (error,): (Vec<u8>,)| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.fail(error).await,)) })
         },
     )?;
 

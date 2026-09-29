@@ -119,14 +119,13 @@ pub(super) fn return_if_retptr_error(
 ) {
     load_retptr_tag(function);
     function.instruction(&Instruction::If(BlockType::Empty));
-    emit_invoke_err_return_from_retptr(function, indices, None, indices.stdlib_invoke_error_fields);
+    emit_invoke_err_return_from_retptr(function, indices, indices.stdlib_invoke_error_fields);
     function.instruction(&Instruction::End);
 }
 
 /// Write `Err(error-info)` into the fixed invoke result area at offset 0 and
 /// `Return` its pointer, sourcing the error bytes from the retptr error
-/// payload (ptr @+4, len @+8). When `fail_index` is given, `runtime.fail`
-/// fires additively with the same bytes first. Free of locals by design (some
+/// payload (ptr @+4, len @+8). Free of locals by design (some
 /// call sites have none): the error ptr/len are staged into the low scratch
 /// at @88/@92 — beyond every host call's retptr write — BEFORE anything
 /// clobbers the retptr.
@@ -140,7 +139,6 @@ pub(super) fn return_if_retptr_error(
 pub(super) fn emit_invoke_err_return_from_retptr(
     function: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
-    fail_index: Option<u32>,
     stdlib_invoke_error_fields: u32,
 ) {
     // Stage the error ptr/len out of the retptr region.
@@ -168,23 +166,6 @@ pub(super) fn emit_invoke_err_return_from_retptr(
         align: 2,
         memory_index: 0,
     }));
-    if let Some(fail) = fail_index {
-        // Additive host-side recording (its retptr write cannot reach @88+).
-        function.instruction(&Instruction::I32Const(0));
-        function.instruction(&Instruction::I32Load(MemArg {
-            offset: 88,
-            align: 2,
-            memory_index: 0,
-        }));
-        function.instruction(&Instruction::I32Const(0));
-        function.instruction(&Instruction::I32Load(MemArg {
-            offset: 92,
-            align: 2,
-            memory_index: 0,
-        }));
-        push_retptr_arg(function);
-        function.instruction(&Instruction::Call(fail));
-    }
     // Structured decomposition, written directly at the result area.
     function.instruction(&Instruction::I32Const(0));
     function.instruction(&Instruction::I32Load(MemArg {
@@ -214,7 +195,7 @@ fn emit_invoke_err_finalize_from_scratch(
     super::deadline_scope::close_alarm(function, indices);
     load_retptr_tag(function);
     function.instruction(&Instruction::If(BlockType::Empty));
-    // Fallback: zero the record, message = staged raw bytes.
+    // Fallback: zero the record, message and details = staged raw bytes.
     function.instruction(&Instruction::I32Const(0));
     function.instruction(&Instruction::I32Const(0));
     function.instruction(&Instruction::I32Const(80));
@@ -243,6 +224,28 @@ fn emit_invoke_err_finalize_from_scratch(
         align: 2,
         memory_index: 0,
     }));
+    // details = some(the same raw bytes): tag @76, ptr @80, len @84.
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Store8(MemArg {
+        offset: 76,
+        align: 0,
+        memory_index: 0,
+    }));
+    for (from, to) in [(88, 80), (92, 84)] {
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::I32Load(MemArg {
+            offset: from,
+            align: 2,
+            memory_index: 0,
+        }));
+        function.instruction(&Instruction::I32Store(MemArg {
+            offset: to,
+            align: 2,
+            memory_index: 0,
+        }));
+    }
     function.instruction(&Instruction::End);
     // result disc = 1 (err) — on the ok arm this flips 0 -> 1 over the
     // stdlib result whose record @8 is already the error-info payload.
@@ -257,8 +260,7 @@ fn emit_invoke_err_finalize_from_scratch(
     function.instruction(&Instruction::Return);
 }
 
-/// Locals-sourced variant of the invoke `Err` writer (fail already fired by
-/// the caller or not wanted): stage the locals into @88/@92 so the shared
+/// Locals-sourced variant of the invoke `Err` writer: stage the locals into @88/@92 so the shared
 /// finalizer's fallback can reach them, then decompose + finalize.
 pub(super) fn emit_invoke_err_return_from_locals(
     function: &mut WasmFunction,
@@ -749,28 +751,13 @@ pub(super) fn emit_fail_if_retptr_error_inplace(
 ) {
     load_retptr_tag(function);
     function.instruction(&Instruction::If(BlockType::Empty));
-    // Additive host-side `runtime.fail` unless terminal status is
-    // suppressed (omit-runtime, or an PublishedAgent child whose
-    // caller owns the instance) — the Err return value is authoritative.
-    let fail_index = if indices.report_terminal_status() {
-        Some(indices.runtime_fail)
-    } else {
-        None
-    };
-    emit_invoke_err_return_from_retptr(
-        function,
-        indices,
-        fail_index,
-        indices.stdlib_invoke_error_fields,
-    );
+    emit_invoke_err_return_from_retptr(function, indices, indices.stdlib_invoke_error_fields);
     function.instruction(&Instruction::End);
 }
 
-/// Like `return_if_retptr_error`, but reports the error via `runtime.fail`
-/// (emitting a `failed` SDK event carrying the error) before returning, instead
-/// of returning `Err` with no payload — which makes wasmtime exit non-zero with
-/// no SDK event and no diagnostic. `err_ptr_local`/`err_len_local` must be free
-/// at the call site (used as scratch to hold the error list).
+/// Return the retptr error as the run's `Err(error-info)`, which the host
+/// persists. `err_ptr_local`/`err_len_local` must be free at the call site
+/// (used as scratch to hold the error list).
 pub(super) fn emit_fail_if_retptr_error(
     function: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,

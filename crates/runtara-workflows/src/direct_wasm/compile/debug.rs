@@ -433,8 +433,7 @@ pub(super) fn emit_step_breakpoint(
         return;
     }
     // A published workflow-agent has no breakpoints. Pausing is an
-    // instance-level action and the instance belongs to the CALLER — the same
-    // reason a composed child never fires `runtime.complete` or `runtime.fail`.
+    // instance-level action and the instance belongs to the CALLER.
     // A breakpoint baked into a reusable agent would halt whichever workflow
     // invoked it, for every caller and every run, over a debugging aid its
     // author never asked for.

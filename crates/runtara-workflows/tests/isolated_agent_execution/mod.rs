@@ -140,6 +140,7 @@ impl InvocationLauncher for RetryFixture {
                         retryable: true,
                         retry_after_ms: None,
                         attributes: None,
+                        details: None,
                     })
                 })
             })))
@@ -399,7 +400,7 @@ async fn run_composed(
         None
     };
     let input = serde_json::to_vec(&input).unwrap();
-    let (host, _rx) = super::wasm_performance_baseline::host(&input);
+    let (host, _rx) = super::wasm_performance_baseline::host();
     let ticker = EpochTicker::spawn(engine);
     let run_spec = WorkflowRunSpec {
         trusted_instance: None,

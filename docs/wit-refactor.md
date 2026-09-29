@@ -668,6 +668,27 @@ components, not workflows.
 
 ### Phase 6: the return value is the only terminal channel
 
+Progress: landed as one commit after Phase 5. Differences from the text
+below:
+- The guards stay where they were. `RuntimeHost` swaps `load_input`, `complete`
+  and `fail` for one host-only method, `terminal(RunTerminal)`, which is
+  never linked for the guest and defaults to a no-op.
+  `PersistenceRuntimeHost::terminal` keeps the cancel suppression and the
+  guarded event path, and retries a failed write (5 attempts, backoff to 2 s).
+  The plain runner calls it right after the entry returns, inside the runner
+  task. The scoped root calls it after cleanup, through
+  `ScopedRootRuntime::publishable()`.
+- `RunTerminal::from_exit` and `runtime_host::error_payload` own the
+  persistence rule.
+- A parent does not yet keep a workflow-agent child's `details` as the
+  `childError` of its own envelope. Adding a string to the agent-error stdlib
+  calls pushes them past 16 flat parameters, which changes their calling
+  convention. The child's flat fields reach the parent as before.
+- The staging and cross-checks of the second channel (`DeferredTerminal`,
+  `ChildTerminal`, the child `outcome_check`) are deleted, not reworked, and
+  so are their conflict and mismatch tests: with one channel there is nothing
+  to disagree.
+
 A separate commit after Phase 5, in the same release. After Phase 5 every
 workflow already returns `result<outcome, error-info>`. Phase 6 makes that
 value the only way a run finishes, so the host stops receiving the result

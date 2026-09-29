@@ -617,17 +617,8 @@ impl runtara_component_host::runtime_host::RuntimeHost for LaunchHost {
     fn trusted_launch(&self) -> runtara_component_host::trusted::TrustedLaunch {
         self.0
     }
-    async fn load_input(&self) -> Result<Option<Vec<u8>>, String> {
-        Err("unused".into())
-    }
     fn instance_id(&self) -> Result<String, String> {
         Ok("launch-host".into())
-    }
-    async fn complete(&self, _: Vec<u8>) -> Result<(), String> {
-        Err("unused".into())
-    }
-    async fn fail(&self, _: Vec<u8>) -> Result<(), String> {
-        Err("unused".into())
     }
     async fn custom_event(&self, _: String, _: Vec<u8>) -> Result<(), String> {
         Ok(())

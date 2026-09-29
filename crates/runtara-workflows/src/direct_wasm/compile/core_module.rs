@@ -43,18 +43,16 @@ pub(super) struct DirectCoreConfig {
     pub(super) static_data: DirectCoreStaticData,
     pub(super) track_events: bool,
     /// Top-level export shape (see `component::WorkflowRole`). Defaults to
-    /// `lifecycle.invoke`; set via [`Self::with_abi`].
+    /// the workflow entry; set via [`Self::with_abi`].
     pub(super) abi: crate::direct_wasm::component::WorkflowRole,
     /// When true, the component imports no `runtara:workflow/runtime`,
-    /// so the emitter must NOT lower any `runtime.*` call — the terminal
-    /// `complete`/`fail` are dropped and the result travels solely in-band via
-    /// the invoke return value. Only valid for a pure workflow under the invoke
-    /// export (see [`Self::with_omit_runtime`]).
+    /// so the emitter must NOT lower any `runtime.*` call. Only valid for a
+    /// pure workflow (see [`Self::with_omit_runtime`]).
     pub(super) omit_runtime: bool,
 }
 
 impl DirectCoreConfig {
-    /// Test constructor with the default (`lifecycle.invoke`) export shape.
+    /// Test constructor with the default (root) export.
     #[cfg(test)]
     pub(super) fn new(
         manifest: &DirectWorkflowManifest,
@@ -665,9 +663,9 @@ fn export_core_function(
     exports.export(&export_name, ExportKind::Func, function_index);
 
     let body = if super::core_imports::is_capabilities_invoke_export(resolve, interface, function) {
-        // The entry export of the current ABI (the world declares exactly one):
-        // `lifecycle.invoke` under Root, `capabilities.invoke`
-        // under PublishedAgent.
+        // The entry export (the world declares exactly one): the workflow
+        // entry under Root, the slug's `capabilities.invoke` under
+        // PublishedAgent; both take `(capability-id, input)`.
         // `direct_run_function` shapes its prologue, param fold, and return
         // convention from `config.abi` and the export's param count.
         direct_run_function(import_indices, config, signature.params.len())
@@ -794,7 +792,6 @@ fn export_initialize(
 /// Canonical declared-local groups for the run function as if it took ZERO
 /// export params. Each ABI derives its declared locals by dropping its export
 /// params off the FRONT of this list ([`drop_leading_locals`]):
-/// `lifecycle.invoke(input)` takes 2 (its `input` folds onto locals 0/1), and
 /// `capabilities.invoke(capability-id, input)` takes 4. Because
 /// the ~100 hand-assigned `DIRECT_*_LOCAL` indices are ABSOLUTE, dropping params
 /// off the front keeps each surviving declared local at its original absolute
@@ -897,8 +894,6 @@ fn direct_run_function(
     config: &DirectCoreConfig,
     export_param_count: usize,
 ) -> WasmFunction {
-    use crate::direct_wasm::component::WorkflowRole;
-
     const DATA_PTR_LOCAL: u32 = 0;
     const DATA_LEN_LOCAL: u32 = 1;
     const SOURCE_PTR_LOCAL: u32 = 2;
@@ -910,12 +905,11 @@ fn direct_run_function(
     const ROUTE_PTR_LOCAL: u32 = 8;
     const ROUTE_LEN_LOCAL: u32 = 9;
 
-    // Fold the export params onto the front of the canonical local layout. The
-    // input list's two i32s land on DATA_PTR/DATA_LEN (0/1) under
-    // `lifecycle.invoke` (2 params); under `capabilities.invoke(capability-id,
-    // input)` (4 params: cap-id + input, ≤ the 16-param flat limit so passed
-    // DIRECTLY) the input lands on params 2/3 and is copied to 0/1 in the
-    // prologue below. Every surviving declared local keeps its absolute
+    // Fold the export params onto the front of the canonical local layout.
+    // Under `capabilities.invoke(capability-id, input)` (4 params: cap-id +
+    // input, ≤ the 16-param flat limit so passed DIRECTLY) the input lands on
+    // params 2/3 and is copied to DATA_PTR/DATA_LEN (0/1) in the prologue
+    // below. Every surviving declared local keeps its absolute
     // DIRECT_*_LOCAL index.
     let mut body = WasmFunction::new(drop_leading_locals(
         CANONICAL_LOCAL_GROUPS,
@@ -978,14 +972,6 @@ fn direct_run_function(
         None,
     );
 
-    // `runtime.complete` records terminal status/output host-side until
-    // Phase 6 moves that to the runner. Suppressed when the runtime is omitted
-    // (nothing to call) and under PublishedAgent: a workflow-agent shares its
-    // caller's instance, so completing it here would finish the caller
-    // mid-flight. Its return value is its sole terminal result.
-    if !config.omit_runtime && !matches!(config.abi, WorkflowRole::PublishedAgent) {
-        emit_complete(&mut body, indices, OUTPUT_PTR_LOCAL, OUTPUT_LEN_LOCAL);
-    }
     super::deadline_scope::close_alarm(&mut body, indices);
     // The terminal result travels as the return value:
     // Ok(outcome::completed(output)).
@@ -1001,19 +987,6 @@ pub(super) const NESTED_SUSPEND_DEADLINE_LOCAL: u32 = 188;
 /// The forwarded wakes, then the signal route of a forwarded `on-signal`.
 pub(super) const NESTED_SUSPEND_SIGNAL_PTR_LOCAL: u32 = 189;
 pub(super) const NESTED_SUSPEND_SIGNAL_LEN_LOCAL: u32 = 190;
-
-/// Both normal and handled-error terminal paths use the same completion API.
-pub(super) fn emit_complete(
-    body: &mut WasmFunction,
-    indices: &DirectCoreFunctionIndices,
-    output_ptr: u32,
-    output_len: u32,
-) {
-    body.instruction(&Instruction::LocalGet(output_ptr));
-    body.instruction(&Instruction::LocalGet(output_len));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.runtime_complete));
-}
 
 /// Write `Ok(outcome::completed(output))` for the invoke export into the
 /// fixed result area and leave its pointer on the stack.

@@ -11,7 +11,7 @@ const CAPABILITY: &str = "runtara:test/capabilities@0.1.0";
 const ERROR_TYPE: &str = r#"(type $error (record
     (field "code" string) (field "message" string) (field "category" string)
     (field "severity" string) (field "retryable" bool)
-    (field "retry-after-ms" (option u64)) (field "attributes" (option string))))"#;
+    (field "retry-after-ms" (option u64)) (field "attributes" (option string)) (field "details" (option string))))"#;
 /// The `runtara:agent/types` outcome every entry returns, and its exports.
 const OUTCOME_TYPES: &str = r#"(type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
       (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")

@@ -4,7 +4,7 @@
   (export "task" (type $task (sub resource)))
   (type $error-info-def (record (field "code" string) (field "message" string)
     (field "category" string) (field "severity" string) (field "retryable" bool)
-    (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
+    (field "retry-after-ms" (option u64)) (field "attributes" (option string)) (field "details" (option string))))
   (export "error-info" (type $error-info (eq $error-info-def)))
   (type $signal-def (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
   (export "signal-wait" (type $signal (eq $signal-def)))

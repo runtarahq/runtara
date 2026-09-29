@@ -24,17 +24,19 @@ pub const DIRECT_AGENT_WIT_VERSION: &str = runtara_wit::VERSION;
 
 /// Who owns the compiled workflow's instance.
 ///
-/// - [`Root`](Self::Root): a top-level run. It exports
-///   `runtara:workflow/lifecycle.invoke(input) -> result<outcome, error-info>`
-///   and also reports its terminal status through `runtime.complete`/`fail`.
+/// Both return `result<outcome, error-info>` from `invoke`, and that value is
+/// the run's only terminal result.
+///
+/// - [`Root`](Self::Root): a top-level run. It exports the workflow entry,
+///   `runtara:agent-workflow-agent/capabilities`, and the host persists its
+///   return value.
 /// - [`PublishedAgent`](Self::PublishedAgent): a workflow published as an
-///   agent. It exports `runtara:agent-<slug>/capabilities.invoke(capability-id,
-///   input) -> result<list<u8>, error-info>` and is composed into a parent,
-///   whose instance it runs in, so it never reports terminal status itself.
-///   Its connection rides inside `input` like any agent's.
+///   agent. It exports `runtara:agent-<slug>/capabilities` and is composed
+///   into a parent, whose instance it runs in; the parent reads its return
+///   value like any agent's. Its connection rides inside `input`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorkflowRole {
-    /// A top-level run: exports `lifecycle.invoke`.
+    /// A top-level run: exports the workflow entry.
     #[default]
     Root,
     /// A published workflow-agent: exports `runtara:agent-<slug>/capabilities`.

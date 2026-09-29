@@ -714,6 +714,29 @@ fn direct_core_imports_and_run_calls(core: &[u8]) -> (HashMap<String, u32>, Vec<
     (imports, run_calls)
 }
 
+/// Operator positions of the in-band `Ok(outcome::completed(output))` write
+/// (`emit_invoke_ok_completed_return`): the zeroed header, then the output
+/// list pointer/length at +12/+16. A run completes through this return value;
+/// there is no `runtime.complete` call to find.
+fn completed_return_positions(ops: &[Operator<'_>]) -> Vec<usize> {
+    ops.windows(8)
+        .enumerate()
+        .filter_map(|(position, window)| match window {
+            [
+                Operator::I32Const { value: 24 },
+                Operator::MemoryFill { mem: 0 },
+                Operator::I32Const { value: 0 },
+                Operator::LocalGet { .. },
+                Operator::I32Store { memarg: ptr },
+                Operator::I32Const { value: 0 },
+                Operator::LocalGet { .. },
+                Operator::I32Store { memarg: len },
+            ] if ptr.offset == 12 && len.offset == 16 => Some(position),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Expand calls to defined core helpers for structural ordering assertions.
 /// Only entry returns are retained: a helper return does not end the workflow.
 fn entry_operators_with_helpers(core: &[u8]) -> Vec<Operator<'_>> {
@@ -4519,13 +4542,6 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
     let (resolve, world) = build_direct_component_resolve().expect("resolve");
     let expected_imports = [
         (
-            "runtime.load-input",
-            "runtara:workflow/runtime",
-            "cm32p2|runtara:workflow/runtime@1",
-            "load-input",
-            vec![WasmType::Pointer],
-        ),
-        (
             "stdlib.init-manifest",
             "runtara:workflow-stdlib/json",
             "cm32p2|runtara:workflow-stdlib/json@1",
@@ -4714,20 +4730,6 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
             ],
         ),
         (
-            "runtime.complete",
-            "runtara:workflow/runtime",
-            "cm32p2|runtara:workflow/runtime@1",
-            "complete",
-            vec![WasmType::Pointer, WasmType::Length, WasmType::Pointer],
-        ),
-        (
-            "runtime.fail",
-            "runtara:workflow/runtime",
-            "cm32p2|runtara:workflow/runtime@1",
-            "fail",
-            vec![WasmType::Pointer, WasmType::Length, WasmType::Pointer],
-        ),
-        (
             "runtime.custom-event",
             "runtara:workflow/runtime",
             "cm32p2|runtara:workflow/runtime@1",
@@ -4902,23 +4904,19 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         }
     }
 
-    // Each setup/stdlib call is followed by a fail-on-error guard (`runtime.fail`
-    // then the structured `Err(error-info)` return, inside an `if error` block)
-    // so an unhandled error surfaces as a `failed` SDK event. The input is the
-    // invoke argument, so there is no load-input call.
-    let fail = fail_index.expect("fail import");
+    // Each setup/stdlib call is followed by a fail-on-error guard (the
+    // structured `Err(error-info)` return, inside an `if error` block) so an
+    // unhandled error is the run's returned failure. The input is the invoke
+    // argument and the output its return value, so there is no load-input
+    // call and no terminal call after the Finish mapping.
     let error_fields = invoke_error_fields_index.expect("invoke-error-fields import");
     let expected_call_order = [
         init_manifest_index.expect("init-manifest import"),
-        fail,
         error_fields,
         build_source_index.expect("build-source import"),
-        fail,
         error_fields,
         apply_mapping_index.expect("apply-mapping import"),
-        fail,
         error_fields,
-        complete_index.expect("complete import"),
     ];
     assert!(
         eval_condition_index.is_some(),
@@ -4945,8 +4943,8 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         "error import should exist for Error lowering"
     );
     assert!(
-        fail_index.is_some(),
-        "fail import should exist for Error lowering"
+        complete_index.is_none() && fail_index.is_none(),
+        "the return value is the only terminal channel; no runtime.complete/fail import"
     );
     assert!(
         custom_event_index.is_some(),
@@ -4954,7 +4952,7 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
     );
     assert_eq!(
         run_calls, expected_call_order,
-        "run body should lower Finish through stdlib/runtime calls in order"
+        "run body should lower Finish through stdlib calls in order"
     );
     assert!(saw_manifest_data, "manifest JSON should be static data");
     assert!(saw_variables_data, "variables JSON should be static data");
@@ -5002,9 +5000,8 @@ fn direct_core_run_lowers_finish_breakpoint_after_output_mapping() {
     let mut stdlib_breakpoint_event_index = None;
     let mut runtime_custom_event_index = None;
     let mut runtime_breakpoint_pause_index = None;
-    let mut runtime_complete_index = None;
     let mut saw_mapping_id = false;
-    let mut run_calls = Vec::new();
+    let mut entry_ops = Vec::new();
     let mut code_body_index = 0;
 
     for payload in Parser::new(0).parse_all(&core) {
@@ -5035,9 +5032,6 @@ fn direct_core_run_lowers_finish_breakpoint_after_output_mapping() {
                             ("cm32p2|runtara:workflow/runtime@1", "breakpoint-pause") => {
                                 runtime_breakpoint_pause_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow/runtime@1", "complete") => {
-                                runtime_complete_index = Some(next_function_index)
-                            }
                             _ => {}
                         }
                         next_function_index += 1;
@@ -5047,13 +5041,12 @@ fn direct_core_run_lowers_finish_breakpoint_after_output_mapping() {
             Payload::CodeSectionEntry(body) => {
                 if code_body_index == 0 {
                     for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
-                            Operator::Call { function_index } => run_calls.push(function_index),
-                            Operator::I32Const { value } if value == *mapping_id as i32 => {
-                                saw_mapping_id = true;
-                            }
-                            _ => {}
+                        let operator = operator.expect("operator");
+                        if matches!(operator, Operator::I32Const { value } if value == *mapping_id as i32)
+                        {
+                            saw_mapping_id = true;
                         }
+                        entry_ops.push(operator);
                     }
                 }
                 code_body_index += 1;
@@ -5072,12 +5065,20 @@ fn direct_core_run_lowers_finish_breakpoint_after_output_mapping() {
     let runtime_custom_event_index = runtime_custom_event_index.expect("custom-event import");
     let runtime_breakpoint_pause_index =
         runtime_breakpoint_pause_index.expect("breakpoint-pause import");
-    let runtime_complete_index = runtime_complete_index.expect("complete import");
 
+    let run_calls: Vec<u32> = entry_ops
+        .iter()
+        .filter_map(|operator| match operator {
+            Operator::Call { function_index } => Some(*function_index),
+            _ => None,
+        })
+        .collect();
+    // Positions are operator indices in the entry body, so the in-band
+    // completed return can be ordered against the calls.
     let position = |index| {
-        run_calls
+        entry_ops
             .iter()
-            .position(|call| *call == index)
+            .position(|operator| matches!(operator, Operator::Call { function_index } if *function_index == index))
             .expect("expected Finish breakpoint call")
     };
     let apply_mapping_position = position(stdlib_apply_mapping_index);
@@ -5087,7 +5088,9 @@ fn direct_core_run_lowers_finish_breakpoint_after_output_mapping() {
     let breakpoint_event_position = position(stdlib_breakpoint_event_index);
     let custom_event_position = position(runtime_custom_event_index);
     let breakpoint_pause_position = position(runtime_breakpoint_pause_index);
-    let complete_position = position(runtime_complete_index);
+    let complete_position = *completed_return_positions(&entry_ops)
+        .last()
+        .expect("the entry returns Ok(completed) in-band");
 
     assert!(
         apply_mapping_position < debug_mode_position
@@ -5480,7 +5483,7 @@ fn direct_core_lowers_non_durable_agent_call() {
     let mut saw_agent_validate_input = false;
     let mut saw_agent_error = false;
     let mut saw_agent_debug_error = false;
-    let mut saw_runtime_fail = false;
+    let mut saw_runtime_terminal = false;
     let mut saw_agent_ok_ptr_load = false;
     let mut saw_agent_ok_len_load = false;
     let mut saw_agent_retry_after_value_load = false;
@@ -5510,8 +5513,8 @@ fn direct_core_lowers_non_durable_agent_call() {
                         && import.name == "agent-error";
                     saw_agent_debug_error |= import.module.contains("runtara:workflow-stdlib/json")
                         && import.name == "agent-debug-error";
-                    saw_runtime_fail |=
-                        import.module.contains("runtara:workflow/runtime") && import.name == "fail";
+                    saw_runtime_terminal |= import.module.contains("runtara:workflow/runtime")
+                        && matches!(import.name, "complete" | "fail" | "load-input");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         next_function_index += 1;
                     }
@@ -5572,7 +5575,10 @@ fn direct_core_lowers_non_durable_agent_call() {
         saw_agent_debug_error,
         "core should import stdlib.agent-debug-error"
     );
-    assert!(saw_runtime_fail, "core should import runtime.fail");
+    assert!(
+        !saw_runtime_terminal,
+        "the return value is the only terminal channel; core must not import a runtime terminal call"
+    );
     assert!(
         saw_agent_ok_ptr_load,
         "Agent success should load list pointer from result payload offset 8"
@@ -6965,8 +6971,7 @@ fn direct_core_lowers_non_durable_agent_on_error_route() {
 
     let mut error_steps_index = None;
     let mut eval_condition_index = None;
-    let mut complete_index = None;
-    let mut fail_index = None;
+    let mut saw_runtime_terminal = false;
     let mut saw_error_steps_call = false;
     let mut saw_condition_after_error_steps = false;
     let mut saw_complete_after_error_steps = false;
@@ -6988,14 +6993,8 @@ fn direct_core_lowers_non_durable_agent_on_error_route() {
                     {
                         eval_condition_index = Some(next_function_index);
                     }
-                    if import.module.contains("runtara:workflow/runtime")
-                        && import.name == "complete"
-                    {
-                        complete_index = Some(next_function_index);
-                    }
-                    if import.module.contains("runtara:workflow/runtime") && import.name == "fail" {
-                        fail_index = Some(next_function_index);
-                    }
+                    saw_runtime_terminal |= import.module.contains("runtara:workflow/runtime")
+                        && matches!(import.name, "complete" | "fail");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         next_function_index += 1;
                     }
@@ -7003,19 +7002,26 @@ fn direct_core_lowers_non_durable_agent_on_error_route() {
             }
             Payload::CodeSectionEntry(body) => {
                 if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators").into_iter() {
-                        if let Operator::Call { function_index } = operator.expect("operator") {
-                            if Some(function_index) == error_steps_index {
-                                saw_error_steps_call = true;
-                            }
-                            if saw_error_steps_call && Some(function_index) == eval_condition_index
-                            {
-                                saw_condition_after_error_steps = true;
-                            }
-                            if saw_error_steps_call && Some(function_index) == complete_index {
-                                saw_complete_after_error_steps = true;
-                            }
-                        }
+                    let ops: Vec<_> = body
+                        .get_operators_reader()
+                        .expect("operators")
+                        .into_iter()
+                        .map(|operator| operator.expect("operator"))
+                        .collect();
+                    let first_error_steps = ops.iter().position(|operator| {
+                        matches!(operator, Operator::Call { function_index }
+                            if Some(*function_index) == error_steps_index)
+                    });
+                    if let Some(first_error_steps) = first_error_steps {
+                        saw_error_steps_call = true;
+                        saw_condition_after_error_steps =
+                            ops[first_error_steps..].iter().any(|operator| {
+                                matches!(operator, Operator::Call { function_index }
+                                    if Some(*function_index) == eval_condition_index)
+                            });
+                        saw_complete_after_error_steps = completed_return_positions(&ops)
+                            .iter()
+                            .any(|position| *position > first_error_steps);
                     }
                 }
                 code_body_index += 1;
@@ -7029,8 +7035,8 @@ fn direct_core_lowers_non_durable_agent_on_error_route() {
         "core should import stdlib.error-steps"
     );
     assert!(
-        fail_index.is_some(),
-        "core should retain runtime.fail fallback for unmatched onError routes"
+        !saw_runtime_terminal,
+        "unmatched onError routes fail through the returned error, not runtime.fail"
     );
     assert!(
         saw_error_steps_call,
@@ -7064,9 +7070,8 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
     let mut invoke_error_fields_index = None;
     let mut build_source_index = None;
     let mut apply_mapping_index = None;
-    let mut complete_index = None;
+    let mut saw_runtime_terminal = false;
     let mut custom_event_index = None;
-    let mut fail_index = None;
     let mut step_debug_start_index = None;
     let mut step_debug_end_index = None;
     let mut step_debug_error_index = None;
@@ -7095,14 +7100,11 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
                             ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
                                 apply_mapping_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow/runtime@1", "complete") => {
-                                complete_index = Some(next_function_index)
+                            ("cm32p2|runtara:workflow/runtime@1", "complete" | "fail") => {
+                                saw_runtime_terminal = true
                             }
                             ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
                                 custom_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "fail") => {
-                                fail_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@1", "step-debug-start") => {
                                 step_debug_start_index = Some(next_function_index)
@@ -7142,44 +7144,38 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
     }
 
     // Each setup/stdlib call (including the step-debug-start/end and their
-    // custom-event emits) is followed by a fail-on-error guard (`runtime.fail`
-    // then the structured `Err(error-info)` return, inside an `if error` block)
-    // so an unhandled error surfaces as a `failed` SDK event.
-    let fail = fail_index.expect("fail import");
+    // custom-event emits) is followed by a fail-on-error guard (the
+    // structured `Err(error-info)` return, inside an `if error` block) so an
+    // unhandled error is the run's returned failure. Completion is the
+    // in-band return value, so no terminal call follows the end event.
+    assert!(
+        !saw_runtime_terminal,
+        "the return value is the only terminal channel; no runtime.complete/fail import"
+    );
     let error_fields = invoke_error_fields_index.expect("invoke-error-fields import");
     let expected_call_order = [
         init_manifest_index.expect("init-manifest import"),
-        fail,
         error_fields,
         build_source_index.expect("build-source import"),
-        fail,
         error_fields,
         step_debug_start_index.expect("step-debug-start import"),
-        fail,
         error_fields,
         custom_event_index.expect("custom-event import"),
-        fail,
         error_fields,
         apply_mapping_index.expect("apply-mapping import"),
         // Unhandled-failure attribution: on a mapping error this Finish emits an
         // error step-debug-end (step-debug-error builder + custom-event) and then
-        // runtime.fail. These execute only on the error branch; the success path
+        // the failed return. These execute only on the error branch; the success path
         // falls through to the end event below.
         step_debug_error_index.expect("step-debug-error import"),
-        fail,
         error_fields,
         custom_event_index.expect("custom-event import"),
-        fail,
         error_fields,
-        fail,
         error_fields,
         step_debug_end_index.expect("step-debug-end import"),
-        fail,
         error_fields,
         custom_event_index.expect("custom-event import"),
-        fail,
         error_fields,
-        complete_index.expect("complete import"),
     ];
     assert_eq!(
         run_calls, expected_call_order,
@@ -8962,7 +8958,7 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
     let mut apply_mapping_index = None;
     let mut runtime_instance_id_index = None;
     let mut runtime_now_ms_index = None;
-    let mut runtime_fail_index = None;
+    let mut invoke_error_fields_index = None;
     let mut runtime_custom_event_index = None;
     let mut runtime_check_signals_index = None;
     let mut runtime_poll_input_index = None;
@@ -9010,8 +9006,8 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
                             ("cm32p2|runtara:workflow/runtime@1", "now-ms") => {
                                 runtime_now_ms_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow/runtime@1", "fail") => {
-                                runtime_fail_index = Some(next_function_index)
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "invoke-error-fields") => {
+                                invoke_error_fields_index = Some(next_function_index)
                             }
                             ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
                                 runtime_custom_event_index = Some(next_function_index)
@@ -9086,8 +9082,8 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
         "WaitForSignal closure lowering should retain the authoritative reason"
     );
     assert!(
-        run_calls.contains(&runtime_fail_index.expect("fail import")),
-        "WaitForSignal timeout lowering should report timeout through runtime.fail"
+        run_calls.contains(&invoke_error_fields_index.expect("invoke-error-fields import")),
+        "WaitForSignal timeout lowering should return the timeout as the run's error"
     );
     assert_eq!(
         run_calls
@@ -9481,7 +9477,7 @@ fn direct_core_run_executes_wait_on_wait_callback_before_wait_event() {
 }
 
 #[test]
-fn direct_core_run_wraps_wait_on_wait_error_before_runtime_fail() {
+fn direct_core_run_wraps_wait_on_wait_error_before_failed_return() {
     let graph = fixture("wait_on_wait_error");
     let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
     let manifest_json = manifest.to_canonical_json().expect("manifest json");
@@ -9507,7 +9503,7 @@ fn direct_core_run_wraps_wait_on_wait_error_before_runtime_fail() {
     let mut next_function_index = 0;
     let mut error_index = None;
     let mut wait_on_wait_error_index = None;
-    let mut runtime_fail_index = None;
+    let mut invoke_error_fields_index = None;
     let mut run_calls = Vec::new();
     let mut code_body_index = 0;
 
@@ -9524,8 +9520,8 @@ fn direct_core_run_wraps_wait_on_wait_error_before_runtime_fail() {
                             ("cm32p2|runtara:workflow-stdlib/json@1", "wait-on-wait-error") => {
                                 wait_on_wait_error_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow/runtime@1", "fail") => {
-                                runtime_fail_index = Some(next_function_index)
+                            ("cm32p2|runtara:workflow-stdlib/json@1", "invoke-error-fields") => {
+                                invoke_error_fields_index = Some(next_function_index)
                             }
                             _ => {}
                         }
@@ -9549,7 +9545,9 @@ fn direct_core_run_wraps_wait_on_wait_error_before_runtime_fail() {
 
     let error_index = error_index.expect("error import");
     let wait_on_wait_error_index = wait_on_wait_error_index.expect("wait-on-wait-error import");
-    let runtime_fail_index = runtime_fail_index.expect("runtime fail import");
+    // The failed return decomposes the wrapped payload through
+    // `invoke-error-fields`; there is no `runtime.fail` call.
+    let invoke_error_fields_index = invoke_error_fields_index.expect("invoke-error-fields import");
     let error_position = run_calls
         .iter()
         .position(|&index| index == error_index)
@@ -9562,19 +9560,19 @@ fn direct_core_run_wraps_wait_on_wait_error_before_runtime_fail() {
         })
         .next()
         .expect("onWait failure wrapper call after nested Error payload");
-    let runtime_fail_position = run_calls
+    let failed_return_position = run_calls
         .iter()
         .enumerate()
         .filter_map(|(position, &index)| {
-            (index == runtime_fail_index && position > wait_on_wait_error_position)
+            (index == invoke_error_fields_index && position > wait_on_wait_error_position)
                 .then_some(position)
         })
         .next()
-        .expect("runtime fail call after onWait wrapper");
+        .expect("failed return after onWait wrapper");
 
     assert!(
-        wait_on_wait_error_position < runtime_fail_position,
-        "onWait wrapper should feed runtime.fail"
+        wait_on_wait_error_position < failed_return_position,
+        "onWait wrapper should feed the failed return"
     );
 }
 
@@ -10145,12 +10143,12 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
     let mut error_event_index = None;
     let mut error_index = None;
     let mut custom_event_index = None;
-    let mut fail_index = None;
-    let mut complete_index = None;
+    let mut saw_runtime_terminal = false;
     let mut saw_error_id = false;
     let mut saw_workflow_error_kind = false;
     let mut invoke_error_fields_index = None;
     let mut run_calls = Vec::new();
+    let mut entry_ops = Vec::new();
     let mut code_body_index = 0;
 
     for payload in Parser::new(0).parse_all(&core) {
@@ -10172,11 +10170,8 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
                             ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
                                 custom_event_index = Some(next_function_index)
                             }
-                            ("cm32p2|runtara:workflow/runtime@1", "fail") => {
-                                fail_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "complete") => {
-                                complete_index = Some(next_function_index)
+                            ("cm32p2|runtara:workflow/runtime@1", "complete" | "fail") => {
+                                saw_runtime_terminal = true
                             }
                             ("cm32p2|runtara:workflow-stdlib/json@1", "invoke-error-fields") => {
                                 invoke_error_fields_index = Some(next_function_index)
@@ -10190,7 +10185,8 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
             Payload::CodeSectionEntry(body) => {
                 if code_body_index == 0 {
                     for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
+                        let operator = operator.expect("operator");
+                        match operator {
                             Operator::Call { function_index } => {
                                 run_calls.push(function_index);
                             }
@@ -10199,6 +10195,7 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
                             }
                             _ => {}
                         }
+                        entry_ops.push(operator);
                     }
                 }
                 code_body_index += 1;
@@ -10217,8 +10214,11 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
     let error_event_index = error_event_index.expect("error-event import");
     let error_index = error_index.expect("error import");
     let custom_event_index = custom_event_index.expect("custom-event import");
-    let fail_index = fail_index.expect("fail import");
-    let complete_index = complete_index.expect("complete import");
+    assert!(
+        !saw_runtime_terminal,
+        "the return value is the only terminal channel; no runtime.complete/fail import"
+    );
+    let invoke_error_fields_index = invoke_error_fields_index.expect("invoke-error-fields import");
     assert_eq!(
         run_calls
             .iter()
@@ -10254,35 +10254,31 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
     assert_eq!(
         run_calls
             .iter()
-            .filter(|&&index| index == fail_index)
+            .filter(|&&index| index == invoke_error_fields_index)
             .count(),
-        3,
-        "Error run should emit runtime.fail three times: one terminal fail for the \
-         Error step plus the two fail-on-error guards after init-manifest and \
-         build-source (each guarded by an `if error` block)"
+        6,
+        "Error run should return Err(error-info) six times: one terminal failure \
+         for the Error step plus a fail-on-error guard after each of init-manifest, \
+         build-source, error-event, custom-event and error (each inside an \
+         `if error` block)"
     );
+    let first_failed_return = entry_ops
+        .iter()
+        .position(|operator| {
+            matches!(operator, Operator::Call { function_index }
+                if *function_index == invoke_error_fields_index)
+        })
+        .expect("failed return");
     assert!(
-        run_calls
+        completed_return_positions(&entry_ops)
             .iter()
-            .position(|&index| index == fail_index)
-            .expect("runtime.fail call")
-            < run_calls
-                .iter()
-                .position(|&index| index == complete_index)
-                .expect("runtime.complete call"),
-        "runtime.fail should be emitted before the unreachable completion tail"
+            .all(|completed| first_failed_return < *completed),
+        "the failed return should be emitted before the unreachable completion tail"
     );
     assert!(saw_error_id, "Error id should be passed to stdlib");
     assert!(
         saw_workflow_error_kind,
         "workflow_error custom-event kind should be static data"
-    );
-    let invoke_error_fields_index = invoke_error_fields_index.expect("invoke-error-fields import");
-    assert!(
-        run_calls
-            .windows(2)
-            .all(|pair| pair[0] != fail_index || pair[1] == invoke_error_fields_index),
-        "every runtime.fail should be followed by the Err(error-info) return: {run_calls:?}"
     );
 }
 
@@ -10983,7 +10979,7 @@ fn abi_is_part_of_the_lowering_tag() {
 
     let tag = super::direct_lowering_tag();
     assert!(
-        tag.contains("abi=invoke-v3"),
+        tag.contains("abi=invoke-v4"),
         "the tag must name the ABI, or changing it cannot invalidate a cached image: {tag}"
     );
     assert!(

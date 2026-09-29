@@ -174,7 +174,7 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
                         code: "UNKNOWN_CAPABILITY".into(),
                         message: format!("{} agent has no capability `{other}`", #agent),
                         category: "permanent".into(), severity: "error".into(),
-                        retryable: false, retry_after_ms: None, attributes: None,
+                        retryable: false, retry_after_ms: None, attributes: None, details: None,
                     }),
                 };
                 result.map_err(error_string_to_error_info)
@@ -192,6 +192,7 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
                 retryable: false,
                 retry_after_ms: None,
                 attributes: None,
+                details: None,
             }
         }
 
@@ -230,6 +231,7 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
                     retryable,
                     retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
                     attributes: value.get("attributes").map(|v| v.to_string()),
+                    details: None,
                 }
             } else {
                 ErrorInfo {
@@ -240,6 +242,7 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
                     retryable: false,
                     retry_after_ms: None,
                     attributes: None,
+                    details: None,
                 }
             }
         }
@@ -379,7 +382,7 @@ fn ordinary_suspension(
                     code: "UNKNOWN_CAPABILITY".into(),
                     message: format!("{} agent has no suspending capability `{other}`", #agent),
                     category: "permanent".into(), severity: "error".into(),
-                    retryable: false, retry_after_ms: None, attributes: None,
+                    retryable: false, retry_after_ms: None, attributes: None, details: None,
                 }),
             };
             result.map_err(error_string_to_error_info)
@@ -480,6 +483,7 @@ fn control_executor(
                 retryable: false,
                 retry_after_ms: None,
                 attributes: None,
+                details: None,
             }
         }
 
@@ -528,6 +532,7 @@ fn control_executor(
                 severity: field("severity").unwrap_or_else(|| "error".into()),
                 retry_after_ms: value.get("retry_after_ms").and_then(|v| v.as_u64()),
                 attributes: value.get("attributes").map(|v| v.to_string()),
+                details: None,
             }
         }
 

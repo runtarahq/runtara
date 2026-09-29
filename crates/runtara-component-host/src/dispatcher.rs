@@ -618,6 +618,7 @@ pub(crate) fn unexpected_suspend(capability: &str) -> ErrorInfo {
         retryable: false,
         retry_after_ms: None,
         attributes: None,
+        details: None,
     }
 }
 

@@ -6,7 +6,8 @@
 (component
   (type $error (record (field "code" string) (field "message" string)
     (field "category" string) (field "severity" string) (field "retryable" bool)
-    (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
+    (field "retry-after-ms" (option u64)) (field "attributes" (option string))
+    (field "details" (option string))))
   (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
   (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
     (case "instances" string)))
@@ -23,7 +24,9 @@
   (core func $return (canon task.return (result (result $outcome (error $error))) (memory $memory "memory")))
   (core module $code
     (import "m" "memory" (memory 1))
-    (import "h" "return" (func $return (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i64 i32 i32 i32)))
+    ;; `result<outcome, error-info>` flattens past 16 values, so task.return
+    ;; takes a pointer to the result laid out in linear memory.
+    (import "h" "return" (func $return (param i32)))
     (data (i32.const 1024) "__rt_on_signal__")
     (data (i32.const 1056) "approval")
     (data (i32.const 1088) "permanent")
@@ -31,15 +34,20 @@
     (func (export "invoke") (param i32 i32 i32 i32) (result i32)
       ;; err(error-info { code, message: "approval", category: "permanent",
       ;; severity: "error", retryable: false, retry-after-ms: none,
-      ;; attributes: none }), flattened to the 15 canonical values.
-      (call $return (i32.const 1)
-        (i32.const 1024) (i32.const 16)
-        (i32.const 1056) (i32.const 8)
-        (i32.const 1088) (i32.const 9)
-        (i32.const 1120) (i32.const 5)
-        (i32.const 0)
-        (i32.const 0) (i64.const 0)
-        (i32.const 0) (i32.const 0) (i32.const 0))
+      ;; attributes: none, details: none }) laid out at 2048: the err tag at
+      ;; +0 and the record at +8. Memory starts zeroed, so the false/none
+      ;; fields (retryable +40, retry-after-ms +48, attributes +64,
+      ;; details +76) need no store.
+      (i32.store8 (i32.const 2048) (i32.const 1))
+      (i32.store (i32.const 2056) (i32.const 1024))
+      (i32.store (i32.const 2060) (i32.const 16))
+      (i32.store (i32.const 2064) (i32.const 1056))
+      (i32.store (i32.const 2068) (i32.const 8))
+      (i32.store (i32.const 2072) (i32.const 1088))
+      (i32.store (i32.const 2076) (i32.const 9))
+      (i32.store (i32.const 2080) (i32.const 1120))
+      (i32.store (i32.const 2084) (i32.const 5))
+      (call $return (i32.const 2048))
       (i32.const 0))
     (func (export "callback") (param i32 i32 i32) (result i32)
       unreachable))

@@ -87,7 +87,6 @@ use wit_parser::{Resolve, WorldId};
 
 pub use super::child_workflows::DirectChildWorkflowDependencyMetadata;
 use super::child_workflows::resolve_direct_child_workflow_metadata;
-use abi::push_retptr_arg;
 pub use artifact_metadata::{
     AGENT_IMPORT_ALLOWLIST, AgentImportGrants, AgentImportKind, CONTROL_AGENT_IMPORTS,
     DirectArtifactFileMetadata, DirectArtifactMetadata, DirectComponentDependencyMetadata,
@@ -137,7 +136,7 @@ use super::support::{
 /// Direct workflow artifact ABI version: every workflow exports
 /// `runtara:agent-<id>/capabilities.invoke -> result<outcome, error-info>`.
 /// Bumped whenever the export shape changes, so cached artifacts recompile.
-pub const DIRECT_WORKFLOW_INVOKE_ABI_VERSION: u32 = 3;
+pub const DIRECT_WORKFLOW_INVOKE_ABI_VERSION: u32 = 4;
 /// Custom section containing [`DirectWorkflowManifest`] JSON.
 pub const DIRECT_WORKFLOW_MANIFEST_SECTION: &str = "runtara.direct_workflow.manifest";
 /// Custom section containing [`DirectWorkflowSupportReport`] JSON.
@@ -1001,7 +1000,7 @@ const DIRECT_COMPILE_STACK_SIZE: usize = 256 * 1024 * 1024;
 /// Accepts exactly the graphs passed by [`super::support::analyze_direct_wasm_support`];
 /// anything else is a hard [`DirectCompileError::Unsupported`] carrying the
 /// per-feature report. The emitted component-format artifact is a stable
-/// direct pipeline artifact with a canonical `lifecycle.invoke` export, stdlib
+/// direct pipeline artifact with the canonical workflow entry export, stdlib
 /// JSON calls, and runtime completion calls.
 ///
 /// Runs on a dedicated thread with an explicit [`DIRECT_COMPILE_STACK_SIZE`]
@@ -1064,8 +1063,8 @@ fn workflow_abi_tag(abi: super::component::WorkflowRole) -> &'static str {
 
 /// Opt-in to dropping the `runtara:workflow/runtime` import for a PURE,
 /// non-durable, invoke-ABI workflow (see `WorkflowFeatureSummary::needs_runtime`
-/// and the omit path in the emitter). Default OFF — the runtime import is kept
-/// and the additive `runtime.complete`/`fail` fire as today. Set to `1`/`true`
+/// and the omit path in the emitter). Default OFF — the runtime import is
+/// kept. Set to `1`/`true`
 /// to let eligible workflows compile agent-shaped (zero runtime imports). This
 /// is the compile lever behind workflow-as-agent.
 pub(crate) fn omit_runtime_from_env() -> bool {
@@ -1081,7 +1080,7 @@ fn omit_runtime_from_raw(raw: Option<&str>) -> bool {
 
 /// Reject the removed direct-workflow ABI switch.
 ///
-/// Production direct workflows are always emitted with `lifecycle.invoke`;
+/// Production direct workflows always export the workflow entry;
 /// the legacy `wasi:cli/run` shape no longer exists. A stale environment that
 /// still sets `RUNTARA_DIRECT_WORKFLOW_ABI` to anything else fails loudly
 /// instead of being silently ignored.
@@ -1089,7 +1088,7 @@ fn ensure_supported_production_workflow_abi() -> Result<(), DirectCompileError> 
     match std::env::var("RUNTARA_DIRECT_WORKFLOW_ABI") {
         Err(std::env::VarError::NotPresent) => ensure_supported_production_workflow_abi_raw(None),
         Err(std::env::VarError::NotUnicode(_)) => Err(DirectCompileError::Component(
-            "RUNTARA_DIRECT_WORKFLOW_ABI is not valid Unicode; direct workflows must use lifecycle.invoke".to_string(),
+            "RUNTARA_DIRECT_WORKFLOW_ABI is not valid Unicode; direct workflows must export the workflow entry".to_string(),
         )),
         Ok(value) => ensure_supported_production_workflow_abi_raw(Some(&value)),
     }
@@ -1101,7 +1100,7 @@ fn ensure_supported_production_workflow_abi_raw(
     match raw {
         None | Some("") | Some("invoke") => Ok(()),
         Some(value) => Err(DirectCompileError::Component(format!(
-            "RUNTARA_DIRECT_WORKFLOW_ABI={value:?} is unsupported: direct workflows must use lifecycle.invoke; rebuild or republish legacy artifacts"
+            "RUNTARA_DIRECT_WORKFLOW_ABI={value:?} is unsupported: direct workflows must export the workflow entry; rebuild or republish legacy artifacts"
         ))),
     }
 }
@@ -1700,36 +1699,23 @@ fn build_direct_component_resolve_with_waits(
     Ok((resolve, world))
 }
 
-/// Terminal-failure return — the ONE place that owns the per-ABI exit shape.
-/// Every fail site in every lowerer funnels here (directly or via the
-/// `abi.rs` retptr-error wrappers).
+/// Terminal-failure return — the ONE place that owns the exit shape. Every
+/// fail site in every lowerer funnels here (directly or via the `abi.rs`
+/// retptr-error wrappers).
 ///
-/// The failure is still recorded host-side via `runtime.fail` (additive
-/// during the migration). The return is `Err(error-info)` written into the
-/// fixed result area at offset 0 (the low retptr scratch — dead here by
-/// construction: no host call runs between this write and the canonical lift,
-/// and it is 8-aligned as the payload requires). Layout (payload @8, align 8):
-/// code@8/12, message@16/20, category@24/28, severity@32/36, retryable@40,
-/// retry-after-ms tag@48 val@56, attributes tag@64 str@68/72 — total 80.
-/// v1 wraps the raw error bytes as `message` and leaves code/category/
-/// severity as empty strings (zeroed ptr/len is a valid empty string);
-/// structured mapping arrives with the suspend wiring phase.
+/// The return is `Err(error-info)` written into the fixed result area at
+/// offset 0 (the low retptr scratch — dead here by construction: no host call
+/// runs between this write and the canonical lift, and it is 8-aligned as the
+/// payload requires). Layout (payload @8, align 8): code@8/12,
+/// message@16/20, category@24/28, severity@32/36, retryable@40,
+/// retry-after-ms tag@48 val@56, attributes tag@64 str@68/72, details tag@76
+/// str@80/84 — total 88. The host persists the run's error from it.
 fn emit_runtime_fail_return(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
     error_ptr_local: u32,
     error_len_local: u32,
 ) {
-    // The additive `runtime.fail` records the terminal error host-side during
-    // the migration. Suppressed when terminal status is suppressed
-    // (omit-runtime, or an PublishedAgent child whose caller owns the
-    // instance) — the `Err(error-info)` return value is the sole terminal error.
-    if indices.report_terminal_status() {
-        body.instruction(&Instruction::LocalGet(error_ptr_local));
-        body.instruction(&Instruction::LocalGet(error_len_local));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.runtime_fail));
-    }
     // Structured Err(error-info): stdlib decomposes the payload directly
     // into the result area; abi.rs owns the writer. Both invoke shapes have
     // `result<_, error-info>` with error-info at the same offset.

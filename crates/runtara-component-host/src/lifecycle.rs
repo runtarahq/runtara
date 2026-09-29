@@ -37,6 +37,8 @@ pub struct WorkflowErrorInfo {
     #[component(name = "retry-after-ms")]
     pub retry_after_ms: Option<u64>,
     pub attributes: Option<String>,
+    /// The workflow's full structured error (JSON), persisted verbatim.
+    pub details: Option<String>,
 }
 
 /// WIT mirror of `runtara:agent/types.signal-wait`.
@@ -198,10 +200,10 @@ pub fn require_workflow_entry_file(path: impl AsRef<Path>) -> anyhow::Result<()>
     match inspect_workflow_entrypoint_file(path)? {
         WorkflowEntrypoint::LifecycleInvoke => Ok(()),
         WorkflowEntrypoint::LegacyCliRun => Err(anyhow::anyhow!(
-            "unsupported_legacy_abi: compiled workflows must export lifecycle.invoke; rebuild or republish this workflow"
+            "unsupported_legacy_abi: compiled workflows must export the workflow entry; rebuild or republish this workflow"
         )),
         WorkflowEntrypoint::Other => Err(anyhow::anyhow!(
-            "compiled workflow does not export lifecycle.invoke"
+            "compiled workflow does not export the workflow entry"
         )),
     }
 }

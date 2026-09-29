@@ -22,8 +22,6 @@ use super::abi::push_core_type;
 
 #[derive(Debug, Default)]
 pub(super) struct DirectCoreImportIndices {
-    runtime_complete: Option<u32>,
-    runtime_fail: Option<u32>,
     runtime_custom_event: Option<u32>,
     runtime_debug_mode_enabled: Option<u32>,
     runtime_breakpoint_pause: Option<u32>,
@@ -192,12 +190,6 @@ impl DirectCoreImportIndices {
                 self.connection_resolver_describe_async,
                 has_connections,
             )?,
-            runtime_complete: require_runtime(
-                self.runtime_complete,
-                "runtime.complete",
-                omit_runtime,
-            )?,
-            runtime_fail: require_runtime(self.runtime_fail, "runtime.fail", omit_runtime)?,
             runtime_custom_event: require_runtime(
                 self.runtime_custom_event,
                 "runtime.custom-event",
@@ -698,15 +690,11 @@ pub(super) struct DirectCoreFunctionIndices {
     /// through the indices because every lowerer already receives them, and
     /// the return convention at fail and suspend sites depends on it.
     pub(super) abi: crate::direct_wasm::component::WorkflowRole,
-    /// When true, the component imports no runtime; the terminal `complete`/
-    /// `fail` are NOT lowered and the result travels solely via the invoke
-    /// return value. Runtime index fields hold a poison sentinel and must never
-    /// be called (see [`RUNTIME_OMITTED_POISON`]).
+    /// When true, the component imports no runtime. Runtime index fields hold
+    /// a poison sentinel and must never be called (see
+    /// [`RUNTIME_OMITTED_POISON`]).
     pub(super) omit_runtime: bool,
     pub(super) connection_resolver_describe_async: u32,
-    // (see `report_terminal_status` below for when complete/fail lower)
-    pub(super) runtime_complete: u32,
-    pub(super) runtime_fail: u32,
     pub(super) runtime_custom_event: u32,
     pub(super) runtime_debug_mode_enabled: u32,
     pub(super) runtime_breakpoint_pause: u32,
@@ -883,21 +871,6 @@ impl DirectCoreFunctionIndices {
         self.wait_instances
             .as_ref()
             .expect("a WaitForInstances step imports runtara:workflow/waits")
-    }
-
-    /// Whether the terminal `runtime.complete`/`runtime.fail` calls lower.
-    ///
-    /// Suppressed when the runtime is omitted (nothing to call) and under the
-    /// `PublishedAgent` export: a workflow-agent shares its caller's instance,
-    /// so its terminal `complete` would finish the caller mid-flight. Its
-    /// terminal result is the return value; the instance belongs to the
-    /// caller.
-    pub(super) fn report_terminal_status(&self) -> bool {
-        !self.omit_runtime
-            && !matches!(
-                self.abi,
-                crate::direct_wasm::component::WorkflowRole::PublishedAgent
-            )
     }
 }
 
@@ -1127,10 +1100,6 @@ pub(super) fn import_core_function(
             .is_some_and(|key| resolve.name_world_key(key) == runtara_wit::wasi::MONOTONIC_CLOCK)
     {
         import_indices.monotonic_now = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "complete") {
-        import_indices.runtime_complete = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "fail") {
-        import_indices.runtime_fail = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "custom-event") {
         import_indices.runtime_custom_event = Some(function_index);
     } else if is_runtime_import(resolve, interface, function, "debug-mode-enabled") {

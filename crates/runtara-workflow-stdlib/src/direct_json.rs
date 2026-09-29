@@ -5590,6 +5590,9 @@ pub struct DirectInvokeErrorFields {
     pub retryable: bool,
     pub retry_after_ms: Option<u64>,
     pub attributes: Option<String>,
+    /// The payload itself (lossily decoded): what the host persists as the
+    /// run's error, so it stays byte-for-byte what the stdlib built.
+    pub details: Option<String>,
 }
 
 /// Best-effort decomposition of a terminal error payload into structured
@@ -5597,19 +5600,21 @@ pub struct DirectInvokeErrorFields {
 /// stdlib error-step shape: `{code, message, category, severity, retryable,
 /// retryAfterMs, attributes}`) maps field-for-field; anything else — plain
 /// strings, non-object JSON, invalid UTF-8 — rides `message` verbatim
-/// (lossily decoded), matching what `runtime.fail` records. Infallible by
+/// (lossily decoded), and `details` carries the payload itself, which the host
+/// records as the run's error. Infallible by
 /// construction.
 pub fn invoke_error_fields(error: &[u8]) -> DirectInvokeErrorFields {
     let raw = String::from_utf8_lossy(error).into_owned();
     let Ok(Value::Object(envelope)) = serde_json::from_slice::<Value>(error) else {
         return DirectInvokeErrorFields {
             code: String::new(),
-            message: raw,
+            message: raw.clone(),
             category: String::new(),
             severity: String::new(),
             retryable: false,
             retry_after_ms: None,
             attributes: None,
+            details: Some(raw),
         };
     };
     let field = |name: &str| {
@@ -5622,7 +5627,7 @@ pub fn invoke_error_fields(error: &[u8]) -> DirectInvokeErrorFields {
     let message = match envelope.get("message").and_then(Value::as_str) {
         Some(message) => message.to_string(),
         // An object without a message string still surfaces everything.
-        None => raw,
+        None => raw.clone(),
     };
     // A suspension crosses the agent boundary as a typed `suspended` outcome,
     // so no error code is reserved: every code passes through as written.
@@ -5644,6 +5649,7 @@ pub fn invoke_error_fields(error: &[u8]) -> DirectInvokeErrorFields {
             .or_else(|| envelope.get("context"))
             .filter(|value| !value.is_null())
             .map(|value| value.to_string()),
+        details: Some(raw),
     }
 }
 
@@ -14325,6 +14331,8 @@ mod invoke_error_and_delay_key_tests {
             fields.attributes.as_deref(),
             Some(r#"{"host":"api.example.com"}"#)
         );
+        // The host persists `details`, so it is the envelope byte for byte.
+        assert_eq!(fields.details, Some(envelope.to_string()));
     }
 
     #[test]

@@ -314,10 +314,7 @@ fn workflow_package_declares_the_workflow_abi() {
 
     let runtime = interface(&resolve, workflow, "runtime");
     for function in [
-        "load-input",
         "instance-id",
-        "complete",
-        "fail",
         "custom-event",
         "debug-mode-enabled",
         "breakpoint-pause",
@@ -341,6 +338,13 @@ fn workflow_package_declares_the_workflow_abi() {
         assert!(
             runtime.functions.contains_key(function),
             "missing runtime function {function}"
+        );
+    }
+    // A run finishes through its entry's return value only.
+    for retired in ["load-input", "complete", "fail"] {
+        assert!(
+            !runtime.functions.contains_key(retired),
+            "runtime.{retired} is retired"
         );
     }
     for type_name in ["signal-info", "custom-signal-info", "checkpoint-result"] {
@@ -680,4 +684,42 @@ fn agents_and_workflows_share_one_outcome() {
             .keys()
             .any(|key| resolve.name_world_key(key) == crate::workflow::ENTRY)
     );
+}
+
+/// `error-info.details` was appended, so every earlier field keeps its offset
+/// and the emitter's hand-laid writers stay valid: the record is 80 bytes and
+/// `details` (tag, ptr, len) sits at 68/72/76 within it.
+#[test]
+fn error_info_appends_details_without_moving_a_field() {
+    let resolve = resolve();
+    let agent = package(&resolve, crate::agent::PACKAGE);
+    let types = interface(&resolve, agent, "types");
+    let id = types.types["error-info"];
+    let TypeDefKind::Record(record) = &resolve.types[id].kind else {
+        panic!("error-info is a record");
+    };
+    let names: Vec<_> = record.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "code",
+            "message",
+            "category",
+            "severity",
+            "retryable",
+            "retry-after-ms",
+            "attributes",
+            "details"
+        ]
+    );
+    let mut sizes = wit_parser::SizeAlign::default();
+    sizes.fill(&resolve);
+    let ty = wit_parser::Type::Id(id);
+    assert_eq!(sizes.size(&ty).size_wasm32(), 80);
+    let offsets: Vec<_> = sizes
+        .field_offsets(record.fields.iter().map(|f| &f.ty))
+        .into_iter()
+        .map(|(offset, _)| offset.size_wasm32())
+        .collect();
+    assert_eq!(offsets, [0, 8, 16, 24, 32, 40, 56, 68]);
 }

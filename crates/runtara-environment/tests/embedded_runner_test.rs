@@ -735,3 +735,93 @@ async fn missing_component_is_binary_not_found() {
         .expect_err("must fail");
     assert!(matches!(err, RunnerError::BinaryNotFound(_)));
 }
+
+/// A workflow entry whose `invoke` returns `result` (a WAT body that leaves
+/// the result area's address on the stack), with no runtime import: the
+/// return value is the run's only terminal channel.
+fn entry_wat(result: &str) -> String {
+    format!(
+        r#"(component
+  (core module $m
+    (memory (export "memory") 1)
+    (data (i32.const 1024) "BOOM")
+    (data (i32.const 1040) "it failed")
+    (data (i32.const 1056) "{{\"stepId\":\"s\"}}")
+    (data (i32.const 1088) "{{\"ok\":1}}")
+    (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 4096)
+    (func (export "invoke") (param i32 i32 i32 i32) (result i32)
+      {result}))
+  (core instance $i (instantiate $m))
+  (type $error (record (field "code" string) (field "message" string)
+    (field "category" string) (field "severity" string) (field "retryable" bool)
+    (field "retry-after-ms" (option u64)) (field "attributes" (option string))
+    (field "details" (option string))))
+  (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
+  (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
+    (case "instances" string)))
+  (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
+  (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
+  (func $invoke async (param "capability-id" string) (param "input" (list u8))
+    (result (result $outcome (error $error)))
+    (canon lift (core func $i "invoke") (memory $i "memory") (realloc (func $i "realloc"))))
+  (instance $entry (export "error-info" (type $error)) (export "signal-wait" (type $signal))
+    (export "wake" (type $wake)) (export "suspension" (type $suspension))
+    (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
+  (export "runtara:agent-workflow-agent/capabilities@1.0.0" (instance $entry)))"#
+    )
+}
+
+/// The runner persists a run's terminal result once, from the value its
+/// entry returned. A failure records `details` verbatim: before, a guest
+/// that returned an error without calling `fail` was later recorded as
+/// crashed with no error.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_returned_result_is_the_persisted_terminal() {
+    let h = harness().await;
+    let failed = r#"(i32.store8 (i32.const 2048) (i32.const 1))
+      (i32.store (i32.const 2056) (i32.const 1024)) (i32.store (i32.const 2060) (i32.const 4))
+      (i32.store (i32.const 2064) (i32.const 1040)) (i32.store (i32.const 2068) (i32.const 9))
+      (i32.store8 (i32.const 2124) (i32.const 1))
+      (i32.store (i32.const 2128) (i32.const 1056)) (i32.store (i32.const 2132) (i32.const 14))
+      (i32.const 2048)"#;
+    let completed = r#"(i32.store8 (i32.const 2048) (i32.const 0))
+      (i32.store8 (i32.const 2056) (i32.const 0))
+      (i32.store (i32.const 2060) (i32.const 1088)) (i32.store (i32.const 2064) (i32.const 8))
+      (i32.const 2048)"#;
+    for (name, body) in [("failed", failed), ("completed", completed)] {
+        let inst_id = unique(&format!("inst-terminal-{name}"));
+        let wasm = write_component(h.dir.path(), &format!("{name}.wasm"), &entry_wat(body));
+        seed_detached_instance(&h, inst_id.as_str()).await;
+        let handle = h
+            .runner
+            .try_launch_detached(&options(inst_id.as_str(), &wasm))
+            .await
+            .expect("launch");
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+        )
+        .await
+        .expect("wait_for_exit hung");
+        let instance = h
+            .persistence
+            .get_instance(inst_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(instance.termination_reason.is_none(), "{instance:?}");
+        if name == "failed" {
+            assert_eq!(
+                instance.status,
+                runtara_core::domain::InstanceStatus::Failed
+            );
+            assert_eq!(instance.error.as_deref(), Some(r#"{"stepId":"s"}"#));
+        } else {
+            assert_eq!(
+                instance.status,
+                runtara_core::domain::InstanceStatus::Completed
+            );
+            assert_eq!(instance.output.as_deref(), Some(br#"{"ok":1}"#.as_slice()));
+        }
+    }
+}

@@ -10,7 +10,8 @@
     (export "sleep" (func async (param "ms" u64)))))
   (type $error (record (field "code" string) (field "message" string)
     (field "category" string) (field "severity" string) (field "retryable" bool)
-    (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
+    (field "retry-after-ms" (option u64)) (field "attributes" (option string))
+    (field "details" (option string))))
   (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
   (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume")
     (case "instances" string)))
@@ -42,7 +43,7 @@
     (import "h" "drop-set" (func $drop-set (param i32)))
     (import "h" "cancel" (func $cancel (param i32) (result i32)))
     (import "h" "drop" (func $drop (param i32)))
-    (import "h" "return" (func $return (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i64 i32 i32 i32)))
+    (import "h" "return" (func $return (param i32)))
     (global $calls (mut i32) (i32.const 0))
     (global $cleaned (mut i32) (i32.const 0))
     (global $handle (mut i32) (i32.const 0))
@@ -54,13 +55,14 @@
       (call $event (local.get $ptr) (local.get $len) (i32.const 0) (i32.const 0) (i32.const 128))
       (if (i32.load (i32.const 128)) (then unreachable)))
     (func $finish
-      ;; The canonical result flattens to 15 values: ok tag, the `completed`
-      ;; outcome tag and list pointer/length, then zero padding for the inactive
-      ;; error-info alternative.
-      (call $return (i32.const 0) (i32.const 0) (i32.const 1024) (i32.const 31)
-        (i32.const 0) (i32.const 0) (i32.const 0)
-        (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)
-        (i64.const 0) (i32.const 0) (i32.const 0) (i32.const 0)))
+      ;; `result<outcome, error-info>` flattens past 16 values, so task.return
+      ;; takes a pointer to the result in linear memory: the ok tag at +0, the
+      ;; `completed` outcome tag at +8 and its list pointer/length at +12/+16.
+      (i32.store8 (i32.const 256) (i32.const 0))
+      (i32.store8 (i32.const 264) (i32.const 0))
+      (i32.store (i32.const 268) (i32.const 1024))
+      (i32.store (i32.const 272) (i32.const 31))
+      (call $return (i32.const 256)))
     (func (export "invoke") (param i32 i32 i32 i32) (result i32) (local $status i32)
       (global.set $calls (i32.add (global.get $calls) (i32.const 1)))
       (if (i32.eq (global.get $calls) (i32.const 2)) (then

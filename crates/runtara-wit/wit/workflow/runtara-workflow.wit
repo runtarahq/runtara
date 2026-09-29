@@ -8,8 +8,8 @@
 // Released WIT is never edited, only versioned (see `runtara-wit`'s crate docs).
 package runtara:workflow@1.0.0;
 
-// Lifecycle and persistence services: persisted input, terminal status,
-// events, cancellation, heartbeat, checkpoints and durable sleep.
+// Run services: events, cancellation, heartbeat, checkpoints and durable
+// sleep. A run finishes through its entry's return value, not a call here.
 interface runtime {
     record signal-info {
         signal-type: string,
@@ -31,13 +31,7 @@ interface runtime {
         custom-signal: option<custom-signal-info>,
     }
 
-    load-input: func() -> result<list<u8>, string>;
-
     instance-id: func() -> result<string, string>;
-
-    complete: func(output: list<u8>) -> result<_, string>;
-
-    fail: func(error: list<u8>) -> result<_, string>;
 
     custom-event: func(
         kind: string,

@@ -35,7 +35,7 @@
   (core instance $code (instantiate $code (with "mem" (instance $mem))
     (with "host" (instance (export "describe" (func $describe)) (export "resolve" (func $resolve))))))
   (type $error (record (field "code" string) (field "message" string) (field "category" string)
-    (field "severity" string) (field "retryable" bool) (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
+    (field "severity" string) (field "retryable" bool) (field "retry-after-ms" (option u64)) (field "attributes" (option string)) (field "details" (option string))))
   (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))
   (type $wake (variant (case "at" u64) (case "on-signal" $signal) (case "on-resume") (case "instances" string)))
   (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))

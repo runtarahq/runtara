@@ -25,12 +25,7 @@ async fn io(fx: &Fixture) -> Arc<InvocationIo> {
 async fn child(fx: &Fixture, io: Arc<InvocationIo>) -> Arc<ScopedRuntimeHost> {
     let (tokens, _) = fx.child().await;
     fx.owner
-        .child_fenced(
-            b"input".to_vec(),
-            Arc::new(Keys("child/")),
-            tokens.cancel.clone(),
-            io,
-        )
+        .child_fenced(Arc::new(Keys("child/")), tokens.cancel.clone(), io)
         .unwrap()
 }
 async fn revoke(fx: &Fixture, io: &InvocationIo) {
@@ -106,7 +101,6 @@ async fn fenced_child_preserves_checkpoint_signal_retry_and_event_semantics() {
             .iter()
             .all(|e| e.checkpoint_id.as_deref() == Some("parent/child"))
     );
-    child.complete(b"child result".to_vec()).await.unwrap();
     assert!(!io.failed());
     assert_eq!(fx.status().await, InstanceStatus::Running);
     assert!(
@@ -166,8 +160,6 @@ async fn fenced_child_rejections_prevent_all_writes_and_latch_host_failure() {
         );
         assert!(child.custom_event("late".into(), vec![]).await.is_err());
         assert!(child.heartbeat().await.is_err());
-        // Ignoring an error cannot reset the host latch through a success callback.
-        assert!(child.complete(b"ignore error".to_vec()).await.is_err());
         assert_eq!(
             fx.persistence
                 .count_checkpoints(&fx.id, None, None, None)
@@ -310,21 +302,20 @@ async fn fenced_storage_failure_cannot_be_caught_into_success_or_report_an_event
         .spawn_managed(
             move |cancel| async move {
                 let child = run_owner
-                    .child_fenced(vec![], Arc::new(Keys("child/")), cancel, run_io)
+                    .child_fenced(Arc::new(Keys("child/")), cancel, run_io)
                     .unwrap();
                 child
                     .custom_event("valid".into(), b"one".to_vec())
                     .await
                     .unwrap();
                 // PostgreSQL text rejects NUL. Pretend the guest catches and ignores
-                // this error, including the rejected terminal callback, then succeeds.
+                // this error, then succeeds.
                 assert!(
                     child
                         .custom_event("invalid\0subtype".into(), vec![])
                         .await
                         .is_err()
                 );
-                let _ = child.complete(b"ignored error".to_vec()).await;
                 InvokeExit::Completed(b"exported success".to_vec())
             },
             None,
@@ -395,7 +386,7 @@ async fn failed_input_abandonment_is_closed_by_production_exit_monitor() {
         .spawn_managed(
             move |cancel| async move {
                 let child = owner
-                    .child_fenced(vec![], Arc::new(Keys("child/")), cancel, child_io)
+                    .child_fenced(Arc::new(Keys("child/")), cancel, child_io)
                     .unwrap();
                 let descriptor =
                     serde_json::to_vec(&serde_json::json!({"signal_id":"child/wait"})).unwrap();
@@ -408,12 +399,6 @@ async fn failed_input_abandonment_is_closed_by_production_exit_monitor() {
                 // managed IO or publish success through the same invocation host.
                 assert!(child.register_input(descriptor, None).await.is_err());
                 assert!(child.poll_input("child/wait".into()).await.is_err());
-                assert!(
-                    child
-                        .complete(b"ignored close failure".to_vec())
-                        .await
-                        .is_err()
-                );
                 InvokeExit::Completed(b"exported success".to_vec())
             },
             None,
@@ -594,12 +579,7 @@ async fn fenced_io_rejects_another_root_and_default_children_do_not_create_lease
     assert!(
         other
             .owner
-            .child_fenced(
-                vec![],
-                Arc::new(Keys("child/")),
-                tokens.cancel.clone(),
-                io.clone()
-            )
+            .child_fenced(Arc::new(Keys("child/")), tokens.cancel.clone(), io.clone())
             .is_err()
     );
     other.close().await;
@@ -619,7 +599,7 @@ async fn managed_fenced_io_cancellation_overrides_a_caught_error_and_success() {
         .spawn_managed(
             move |cancel| async move {
                 let child = owner
-                    .child_fenced(vec![], Arc::new(Keys("child/")), cancel, run_io)
+                    .child_fenced(Arc::new(Keys("child/")), cancel, run_io)
                     .unwrap();
                 child
                     .durable_sleep_checkpoint("child/zero".into(), vec![], 0)

@@ -242,7 +242,7 @@ pub(super) enum DirectRunPlan {
     /// A terminal step that has no successor and no explicit `Finish` (e.g. a
     /// single-Agent workflow with no Finish step). The generated compiler returns
     /// `Ok(Value::Null)` in this case, so the workflow output is `null`; this
-    /// plan node sets the output to `null` before `runtime.complete` runs.
+    /// plan node sets the output to `null` before the entry returns it.
     ImplicitFinish,
 }
 

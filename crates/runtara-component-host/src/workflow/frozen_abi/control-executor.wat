@@ -7,7 +7,7 @@
     (instance
       (type (;0;) (option u64))
       (type (;1;) (option string))
-      (type (;2;) (record (field "code" string) (field "message" string) (field "category" string) (field "severity" string) (field "retryable" bool) (field "retry-after-ms" 0) (field "attributes" 1)))
+      (type (;2;) (record (field "code" string) (field "message" string) (field "category" string) (field "severity" string) (field "retryable" bool) (field "retry-after-ms" 0) (field "attributes" 1) (field "details" 1)))
       (export (;3;) "error-info" (type (eq 2)))
     )
   )

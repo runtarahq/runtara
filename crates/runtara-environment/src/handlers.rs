@@ -623,7 +623,7 @@ pub async fn handle_start_instance(
         warn!(
             image_id = %request.image_id,
             error = %error,
-            "Refusing workflow image without lifecycle.invoke"
+            "Refusing workflow image without the workflow entry"
         );
         return Ok(StartInstanceResponse::rejected(
             StartRejection::ImageNotRunnable {

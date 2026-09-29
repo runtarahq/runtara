@@ -15,7 +15,7 @@
     (export "outcome" (type $outcome (eq $outcome-def)))
     (type $error-def (record (field "code" string) (field "message" string)
       (field "category" string) (field "severity" string) (field "retryable" bool)
-      (field "retry-after-ms" (option u64)) (field "attributes" (option string))))
+      (field "retry-after-ms" (option u64)) (field "attributes" (option string)) (field "details" (option string))))
     (export "error-info" (type $error (eq $error-def)))))
   (alias export $types "error-info" (type $error-info))
   (alias export $types "outcome" (type $outcome))
