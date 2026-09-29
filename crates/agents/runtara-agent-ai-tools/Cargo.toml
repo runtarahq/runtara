@@ -28,9 +28,9 @@ serde_json = { workspace = true }
 runtara-agent-macro = { path = "../../runtara-agent-macro" }
 runtara-dsl = { path = "../../runtara-dsl", default-features = false }
 # Shared LLM completion logic for the `chat-completion` capability (the Ai Agent
-# loop's LLM call). `default-features = false` drops `tracing` from the .wasm,
-# matching how runtara-workflow-stdlib consumes runtara-ai.
-runtara-ai = { path = "../../runtara-ai", default-features = false }
+# loop's LLM call). `default-features = false` drops `tracing` from the .wasm;
+# `completion` brings the provider clients and `run_completion_async`.
+runtara-ai = { path = "../../runtara-ai", default-features = false, features = ["completion"] }
 
 
 

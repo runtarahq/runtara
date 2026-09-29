@@ -75,7 +75,6 @@ runtara-workflows = { path = "../runtara-workflows" }
 runtara-dsl = { path = "../runtara-dsl" }
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
-futures = "0.3"
 # Embedded-runner tests author minimal workflow-entry components in WAT.
 wat = "1"
 # Testcontainers for automatic PostgreSQL setup in tests

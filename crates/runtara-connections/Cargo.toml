@@ -69,8 +69,6 @@ runtara-agents = { path = "../runtara-agents", default-features = false }
 utoipa = { version = "5", optional = true }
 
 [dev-dependencies]
-# Tests require native HTTP; library metadata consumers disable the transport.
-runtara-http = { workspace = true, features = ["native"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
 testcontainers = "0.27"
