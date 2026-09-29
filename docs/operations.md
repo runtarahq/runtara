@@ -5,6 +5,8 @@ The original baseline was checked against `main` at `708286b5` (#279).
 Phase 5 remains later work. See [Implementation](#implementation) for the
 concrete API and validation coverage.
 Monitor is consolidated into Runs; Overview no longer contains Processes.
+The Operations sidebar is Overview → Requests → Queues → Runs. Requests opens
+the cross-workflow inbox directly, independently of Overview and custom queues.
 See [Runs consolidation](operations-runs-consolidation.md) for behavior and validation.
 Queues are now manually created, shared configurations, replacing the original
 automatic queue list and the separate “Shared views” section. Existing saved
