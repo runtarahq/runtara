@@ -127,14 +127,15 @@ export const QueueAnswer = forwardRef<
   if (error) return <p role="alert">{error}</p>;
   if (loading) return <p>Preparing answer…</p>;
   return (
-    <div className="min-w-52 space-y-3">
+    <div className="min-w-40 space-y-3">
       {!editing && options ? (
         <div className="flex flex-wrap gap-2">
-          {options.values.map((value) => (
+          {options.values.map((value, index) => (
             <Button
               key={JSON.stringify(value)}
               size="sm"
-              variant="secondary"
+              variant={index === 0 ? 'primary' : 'secondary'}
+              bordered={index !== 0}
               disabled={disabled}
               onClick={() => void choose(value)}
             >

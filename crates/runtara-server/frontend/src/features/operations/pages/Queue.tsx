@@ -28,7 +28,7 @@ import {
 import { StateValue, type StateField } from '../components/StateValue';
 import { QueueAnswer, type AnswerController } from '../components/QueueAnswer';
 import { ViewEditor, StateFilters } from '../components/ViewEditor';
-import { OperationHeader, RunRows } from './shared';
+import { OperationHeader, RunRows, RefreshControls } from './shared';
 
 const requestKey = (r: OperationRequest) =>
   JSON.stringify([r.instanceId, r.requestId]);
@@ -156,21 +156,29 @@ function QueueContent({
   };
   return (
     <ConsoleTableShell
+      className="mx-auto h-auto max-h-none w-full max-w-[1600px] overflow-visible p-5 lg:px-10 lg:py-7"
+      bodyClassName="flex-none rounded-lg border"
       toolbar={
         <>
           <OperationHeader
             title={view.name}
+            section="Queues"
+            description={
+              isQueue
+                ? 'A decision answers the waiting request; the list follows the run’s state.'
+                : 'Follow runs and their published state.'
+            }
             actions={
               <>
-                <Button
-                  variant="secondary"
-                  onClick={() => void query.refetch()}
-                >
-                  Refresh
-                </Button>
+                <RefreshControls
+                  updatedAt={query.dataUpdatedAt}
+                  busy={query.isFetching}
+                  onRefresh={() => void query.refetch()}
+                />
                 <Can permission="workflow:update">
                   <Button
                     variant="secondary"
+                    bordered
                     onClick={() => setEditing((v) => !v)}
                   >
                     {saved ? 'Edit view' : 'Save view'}
@@ -179,7 +187,13 @@ function QueueContent({
               </>
             }
           />
-          <div className="flex flex-wrap gap-3 border-b px-6 py-4">
+          <div className="mb-4 flex flex-wrap items-center gap-2">
+            <span className="mr-auto border-b-2 border-primary py-2 text-sm font-semibold text-primary-text">
+              {isQueue ? 'Open requests' : 'Runs'}{' '}
+              <span className="ml-1 text-muted-foreground">
+                {data?.totalElements ?? '…'}
+              </span>
+            </span>
             <Input
               aria-label="Search runs"
               placeholder="Search label or run"
@@ -192,6 +206,7 @@ function QueueContent({
             />
             <Button
               variant="secondary"
+              bordered
               onClick={() => setFiltersOpen((v) => !v)}
             >
               Filters
@@ -216,7 +231,7 @@ function QueueContent({
             ) : null}
             <select
               aria-label="Sort by state"
-              className="rounded border bg-background px-3 text-sm"
+              className="h-8 max-w-full rounded border bg-background px-3 text-sm"
               value={view.sort?.field ?? ''}
               onChange={(e) => {
                 setView((v) => ({
@@ -255,7 +270,7 @@ function QueueContent({
         </>
       }
       footer={
-        <div className="flex items-center justify-between border-t px-6 py-3 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center justify-between gap-2 py-3 text-xs text-muted-foreground">
           <span>
             {data?.totalElements ?? 0} {isQueue ? 'requests' : 'runs'}
             {query.isFetching ? ' · Updating…' : ''}
@@ -303,7 +318,7 @@ function QueueContent({
       </Can>
       {isQueue && bulk && selected.length ? (
         <Can permission="workflow:execute">
-          <div className="m-6 flex flex-wrap items-center gap-3 rounded border bg-primary/5 p-3 text-sm">
+          <div className="flex flex-wrap items-center gap-3 border-b bg-primary/5 px-4 py-3 text-sm">
             <strong>{selected.length} requests selected</strong>
             {common.map((value) => (
               <Button
@@ -323,6 +338,7 @@ function QueueContent({
             <Button
               size="sm"
               variant="secondary"
+              bordered
               onClick={() =>
                 void Promise.all(
                   selected.map((row) =>
@@ -336,6 +352,7 @@ function QueueContent({
             <Button
               size="sm"
               variant="secondary"
+              bordered
               onClick={() => setSelection(new Set())}
             >
               Clear
@@ -355,9 +372,9 @@ function QueueContent({
         <p className="p-6">Loading…</p>
       ) : isQueue ? (
         <table className="w-full border-collapse text-left text-sm">
-          <thead className="sticky top-0 bg-muted/90 text-xs text-muted-foreground">
+          <thead className="sticky top-0 bg-muted/90 text-[11px] uppercase tracking-wide text-muted-foreground">
             <tr>
-              <th className="w-12 p-4">
+              <th className="w-12 px-4 py-3">
                 <Can permission="workflow:execute">
                   {bulk ? (
                     <input
@@ -378,27 +395,31 @@ function QueueContent({
                   ) : null}
                 </Can>
               </th>
-              <th className="p-4">
+              <th className="px-4 py-3">
                 {view.roles?.key
                   ? stateLabel(view.roles.key, schema[view.roles.key])
                   : 'Run'}
               </th>
               {columns?.map((field) => (
-                <th key={field} className="p-4">
+                <th
+                  key={field}
+                  className={`px-4 py-3 ${schema[field]?.type === 'number' || schema[field]?.type === 'integer' ? 'text-right' : ''}`}
+                >
                   {view.labels?.[field] || stateLabel(field, schema[field])}
                 </th>
               ))}
-              <th className="p-4">Requested</th>
-              <th className="p-4">Answer</th>
+              <th className="px-4 py-3">Requested</th>
+              <th className="px-4 py-3">Status</th>
+              <th className="px-4 py-3">Decision</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((row) => (
               <tr
                 key={requestKey(row)}
-                className="border-b align-top hover:bg-muted/20"
+                className={`border-b last:border-0 ${selection.has(requestKey(row)) ? 'bg-primary/5' : 'hover:bg-muted/20'}`}
               >
-                <td className="p-4">
+                <td className="px-4 py-3">
                   <Can permission="workflow:execute">
                     {bulk ? (
                       <input
@@ -417,7 +438,7 @@ function QueueContent({
                     ) : null}
                   </Can>
                 </td>
-                <td className="max-w-64 p-4">
+                <td className="max-w-64 px-4 py-3">
                   <Link
                     className="font-medium text-primary hover:underline"
                     to={`/operations/runs/${row.workflowId}/${row.instanceId}`}
@@ -442,7 +463,10 @@ function QueueContent({
                   ) : null}
                 </td>
                 {columns?.map((field) => (
-                  <td key={field} className="max-w-xs p-4">
+                  <td
+                    key={field}
+                    className={`max-w-xs px-4 py-3 ${schema[field]?.type === 'number' || schema[field]?.type === 'integer' ? 'text-right tabular-nums' : ''}`}
+                  >
                     <StateValue
                       value={row.state?.[field]}
                       field={schema[field]}
@@ -457,7 +481,7 @@ function QueueContent({
                     ) : null}
                   </td>
                 ))}
-                <td className="whitespace-nowrap p-4">
+                <td className="whitespace-nowrap px-4 py-3">
                   <StateValue
                     value={row.requestedAt}
                     display={{ kind: 'relative' }}
@@ -472,7 +496,19 @@ function QueueContent({
                     </p>
                   ) : null}
                 </td>
-                <td className="p-4">
+                <td className="whitespace-nowrap px-4 py-3">
+                  <span className="rounded-full bg-warning/10 px-2 py-1 text-xs text-warning">
+                    {submissions.inputs.some(
+                      (input) =>
+                        input.request.instanceId === row.instanceId &&
+                        input.request.requestId === row.requestId &&
+                        input.state === 'accepted'
+                    )
+                      ? 'Decided'
+                      : 'Waiting'}
+                  </span>
+                </td>
+                <td className="px-4 py-3">
                   <Can
                     permission="workflow:execute"
                     fallback={

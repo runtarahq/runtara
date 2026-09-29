@@ -5,7 +5,6 @@ import { useAuthStore } from '@/shared/stores/authStore';
 import { RuntimeREST } from '@/shared/queries';
 import { createAuthHeaders } from '@/shared/queries/utils';
 import { Can } from '@/shared/components/Can';
-import { Button } from '@/shared/components/ui/button';
 import { StructuredErrorDisplay } from '@/shared/components/StructuredErrorDisplay';
 import {
   getWorkflowInstance,
@@ -18,14 +17,19 @@ import { InputRetryPanel } from '@/features/workflows/components/ManagedInputSub
 import { useManagedInputSubmissions } from '@/features/workflows/hooks/useManagedInputSubmissions';
 import { StatePanel } from '../components/RunStateCard';
 import { StateValue, type StateField } from '../components/StateValue';
-import { OperationHeader, ReplayButton } from './shared';
+import {
+  OperationHeader,
+  OperationSection,
+  RefreshControls,
+  ReplayButton,
+} from './shared';
 import { useOperations } from '../queries';
 
 export function RunPage() {
   const { workflowId = '', instanceId = '' } = useParams();
   const tenant = useAuthStore((s) => s.orgId);
   const submissions = useManagedInputSubmissions();
-  const { views } = useOperations();
+  const { views, processes } = useOperations();
   const run = useCustomQuery({
     queryKey: ['operations', tenant, 'run', workflowId, instanceId],
     queryFn: (token: string) =>
@@ -86,57 +90,64 @@ export function RunPage() {
   const stages = stage ? fields[stage]?.enum : undefined;
   const current = stage ? data.state?.[stage] : undefined;
   return (
-    <div>
+    <div className="mx-auto min-h-full w-full max-w-[1600px] bg-background p-5 lg:px-10 lg:py-7">
       <OperationHeader
         title={data.runLabel ?? data.id.slice(0, 8)}
+        section="Queues"
+        description={
+          <span className="inline-flex flex-wrap items-center gap-2">
+            {processes.data?.find((p) => p.workflowId === workflowId)?.name ??
+              data.workflowName ??
+              'Workflow run'}{' '}
+            · run{' '}
+            <span className="font-mono" title={instanceId}>
+              {instanceId.slice(0, 4)}…{instanceId.slice(-4)}
+            </span>
+            <RunStatusPill
+              status={data.status}
+              suspensionReason={data.suspensionReason}
+            />
+          </span>
+        }
         actions={
           <>
-            <Button
-              variant="secondary"
-              onClick={() => {
+            <RefreshControls
+              updatedAt={run.dataUpdatedAt}
+              busy={run.isFetching || pending.isFetching}
+              onRefresh={() => {
                 void run.refetch();
                 void pending.refetch();
+                void steps.refetch();
               }}
-            >
-              Refresh
-            </Button>
+            />
             <Link
               className="rounded border px-3 py-2 text-sm"
               to={`/workflows/${workflowId}/history/${instanceId}`}
             >
-              Steps and debugging
+              Open execution
             </Link>
           </>
         }
       />
-      <main className="space-y-6 p-6">
-        <div className="flex flex-wrap items-center gap-4">
-          <RunStatusPill
-            status={data.status}
-            suspensionReason={data.suspensionReason}
-          />
-          <span className="text-sm text-muted-foreground">
-            Started{' '}
-            <StateValue value={data.created} display={{ kind: 'relative' }} />
-          </span>
-          <button
-            className="text-xs text-muted-foreground"
-            title={instanceId}
-            onClick={() => void navigator.clipboard.writeText(instanceId)}
-          >
-            Copy run ID
-          </button>
-        </div>
+      <main className="space-y-5">
         {stages?.length ? (
-          <ol aria-label="Stages" className="flex flex-wrap gap-2">
+          <ol
+            aria-label="Stages"
+            className="flex items-center gap-3 overflow-x-auto rounded-lg border px-4 py-4"
+          >
             {stages.map((value, index) => (
               <li
                 key={JSON.stringify(value)}
                 aria-current={value === current ? 'step' : undefined}
-                className={`rounded-full border px-4 py-2 text-sm ${value === current ? 'border-primary bg-primary/10 font-semibold' : 'text-muted-foreground'}`}
+                className={`flex min-w-32 flex-1 items-center gap-2 whitespace-nowrap text-xs ${value === current ? 'font-semibold text-warning' : 'text-muted-foreground'}`}
               >
-                {index + 1}. {stateLabel(String(value))}
-                {value === current ? ' · Current' : ''}
+                <span
+                  className={`flex size-6 shrink-0 items-center justify-center rounded-full border-2 ${value === current ? 'border-warning bg-warning/10' : 'border-muted-foreground/30'}`}
+                >
+                  {index + 1}
+                </span>
+                {stateLabel(String(value))}
+                <span className="ml-1 h-px flex-1 bg-border" />
               </li>
             ))}
           </ol>
@@ -145,96 +156,137 @@ export function RunPage() {
         {data.errorSummary?.category === 'transient' ? (
           <ReplayButton run={data} />
         ) : null}
-        <StatePanel
-          state={data.state}
-          schema={fields}
-          updatedAt={data.stateUpdatedAt}
-        />
-        <section className="space-y-3">
-          <h2 className="text-lg font-semibold">Waiting for an answer</h2>
-          {pending.error ? (
-            <p role="alert">Could not load requests.</p>
-          ) : pending.isPending ? (
-            <p>Loading requests…</p>
-          ) : pending.data?.length ? (
-            pending.data.map((request) => {
-              const retained = [...submissions.inputs]
-                .reverse()
-                .find(
-                  (input) =>
-                    input.request.instanceId === instanceId &&
-                    input.request.requestId === request.requestId
-                );
-              return (
-                <article
-                  key={request.requestId}
-                  className="max-w-3xl space-y-3 rounded-lg border p-5"
-                >
-                  <h3 className="font-medium">
-                    {request.toolName || 'Workflow request'}
-                  </h3>
-                  {request.message ? (
-                    <p className="text-sm">{request.message}</p>
-                  ) : null}
-                  <Can
-                    permission="workflow:execute"
-                    fallback={<p>Read only</p>}
+        <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
+          <section className="space-y-4">
+            {pending.error ? (
+              <p role="alert">Could not load requests.</p>
+            ) : pending.isPending ? (
+              <p>Loading requests…</p>
+            ) : pending.data?.length ? (
+              pending.data.map((request) => {
+                const retained = [...submissions.inputs]
+                  .reverse()
+                  .find(
+                    (input) =>
+                      input.request.instanceId === instanceId &&
+                      input.request.requestId === request.requestId
+                  );
+                return (
+                  <article
+                    key={request.requestId}
+                    className="space-y-4 rounded-lg border p-4"
                   >
-                    {retained ? (
-                      <p role="status">
-                        {retained.state === 'accepted'
-                          ? 'Answered'
-                          : retained.state === 'submitting'
-                            ? 'Sending…'
-                            : (retained.error ??
-                              'Acceptance unconfirmed — retry below')}
-                      </p>
-                    ) : (
-                      <ActionForm
-                        inputSchema={request.responseSchema}
-                        onSubmit={(payload) =>
-                          void submissions.submit(
-                            {
-                              kind: 'execution',
-                              workflowId,
-                              instanceId,
-                              requestId: request.requestId,
-                              payload,
-                            },
-                            data.runLabel ?? 'Run'
-                          )
-                        }
-                      />
-                    )}
-                  </Can>
-                </article>
-              );
-            })
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              No requests waiting for an answer.
-            </p>
-          )}
-          <InputRetryPanel matches={(r) => r.instanceId === instanceId} />
-        </section>
-        <section>
-          <h2 className="mb-3 text-lg font-semibold">Recent activity</h2>
-          {steps.error ? (
-            <p role="alert">Could not load activity.</p>
-          ) : (
-            <ol className="space-y-2">
-              {steps.data?.data?.steps?.map((step) => (
-                <li
-                  key={`${step.stepId}/${step.scopeId ?? ''}/${step.startedAt}`}
-                  className="flex items-center justify-between rounded border p-3 text-sm"
+                    <h2 className="-mx-4 -mt-4 border-b px-4 py-3 text-sm font-semibold">
+                      Decision needed
+                    </h2>
+                    <h3 className="text-sm font-semibold">
+                      {request.toolName || 'Workflow request'}
+                    </h3>
+                    {request.message ? (
+                      <p className="text-sm">{request.message}</p>
+                    ) : null}
+                    <Can
+                      permission="workflow:execute"
+                      fallback={<p>Read only</p>}
+                    >
+                      {retained ? (
+                        <p role="status">
+                          {retained.state === 'accepted'
+                            ? 'Answered'
+                            : retained.state === 'submitting'
+                              ? 'Sending…'
+                              : (retained.error ??
+                                'Acceptance unconfirmed — retry below')}
+                        </p>
+                      ) : (
+                        <ActionForm
+                          submitLabel="Send decision"
+                          inputSchema={request.responseSchema}
+                          onSubmit={(payload) =>
+                            void submissions.submit(
+                              {
+                                kind: 'execution',
+                                workflowId,
+                                instanceId,
+                                requestId: request.requestId,
+                                payload,
+                              },
+                              data.runLabel ?? 'Run'
+                            )
+                          }
+                        />
+                      )}
+                    </Can>
+                  </article>
+                );
+              })
+            ) : (
+              <OperationSection title="Decision needed">
+                <p className="p-5 text-sm text-muted-foreground">
+                  No requests waiting for an answer.
+                </p>
+              </OperationSection>
+            )}
+            <InputRetryPanel matches={(r) => r.instanceId === instanceId} />
+          </section>
+          <aside className="min-w-0 space-y-4">
+            <StatePanel
+              state={data.state}
+              schema={fields}
+              updatedAt={data.stateUpdatedAt}
+              compact
+            />
+            <OperationSection
+              title="Activity"
+              aside={
+                <Link
+                  className="text-primary-text"
+                  to={`/workflows/${workflowId}/history/${instanceId}`}
                 >
-                  <span>{step.stepName ?? step.stepId}</span>
-                  <RunStatusPill status={step.status} />
-                </li>
-              ))}
-            </ol>
-          )}
-        </section>
+                  Execution history
+                </Link>
+              }
+            >
+              {steps.error ? (
+                <p role="alert">Could not load activity.</p>
+              ) : (
+                <ol className="space-y-4 p-4">
+                  {steps.data?.data?.steps?.map((step) => (
+                    <li
+                      key={`${step.stepId}/${step.scopeId ?? ''}/${step.startedAt}`}
+                      className="flex min-w-0 items-start gap-3 text-xs"
+                    >
+                      <span
+                        className={`mt-1 size-2 shrink-0 rounded-full ${step.status === 'failed' ? 'bg-destructive' : 'bg-muted-foreground/50'}`}
+                      />
+                      <div className="min-w-0">
+                        <p className="break-words font-medium">
+                          {step.stepName ?? step.stepId}
+                        </p>
+                        <p className="mt-1 text-muted-foreground">
+                          {stateLabel(step.status)}
+                          {step.startedAt ? (
+                            <>
+                              {' '}
+                              ·{' '}
+                              <StateValue
+                                value={step.startedAt}
+                                display={{ kind: 'relative' }}
+                              />
+                            </>
+                          ) : null}
+                        </p>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </OperationSection>
+            <p className="px-4 text-xs text-muted-foreground">
+              Workflow version {data.usedVersion}
+            </p>
+          </aside>
+        </div>
       </main>
     </div>
   );

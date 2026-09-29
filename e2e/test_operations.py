@@ -55,7 +55,7 @@ def immediate(value): return {'valueType': 'immediate', 'value': value}
 def reference(value): return {'valueType': 'reference', 'value': value}
 
 
-name = 'Operations acceptance ' + uuid.uuid4().hex[:8]
+name = '[E2E test] Operations ' + uuid.uuid4().hex[:8]
 workflow = api('/workflows/create', {'name': name, 'description': 'Operations live acceptance test'})['data']['id']
 graph = {
     'name': name, 'entryPoint': 'publish',
@@ -148,7 +148,7 @@ assert requests('new_approval')['content'][0]['inputSchema']['reason']['min'] ==
 print('Validated shared views, stale edit refusal, old queues, registered schemas, and Replay labels', flush=True)
 # A real structured failure exercises Monitor and its Replay affordance.
 failure_workflow = api('/workflows/create', {'name': name + ' failure', 'description': 'Monitor Replay acceptance'})['data']['id']
-failure_graph = {'name': name + ' failure', 'entryPoint': 'fail', 'steps': {'fail': {'id': 'fail', 'stepType': 'Error', 'code': 'TEMPORARY_FAILURE', 'message': 'Acceptance test retryable failure', 'category': 'transient', 'severity': 'warning'}}, 'executionPlan': []}
+failure_graph = {'name': name + ' failure', 'entryPoint': 'fail', 'steps': {'fail': {'id': 'fail', 'stepType': 'Error', 'code': 'TEMPORARY_FAILURE', 'message': 'Intentional E2E failure to verify Replay', 'category': 'transient', 'severity': 'warning'}}, 'executionPlan': []}
 save_and_compile(failure_graph, failure_workflow)
 failure_label = 'RETRY-' + uuid.uuid4().hex[:8]
 failure_run = api(f'/workflows/{failure_workflow}/execute', {'runLabel': failure_label, 'inputs': {'data': {}, 'variables': {}}})['data']['instanceId']

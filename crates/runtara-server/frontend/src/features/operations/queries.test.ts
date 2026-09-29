@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { resolveQuery, selectedFields, failureText } from './queries';
+import {
+  resolveQuery,
+  selectedFields,
+  failureText,
+  describeFailure,
+} from './queries';
 import { inlineOptions } from './answer-options';
 import type { OperationViewConfig } from '@/generated/RuntaraRuntimeApi';
 
@@ -70,4 +75,22 @@ it('renders host failures as text and supplies structured error defaults', () =>
       failureText({ code: 'TEMP', category: 'transient', message: 'Retry' })
     )
   ).toMatchObject({ severity: 'error', attributes: {} });
+});
+
+it('shows structured terminal errors as messages and preserves plain host failures', () => {
+  expect(
+    describeFailure({
+      error: JSON.stringify({
+        message: 'Please retry',
+        category: 'transient',
+        code: 'TEMP',
+      }),
+    })
+  ).toEqual({ message: 'Please retry', category: 'transient', code: 'TEMP' });
+  expect(describeFailure({ error: 'Worker exited' })).toEqual({
+    message: 'Worker exited',
+  });
+  expect(describeFailure({ error: '{malformed' })).toEqual({
+    message: '{malformed',
+  });
 });

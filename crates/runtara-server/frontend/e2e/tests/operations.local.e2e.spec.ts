@@ -26,7 +26,7 @@ test('Operations: edit separate bulk answers in place, resume runs, and inspect 
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(appPath('/operations'));
   await expect(
-    page.getByRole('heading', { name: 'Operations', exact: true })
+    page.getByRole('heading', { name: 'Overview', exact: true })
   ).toBeVisible();
   await page.screenshot({
     path: testInfo.outputPath('overview.png'),
@@ -108,13 +108,13 @@ test('Operations: edit separate bulk answers in place, resume runs, and inspect 
     page.getByRole('heading', { name: 'Monitor', exact: true })
   ).toBeVisible();
   await expect(
-    page.getByRole('heading', { name: 'Failures', exact: true })
+    page.getByRole('heading', { name: 'Failed runs', exact: true })
   ).toBeVisible();
-  const failed = page.getByRole('row').filter({
-    has: page.getByRole('link', { name: fixture.failureLabel, exact: true }),
-  });
+  const failed = page.locator(`[data-run-id="${fixture.failureRun}"]`);
   await expect(
-    failed.getByText('Acceptance test retryable failure', { exact: true })
+    failed.getByText('Intentional E2E failure to verify Replay', {
+      exact: true,
+    })
   ).toBeVisible();
   await page.screenshot({
     path: testInfo.outputPath('monitor.png'),

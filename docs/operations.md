@@ -543,7 +543,15 @@ retained link to the original run.
 ## Implementation
 
 The `/operations` UI provides Overview, request queues, plain workflow run
-views, saved shared views, run details and Monitor. Defaults discover action
+views, saved shared views, run details and Monitor.
+The UI follows the screenshot structure: four Overview summaries with attention
+rows beside process stages; a compact queue toolbar and table; a Run decision
+panel beside state and activity; and Monitor process totals above compact failed
+and waiting-run lists. Queue navigation also exposes saved views. Monitor's time
+range applies to process starts and failure completion times; waiting runs are
+ordered by run start time because the API does not expose a stable wait-start
+timestamp. The UI labels that distinction explicitly.
+ Defaults discover action
 keys in current workflow graphs (including nested Split graphs) and retain
 removed keys while actionable requests remain. Request forms always use their
 registered schema. Queue display metadata comes from the current workflow,
@@ -593,11 +601,14 @@ row editing, independent validation, approval, state display and Monitor Replay.
 Run it with `E2E_OPERATIONS_FIXTURE`, `PLAYWRIGHT_BASE_URL`, and the `local-ui`
 Playwright project. Neither test deletes services or databases.
 
-Verified locally on 2026-09-29: 1,354 frontend tests; production frontend
+Verified locally on 2026-09-29: 1,355 frontend tests; production frontend
 build; frontend lint (zero errors, 29 existing warnings); 55 authorization
 tests; six Operations database integration tests; managed session delivery;
 nested queue discovery; the live API acceptance script; and the Chromium
-Operations browser scenario. Commit hooks ran workspace formatting and Clippy.
+Operations browser scenario. Layout checks additionally exercise all four screens
+at 1440, 1000 and 390 pixels, checking page overflow, action alignment and API
+errors. Locally generated acceptance workflows use an `[E2E test]` name prefix
+and deliberately fail to verify Replay. Commit hooks ran workspace formatting and Clippy.
 The full CI matrix and external-service E2E suites were not run. Local E2E
 used isolated PostgreSQL/Valkey services and real compiled WASM workflows.
 

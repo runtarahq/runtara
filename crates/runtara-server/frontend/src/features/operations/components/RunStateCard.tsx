@@ -15,7 +15,9 @@ export function StatePanel({
   state,
   schema = {},
   updatedAt,
+  compact = false,
 }: {
+  compact?: boolean;
   state?: Record<string, unknown> | null;
   schema?: Record<string, StateField>;
   updatedAt?: string | null;
@@ -27,8 +29,16 @@ export function StatePanel({
       (schema[a]?.order ?? 0) - (schema[b]?.order ?? 0) || a.localeCompare(b)
   );
   return (
-    <Card>
-      <CardHeader>
+    <Card
+      className={compact ? 'gap-0 overflow-hidden py-0 shadow-none' : undefined}
+    >
+      <CardHeader
+        className={
+          compact
+            ? 'flex flex-row flex-wrap items-center justify-between gap-2 border-b px-4 py-3'
+            : undefined
+        }
+      >
         <CardTitle className="text-base">
           <h2>State</h2>
         </CardTitle>
@@ -39,17 +49,32 @@ export function StatePanel({
           </p>
         )}
       </CardHeader>
-      <CardContent>
+      <CardContent className={compact ? 'px-4 py-1' : undefined}>
         {keys.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             No state published yet.
           </p>
         ) : (
-          <dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <dl
+            className={
+              compact ? 'divide-y' : 'grid gap-4 sm:grid-cols-2 lg:grid-cols-3'
+            }
+          >
             {keys.map((key) => (
-              <div key={key} className="min-w-0">
+              <div
+                key={key}
+                className={
+                  compact
+                    ? 'grid min-w-0 grid-cols-[minmax(0,2fr)_minmax(0,3fr)] gap-4 py-2.5'
+                    : 'min-w-0'
+                }
+              >
                 <dt
-                  className="mb-1 text-xs text-muted-foreground"
+                  className={
+                    compact
+                      ? 'text-xs text-muted-foreground'
+                      : 'mb-1 text-xs text-muted-foreground'
+                  }
                   title={schema[key]?.description}
                 >
                   {stateLabel(key, schema[key])}
