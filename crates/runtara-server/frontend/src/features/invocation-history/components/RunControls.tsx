@@ -1,3 +1,5 @@
+import type { ComponentProps } from 'react';
+import { ChevronDown } from 'lucide-react';
 import type { ExecutionHistoryFilters } from '../types';
 import type { ExecutionSummary } from '@/generated/RuntaraRuntimeApi';
 import { runStatusFilters, selectedRunStatus } from '../utils/run-filters';
@@ -24,8 +26,6 @@ export function RunControls({
   updatedAt?: number;
   onRefresh: () => void;
 }) {
-  const selectClass =
-    'h-8 min-w-0 rounded-md border bg-background px-2 text-sm';
   const current = selectedRunStatus(filters.status);
   const range =
     filters.range ??
@@ -79,8 +79,7 @@ export function RunControls({
         {!current && <span className="text-sm">Status: {filters.status}</span>}
       </div>
       <div className="flex flex-wrap items-center gap-3">
-        <select
-          className={selectClass}
+        <RunSelect
           aria-label="Date basis"
           value={filters.dateBasis ?? 'started'}
           onChange={(e) =>
@@ -92,9 +91,8 @@ export function RunControls({
         >
           <option value="started">Started</option>
           <option value="completed">Completed</option>
-        </select>
-        <select
-          className={selectClass}
+        </RunSelect>
+        <RunSelect
           aria-label="Run time range"
           value={range}
           onChange={(e) =>
@@ -105,9 +103,8 @@ export function RunControls({
           <option value="24h">Last 24 hours</option>
           <option value="7d">Last 7 days</option>
           <option value="custom">Custom dates</option>
-        </select>
-        <select
-          className={selectClass}
+        </RunSelect>
+        <RunSelect
           aria-label="Run order"
           value={`${filters.sortBy ?? 'createdAt'}:${filters.sortOrder ?? 'desc'}`}
           onChange={(e) => {
@@ -129,7 +126,7 @@ export function RunControls({
                 Custom order
               </option>
             )}
-        </select>
+        </RunSelect>
         <label className="flex items-center gap-2 text-xs">
           <input
             type="checkbox"
@@ -159,5 +156,20 @@ export function RunControls({
         </p>
       )}
     </div>
+  );
+}
+
+function RunSelect(props: ComponentProps<'select'>) {
+  return (
+    <span className="relative inline-flex min-w-0 max-w-full">
+      <select
+        {...props}
+        className="h-8 w-full min-w-0 appearance-none rounded-md border bg-background pl-3 pr-9 text-sm"
+      />
+      <ChevronDown
+        aria-hidden="true"
+        className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+      />
+    </span>
   );
 }
