@@ -942,6 +942,53 @@ impl RuntimeClient {
     /// * `tenant_id` - The tenant to list instances for
     /// * `status_filter` - Optional status filter (e.g., Running, Pending)
     /// * `limit` - Maximum number of instances to return
+    pub async fn operation_failures(
+        &self,
+        tenant: &str,
+        ids: &[String],
+    ) -> Result<Vec<runtara_environment::operations::RunFailure>, RuntimeError> {
+        self.client
+            .operation_failures(tenant, ids)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    pub async fn operation_requests(
+        &self,
+        tenant: &str,
+        workflow: &str,
+        key: &str,
+        listing: &ListInstancesOptions,
+        fields: &[String],
+    ) -> Result<runtara_environment::operations::RequestPage, RuntimeError> {
+        self.client
+            .operation_requests(tenant, workflow, key, listing, fields)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    pub async fn active_operation_queues(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<runtara_environment::operations::ActiveQueue>, RuntimeError> {
+        self.client
+            .active_operation_queues(tenant)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    pub async fn operation_state_projection(
+        &self,
+        tenant: &str,
+        ids: &[String],
+        fields: &[String],
+    ) -> Result<Vec<(String, Option<Value>)>, RuntimeError> {
+        self.client
+            .operation_state_projection(tenant, ids, fields)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
     pub async fn list_instances(
         &self,
         tenant_id: &str,

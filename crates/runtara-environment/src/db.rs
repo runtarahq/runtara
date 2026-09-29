@@ -238,12 +238,18 @@ pub async fn list_instances(
          LEFT JOIN images img ON ii.image_id = img.image_id",
     );
     push_instance_filters(&mut query, options);
-    query.push(match options.order_by.as_deref() {
-        Some("created_at_asc") => " ORDER BY i.created_at ASC, i.instance_id ASC",
-        Some("finished_at_desc") => " ORDER BY i.finished_at DESC NULLS LAST, i.instance_id DESC",
-        Some("finished_at_asc") => " ORDER BY i.finished_at ASC NULLS LAST, i.instance_id ASC",
-        _ => " ORDER BY i.created_at DESC, i.instance_id DESC",
-    });
+    if let Some(sort) = &options.state_sort {
+        crate::operations::push_state_order(&mut query, sort);
+    } else {
+        query.push(match options.order_by.as_deref() {
+            Some("created_at_asc") => " ORDER BY i.created_at ASC, i.instance_id ASC",
+            Some("finished_at_desc") => {
+                " ORDER BY i.finished_at DESC NULLS LAST, i.instance_id DESC"
+            }
+            Some("finished_at_asc") => " ORDER BY i.finished_at ASC NULLS LAST, i.instance_id ASC",
+            _ => " ORDER BY i.created_at DESC, i.instance_id DESC",
+        });
+    }
     query
         .push(" LIMIT ")
         .push_bind(options.limit)

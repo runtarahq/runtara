@@ -26,3 +26,5 @@ pub mod control;
 pub mod database;
 
 pub mod outbound_http;
+
+pub mod operations;

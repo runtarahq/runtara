@@ -39,6 +39,13 @@ use runtime_client::RuntimeClient;
         // Execution endpoints
         api::handlers::executions::list_all_executions_handler,
         api::handlers::executions::query_executions_handler,
+        api::handlers::operations::operation_queues,
+        api::handlers::operations::operation_processes,
+        api::handlers::operations::list_operation_views,
+        api::handlers::operations::create_operation_view,
+        api::handlers::operations::update_operation_view,
+        api::handlers::operations::delete_operation_view,
+        api::handlers::operations::query_operation_requests,
         // Workflow endpoints (refactored)
         api::handlers::workflows::create_workflow_handler,
         api::handlers::workflows::update_workflow_handler,
@@ -217,6 +224,21 @@ use runtime_client::RuntimeClient;
             api::dto::executions::ListAllExecutionsResponse,
             api::dto::executions::QueryExecutionsRequest,
             api::dto::executions::StateFilterDto,
+            api::dto::executions::StateSortDto,
+            api::dto::operations::QueryOperationRequests,
+            api::dto::operations::OperationRequest,
+            api::dto::operations::OperationRequestPage,
+            api::dto::operations::OperationQueue,
+            api::dto::operations::OperationProcess,
+            api::dto::operations::OperationErrorSummary,
+            api::dto::operations::OperationViewConfig,
+            api::dto::operations::OperationViewFilter,
+            api::dto::operations::OperationViewRoles,
+            api::dto::operations::OperationViewAnswers,
+            api::dto::operations::OperationDisplayFormat,
+            api::dto::operations::OperationDisplayKind,
+            api::dto::operations::SaveOperationView,
+            api::dto::operations::SavedOperationView,
             api::dto::operators::ListAgentsResponse,
             // DSL types from runtara-dsl (with utoipa feature enabled)
             runtara_dsl::Workflow,
@@ -1703,6 +1725,28 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/runtime/executions",
             get(api::handlers::executions::list_all_executions_handler),
+        )
+        .route(
+            "/api/runtime/operations/views",
+            get(api::handlers::operations::list_operation_views)
+                .post(api::handlers::operations::create_operation_view),
+        )
+        .route(
+            "/api/runtime/operations/views/{id}",
+            put(api::handlers::operations::update_operation_view)
+                .delete(api::handlers::operations::delete_operation_view),
+        )
+        .route(
+            "/api/runtime/operations/processes",
+            get(api::handlers::operations::operation_processes),
+        )
+        .route(
+            "/api/runtime/operations/queues",
+            get(api::handlers::operations::operation_queues),
+        )
+        .route(
+            "/api/runtime/operations/requests/query",
+            post(api::handlers::operations::query_operation_requests),
         )
         .route(
             "/api/runtime/executions/query",

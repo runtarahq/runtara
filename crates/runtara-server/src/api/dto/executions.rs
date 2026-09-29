@@ -76,8 +76,8 @@ pub struct StateFilterDto {
 
 /// Body of `POST /api/runtime/executions/query`: the listing filters of
 /// `GET /api/runtime/executions`, plus filters on published state. Returns
-/// executions, never their state.
-#[derive(Debug, Default, Deserialize, ToSchema)]
+/// executions, optionally projecting selected state fields.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QueryExecutionsRequest {
     pub search: Option<String>,
@@ -99,6 +99,11 @@ pub struct QueryExecutionsRequest {
     /// All must hold; a run without the field does not match. At most 16.
     #[serde(default)]
     pub state: Vec<StateFilterDto>,
+    /// Explicit top-level state projection (maximum 32); omitted returns no state.
+    #[serde(default)]
+    pub state_fields: Vec<String>,
+    /// Optional typed state ordering, with missing values last.
+    pub state_sort: Option<StateSortDto>,
 }
 
 impl QueryExecutionsRequest {
@@ -146,6 +151,8 @@ pub struct ExecutionFilters {
     pub sort_order: String,
     /// Published-state filters, validated and canonical.
     pub state_filters: Vec<runtara_environment::state_filter::StateFilter>,
+    pub state_fields: Vec<String>,
+    pub state_sort: Option<runtara_environment::operations::StateSort>,
 }
 
 impl Default for ExecutionFilters {
@@ -163,6 +170,25 @@ impl Default for ExecutionFilters {
             sort_by: "completed_at".to_string(),
             sort_order: "DESC".to_string(),
             state_filters: Vec::new(),
+            state_fields: Vec::new(),
+            state_sort: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StateSortDto {
+    pub field: String,
+    #[serde(default)]
+    pub descending: bool,
+}
+
+impl From<&StateSortDto> for runtara_environment::operations::StateSort {
+    fn from(value: &StateSortDto) -> Self {
+        Self {
+            field: value.field.clone(),
+            descending: value.descending,
         }
     }
 }

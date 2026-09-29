@@ -294,3 +294,333 @@ async fn replay_preserves_label_inputs_and_provenance_with_a_new_run_and_latest_
         assert!(fx.engine.replay("foreign", &id).await.is_err());
     }
 }
+
+#[tokio::test]
+async fn queues_count_requests_filter_active_work_and_project_typed_state() {
+    use axum::{Json, extract::State, http::StatusCode};
+    use runtara_core::persistence::inputs::{InputAuthority, InputRequestSpec};
+    use runtara_server::api::{
+        dto::{
+            executions::{QueryExecutionsRequest, StateSortDto},
+            operations::QueryOperationRequests,
+        },
+        handlers::{executions::query_executions_handler, operations::query_operation_requests},
+        repositories::operations::OperationsRepository,
+        services::operations::discover_queues,
+    };
+    use runtara_server::middleware::tenant_auth::OrgId;
+    let fx = Fixture::new().await;
+    let small = fx.run(Some("SMALL")).await;
+    let large = fx.run(Some("LARGE")).await;
+    let empty = fx.run(Some("EMPTY")).await;
+    for (id, amount) in [(&small, 2), (&large, 10)] {
+        fx.persistence
+            .run_state()
+            .unwrap()
+            .apply_state(
+                &fx.tenant,
+                id,
+                &"1".repeat(64),
+                &StatePatch::from_object(
+                    json!({"amount":amount,"secret":"not selected"})
+                        .as_object()
+                        .unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let store = fx.persistence.input_requests().unwrap();
+    let mut requests = Vec::new();
+    for (id, signal, deadline) in [
+        (&small, "first", None),
+        (&small, "second", None),
+        (&large, "third", None),
+        (&empty, "fourth", None),
+        (
+            &small,
+            "expired",
+            Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+        ),
+        (&small, "inactive", None),
+    ] {
+        let request = store
+            .register_input(
+                &InputAuthority::Root {
+                    tenant_id: fx.tenant.clone(),
+                    instance_id: id.clone(),
+                },
+                &InputRequestSpec {
+                    signal_id: signal.into(),
+                    response_schema: Some(json!({"decision":{"type":"string","enum":[signal]}})),
+                    metadata: json!({"action_key":"old_key","context":{"signal":signal}}),
+                    deadline,
+                },
+            )
+            .await
+            .unwrap();
+        if signal == "inactive" {
+            sqlx::query("UPDATE instance_input_requests SET invocation_path='missing/invocation' WHERE instance_id=$1 AND request_id=$2").bind(id).bind(&request.request_id).execute(&fx.runtime).await.unwrap();
+        }
+        requests.push(request);
+    }
+    let terminal = fx.run(None).await;
+    store
+        .register_input(
+            &InputAuthority::Root {
+                tenant_id: fx.tenant.clone(),
+                instance_id: terminal.clone(),
+            },
+            &InputRequestSpec {
+                signal_id: "terminal".into(),
+                response_schema: None,
+                metadata: json!({"action_key":"old_key"}),
+                deadline: None,
+            },
+        )
+        .await
+        .unwrap();
+    fx.persistence
+        .update_instance_status(&terminal, InstanceStatus::Completed, None)
+        .await
+        .unwrap();
+    let queues = discover_queues(
+        &OperationsRepository::new(fx.server.clone()),
+        &fx.client,
+        &fx.tenant,
+    )
+    .await
+    .unwrap();
+    assert_eq!(queues.len(), 1);
+    assert_eq!(queues[0].action_key, "old_key"); // Absent in the latest graph.
+    assert_eq!(queues[0].count, 4);
+    assert!(
+        discover_queues(
+            &OperationsRepository::new(fx.server.clone()),
+            &fx.client,
+            "foreign"
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    let engine = Arc::new(fx.engine);
+    for (page, expected) in [(0, &small), (1, &large)] {
+        let (status, Json(body)) = query_operation_requests(
+            OrgId(fx.tenant.clone()),
+            State(engine.clone()),
+            State(Some(fx.client.clone())),
+            Json(QueryOperationRequests {
+                workflow_id: fx.workflow.clone(),
+                action_key: "old_key".into(),
+                query: QueryExecutionsRequest {
+                    page: Some(page),
+                    size: Some(2),
+                    state_fields: vec!["amount".into(), "missing".into()],
+                    state_sort: Some(StateSortDto {
+                        field: "amount".into(),
+                        descending: false,
+                    }),
+                    ..Default::default()
+                },
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["totalElements"], 4);
+        assert_eq!(body["data"]["content"][0]["instanceId"], *expected);
+        if page == 1 {
+            assert_eq!(body["data"]["content"][1]["instanceId"], empty);
+        }
+        if page == 0 {
+            assert_eq!(body["data"]["content"].as_array().unwrap().len(), 2);
+            assert_eq!(body["data"]["content"][0]["instanceId"], *expected);
+            assert_eq!(body["data"]["content"][1]["instanceId"], small);
+            assert_ne!(
+                body["data"]["content"][0]["requestId"],
+                body["data"]["content"][1]["requestId"]
+            );
+        }
+        for row in body["data"]["content"].as_array().unwrap() {
+            assert!(row["state"].get("secret").is_none());
+            assert!(row["state"].get("missing").is_none());
+            assert_eq!(
+                row["inputSchema"]["decision"]["enum"][0],
+                row["context"]["signal"]
+            );
+        }
+    }
+    let (_, Json(filtered)) = query_operation_requests(
+        OrgId(fx.tenant.clone()),
+        State(engine.clone()),
+        State(Some(fx.client.clone())),
+        Json(QueryOperationRequests {
+            workflow_id: fx.workflow.clone(),
+            action_key: "old_key".into(),
+            query: serde_json::from_value(
+                json!({"state":[{"field":"amount","op":"gte","value":10}]}),
+            )
+            .unwrap(),
+        }),
+    )
+    .await;
+    assert_eq!(filtered["data"]["totalElements"], 1);
+    assert_eq!(filtered["data"]["content"][0]["instanceId"], large);
+    assert!(filtered["data"]["content"][0].get("state").is_none());
+
+    let query = QueryExecutionsRequest {
+        workflow_id: Some(fx.workflow.clone()),
+        state_fields: vec!["amount".into()],
+        state_sort: Some(StateSortDto {
+            field: "amount".into(),
+            descending: true,
+        }),
+        ..Default::default()
+    };
+    let (status, Json(body)) =
+        query_executions_handler(OrgId(fx.tenant.clone()), State(engine.clone()), Json(query))
+            .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["content"][0]["id"], large);
+    assert_eq!(body["data"]["content"][1]["id"], small);
+    assert_eq!(body["data"]["content"][0]["state"], json!({"amount":10}));
+    let (_, Json(body)) = query_executions_handler(
+        OrgId(fx.tenant.clone()),
+        State(engine.clone()),
+        Json(QueryExecutionsRequest::default()),
+    )
+    .await;
+    assert!(
+        body["data"]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r.get("state").is_none())
+    );
+    let (status, Json(body)) = query_operation_requests(
+        OrgId("foreign".into()),
+        State(engine.clone()),
+        State(Some(fx.client.clone())),
+        Json(QueryOperationRequests {
+            workflow_id: fx.workflow.clone(),
+            action_key: "old_key".into(),
+            query: QueryExecutionsRequest::default(),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["totalElements"], 0);
+}
+
+#[tokio::test]
+async fn shared_views_validate_scope_and_reject_lost_updates() {
+    use axum::{
+        Extension, Json,
+        extract::{Path, State},
+        http::StatusCode,
+    };
+    use runtara_server::{
+        api::{
+            dto::operations::SaveOperationView,
+            handlers::operations::{create_operation_view, update_operation_view},
+            repositories::operations::OperationsRepository,
+        },
+        auth::{AuthContext, AuthMethod},
+        middleware::tenant_auth::OrgId,
+    };
+    let fx = Fixture::new().await;
+    let actor = AuthContext::new(fx.tenant.clone(), "alice".into(), AuthMethod::Jwt);
+    let config = json!({"name":"Approvals","workflow":fx.workflow,"columns":["amount"],"where":{"openRequest":"approve","state":[{"field":"dueAt","op":"lt","value":{"relative":"now","offsetSeconds":0}}]},"formats":{"amount":{"kind":"number","decimals":2,"prefix":"$"}}});
+    let request = SaveOperationView {
+        configuration: serde_json::from_value(config).unwrap(),
+        revision: None,
+    };
+    let (status, Json(body)) = create_operation_view(
+        OrgId(fx.tenant.clone()),
+        State(fx.server.clone()),
+        Extension(actor.clone()),
+        Json(request.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["data"]["id"].as_str().unwrap().to_owned();
+    let repo = OperationsRepository::new(fx.server.clone());
+    assert!(repo.get_view("foreign", &id).await.unwrap().is_none());
+    assert_eq!(repo.list_views(&fx.tenant).await.unwrap().len(), 1);
+    let mut edit = request.clone();
+    edit.revision = Some(1);
+    edit.configuration.name = "Shared edit".into();
+    let bob = AuthContext::new(fx.tenant.clone(), "bob".into(), AuthMethod::Jwt);
+    let (status, Json(body)) = update_operation_view(
+        OrgId(fx.tenant.clone()),
+        State(fx.server.clone()),
+        Extension(bob),
+        Path(id.clone()),
+        Json(edit.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["revision"], 2);
+    let (status, _) = update_operation_view(
+        OrgId(fx.tenant.clone()),
+        State(fx.server.clone()),
+        Extension(actor.clone()),
+        Path(id.clone()),
+        Json(edit),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let mut bad = request.clone();
+    bad.configuration.workflow = "foreign-workflow".into();
+    let (status, _) = create_operation_view(
+        OrgId(fx.tenant.clone()),
+        State(fx.server.clone()),
+        Extension(actor.clone()),
+        Json(bad),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let mut bad = request;
+    bad.configuration.columns = vec!["bad\0field".into()];
+    let (status, _) = create_operation_view(
+        OrgId(fx.tenant.clone()),
+        State(fx.server.clone()),
+        Extension(actor),
+        Json(bad),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(!repo.delete_view("foreign", &id, 2).await.unwrap());
+    assert!(!repo.delete_view(&fx.tenant, &id, 1).await.unwrap());
+    assert!(repo.delete_view(&fx.tenant, &id, 2).await.unwrap());
+}
+
+#[tokio::test]
+async fn failed_run_lists_include_step_errors_and_host_fallback() {
+    use runtara_server::api::dto::executions::ExecutionFilters;
+    let fx = Fixture::new().await;
+    let id = fx.run(None).await;
+    let detail = json!({"step_id":"call","error":{"code":"HTTP_TIMEOUT","category":"transient","message":"Request timed out","retryable":true}});
+    sqlx::query("INSERT INTO instance_events(instance_id,event_type,subtype,payload) VALUES ($1,'custom','step_debug_end',$2)").bind(&id).bind(serde_json::to_vec(&detail).unwrap()).execute(&fx.runtime).await.unwrap();
+    fx.persistence
+        .update_instance_status(&id, InstanceStatus::Failed, Some(chrono::Utc::now()))
+        .await
+        .unwrap();
+    let page = fx
+        .engine
+        .list_all_executions(&fx.tenant, None, None, ExecutionFilters::default())
+        .await
+        .unwrap();
+    assert_eq!(page.content.len(), 1);
+    let summary = page.content[0].error_summary.as_ref().unwrap();
+    assert_eq!(summary.code.as_deref(), Some("HTTP_TIMEOUT"));
+    assert_eq!(summary.category.as_deref(), Some("transient"));
+    assert_eq!(summary.message, "Request timed out");
+    assert!(
+        fx.client
+            .operation_failures("foreign", &[id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
