@@ -140,8 +140,9 @@ async fn a_worker_prepared_run_entry_calls_the_control_api() -> anyhow::Result<(
     };
     let fx = Fixture::new()?;
     let executor = fx.executor(Some(fx.host.clone()));
-    let request =
-        PrecompileRequest::for_artifact([7; 32], fx.write("direct.wasm", &direct_root()))?;
+    let mut nonce = [0u8; crate::precompile::PRECOMPILE_NONCE_BYTES];
+    getrandom::fill(&mut nonce).expect("obtain test nonce entropy");
+    let request = PrecompileRequest::for_artifact(nonce, fx.write("direct.wasm", &direct_root()))?;
     let native = precompile_artifact_with_engine(&request, &fx.engine)?;
     // A plain component keeps the legacy native encoding.
     assert!(!native.serialized_component().starts_with(b"RTRNP"));
