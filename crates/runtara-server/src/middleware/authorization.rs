@@ -375,6 +375,7 @@ pub fn permission_for(method: &Method, path: &str) -> Option<Permission> {
         ("POST", "/api/runtime/agents/{name}/capabilities/{capability_id}/test") => WorkflowExecute,
         // ── Invocation history (runs, steps, events) ─────────────────────
         ("GET", "/api/runtime/executions") => InvocationHistoryRead,
+        ("POST", "/api/runtime/executions/query") => InvocationHistoryRead,
         ("GET", "/api/runtime/sessions/{sessionId}/events") => InvocationHistoryRead,
         ("GET", "/api/runtime/sessions/{sessionId}/pending-input") => InvocationHistoryRead,
         ("GET", "/api/runtime/workflows/{id}/instances") => InvocationHistoryRead,
@@ -1133,6 +1134,11 @@ mod tests {
                 Method::POST,
                 "/api/runtime/workflows/{id}/versions/{version}/compile",
                 Permission::WorkflowExecute,
+            ),
+            (
+                Method::POST,
+                "/api/runtime/executions/query",
+                Permission::InvocationHistoryRead,
             ),
             (
                 Method::GET,

@@ -65,6 +65,11 @@ path = "tests/managed_actions.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
+name = "operations"
+path = "tests/operations.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
 name = "control_service"
 path = "tests/control_service.rs"
 required-features = ["db-integration-tests"]

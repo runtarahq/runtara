@@ -1631,20 +1631,8 @@ impl ExecutionEngine {
         }
 
         let mut instance = runtara_info_to_dto(info);
-        // The run's published state; a failed read leaves it out rather than
-        // failing the whole lookup.
-        match client.get_run_state(tenant_id, instance_id).await {
-            Ok(Some(record)) => {
-                instance.state = Some(Value::Object(record.state));
-                instance.state_updated_at = Some(record.updated_at.to_rfc3339());
-            }
-            Ok(None) => {}
-            Err(error) => warn!(
-                instance_id = %instance_id,
-                error = %error,
-                "Reading the run's state failed"
-            ),
-        }
+        self.enrich_state(&mut instance, tenant_id, instance_id)
+            .await;
         Ok(instance)
     }
 
@@ -1816,7 +1804,7 @@ impl ExecutionEngine {
             .map_err(|e| ExecutionError::ValidationError(e.message))?;
 
         self.queue(QueueRequest {
-            run_label: None,
+            run_label: info.run_label,
             tenant_id,
             workflow_id: &workflow_id,
             version: Some(latest_version),
@@ -1890,6 +1878,32 @@ impl ExecutionEngine {
         Ok(info)
     }
 
+    /// Read published state consistently on both instance-detail endpoints.
+    async fn enrich_state(
+        &self,
+        instance: &mut WorkflowInstanceDto,
+        tenant_id: &str,
+        instance_id: &str,
+    ) {
+        let Some(client) = self.runtime_client.as_ref() else {
+            return;
+        };
+        // The run's published state; a failed read leaves it out rather than
+        // failing the whole lookup.
+        match client.get_run_state(tenant_id, instance_id).await {
+            Ok(Some(record)) => {
+                instance.state = Some(Value::Object(record.state));
+                instance.state_updated_at = Some(record.updated_at.to_rfc3339());
+            }
+            Ok(None) => {}
+            Err(error) => warn!(
+                instance_id = %instance_id,
+                error = %error,
+                "Reading the run's state failed"
+            ),
+        }
+    }
+
     /// Get an execution enriched with workflow metadata.
     pub async fn get_execution_with_metadata(
         &self,
@@ -1915,6 +1929,8 @@ impl ExecutionEngine {
 
         let mut result =
             runtara_info_to_execution_with_metadata(info, workflow_name, workflow_description);
+        self.enrich_state(&mut result.instance, tenant_id, instance_id)
+            .await;
         enrich_pending_input(
             std::slice::from_mut(&mut result.instance),
             client,
