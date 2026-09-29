@@ -555,13 +555,14 @@ jobs:
         working-directory: crates/runtara-wit
         run: wit-deps lock
 
-      # The self-contained runtara packages parse on their own. `workflow` and
-      # `control` `use` runtara:agent; every package, together, is resolved by
-      # runtara-wit's unit tests in the workspace `--lib` job.
+      # The self-contained runtara packages parse on their own. `workflow`,
+      # `workflow-stdlib` and `control` `use` runtara:agent; every package,
+      # together, is resolved by runtara-wit's unit tests in the workspace
+      # `--lib` job.
       - name: Validate WIT packages
         run: |
           set -euo pipefail
-          for pkg in agent host workflow-stdlib trusted; do
+          for pkg in agent host trusted; do
             wasm-tools component wit "crates/runtara-wit/wit/$pkg" > /dev/null
           done
 
