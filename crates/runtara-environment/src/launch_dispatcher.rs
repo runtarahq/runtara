@@ -1212,7 +1212,7 @@ impl LaunchDispatcher {
             .map_err(|error| format!("failed to read image: {error}"))?
             .ok_or_else(|| "launch image no longer exists".to_string())?;
         self.validate_image(&image, launch)?;
-        let expected_workflow_checksum = image.workflow_binary_checksum()?.map(str::to_owned);
+        let expected_workflow_checksum = Some(image.workflow_binary_checksum()?.to_owned());
         let timeout = self
             .execution_timeout_policy
             .resolve_persisted(binding.timeout_seconds)

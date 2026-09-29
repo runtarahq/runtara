@@ -201,6 +201,57 @@ async fn test_handler_state_creation() {
     assert!(state.uptime_ms() >= 0);
 }
 
+/// Every image records the checksum of its exact bytes: a registration whose
+/// metadata omits it, or records another binary's, is refused before anything
+/// is written.
+#[tokio::test]
+async fn image_registration_requires_the_binary_checksum() {
+    use runtara_environment::handlers::{StoreImageError, StoreImageParams, handle_store_image};
+    use sha2::{Digest, Sha256};
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let state = create_test_state(pool.clone(), temp_dir.path().to_path_buf());
+    let binary = b"checksummed image bytes";
+    let checksum = format!("{:x}", Sha256::digest(binary));
+    let tenant = format!("checksum-tenant-{}", Uuid::new_v4());
+    let params = |metadata: Option<serde_json::Value>| StoreImageParams {
+        tenant_id: tenant.clone(),
+        name: "checksummed".into(),
+        description: None,
+        metadata,
+    };
+
+    for metadata in [
+        None,
+        Some(serde_json::json!({ "workflow": {} })),
+        Some(serde_json::json!({ "workflow": { "binaryChecksum": "0".repeat(64) } })),
+    ] {
+        let error = handle_store_image(&state, params(metadata.clone()), binary)
+            .await
+            .expect_err("an image without its checksum is refused");
+        assert!(
+            matches!(error, StoreImageError::Invalid(_)),
+            "{metadata:?}: {error}"
+        );
+    }
+    assert!(
+        !temp_dir.path().join("images").exists(),
+        "a refused registration writes nothing"
+    );
+
+    let image_id = handle_store_image(
+        &state,
+        params(Some(
+            serde_json::json!({ "workflow": { "binaryChecksum": checksum } }),
+        )),
+        binary,
+    )
+    .await
+    .expect("an image with its checksum registers");
+    cleanup(&pool, None, Some(&image_id)).await;
+}
+
 #[tokio::test]
 async fn test_handler_state_uptime() {
     skip_if_no_db!();

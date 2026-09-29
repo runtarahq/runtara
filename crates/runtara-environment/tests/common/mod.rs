@@ -113,21 +113,26 @@ impl TestContext {
         }
 
         let image_id = Uuid::new_v4();
-        let binary_path = self
-            .data_dir
-            .join("test_binary")
-            .to_string_lossy()
-            .to_string();
+        let binary = self.data_dir.join("test_binary");
+        // Every image records the checksum of its bytes; tests that launch it
+        // keep these bytes.
+        std::fs::write(&binary, TEST_BINARY).expect("write test binary");
+        let binary_path = binary.to_string_lossy().to_string();
+        let checksum = {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(TEST_BINARY))
+        };
         sqlx::query(
             r#"
-            INSERT INTO images (image_id, tenant_id, name, description, binary_path)
-            VALUES ($1, $2, $3, 'Test image', $4)
+            INSERT INTO images (image_id, tenant_id, name, description, binary_path, metadata)
+            VALUES ($1, $2, $3, 'Test image', $4, $5)
             "#,
         )
         .bind(image_id.to_string())
         .bind(tenant_id)
         .bind(name)
         .bind(&binary_path)
+        .bind(serde_json::json!({ "workflow": { "binaryChecksum": checksum } }))
         .execute(&self.pool)
         .await
         .expect("Failed to create test image");
@@ -285,3 +290,6 @@ async fn integration_database(base_url: &str) -> Result<String, String> {
 
     Ok(base.database(&name).to_url_lossy().to_string())
 }
+
+/// The bytes of every image `create_test_image` registers.
+pub const TEST_BINARY: &[u8] = b"mock workflow";

@@ -2498,14 +2498,17 @@ pub enum StoreImageError {
     Io(String),
     /// Writing the image row failed.
     Register(String),
+    /// The metadata does not record the uploaded binary's checksum.
+    Invalid(String),
 }
 
 impl std::fmt::Display for StoreImageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Lookup(message) | Self::Io(message) | Self::Register(message) => {
-                f.write_str(message)
-            }
+            Self::Lookup(message)
+            | Self::Io(message)
+            | Self::Register(message)
+            | Self::Invalid(message) => f.write_str(message),
         }
     }
 }
@@ -2523,7 +2526,23 @@ pub async fn handle_store_image(
     params: StoreImageParams,
     binary: &[u8],
 ) -> std::result::Result<String, StoreImageError> {
+    use sha2::{Digest, Sha256};
     use std::io::Write;
+
+    // Every image records the checksum of its exact bytes, which durable
+    // preparation compares to what it reads before running them.
+    let actual = format!("{:x}", Sha256::digest(binary));
+    let recorded = params
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.pointer("/workflow/binaryChecksum"))
+        .and_then(Value::as_str);
+    if recorded != Some(actual.as_str()) {
+        return Err(StoreImageError::Invalid(format!(
+            "image metadata must record the binary's checksum at workflow.binaryChecksum \
+             ({actual}), got {recorded:?}"
+        )));
+    }
 
     let image_registry = ImageRegistry::new(state.pool.clone());
     let candidate_image_id = uuid::Uuid::new_v4().to_string();

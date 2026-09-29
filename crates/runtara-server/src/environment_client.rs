@@ -788,6 +788,7 @@ impl EnvironmentClient {
                 code: "IO_ERROR".to_string(),
                 message,
             },
+            handlers::StoreImageError::Invalid(message) => EnvironmentError::InvalidInput(message),
             handlers::StoreImageError::Lookup(message)
             | handlers::StoreImageError::Register(message) => EnvironmentError::Failed {
                 code: "REGISTER_IMAGE_ERROR".to_string(),

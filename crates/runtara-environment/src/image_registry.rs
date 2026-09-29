@@ -35,29 +35,19 @@ pub struct Image {
 }
 
 impl Image {
-    /// Immutable SHA-256 identity recorded for a generated direct workflow,
-    /// which durable preparation compares to the bytes it reads.
+    /// Immutable SHA-256 identity of the image's binary, which durable
+    /// preparation compares to the bytes it reads.
     ///
-    /// The server's `workflow` metadata envelope must carry it: an envelope
-    /// without one is an error, so its bytes are never run unverified. An
-    /// image registered without that envelope has no recorded identity.
-    pub fn workflow_binary_checksum(&self) -> std::result::Result<Option<&str>, String> {
-        let Some(workflow) = self
-            .metadata
+    /// Every image carries it in its `workflow` metadata envelope; an image
+    /// without one is refused, so no bytes run unverified.
+    pub fn workflow_binary_checksum(&self) -> std::result::Result<&str, String> {
+        self.metadata
             .as_ref()
             .and_then(|metadata| metadata.get("workflow"))
-            .filter(|workflow| workflow.is_object())
-        else {
-            return Ok(None);
-        };
-        workflow
-            .get("binaryChecksum")
+            .and_then(|workflow| workflow.get("binaryChecksum"))
             .and_then(serde_json::Value::as_str)
             .filter(|checksum| !checksum.is_empty())
-            .map(Some)
-            .ok_or_else(|| {
-                "generated workflow image is missing its immutable binary checksum".to_string()
-            })
+            .ok_or_else(|| "workflow image is missing its immutable binary checksum".to_string())
     }
 }
 
@@ -547,7 +537,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_workflow_envelope_must_record_its_binary_checksum() {
+    fn every_image_must_record_its_binary_checksum() {
         let workflow = |envelope: serde_json::Value| {
             ImageBuilder::new("tenant", "workflow", "/tmp/workflow.wasm")
                 .metadata(serde_json::json!({ "workflow": envelope }))
@@ -555,7 +545,7 @@ mod tests {
         };
         assert_eq!(
             workflow(serde_json::json!({ "binaryChecksum": "abc" })).workflow_binary_checksum(),
-            Ok(Some("abc"))
+            Ok("abc")
         );
         assert!(
             workflow(serde_json::json!({ "compilerMode": "direct-wasm" }))
@@ -569,6 +559,9 @@ mod tests {
         );
 
         let without_envelope = ImageBuilder::new("tenant", "image", "/tmp/image.wasm").build();
-        assert_eq!(without_envelope.workflow_binary_checksum(), Ok(None));
+        assert!(
+            without_envelope.workflow_binary_checksum().is_err(),
+            "every image records its checksum"
+        );
     }
 }
