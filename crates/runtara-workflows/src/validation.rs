@@ -2398,16 +2398,22 @@ fn validate_embed_workflow_outputs(
         let mut found = Vec::new();
         references(&value, &mut found);
         for reference in found {
-            let segments: Vec<&str> = reference.split('.').collect();
-            let (Some("steps"), Some(embed), Some("outputs"), Some(field)) = (
-                segments.first().copied(),
-                segments.get(1).copied(),
-                segments.get(2).copied(),
-                segments.get(3).copied(),
-            ) else {
+            // A malformed path is already reported, once, where the reference
+            // itself is validated. Its repaired segments would only add a
+            // second error, named after a key the author never wrote.
+            if malformed_path_reason(&reference).is_some() {
+                continue;
+            }
+            // Tokenized as the runtime resolves it, so a bracketed reference
+            // value (`steps["embed"].outputs.x`, `outputs["x"]`) is checked too.
+            // Template text is only scanned for dotted `steps.` paths above.
+            let segments = reference_segments(&reference);
+            let [root, embed, top_field, field, ..] = segments.as_slice() else {
                 continue;
             };
-            let field = field.split('[').next().unwrap_or(field);
+            if root != "steps" || top_field != "outputs" {
+                continue;
+            }
             let Some(child) = checked.get(embed) else {
                 continue;
             };
@@ -3091,8 +3097,12 @@ fn validate_reference(
 ///   top-level field are left alone;
 /// - dynamic outputs (agents, GroupBy/Switch results, EmbedWorkflow, Finish) are
 ///   never flagged;
-/// - bracket forms (`outputs[0]`) are skipped — the runtime normalizes those;
 /// - only the first segment after `outputs` is checked (deeper shape is dynamic).
+///
+/// The path is tokenized exactly as the runtime resolves it, so every spelling
+/// of the same segments is judged alike: `steps["split"].outputs.result` and
+/// `steps.split.outputs["result"]` are the same mistake as the dotted form, and
+/// a step id containing a dot (`steps["a.b"]`) stays one segment.
 ///
 /// Emits E059 (array indexed by a named key) or E058 (unknown field on a closed
 /// object), reusing the existing nested-reference diagnostics.
@@ -3105,38 +3115,33 @@ fn validate_step_output_reference(
 ) {
     use runtara_dsl::step_output_shape::{OutputsShape, step_output_shape};
 
-    // Bracket indexing is normalized at runtime; don't second-guess it here.
-    if ref_path.contains('[') {
-        return;
-    }
     let Some(shape) = step_output_shape(referenced_step_type) else {
         return;
     };
 
-    let segments: Vec<&str> = ref_path.split('.').collect();
-    // Expect `steps.<id>.<field>[.<rest>]`; bail on anything else (incl. step ids
-    // containing dots, where positional indexing would be wrong).
-    if segments.len() < 3
-        || segments[0] != "steps"
-        || segments.get(1).copied() != Some(referenced_step_id)
-    {
+    // Expect `steps.<id>.<field>[.<rest>]`; bail on anything else.
+    let segments = reference_segments(ref_path);
+    let [root, id, top_field, rest @ ..] = segments.as_slice() else {
+        return;
+    };
+    if root != "steps" || id != referenced_step_id {
         return;
     }
 
-    let top_field = segments[2];
     // Sibling fields are valid references; only `outputs` has a declared shape.
     if shape.siblings.iter().any(|s| s.name == top_field) || top_field != "outputs" {
         return;
     }
     // `steps.<id>.outputs` with no further tail references the whole value: fine.
-    let Some(after) = segments.get(3).copied() else {
+    let Some(after) = rest.first().map(String::as_str) else {
         return;
     };
 
     match shape.outputs {
         OutputsShape::Array => {
-            // Elements are addressed by numeric index (incl. Python-style negatives).
-            if after.parse::<i64>().is_err() {
+            // Elements are addressed by numeric index (incl. Python-style
+            // negatives), read the way the runtime's array descent reads them.
+            if !is_array_index_token(after) {
                 result
                     .errors
                     .push(ValidationError::ReferenceNonObjectTraversal {
@@ -8748,21 +8753,166 @@ mod tests {
     }
 
     #[test]
-    fn output_shape_preflight_skips_dynamic_outputs_and_brackets() {
-        // Agent outputs are dynamic (shape from the capability) -> never flagged.
-        let mut dynamic = ValidationResult::default();
+    fn output_shape_preflight_skips_dynamic_outputs() {
+        // Agent outputs are dynamic (shape from the capability) -> never flagged,
+        // in either spelling.
+        for path in [
+            "steps.fetch.outputs.anything.nested",
+            r#"steps["fetch"].outputs["anything"]"#,
+        ] {
+            let mut dynamic = ValidationResult::default();
+            validate_step_output_reference("f", path, "fetch", "Agent", &mut dynamic);
+            assert!(!dynamic.has_errors(), "dynamic output flagged: {path}");
+        }
+    }
+
+    /// Bracket spellings tokenize to the same segments as the dotted form, so
+    /// they are the same mistake and must be caught the same way. The check
+    /// used to return early on any `[`, accepting every one of these.
+    #[test]
+    fn output_shape_preflight_checks_bracket_spellings() {
+        let check = |path: &str, id: &str, step_type: &str| {
+            let mut r = ValidationResult::default();
+            validate_step_output_reference("f", path, id, step_type, &mut r);
+            r.errors
+        };
+
+        for path in [
+            r#"steps["split_users"].outputs.result"#,
+            "steps['split_users'].outputs.result",
+            r#"steps.split_users.outputs["result"]"#,
+            r#"steps.split_users["outputs"]["result"]"#,
+            // The tail after the checked segment used to hide it too.
+            "steps.split_users.outputs.result[0]",
+        ] {
+            assert!(
+                matches!(
+                    check(path, "split_users", "Split").as_slice(),
+                    [ValidationError::ReferenceNonObjectTraversal { attempted_field, known_prefix, .. }]
+                        if attempted_field == "result" && known_prefix == "steps.split_users.outputs"
+                ),
+                "named key into a Split's array not flagged: {path}"
+            );
+        }
+
+        assert!(matches!(
+            check(r#"steps["loop"].outputs["bogus"]"#, "loop", "While").as_slice(),
+            [ValidationError::UndefinedReferenceField { missing_field, .. }] if missing_field == "bogus"
+        ));
+
+        // A step id containing a dot is one bracketed segment; a positional
+        // split on `.` could not line it up with the step id at all.
+        assert!(matches!(
+            check(r#"steps["a.b"].outputs.result"#, "a.b", "Split").as_slice(),
+            [ValidationError::ReferenceNonObjectTraversal { attempted_field, .. }]
+                if attempted_field == "result"
+        ));
+    }
+
+    #[test]
+    fn output_shape_preflight_allows_valid_bracket_spellings() {
+        for (path, id, step_type) in [
+            ("steps.split_users.outputs[0]", "split_users", "Split"),
+            ("steps.split_users.outputs[-1]", "split_users", "Split"),
+            (r#"steps.split_users.outputs["0"]"#, "split_users", "Split"),
+            (
+                "steps.split_users.outputs[0].result",
+                "split_users",
+                "Split",
+            ),
+            (
+                r#"steps["split_users"]["data"]["success"]"#,
+                "split_users",
+                "Split",
+            ),
+            (r#"steps["a.b"].outputs[0]"#, "a.b", "Split"),
+            (r#"steps.loop.outputs["iterations"]"#, "loop", "While"),
+            (r#"steps["loop"]["outputs"]"#, "loop", "While"),
+        ] {
+            let mut r = ValidationResult::default();
+            validate_step_output_reference("f", path, id, step_type, &mut r);
+            assert!(
+                !r.has_errors(),
+                "wrongly flagged valid path: {path}: {:?}",
+                r.errors
+            );
+        }
+    }
+
+    /// An element of a Split's array is addressed exactly when the runtime's
+    /// array descent treats the segment as an index. `parse::<i64>` disagreed
+    /// both ways: it accepted `+1` (a named key at run time, which fails) and
+    /// rejected an index too large for `i64` (an out-of-range miss at run time,
+    /// which resolves to null).
+    #[test]
+    fn output_shape_preflight_reads_array_indexes_like_the_runtime() {
+        let mut signed = ValidationResult::default();
+        validate_step_output_reference("f", "steps.s.outputs[+1]", "s", "Split", &mut signed);
+        assert!(
+            matches!(
+                signed.errors.as_slice(),
+                [ValidationError::ReferenceNonObjectTraversal { attempted_field, .. }]
+                    if attempted_field == "+1"
+            ),
+            "{:?}",
+            signed.errors
+        );
+
+        let mut huge = ValidationResult::default();
         validate_step_output_reference(
             "f",
-            "steps.fetch.outputs.anything.nested",
-            "fetch",
-            "Agent",
-            &mut dynamic,
+            "steps.s.outputs.99999999999999999999",
+            "s",
+            "Split",
+            &mut huge,
         );
-        assert!(!dynamic.has_errors());
-        // Bracket indexing is normalized at runtime; the preflight leaves it be.
-        let mut bracket = ValidationResult::default();
-        validate_step_output_reference("f", "steps.s.outputs[0]", "s", "Split", &mut bracket);
-        assert!(!bracket.has_errors());
+        assert!(!huge.has_errors(), "{:?}", huge.errors);
+    }
+
+    /// End to end through the public entry point: a bracket-spelled reference
+    /// into a Split's collected array is rejected at authoring time, like the
+    /// dotted one, instead of deploying and failing at run time.
+    #[test]
+    fn validate_workflow_rejects_bracket_spelled_output_shape_mistakes() {
+        let graph = |reference: &str| -> ExecutionGraph {
+            serde_json::from_value(serde_json::json!({
+                "steps": {
+                    "split_users": { "stepType": "Split", "id": "split_users",
+                        "config": { "value": { "valueType": "immediate", "value": [1] } },
+                        "subgraph": {
+                            "entryPoint": "item_finish",
+                            "steps": { "item_finish": { "stepType": "Finish", "id": "item_finish" } }
+                        } },
+                    "finish": { "stepType": "Finish", "id": "finish", "inputMapping": {
+                        "out": { "valueType": "reference", "value": reference }
+                    } }
+                },
+                "entryPoint": "split_users",
+                "executionPlan": [{ "fromStep": "split_users", "toStep": "finish" }]
+            }))
+            .unwrap()
+        };
+        let traversals = |reference: &str| {
+            validate_workflow(&graph(reference), &test_catalog())
+                .errors
+                .into_iter()
+                .filter(|e| matches!(e, ValidationError::ReferenceNonObjectTraversal { .. }))
+                .count()
+        };
+
+        for reference in [
+            "steps.split_users.outputs.result",
+            r#"steps["split_users"].outputs.result"#,
+            r#"steps.split_users.outputs["result"]"#,
+        ] {
+            assert_eq!(traversals(reference), 1, "not rejected: {reference}");
+        }
+        for reference in [
+            r#"steps["split_users"].outputs[0]"#,
+            r#"steps["split_users"].outputs"#,
+        ] {
+            assert_eq!(traversals(reference), 0, "wrongly rejected: {reference}");
+        }
     }
 
     #[test]
@@ -14951,18 +15101,27 @@ mod tests {
                     "childVersion": "latest" },
                 "plain": { "stepType": "EmbedWorkflow", "id": "plain", "childWorkflowId": "child-2",
                     "childVersion": "latest" },
+                "sub.flow": { "stepType": "EmbedWorkflow", "id": "sub.flow", "childWorkflowId": "child-1",
+                    "childVersion": "latest" },
                 "finish": { "stepType": "Finish", "id": "finish", "inputMapping": {
                     "rows": { "valueType": "reference", "value": "steps.data.outputs.rows" },
                     "first": { "valueType": "reference", "value": "steps.data.outputs.rows[0]" },
                     "typo": { "valueType": "reference", "value": "steps.data.outputs.rowz" },
                     "note": { "valueType": "template", "value": "{{ steps.data.outputs.totl }} total" },
-                    "free": { "valueType": "reference", "value": "steps.plain.outputs.anything" }
+                    "free": { "valueType": "reference", "value": "steps.plain.outputs.anything" },
+                    // Bracket spellings tokenize like the dotted form, so they
+                    // are checked like it — including a step id with a dot.
+                    "bracket_root": { "valueType": "reference", "value": "steps[\"data\"].outputs.rowz" },
+                    "bracket_field": { "valueType": "reference", "value": "steps.data.outputs[\"totl\"]" },
+                    "bracket_ok": { "valueType": "reference", "value": "steps[\"data\"][\"outputs\"][\"rows\"][0]" },
+                    "dotted_id": { "valueType": "reference", "value": "steps[\"sub.flow\"].outputs.rowz" }
                 } }
             },
             "entryPoint": "data",
             "executionPlan": [
                 { "fromStep": "data", "toStep": "plain" },
-                { "fromStep": "plain", "toStep": "finish" }
+                { "fromStep": "plain", "toStep": "sub.flow" },
+                { "fromStep": "sub.flow", "toStep": "finish" }
             ]
         }))
         .unwrap();
@@ -15005,10 +15164,64 @@ mod tests {
         assert_eq!(
             missing,
             [
+                ("totl", r#"steps.data.outputs["totl"]"#),
+                ("rowz", r#"steps["data"].outputs.rowz"#),
+                ("rowz", r#"steps["sub.flow"].outputs.rowz"#),
                 ("totl", "steps.data.outputs.totl"),
                 ("rowz", "steps.data.outputs.rowz")
             ]
         );
+    }
+
+    /// A malformed path into an embed's outputs is reported once, as a
+    /// malformed path. The embed check reads the tokenizer's repaired segments,
+    /// so without its own guard it added an E058 named after a key the author
+    /// never wrote (`"rowz`, quote included).
+    #[test]
+    fn test_malformed_embed_output_reference_reports_a_single_error() {
+        let child: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "steps": { "finish": { "stepType": "Finish", "id": "finish" } },
+            "entryPoint": "finish",
+            "outputSchema": { "rows": { "type": "array" } }
+        }))
+        .unwrap();
+        let children = HashMap::from([("child-1".to_string(), child)]);
+
+        for reference in [
+            r#"steps.data.outputs["rowz"#,
+            "steps.data.outputs[rowz",
+            "steps.data..outputs.rowz",
+            ".steps.data.outputs.rowz",
+            "steps.data.outputs.rowz.",
+        ] {
+            let parent: ExecutionGraph = serde_json::from_value(serde_json::json!({
+                "steps": {
+                    "data": { "stepType": "EmbedWorkflow", "id": "data", "childWorkflowId": "child-1",
+                        "childVersion": "latest" },
+                    "finish": { "stepType": "Finish", "id": "finish", "inputMapping": {
+                        "out": { "valueType": "reference", "value": reference }
+                    } }
+                },
+                "entryPoint": "data",
+                "executionPlan": [{ "fromStep": "data", "toStep": "finish" }]
+            }))
+            .unwrap();
+            let result = validate_workflow_with_children(&parent, &test_catalog(), &children);
+            assert_eq!(
+                malformed_path_errors(&result, reference).len(),
+                1,
+                "`{reference}` must be rejected exactly once: {:?}",
+                result.errors
+            );
+            assert!(
+                !result
+                    .errors
+                    .iter()
+                    .any(|error| matches!(error, ValidationError::UndefinedReferenceField { .. })),
+                "`{reference}` must not also report its repaired key: {:?}",
+                result.errors
+            );
+        }
     }
 
     #[test]
