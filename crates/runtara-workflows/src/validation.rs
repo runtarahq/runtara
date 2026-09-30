@@ -2398,8 +2398,15 @@ fn validate_embed_workflow_outputs(
         let mut found = Vec::new();
         references(&value, &mut found);
         for reference in found {
-            // Tokenized as the runtime resolves it, so a bracketed spelling
-            // (`steps["embed"].outputs.x`, `outputs["x"]`) is checked too.
+            // A malformed path is already reported, once, where the reference
+            // itself is validated. Its repaired segments would only add a
+            // second error, named after a key the author never wrote.
+            if malformed_path_reason(&reference).is_some() {
+                continue;
+            }
+            // Tokenized as the runtime resolves it, so a bracketed reference
+            // value (`steps["embed"].outputs.x`, `outputs["x"]`) is checked too.
+            // Template text is only scanned for dotted `steps.` paths above.
             let segments = reference_segments(&reference);
             let [root, embed, top_field, field, ..] = segments.as_slice() else {
                 continue;
@@ -15164,6 +15171,57 @@ mod tests {
                 ("rowz", "steps.data.outputs.rowz")
             ]
         );
+    }
+
+    /// A malformed path into an embed's outputs is reported once, as a
+    /// malformed path. The embed check reads the tokenizer's repaired segments,
+    /// so without its own guard it added an E058 named after a key the author
+    /// never wrote (`"rowz`, quote included).
+    #[test]
+    fn test_malformed_embed_output_reference_reports_a_single_error() {
+        let child: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "steps": { "finish": { "stepType": "Finish", "id": "finish" } },
+            "entryPoint": "finish",
+            "outputSchema": { "rows": { "type": "array" } }
+        }))
+        .unwrap();
+        let children = HashMap::from([("child-1".to_string(), child)]);
+
+        for reference in [
+            r#"steps.data.outputs["rowz"#,
+            "steps.data.outputs[rowz",
+            "steps.data..outputs.rowz",
+            ".steps.data.outputs.rowz",
+            "steps.data.outputs.rowz.",
+        ] {
+            let parent: ExecutionGraph = serde_json::from_value(serde_json::json!({
+                "steps": {
+                    "data": { "stepType": "EmbedWorkflow", "id": "data", "childWorkflowId": "child-1",
+                        "childVersion": "latest" },
+                    "finish": { "stepType": "Finish", "id": "finish", "inputMapping": {
+                        "out": { "valueType": "reference", "value": reference }
+                    } }
+                },
+                "entryPoint": "data",
+                "executionPlan": [{ "fromStep": "data", "toStep": "finish" }]
+            }))
+            .unwrap();
+            let result = validate_workflow_with_children(&parent, &test_catalog(), &children);
+            assert_eq!(
+                malformed_path_errors(&result, reference).len(),
+                1,
+                "`{reference}` must be rejected exactly once: {:?}",
+                result.errors
+            );
+            assert!(
+                !result
+                    .errors
+                    .iter()
+                    .any(|error| matches!(error, ValidationError::UndefinedReferenceField { .. })),
+                "`{reference}` must not also report its repaired key: {:?}",
+                result.errors
+            );
+        }
     }
 
     #[test]
