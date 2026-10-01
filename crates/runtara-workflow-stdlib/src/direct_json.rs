@@ -6985,7 +6985,9 @@ fn apply_composite(value: &Value, source: &Value) -> Result<Value, String> {
 /// Two positions intentionally stay as references because their string value
 /// names an Object Model column rather than a workflow path:
 /// - argument 0 of field-based condition operators (`EQ`, `IN`, ...);
-/// - unqualified references inside `fn` call arguments (e.g. `SIMILARITY`).
+/// - unqualified references inside `fn` call arguments (e.g. `SIMILARITY`),
+///   i.e. ones not rooted at a workflow source (see
+///   [`is_qualified_workflow_path`]).
 ///
 /// Resolved references are rewritten as `{valueType: "immediate", value: X}`
 /// rather than the bare value: condition arguments are typed at the agent
@@ -7105,9 +7107,15 @@ fn is_unqualified_reference_envelope(map: &Map<String, Value>) -> bool {
     is_reference_envelope(map) && !is_qualified_workflow_path(path)
 }
 
+/// True when `path` is rooted at a workflow source rather than naming an Object
+/// Model column. The root is read with the same tokenizer that resolves the
+/// path, so a bracketed root (`steps["fetch"].outputs.q`, `data["a.b"]`) is
+/// qualified exactly like its dotted spelling.
 fn is_qualified_workflow_path(path: &str) -> bool {
     matches!(
-        path.split('.').next(),
+        reference_path::reference_segments(path)
+            .first()
+            .map(String::as_str),
         Some("data" | "variables" | "workflow" | "steps" | "loop" | "item" | "iteration")
     )
 }
@@ -9901,6 +9909,54 @@ mod tests {
             json!([
                 { "valueType": "reference", "value": "commodity_title" },
                 { "valueType": "immediate", "value": "leather wallet" }
+            ])
+        );
+    }
+
+    #[test]
+    fn agent_mapping_score_expression_reads_bracketed_roots_like_dotted_ones() {
+        // Whether an `fn` argument is a workflow ref or a column ref is decided
+        // by its root, read with the same tokenizer that resolves it. Splitting
+        // on the first `.` instead read `steps["fetch"]` or `data["a` as the
+        // root, so these were sent to the agent as column names, unresolved.
+        let arguments = json!([
+            { "valueType": "reference", "value": "steps[\"fetch\"].outputs.q" },
+            { "valueType": "reference", "value": "steps.fetch.outputs.q" },
+            { "valueType": "reference", "value": "data['a.b']" },
+            { "valueType": "reference", "value": "variables[\"threshold\"]" },
+            // Column refs keep being left alone, bracketed or not, and a root
+            // that merely starts with a workflow root's name is still a column.
+            { "valueType": "reference", "value": "commodity_title" },
+            { "valueType": "reference", "value": "meta[\"k\"]" },
+            { "valueType": "reference", "value": "dataset.x" }
+        ]);
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({
+            "score_expression": { "valueType": "immediate", "value": {
+                "alias": "sim",
+                "expression": { "fn": "SIMILARITY", "arguments": arguments }
+            }}
+        })))
+        .expect("manifest");
+        let source = build_source(
+            br#"{"a.b":"literal dotted key"}"#,
+            br#"{"threshold":0.8}"#,
+            br#"{"fetch":{"outputs":{"q":"leather wallet"}}}"#,
+        )
+        .expect("source");
+
+        let output = manifest.apply_mapping(0, &source).expect("mapping output");
+        let output: Value = serde_json::from_slice(&output).expect("output json");
+
+        assert_eq!(
+            output["score_expression"]["expression"]["arguments"],
+            json!([
+                { "valueType": "immediate", "value": "leather wallet" },
+                { "valueType": "immediate", "value": "leather wallet" },
+                { "valueType": "immediate", "value": "literal dotted key" },
+                { "valueType": "immediate", "value": 0.8 },
+                { "valueType": "reference", "value": "commodity_title" },
+                { "valueType": "reference", "value": "meta[\"k\"]" },
+                { "valueType": "reference", "value": "dataset.x" }
             ])
         );
     }
