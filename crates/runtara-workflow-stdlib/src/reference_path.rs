@@ -154,8 +154,13 @@ pub fn tokenize_reference(path: &str) -> TokenizedPath {
 /// The roots a workflow reference resolves from. `build_source` in
 /// `direct_json.rs` always populates `data`/`variables`/`steps`/`workflow`, and
 /// populates `iteration`/`loop`/`item` inside the scopes that define them.
-/// Anything else is not a workflow path: in an Object Model expression it names
-/// a column instead.
+///
+/// Deliberately absent: the bare `__error`/`error` aliases. During onError
+/// dispatch `build_source` also mirrors the captured error envelope to those
+/// roots for back-compat, but the canonical spelling is `steps.__error.*`, so
+/// they are not advertised as roots and an Object Model expression treats them
+/// as column names. Callers that still accept the bare aliases (the validator,
+/// with a deprecation warning) match them on their own.
 ///
 /// The one list the runtime, the validator and the debugging tools all classify
 /// against, so they cannot disagree on what counts as a workflow reference.

@@ -3015,11 +3015,15 @@ fn validate_step_reference(
         return false;
     }
 
-    if ref_path == "__error" || ref_path.starts_with("__error.") {
+    // Read the root as the runtime does, so `["__error"].message` and
+    // `__error["message"]` are steered to the canonical path like the dotted
+    // spelling.
+    if reference_root(ref_path).as_deref() == Some("__error") {
+        let separator = if ref_path.starts_with('[') { "" } else { "." };
         result.warnings.push(ValidationWarning::BareErrorReference {
             step_id: step_id.to_string(),
             reference_path: ref_path.to_string(),
-            suggested_path: format!("steps.{ref_path}"),
+            suggested_path: format!("steps{separator}{ref_path}"),
         });
     }
 
@@ -8672,6 +8676,54 @@ mod tests {
         );
         assert!(!canonical.has_errors());
         assert!(!canonical.has_warnings());
+    }
+
+    /// The bare root is read with the runtime's tokenizer, so every spelling of
+    /// it warns, not only the dotted one, and the suggestion stays a valid path.
+    #[test]
+    fn bare_error_reference_warns_for_bracket_spellings() {
+        for (reference, suggested) in [
+            (r#"__error["message"]"#, r#"steps.__error["message"]"#),
+            (r#"["__error"].message"#, r#"steps["__error"].message"#),
+            ("__error", "steps.__error"),
+        ] {
+            let mut result = ValidationResult::default();
+            validate_reference(
+                "handler",
+                reference,
+                &HashSet::new(),
+                &HashMap::new(),
+                &HashSet::new(),
+                &mut result,
+            );
+            assert!(!result.has_errors(), "{reference}: {:?}", result.errors);
+            assert!(
+                matches!(
+                    result.warnings.as_slice(),
+                    [ValidationWarning::BareErrorReference { suggested_path, .. }]
+                        if suggested_path == suggested
+                ),
+                "{reference}: {:?}",
+                result.warnings
+            );
+            assert_eq!(
+                reference_segments(suggested)[..2],
+                ["steps", "__error"],
+                "the suggestion for {reference} must be the canonical path"
+            );
+        }
+
+        // A root that merely starts with `__error` is not the alias.
+        let mut other = ValidationResult::default();
+        validate_reference(
+            "handler",
+            "__errors.message",
+            &HashSet::new(),
+            &HashMap::new(),
+            &HashSet::new(),
+            &mut other,
+        );
+        assert!(!other.has_warnings(), "{:?}", other.warnings);
     }
 
     // === Output-shape preflight (reporter's `steps.split.outputs.result` bug) ===

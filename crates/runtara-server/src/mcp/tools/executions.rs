@@ -861,13 +861,14 @@ fn resolve_reference_value(
             let envelope = source.get("outputs")?;
             resolve_json_path(envelope, field_path)
         }
-        "data" if !rest.is_empty() => {
+        // A bare `data` / `variables` is the whole object, as at runtime.
+        "data" => {
             let inputs = execution
                 .pointer("/data/inputs/data")
                 .or_else(|| execution.pointer("/data/inputs"))?;
             resolve_json_path(inputs, rest)
         }
-        "variables" if !rest.is_empty() => execution
+        "variables" => execution
             .pointer("/data/inputs/variables")
             .or_else(|| execution.pointer("/data/variables"))
             .and_then(|variables| resolve_json_path(variables, rest)),
@@ -1383,7 +1384,7 @@ fn resolve_input_mappings(
                                 entry["sourceStatus"] = json!("not_found");
                             }
                         }
-                        "data" if !rest.is_empty() => {
+                        "data" => {
                             if let Some(inputs) = execution
                                 .pointer("/data/inputs/data")
                                 .or_else(|| execution.pointer("/data/inputs"))
@@ -1393,9 +1394,11 @@ fn resolve_input_mappings(
                             }
                             entry["source"] = json!("workflow_input");
                         }
-                        "variables" if !rest.is_empty() => {
+                        "variables" => {
                             entry["source"] = json!("variable");
-                            entry["variableName"] = json!(rest[0]);
+                            if let Some(name) = rest.first() {
+                                entry["variableName"] = json!(name);
+                            }
                             // Route through the shared resolver, same as the
                             // steps/data arms above — this used to be dropped,
                             // silently reporting resolvedValue:null even though
@@ -1842,7 +1845,7 @@ pub async fn trace_reference(
         }
         _ => Err(rmcp::ErrorData::invalid_params(
             format!(
-                "Unknown reference root '{}'. Must be 'steps', 'data', or 'variables'.",
+                "Unknown reference root '{}'. Must be 'steps', 'data', 'variables', or 'loop'.",
                 root
             ),
             None,
@@ -3006,6 +3009,38 @@ mod tests {
         assert_eq!(resolved["name"]["resolvedValue"], json!("Ada"));
         assert_eq!(resolved["limit"]["variableName"], json!("limit"));
         assert_eq!(resolved["limit"]["resolvedValue"], json!(10));
+    }
+
+    /// A bare `data` / `variables` is the whole object at runtime, so both
+    /// `trace_reference` (via `resolve_reference_value`) and `inspect_step`
+    /// (via `resolve_input_mappings`) show it whole rather than nothing.
+    #[test]
+    fn bare_data_and_variables_resolve_to_the_whole_object() {
+        let data = json!({"customer": {"name": "Ada"}, "threshold": 7});
+        let variables = json!({"limit": 10});
+        assert_eq!(
+            resolve_reference_value("data", &summaries(), &execution(), None),
+            Some(data.clone())
+        );
+        assert_eq!(
+            resolve_reference_value("variables", &summaries(), &execution(), None),
+            Some(variables.clone())
+        );
+
+        let resolved = resolve_input_mappings(
+            &json!({
+                "all_data": { "valueType": "reference", "value": "data" },
+                "all_vars": { "valueType": "reference", "value": "variables" },
+            }),
+            &summaries(),
+            &execution(),
+            None,
+        );
+        assert_eq!(resolved["all_data"]["resolvedValue"], data);
+        assert_eq!(resolved["all_data"]["source"], json!("workflow_input"));
+        assert_eq!(resolved["all_vars"]["resolvedValue"], variables);
+        assert_eq!(resolved["all_vars"]["source"], json!("variable"));
+        assert!(resolved["all_vars"].get("variableName").is_none());
     }
 
     #[test]
