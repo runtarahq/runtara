@@ -6987,7 +6987,7 @@ fn apply_composite(value: &Value, source: &Value) -> Result<Value, String> {
 /// - argument 0 of field-based condition operators (`EQ`, `IN`, ...);
 /// - unqualified references inside `fn` call arguments (e.g. `SIMILARITY`),
 ///   i.e. ones not rooted at a workflow source (see
-///   [`is_qualified_workflow_path`]).
+///   [`reference_path::is_workflow_reference`]).
 ///
 /// Resolved references are rewritten as `{valueType: "immediate", value: X}`
 /// rather than the bare value: condition arguments are typed at the agent
@@ -7104,20 +7104,7 @@ fn is_unqualified_reference_envelope(map: &Map<String, Value>) -> bool {
     let Some(path) = map.get("value").and_then(Value::as_str) else {
         return false;
     };
-    is_reference_envelope(map) && !is_qualified_workflow_path(path)
-}
-
-/// True when `path` is rooted at a workflow source rather than naming an Object
-/// Model column. The root is read with the same tokenizer that resolves the
-/// path, so a bracketed root (`steps["fetch"].outputs.q`, `data["a.b"]`) is
-/// qualified exactly like its dotted spelling.
-fn is_qualified_workflow_path(path: &str) -> bool {
-    matches!(
-        reference_path::reference_segments(path)
-            .first()
-            .map(String::as_str),
-        Some("data" | "variables" | "workflow" | "steps" | "loop" | "item" | "iteration")
-    )
+    is_reference_envelope(map) && !reference_path::is_workflow_reference(path)
 }
 
 fn is_field_argument_operator(op: &str) -> bool {

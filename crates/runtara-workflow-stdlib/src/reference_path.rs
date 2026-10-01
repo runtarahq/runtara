@@ -151,6 +151,42 @@ pub fn tokenize_reference(path: &str) -> TokenizedPath {
     tokenized
 }
 
+/// The roots a workflow reference resolves from. `build_source` in
+/// `direct_json.rs` always populates `data`/`variables`/`steps`/`workflow`, and
+/// populates `iteration`/`loop`/`item` inside the scopes that define them.
+///
+/// Deliberately absent: the bare `__error`/`error` aliases. During onError
+/// dispatch `build_source` also mirrors the captured error envelope to those
+/// roots for back-compat, but the canonical spelling is `steps.__error.*`, so
+/// they are not advertised as roots and an Object Model expression treats them
+/// as column names. Callers that still accept the bare aliases (the validator,
+/// with a deprecation warning) match them on their own.
+///
+/// The one list the runtime, the validator and the debugging tools all classify
+/// against, so they cannot disagree on what counts as a workflow reference.
+pub const WORKFLOW_REFERENCE_ROOTS: &[&str] = &[
+    "data",
+    "variables",
+    "workflow",
+    "steps",
+    "iteration",
+    "loop",
+    "item",
+];
+
+/// The first segment of a reference path, read with [`reference_segments`], so
+/// a bracketed root is the same root as its dotted spelling: `steps["a"].x`
+/// and `["steps"].a.x` are both rooted at `steps`. `None` for a path with no
+/// segments (`""`).
+pub fn reference_root(path: &str) -> Option<String> {
+    reference_segments(path).into_iter().next()
+}
+
+/// True when `path` is rooted at one of the [`WORKFLOW_REFERENCE_ROOTS`].
+pub fn is_workflow_reference(path: &str) -> bool {
+    reference_root(path).is_some_and(|root| WORKFLOW_REFERENCE_ROOTS.contains(&root.as_str()))
+}
+
 /// Render a reference path as an RFC 6901 JSON pointer, escaping `~` and `/`
 /// inside segment text. Tokenization is [`reference_segments`], so bracket
 /// bodies stay opaque here too.
@@ -468,6 +504,56 @@ mod tests {
                 .map(|segment| segment.replace("~1", "/").replace("~0", "~"))
                 .collect();
             assert_eq!(from_pointer, reference_segments(path), "path: {path}");
+        }
+    }
+
+    #[test]
+    fn root_is_read_by_the_tokenizer_not_by_spelling() {
+        assert_eq!(
+            reference_root("steps.fetch.outputs").as_deref(),
+            Some("steps")
+        );
+        assert_eq!(
+            reference_root(r#"steps["fetch"].outputs"#).as_deref(),
+            Some("steps")
+        );
+        assert_eq!(reference_root("data['a.b']").as_deref(), Some("data"));
+        assert_eq!(reference_root(r#"["data"].x"#).as_deref(), Some("data"));
+        assert_eq!(reference_root("item[0]").as_deref(), Some("item"));
+        assert_eq!(reference_root("data").as_deref(), Some("data"));
+        assert_eq!(reference_root(""), None);
+    }
+
+    #[test]
+    fn workflow_references_are_classified_by_root() {
+        for path in [
+            "data.a",
+            r#"data["a.b"]"#,
+            "variables['threshold']",
+            r#"steps["fetch"].outputs.q"#,
+            "workflow.inputs.data",
+            "iteration",
+            "loop.index",
+            "item[0]",
+        ] {
+            assert!(
+                is_workflow_reference(path),
+                "{path} is a workflow reference"
+            );
+        }
+        // Object Model columns, including bracketed ones and names that merely
+        // start with a workflow root's name.
+        for path in [
+            "commodity_title",
+            r#"meta["k"]"#,
+            "dataset.x",
+            "items[0]",
+            "",
+        ] {
+            assert!(
+                !is_workflow_reference(path),
+                "{path} is not a workflow reference"
+            );
         }
     }
 }

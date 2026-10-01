@@ -1,4 +1,7 @@
 use rmcp::model::{CallToolResult, ContentBlock};
+use runtara_workflow_stdlib::reference_path::{
+    array_index, is_array_index_token, is_workflow_reference, reference_segments,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -639,14 +642,19 @@ fn referenced_step_ids(mapping: &serde_json::Value) -> (std::collections::BTreeS
                     map.get("valueType"),
                     Some(serde_json::Value::String(kind)) if kind == "reference"
                 ) && let Some(path) = map.get("value").and_then(|v| v.as_str())
-                    && let Some(rest) = path.strip_prefix("steps.")
                 {
-                    match rest.split('.').next() {
-                        Some("__error" | "error") => *wants_error = true,
-                        Some(id) if !id.is_empty() => {
-                            ids.insert(id.to_string());
+                    // Tokenized like the runtime reads it, so a bracketed id
+                    // (`steps['fetch'].outputs`) is collected too.
+                    let segments = reference_segments(path);
+                    if let [root, id, ..] = segments.as_slice()
+                        && root == "steps"
+                    {
+                        match id.as_str() {
+                            "__error" | "error" => *wants_error = true,
+                            id => {
+                                ids.insert(id.to_string());
+                            }
                         }
-                        _ => {}
                     }
                 }
                 for child in map.values() {
@@ -668,38 +676,27 @@ fn referenced_step_ids(mapping: &serde_json::Value) -> (std::collections::BTreeS
     (ids, wants_error)
 }
 
-/// Helper: resolve a JSON path like "field.nested.0.name" against a Value.
+/// Helper: resolve path `segments` (see [`reference_segments`]) against a Value.
 ///
-/// Array segments support Python-style negative suffix indexing (`-1` is the last
-/// element), matching the workflow reference resolver so diagnostics agree with
-/// runtime resolution.
-fn resolve_json_path(value: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
+/// Walks them the way the workflow runtime does, so diagnostics agree with
+/// runtime resolution: an object segment is always a key lookup (a key named
+/// `"0"` included), and an array segment must be an index token, with
+/// Python-style negative suffix indexing (`-1` is the last element).
+fn resolve_json_path(value: &serde_json::Value, segments: &[String]) -> Option<serde_json::Value> {
     let mut current = value;
-    for segment in path.split('.') {
-        if let serde_json::Value::Array(items) = current {
-            current = items.get(signed_array_index(segment, items.len())?)?;
-        } else if let Ok(idx) = segment.parse::<usize>() {
-            current = current.get(idx)?;
-        } else {
-            current = current.get(segment)?;
-        }
+    for segment in segments {
+        current = match current {
+            serde_json::Value::Object(map) => map.get(segment)?,
+            serde_json::Value::Array(items) if is_array_index_token(segment) => {
+                items.get(array_index(segment, items.len())?)?
+            }
+            _ => return None,
+        };
     }
     Some(current.clone())
 }
 
-/// Resolve a path segment to a concrete array index, supporting Python-style
-/// negative suffix indexing (`-1` is the last element). Non-numeric segments and
-/// out-of-range negatives return `None`.
-fn signed_array_index(segment: &str, len: usize) -> Option<usize> {
-    let raw: i64 = segment.parse().ok()?;
-    if raw >= 0 {
-        usize::try_from(raw).ok()
-    } else {
-        len.checked_sub(usize::try_from(raw.unsigned_abs()).ok()?)
-    }
-}
-
-/// Explain why a dotted `tail` path failed to resolve against `value`,
+/// Explain why the `tail` path segments failed to resolve against `value`,
 /// distinguishing a *shape mismatch* (a named key indexed into an array, or a
 /// segment reaching into a scalar — the reporter's `steps.split.outputs.result`)
 /// from a plain missing/out-of-range field. Mirrors the workflow runtime's
@@ -709,11 +706,16 @@ fn signed_array_index(segment: &str, len: usize) -> Option<usize> {
 /// Returns `None` when the path fully resolves (to any value, including a
 /// genuine `null`) — a real null leaf is not a mismatch and gets no reason.
 /// `base` is the human prefix the tail hangs off (e.g. `steps.split_users`).
-fn explain_unresolved_path(value: &serde_json::Value, base: &str, tail: &str) -> Option<String> {
+fn explain_unresolved_path(
+    value: &serde_json::Value,
+    base: &str,
+    tail: &[String],
+) -> Option<String> {
     use serde_json::Value;
     let mut current = value;
     let mut walked = base.to_string();
-    for segment in tail.split('.') {
+    for segment in tail {
+        let segment = segment.as_str();
         match current {
             Value::Object(map) => match map.get(segment) {
                 Some(child) => current = child,
@@ -729,8 +731,8 @@ fn explain_unresolved_path(value: &serde_json::Value, base: &str, tail: &str) ->
                     ));
                 }
             },
-            Value::Array(items) => match signed_array_index(segment, items.len()) {
-                Some(index) => match items.get(index) {
+            Value::Array(items) if is_array_index_token(segment) => {
+                match array_index(segment, items.len()).and_then(|index| items.get(index)) {
                     Some(child) => current = child,
                     None => {
                         return Some(format!(
@@ -738,15 +740,15 @@ fn explain_unresolved_path(value: &serde_json::Value, base: &str, tail: &str) ->
                             items.len()
                         ));
                     }
-                },
-                None => {
-                    return Some(format!(
-                        "'{walked}' is an array, so '{segment}' is not a valid field — address \
-                         elements by numeric index (e.g. '{walked}.0'), or reference '{walked}' \
-                         itself for the whole array"
-                    ));
                 }
-            },
+            }
+            Value::Array(_) => {
+                return Some(format!(
+                    "'{walked}' is an array, so '{segment}' is not a valid field — address \
+                     elements by numeric index (e.g. '{walked}.0'), or reference '{walked}' \
+                     itself for the whole array"
+                ));
+            }
             scalar => {
                 let kind = match scalar {
                     Value::String(_) => "a string",
@@ -831,10 +833,13 @@ fn resolve_reference_value(
     execution: &serde_json::Value,
     scope_id: Option<&str>,
 ) -> Option<serde_json::Value> {
-    let parts: Vec<&str> = ref_path.splitn(3, '.').collect();
-    match parts.first().copied() {
-        Some("steps") if parts.len() >= 2 => {
-            let source_step_id = parts[1];
+    // Tokenized exactly as the runtime reads the path, so a bracketed spelling
+    // (`steps['fetch'].outputs`, `data["a.b"]`) resolves like the dotted one.
+    let segments = reference_segments(ref_path);
+    let (root, rest) = segments.split_first()?;
+    match root.as_str() {
+        "steps" => {
+            let (source_step_id, field_path) = rest.split_first()?;
             if source_step_id == "__error" || source_step_id == "error" {
                 // `__error`/`error` aren't real steps — the runtime injects the
                 // captured onError envelope under this synthetic id when routing
@@ -845,10 +850,7 @@ fn resolve_reference_value(
                 // best-effort match — the same "primary failure" step
                 // `why_execution_failed` already reports.
                 let envelope = find_error_envelope(summaries)?;
-                return match parts.get(2) {
-                    Some(field_path) => resolve_json_path(&envelope, field_path),
-                    None => Some(envelope),
-                };
+                return resolve_json_path(&envelope, field_path);
             }
             // A step summary's `outputs` field is the full step *envelope*
             // (`{ "outputs": <actual>, "stepId", "stepType", ... }`) — exactly the
@@ -857,36 +859,27 @@ fn resolve_reference_value(
             // same way the workflow runtime resolves `steps.<id>.<path>`.
             let source = find_step_in_summaries(summaries, source_step_id)?;
             let envelope = source.get("outputs")?;
-            match parts.get(2) {
-                Some(field_path) => resolve_json_path(envelope, field_path),
-                None => Some(envelope.clone()),
-            }
+            resolve_json_path(envelope, field_path)
         }
-        Some("data") if parts.len() >= 2 => {
-            let field = parts[1..].join(".");
+        // A bare `data` / `variables` is the whole object, as at runtime.
+        "data" => {
             let inputs = execution
                 .pointer("/data/inputs/data")
                 .or_else(|| execution.pointer("/data/inputs"))?;
-            resolve_json_path(inputs, &field)
+            resolve_json_path(inputs, rest)
         }
-        Some("variables") if parts.len() >= 2 => {
-            let field = parts[1..].join(".");
-            execution
-                .pointer("/data/inputs/variables")
-                .or_else(|| execution.pointer("/data/variables"))
-                .and_then(|variables| resolve_json_path(variables, &field))
-        }
-        Some("loop") => {
+        "variables" => execution
+            .pointer("/data/inputs/variables")
+            .or_else(|| execution.pointer("/data/variables"))
+            .and_then(|variables| resolve_json_path(variables, rest)),
+        "loop" => {
             // The iteration index is recoverable from the step's scope id (see
             // `loop_index_from_scope_id`). `loop.outputs` is not: it only ever
             // lived in the ephemeral per-iteration variables bag and was never
             // persisted, so it's intentionally absent here rather than
             // fabricated — the lookup below just returns `None` for it.
             let loop_context = json!({ "index": loop_index_from_scope_id(scope_id?)? });
-            match parts.get(1..).filter(|p| !p.is_empty()) {
-                Some(field_parts) => resolve_json_path(&loop_context, &field_parts.join(".")),
-                None => Some(loop_context),
-            }
+            resolve_json_path(&loop_context, rest)
         }
         _ => None,
     }
@@ -1248,14 +1241,7 @@ fn is_unqualified_reference_envelope(value: &serde_json::Value) -> bool {
     let Some(path) = value.get("value").and_then(|v| v.as_str()) else {
         return false;
     };
-    is_reference_envelope(value) && !is_qualified_workflow_path(path)
-}
-
-fn is_qualified_workflow_path(path: &str) -> bool {
-    matches!(
-        path.split('.').next(),
-        Some("data" | "variables" | "workflow" | "steps" | "loop")
-    )
+    is_reference_envelope(value) && !is_workflow_reference(path)
 }
 
 fn is_field_argument_operator(op: &str) -> bool {
@@ -1355,10 +1341,17 @@ fn resolve_input_mappings(
         match value_type {
             "reference" => {
                 if let Some(ref_path) = value.as_str() {
-                    let parts: Vec<&str> = ref_path.splitn(3, '.').collect();
-                    match parts.first().copied() {
-                        Some("steps") if parts.len() >= 2 => {
-                            let source_step_id = parts[1];
+                    // Tokenized as the runtime reads it, like the shared
+                    // resolver below, so a bracketed root or step id
+                    // (`steps['fetch'].outputs`) takes the same arm.
+                    let segments = reference_segments(ref_path);
+                    let (root, rest) = match segments.split_first() {
+                        Some((root, rest)) => (root.as_str(), rest),
+                        None => ("", &[][..]),
+                    };
+                    match root {
+                        "steps" if !rest.is_empty() => {
+                            let source_step_id = rest[0].as_str();
 
                             if source_step_id == "__error" || source_step_id == "error" {
                                 // Not a real step — see the matching special-case
@@ -1391,20 +1384,21 @@ fn resolve_input_mappings(
                                 entry["sourceStatus"] = json!("not_found");
                             }
                         }
-                        Some("data") if parts.len() >= 2 => {
-                            let field = parts[1..].join(".");
+                        "data" => {
                             if let Some(inputs) = execution
                                 .pointer("/data/inputs/data")
                                 .or_else(|| execution.pointer("/data/inputs"))
                             {
                                 entry["resolvedValue"] =
-                                    resolve_json_path(inputs, &field).unwrap_or(json!(null));
+                                    resolve_json_path(inputs, rest).unwrap_or(json!(null));
                             }
                             entry["source"] = json!("workflow_input");
                         }
-                        Some("variables") if parts.len() >= 2 => {
+                        "variables" => {
                             entry["source"] = json!("variable");
-                            entry["variableName"] = json!(parts[1]);
+                            if let Some(name) = rest.first() {
+                                entry["variableName"] = json!(name);
+                            }
                             // Route through the shared resolver, same as the
                             // steps/data arms above — this used to be dropped,
                             // silently reporting resolvedValue:null even though
@@ -1413,7 +1407,7 @@ fn resolve_input_mappings(
                                 resolve_reference_value(ref_path, summaries, execution, scope_id)
                                     .unwrap_or(json!(null));
                         }
-                        Some("loop") => {
+                        "loop" => {
                             entry["source"] = json!("loop");
                             entry["resolvedValue"] =
                                 resolve_reference_value(ref_path, summaries, execution, scope_id)
@@ -1653,23 +1647,25 @@ pub async fn trace_reference(
     validate_path_param("workflow_id", &params.workflow_id)?;
     validate_path_param("instance_id", &params.instance_id)?;
 
-    let parts: Vec<&str> = params.reference.splitn(3, '.').collect();
-    if parts.is_empty() {
+    // Tokenized exactly as the runtime reads the path, so a bracketed spelling
+    // (`steps['fetch'].outputs.q`, `data["a.b"]`) traces like the dotted one.
+    let segments = reference_segments(&params.reference);
+    let Some((root, rest)) = segments.split_first() else {
         return Err(rmcp::ErrorData::invalid_params(
             "Reference path must not be empty".to_string(),
             None,
         ));
-    }
+    };
 
-    match parts[0] {
+    match root.as_str() {
         "steps" => {
-            if parts.len() < 2 {
+            let Some((step_id, tail)) = rest.split_first() else {
                 return Err(rmcp::ErrorData::invalid_params(
                     "Step reference must be 'steps.<stepId>[.outputs.<field>]'".to_string(),
                     None,
                 ));
-            }
-            let step_id = parts[1];
+            };
+            let step_id = step_id.as_str();
 
             if step_id == "__error" || step_id == "error" {
                 // Not a real step — the runtime injects the captured onError
@@ -1760,9 +1756,9 @@ pub async fn trace_reference(
             // named key indexed into an array (e.g. `steps.split.outputs.result`)
             // or a scalar traversal is a shape mismatch that now fails loud at
             // runtime and preflight — the diagnostic must not keep implying the
-            // value is simply absent. `parts[2]` is the tail after `steps.<id>`.
+            // value is simply absent. `tail` is the path after `steps.<id>`.
             if resolved.is_null()
-                && let Some(tail) = parts.get(2)
+                && !tail.is_empty()
                 && let Some(reason) =
                     explain_unresolved_path(&outputs, &format!("steps.{step_id}"), tail)
             {
@@ -1796,7 +1792,6 @@ pub async fn trace_reference(
             }))
         }
         "data" => {
-            let field = parts[1..].join(".");
             // `?full=true`: the reference may point *into* a large input field
             // that the default detail fetch elides; resolve against the complete
             // value. The MCP response is re-truncated downstream, so the wire
@@ -1816,7 +1811,7 @@ pub async fn trace_reference(
                 .cloned()
                 .unwrap_or(json!(null));
 
-            let resolved = resolve_json_path(&inputs, &field).unwrap_or(json!(null));
+            let resolved = resolve_json_path(&inputs, rest).unwrap_or(json!(null));
 
             json_result(json!({
                 "reference": params.reference,
@@ -1850,8 +1845,8 @@ pub async fn trace_reference(
         }
         _ => Err(rmcp::ErrorData::invalid_params(
             format!(
-                "Unknown reference root '{}'. Must be 'steps', 'data', or 'variables'.",
-                parts[0]
+                "Unknown reference root '{}'. Must be 'steps', 'data', 'variables', or 'loop'.",
+                root
             ),
             None,
         )),
@@ -2066,6 +2061,11 @@ mod tests {
     use schemars::JsonSchema;
     use serde_json::json;
 
+    /// A reference path tokenized as the runtime reads it.
+    fn segments(path: &str) -> Vec<String> {
+        reference_segments(path)
+    }
+
     fn generated_property_schema<T: JsonSchema>(property: &str) -> serde_json::Value {
         let schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
         schema
@@ -2082,11 +2082,20 @@ mod tests {
     fn resolve_json_path_supports_negative_indices() {
         let value = json!({ "items": ["a", "b", "c"] });
 
-        assert_eq!(resolve_json_path(&value, "items.-1"), Some(json!("c")));
-        assert_eq!(resolve_json_path(&value, "items.-3"), Some(json!("a")));
-        assert_eq!(resolve_json_path(&value, "items.0"), Some(json!("a")));
-        assert_eq!(resolve_json_path(&value, "items.-4"), None);
-        assert_eq!(resolve_json_path(&value, "items.5"), None);
+        assert_eq!(
+            resolve_json_path(&value, &segments("items.-1")),
+            Some(json!("c"))
+        );
+        assert_eq!(
+            resolve_json_path(&value, &segments("items.-3")),
+            Some(json!("a"))
+        );
+        assert_eq!(
+            resolve_json_path(&value, &segments("items.0")),
+            Some(json!("a"))
+        );
+        assert_eq!(resolve_json_path(&value, &segments("items.-4")), None);
+        assert_eq!(resolve_json_path(&value, &segments("items.5")), None);
     }
 
     /// trace_reference must explain a shape mismatch (the reporter's
@@ -2101,8 +2110,9 @@ mod tests {
         });
 
         // Named key into the array -> shape mismatch, with a numeric-index hint.
-        let reason = explain_unresolved_path(&envelope, "steps.split_users", "outputs.result")
-            .expect("named key into array must produce a reason");
+        let reason =
+            explain_unresolved_path(&envelope, "steps.split_users", &segments("outputs.result"))
+                .expect("named key into array must produce a reason");
         assert!(
             reason.contains("is an array")
                 && reason.contains("'result'")
@@ -2111,19 +2121,25 @@ mod tests {
         );
 
         // Unknown top-level field -> missing (not a mismatch), lists available.
-        let reason = explain_unresolved_path(&envelope, "steps.split_users", "bogus")
+        let reason = explain_unresolved_path(&envelope, "steps.split_users", &segments("bogus"))
             .expect("missing field must produce a reason");
         assert!(reason.contains("has no field 'bogus'"), "reason: {reason}");
 
         // Traversing into a scalar -> mismatch.
-        let reason = explain_unresolved_path(&envelope, "steps.split_users", "stepType.first")
-            .expect("scalar traversal must produce a reason");
+        let reason =
+            explain_unresolved_path(&envelope, "steps.split_users", &segments("stepType.first"))
+                .expect("scalar traversal must produce a reason");
         assert!(reason.contains("is a string"), "reason: {reason}");
 
         // A path that fully resolves (to the array, or into an element) yields no
         // reason — a real value, including a genuine null leaf, is not a mismatch.
-        assert!(explain_unresolved_path(&envelope, "steps.split_users", "outputs").is_none());
-        assert!(explain_unresolved_path(&envelope, "steps.split_users", "outputs.0.id").is_none());
+        assert!(
+            explain_unresolved_path(&envelope, "steps.split_users", &segments("outputs")).is_none()
+        );
+        assert!(
+            explain_unresolved_path(&envelope, "steps.split_users", &segments("outputs.0.id"))
+                .is_none()
+        );
     }
 
     /// The referenced-id walk decides which steps' payloads are fetched at
@@ -2849,5 +2865,196 @@ mod tests {
 
         assert_eq!(effective_step_status(&step), Some("completed"));
         assert_eq!(step_error(&step), serde_json::Value::Null);
+    }
+
+    /// The debugging tools read a reference path with the runtime's tokenizer,
+    /// so every spelling of the same path shows the same value. Splitting on
+    /// `.` left every bracketed spelling unresolved.
+    #[test]
+    fn bracket_spellings_resolve_like_dotted_ones() {
+        let summaries = summaries_with_failed_step();
+        for (dotted, bracketed) in [
+            (
+                "steps.build.outputs.status",
+                r#"steps["build"].outputs.status"#,
+            ),
+            (
+                "steps.build.outputs.nested.name",
+                r#"steps['build']["outputs"]["nested"].name"#,
+            ),
+            (
+                "steps.embed.outputs.embeddings.0.1",
+                "steps.embed.outputs.embeddings[0][1]",
+            ),
+            ("steps.__error.message", r#"steps["__error"].message"#),
+            ("data.customer.name", r#"data["customer"]['name']"#),
+            ("variables.limit", "variables['limit']"),
+        ] {
+            let expected = resolve_reference_value(dotted, &summaries, &execution(), None);
+            assert!(expected.is_some(), "fixture must resolve {dotted}");
+            assert_eq!(
+                resolve_reference_value(bracketed, &summaries, &execution(), None),
+                expected,
+                "{bracketed} must resolve like {dotted}"
+            );
+        }
+    }
+
+    /// A bracket-quoted body is one key, dots included — the runtime looks up
+    /// `a.b` itself, never `a` then `b`.
+    #[test]
+    fn bracket_quoted_dotted_key_resolves_as_one_key() {
+        let execution = json!({
+            "data": { "inputs": { "data": {
+                "a.b": "literal dotted key",
+                "a": { "b": "nested" }
+            }}}
+        });
+        assert_eq!(
+            resolve_reference_value(r#"data["a.b"]"#, &summaries(), &execution, None),
+            Some(json!("literal dotted key"))
+        );
+        assert_eq!(
+            resolve_reference_value("data.a.b", &summaries(), &execution, None),
+            Some(json!("nested"))
+        );
+    }
+
+    /// Segments are walked the way the runtime's `descend` walks them: an
+    /// object segment is always a key, and only an index token indexes an
+    /// array.
+    #[test]
+    fn resolve_json_path_reads_segments_like_the_runtime() {
+        let value = json!({ "by_slot": { "0": "zero" }, "items": ["a", "b"] });
+        assert_eq!(
+            resolve_json_path(&value, &segments("by_slot.0")),
+            Some(json!("zero"))
+        );
+        assert_eq!(resolve_json_path(&value, &segments("items[+1]")), None);
+        assert_eq!(
+            resolve_json_path(&value, &segments("items[1]")),
+            Some(json!("b"))
+        );
+    }
+
+    #[test]
+    fn referenced_step_ids_collects_bracketed_ids() {
+        let (ids, wants_error) = referenced_step_ids(&json!({
+            "a": { "valueType": "reference", "value": "steps['fetch'].outputs" },
+            "b": { "valueType": "reference", "value": r#"steps["a.b"].outputs.x"# },
+            "c": { "valueType": "reference", "value": r#"steps["__error"].message"# },
+        }));
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        assert_eq!(ids, ["a.b", "fetch"]);
+        assert!(wants_error);
+    }
+
+    /// `fn` call arguments are classified exactly as the runtime classifies
+    /// them: by the tokenized root. A bracketed workflow root resolves (the
+    /// runtime resolves it before the agent sees it); a column ref, bracketed
+    /// or not, stays a reference; and an `item`-rooted ref is a workflow
+    /// reference the runtime resolves but persisted state cannot reproduce, so
+    /// it is reported as unresolved rather than shown as a column name.
+    #[test]
+    fn score_expression_classifies_bracketed_roots_like_the_runtime() {
+        let input_mapping = json!({
+            "score_expression": {
+                "valueType": "immediate",
+                "value": {
+                    "alias": "similarity",
+                    "expression": {
+                        "fn": "SIMILARITY",
+                        "arguments": [
+                            {"valueType": "reference", "value": "embedding"},
+                            {"valueType": "reference", "value": "meta[\"k\"]"},
+                            {"valueType": "reference", "value": "steps[\"embed\"].outputs.embeddings[0]"},
+                            {"valueType": "reference", "value": "data['threshold']"},
+                            {"valueType": "reference", "value": "item.sku"}
+                        ]
+                    }
+                }
+            }
+        });
+
+        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution(), None);
+
+        assert_eq!(
+            resolved["score_expression"]["resolvedValue"]["expression"]["arguments"],
+            json!([
+                {"valueType": "reference", "value": "embedding"},
+                {"valueType": "reference", "value": "meta[\"k\"]"},
+                {"valueType": "immediate", "value": [0.1, 0.2, 0.3]},
+                {"valueType": "immediate", "value": 7},
+                {"valueType": "reference", "value": "item.sku"}
+            ])
+        );
+        assert_eq!(
+            resolved["score_expression"]["unresolvedNestedReferences"],
+            json!(["item.sku"])
+        );
+    }
+
+    #[test]
+    fn input_mapping_reference_takes_the_bracketed_roots_arm() {
+        let input_mapping = json!({
+            "status": { "valueType": "reference", "value": r#"steps["build"].outputs.status"# },
+            "name": { "valueType": "reference", "value": "data['customer'].name" },
+            "limit": { "valueType": "reference", "value": r#"variables["limit"]"# },
+        });
+
+        let resolved = resolve_input_mappings(&input_mapping, &summaries(), &execution(), None);
+
+        assert_eq!(resolved["status"]["sourceStep"], json!("build"));
+        assert_eq!(resolved["status"]["resolvedValue"], json!("active"));
+        assert_eq!(resolved["name"]["resolvedValue"], json!("Ada"));
+        assert_eq!(resolved["limit"]["variableName"], json!("limit"));
+        assert_eq!(resolved["limit"]["resolvedValue"], json!(10));
+    }
+
+    /// A bare `data` / `variables` is the whole object at runtime, so both
+    /// `trace_reference` (via `resolve_reference_value`) and `inspect_step`
+    /// (via `resolve_input_mappings`) show it whole rather than nothing.
+    #[test]
+    fn bare_data_and_variables_resolve_to_the_whole_object() {
+        let data = json!({"customer": {"name": "Ada"}, "threshold": 7});
+        let variables = json!({"limit": 10});
+        assert_eq!(
+            resolve_reference_value("data", &summaries(), &execution(), None),
+            Some(data.clone())
+        );
+        assert_eq!(
+            resolve_reference_value("variables", &summaries(), &execution(), None),
+            Some(variables.clone())
+        );
+
+        let resolved = resolve_input_mappings(
+            &json!({
+                "all_data": { "valueType": "reference", "value": "data" },
+                "all_vars": { "valueType": "reference", "value": "variables" },
+            }),
+            &summaries(),
+            &execution(),
+            None,
+        );
+        assert_eq!(resolved["all_data"]["resolvedValue"], data);
+        assert_eq!(resolved["all_data"]["source"], json!("workflow_input"));
+        assert_eq!(resolved["all_vars"]["resolvedValue"], variables);
+        assert_eq!(resolved["all_vars"]["source"], json!("variable"));
+        assert!(resolved["all_vars"].get("variableName").is_none());
+    }
+
+    #[test]
+    fn explain_unresolved_path_reads_a_bracketed_tail() {
+        let envelope = json!({ "stepType": "Split", "outputs": [{"id": 1}] });
+        let reason = explain_unresolved_path(
+            &envelope,
+            "steps.split_users",
+            &segments(r#"["outputs"]["result"]"#),
+        )
+        .expect("named key into array must produce a reason");
+        assert!(
+            reason.contains("is an array") && reason.contains("'result'"),
+            "reason: {reason}"
+        );
     }
 }

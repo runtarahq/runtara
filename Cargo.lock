@@ -4810,6 +4810,7 @@ dependencies = [
  "runtara-object-store",
  "runtara-store-postgres",
  "runtara-text-parser",
+ "runtara-workflow-stdlib",
  "runtara-workflows",
  "rust-embed",
  "schemars 1.2.1",

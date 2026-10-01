@@ -88,7 +88,8 @@ use runtara_dsl::{
 // exactly the segments a lookup will walk — in particular treating a
 // bracket-quoted body like `data["a.b"]` as one opaque key, not a nested path.
 use runtara_workflow_stdlib::reference_path::{
-    PathDefect, array_index, is_array_index_token, reference_segments, tokenize_reference,
+    PathDefect, WORKFLOW_REFERENCE_ROOTS, array_index, is_array_index_token, reference_root,
+    reference_segments, tokenize_reference,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -3014,11 +3015,15 @@ fn validate_step_reference(
         return false;
     }
 
-    if ref_path == "__error" || ref_path.starts_with("__error.") {
+    // Read the root as the runtime does, so `["__error"].message` and
+    // `__error["message"]` are steered to the canonical path like the dotted
+    // spelling.
+    if reference_root(ref_path).as_deref() == Some("__error") {
+        let separator = if ref_path.starts_with('[') { "" } else { "." };
         result.warnings.push(ValidationWarning::BareErrorReference {
             step_id: step_id.to_string(),
             reference_path: ref_path.to_string(),
-            suggested_path: format!("steps.{ref_path}"),
+            suggested_path: format!("steps{separator}{ref_path}"),
         });
     }
 
@@ -5461,29 +5466,6 @@ fn parse_reference(reference: &str) -> Option<(String, String)> {
     Some((root, segments.next()?))
 }
 
-/// The reference roots the runtime resolves — `build_source` in
-/// `direct_json.rs` always populates `data`/`variables`/`steps`/`workflow`,
-/// and conditionally populates `loop`/`item` (see [`ValidationError::ReferenceRootOutOfScope`]).
-/// Anything else falls through `lookup_source_path` to a silent `null`
-/// instead of failing to compile.
-const LEGAL_REFERENCE_ROOTS: &[&str] = &[
-    "data",
-    "variables",
-    "workflow",
-    "steps",
-    "iteration",
-    "loop",
-    "item",
-];
-
-/// The leading identifier of a reference path, up to the first `.` or `[`
-/// (e.g. `"data"` from `"data.foo"`, `"steps"` from `"steps['id'].outputs"`,
-/// or the whole string for a bare root like `"data"`).
-fn reference_root(reference: &str) -> &str {
-    let end = reference.find(['.', '[']).unwrap_or(reference.len());
-    &reference[..end]
-}
-
 /// True when `segments` begins with exactly `prefix` (caller has already
 /// checked `segments.len() > prefix.len()`).
 fn segments_start_with(segments: &[String], prefix: &[&str]) -> bool {
@@ -6037,7 +6019,11 @@ fn validate_reference_root(
         return;
     }
 
-    match reference_root(reference) {
+    // The root as the runtime reads it, so `["data"].x` is the `data` reference
+    // it resolves to. Anything outside `WORKFLOW_REFERENCE_ROOTS` would fall
+    // through `lookup_source_path` to a silent `null`, so it is rejected here
+    // instead (`loop`/`item` are further gated by scope below).
+    match reference_root(reference).as_deref().unwrap_or("") {
         "data" => {
             if parse_reference(reference).is_none() {
                 return;
@@ -6146,7 +6132,7 @@ fn validate_reference_root(
                 step_id: step_id.to_string(),
                 reference: reference.to_string(),
                 root: other.to_string(),
-                legal_roots: LEGAL_REFERENCE_ROOTS
+                legal_roots: WORKFLOW_REFERENCE_ROOTS
                     .iter()
                     .map(|s| s.to_string())
                     .collect(),
@@ -8690,6 +8676,54 @@ mod tests {
         );
         assert!(!canonical.has_errors());
         assert!(!canonical.has_warnings());
+    }
+
+    /// The bare root is read with the runtime's tokenizer, so every spelling of
+    /// it warns, not only the dotted one, and the suggestion stays a valid path.
+    #[test]
+    fn bare_error_reference_warns_for_bracket_spellings() {
+        for (reference, suggested) in [
+            (r#"__error["message"]"#, r#"steps.__error["message"]"#),
+            (r#"["__error"].message"#, r#"steps["__error"].message"#),
+            ("__error", "steps.__error"),
+        ] {
+            let mut result = ValidationResult::default();
+            validate_reference(
+                "handler",
+                reference,
+                &HashSet::new(),
+                &HashMap::new(),
+                &HashSet::new(),
+                &mut result,
+            );
+            assert!(!result.has_errors(), "{reference}: {:?}", result.errors);
+            assert!(
+                matches!(
+                    result.warnings.as_slice(),
+                    [ValidationWarning::BareErrorReference { suggested_path, .. }]
+                        if suggested_path == suggested
+                ),
+                "{reference}: {:?}",
+                result.warnings
+            );
+            assert_eq!(
+                reference_segments(suggested)[..2],
+                ["steps", "__error"],
+                "the suggestion for {reference} must be the canonical path"
+            );
+        }
+
+        // A root that merely starts with `__error` is not the alias.
+        let mut other = ValidationResult::default();
+        validate_reference(
+            "handler",
+            "__errors.message",
+            &HashSet::new(),
+            &HashMap::new(),
+            &HashSet::new(),
+            &mut other,
+        );
+        assert!(!other.has_warnings(), "{:?}", other.warnings);
     }
 
     // === Output-shape preflight (reporter's `steps.split.outputs.result` bug) ===
@@ -12740,6 +12774,35 @@ mod tests {
             "single-quoted body must behave like the double-quoted one: {:?}",
             single.errors
         );
+    }
+
+    /// A path whose *root* is bracketed (`["data"]`) is the `data` reference
+    /// the runtime resolves it to. The root used to be read up to the first
+    /// `.` or `[`, which is the empty string here, so it was rejected as an
+    /// unknown root `''` and never reached the schema walk.
+    #[test]
+    fn test_bracketed_root_is_read_like_the_runtime() {
+        let root_errors = |result: &ValidationResult| -> Vec<String> {
+            result
+                .errors
+                .iter()
+                .filter_map(|error| match error {
+                    ValidationError::UnknownReferenceRoot { root, .. } => {
+                        Some(format!("unknown root `{root}`"))
+                    }
+                    ValidationError::UndefinedDataReference { field_name, .. } => {
+                        Some(format!("undefined `{field_name}`"))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let declared = validate_root_bracket_reference(r#"["data"]["a.b"]"#);
+        assert_eq!(root_errors(&declared), Vec::<String>::new());
+
+        let undeclared = validate_root_bracket_reference(r#"["data"]["c.d"]"#);
+        assert_eq!(root_errors(&undeclared), ["undefined `c.d`"]);
     }
 
     /// Validate a single-mapping workflow whose only reference is `reference`,

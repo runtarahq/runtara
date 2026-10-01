@@ -139,6 +139,9 @@ runtara-database-contract = { path = "../runtara-database-contract" }
 runtara-agent-trusted = { path = "../runtara-agent-trusted" }
 # Runtara crates
 runtara-workflows = { path = "../runtara-workflows" }
+# Reference-path tokenizer, so the MCP debugging tools read paths exactly as
+# the workflow runtime resolves them.
+runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", default-features = false }
 runtara-dsl = { path = "../runtara-dsl", features = ["utoipa"] }
 runtara-agents = { path = "../runtara-agents" }
 runtara-core = { path = "../runtara-core" }
