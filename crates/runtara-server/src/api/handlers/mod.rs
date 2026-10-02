@@ -29,3 +29,5 @@ pub mod workflows_sync;
 // feature (and with it the `rerun-if-changed=frontend/dist` that makes a running
 // `npm run build:watch` invalidate every cargo build).
 pub mod ui;
+
+pub mod operations;

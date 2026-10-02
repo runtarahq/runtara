@@ -6990,6 +6990,7 @@ mod tests {
             pattern: None,
             properties: None,
             visible_when: None,
+            required_when: None,
             nullable: None,
         }
     }

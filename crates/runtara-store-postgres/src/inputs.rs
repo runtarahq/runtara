@@ -388,10 +388,11 @@ impl InputRequests for PostgresPersistence {
             }
             let at = now(&mut tx).await?;
             let expired = spec.deadline.is_some_and(|deadline| deadline <= at);
-            sqlx::query("INSERT INTO instance_input_requests (instance_id,tenant_id,request_id,signal_id,invocation_path,fence,spec,created_at,deadline,state,closure_reason,closed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
+            sqlx::query("INSERT INTO instance_input_requests (instance_id,tenant_id,request_id,signal_id,invocation_path,fence,spec,created_at,deadline,state,closure_reason,closed_at,action_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)")
                 .bind(owner.instance_id()).bind(owner.tenant_id()).bind(&id).bind(&spec.signal_id).bind(owner.invocation_path()).bind(fence)
                 .bind(serde_json::to_string(spec).map_err(storage)?).bind(at).bind(spec.deadline)
                 .bind(if expired { "closed" } else { "open" }).bind(expired.then_some("expired")).bind(expired.then_some(at))
+                .bind(spec.metadata.get("action_key").and_then(serde_json::Value::as_str).filter(|key| !key.contains('\0')))
                 .execute(&mut *tx).await.map_err(storage)?;
         }
         let record = load(&mut tx, owner.instance_id(), &id)

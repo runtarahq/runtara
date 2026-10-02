@@ -3,6 +3,7 @@
 // Separating would require splitting the routing logic from its component references.
 import { createBrowserRouter, Navigate } from 'react-router';
 import { lazy, Suspense } from 'react';
+import { InvocationHistoryRedirect } from '@/router/InvocationHistoryRedirect';
 import { PrivateRoute } from '@/router/PrivateRoute';
 import { EntitlementRoute } from '@/router/EntitlementRoute';
 import { Layout } from '@/shared/layouts/layout';
@@ -10,6 +11,10 @@ import { Login } from '@/shared/pages/login';
 import { NotFound } from '@/shared/pages/NotFound';
 import { ErrorBoundary } from '@/shared/components/error-boundary.tsx';
 import { Spinner } from '@/shared/components/ui/spinner';
+
+const Operations = lazy(() =>
+  import('@/features/operations/pages').then((m) => ({ default: m.Operations }))
+);
 
 // Lazy load all page components
 const Connections = lazy(() =>
@@ -115,11 +120,6 @@ const AnalyticsSystem = lazy(() =>
 const AnalyticsRateLimits = lazy(() =>
   import('@/features/analytics/pages/RateLimits').then((m) => ({
     default: m.RateLimits,
-  }))
-);
-const InvocationHistory = lazy(() =>
-  import('@/features/invocation-history/pages/InvocationHistory').then((m) => ({
-    default: m.InvocationHistory,
   }))
 );
 const Settings = lazy(() =>
@@ -403,12 +403,20 @@ export const router = createBrowserRouter(
           ),
         },
         {
-          path: '/invocation-history',
+          path: '/operations/*',
           element: (
             <PrivateRoute>
               <Suspense fallback={<PageLoader />}>
-                <InvocationHistory />
+                <Operations />
               </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
+          path: '/invocation-history',
+          element: (
+            <PrivateRoute>
+              <InvocationHistoryRedirect />
             </PrivateRoute>
           ),
         },

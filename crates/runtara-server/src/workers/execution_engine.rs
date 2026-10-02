@@ -1631,20 +1631,8 @@ impl ExecutionEngine {
         }
 
         let mut instance = runtara_info_to_dto(info);
-        // The run's published state; a failed read leaves it out rather than
-        // failing the whole lookup.
-        match client.get_run_state(tenant_id, instance_id).await {
-            Ok(Some(record)) => {
-                instance.state = Some(Value::Object(record.state));
-                instance.state_updated_at = Some(record.updated_at.to_rfc3339());
-            }
-            Ok(None) => {}
-            Err(error) => warn!(
-                instance_id = %instance_id,
-                error = %error,
-                "Reading the run's state failed"
-            ),
-        }
+        self.enrich_state(&mut instance, tenant_id, instance_id)
+            .await;
         Ok(instance)
     }
 
@@ -1816,7 +1804,7 @@ impl ExecutionEngine {
             .map_err(|e| ExecutionError::ValidationError(e.message))?;
 
         self.queue(QueueRequest {
-            run_label: None,
+            run_label: info.run_label,
             tenant_id,
             workflow_id: &workflow_id,
             version: Some(latest_version),
@@ -1890,6 +1878,32 @@ impl ExecutionEngine {
         Ok(info)
     }
 
+    /// Read published state consistently on both instance-detail endpoints.
+    async fn enrich_state(
+        &self,
+        instance: &mut WorkflowInstanceDto,
+        tenant_id: &str,
+        instance_id: &str,
+    ) {
+        let Some(client) = self.runtime_client.as_ref() else {
+            return;
+        };
+        // The run's published state; a failed read leaves it out rather than
+        // failing the whole lookup.
+        match client.get_run_state(tenant_id, instance_id).await {
+            Ok(Some(record)) => {
+                instance.state = Some(Value::Object(record.state));
+                instance.state_updated_at = Some(record.updated_at.to_rfc3339());
+            }
+            Ok(None) => {}
+            Err(error) => warn!(
+                instance_id = %instance_id,
+                error = %error,
+                "Reading the run's state failed"
+            ),
+        }
+    }
+
     /// Get an execution enriched with workflow metadata.
     pub async fn get_execution_with_metadata(
         &self,
@@ -1915,6 +1929,8 @@ impl ExecutionEngine {
 
         let mut result =
             runtara_info_to_execution_with_metadata(info, workflow_name, workflow_description);
+        self.enrich_state(&mut result.instance, tenant_id, instance_id)
+            .await;
         enrich_pending_input(
             std::slice::from_mut(&mut result.instance),
             client,
@@ -2062,27 +2078,23 @@ impl ExecutionEngine {
         })
     }
 
-    /// List all executions across all workflows with filtering, sorting, and pagination.
-    pub async fn list_all_executions(
+    /// Shared run predicates for run lists and request-level Operations queries.
+    pub async fn execution_listing_options(
         &self,
         tenant_id: &str,
-        page: Option<i32>,
-        size: Option<i32>,
-        filters: ExecutionFilters,
-    ) -> Result<PageWorkflowInstanceHistoryDto, ExecutionError> {
-        let page = crate::api::utils::pagination::normalize_page(page);
-        let size = size.unwrap_or(20).clamp(1, 100);
-
-        let client = self.require_runtime_client()?;
-
+        page: i32,
+        size: i32,
+        filters: &ExecutionFilters,
+    ) -> Result<ListInstancesOptions, ExecutionError> {
         let mut options = ListInstancesOptions::new()
             .with_tenant_id(tenant_id)
             .with_limit(size as u32)
-            .with_offset((page * size) as u32);
+            .with_offset((i64::from(page) * i64::from(size)).min(i64::from(u32::MAX)) as u32);
 
         options.search = filters.search.clone();
         options.parent_instance_id = filters.parent_instance_id.clone();
         options.state_filters = filters.state_filters.clone();
+        options.state_sort = filters.state_sort.clone();
         options.run_label =
             runtara_dsl::run_label::normalize_run_label(filters.run_label.as_deref())
                 .map_err(ExecutionError::ValidationError)?;
@@ -2128,6 +2140,51 @@ impl ExecutionEngine {
             _ => ListInstancesOrder::FinishedAtDesc,
         };
         options = options.with_order_by(order);
+
+        Ok(options)
+    }
+
+    /// Status totals over exactly the listing predicates, without fetching rows.
+    pub async fn execution_summary(
+        &self,
+        tenant_id: &str,
+        mut filters: ExecutionFilters,
+    ) -> Result<crate::api::dto::executions::ExecutionSummary, ExecutionError> {
+        filters.statuses = None;
+        let options = self
+            .execution_listing_options(tenant_id, 0, 1, &filters)
+            .await?;
+        let rows = self
+            .require_runtime_client()?
+            .execution_counts(&options)
+            .await
+            .map_err(|e| ExecutionError::DatabaseError(e.to_string()))?;
+        let mut counts = std::collections::BTreeMap::new();
+        let mut total = 0;
+        for (status, count) in rows {
+            let status = super::runtara_dto::runtara_status_to_execution_status(status).to_string();
+            *counts.entry(status).or_insert(0) += count;
+            total += count;
+        }
+        Ok(crate::api::dto::executions::ExecutionSummary { total, counts })
+    }
+
+    /// List all executions across all workflows with filtering, sorting, and pagination.
+    pub async fn list_all_executions(
+        &self,
+        tenant_id: &str,
+        page: Option<i32>,
+        size: Option<i32>,
+        filters: ExecutionFilters,
+    ) -> Result<PageWorkflowInstanceHistoryDto, ExecutionError> {
+        let page = crate::api::utils::pagination::normalize_page(page);
+        let size = size.unwrap_or(20).clamp(1, 100);
+
+        let client = self.require_runtime_client()?;
+
+        let options = self
+            .execution_listing_options(tenant_id, page, size, &filters)
+            .await?;
 
         debug!(
             tenant_id = %tenant_id,
@@ -2251,6 +2308,80 @@ impl ExecutionEngine {
         enrich_pending_input(&mut instances, client, tenant_id)
             .await
             .map_err(|error| ExecutionError::RuntimeError(error.to_string()))?;
+
+        let failed_ids = instances
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i.status,
+                    crate::types::ExecutionStatus::Failed | crate::types::ExecutionStatus::Timeout
+                )
+            })
+            .map(|i| i.id.clone())
+            .collect::<Vec<_>>();
+        if !failed_ids.is_empty() {
+            let mut failures = client
+                .operation_failures(tenant_id, &failed_ids)
+                .await
+                .map_err(|e| ExecutionError::RuntimeError(e.to_string()))?
+                .into_iter()
+                .map(|f| (f.instance_id.clone(), f))
+                .collect::<std::collections::HashMap<_, _>>();
+            for instance in &mut instances {
+                if let Some(failure) = failures.remove(&instance.id) {
+                    instance.error = failure.error;
+                    // Error steps may terminate with structured instance.error
+                    // without emitting a failed step_debug_end event.
+                    if let Some(detail) = failure
+                        .detail
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                        .or_else(|| {
+                            instance
+                                .error
+                                .as_deref()
+                                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                        })
+                    {
+                        instance.error_summary =
+                            Some(crate::api::dto::operations::OperationErrorSummary {
+                                code: detail
+                                    .get("code")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned),
+                                category: detail
+                                    .get("category")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned),
+                                message: detail
+                                    .get("message")
+                                    .and_then(Value::as_str)
+                                    .or_else(|| detail.as_str())
+                                    .unwrap_or("Step failed")
+                                    .into(),
+                                retryable: detail.get("retryable").and_then(Value::as_bool),
+                                severity: detail
+                                    .get("severity")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned),
+                            });
+                    }
+                }
+            }
+        }
+
+        if !filters.state_fields.is_empty() {
+            let ids = instances.iter().map(|i| i.id.clone()).collect::<Vec<_>>();
+            let mut projected = client
+                .operation_state_projection(tenant_id, &ids, &filters.state_fields)
+                .await
+                .map_err(|e| ExecutionError::RuntimeError(e.to_string()))?
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>();
+            for instance in &mut instances {
+                instance.state = projected.remove(&instance.id).flatten();
+            }
+        }
 
         let total_elements = result.total_count as i64;
         let total_pages = if total_elements == 0 {

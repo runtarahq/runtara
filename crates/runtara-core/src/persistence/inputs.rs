@@ -236,16 +236,29 @@ pub enum InputReplayIdentity<'a> {
 }
 
 impl InputReplayIdentity<'_> {
-    /// Source transitions also conflict: a direct response cannot replay a
-    /// contextual operation merely by guessing its effective payload.
+    /// Enriching adapter transitions conflict: a direct response cannot replay
+    /// control's context by guessing its effective payload. User attribution
+    /// does not enrich a direct response, so its payload retry stays compatible.
     pub fn matches(&self, receipt: &InputReceipt) -> bool {
         match self {
             Self::Payload(payload) => {
-                receipt.acceptance_context.is_none() && receipt.payload == *payload
+                receipt.payload == *payload
+                    && receipt
+                        .acceptance_context
+                        .as_deref()
+                        .is_none_or(is_user_attribution)
             }
             Self::Context(context) => receipt.acceptance_context.as_deref() == Some(*context),
         }
     }
+}
+
+// User attribution records who first acted without changing the direct-response
+// retry contract. Unlike control adapters, it never enriches the payload.
+fn is_user_attribution(context: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(context)
+        .ok()
+        .is_some_and(|context| context["source"] == "user")
 }
 
 /// Durable request state. Accepted is final; consumption does not reopen it.
@@ -354,6 +367,9 @@ impl ValidatedInputResponse {
     /// Identity used for the receipt check under the acceptance lock.
     pub fn replay_identity(&self) -> InputReplayIdentity<'_> {
         match self.acceptance_context() {
+            Some(context) if is_user_attribution(context) => {
+                InputReplayIdentity::Payload(self.payload())
+            }
             Some(context) => InputReplayIdentity::Context(context),
             None => InputReplayIdentity::Payload(self.payload()),
         }
@@ -553,6 +569,9 @@ pub async fn submit_input_with_context(
 ) -> InputResult<InputReceipt> {
     let canonical = canonical_payload(payload);
     let identity = || match context {
+        Some(context) if is_user_attribution(context.as_bytes()) => {
+            InputReplayIdentity::Payload(&canonical)
+        }
         Some(context) => InputReplayIdentity::Context(context.as_bytes()),
         None => InputReplayIdentity::Payload(&canonical),
     };
@@ -590,6 +609,31 @@ pub async fn submit_input_with_context(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn user_attribution_preserves_payload_retries_without_weakening_control_identity() {
+        let payload = json!({"decision":"approve"});
+        let canonical = canonical_payload(&payload);
+        let mut receipt = InputReceipt {
+            receipt_id: "receipt".into(),
+            operation_id: "operation".into(),
+            request_id: "request".into(),
+            accepted_at: Utc::now(),
+            payload: canonical.clone(),
+            acceptance_context: None,
+        };
+        let direct = InputReplayIdentity::Payload(&canonical);
+        assert!(direct.matches(&receipt));
+        for (source, matches) in [("user", true), ("control", false)] {
+            let context =
+                InputAcceptanceContext::new(source, "actor", &json!({}), &payload).unwrap();
+            receipt.acceptance_context = Some(context.as_bytes().to_vec());
+            assert_eq!(direct.matches(&receipt), matches);
+            assert!(InputReplayIdentity::Context(context.as_bytes()).matches(&receipt));
+        }
+        receipt.acceptance_context = Some(b"malformed".to_vec());
+        assert!(!direct.matches(&receipt));
+    }
 
     #[test]
     fn canonicalization_preserves_scalar_types_and_array_order() {

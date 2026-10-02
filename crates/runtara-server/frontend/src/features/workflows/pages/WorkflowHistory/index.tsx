@@ -1,4 +1,5 @@
 import { useManagedInputSubmissions } from '@/features/workflows/hooks/useManagedInputSubmissions';
+import { RunStateCard } from '@/features/operations/components/RunStateCard';
 import {
   ManagedInputScope,
   InputRetryPanel,
@@ -505,6 +506,12 @@ function WorkflowHistoryContent() {
       )}
 
       <div className="space-y-6">
+        <RunStateCard
+          workflowId={workflowId!}
+          version={data.usedVersion}
+          state={data.state}
+          updatedAt={data.stateUpdatedAt}
+        />
         {/* Timing and Performance Metrics */}
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           {/* Execution Duration Card */}

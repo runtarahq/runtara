@@ -414,6 +414,37 @@ impl RuntimeClient {
             .await
     }
 
+    /// Attribute a direct response to the authenticated caller, atomically
+    /// with acceptance. Idempotent retries retain the original attribution.
+    pub async fn submit_authenticated_input_response(
+        &self,
+        auth: &crate::auth::AuthContext,
+        instance: &str,
+        request: &str,
+        operation: &str,
+        payload: &Value,
+    ) -> runtara_core::persistence::inputs::InputResult<
+        runtara_core::persistence::inputs::InputReceipt,
+    > {
+        refuse_reserved_operation(operation)?;
+        let context = runtara_core::persistence::inputs::InputAcceptanceContext::new(
+            "user",
+            &auth.user_id,
+            &serde_json::json!({"tenantId": auth.org_id}),
+            payload,
+        )?;
+        self.client
+            .submit_contextual_input_response(
+                &auth.org_id,
+                instance,
+                request,
+                operation,
+                payload,
+                &context,
+            )
+            .await
+    }
+
     /// Control's `send-signal`: replay of its own `control:` operation.
     pub(crate) async fn replay_control_input_response(
         &self,
@@ -911,6 +942,63 @@ impl RuntimeClient {
     /// * `tenant_id` - The tenant to list instances for
     /// * `status_filter` - Optional status filter (e.g., Running, Pending)
     /// * `limit` - Maximum number of instances to return
+    pub async fn execution_counts(
+        &self,
+        options: &ListInstancesOptions,
+    ) -> Result<Vec<(crate::runtime_types::InstanceStatus, i64)>, RuntimeError> {
+        self.client
+            .execution_counts(options)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    pub async fn operation_failures(
+        &self,
+        tenant: &str,
+        ids: &[String],
+    ) -> Result<Vec<runtara_environment::operations::RunFailure>, RuntimeError> {
+        self.client
+            .operation_failures(tenant, ids)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    pub async fn operation_requests(
+        &self,
+        tenant: &str,
+        workflow: &str,
+        key: &str,
+        listing: &ListInstancesOptions,
+        fields: &[String],
+    ) -> Result<runtara_environment::operations::RequestPage, RuntimeError> {
+        self.client
+            .operation_requests(tenant, workflow, key, listing, fields)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    pub async fn active_operation_queues(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<runtara_environment::operations::ActiveQueue>, RuntimeError> {
+        self.client
+            .active_operation_queues(tenant)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
+    pub async fn operation_state_projection(
+        &self,
+        tenant: &str,
+        ids: &[String],
+        fields: &[String],
+    ) -> Result<Vec<(String, Option<Value>)>, RuntimeError> {
+        self.client
+            .operation_state_projection(tenant, ids, fields)
+            .await
+            .map_err(|e| RuntimeError::SdkError(e.to_string()))
+    }
+
     pub async fn list_instances(
         &self,
         tenant_id: &str,

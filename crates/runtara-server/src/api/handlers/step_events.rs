@@ -1,6 +1,6 @@
 use crate::runtime_types::{EventSortOrder, ListEventsOptions};
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, Query, State},
     http::StatusCode,
 };
@@ -580,11 +580,18 @@ pub async fn list_workflow_instance_open_actions(
 )]
 pub async fn submit_workflow_action(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    Extension(auth): Extension<crate::auth::AuthContext>,
+    State(pool): State<sqlx::PgPool>,
     State(engine): State<Arc<ExecutionEngine>>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     Path((workflow_id, instance_id, action_id)): Path<(String, String, String)>,
     body: Result<Json<SubmitWorkflowActionRequest>, axum::extract::rejection::JsonRejection>,
 ) -> (StatusCode, Json<Value>) {
+    if auth.org_id != tenant_id {
+        return workflow_runtime_error_response(WorkflowRuntimeError::Managed(
+            runtara_core::persistence::inputs::InputError::NotFound,
+        ));
+    }
     let Ok(Json(body)) = body else {
         return workflow_runtime_error_response(WorkflowRuntimeError::Managed(
             runtara_core::persistence::inputs::InputError::InvalidRequest,
@@ -603,7 +610,8 @@ pub async fn submit_workflow_action(
     match submit_runtime_workflow_action(
         &engine,
         &client,
-        &tenant_id,
+        &pool,
+        &auth,
         &workflow_id,
         &instance_id,
         &body.request_id,
@@ -656,10 +664,17 @@ pub(crate) fn workflow_runtime_error_response(
 )]
 pub async fn submit_signal(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    Extension(auth): Extension<crate::auth::AuthContext>,
+    State(pool): State<sqlx::PgPool>,
     Path(instance_id): Path<String>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     body: Result<Json<SubmitSignalRequest>, axum::extract::rejection::JsonRejection>,
 ) -> (StatusCode, Json<Value>) {
+    if auth.org_id != tenant_id {
+        return workflow_runtime_error_response(WorkflowRuntimeError::Managed(
+            runtara_core::persistence::inputs::InputError::NotFound,
+        ));
+    }
     let Ok(Json(body)) = body else {
         return workflow_runtime_error_response(
             runtara_core::persistence::inputs::InputError::InvalidRequest.into(),
@@ -673,22 +688,21 @@ pub async fn submit_signal(
     let Some(client) = runtime_client else {
         return workflow_runtime_error_response(WorkflowRuntimeError::RuntimeUnavailable);
     };
-    match client
-        .submit_input_response(
-            &tenant_id,
-            &instance_id,
-            &body.request_id,
-            &body.operation_id,
-            &body.payload,
-        )
-        .await
+    match crate::api::services::workflow_runtime::submit_authenticated_input(
+        &client,
+        &pool,
+        &auth,
+        &instance_id,
+        &body.request_id,
+        &body.operation_id,
+        &body.payload,
+    )
+    .await
     {
         Ok(receipt) => (
             StatusCode::OK,
-            Json(
-                json!({"success":true,"message":"Response accepted","data":crate::api::services::workflow_runtime::WorkflowActionReceipt::from(receipt)}),
-            ),
+            Json(json!({"success":true,"message":"Response accepted","data":receipt})),
         ),
-        Err(error) => workflow_runtime_error_response(error.into()),
+        Err(error) => workflow_runtime_error_response(error),
     }
 }

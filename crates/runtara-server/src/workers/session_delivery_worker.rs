@@ -14,6 +14,7 @@ use tracing::warn;
 pub async fn run(
     mut conn: ConnectionManager,
     client: Arc<RuntimeClient>,
+    pool: sqlx::PgPool,
     shutdown: ShutdownSignal,
 ) {
     let mut cursor = 0;
@@ -62,9 +63,16 @@ pub async fn run(
                     if !has_unresolved(&mut conn, &scope).await? {
                         return Ok(false);
                     }
-                    deliver_session(&mut conn, &scope, &client)
-                        .await
-                        .map(|_| true)
+                    let outcome = deliver_session(&mut conn, &scope, &client).await?;
+                    if let crate::api::services::session_queue::managed::DeliveryOutcome::Accepted(
+                        envelope,
+                    ) = outcome
+                        && let (Some(actor), Some(target), Some(receipt)) =
+                            (&envelope.actor_id, &envelope.target, &envelope.receipt_id)
+                    {
+                        crate::audit::emit(&pool,scope.tenant_id(),Some(actor),crate::audit::AuditEvent::new("input.answer").resource("instance",&target.instance_id).payload(serde_json::json!({"requestId":target.request_id,"receiptId":receipt}))).await;
+                    }
+                    Ok::<bool, crate::api::services::session_queue::managed::QueueError>(true)
                 };
                 match tokio::time::timeout_at(deadline, delivery).await {
                     Ok(Ok(delivered)) => deliveries += usize::from(delivered),

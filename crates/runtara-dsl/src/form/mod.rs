@@ -458,6 +458,7 @@ pub fn connection_form_definition(meta: &crate::agent_meta::ConnectionTypeMeta) 
                     pattern: None,
                     properties: None,
                     visible_when: None,
+                    required_when: None,
                     nullable: None,
                 },
                 control: control_kind.map(|kind| FormControl {
@@ -618,6 +619,10 @@ pub fn schema_fields_form_definition(fields: &HashMap<String, SchemaField>) -> F
                         control: None,
                         section: None,
                         conditions: FormConditions {
+                            required: source
+                                .required_when
+                                .as_ref()
+                                .and_then(legacy_visible_condition),
                             visible,
                             ..FormConditions::default()
                         },
@@ -728,6 +733,7 @@ fn empty_schema_field(field_type: SchemaFieldType) -> SchemaField {
         pattern: None,
         properties: None,
         visible_when: None,
+        required_when: None,
         nullable: None,
     }
 }
@@ -1135,6 +1141,7 @@ mod tests {
             pattern: None,
             properties: None,
             visible_when: None,
+            required_when: None,
             nullable: None,
         }
     }

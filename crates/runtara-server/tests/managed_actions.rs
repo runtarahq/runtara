@@ -1,6 +1,6 @@
 //! Public action handlers over real request persistence and workflow associations.
 use axum::{
-    Json,
+    Extension, Json,
     extract::{FromRequest, Path, State},
     http::StatusCode,
 };
@@ -20,6 +20,7 @@ use runtara_server::{
             SubmitWorkflowActionRequest, list_instance_actions, list_workflow_actions,
         },
     },
+    auth::{AuthContext, AuthMethod},
     middleware::tenant_auth::OrgId,
     product_events::ProductEventSink,
     runtime_client::{RuntimeClient, RuntimeClientConfig},
@@ -37,6 +38,8 @@ fn mcp_server(
     tenant: &str,
 ) -> runtara_server::mcp::server::SmoMcpServer {
     let discovery_client = client.clone();
+    let signal_client = client.clone();
+    let signal_pool = pool.clone();
     let router = axum::Router::new()
         .route(
             "/api/runtime/workflows/{workflow}/instances/{instance}/pending-input",
@@ -50,7 +53,26 @@ fn mcp_server(
         )
         .route(
             "/api/runtime/signals/{instance}",
-            axum::routing::post(step_events::submit_signal).with_state(client.clone()),
+            axum::routing::post(
+                move |owner: OrgId,
+                      auth: Extension<runtara_server::auth::AuthContext>,
+                      path: Path<String>,
+                      body| {
+                    let client = signal_client.clone();
+                    let pool = signal_pool.clone();
+                    async move {
+                        step_events::submit_signal(
+                            owner,
+                            auth,
+                            State(pool),
+                            path,
+                            State(client),
+                            body,
+                        )
+                        .await
+                    }
+                },
+            ),
         );
     runtara_server::mcp::server::SmoMcpServer::new(
         pool,
@@ -97,6 +119,11 @@ async fn delivery_api_contract(
     let submit = |owner: &str, operation: &str, request_id: Option<&str>| {
         submit_event(
             OrgId(owner.into()),
+            Extension(AuthContext::new(
+                owner.into(),
+                "session-operator".into(),
+                AuthMethod::Unauthenticated,
+            )),
             State(Some(client.clone())),
             State(Some(conn.clone())),
             Path(session.into()),
@@ -141,6 +168,7 @@ async fn delivery_api_contract(
     else {
         panic!("targeted submission claim")
     };
+    assert_eq!(targeted.actor_id.as_deref(), Some("session-operator"));
     fail_targeted(&mut conn.clone(), &scope, &targeted).await;
     // A message retained before submit-time binding has no target at all.
     enqueue(
@@ -529,6 +557,12 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
         .unwrap_err();
     let (status, Json(error)) = step_events::submit_signal(
         OrgId(tenant.clone()),
+        Extension(runtara_server::auth::AuthContext::new(
+            tenant.clone(),
+            "operator".into(),
+            runtara_server::auth::AuthMethod::Unauthenticated,
+        )),
+        State(pool.clone()),
         Path(action.instance_id.clone()),
         State(Some(client.clone())),
         Err(rejection),
@@ -538,7 +572,13 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
     assert_eq!(error["code"], "INPUT_INVALID_REQUEST");
     let signal = |owner: String, operation: &str, payload: Value| {
         step_events::submit_signal(
-            OrgId(owner),
+            OrgId(owner.clone()),
+            Extension(runtara_server::auth::AuthContext::new(
+                owner,
+                "operator".into(),
+                runtara_server::auth::AuthMethod::Unauthenticated,
+            )),
+            State(pool.clone()),
             Path(action.instance_id.clone()),
             State(Some(client.clone())),
             Ok(Json(SubmitWorkflowActionRequest {
@@ -605,7 +645,13 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
 
     let submit = |owner: String, operation: &str, payload: Value| {
         step_events::submit_workflow_action(
-            OrgId(owner),
+            OrgId(owner.clone()),
+            Extension(runtara_server::auth::AuthContext::new(
+                owner,
+                "operator".into(),
+                runtara_server::auth::AuthMethod::Unauthenticated,
+            )),
+            State(pool.clone()),
             State(engine.clone()),
             State(Some(client.clone())),
             Path((
@@ -695,6 +741,7 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
         let worker = tokio::spawn(runtara_server::workers::session_delivery_worker::run(
             recovered.clone(),
             client.clone(),
+            pool.clone(),
             shutdown.clone(),
         ));
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {

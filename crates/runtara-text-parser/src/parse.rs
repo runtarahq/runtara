@@ -23,6 +23,7 @@ fn plain_string_field() -> SchemaField {
         pattern: None,
         properties: None,
         visible_when: None,
+        required_when: None,
         nullable: None,
     }
 }

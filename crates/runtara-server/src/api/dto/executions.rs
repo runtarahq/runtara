@@ -76,8 +76,8 @@ pub struct StateFilterDto {
 
 /// Body of `POST /api/runtime/executions/query`: the listing filters of
 /// `GET /api/runtime/executions`, plus filters on published state. Returns
-/// executions, never their state.
-#[derive(Debug, Default, Deserialize, ToSchema)]
+/// executions, optionally projecting selected state fields.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QueryExecutionsRequest {
     pub search: Option<String>,
@@ -99,6 +99,11 @@ pub struct QueryExecutionsRequest {
     /// All must hold; a run without the field does not match. At most 16.
     #[serde(default)]
     pub state: Vec<StateFilterDto>,
+    /// Explicit top-level state projection (maximum 32); omitted returns no state.
+    #[serde(default)]
+    pub state_fields: Vec<String>,
+    /// Optional typed state ordering, with missing values last.
+    pub state_sort: Option<StateSortDto>,
 }
 
 impl QueryExecutionsRequest {
@@ -146,6 +151,8 @@ pub struct ExecutionFilters {
     pub sort_order: String,
     /// Published-state filters, validated and canonical.
     pub state_filters: Vec<runtara_environment::state_filter::StateFilter>,
+    pub state_fields: Vec<String>,
+    pub state_sort: Option<runtara_environment::operations::StateSort>,
 }
 
 impl Default for ExecutionFilters {
@@ -163,6 +170,90 @@ impl Default for ExecutionFilters {
             sort_by: "completed_at".to_string(),
             sort_order: "DESC".to_string(),
             state_filters: Vec::new(),
+            state_fields: Vec::new(),
+            state_sort: None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StateSortDto {
+    pub field: String,
+    #[serde(default)]
+    pub descending: bool,
+}
+
+impl From<&StateSortDto> for runtara_environment::operations::StateSort {
+    fn from(value: &StateSortDto) -> Self {
+        Self {
+            field: value.field.clone(),
+            descending: value.descending,
+        }
+    }
+}
+
+/// Non-status predicates for status totals. Counts deliberately ignore pagination.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionSummaryRequest {
+    pub search: Option<String>,
+    pub run_label: Option<String>,
+    pub parent_instance_id: Option<String>,
+    pub workflow_id: Option<String>,
+    pub created_from: Option<DateTime<Utc>>,
+    pub created_to: Option<DateTime<Utc>>,
+    pub completed_from: Option<DateTime<Utc>>,
+    pub completed_to: Option<DateTime<Utc>>,
+}
+
+impl ExecutionSummaryRequest {
+    pub fn listing(self) -> QueryExecutionsRequest {
+        QueryExecutionsRequest {
+            search: self.search,
+            run_label: self.run_label,
+            parent_instance_id: self.parent_instance_id,
+            workflow_id: self.workflow_id,
+            created_from: self.created_from,
+            created_to: self.created_to,
+            completed_from: self.completed_from,
+            completed_to: self.completed_to,
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionSummary {
+    pub total: i64,
+    /// Counts by displayed status. Filter aliases (compiling/timeout) are not
+    /// counted twice: their rows display as queued/failed in execution lists.
+    pub counts: std::collections::BTreeMap<String, i64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ExecutionSummaryResponse {
+    pub success: bool,
+    pub data: ExecutionSummary,
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+    #[test]
+    fn summary_rejects_status_and_pagination_instead_of_silently_changing_totals() {
+        for key in ["status", "page", "size", "sortBy", "unexpected"] {
+            assert!(
+                serde_json::from_value::<ExecutionSummaryRequest>(serde_json::json!({key: "x"}))
+                    .is_err()
+            );
+        }
+        assert!(
+            serde_json::from_value::<ExecutionSummaryRequest>(
+                serde_json::json!({"search":"order", "workflowId":"workflow"})
+            )
+            .is_ok()
+        );
     }
 }

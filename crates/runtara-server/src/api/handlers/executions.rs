@@ -68,7 +68,7 @@ pub async fn list_all_executions_handler(
 }
 
 /// List executions filtered by published state (plus the GET listing's
-/// filters). Returns executions, never their state.
+/// filters), optionally projecting selected state fields.
 #[utoipa::path(
     post,
     path = "/api/runtime/executions/query",
@@ -87,12 +87,7 @@ pub async fn query_executions_handler(
     Json(request): Json<QueryExecutionsRequest>,
 ) -> (StatusCode, Json<Value>) {
     let listing = request.listing();
-    let filters = parse_filters(&listing).and_then(|mut filters| {
-        let state = serde_json::to_vec(&request.state).map_err(|e| e.to_string())?;
-        filters.state_filters = runtara_environment::state_filter::parse_state_filters(&state)
-            .map_err(|e| format!("state: {e}"))?;
-        Ok(filters)
-    });
+    let filters = parse_query(&request);
     let filters = match filters {
         Ok(filters) => filters,
         Err(e) => {
@@ -123,8 +118,41 @@ pub async fn query_executions_handler(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/runtime/executions/summary",
+    request_body = crate::api::dto::executions::ExecutionSummaryRequest,
+    responses(
+        (status = 200, description = "Execution status totals", body = crate::api::dto::executions::ExecutionSummaryResponse),
+        (status = 400, description = "Invalid filters", body = Value)
+    ),
+    tag = "executions-controller"
+)]
+pub async fn execution_summary_handler(
+    crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    State(engine): State<Arc<ExecutionEngine>>,
+    Json(request): Json<crate::api::dto::executions::ExecutionSummaryRequest>,
+) -> (StatusCode, Json<Value>) {
+    let filters = match parse_query(&request.listing()) {
+        Ok(filters) => filters,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"success": false, "error": error})),
+            );
+        }
+    };
+    match engine.execution_summary(&tenant_id, filters).await {
+        Ok(data) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"success": true, "data": data})),
+        ),
+        Err(error) => execution_error_response(&error),
+    }
+}
+
 /// Parse and validate query parameters into filters
-fn parse_filters(query: &ListAllExecutionsQuery) -> Result<ExecutionFilters, String> {
+pub(crate) fn parse_filters(query: &ListAllExecutionsQuery) -> Result<ExecutionFilters, String> {
     // Parse statuses from comma-separated string
     let statuses = query.status.as_ref().map(|s| {
         s.split(',')
@@ -221,7 +249,23 @@ fn parse_filters(query: &ListAllExecutionsQuery) -> Result<ExecutionFilters, Str
         sort_by: sort_column.to_string(),
         sort_order: sort_order_sql.to_string(),
         state_filters: Vec::new(),
+        state_fields: Vec::new(),
+        state_sort: None,
     })
+}
+
+pub(crate) fn parse_query(request: &QueryExecutionsRequest) -> Result<ExecutionFilters, String> {
+    let mut filters = parse_filters(&request.listing())?;
+    filters.state_filters = runtara_environment::state_filter::parse_state_filters(
+        &serde_json::to_vec(&request.state).map_err(|e| e.to_string())?,
+    )?;
+    filters.state_fields = request.state_fields.clone();
+    filters.state_sort = request.state_sort.as_ref().map(Into::into);
+    runtara_environment::operations::validate_fields(
+        &filters.state_fields,
+        filters.state_sort.as_ref(),
+    )?;
+    Ok(filters)
 }
 
 #[cfg(test)]

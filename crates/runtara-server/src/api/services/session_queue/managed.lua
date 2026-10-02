@@ -111,7 +111,8 @@ if op == 'enqueue' then
     local existing = redis.call('HGET', KEYS[3], operation)
     if existing then return {'conflict'} end
     local e = {message_id=id, operation_id=operation, payload_json=payload,
-               state='queued', enqueued_at_ms=now, attempts=0, target=selected}
+               state='queued', enqueued_at_ms=now, attempts=0, target=selected,
+               actor_id=ARGV[6] ~= '' and ARGV[6] or nil}
     local result = save(e)
     redis.call('HSET', KEYS[5], 'tenant_id', tenant, 'session_id', session)
     redis.call('PERSIST', KEYS[5])
@@ -207,6 +208,7 @@ elseif op == 'ack' then
         return {'conflict'}
     end
     e.receipt_id = receipt.receipt_id
+    e.actor_id = receipt.actor_id
     e.state = 'accepted'
     e.reason = nil
     return finish(e)

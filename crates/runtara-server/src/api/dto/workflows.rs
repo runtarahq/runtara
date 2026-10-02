@@ -970,6 +970,13 @@ pub struct WorkflowInstanceDto {
     /// the SDK reporting a terminal status, so the failure is not silent in the API.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Latest failed step's structured error, batched into list results.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "errorSummary"
+    )]
+    pub error_summary: Option<crate::api::dto::operations::OperationErrorSummary>,
     #[serde(rename = "workflowId")]
     pub workflow_id: String,
     /// Workflow name (populated when listing all executions)
@@ -1001,8 +1008,7 @@ pub struct WorkflowInstanceDto {
     #[serde(default, rename = "hasPendingInput")]
     pub has_pending_input: bool,
     /// The run's published state, as its SetState steps wrote it (declared by
-    /// the workflow's `stateSchema`). Only on the single-run endpoints; lists
-    /// filter by state but never return it.
+    /// the workflow's `stateSchema`). Query lists return only explicitly selected fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<Value>,
     /// When the published state last changed (RFC 3339).

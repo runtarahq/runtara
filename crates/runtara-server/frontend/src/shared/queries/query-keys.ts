@@ -60,6 +60,8 @@ export const queryKeys = {
         : ([...queryKeys.workflows.byId(id), 'workflow'] as const),
     versions: (id: string) =>
       [...queryKeys.workflows.byId(id), 'versions'] as const,
+    schemas: (id: string, version: number) =>
+      [...queryKeys.workflows.byId(id), 'schemas', version] as const,
     compilationProgress: (id: string, version: number) =>
       [
         ...queryKeys.workflows.byId(id),

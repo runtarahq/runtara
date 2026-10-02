@@ -9,6 +9,7 @@ import {
 } from '@/shared/forms';
 import {
   initialWorkflowFormValues,
+  workflowFormPayload,
   useWorkflowFormDefinition,
 } from '@/features/workflows/utils/form-schema-adapter';
 
@@ -41,8 +42,9 @@ export function ActionForm({
   }, [definition]);
 
   const handleSubmit = async () => {
+    const submittedValues = workflowFormPayload(definition, formValues);
     const submissionAnalysis = hasFields
-      ? await analyzeFormWithRust(definition, formValues)
+      ? await analyzeFormWithRust(definition, submittedValues)
       : analysis;
     if (submissionAnalysis) setAnalysis(submissionAnalysis);
     setSubmitAttempt((attempt) => attempt + 1);
@@ -50,7 +52,7 @@ export function ActionForm({
     const payload = Object.fromEntries(
       Object.keys(definition.fields)
         .filter((name) => submissionAnalysis?.fields[name]?.visible !== false)
-        .map((name) => [name, formValues[name]])
+        .map((name) => [name, submittedValues[name]])
     );
     onSubmit(payload);
   };
