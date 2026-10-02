@@ -107,11 +107,6 @@ const AnalyticsUsage = lazy(() =>
     default: m.Usage,
   }))
 );
-const AnalyticsSystem = lazy(() =>
-  import('@/features/analytics/pages/System').then((m) => ({
-    default: m.System,
-  }))
-);
 const AnalyticsRateLimits = lazy(() =>
   import('@/features/analytics/pages/RateLimits').then((m) => ({
     default: m.RateLimits,
@@ -383,14 +378,9 @@ export const router = createBrowserRouter(
           ),
         },
         {
+          // The host tiles moved onto the usage page; keep old links working.
           path: '/analytics/system',
-          element: (
-            <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <AnalyticsSystem />
-              </Suspense>
-            </PrivateRoute>
-          ),
+          element: <Navigate to="/analytics/usage" replace />,
         },
         {
           path: '/analytics/rate-limits',

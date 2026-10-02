@@ -104,7 +104,6 @@ export const menu: MenuItem[] = [
     allowedGroups: [],
     children: [
       { key: 'usage', title: 'Usage', to: '/analytics/usage' },
-      { key: 'system', title: 'System', to: '/analytics/system' },
       {
         key: 'rate-limits',
         title: 'Rate Limits',
