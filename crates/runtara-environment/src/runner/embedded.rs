@@ -1307,14 +1307,10 @@ async fn record_unacknowledged_cancel_exit(
             if signal.signal_type == runtara_core::domain::SignalType::Cancel
                 && signal.acknowledged_at.is_none() =>
         {
-            let mut params =
-                CompleteInstanceParams::new(instance_id, CoreInstanceStatus::Cancelled)
-                    .if_running()
-                    .with_termination("aborted", None);
-            if let Some(lease) = lease {
-                params = params.owned_by(lease);
-            }
-            let result = persistence.complete_instance(params).await;
+            let params = CompleteInstanceParams::new(instance_id, CoreInstanceStatus::Cancelled)
+                .if_running()
+                .with_termination("aborted", None);
+            let result = complete_run(persistence.as_ref(), params, lease).await;
             match result {
                 Ok(true) => warn!(
                     instance_id,
@@ -1336,6 +1332,26 @@ async fn record_unacknowledged_cancel_exit(
     }
 }
 
+/// Finish a run from its run task: owned by the run's root lease when it has
+/// one, so a superseded run cannot stamp its replacement. `true` when the run
+/// is in the requested state through this run's write (a retry included).
+async fn complete_run(
+    persistence: &dyn Persistence,
+    params: CompleteInstanceParams<'_>,
+    lease: Option<&runtara_core::persistence::invocations::InvocationLease>,
+) -> std::result::Result<bool, runtara_core::error::CoreError> {
+    use runtara_core::lifecycle::TransitionOutcome;
+    match lease {
+        Some(lease) => Ok(
+            match persistence.complete_execution(lease, params, None).await? {
+                TransitionOutcome::Applied | TransitionOutcome::AlreadyApplied => true,
+                TransitionOutcome::Superseded => false,
+            },
+        ),
+        None => persistence.complete_instance(params).await,
+    }
+}
+
 /// A cleanup alarm ends the whole Store without acknowledging any command.
 /// Preserve accepted terminal state and distinguish this from a normal timeout.
 async fn record_cleanup_aborted_exit(
@@ -1353,14 +1369,11 @@ async fn record_cleanup_aborted_exit(
             return;
         }
     };
-    let mut params = CompleteInstanceParams::new(instance_id, status)
+    let params = CompleteInstanceParams::new(instance_id, status)
         .if_running()
         .with_error("Cooperative cleanup grace expired; whole execution aborted")
         .with_termination("aborted", None);
-    if let Some(lease) = lease {
-        params = params.owned_by(lease);
-    }
-    if let Err(error) = persistence.complete_instance(params).await {
+    if let Err(error) = complete_run(persistence.as_ref(), params, lease).await {
         warn!(instance_id, %error, "Could not record cleanup abort after Store disposal");
     }
 }
@@ -1378,7 +1391,8 @@ async fn park_with_retry(
     lease: Option<&runtara_core::persistence::invocations::InvocationLease>,
     wakes: &[runtara_component_host::lifecycle::WorkflowWake],
     instance_waits: &[String],
-) -> std::result::Result<runtara_core::lifecycle::ParkOutcome, runtara_core::error::CoreError> {
+) -> std::result::Result<runtara_core::lifecycle::TransitionOutcome, runtara_core::error::CoreError>
+{
     let mut delay = Duration::from_millis(100);
     let mut attempt = 1;
     loop {
@@ -1424,7 +1438,7 @@ async fn park_with_retry(
 ///
 /// With the run's root lease the park is owned: the store applies it only
 /// while that lease is active and recognises a retry of a committed park
-/// ([`ParkOutcome::AlreadyParked`]). Without one (a host outside a launched
+/// ([`TransitionOutcome::AlreadyApplied`]). Without one (a host outside a launched
 /// run) it is the unowned, running-guarded park. A storage failure is an
 /// error, never a silent no-op: the caller must retry or hand the run to
 /// recovery.
@@ -1434,7 +1448,8 @@ async fn park_invoke_suspend(
     lease: Option<&runtara_core::persistence::invocations::InvocationLease>,
     wakes: &[runtara_component_host::lifecycle::WorkflowWake],
     instance_waits: &[String],
-) -> std::result::Result<runtara_core::lifecycle::ParkOutcome, runtara_core::error::CoreError> {
+) -> std::result::Result<runtara_core::lifecycle::TransitionOutcome, runtara_core::error::CoreError>
+{
     let wakes = &with_persistence_input_deadlines(persistence, instance_id, wakes).await;
     // Instance waits arrive both from the run's own WaitForInstances steps and
     // as `instances` wakes returned through a suspension.
@@ -1448,10 +1463,10 @@ async fn park_invoke_suspend(
     }
     let instance_waits = instance_waits.as_slice();
     let deadline_ms = earliest_wake_deadline_ms(wakes);
-    use runtara_core::lifecycle::{Decision, ParkOutcome, ParkReason, ParkRequest};
+    use runtara_core::lifecycle::{Decision, ParkReason, ParkRequest, TransitionOutcome};
     if deadline_ms.is_none() && !has_on_signal_wake(wakes) && instance_waits.is_empty() {
         // Pure on-resume: already handled by the ack path.
-        return Ok(ParkOutcome::AlreadyParked);
+        return Ok(TransitionOutcome::AlreadyApplied);
     }
     let deadline = deadline_ms
         .and_then(|ms| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64));
@@ -1486,13 +1501,13 @@ async fn park_invoke_suspend(
             .park_instance_on_targets(instance_id, request, targets)
             .await?
         {
-            Decision::Applied(_) => ParkOutcome::Parked,
-            Decision::AlreadyApplied => ParkOutcome::AlreadyParked,
-            Decision::Rejected => ParkOutcome::Superseded,
+            Decision::Applied(_) => TransitionOutcome::Applied,
+            Decision::AlreadyApplied => TransitionOutcome::AlreadyApplied,
+            Decision::Rejected => TransitionOutcome::Superseded,
         },
     };
     match outcome {
-        ParkOutcome::Superseded => {
+        TransitionOutcome::Superseded => {
             warn!(
                 instance_id,
                 "Invoke suspend not applied: the run no longer owns its root"
@@ -1502,7 +1517,7 @@ async fn park_invoke_suspend(
         // first attempt committed but lost its acknowledgement. Later
         // arrivals observe suspended state and schedule their own immediate
         // wake. Never overwrite it with the timer.
-        ParkOutcome::Parked | ParkOutcome::AlreadyParked => {
+        TransitionOutcome::Applied | TransitionOutcome::AlreadyApplied => {
             if request.reason == ParkReason::Signal {
                 wake_if_signal_already_arrived(persistence, instance_id, wakes).await;
             }
@@ -2610,7 +2625,7 @@ mod tests {
     #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn an_owned_park_retry_after_a_lost_ack_still_wakes_on_an_early_signal() {
-        use runtara_core::lifecycle::{ParkOutcome, ParkReason, ParkRequest};
+        use runtara_core::lifecycle::{ParkReason, ParkRequest, TransitionOutcome};
         let (persistence, instance_id) = running_instance().await;
         let tenant = persistence
             .get_instance_meta(&instance_id)
@@ -2645,7 +2660,7 @@ mod tests {
                 )
                 .await
                 .unwrap(),
-            ParkOutcome::Parked
+            TransitionOutcome::Applied
         );
         assert!(
             persistence
@@ -2670,7 +2685,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(retried, ParkOutcome::AlreadyParked);
+        assert_eq!(retried, TransitionOutcome::AlreadyApplied);
         let inst = persistence
             .get_instance(&instance_id)
             .await

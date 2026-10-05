@@ -19,13 +19,24 @@ pub(crate) struct StoredLease {
     owner: String,
     epoch: i64,
     pub active: bool,
-    pub parked: bool,
+    /// The transition this lease's execution committed when it gave the
+    /// root up, if it gave it up through one (see `LeaseRelease`).
+    pub released_by: Option<String>,
 }
 
 impl StoredLease {
     /// Whether this row is exactly `lease`, active or not.
     pub fn is(&self, lease: &InvocationLease) -> bool {
         self.owner == lease.owner && self.epoch == lease.epoch
+    }
+
+    /// Whether `lease` gave the root up through exactly `release`.
+    pub fn released(
+        &self,
+        lease: &InvocationLease,
+        release: runtara_core::lifecycle::LeaseRelease,
+    ) -> bool {
+        self.is(lease) && !self.active && self.released_by.as_deref() == Some(release.as_str())
     }
 }
 
@@ -35,7 +46,7 @@ pub(crate) async fn load(
     instance_id: &str,
 ) -> Result<Option<StoredLease>, CoreError> {
     sqlx::query_as(
-        "SELECT owner, epoch, active, parked FROM invocation_root_leases WHERE instance_id = $1",
+        "SELECT owner, epoch, active, released_by FROM invocation_root_leases WHERE instance_id = $1",
     )
     .bind(instance_id)
     .fetch_optional(db)
@@ -43,15 +54,26 @@ pub(crate) async fn load(
     .db()
 }
 
-/// Whether `lease` is the instance's active root lease. The caller must
-/// already hold the instance row lock.
-pub(crate) async fn holds(
+/// Record on `lease` the transition its execution committed when it gave
+/// the root up. The status change already revoked the lease (the instance
+/// status trigger), in the same transaction.
+pub(crate) async fn record_release(
     db: &mut PgConnection,
     lease: &InvocationLease,
-) -> Result<bool, CoreError> {
-    Ok(load(db, &lease.instance_id)
-        .await?
-        .is_some_and(|stored| stored.active && stored.is(lease)))
+    release: runtara_core::lifecycle::LeaseRelease,
+) -> Result<(), CoreError> {
+    sqlx::query(
+        "UPDATE invocation_root_leases SET released_by = $4 \
+         WHERE instance_id = $1 AND owner = $2 AND epoch = $3",
+    )
+    .bind(&lease.instance_id)
+    .bind(&lease.owner)
+    .bind(lease.epoch)
+    .bind(release.as_str())
+    .execute(db)
+    .await
+    .db()?;
+    Ok(())
 }
 
 /// Whether `owner` may write the instance's guest state, given its stored

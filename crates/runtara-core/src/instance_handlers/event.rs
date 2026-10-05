@@ -11,6 +11,7 @@ use tracing::{debug, info, instrument, warn};
 use super::state::InstanceHandlerState;
 use super::types::{InstanceEvent, InstanceEventResponse, InstanceEventType, RetryAttemptEvent};
 use crate::error::CoreError;
+use crate::lifecycle::TransitionOutcome;
 use crate::persistence::{CompleteInstanceParams, EventRecord};
 
 /// Handle instance event.
@@ -56,7 +57,9 @@ pub async fn handle_instance_event(
     // 3. Determine timestamp
     let created_at = DateTime::from_timestamp_millis(event.timestamp_ms).unwrap_or_else(Utc::now);
 
-    // 4. Insert event record
+    // 4. The event record, and the status transition a terminal event asks
+    // for. Each transition is `if_running()`-guarded so a queued event cannot
+    // overwrite an outcome the monitor already recorded (e.g. a crash).
     let event_record = EventRecord {
         id: None,
         instance_id: event.instance_id.clone(),
@@ -70,85 +73,33 @@ pub async fn handle_instance_event(
         created_at,
         subtype: event.subtype.clone(),
     };
-    state
-        .persistence
-        .append_execution_event(&event_record, event.owner.as_ref())
-        .await?;
-
-    // Report the event where every event is already passing. Doing it here
-    // rather than at a call site means a new event kind cannot be added
-    // without being reported — the alternative drifts silently, and a counter
-    // that undercounts reads as a stall. Which subtypes are worth counting is
-    // the observer's decision, not this crate's.
-    if let Some(observer) = &state.event_observer {
-        observer.on_event_persisted(event.subtype.as_deref());
-    }
-
-    // 5. Update instance status based on event type
-    // All events return a response to acknowledge persistence
-    match event.event_type() {
-        InstanceEventType::EventHeartbeat => {
-            // Heartbeat is just an "I'm alive" signal - no state changes needed
-            // The event was already logged above
-            debug!("Heartbeat received");
-        }
+    let failure = std::str::from_utf8(&event.payload)
+        .ok()
+        .filter(|error| !error.is_empty())
+        .unwrap_or(if event.payload.is_empty() {
+            "Unknown error"
+        } else {
+            "Unknown error (binary payload)"
+        });
+    let transition = match event.event_type() {
         InstanceEventType::EventCompleted => {
-            let output = if event.payload.is_empty() {
-                None
-            } else {
-                Some(event.payload.as_slice())
-            };
-            // Guard with `if_running()` to prevent race condition with PID monitor:
-            // if the process crashed and the PID monitor already set status to
-            // "failed", we should not overwrite it with "completed" from a queued
-            // SDK event.
             let mut params =
                 CompleteInstanceParams::new(&event.instance_id, CoreInstanceStatus::Completed)
                     .if_running();
-            if let Some(o) = output {
-                params = params.with_output(o);
+            if !event.payload.is_empty() {
+                params = params.with_output(&event.payload);
             }
-            if let Some(lease) = &event.owner {
-                params = params.owned_by(lease);
-            }
-            let applied = state.persistence.complete_instance(params).await?;
-            if applied {
-                info!("Instance completed successfully");
-            } else {
-                warn!("Instance completion skipped (not running or no longer owned)");
-            }
+            Some(params)
         }
-        InstanceEventType::EventFailed => {
-            let error = if event.payload.is_empty() {
-                "Unknown error"
-            } else {
-                std::str::from_utf8(&event.payload).unwrap_or("Unknown error (binary payload)")
-            };
-            // Guard with `if_running()` to prevent race condition with PID monitor:
-            // if the PID monitor already set status to "failed", don't overwrite
-            // with the SDK event.
-            let mut params =
-                CompleteInstanceParams::new(&event.instance_id, CoreInstanceStatus::Failed)
-                    .if_running()
-                    .with_error(error);
-            if let Some(lease) = &event.owner {
-                params = params.owned_by(lease);
-            }
-            let applied = state.persistence.complete_instance(params).await?;
-            if applied {
-                warn!(error = %error, "Instance failed");
-            } else {
-                warn!(error = %error, "Instance failure event skipped (not running or no longer owned)");
-            }
-        }
+        InstanceEventType::EventFailed => Some(
+            CompleteInstanceParams::new(&event.instance_id, CoreInstanceStatus::Failed)
+                .if_running()
+                .with_error(failure),
+        ),
         InstanceEventType::EventSuspended => {
-            // A suspend event carries no payload. This arm once sniffed a
-            // `{wake_at_ms, state}` sleep payload out of it, but that producer
-            // disappeared with the move to HTTP-only transport: durable sleep
-            // now goes through the dedicated sleep endpoint, which calls
-            // `set_instance_sleep` directly. Warn if a payload ever turns up so
-            // a stale out-of-tree client is loud rather than silently parking
-            // with no wake armed.
+            // A suspend event carries no payload. Warn if one turns up so a
+            // stale out-of-tree client is loud rather than silently parking
+            // with no wake armed: durable sleep has its own endpoint.
             if !event.payload.is_empty() {
                 warn!(
                     payload_len = event.payload.len(),
@@ -156,33 +107,85 @@ pub async fn handle_instance_event(
                     "Suspend event carried a payload; ignoring it, no wake armed"
                 );
             }
-
-            // Guard with `if_running()` to prevent race condition with the PID
-            // monitor.
-            let mut params =
+            Some(
                 CompleteInstanceParams::new(&event.instance_id, CoreInstanceStatus::Suspended)
-                    .if_running();
-            if let Some(lease) = &event.owner {
-                params = params.owned_by(lease);
-            }
-            let applied = state.persistence.complete_instance(params).await?;
-            if applied {
-                info!("Instance suspended");
-            } else {
-                warn!("Instance suspend event skipped (not running or no longer owned)");
+                    .if_running(),
+            )
+        }
+        InstanceEventType::EventHeartbeat | InstanceEventType::EventCustom => None,
+    };
+
+    // 5. Persist. An execution's terminal event and its transition commit
+    // together, fenced by its lease: a retry after a lost acknowledgement is
+    // recognised and writes nothing, and a superseded execution writes
+    // nothing at all. Anything else appends the event, then transitions.
+    let persisted = match (&event.owner, transition) {
+        (Some(lease), Some(params)) => {
+            let status = params.status;
+            match state
+                .persistence
+                .complete_execution(lease, params, Some(&event_record))
+                .await?
+            {
+                TransitionOutcome::Applied => {
+                    log_transition(status, true, failure);
+                    true
+                }
+                TransitionOutcome::AlreadyApplied => {
+                    debug!(?status, "Terminal event already applied by this execution");
+                    false
+                }
+                TransitionOutcome::Superseded => {
+                    return Err(CoreError::Superseded {
+                        instance_id: event.instance_id.clone(),
+                    }
+                    .into());
+                }
             }
         }
-        InstanceEventType::EventCustom => {
-            // Custom events are just stored for telemetry - no state changes needed
-            // The event was already logged above with its subtype
-            debug!(subtype = ?event.subtype, "Custom event received");
+        (owner, transition) => {
+            state
+                .persistence
+                .append_execution_event(&event_record, owner.as_ref())
+                .await?;
+            match transition {
+                Some(params) => {
+                    let status = params.status;
+                    let applied = state.persistence.complete_instance(params).await?;
+                    log_transition(status, applied, failure);
+                }
+                None => debug!(subtype = ?event.subtype, "Event recorded"),
+            }
+            true
         }
+    };
+
+    // Report the event where every event is already passing. Doing it here
+    // rather than at a call site means a new event kind cannot be added
+    // without being reported — the alternative drifts silently, and a counter
+    // that undercounts reads as a stall. Which subtypes are worth counting is
+    // the observer's decision, not this crate's. A retried terminal event that
+    // wrote nothing is not reported again.
+    if persisted && let Some(observer) = &state.event_observer {
+        observer.on_event_persisted(event.subtype.as_deref());
     }
 
     Ok(InstanceEventResponse {
         success: true,
         error: None,
     })
+}
+
+fn log_transition(status: CoreInstanceStatus, applied: bool, error: &str) {
+    match (status, applied) {
+        (CoreInstanceStatus::Completed, true) => info!("Instance completed successfully"),
+        (CoreInstanceStatus::Failed, true) => warn!(error = %error, "Instance failed"),
+        (CoreInstanceStatus::Suspended, true) => info!("Instance suspended"),
+        (status, true) => info!(?status, "Instance transitioned"),
+        (status, false) => {
+            warn!(?status, "Instance transition skipped (not running)")
+        }
+    }
 }
 
 /// Handle retry attempt event (fire-and-forget).

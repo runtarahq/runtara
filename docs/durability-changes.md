@@ -12,15 +12,25 @@ As built, where it differs from the plan below:
 - **Unbound hosts.** A run with no supervisor lease claims one itself only when
   it promoted itself (an ungated launch) or is scoped. A gated launch whose
   supervisor bound no lease runs unowned.
-- **Park release cause.** Migration 045 adds `parked BOOLEAN`, not a
-  `released_by TEXT` column. The park sets it under the row lock, and every
-  claim resets it.
-- **Park API.** `ParkOutcome` carries no epoch, since the caller holds the
-  token. Owned parking is a new `park_execution`. `park_instance_on_targets`
-  stays the unowned host path.
-- **Completion.** Owned completion (`CompleteInstanceParams::owned_by`) keeps
-  the `bool` result. Its callers treat "already applied" and "superseded" the
-  same way, so a typed outcome would carry nothing they use.
+- **Release cause.** Migration 045 added a `parked` flag; migration 048
+  replaces it with `released_by` (`park`, `completed`, `failed`, `suspended`,
+  `cancelled`). That records which transition the lease's own execution
+  committed. The transition sets it under the row lock, and every claim resets
+  it.
+- **Owned transitions.** Parks and completions share
+  `TransitionOutcome` (`Applied`, `AlreadyApplied`, `Superseded`). It carries
+  no epoch, since the caller holds the token. `park_execution` and
+  `complete_execution` are the owned paths; `park_instance_on_targets` and
+  `complete_instance` stay as the unowned host paths. A retry is
+  `AlreadyApplied` only for the exact transition the lease committed: a
+  different status, or a completion after a park, is `Superseded`.
+- **Terminal event and status in one transaction.** `complete_execution`
+  appends the guest's terminal event in the same transaction as the status
+  change. A retry after a lost acknowledgement therefore succeeds without a
+  second event, and is not mistaken for a superseded run. Before this, the
+  retried append was refused and the host stopped the guest as if it had been
+  replaced. A crash can no longer leave a terminal event without its
+  transition. The runtime host's terminal write stops retrying on `Superseded`.
 - **Park retry.** The run retries the park 5 times with backoff, then reports
   `RunExitReport::SuspendNotParked` to its monitor. The monitor applies
   `ExitKind::UnparkedSuspend` through `recover_or_fail_because(...,
@@ -32,9 +42,9 @@ As built, where it differs from the plan below:
 - **Writers without a lease.** A guest write that presents no lease (the
   instance protocol over HTTP, tests) is admitted only while no execution holds
   the root. Host-side writers keep their own unfenced methods (`insert_event`,
-  `save_retry_attempt`, `save_checkpoint`, `complete_instance` without an
-  owner). The run task's own post-exit writes (cancel and cleanup aborts)
-  present the lease.
+  `save_retry_attempt`, `save_checkpoint`, `complete_instance`). The run
+  task's own post-exit writes (cancel and cleanup aborts) go through
+  `complete_execution` with the lease.
 - **Lock order.** An owned fence on a write that does not touch the instance
   row takes `FOR KEY SHARE` on the instance row, then `FOR SHARE` on the lease
   row, in one statement. That is the same order every lifecycle writer uses, so
@@ -70,7 +80,8 @@ Verified 2026-10-05:
     wait);
   - promotion and the root lease (`launch_queue_test`, `embedded_runner_test`);
   - park retry and recovery (`agent_suspension_runner_test`);
-  - a suspended exit with a failed cleanup (component-host).
+  - a suspended exit with a failed cleanup (component-host);
+  - a retried terminal write after a lost acknowledgement (runtime host).
 - **Existing suites.** All pass:
   - core, store-postgres, environment (database and scoped);
   - component-host with its integration features;

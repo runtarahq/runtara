@@ -177,3 +177,55 @@ pub(crate) async fn park(
     }
     Ok(decision)
 }
+
+/// Apply a completion request inside the caller's transaction, closing the
+/// run's managed inputs when it becomes terminal. Returns whether a row was
+/// updated (`false` for a guarded request against a non-running instance).
+pub(crate) async fn complete(
+    tx: &mut Transaction<'_, Postgres>,
+    params: &runtara_core::persistence::CompleteInstanceParams<'_>,
+) -> Result<bool, CoreError> {
+    use runtara_core::persistence::CompleteInstanceGuard;
+    let guard_clause = match params.guard {
+        CompleteInstanceGuard::Any => "",
+        CompleteInstanceGuard::OnlyRunning => " AND status = 'running'",
+    };
+    let sql = format!(
+        "UPDATE instances \
+         SET status = $2::instance_status, \
+             termination_reason = COALESCE($3::termination_reason, termination_reason), \
+             exit_code = COALESCE($4, exit_code), \
+             output = $5, \
+             error = $6, \
+             stderr = COALESCE($7, stderr), \
+             checkpoint_id = COALESCE($8, checkpoint_id), \
+             finished_at = CASE \
+                 WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN CURRENT_TIMESTAMP \
+                 ELSE finished_at \
+             END \
+         WHERE instance_id = $1{guard_clause}"
+    );
+    let updated = sqlx::query(&sql)
+        .bind(params.instance_id)
+        .bind(crate::encoding::status_to_str(params.status))
+        .bind(params.termination_reason)
+        .bind(params.exit_code)
+        .bind(params.output)
+        .bind(params.error)
+        .bind(params.stderr)
+        .bind(params.checkpoint_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| CoreError::PersistenceError {
+            operation: "complete_instance".into(),
+            details: e.to_string(),
+        })?
+        .rows_affected()
+        > 0;
+    if updated && params.status.is_terminal() {
+        crate::inputs::close_roots(tx, &[params.instance_id.to_string()])
+            .await
+            .db()?;
+    }
+    Ok(updated)
+}

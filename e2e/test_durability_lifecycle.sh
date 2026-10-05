@@ -126,7 +126,7 @@ start_server() {
 execution() { curl -sS "${API}/workflows/instances/$1"; }
 field() { execution "$1" | jq -r ".data.$2 // empty"; }
 lease_row() {
-    runtime_sql "SELECT owner || '|' || epoch || '|' || active || '|' || parked FROM invocation_root_leases WHERE instance_id = '$1'"
+    runtime_sql "SELECT owner || '|' || epoch || '|' || active || '|' || COALESCE(released_by, '') FROM invocation_root_leases WHERE instance_id = '$1'"
 }
 instance_row() {
     runtime_sql "SELECT COALESCE(status::text,'') || '|' || COALESCE(termination_reason::text,'') FROM instances WHERE instance_id = '$1'"
@@ -211,11 +211,11 @@ INST=$(execute "${WF_PARK}")
 echo "  Instance ${INST}"
 wait_status "${INST}" suspended 30
 LEASE=$(lease_row "${INST}")
-IFS='|' read -r L_OWNER L_EPOCH L_ACTIVE L_PARKED <<< "${LEASE}"
-echo "  lease owner=${L_OWNER} epoch=${L_EPOCH} active=${L_ACTIVE} parked=${L_PARKED}"
+IFS='|' read -r L_OWNER L_EPOCH L_ACTIVE L_RELEASED <<< "${LEASE}"
+echo "  lease owner=${L_OWNER} epoch=${L_EPOCH} active=${L_ACTIVE} released_by=${L_RELEASED}"
 [ "${L_EPOCH}" = "1" ] || { print_error "the first run must hold epoch 1, got '${LEASE}'"; exit 1; }
 [ "${L_ACTIVE}" = "false" ] || { print_error "a parked run must not keep its lease active: '${LEASE}'"; exit 1; }
-[ "${L_PARKED}" = "true" ] || { print_error "the lease must record that its execution parked: '${LEASE}'"; exit 1; }
+[ "${L_RELEASED}" = "park" ] || { print_error "the lease must record that its execution parked: '${LEASE}'"; exit 1; }
 [[ "${L_OWNER}" == wasm_* ]] || { print_error "the lease owner must be the runner registration, got '${L_OWNER}'"; exit 1; }
 PHASE=$(field "${INST}" executionPhase)
 REASON=$(field "${INST}" suspensionReason)
@@ -226,11 +226,14 @@ print_success "Parked under its lease, reported as suspended ✓"
 
 wait_status "${INST}" completed 60
 LEASE=$(lease_row "${INST}")
-IFS='|' read -r L_OWNER2 L_EPOCH2 L_ACTIVE2 L_PARKED2 <<< "${LEASE}"
-echo "  after wake: lease owner=${L_OWNER2} epoch=${L_EPOCH2} active=${L_ACTIVE2}"
+IFS='|' read -r L_OWNER2 L_EPOCH2 L_ACTIVE2 L_RELEASED2 <<< "${LEASE}"
+echo "  after wake: lease owner=${L_OWNER2} epoch=${L_EPOCH2} active=${L_ACTIVE2} released_by=${L_RELEASED2}"
 [ "${L_EPOCH2}" = "2" ] || { print_error "the relaunch must claim epoch 2, got '${LEASE}'"; exit 1; }
 [ "${L_OWNER2}" != "${L_OWNER}" ] || { print_error "the relaunch must own the root under a new registration"; exit 1; }
 [ "${L_ACTIVE2}" = "false" ] || { print_error "a completed run must not keep its lease: '${LEASE}'"; exit 1; }
+[ "${L_RELEASED2}" = "completed" ] || { print_error "the lease must record that its execution completed the run: '${LEASE}'"; exit 1; }
+COMPLETED_EVENTS=$(runtime_sql "SELECT COUNT(*) FROM instance_events WHERE instance_id = '${INST}' AND event_type = 'completed'")
+[ "${COMPLETED_EVENTS}" = "1" ] || { print_error "expected exactly one completed event, got ${COMPLETED_EVENTS}"; exit 1; }
 [ -z "$(field "${INST}" executionPhase)" ] || { print_error "a completed run has no live phase"; exit 1; }
 print_success "Woken under epoch 2 and completed; no lease left active ✓"
 

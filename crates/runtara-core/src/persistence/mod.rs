@@ -637,11 +637,6 @@ pub struct CompleteInstanceParams<'a> {
     pub termination_reason: Option<&'a str>,
     /// Process exit code if available.
     pub exit_code: Option<i32>,
-    /// The execution's root lease. When set, the transition applies only
-    /// while that exact lease is active: a superseded execution cannot
-    /// complete, fail or suspend its replacement. Host-side writers (monitor,
-    /// recovery, API commands) leave it unset.
-    pub owner: Option<&'a invocations::InvocationLease>,
 }
 
 impl<'a> CompleteInstanceParams<'a> {
@@ -657,17 +652,7 @@ impl<'a> CompleteInstanceParams<'a> {
             checkpoint_id: None,
             termination_reason: None,
             exit_code: None,
-            owner: None,
         }
-    }
-
-    /// Apply only while `lease` is the instance's active root lease. Implies
-    /// [`Self::if_running`], since leaving `running` revokes the lease.
-    #[must_use]
-    pub fn owned_by(mut self, lease: &'a invocations::InvocationLease) -> Self {
-        self.owner = Some(lease);
-        self.guard = CompleteInstanceGuard::OnlyRunning;
-        self
     }
 
     /// Guard the update against races: only apply when the current status
@@ -1257,21 +1242,51 @@ pub trait Persistence: Send + Sync {
     /// Ownership is checked against the stored root lease under the instance
     /// row lock, never by the caller:
     /// - the lease is active: apply [`crate::lifecycle::park`] and record that
-    ///   this execution parked ([`crate::lifecycle::ParkOutcome::Parked`]);
+    ///   this execution parked ([`crate::lifecycle::TransitionOutcome::Applied`]);
     /// - this execution already parked and the instance is still suspended:
-    ///   [`crate::lifecycle::ParkOutcome::AlreadyParked`], writing nothing, so
+    ///   [`crate::lifecycle::TransitionOutcome::AlreadyApplied`], writing nothing, so
     ///   a retry after a lost acknowledgement is safe;
     /// - anything else (another epoch, a pause, a cancel, a terminal state):
-    ///   [`crate::lifecycle::ParkOutcome::Superseded`], writing nothing.
+    ///   [`crate::lifecycle::TransitionOutcome::Superseded`], writing nothing.
     async fn park_execution(
         &self,
         _lease: &invocations::InvocationLease,
         _request: crate::lifecycle::ParkRequest,
         _targets: ParkTargets<'_>,
-    ) -> Result<crate::lifecycle::ParkOutcome, CoreError> {
+    ) -> Result<crate::lifecycle::TransitionOutcome, CoreError> {
         Err(CoreError::PersistenceError {
             operation: "park_execution".into(),
             details: "owned parking is not implemented by this backend".into(),
+        })
+    }
+
+    /// Complete, fail or suspend the run of the execution holding `lease`,
+    /// appending its terminal `event` (if any) in the same transaction.
+    /// `params.guard` is ignored: an active lease implies a running instance.
+    ///
+    /// Ownership is checked against the stored root lease under the instance
+    /// row lock:
+    /// - the lease is active: apply the transition, append the event, and
+    ///   record on the lease that this execution moved the run to
+    ///   `params.status` ([`crate::lifecycle::TransitionOutcome::Applied`]);
+    /// - this execution already moved the run to `params.status` and it is
+    ///   still there: [`crate::lifecycle::TransitionOutcome::AlreadyApplied`],
+    ///   writing nothing, so a retry after a lost acknowledgement appends no
+    ///   second event;
+    /// - anything else: [`crate::lifecycle::TransitionOutcome::Superseded`],
+    ///   writing nothing.
+    ///
+    /// Host-side writers (monitor, recovery, API commands) use
+    /// [`Self::complete_instance`].
+    async fn complete_execution(
+        &self,
+        _lease: &invocations::InvocationLease,
+        _params: CompleteInstanceParams<'_>,
+        _event: Option<&EventRecord>,
+    ) -> Result<crate::lifecycle::TransitionOutcome, CoreError> {
+        Err(CoreError::PersistenceError {
+            operation: "complete_execution".into(),
+            details: "owned completion is not implemented by this backend".into(),
         })
     }
 

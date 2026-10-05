@@ -1567,7 +1567,7 @@ impl LaunchRepository {
             SET owner = EXCLUDED.owner,
                 epoch = invocation_root_leases.epoch + 1,
                 active = TRUE,
-                parked = FALSE
+                released_by = NULL
             WHERE NOT invocation_root_leases.active
             RETURNING epoch
             "#,

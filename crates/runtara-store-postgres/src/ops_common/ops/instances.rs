@@ -369,82 +369,16 @@ macro_rules! impl_instance_ops {
                 params: ::runtara_core::persistence::CompleteInstanceParams<'_>,
             ) -> ::core::result::Result<bool, ::runtara_core::error::CoreError> {
                 use ::runtara_core::persistence::CompleteInstanceGuard;
-                use crate::ops_common::error::{RowsAffected, not_found_if_empty};
-                use crate::dialect::{Dialect, EnumKind};
                 let mut tx = pool.begin().await.db()?;
-                if let Some(owner) = params.owner {
-                    // An execution's transition applies only while it owns
-                    // the root. Lock the row first and read the lease in a
-                    // later statement, so a write that waited on the lock
-                    // sees a replacement's committed claim.
-                    let locked: Option<i32> = ::sqlx::query_scalar(
-                        "SELECT 1 FROM instances WHERE instance_id = $1 FOR UPDATE",
-                    )
-                    .bind(params.instance_id)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .db()?;
-                    if locked.is_none() || !crate::root_owner::holds(&mut tx, owner).await? {
-                        return Ok(false);
-                    }
-                }
-                let p1 = <$Dialect>::placeholder(1);
-                let p2 = <$Dialect>::placeholder(2);
-                let p3 = <$Dialect>::placeholder(3);
-                let p4 = <$Dialect>::placeholder(4);
-                let p5 = <$Dialect>::placeholder(5);
-                let p6 = <$Dialect>::placeholder(6);
-                let p7 = <$Dialect>::placeholder(7);
-                let p8 = <$Dialect>::placeholder(8);
-                let status_cast = <$Dialect>::enum_cast(EnumKind::InstanceStatus);
-                let term_cast = <$Dialect>::enum_cast(EnumKind::TerminationReason);
-                let now = <$Dialect>::NOW;
-                let guard_clause = match params.guard {
-                    CompleteInstanceGuard::Any => "",
-                    CompleteInstanceGuard::OnlyRunning => " AND status = 'running'",
-                };
-                let sql = format!(
-                    "UPDATE instances \
-                     SET status = {p2}{status_cast}, \
-                         termination_reason = COALESCE({p3}{term_cast}, termination_reason), \
-                         exit_code = COALESCE({p4}, exit_code), \
-                         output = {p5}, \
-                         error = {p6}, \
-                         stderr = COALESCE({p7}, stderr), \
-                         checkpoint_id = COALESCE({p8}, checkpoint_id), \
-                         finished_at = CASE \
-                             WHEN {p2} IN ('completed', 'failed', 'cancelled', 'suspended') THEN {now} \
-                             ELSE finished_at \
-                         END \
-                     WHERE instance_id = {p1}{guard_clause}"
-                );
-                let result = ::sqlx::query(&sql)
-                    .bind(params.instance_id)
-                    .bind(crate::encoding::status_to_str(params.status))
-                    .bind(params.termination_reason)
-                    .bind(params.exit_code)
-                    .bind(params.output)
-                    .bind(params.error)
-                    .bind(params.stderr)
-                    .bind(params.checkpoint_id)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| ::runtara_core::error::CoreError::PersistenceError {
-                        operation: "complete_instance".into(),
-                        details: e.to_string(),
-                    })?;
-                if result.rows_affected_generic() > 0 && params.status.is_terminal() {
-                    crate::inputs::close_roots(&mut tx, &[params.instance_id.to_string()]).await.db()?;
-                }
+                let applied = crate::lifecycle::complete(&mut tx, &params).await?;
                 tx.commit().await.db()?;
                 match params.guard {
-                    CompleteInstanceGuard::OnlyRunning => Ok(result.rows_affected_generic() > 0),
+                    CompleteInstanceGuard::OnlyRunning => Ok(applied),
+                    CompleteInstanceGuard::Any if applied => Ok(true),
                     CompleteInstanceGuard::Any => {
-                        not_found_if_empty::<<$Dialect as Dialect>::Database>(
-                            &result,
-                            params.instance_id,
-                        )?;
-                        Ok(true)
+                        Err(::runtara_core::error::CoreError::InstanceNotFound {
+                            instance_id: params.instance_id.to_string(),
+                        })
                     }
                 }
             }

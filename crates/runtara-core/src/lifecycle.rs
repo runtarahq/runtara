@@ -264,21 +264,48 @@ pub fn park(status: InstanceStatus, request: ParkRequest) -> Decision {
     })
 }
 
-/// Result of a park presented with the execution's root lease.
+/// Result of a lifecycle transition (a park or a completion) presented with
+/// the execution's root lease.
 ///
 /// Storage failures are errors, not outcomes: the caller must retry them,
-/// which is safe because a retry of a committed park is
-/// [`ParkOutcome::AlreadyParked`].
+/// which is safe because a retry of a committed transition is
+/// [`TransitionOutcome::AlreadyApplied`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParkOutcome {
-    /// This call committed the park.
-    Parked,
-    /// This execution's park already committed (a retry after a lost
-    /// acknowledgement). Nothing was written again.
-    AlreadyParked,
+pub enum TransitionOutcome {
+    /// This call committed the transition.
+    Applied,
+    /// This execution already committed this transition (a retry after a
+    /// lost acknowledgement). Nothing was written again.
+    AlreadyApplied,
     /// The execution no longer owns the root: a replacement execution, a
-    /// pause, a cancel or a terminal transition won. Nothing was written.
+    /// pause, a cancel, or another transition won. Nothing was written.
     Superseded,
+}
+
+/// The transition an execution committed when it gave up its root lease.
+/// Recorded on the lease so a retry from the same lease can be recognised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseRelease {
+    /// The execution parked its run.
+    Park,
+    /// The execution moved its run to this status (completed, failed,
+    /// suspended or cancelled).
+    Status(InstanceStatus),
+}
+
+impl LeaseRelease {
+    /// Stable storage label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Park => "park",
+            Self::Status(InstanceStatus::Completed) => "completed",
+            Self::Status(InstanceStatus::Failed) => "failed",
+            Self::Status(InstanceStatus::Suspended) => "suspended",
+            Self::Status(InstanceStatus::Cancelled) => "cancelled",
+            Self::Status(InstanceStatus::Running) => "running",
+            Self::Status(InstanceStatus::Pending) => "pending",
+        }
+    }
 }
 
 /// Action performed locally after a successful command acknowledgment.

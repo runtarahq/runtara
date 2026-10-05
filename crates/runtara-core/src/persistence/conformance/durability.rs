@@ -4,7 +4,7 @@
 use crate::domain::EventType;
 use crate::domain::{InstanceStatus, SignalType};
 use crate::error::CoreError;
-use crate::lifecycle::{ParkOutcome, ParkReason, ParkRequest};
+use crate::lifecycle::{ParkReason, ParkRequest, TransitionOutcome};
 use crate::persistence::invocations::{InvocationFences, InvocationLease};
 use crate::persistence::{
     CheckpointWrite, CompleteInstanceParams, EventRecord, ExecutionWriter, ParkTargets, Persistence,
@@ -140,7 +140,7 @@ pub async fn owned_park_retry_is_already_parked(p: &dyn Persistence) {
         p.park_execution(&lease, timer_park(), NO_TARGETS)
             .await
             .unwrap(),
-        ParkOutcome::Parked
+        TransitionOutcome::Applied
     );
     let parked = p.get_instance(&id).await.unwrap().unwrap();
     assert_eq!(parked.status, InstanceStatus::Suspended);
@@ -152,7 +152,7 @@ pub async fn owned_park_retry_is_already_parked(p: &dyn Persistence) {
     };
     assert_eq!(
         p.park_execution(&lease, retry, NO_TARGETS).await.unwrap(),
-        ParkOutcome::AlreadyParked
+        TransitionOutcome::AlreadyApplied
     );
     let after = p.get_instance(&id).await.unwrap().unwrap();
     assert_eq!(after.status, InstanceStatus::Suspended);
@@ -180,31 +180,35 @@ pub async fn superseded_execution_cannot_park_or_complete(p: &dyn Persistence) {
         p.park_execution(&stale, timer_park(), NO_TARGETS)
             .await
             .unwrap(),
-        ParkOutcome::Superseded
+        TransitionOutcome::Superseded
     );
-    assert!(
-        !p.complete_instance(
-            CompleteInstanceParams::new(&id, InstanceStatus::Completed)
-                .owned_by(&stale)
-                .with_output(b"stale"),
+    assert_eq!(
+        p.complete_execution(
+            &stale,
+            CompleteInstanceParams::new(&id, InstanceStatus::Completed).with_output(b"stale"),
+            Some(&terminal_event(&id, EventType::Completed)),
         )
         .await
         .unwrap(),
+        TransitionOutcome::Superseded,
         "a superseded execution must not complete its replacement"
     );
+    assert_eq!(terminal_events(p, &id).await, 0, "nor append its event");
     let instance = p.get_instance(&id).await.unwrap().unwrap();
     assert_eq!(instance.status, InstanceStatus::Running);
     assert!(instance.output.is_none());
 
-    assert!(
-        p.complete_instance(
-            CompleteInstanceParams::new(&id, InstanceStatus::Completed)
-                .owned_by(&current)
-                .with_output(b"current"),
+    assert_eq!(
+        p.complete_execution(
+            &current,
+            CompleteInstanceParams::new(&id, InstanceStatus::Completed).with_output(b"current"),
+            Some(&terminal_event(&id, EventType::Completed)),
         )
         .await
-        .unwrap()
+        .unwrap(),
+        TransitionOutcome::Applied
     );
+    assert_eq!(terminal_events(p, &id).await, 1);
     let instance = p.get_instance(&id).await.unwrap().unwrap();
     assert_eq!(instance.status, InstanceStatus::Completed);
     assert_eq!(instance.output.as_deref(), Some(&b"current"[..]));
@@ -231,7 +235,7 @@ pub async fn pause_or_cancel_before_park_supersedes_it(p: &dyn Persistence) {
                 p.park_execution(&lease, timer_park(), NO_TARGETS)
                     .await
                     .unwrap(),
-                ParkOutcome::Superseded,
+                TransitionOutcome::Superseded,
                 "{kind:?} must supersede the park"
             );
         }
@@ -243,22 +247,174 @@ pub async fn pause_or_cancel_before_park_supersedes_it(p: &dyn Persistence) {
     }
 }
 
-/// A completion presented with the execution's lease applies once; the
-/// execution's retry after a lost acknowledgement changes nothing.
+fn terminal_event(id: &str, event_type: EventType) -> EventRecord {
+    EventRecord {
+        id: None,
+        instance_id: id.to_string(),
+        event_type,
+        checkpoint_id: None,
+        payload: None,
+        created_at: chrono::Utc::now(),
+        subtype: None,
+    }
+}
+
+async fn terminal_events(p: &dyn Persistence, id: &str) -> i64 {
+    let mut total = 0;
+    for event_type in [
+        EventType::Completed,
+        EventType::Failed,
+        EventType::Suspended,
+    ] {
+        total += p
+            .count_events(
+                id,
+                &crate::persistence::ListEventsFilter {
+                    event_type: Some(event_type),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    total
+}
+
+/// An execution's completion commits its terminal event with the
+/// transition, once: a retry after a lost acknowledgement is recognised and
+/// writes nothing, not even a second event.
 pub async fn owned_completion_applies_once(p: &dyn Persistence) {
-    let id = running(p, "complete-retry").await;
+    for status in [
+        InstanceStatus::Completed,
+        InstanceStatus::Failed,
+        InstanceStatus::Suspended,
+    ] {
+        let id = running(p, "complete-retry").await;
+        let lease = claim(p, &id, "runner-a").await;
+        let event_type = match status {
+            InstanceStatus::Completed => EventType::Completed,
+            InstanceStatus::Failed => EventType::Failed,
+            _ => EventType::Suspended,
+        };
+        let terminal = terminal_event(&id, event_type);
+        let complete = || {
+            p.complete_execution(
+                &lease,
+                CompleteInstanceParams::new(&id, status).with_output(b"done"),
+                Some(&terminal),
+            )
+        };
+        assert_eq!(
+            complete().await.unwrap(),
+            TransitionOutcome::Applied,
+            "{status:?}"
+        );
+        assert_eq!(
+            complete().await.unwrap(),
+            TransitionOutcome::AlreadyApplied,
+            "{status:?}"
+        );
+        let instance = p.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(instance.status, status);
+        assert_eq!(instance.output.as_deref(), Some(&b"done"[..]));
+        assert_eq!(
+            terminal_events(p, &id).await,
+            1,
+            "{status:?}: the event commits with the transition, once"
+        );
+        p.delete_instances_batch(&[id]).await.unwrap();
+    }
+}
+
+/// A transition is recognised as already applied only when it is the one
+/// this execution committed: a different status, a park, or a completion
+/// after a park is superseded and writes nothing.
+pub async fn only_the_committed_transition_is_already_applied(p: &dyn Persistence) {
+    let id = running(p, "other-transition").await;
     let lease = claim(p, &id, "runner-a").await;
-    let complete = || {
-        CompleteInstanceParams::new(&id, InstanceStatus::Completed)
-            .owned_by(&lease)
-            .with_output(b"done")
-    };
-    assert!(p.complete_instance(complete()).await.unwrap());
-    assert!(!p.complete_instance(complete()).await.unwrap());
+    assert_eq!(
+        p.complete_execution(
+            &lease,
+            CompleteInstanceParams::new(&id, InstanceStatus::Completed).with_output(b"done"),
+            None,
+        )
+        .await
+        .unwrap(),
+        TransitionOutcome::Applied
+    );
+    assert_eq!(
+        p.complete_execution(
+            &lease,
+            CompleteInstanceParams::new(&id, InstanceStatus::Failed).with_error("late"),
+            Some(&terminal_event(&id, EventType::Failed)),
+        )
+        .await
+        .unwrap(),
+        TransitionOutcome::Superseded
+    );
+    assert_eq!(
+        p.park_execution(&lease, timer_park(), NO_TARGETS)
+            .await
+            .unwrap(),
+        TransitionOutcome::Superseded
+    );
     let instance = p.get_instance(&id).await.unwrap().unwrap();
     assert_eq!(instance.status, InstanceStatus::Completed);
-    assert_eq!(instance.output.as_deref(), Some(&b"done"[..]));
-    p.delete_instances_batch(&[id]).await.unwrap();
+    assert_eq!(terminal_events(p, &id).await, 0);
+
+    // A parked execution's later completion is not its committed park.
+    let parked = running(p, "park-then-complete").await;
+    let lease = claim(p, &parked, "runner-a").await;
+    assert_eq!(
+        p.park_execution(&lease, timer_park(), NO_TARGETS)
+            .await
+            .unwrap(),
+        TransitionOutcome::Applied
+    );
+    assert_eq!(
+        p.complete_execution(
+            &lease,
+            CompleteInstanceParams::new(&parked, InstanceStatus::Suspended),
+            Some(&terminal_event(&parked, EventType::Suspended)),
+        )
+        .await
+        .unwrap(),
+        TransitionOutcome::Superseded
+    );
+    assert_eq!(terminal_events(p, &parked).await, 0);
+    p.delete_instances_batch(&[id, parked]).await.unwrap();
+}
+
+/// A pause or cancel that wins first supersedes the execution's completion.
+pub async fn pause_or_cancel_before_completion_supersedes_it(p: &dyn Persistence) {
+    for kind in [SignalType::Pause, SignalType::Cancel] {
+        let id = running(p, "complete-race").await;
+        let lease = claim(p, &id, "runner-a").await;
+        p.insert_signal(&id, kind, b"").await.unwrap();
+        let command = p.get_pending_signal(&id).await.unwrap().unwrap();
+        assert!(
+            p.apply_lifecycle_command(&id, &command.command_id, kind)
+                .await
+                .unwrap()
+                .accepted()
+        );
+        let before = p.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(
+            p.complete_execution(
+                &lease,
+                CompleteInstanceParams::new(&id, InstanceStatus::Completed).with_output(b"late"),
+                Some(&terminal_event(&id, EventType::Completed)),
+            )
+            .await
+            .unwrap(),
+            TransitionOutcome::Superseded,
+            "{kind:?}"
+        );
+        let after = p.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(after.status, before.status);
+        assert!(after.output.is_none());
+        p.delete_instances_batch(&[id]).await.unwrap();
+    }
 }
 
 fn event(id: &str) -> EventRecord {
@@ -352,12 +508,15 @@ pub async fn superseded_execution_cannot_write_guest_state(p: &dyn Persistence) 
     assert!(p.count_events(&id, &Default::default()).await.unwrap() > events);
 
     // Once the owner leaves `running` its lease is spent too.
-    assert!(
-        p.complete_instance(
-            CompleteInstanceParams::new(&id, InstanceStatus::Completed).owned_by(&current)
+    assert_eq!(
+        p.complete_execution(
+            &current,
+            CompleteInstanceParams::new(&id, InstanceStatus::Completed),
+            None,
         )
         .await
-        .unwrap()
+        .unwrap(),
+        TransitionOutcome::Applied
     );
     for (what, result) in guest_writes(p, &id, Some(&current), "late").await {
         assert!(result.is_err(), "{what} after completion must be refused");
@@ -442,6 +601,8 @@ pub async fn run_all(p: &dyn Persistence) {
     superseded_execution_cannot_park_or_complete(p).await;
     pause_or_cancel_before_park_supersedes_it(p).await;
     owned_completion_applies_once(p).await;
+    only_the_committed_transition_is_already_applied(p).await;
+    pause_or_cancel_before_completion_supersedes_it(p).await;
     superseded_execution_cannot_write_guest_state(p).await;
     unowned_writes_yield_to_an_owning_execution(p).await;
     fenced_child_lookup_reads_only_under_its_fence(p).await;

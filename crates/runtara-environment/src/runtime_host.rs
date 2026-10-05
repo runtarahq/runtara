@@ -178,10 +178,7 @@ impl PersistenceRuntimeHost {
     /// does: it must not keep running against a replacement's state.
     fn write_err(&self, error: impl Into<anyhow::Error>) -> String {
         let error = error.into();
-        if matches!(
-            error.downcast_ref::<runtara_core::error::CoreError>(),
-            Some(runtara_core::error::CoreError::Superseded { .. })
-        ) {
+        if is_superseded(&error) {
             tracing::warn!(instance_id = %self.instance_id, "Execution superseded; stopping the guest");
             self.cancelled.store(true, Ordering::SeqCst);
             if let Some(token) = &self.cancel_token {
@@ -375,6 +372,18 @@ impl PersistenceRuntimeHost {
         payload: Vec<u8>,
         subtype: Option<String>,
     ) -> Result<(), String> {
+        self.publish_event(event_type, checkpoint_id, payload, subtype)
+            .await
+            .map_err(|error| self.write_err(error))
+    }
+
+    async fn publish_event(
+        &self,
+        event_type: InstanceEventType,
+        checkpoint_id: Option<String>,
+        payload: Vec<u8>,
+        subtype: Option<String>,
+    ) -> anyhow::Result<()> {
         // An execution selected for full abort cannot publish a normal terminal
         // result or park itself while its epoch interrupt is taking effect.
         // Already accepted outcomes are also protected by Core's atomic guards.
@@ -405,7 +414,6 @@ impl PersistenceRuntimeHost {
         )
         .await
         .map(|_| ())
-        .map_err(|error| self.write_err(error))
     }
 
     /// Decode a handler-layer signal-type discriminant (the enum only
@@ -443,6 +451,14 @@ impl PersistenceRuntimeHost {
     }
 }
 
+/// Whether a write was refused because the execution no longer owns its root.
+fn is_superseded(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<runtara_core::error::CoreError>(),
+        Some(runtara_core::error::CoreError::Superseded { .. })
+    )
+}
+
 /// Attempts at the terminal write before the run is left to the monitor.
 const TERMINAL_WRITE_ATTEMPTS: u32 = 5;
 
@@ -476,8 +492,22 @@ impl RuntimeHost for PersistenceRuntimeHost {
         let mut delay = Duration::from_millis(50);
         let mut attempt = 1;
         loop {
-            match self.event(event_type, None, payload.clone(), None).await {
+            // A retry after a lost acknowledgement is recognised by the store
+            // and writes nothing, so it succeeds here. Only storage failures
+            // are retried: a superseded execution has nothing left to publish.
+            match self
+                .publish_event(event_type, None, payload.clone(), None)
+                .await
+            {
                 Ok(()) => return Ok(()),
+                Err(error) if is_superseded(&error) => {
+                    tracing::warn!(
+                        instance_id = %self.instance_id,
+                        "terminal result not published: this execution was superseded"
+                    );
+                    self.write_err(error);
+                    return Ok(());
+                }
                 Err(error) if attempt < TERMINAL_WRITE_ATTEMPTS => {
                     tracing::warn!(
                         instance_id = %self.instance_id,
@@ -489,7 +519,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
                     delay = (delay * 2).min(Duration::from_secs(2));
                     attempt += 1;
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(self.write_err(error)),
             }
         }
     }
@@ -869,6 +899,64 @@ mod tests {
         let instance = persistence.get_instance(&id).await.unwrap().unwrap();
         assert_eq!(instance.status, CoreInstanceStatus::Completed);
         assert_eq!(instance.output.as_deref(), Some(&b"{\"current\":true}"[..]));
+    }
+
+    /// A terminal result whose first write committed but lost its
+    /// acknowledgement is recognised on retry: the retry succeeds, appends
+    /// no second event, and does not take the run for superseded.
+    #[tokio::test]
+    async fn a_retried_terminal_after_a_lost_ack_is_already_applied() {
+        use runtara_core::lifecycle::TransitionOutcome;
+        use runtara_core::persistence::{CompleteInstanceParams, EventRecord, ListEventsFilter};
+        let (persistence, host, id) = setup().await;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let host = host.with_cancel_token(cancel.clone());
+        let lease = claim_root(&persistence, &id, "runner-a").await;
+        host.bind_root_lease(lease.clone()).unwrap();
+        let output = b"{\"ok\":1}".to_vec();
+        // The first attempt committed; its acknowledgement was lost.
+        assert_eq!(
+            persistence
+                .complete_execution(
+                    &lease,
+                    CompleteInstanceParams::new(&id, CoreInstanceStatus::Completed)
+                        .with_output(&output),
+                    Some(&EventRecord {
+                        id: None,
+                        instance_id: id.clone(),
+                        event_type: runtara_core::domain::EventType::Completed,
+                        checkpoint_id: None,
+                        payload: Some(output.clone()),
+                        created_at: chrono::Utc::now(),
+                        subtype: None,
+                    }),
+                )
+                .await
+                .unwrap(),
+            TransitionOutcome::Applied
+        );
+
+        host.terminal(RunTerminal::Completed(output.clone()))
+            .await
+            .unwrap();
+        assert!(
+            !cancel.load(Ordering::SeqCst),
+            "a retry of the run's own completion is not a supersession"
+        );
+        let completed = persistence
+            .count_events(
+                &id,
+                &ListEventsFilter {
+                    event_type: Some(runtara_core::domain::EventType::Completed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed, 1, "the retry must not append a second event");
+        let instance = persistence.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(instance.status, CoreInstanceStatus::Completed);
+        assert_eq!(instance.output.as_deref(), Some(&output[..]));
     }
 
     /// Each guest write of a superseded host is refused, and the refusal

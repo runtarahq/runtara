@@ -43,8 +43,15 @@ struct Store {
     input_requests: HashMap<(String, String), crate::persistence::inputs::InputRequest>,
     input_parks: HashMap<String, inputs::InputPark>,
     invocation_leases: HashMap<String, (crate::persistence::invocations::InvocationLease, bool)>,
-    /// The lease whose execution committed the instance's latest owned park.
-    parked_by: HashMap<String, crate::persistence::invocations::InvocationLease>,
+    /// The lease whose execution gave up the root through an owned transition,
+    /// and which transition it was.
+    released_by: HashMap<
+        String,
+        (
+            crate::persistence::invocations::InvocationLease,
+            lifecycle::LeaseRelease,
+        ),
+    >,
     invocation_attempts: Vec<crate::persistence::invocations::InvocationAttempt>,
     invocation_parents: HashMap<(String, String), Option<String>>,
     instances: HashMap<String, InstanceRecord>,
@@ -127,6 +134,53 @@ impl Store {
             state: state.to_vec(),
             created_at: Utc::now(),
         });
+    }
+
+    /// Apply a completion request to a locked store.
+    fn complete(&mut self, params: CompleteInstanceParams<'_>) -> Result<bool, CoreError> {
+        let Some(inst) = self.instances.get_mut(params.instance_id) else {
+            return match params.guard {
+                CompleteInstanceGuard::Any => Err(CoreError::InstanceNotFound {
+                    instance_id: params.instance_id.to_string(),
+                }),
+                CompleteInstanceGuard::OnlyRunning => Ok(false),
+            };
+        };
+        if params.guard == CompleteInstanceGuard::OnlyRunning
+            && inst.status != CoreInstanceStatus::Running
+        {
+            return Ok(false);
+        }
+
+        let was_terminal = inst.status.is_terminal();
+        inst.status = params.status;
+        // Replaced: a transition that carries no output or error clears the
+        // previous one, so a failure cannot be read as still holding a stale
+        // success payload.
+        inst.output = params.output.map(<[u8]>::to_vec);
+        inst.error = params.error.map(str::to_string);
+        // Merged: omitting these leaves what an earlier transition recorded.
+        if let Some(v) = params.termination_reason {
+            inst.termination_reason = Some(v.to_string());
+        }
+        if let Some(v) = params.exit_code {
+            inst.exit_code = Some(v);
+        }
+        if let Some(v) = params.checkpoint_id {
+            inst.checkpoint_id = Some(v.to_string());
+        }
+        if stamps_finished_at(params.status) {
+            inst.finished_at = Some(Utc::now());
+        }
+        self.revoke_inactive_execution(params.instance_id);
+        if params.status.is_terminal() {
+            let now = Utc::now();
+            inputs::close_root(self, params.instance_id, now);
+            if !was_terminal {
+                waits::target_finished(self, params.instance_id, now);
+            }
+        }
+        Ok(true)
     }
 
     /// Evaluate the park policy and apply it with its targets.
@@ -669,55 +723,40 @@ impl Persistence for InMemoryPersistence {
         &self,
         params: CompleteInstanceParams<'_>,
     ) -> Result<bool, CoreError> {
-        let mut store = self.store.lock().unwrap();
-        if let Some(owner) = params.owner
-            && store.invocation_leases.get(params.instance_id) != Some(&(owner.clone(), true))
-        {
-            return Ok(false);
-        }
-        let Some(inst) = store.instances.get_mut(params.instance_id) else {
-            return match params.guard {
-                CompleteInstanceGuard::Any => Err(CoreError::InstanceNotFound {
-                    instance_id: params.instance_id.to_string(),
-                }),
-                CompleteInstanceGuard::OnlyRunning => Ok(false),
-            };
-        };
-        if params.guard == CompleteInstanceGuard::OnlyRunning
-            && inst.status != CoreInstanceStatus::Running
-        {
-            return Ok(false);
-        }
+        self.store.lock().unwrap().complete(params)
+    }
 
-        let was_terminal = inst.status.is_terminal();
-        inst.status = params.status;
-        // Replaced: a transition that carries no output or error clears the
-        // previous one, so a failure cannot be read as still holding a stale
-        // success payload.
-        inst.output = params.output.map(<[u8]>::to_vec);
-        inst.error = params.error.map(str::to_string);
-        // Merged: omitting these leaves what an earlier transition recorded.
-        if let Some(v) = params.termination_reason {
-            inst.termination_reason = Some(v.to_string());
-        }
-        if let Some(v) = params.exit_code {
-            inst.exit_code = Some(v);
-        }
-        if let Some(v) = params.checkpoint_id {
-            inst.checkpoint_id = Some(v.to_string());
-        }
-        if stamps_finished_at(params.status) {
-            inst.finished_at = Some(Utc::now());
-        }
-        store.revoke_inactive_execution(params.instance_id);
-        if params.status.is_terminal() {
-            let now = Utc::now();
-            inputs::close_root(&mut store, params.instance_id, now);
-            if !was_terminal {
-                waits::target_finished(&mut store, params.instance_id, now);
+    async fn complete_execution(
+        &self,
+        lease: &crate::persistence::invocations::InvocationLease,
+        params: CompleteInstanceParams<'_>,
+        event: Option<&EventRecord>,
+    ) -> Result<lifecycle::TransitionOutcome, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        let status = store.instance_mut(params.instance_id)?.status;
+        let release = lifecycle::LeaseRelease::Status(params.status);
+        match store.invocation_leases.get(params.instance_id) {
+            Some((current, true)) if current == lease => {
+                if let Some(event) = event {
+                    store.push_event(event);
+                }
+                let instance_id = params.instance_id;
+                store.complete(params.if_running())?;
+                store
+                    .released_by
+                    .insert(instance_id.into(), (lease.clone(), release));
+                Ok(lifecycle::TransitionOutcome::Applied)
             }
+            Some((current, false))
+                if current == lease
+                    && status == params.status
+                    && store.released_by.get(params.instance_id)
+                        == Some(&(lease.clone(), release)) =>
+            {
+                Ok(lifecycle::TransitionOutcome::AlreadyApplied)
+            }
+            _ => Ok(lifecycle::TransitionOutcome::Superseded),
         }
-        Ok(true)
     }
 
     async fn store_instance_input(&self, instance_id: &str, input: &[u8]) -> Result<(), CoreError> {
@@ -971,7 +1010,7 @@ impl Persistence for InMemoryPersistence {
         lease: &crate::persistence::invocations::InvocationLease,
         request: crate::lifecycle::ParkRequest,
         targets: crate::persistence::ParkTargets<'_>,
-    ) -> Result<lifecycle::ParkOutcome, CoreError> {
+    ) -> Result<lifecycle::TransitionOutcome, CoreError> {
         let mut store = self.store.lock().unwrap();
         let instance_id = lease.instance_id.as_str();
         let status = store.instance_mut(instance_id)?.status;
@@ -979,20 +1018,24 @@ impl Persistence for InMemoryPersistence {
             Some((current, true)) if current == lease => {
                 match store.park(instance_id, request, targets)? {
                     Decision::Applied(_) => {
-                        store.parked_by.insert(instance_id.into(), lease.clone());
-                        Ok(lifecycle::ParkOutcome::Parked)
+                        store.released_by.insert(
+                            instance_id.into(),
+                            (lease.clone(), lifecycle::LeaseRelease::Park),
+                        );
+                        Ok(lifecycle::TransitionOutcome::Applied)
                     }
-                    _ => Ok(lifecycle::ParkOutcome::Superseded),
+                    _ => Ok(lifecycle::TransitionOutcome::Superseded),
                 }
             }
             Some((current, false))
                 if current == lease
                     && status == CoreInstanceStatus::Suspended
-                    && store.parked_by.get(instance_id) == Some(lease) =>
+                    && store.released_by.get(instance_id)
+                        == Some(&(lease.clone(), lifecycle::LeaseRelease::Park)) =>
             {
-                Ok(lifecycle::ParkOutcome::AlreadyParked)
+                Ok(lifecycle::TransitionOutcome::AlreadyApplied)
             }
-            _ => Ok(lifecycle::ParkOutcome::Superseded),
+            _ => Ok(lifecycle::TransitionOutcome::Superseded),
         }
     }
 
