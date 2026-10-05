@@ -1,7 +1,8 @@
 import { expect, test } from '../../../fixtures';
 import { AnalyticsUsagePage } from '../../../pages/AnalyticsPages';
+import { appPath } from '../../../utils/app-path';
 
-test.describe('Analytics / Usage (mocked)', () => {
+test.describe('Usage (mocked)', () => {
   test('renders dashboard, a11y + snapshot', async ({
     page,
     mockApi,
@@ -40,5 +41,19 @@ test.describe('Analytics / Usage (mocked)', () => {
     await expect(page.getByText('16 cores')).toBeVisible();
     await runA11y(page, { exclude: ['[data-sonner-toaster]'] });
     await view.expectMatchesSnapshot('analytics-usage');
+  });
+
+  test('old analytics addresses redirect to /usage', async ({
+    page,
+    mockApi,
+  }) => {
+    await mockApi.bootstrap(page);
+    await mockApi.analytics.tenantMetrics(page, { success: true, data: {} });
+    await mockApi.analytics.system(page, { success: true, data: {} });
+
+    for (const old of ['/analytics', '/analytics/usage', '/analytics/system']) {
+      await page.goto(appPath(old));
+      await expect(page).toHaveURL(/\/usage(\?|$)/);
+    }
   });
 });

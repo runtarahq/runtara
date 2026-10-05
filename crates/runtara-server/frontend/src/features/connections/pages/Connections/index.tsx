@@ -1,11 +1,11 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import { ExistingConnections } from '@/features/connections/components/ExistingConnections';
 import { ConnectionPickerModal } from '@/features/connections/components/ConnectionPickerModal';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { Button } from '@/shared/components/ui/button';
 import { Can } from '@/shared/components/Can';
-import { Plus } from 'lucide-react';
+import { Gauge, Plus } from 'lucide-react';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import {
@@ -45,29 +45,37 @@ export function Connections() {
     <ConsoleToolbar
       left={<Breadcrumb items={[{ label: 'Connections' }]} />}
       actions={
-        <Can permission="connection:create">
-          <Button
-            disabled={
-              isFetching ||
-              connectionTypes.length === 0 ||
-              connectionTypesError ||
-              connectionsError
-            }
-            onClick={() => setIsModalOpen(true)}
-          >
-            {isFetching ? (
-              <>
-                <Spinner className="mr-2 size-4" />
-                Loading...
-              </>
-            ) : (
-              <>
-                <Plus className="mr-2 size-4" />
-                New connection
-              </>
-            )}
+        <div className="flex items-center gap-2">
+          <Button asChild variant="secondary" bordered>
+            <Link to="/connections/rate-limits">
+              <Gauge className="mr-2 size-4" />
+              Rate limits
+            </Link>
           </Button>
-        </Can>
+          <Can permission="connection:create">
+            <Button
+              disabled={
+                isFetching ||
+                connectionTypes.length === 0 ||
+                connectionTypesError ||
+                connectionsError
+              }
+              onClick={() => setIsModalOpen(true)}
+            >
+              {isFetching ? (
+                <>
+                  <Spinner className="mr-2 size-4" />
+                  Loading...
+                </>
+              ) : (
+                <>
+                  <Plus className="mr-2 size-4" />
+                  New connection
+                </>
+              )}
+            </Button>
+          </Can>
+        </div>
       }
     />
   );

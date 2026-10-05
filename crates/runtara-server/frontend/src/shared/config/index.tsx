@@ -33,7 +33,7 @@ export type MenuItem = {
   /** When set, this entry is hidden unless the resolved entitlement snapshot
    *  has the feature enabled. Workflows / Triggers / Connections / Analytics
    *  / Invocation History are intentionally always-on (the "Files /
-   *  Connections / Triggers / Analytics / Invocation History" decision). */
+   *  Connections / Triggers / Usage / Invocation History" decision). */
   requiresFeature?: FeatureKey;
   children?: MenuChild[];
 };
@@ -98,17 +98,9 @@ export const menu: MenuItem[] = [
   },
   {
     key: 'analytics',
-    title: 'Analytics',
-    to: '/analytics/usage',
+    title: 'Usage',
+    to: '/usage',
     icon: <BarChart3 size={16} />,
     allowedGroups: [],
-    children: [
-      { key: 'usage', title: 'Usage', to: '/analytics/usage' },
-      {
-        key: 'rate-limits',
-        title: 'Rate Limits',
-        to: '/analytics/rate-limits',
-      },
-    ],
   },
 ];

@@ -46,7 +46,7 @@ test.describe('Protected Routes (Unauthenticated)', () => {
     '/workflows',
     '/connections',
     '/invocation-triggers',
-    '/analytics',
+    '/usage',
     '/objects/types',
   ];
 

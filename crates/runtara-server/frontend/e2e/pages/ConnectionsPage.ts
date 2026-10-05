@@ -15,3 +15,7 @@ export class CreateConnectionPage extends BasePage {
     this.path = `/connections/${integrationId}/create`;
   }
 }
+
+export class ConnectionRateLimitsPage extends BasePage {
+  readonly path = '/connections/rate-limits';
+}

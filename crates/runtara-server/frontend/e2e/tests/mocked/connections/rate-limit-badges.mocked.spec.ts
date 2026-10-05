@@ -1,6 +1,6 @@
 import { expect } from '@playwright/test';
 import { test } from '../../../fixtures';
-import { AnalyticsRateLimitsPage } from '../../../pages/AnalyticsPages';
+import { ConnectionRateLimitsPage } from '../../../pages/ConnectionsPage';
 
 /**
  * SYN-495 regression guard: the rate-limit dashboard badge must reflect the
@@ -32,7 +32,7 @@ function status(over: Status): Status {
   };
 }
 
-test.describe('Analytics / Rate limits badges (mocked)', () => {
+test.describe('Connections / Rate limits badges (mocked)', () => {
   test('each card shows a badge that matches its real protection state', async ({
     page,
     mockApi,
@@ -82,7 +82,7 @@ test.describe('Analytics / Rate limits badges (mocked)', () => {
         })
     );
 
-    const view = new AnalyticsRateLimitsPage(page);
+    const view = new ConnectionRateLimitsPage(page);
     await view.goto();
     await view.expectHeading(/rate limits/i);
 

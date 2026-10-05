@@ -1,7 +1,7 @@
 import { test } from '../../../fixtures';
-import { AnalyticsRateLimitsPage } from '../../../pages/AnalyticsPages';
+import { ConnectionRateLimitsPage } from '../../../pages/ConnectionsPage';
 
-test.describe('Analytics / Rate limits (mocked)', () => {
+test.describe('Connections / Rate limits (mocked)', () => {
   test('renders dashboard, a11y + snapshot', async ({
     page,
     mockApi,
@@ -15,11 +15,11 @@ test.describe('Analytics / Rate limits (mocked)', () => {
       windowSeconds: 60,
     });
 
-    const view = new AnalyticsRateLimitsPage(page);
+    const view = new ConnectionRateLimitsPage(page);
     await view.goto();
 
     await view.expectHeading(/rate limits/i);
     await runA11y(page, { exclude: ['[data-sonner-toaster]'] });
-    await view.expectMatchesSnapshot('analytics-rate-limits');
+    await view.expectMatchesSnapshot('connections-rate-limits');
   });
 });

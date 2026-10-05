@@ -130,7 +130,7 @@ function toSeries(buckets: MetricsBucket[], period: DateRangeOption) {
 }
 
 export function Usage() {
-  usePageTitle('Usage Analytics');
+  usePageTitle('Usage');
 
   const [searchParams, setSearchParams] = useSearchParams();
   const urlPeriod = searchParams.get('period') as DateRangeOption;
@@ -227,14 +227,7 @@ export function Usage() {
       bodyClassName="flex min-h-0 flex-col overflow-auto p-3 md:p-4"
       toolbar={
         <ConsoleToolbar
-          left={
-            <Breadcrumb
-              items={[
-                { label: 'Analytics', to: '/analytics/usage' },
-                { label: 'Usage' },
-              ]}
-            />
-          }
+          left={<Breadcrumb items={[{ label: 'Usage' }]} />}
           actions={
             <div className="flex items-center gap-2">
               <DateRangeSelector value={dateRange} onChange={setDateRange} />
@@ -258,7 +251,7 @@ export function Usage() {
       {isError && !isLoading ? (
         <ConsoleErrorState
           error={error}
-          entityLabel="analytics"
+          entityLabel="usage"
           className="h-auto rounded-lg border bg-muted/20"
         />
       ) : (
