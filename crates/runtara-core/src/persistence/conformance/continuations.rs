@@ -29,21 +29,21 @@ pub async fn attempt_matched(p: &dyn Persistence) {
     let id = running(p, "attempt").await;
     let op = op(1);
     assert_eq!(c.get(&id, &op, 1).await.unwrap(), None);
-    c.put(&id, &op, 1, b"first").await.unwrap();
+    c.put(&id, &op, 1, b"first", None).await.unwrap();
     assert_eq!(c.get(&id, &op, 1).await.unwrap(), Some(b"first".to_vec()));
     assert_eq!(c.get(&id, &op, 2).await.unwrap(), None);
 
     // The same attempt overwrites its own continuation.
-    c.put(&id, &op, 1, b"second").await.unwrap();
+    c.put(&id, &op, 1, b"second", None).await.unwrap();
     assert_eq!(c.get(&id, &op, 1).await.unwrap(), Some(b"second".to_vec()));
 
     // A retry replaces it; the earlier attempt no longer sees anything.
-    c.put(&id, &op, 2, b"retry").await.unwrap();
+    c.put(&id, &op, 2, b"retry", None).await.unwrap();
     assert_eq!(c.get(&id, &op, 2).await.unwrap(), Some(b"retry".to_vec()));
     assert_eq!(c.get(&id, &op, 1).await.unwrap(), None);
 
     // An empty continuation is a continuation.
-    c.put(&id, &op, 3, b"").await.unwrap();
+    c.put(&id, &op, 3, b"", None).await.unwrap();
     assert_eq!(c.get(&id, &op, 3).await.unwrap(), Some(Vec::new()));
     p.delete_instances_batch(&[id]).await.unwrap();
 }
@@ -55,26 +55,26 @@ pub async fn validation(p: &dyn Persistence) {
     let id = running(p, "size").await;
     let op = op(2);
     let max = vec![0xA5; MAX_CONTINUATION_BYTES];
-    c.put(&id, &op, 1, &max).await.unwrap();
+    c.put(&id, &op, 1, &max, None).await.unwrap();
     assert_eq!(c.get(&id, &op, 1).await.unwrap(), Some(max));
 
     let other = op_other();
     let over = vec![0x5A; MAX_CONTINUATION_BYTES + 1];
     assert!(matches!(
-        c.put(&id, &other, 1, &over).await,
+        c.put(&id, &other, 1, &over, None).await,
         Err(CoreError::ValidationError { .. })
     ));
     assert_eq!(c.get(&id, &other, 1).await.unwrap(), None);
     // An oversized replacement leaves the stored one alone.
     assert!(matches!(
-        c.put(&id, &op, 2, &over).await,
+        c.put(&id, &op, 2, &over, None).await,
         Err(CoreError::ValidationError { .. })
     ));
     assert!(c.get(&id, &op, 1).await.unwrap().is_some());
 
     for bad in ["", "a\nb", &"x".repeat(MAX_OPERATION_HASH_BYTES + 1)] {
         assert!(matches!(
-            c.put(&id, bad, 1, b"s").await,
+            c.put(&id, bad, 1, b"s", None).await,
             Err(CoreError::ValidationError { .. })
         ));
         assert!(matches!(
@@ -86,11 +86,11 @@ pub async fn validation(p: &dyn Persistence) {
             Err(CoreError::ValidationError { .. })
         ));
     }
-    c.put(&id, &"x".repeat(MAX_OPERATION_HASH_BYTES), 1, b"s")
+    c.put(&id, &"x".repeat(MAX_OPERATION_HASH_BYTES), 1, b"s", None)
         .await
         .unwrap();
     assert!(matches!(
-        c.put(&id, &other, 0, b"s").await,
+        c.put(&id, &other, 0, b"s", None).await,
         Err(CoreError::ValidationError { .. })
     ));
     assert!(matches!(
@@ -110,7 +110,7 @@ pub async fn fence(p: &dyn Persistence) {
     let op = op(3);
     let missing = format!("continuations-missing-{}", uuid::Uuid::new_v4());
     assert!(matches!(
-        c.put(&missing, &op, 1, b"s").await,
+        c.put(&missing, &op, 1, b"s", None).await,
         Err(CoreError::InstanceNotFound { .. })
     ));
     assert_eq!(c.get(&missing, &op, 1).await.unwrap(), None);
@@ -120,18 +120,18 @@ pub async fn fence(p: &dyn Persistence) {
         .await
         .unwrap();
     assert!(matches!(
-        c.put(&pending, &op, 1, b"s").await,
+        c.put(&pending, &op, 1, b"s", None).await,
         Err(CoreError::InvalidInstanceState { .. })
     ));
     assert_eq!(c.get(&pending, &op, 1).await.unwrap(), None);
 
     let id = running(p, "fence").await;
-    c.put(&id, &op, 1, b"kept").await.unwrap();
+    c.put(&id, &op, 1, b"kept", None).await.unwrap();
     p.update_instance_status(&id, InstanceStatus::Suspended, None)
         .await
         .unwrap();
     assert!(matches!(
-        c.put(&id, &op, 1, b"late").await,
+        c.put(&id, &op, 1, b"late", None).await,
         Err(CoreError::InvalidInstanceState { .. })
     ));
     // The refused write changed nothing, and reading is not fenced.
@@ -145,7 +145,7 @@ pub async fn delete_and_cascade(p: &dyn Persistence) {
     let id = running(p, "delete").await;
     let op = op(4);
     assert!(!c.delete(&id, &op).await.unwrap());
-    c.put(&id, &op, 1, b"s").await.unwrap();
+    c.put(&id, &op, 1, b"s", None).await.unwrap();
     assert!(c.delete(&id, &op).await.unwrap());
     assert!(!c.delete(&id, &op).await.unwrap());
     assert_eq!(c.get(&id, &op, 1).await.unwrap(), None);
@@ -158,7 +158,7 @@ pub async fn delete_and_cascade(p: &dyn Persistence) {
         .unwrap()
     );
 
-    c.put(&id, &op, 1, b"s").await.unwrap();
+    c.put(&id, &op, 1, b"s", None).await.unwrap();
     p.delete_instances_batch(std::slice::from_ref(&id))
         .await
         .unwrap();
@@ -178,9 +178,9 @@ pub async fn isolation(p: &dyn Persistence) {
     let a = running(p, "iso-a").await;
     let b = running(p, "iso-b").await;
     let (x, y) = (op(5), op(6));
-    c.put(&a, &x, 1, b"a-x").await.unwrap();
-    c.put(&a, &y, 1, b"a-y").await.unwrap();
-    c.put(&b, &x, 1, b"b-x").await.unwrap();
+    c.put(&a, &x, 1, b"a-x", None).await.unwrap();
+    c.put(&a, &y, 1, b"a-y", None).await.unwrap();
+    c.put(&b, &x, 1, b"b-x", None).await.unwrap();
     assert_eq!(c.get(&a, &x, 1).await.unwrap(), Some(b"a-x".to_vec()));
     assert_eq!(c.get(&a, &y, 1).await.unwrap(), Some(b"a-y".to_vec()));
     assert_eq!(c.get(&b, &x, 1).await.unwrap(), Some(b"b-x".to_vec()));

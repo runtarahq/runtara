@@ -113,6 +113,8 @@ async fn hooks(
         .claim_invocation_lease(&instance.tenant_id, &fx.id, "test-launch", None)
         .await
         .unwrap();
+    // As a launch does: the root host presents the run's lease on its writes.
+    fx.owner.root.bind_root_lease(lease.clone()).unwrap();
     Arc::new(DatabaseLifecycle {
         persistence: fx.persistence.clone(),
         lease,

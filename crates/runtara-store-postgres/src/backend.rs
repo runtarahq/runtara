@@ -738,11 +738,40 @@ impl Persistence for PostgresPersistence {
         instance_id: &str,
         checkpoint_id: &str,
         state: &[u8],
+        owner: runtara_core::persistence::ExecutionWriter<'_>,
     ) -> Result<runtara_core::persistence::CheckpointWrite, CoreError> {
         let mut tx = self.pool.begin().await.db()?;
+        crate::root_owner::admit_row_writer(&mut tx, instance_id, owner).await?;
         let write = crate::checkpoints::record(&mut tx, instance_id, checkpoint_id, state).await?;
         tx.commit().await.db()?;
         Ok(write)
+    }
+
+    async fn save_sleep_checkpoint(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        state: &[u8],
+        owner: runtara_core::persistence::ExecutionWriter<'_>,
+    ) -> Result<(), CoreError> {
+        use crate::dialect::Dialect;
+        let mut tx = self.pool.begin().await.db()?;
+        crate::root_owner::admit_row_writer(&mut tx, instance_id, owner).await?;
+        sqlx::query(crate::dialect::PostgresDialect::sql_save_checkpoint())
+            .bind(instance_id)
+            .bind(checkpoint_id)
+            .bind(state)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| crate::ops_common::error::wrap_checkpoint_save(e, instance_id))?;
+        sqlx::query("UPDATE instances SET checkpoint_id = $2 WHERE instance_id = $1")
+            .bind(instance_id)
+            .bind(checkpoint_id)
+            .execute(&mut *tx)
+            .await
+            .db()?;
+        tx.commit().await.db()?;
+        Ok(())
     }
 
     async fn load_checkpoint(
@@ -793,6 +822,35 @@ impl Persistence for PostgresPersistence {
 
     async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError> {
         insert_event(&self.pool, event).await
+    }
+
+    async fn append_execution_event(
+        &self,
+        event: &EventRecord,
+        owner: runtara_core::persistence::ExecutionWriter<'_>,
+    ) -> Result<(), CoreError> {
+        let sql = format!(
+            "WITH fence AS ({}) \
+             INSERT INTO instance_events (instance_id, event_type, checkpoint_id, payload, \
+                                          created_at, subtype) \
+             SELECT instance_id, $2::instance_event_type, $3, $4, $5, $6 FROM fence",
+            crate::root_owner::fence(owner, 7, false)
+        );
+        let query = sqlx::query(&sql)
+            .bind(&event.instance_id)
+            .bind(crate::encoding::event_type_to_str(event.event_type))
+            .bind(&event.checkpoint_id)
+            .bind(&event.payload)
+            .bind(event.created_at)
+            .bind(&event.subtype);
+        let written = crate::root_owner::bind_owner(query, owner)
+            .execute(&self.pool)
+            .await
+            .db()?;
+        if written.rows_affected() == 0 {
+            return Err(crate::root_owner::refusal(&self.pool, &event.instance_id).await);
+        }
+        Ok(())
     }
 
     async fn insert_signal(
@@ -991,6 +1049,44 @@ impl Persistence for PostgresPersistence {
             error_message,
         )
         .await
+    }
+
+    async fn record_retry_attempt(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        attempt: i32,
+        error_message: Option<&str>,
+        owner: runtara_core::persistence::ExecutionWriter<'_>,
+    ) -> Result<(), CoreError> {
+        let retry_checkpoint_id = format!("{checkpoint_id}::retry::{attempt}");
+        let sql = format!(
+            "WITH fence AS ({}) \
+             INSERT INTO checkpoints (instance_id, checkpoint_id, state, is_retry_attempt, \
+                                      attempt_number, error_message, created_at) \
+             SELECT instance_id, $2, '', true, $3, $4, NOW() FROM fence \
+             ON CONFLICT (instance_id, checkpoint_id) DO UPDATE \
+             SET attempt_number = EXCLUDED.attempt_number, \
+                 error_message = EXCLUDED.error_message, \
+                 created_at = NOW()",
+            crate::root_owner::fence(owner, 5, false)
+        );
+        let query = sqlx::query(&sql)
+            .bind(instance_id)
+            .bind(&retry_checkpoint_id)
+            .bind(attempt)
+            .bind(error_message);
+        let written = crate::root_owner::bind_owner(query, owner)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| CoreError::CheckpointSaveFailed {
+                instance_id: instance_id.to_string(),
+                reason: e.to_string(),
+            })?;
+        if written.rows_affected() == 0 {
+            return Err(crate::root_owner::refusal(&self.pool, instance_id).await);
+        }
+        Ok(())
     }
 
     async fn list_instances(

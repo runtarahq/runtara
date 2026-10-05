@@ -218,6 +218,7 @@ impl RuntimeHost for ScopedRootRuntime {
                 checkpoint_id,
                 state,
                 duration_ms: ms,
+                owner: self.owner.root.root_lease().cloned(),
             },
         )
         .await

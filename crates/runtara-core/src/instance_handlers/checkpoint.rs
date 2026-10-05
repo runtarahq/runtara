@@ -39,8 +39,12 @@ pub async fn handle_checkpoint(
         "Processing checkpoint request"
     );
 
-    // 1. Validate instance exists and is running
-    ensure_instance_running(state.persistence.as_ref(), &request.instance_id).await?;
+    // 1. Validate instance exists and is running. An owned write is fenced by
+    // the store atomically with the write, which also requires `running`;
+    // only a writer without a lease needs this separate read.
+    if request.owner.is_none() {
+        ensure_instance_running(state.persistence.as_ref(), &request.instance_id).await?;
+    }
 
     // 2. Check if checkpoint already exists
     if let Some(existing) = state
@@ -77,7 +81,12 @@ pub async fn handle_checkpoint(
     // insert, in the same transaction.
     match state
         .persistence
-        .record_checkpoint(&request.instance_id, &request.checkpoint_id, &request.state)
+        .record_checkpoint(
+            &request.instance_id,
+            &request.checkpoint_id,
+            &request.state,
+            request.owner.as_ref(),
+        )
         .await?
     {
         CheckpointWrite::Existing(winner) => {
@@ -269,19 +278,21 @@ pub async fn handle_sleep(
     // failure — a retryable-looking error for a caller mistake. The check is
     // unconditional: sleeping out the clock on behalf of an instance that
     // isn't running is just as wrong when there is no checkpoint to save.
-    ensure_instance_running(state.persistence.as_ref(), &request.instance_id).await?;
+    if request.owner.is_none() {
+        ensure_instance_running(state.persistence.as_ref(), &request.instance_id).await?;
+    }
 
-    // 2. Save checkpoint before sleeping (for durability)
+    // 2. Save checkpoint before sleeping (for durability), and point the
+    // instance at it, in one fenced write.
     if !request.checkpoint_id.is_empty() {
         state
             .persistence
-            .save_checkpoint(&request.instance_id, &request.checkpoint_id, &request.state)
-            .await?;
-
-        // Update instance's current checkpoint_id
-        state
-            .persistence
-            .update_instance_checkpoint(&request.instance_id, &request.checkpoint_id)
+            .save_sleep_checkpoint(
+                &request.instance_id,
+                &request.checkpoint_id,
+                &request.state,
+                request.owner.as_ref(),
+            )
             .await?;
 
         debug!(checkpoint_id = %request.checkpoint_id, "Sleep checkpoint saved");
@@ -309,7 +320,7 @@ pub async fn handle_sleep(
 
         // Proof of life for the staleness reaper, which judges liveness from
         // `instance_events` and counts any event.
-        record_sleep_heartbeat(state, &request.instance_id).await;
+        record_sleep_heartbeat(state, &request.instance_id, request.owner.as_ref()).await?;
 
         if let Some(signal) = get_pending_signal(state.persistence.as_ref(), &request.instance_id)
             .await?
@@ -339,7 +350,14 @@ fn interrupts_sleep(signal: &Signal) -> bool {
 /// Best-effort: a heartbeat that fails to persist must not fail the sleep, since
 /// the sleep itself is still perfectly valid. The worst case is the instance
 /// looking stale, which is exactly the pre-existing behaviour.
-async fn record_sleep_heartbeat(state: &InstanceHandlerState, instance_id: &str) {
+///
+/// The one failure that does end the sleep is losing the root: a superseded
+/// execution must stop, not sleep out its clock on a run it no longer owns.
+async fn record_sleep_heartbeat(
+    state: &InstanceHandlerState,
+    instance_id: &str,
+    owner: crate::persistence::ExecutionWriter<'_>,
+) -> std::result::Result<(), CoreError> {
     let event = EventRecord {
         id: None,
         instance_id: instance_id.to_string(),
@@ -349,8 +367,17 @@ async fn record_sleep_heartbeat(state: &InstanceHandlerState, instance_id: &str)
         created_at: Utc::now(),
         subtype: None,
     };
-    if let Err(error) = state.persistence.insert_event(&event).await {
-        debug!(%error, "Failed to record sleep heartbeat");
+    match state
+        .persistence
+        .append_execution_event(&event, owner)
+        .await
+    {
+        Err(error @ CoreError::Superseded { .. }) => Err(error),
+        Err(error) => {
+            debug!(%error, "Failed to record sleep heartbeat");
+            Ok(())
+        }
+        Ok(()) => Ok(()),
     }
 }
 
@@ -375,6 +402,7 @@ mod tests {
             instance_id: "nonexistent".to_string(),
             checkpoint_id: "cp-1".to_string(),
             state: b"test state".to_vec(),
+            owner: None,
         };
 
         let result = handle_checkpoint(&state, request).await;
@@ -394,6 +422,7 @@ mod tests {
             instance_id: "inst-1".to_string(),
             checkpoint_id: "cp-1".to_string(),
             state: b"test state".to_vec(),
+            owner: None,
         };
 
         let result = handle_checkpoint(&state, request).await;
@@ -413,6 +442,7 @@ mod tests {
             instance_id: "inst-1".to_string(),
             checkpoint_id: "cp-1".to_string(),
             state: b"test state".to_vec(),
+            owner: None,
         };
 
         let result = handle_checkpoint(&state, request).await.unwrap();
@@ -436,6 +466,7 @@ mod tests {
             instance_id: "inst-1".to_string(),
             checkpoint_id: "cp-1".to_string(),
             state: b"new state".to_vec(), // This should be ignored
+            owner: None,
         };
 
         let result = handle_checkpoint(&state, request).await.unwrap();
@@ -460,6 +491,7 @@ mod tests {
             instance_id: "inst-1".to_string(),
             checkpoint_id: "cp-1".to_string(),
             state: b"test state".to_vec(),
+            owner: None,
         };
 
         let result = handle_checkpoint(&state, request).await.unwrap();
@@ -492,6 +524,7 @@ mod tests {
             instance_id: "inst-1".to_string(),
             checkpoint_id: "cp-1".to_string(),
             state: b"test state".to_vec(),
+            owner: None,
         };
 
         let result = handle_checkpoint(&state, request).await.unwrap();
@@ -513,6 +546,7 @@ mod tests {
             duration_ms: 30_000,
             checkpoint_id: "delay-1".to_string(),
             state: b"sleep state".to_vec(),
+            owner: None,
         };
         let Err(error) = handle_sleep(&state, request).await else {
             panic!("an unknown instance must be rejected, not slept on");
@@ -587,6 +621,7 @@ mod tests {
             duration_ms,
             checkpoint_id: String::new(),
             state: Vec::new(),
+            owner: None,
         }
     }
 
@@ -762,6 +797,7 @@ mod tests {
             duration_ms: 30_000,
             checkpoint_id: "delay-1".to_string(),
             state: b"sleep state".to_vec(),
+            owner: None,
         };
         let response = handle_sleep(&state, request).await.unwrap();
 

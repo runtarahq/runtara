@@ -136,6 +136,9 @@ pub struct CheckpointRequest {
     pub checkpoint_id: String,
     /// Serialized workflow state.
     pub state: Vec<u8>,
+    /// The writing execution's root lease; see
+    /// [`crate::persistence::ExecutionWriter`].
+    pub owner: Option<crate::persistence::invocations::InvocationLease>,
 }
 
 /// Signal forwarded from core to instance.
@@ -200,6 +203,9 @@ pub struct SleepRequest {
     pub checkpoint_id: String,
     /// State to restore on wake.
     pub state: Vec<u8>,
+    /// The sleeping execution's root lease; see
+    /// [`crate::persistence::ExecutionWriter`].
+    pub owner: Option<crate::persistence::invocations::InvocationLease>,
 }
 
 /// Sleep response.
@@ -373,6 +379,9 @@ pub struct RetryAttemptEvent {
     pub error_message: Option<String>,
     /// Structured error metadata for retry decisions.
     pub error_metadata: Option<ErrorMetadata>,
+    /// The retrying execution's root lease; see
+    /// [`crate::persistence::ExecutionWriter`].
+    pub owner: Option<crate::persistence::invocations::InvocationLease>,
 }
 
 /// Error string returned by `handle_register_instance` when the core is

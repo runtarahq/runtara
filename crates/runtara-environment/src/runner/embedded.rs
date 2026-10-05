@@ -1295,19 +1295,26 @@ async fn wake_if_signal_already_arrived(
 /// Record an unacknowledged cancellation after the guest has exited. Preserve
 /// accepted terminal outcomes. The host cannot provide a guest cleanup receipt:
 /// leave the command pending and mark an unclean exit only if still running.
-async fn record_unacknowledged_cancel_exit(persistence: &Arc<dyn Persistence>, instance_id: &str) {
+/// With the run's root lease the write is owned: a superseded run cannot
+/// stamp its replacement.
+async fn record_unacknowledged_cancel_exit(
+    persistence: &Arc<dyn Persistence>,
+    instance_id: &str,
+    lease: Option<&runtara_core::persistence::invocations::InvocationLease>,
+) {
     match persistence.get_pending_signal(instance_id).await {
         Ok(Some(signal))
             if signal.signal_type == runtara_core::domain::SignalType::Cancel
                 && signal.acknowledged_at.is_none() =>
         {
-            let result = persistence
-                .complete_instance(
-                    CompleteInstanceParams::new(instance_id, CoreInstanceStatus::Cancelled)
-                        .if_running()
-                        .with_termination("aborted", None),
-                )
-                .await;
+            let mut params =
+                CompleteInstanceParams::new(instance_id, CoreInstanceStatus::Cancelled)
+                    .if_running()
+                    .with_termination("aborted", None);
+            if let Some(lease) = lease {
+                params = params.owned_by(lease);
+            }
+            let result = persistence.complete_instance(params).await;
             match result {
                 Ok(true) => warn!(
                     instance_id,
@@ -1331,7 +1338,11 @@ async fn record_unacknowledged_cancel_exit(persistence: &Arc<dyn Persistence>, i
 
 /// A cleanup alarm ends the whole Store without acknowledging any command.
 /// Preserve accepted terminal state and distinguish this from a normal timeout.
-async fn record_cleanup_aborted_exit(persistence: &Arc<dyn Persistence>, instance_id: &str) {
+async fn record_cleanup_aborted_exit(
+    persistence: &Arc<dyn Persistence>,
+    instance_id: &str,
+    lease: Option<&runtara_core::persistence::invocations::InvocationLease>,
+) {
     let status = match persistence.get_pending_signal(instance_id).await {
         Ok(Some(signal)) if signal.signal_type == runtara_core::domain::SignalType::Cancel => {
             CoreInstanceStatus::Cancelled
@@ -1342,15 +1353,14 @@ async fn record_cleanup_aborted_exit(persistence: &Arc<dyn Persistence>, instanc
             return;
         }
     };
-    if let Err(error) = persistence
-        .complete_instance(
-            CompleteInstanceParams::new(instance_id, status)
-                .if_running()
-                .with_error("Cooperative cleanup grace expired; whole execution aborted")
-                .with_termination("aborted", None),
-        )
-        .await
-    {
+    let mut params = CompleteInstanceParams::new(instance_id, status)
+        .if_running()
+        .with_error("Cooperative cleanup grace expired; whole execution aborted")
+        .with_termination("aborted", None);
+    if let Some(lease) = lease {
+        params = params.owned_by(lease);
+    }
+    if let Err(error) = persistence.complete_instance(params).await {
         warn!(instance_id, %error, "Could not record cleanup abort after Store disposal");
     }
 }
@@ -1836,7 +1846,12 @@ impl Runner for EmbeddedWasmRunner {
                     warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
                 }
                 InvokeExit::CleanupAborted => {
-                    record_cleanup_aborted_exit(&persistence, &instance_id).await;
+                    record_cleanup_aborted_exit(
+                        &persistence,
+                        &instance_id,
+                        root_lease.as_ref().map(|lease| &lease.token),
+                    )
+                    .await;
                 }
             }
             if matches!(&run.exit, InvokeExit::Suspended(_)) {
@@ -1850,7 +1865,12 @@ impl Runner for EmbeddedWasmRunner {
                     warn!(instance_id, %error, "Parked cancellation deferred to scheduler recovery");
                 }
             } else {
-                record_unacknowledged_cancel_exit(&persistence, &instance_id).await;
+                record_unacknowledged_cancel_exit(
+                    &persistence,
+                    &instance_id,
+                    root_lease.as_ref().map(|lease| &lease.token),
+                )
+                .await;
             }
             // Nothing of this execution writes after this point. Leaving
             // `running` already revoked the lease; this covers an exit that
@@ -2903,7 +2923,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            record_cleanup_aborted_exit(&persistence, &id).await;
+            record_cleanup_aborted_exit(&persistence, &id, None).await;
             let after = persistence.get_instance(&id).await.unwrap().unwrap();
             assert_eq!(
                 after.status,
@@ -2950,7 +2970,7 @@ mod tests {
                 .await
                 .unwrap();
             let before = persistence.get_instance(&id).await.unwrap().unwrap();
-            record_cleanup_aborted_exit(&persistence, &id).await;
+            record_cleanup_aborted_exit(&persistence, &id, None).await;
             let after = persistence.get_instance(&id).await.unwrap().unwrap();
             assert_eq!(after.status, before.status);
             assert_eq!(after.output, before.output);
@@ -2984,7 +3004,7 @@ mod tests {
                 .await
                 .unwrap();
             let before = persistence.get_instance(&id).await.unwrap().unwrap();
-            record_unacknowledged_cancel_exit(&persistence, &id).await;
+            record_unacknowledged_cancel_exit(&persistence, &id, None).await;
             let after = persistence.get_instance(&id).await.unwrap().unwrap();
             assert_eq!(after.status, status);
             assert_eq!(after.output, before.output);
@@ -3013,7 +3033,7 @@ mod tests {
             .await
             .unwrap();
         let command = persistence.get_pending_signal(&id).await.unwrap().unwrap();
-        record_unacknowledged_cancel_exit(&persistence, &id).await;
+        record_unacknowledged_cancel_exit(&persistence, &id, None).await;
         let after = persistence.get_instance(&id).await.unwrap().unwrap();
         assert_eq!(after.status, CoreInstanceStatus::Cancelled);
         assert_eq!(after.termination_reason.as_deref(), Some("aborted"));
@@ -3021,7 +3041,7 @@ mod tests {
         let pending = persistence.get_pending_signal(&id).await.unwrap().unwrap();
         assert_eq!(pending.command_id, command.command_id);
         assert!(pending.acknowledged_at.is_none());
-        record_unacknowledged_cancel_exit(&persistence, &id).await;
+        record_unacknowledged_cancel_exit(&persistence, &id, None).await;
         assert_eq!(
             persistence
                 .get_instance(&id)
@@ -3070,7 +3090,7 @@ mod tests {
             .await
             .unwrap();
 
-        record_unacknowledged_cancel_exit(&persistence, instance_id.as_str()).await;
+        record_unacknowledged_cancel_exit(&persistence, instance_id.as_str(), None).await;
 
         assert_eq!(
             persistence
@@ -3097,7 +3117,7 @@ mod tests {
             .await
             .unwrap();
 
-        record_unacknowledged_cancel_exit(&persistence, instance_id.as_str()).await;
+        record_unacknowledged_cancel_exit(&persistence, instance_id.as_str(), None).await;
 
         assert_eq!(
             persistence

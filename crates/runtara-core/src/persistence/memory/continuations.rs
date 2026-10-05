@@ -26,6 +26,7 @@ impl AgentContinuations for InMemoryPersistence {
         op_hash: &str,
         attempt: u32,
         state: &[u8],
+        owner: crate::persistence::ExecutionWriter<'_>,
     ) -> Result<(), CoreError> {
         validate_continuation(instance_id, op_hash, attempt, Some(state))?;
         let mut store = self.store.lock().unwrap();
@@ -33,6 +34,7 @@ impl AgentContinuations for InMemoryPersistence {
         if status != CoreInstanceStatus::Running {
             return Err(not_running(instance_id, status));
         }
+        store.admit_writer(instance_id, owner)?;
         store.agent_continuations.insert(
             (instance_id.to_owned(), op_hash.to_owned()),
             (attempt, state.to_vec()),

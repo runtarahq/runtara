@@ -81,6 +81,54 @@ impl Store {
         }
     }
 
+    /// Fence a guest write: see [`crate::persistence::ExecutionWriter`].
+    fn admit_writer(
+        &self,
+        instance_id: &str,
+        owner: crate::persistence::ExecutionWriter<'_>,
+    ) -> Result<(), CoreError> {
+        let current = self.invocation_leases.get(instance_id);
+        let admitted = match owner {
+            Some(lease) => current.is_some_and(|(held, active)| *active && held == lease),
+            None => !current.is_some_and(|(_, active)| *active),
+        };
+        if admitted {
+            Ok(())
+        } else {
+            Err(CoreError::Superseded {
+                instance_id: instance_id.to_string(),
+            })
+        }
+    }
+
+    fn push_event(&mut self, event: &EventRecord) {
+        let id = self.next_id();
+        let mut stored = event.clone();
+        // The docs are explicit: store the emitter's `created_at` verbatim.
+        stored.id = Some(id);
+        self.events.push(stored);
+    }
+
+    fn upsert_checkpoint(&mut self, instance_id: &str, checkpoint_id: &str, state: &[u8]) {
+        if let Some(existing) = self
+            .checkpoints
+            .iter_mut()
+            .find(|c| c.instance_id == instance_id && c.checkpoint_id == checkpoint_id)
+        {
+            existing.state = state.to_vec();
+            // A refresh restamps: the trait dates a checkpoint by when its
+            // state was written, and `list_checkpoints` pages on that field.
+            existing.created_at = Utc::now();
+            return;
+        }
+        self.checkpoints.push(CheckpointRecord {
+            instance_id: instance_id.to_string(),
+            checkpoint_id: checkpoint_id.to_string(),
+            state: state.to_vec(),
+            created_at: Utc::now(),
+        });
+    }
+
     /// Evaluate the park policy and apply it with its targets.
     fn park(
         &mut self,
@@ -686,24 +734,25 @@ impl Persistence for InMemoryPersistence {
         checkpoint_id: &str,
         state: &[u8],
     ) -> Result<(), CoreError> {
+        self.store
+            .lock()
+            .unwrap()
+            .upsert_checkpoint(instance_id, checkpoint_id, state);
+        Ok(())
+    }
+
+    async fn save_sleep_checkpoint(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        state: &[u8],
+        owner: crate::persistence::ExecutionWriter<'_>,
+    ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
-        if let Some(existing) = store
-            .checkpoints
-            .iter_mut()
-            .find(|c| c.instance_id == instance_id && c.checkpoint_id == checkpoint_id)
-        {
-            existing.state = state.to_vec();
-            // A refresh restamps: the trait dates a checkpoint by when its
-            // state was written, and `list_checkpoints` pages on that field.
-            existing.created_at = Utc::now();
-            return Ok(());
-        }
-        store.checkpoints.push(CheckpointRecord {
-            instance_id: instance_id.to_string(),
-            checkpoint_id: checkpoint_id.to_string(),
-            state: state.to_vec(),
-            created_at: Utc::now(),
-        });
+        store.instance_mut(instance_id)?;
+        store.admit_writer(instance_id, owner)?;
+        store.upsert_checkpoint(instance_id, checkpoint_id, state);
+        store.instance_mut(instance_id)?.checkpoint_id = Some(checkpoint_id.to_string());
         Ok(())
     }
 
@@ -712,8 +761,10 @@ impl Persistence for InMemoryPersistence {
         instance_id: &str,
         checkpoint_id: &str,
         state: &[u8],
+        owner: crate::persistence::ExecutionWriter<'_>,
     ) -> Result<CheckpointWrite, CoreError> {
         let mut store = self.store.lock().unwrap();
+        store.admit_writer(instance_id, owner)?;
         if let Some(existing) = store
             .checkpoints
             .iter()
@@ -801,12 +852,18 @@ impl Persistence for InMemoryPersistence {
     }
 
     async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError> {
+        self.store.lock().unwrap().push_event(event);
+        Ok(())
+    }
+
+    async fn append_execution_event(
+        &self,
+        event: &EventRecord,
+        owner: crate::persistence::ExecutionWriter<'_>,
+    ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
-        let id = store.next_id();
-        let mut stored = event.clone();
-        // The docs are explicit: store the emitter's `created_at` verbatim.
-        stored.id = Some(id);
-        store.events.push(stored);
+        store.admit_writer(&event.instance_id, owner)?;
+        store.push_event(event);
         Ok(())
     }
 
@@ -1017,6 +1074,24 @@ impl Persistence for InMemoryPersistence {
             b"",
         )
         .await
+    }
+
+    async fn record_retry_attempt(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        attempt: i32,
+        _error_message: Option<&str>,
+        owner: crate::persistence::ExecutionWriter<'_>,
+    ) -> Result<(), CoreError> {
+        let mut store = self.store.lock().unwrap();
+        store.admit_writer(instance_id, owner)?;
+        store.upsert_checkpoint(
+            instance_id,
+            &format!("{checkpoint_id}::retry::{attempt}"),
+            b"",
+        );
+        Ok(())
     }
 
     async fn list_instances(

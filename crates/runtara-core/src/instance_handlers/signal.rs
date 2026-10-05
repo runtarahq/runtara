@@ -175,6 +175,7 @@ mod tests {
                     instance_id: "instance".into(),
                     checkpoint_id: "cp".into(),
                     state: vec![1],
+                    owner: None,
                 },
             )
             .await
@@ -211,6 +212,7 @@ mod tests {
                 instance_id: "instance".into(),
                 checkpoint_id: "cp".into(),
                 state: vec![1],
+                owner: None,
             },
         )
         .await;

@@ -69,6 +69,14 @@ pub enum CoreError {
         message: String,
     },
 
+    /// The writing execution no longer owns the root instance: another
+    /// execution holds its root lease, or it is no longer running. Nothing
+    /// was written; the execution must stop rather than retry.
+    Superseded {
+        /// The instance ID.
+        instance_id: String,
+    },
+
     /// Persistence operation failed.
     PersistenceError {
         /// The operation that failed.
@@ -112,9 +120,9 @@ impl CoreError {
             Self::InstanceNotFound { .. } | Self::CheckpointNotFound { .. } => {
                 CoreErrorClass::Missing
             }
-            Self::InvalidInstanceState { .. } | Self::InstanceAlreadyExists { .. } => {
-                CoreErrorClass::Conflict
-            }
+            Self::InvalidInstanceState { .. }
+            | Self::InstanceAlreadyExists { .. }
+            | Self::Superseded { .. } => CoreErrorClass::Conflict,
             Self::ValidationError { .. } => CoreErrorClass::Invalid,
             Self::PersistenceError { .. }
             | Self::CheckpointSaveFailed { .. }
@@ -132,6 +140,7 @@ impl CoreError {
             Self::CheckpointSaveFailed { .. } => "CHECKPOINT_SAVE_FAILED",
             Self::SignalDeliveryFailed { .. } => "SIGNAL_DELIVERY_FAILED",
             Self::ValidationError { .. } => "VALIDATION_ERROR",
+            Self::Superseded { .. } => "SUPERSEDED",
             Self::PersistenceError { .. } => "PERSISTENCE_ERROR",
         }
     }
@@ -195,6 +204,13 @@ impl fmt::Display for CoreError {
             Self::ValidationError { field, message } => {
                 write!(f, "Validation error for '{}': {}", field, message)
             }
+            Self::Superseded { instance_id } => {
+                write!(
+                    f,
+                    "Instance '{}' is owned by another execution; this execution was superseded",
+                    instance_id
+                )
+            }
             Self::PersistenceError { operation, details } => {
                 write!(f, "Persistence error during '{}': {}", operation, details)
             }
@@ -237,6 +253,12 @@ mod tests {
                     checkpoint_id: Some("cp-1".to_string()),
                 },
                 "CHECKPOINT_NOT_FOUND",
+            ),
+            (
+                CoreError::Superseded {
+                    instance_id: "test-id".to_string(),
+                },
+                "SUPERSEDED",
             ),
             (
                 CoreError::CheckpointSaveFailed {

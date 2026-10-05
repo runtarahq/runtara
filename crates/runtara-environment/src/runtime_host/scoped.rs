@@ -516,6 +516,7 @@ impl RuntimeHost for ScopedRuntimeHost {
                 instance_id: self.owner.root.instance_id.clone(),
                 checkpoint_id,
                 state,
+                owner: self.owner.root.root_lease().cloned(),
             },
         )
         .await
@@ -565,6 +566,7 @@ impl RuntimeHost for ScopedRuntimeHost {
                 timestamp_ms: chrono::Utc::now().timestamp_millis(),
                 error_message,
                 error_metadata: None,
+                owner: self.owner.root.root_lease().cloned(),
             },
         )
         .await
@@ -587,6 +589,7 @@ impl RuntimeHost for ScopedRuntimeHost {
                 checkpoint_id,
                 state,
                 duration_ms: ms,
+                owner: self.owner.root.root_lease().cloned(),
             },
         )
         .await

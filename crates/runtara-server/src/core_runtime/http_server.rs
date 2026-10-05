@@ -343,6 +343,7 @@ async fn checkpoint_handler(
         instance_id,
         checkpoint_id: body.checkpoint_id,
         state: state_bytes,
+        owner: None,
     };
 
     match instance_handlers::handle_checkpoint(&state, request).await {
@@ -630,6 +631,7 @@ async fn sleep_handler(
         duration_ms: body.duration_ms,
         checkpoint_id: body.checkpoint_id,
         state: state_bytes,
+        owner: None,
     };
 
     match instance_handlers::handle_sleep(&state, request).await {
@@ -686,6 +688,7 @@ async fn retry_handler(
         error_message: body.error_message,
         error_metadata: None,
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        owner: None,
     };
 
     match instance_handlers::handle_retry_attempt(&state, event).await {

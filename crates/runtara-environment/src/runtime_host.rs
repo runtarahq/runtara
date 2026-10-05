@@ -173,6 +173,27 @@ impl PersistenceRuntimeHost {
         error.to_string()
     }
 
+    /// Report a refused durable write. A write refused because this execution
+    /// no longer owns its root stops the guest, as losing the execution lease
+    /// does: it must not keep running against a replacement's state.
+    fn write_err(&self, error: impl Into<anyhow::Error>) -> String {
+        let error = error.into();
+        if matches!(
+            error.downcast_ref::<runtara_core::error::CoreError>(),
+            Some(runtara_core::error::CoreError::Superseded { .. })
+        ) {
+            tracing::warn!(instance_id = %self.instance_id, "Execution superseded; stopping the guest");
+            self.cancelled.store(true, Ordering::SeqCst);
+            if let Some(token) = &self.cancel_token {
+                token.store(true, Ordering::SeqCst);
+            }
+            if let Some(interrupt) = &self.interrupt_guest {
+                interrupt();
+            }
+        }
+        error.to_string()
+    }
+
     /// The store's continuations of suspending agent operations. Typed
     /// suspension fails closed on a backend without them.
     fn continuations(
@@ -384,7 +405,7 @@ impl PersistenceRuntimeHost {
         )
         .await
         .map(|_| ())
-        .map_err(Self::err)
+        .map_err(|error| self.write_err(error))
     }
 
     /// Decode a handler-layer signal-type discriminant (the enum only
@@ -591,10 +612,11 @@ impl RuntimeHost for PersistenceRuntimeHost {
                 instance_id: self.instance_id.clone(),
                 checkpoint_id,
                 state,
+                owner: self.root_lease.get().cloned(),
             },
         )
         .await
-        .map_err(Self::err)?;
+        .map_err(|error| self.write_err(error))?;
         Ok(RuntimeCheckpointResult {
             found: response.found,
             state: response.state,
@@ -648,11 +670,12 @@ impl RuntimeHost for PersistenceRuntimeHost {
                 timestamp_ms: chrono::Utc::now().timestamp_millis(),
                 error_message,
                 error_metadata: None,
+                owner: self.root_lease.get().cloned(),
             },
         )
         .await
         .map(|_| ())
-        .map_err(Self::err)
+        .map_err(|error| self.write_err(error))
     }
 
     async fn operation_continuation_load(
@@ -674,9 +697,15 @@ impl RuntimeHost for PersistenceRuntimeHost {
     ) -> Result<(), String> {
         self.escalate_if_cancel_ignored().await;
         self.continuations()?
-            .put(&self.instance_id, &op_hash, attempt, &state)
+            .put(
+                &self.instance_id,
+                &op_hash,
+                attempt,
+                &state,
+                self.root_lease.get(),
+            )
             .await
-            .map_err(Self::err)
+            .map_err(|error| self.write_err(error))
     }
 
     async fn operation_wait_close(&self, op_hash: String) -> Result<(), String> {
@@ -723,10 +752,11 @@ impl RuntimeHost for PersistenceRuntimeHost {
                 duration_ms: ms,
                 checkpoint_id,
                 state,
+                owner: self.root_lease.get().cloned(),
             },
         )
         .await
-        .map_err(Self::err)?;
+        .map_err(|error| self.write_err(error))?;
 
         // The sleep cut itself short because a signal is pending, and a fixed
         // artifact polls `check-signals` immediately after. Clear the rate
@@ -833,6 +863,57 @@ mod tests {
         let instance = persistence.get_instance(&id).await.unwrap().unwrap();
         assert_eq!(instance.status, CoreInstanceStatus::Completed);
         assert_eq!(instance.output.as_deref(), Some(&b"{\"current\":true}"[..]));
+    }
+
+    /// Each guest write of a superseded host is refused, and the refusal
+    /// stops the guest, as losing the execution lease does.
+    #[tokio::test]
+    async fn a_superseded_write_is_refused_and_stops_the_guest() {
+        let (persistence, stale_host, id) = setup().await;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stale_host = stale_host.with_cancel_token(cancel.clone());
+        stale_host
+            .bind_root_lease(claim_root(&persistence, &id, "runner-a").await)
+            .unwrap();
+        persistence
+            .update_instance_status(&id, CoreInstanceStatus::Suspended, None)
+            .await
+            .unwrap();
+        persistence
+            .update_instance_status(&id, CoreInstanceStatus::Running, None)
+            .await
+            .unwrap();
+        claim_root(&persistence, &id, "runner-b").await;
+
+        let refused = stale_host
+            .checkpoint("late".into(), b"late".to_vec())
+            .await
+            .unwrap_err();
+        assert!(refused.contains("superseded"), "{refused}");
+        assert!(
+            cancel.load(Ordering::SeqCst),
+            "a superseded write must stop the guest"
+        );
+        assert!(stale_host.is_cancelled().await.unwrap());
+        assert!(
+            persistence
+                .load_checkpoint(&id, "late")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            stale_host
+                .custom_event("late".into(), b"{}".to_vec())
+                .await
+                .is_err()
+        );
+        assert!(
+            stale_host
+                .record_retry_attempt("late".into(), 1, None)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

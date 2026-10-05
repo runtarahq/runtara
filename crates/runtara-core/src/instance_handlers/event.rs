@@ -70,7 +70,10 @@ pub async fn handle_instance_event(
         created_at,
         subtype: event.subtype.clone(),
     };
-    state.persistence.insert_event(&event_record).await?;
+    state
+        .persistence
+        .append_execution_event(&event_record, event.owner.as_ref())
+        .await?;
 
     // Report the event where every event is already passing. Doing it here
     // rather than at a call site means a new event kind cannot be added
@@ -203,11 +206,12 @@ pub async fn handle_retry_attempt(
     // Save retry attempt record for audit trail
     state
         .persistence
-        .save_retry_attempt(
+        .record_retry_attempt(
             &event.instance_id,
             &event.checkpoint_id,
             event.attempt_number as i32,
             event.error_message.as_deref(),
+            event.owner.as_ref(),
         )
         .await?;
 
