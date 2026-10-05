@@ -1,6 +1,88 @@
 # Durability lifecycle: change plan
 
-Status: plan, 2026-10-05. Nothing below is implemented.
+Status: implemented, 2026-10-05, all seven phases. End-to-end check:
+`e2e/test_durability_lifecycle.sh`.
+
+As built, where it differs from the plan below:
+
+- **Lease owner.** The root lease owner is the runner registration (its
+  container handle id). The scoped runner no longer claims a lease of its own.
+  The run task owns the lease for the whole run and releases it last, after it
+  has parked, because the park must still present it.
+- **Unbound hosts.** A run with no supervisor lease claims one itself only when
+  it promoted itself (an ungated launch) or is scoped. A gated launch whose
+  supervisor bound no lease runs unowned.
+- **Park release cause.** Migration 045 adds `parked BOOLEAN`, not a
+  `released_by TEXT` column. The park sets it under the row lock, and every
+  claim resets it.
+- **Park API.** `ParkOutcome` carries no epoch, since the caller holds the
+  token. Owned parking is a new `park_execution`. `park_instance_on_targets`
+  stays the unowned host path.
+- **Completion.** Owned completion (`CompleteInstanceParams::owned_by`) keeps
+  the `bool` result. Its callers treat "already applied" and "superseded" the
+  same way, so a typed outcome would carry nothing they use.
+- **Park retry.** The run retries the park 5 times with backoff, then reports
+  `RunExitReport::SuspendNotParked` to its monitor. The monitor applies
+  `ExitKind::UnparkedSuspend` through `recover_or_fail_because(...,
+  RecoveryCause::ParkFailed)`. Migration 046 adds `park_failed`.
+- **Recovery wake (existing bug, fixed).** `mark_for_recovery` stamped
+  `sleep_until` without `wake_reason`, and the launch queue refuses a wake
+  launch without one. Every run recovered through `recover_or_fail` therefore
+  stayed suspended. It now sets `wake_reason = 'recovery'`.
+- **Writers without a lease.** A guest write that presents no lease (the
+  instance protocol over HTTP, tests) is admitted only while no execution holds
+  the root. Host-side writers keep their own unfenced methods (`insert_event`,
+  `save_retry_attempt`, `save_checkpoint`, `complete_instance` without an
+  owner). The run task's own post-exit writes (cancel and cleanup aborts)
+  present the lease.
+- **Lock order.** An owned fence on a write that does not touch the instance
+  row takes `FOR KEY SHARE` on the instance row, then `FOR SHARE` on the lease
+  row, in one statement. That is the same order every lifecycle writer uses, so
+  the two cannot deadlock. A refusal is `CoreError::Superseded`, and it stops
+  the guest.
+- **Command acknowledgements.** A guest's acknowledgement of a pause or cancel
+  command stays unfenced. It applies the command the operator issued, whichever
+  execution acknowledges it.
+- **Checkpoint lookup.** The emitter already reads through `get-checkpoint`, so
+  no guest code changed. `handle_checkpoint_call` is the single transport
+  adapter for the external empty-bytes form. `invocation_checkpoint` still
+  accepts empty bytes for compatibility, beside the new
+  `invocation_checkpoint_lookup`.
+- **Lifecycle projection.**
+  - `executionPhase` is on the executions API (`WorkflowInstanceDto`).
+  - `waiting_in_process` comes from a process-local registry
+    (`runtara_environment::in_process_waits`). The runtime host marks it for
+    timer sleeps, `blocking-sleep` and in-process durable sleeps, through the
+    new `RuntimeHost::in_process_wait` hook.
+  - Migration 047 adds the `paused` event. A guest-emitted breakpoint pause
+    still records `suspended`.
+  - The direct compiler rejects a non-durable Delay, so today the only
+    in-process waits are non-durable Agent retry backoffs.
+
+Verified 2026-10-05:
+
+- **New tests.** Durability conformance (`conformance/durability.rs`) runs
+  against both backends. Each new test was also run against the old behaviour
+  to confirm it fails:
+  - the racing checkpoint handler (`stale_root_write_waiting_on_a_lock_*`),
+    plus `tests/conformance.rs` in store-postgres;
+  - the runtime host tests (superseded host, empty-bytes call, in-process
+    wait);
+  - promotion and the root lease (`launch_queue_test`, `embedded_runner_test`);
+  - park retry and recovery (`agent_suspension_runner_test`);
+  - a suspended exit with a failed cleanup (component-host).
+- **Existing suites.** All pass:
+  - core, store-postgres, environment (database and scoped);
+  - component-host with its integration features;
+  - `runtara-workflows`, including `direct_wasm_execute`;
+  - the runtara-server database and Valkey suites;
+  - the frontend `npm test`, lint and build;
+  - `cargo clippy --workspace --all-targets` with every CI gate feature except
+    `embed-ui`, which needs a built frontend.
+- **End to end.** `e2e/test_durability_lifecycle.sh` passes against a live
+  server: owned park and a relaunch under epoch 2, the paused event and phase,
+  five injected park failures recovered as `park_failed` then completed, and
+  `waiting_in_process` during a retry backoff.
 
 This plan makes checkpointing, suspension, and recovery follow one ownership
 contract. It is a reliability change, not a rewrite. Checkpoint identities,
