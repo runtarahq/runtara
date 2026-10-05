@@ -104,7 +104,7 @@ impl ScopedInvocationFactory {
         }
         self.owner
             .root
-            .bind_input_lease(lease.clone())
+            .bind_root_lease(lease.clone())
             .map_err(|_| ExecutionError::InvalidContext)?;
         self.durable = Some((lease, control_timeout));
         Ok(self)

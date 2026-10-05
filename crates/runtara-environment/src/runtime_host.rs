@@ -50,7 +50,11 @@ const DEFAULT_SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// Persistence-backed runtime host for one workflow instance run.
 pub struct PersistenceRuntimeHost {
-    input_lease: std::sync::OnceLock<runtara_core::persistence::invocations::InvocationLease>,
+    /// The root execution lease this run presents on every durable write.
+    /// Bound once, after the supervisor promotes the run; unbound only for
+    /// hosts outside a launched run, whose writes are accepted while no
+    /// execution holds the lease.
+    root_lease: std::sync::OnceLock<runtara_core::persistence::invocations::InvocationLease>,
     state: Arc<InstanceHandlerState>,
     instance_id: String,
     debug_mode: bool,
@@ -81,7 +85,7 @@ impl PersistenceRuntimeHost {
     /// Host for `instance_id` over the environment's shared handler state.
     pub fn new(state: Arc<InstanceHandlerState>, instance_id: String, debug_mode: bool) -> Self {
         Self {
-            input_lease: std::sync::OnceLock::new(),
+            root_lease: std::sync::OnceLock::new(),
             state,
             instance_id,
             debug_mode,
@@ -95,6 +99,27 @@ impl PersistenceRuntimeHost {
             tenant: tokio::sync::OnceCell::new(),
             trusted_launch: Default::default(),
         }
+    }
+
+    /// Bind the root execution lease. A running host cannot be rebound to a
+    /// different execution owner; rebinding the same lease is a no-op.
+    pub fn bind_root_lease(
+        &self,
+        lease: runtara_core::persistence::invocations::InvocationLease,
+    ) -> Result<(), String> {
+        if lease.instance_id != self.instance_id {
+            return Err("root lease belongs to another instance".into());
+        }
+        match self.root_lease.set(lease) {
+            Ok(()) => Ok(()),
+            Err(lease) if self.root_lease.get() == Some(&lease) => Ok(()),
+            Err(_) => Err("runtime root lease is already bound".into()),
+        }
+    }
+
+    /// The bound root execution lease, if any.
+    pub fn root_lease(&self) -> Option<&runtara_core::persistence::invocations::InvocationLease> {
+        self.root_lease.get()
     }
 
     /// The kind of the durable launch this run executes (from the launch

@@ -104,7 +104,7 @@ async fn mark_running_without_gate_confirmation(
         "claimed launch must enter the start gate"
     );
     let running = repository
-        .mark_running(launch_id, owner, claimed_launch.attempt_count)
+        .mark_running(launch_id, owner, claimed_launch.attempt_count, "root-owner")
         .await
         .expect("running transition must succeed")
         .expect("start-gated launch must promote to running");

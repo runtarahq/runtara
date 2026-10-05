@@ -4,7 +4,6 @@ use runtara_component_host::runtime_host::RuntimeInputState;
 use runtara_core::persistence::inputs::{
     InputAuthority, InputClosure, InputRequestSpec, InputRequests, InputState, request_id,
 };
-use runtara_core::persistence::invocations::InvocationLease;
 
 pub(super) fn state(value: InputState) -> RuntimeInputState {
     match value {
@@ -15,19 +14,6 @@ pub(super) fn state(value: InputState) -> RuntimeInputState {
 }
 
 impl PersistenceRuntimeHost {
-    /// Bind the root's input IO to the same lease as isolated invocation IO.
-    /// A running host cannot be rebound to a different execution owner.
-    pub fn bind_input_lease(&self, lease: InvocationLease) -> Result<(), String> {
-        if lease.instance_id != self.instance_id {
-            return Err("input lease belongs to another instance".into());
-        }
-        match self.input_lease.set(lease) {
-            Ok(()) => Ok(()),
-            Err(lease) if self.input_lease.get() == Some(&lease) => Ok(()),
-            Err(_) => Err("runtime input lease is already bound".into()),
-        }
-    }
-
     pub(super) fn inputs(&self) -> Result<&dyn InputRequests, String> {
         self.state
             .persistence
@@ -52,7 +38,7 @@ impl PersistenceRuntimeHost {
     }
 
     async fn input_authority(&self) -> Result<InputAuthority, String> {
-        if let Some(lease) = self.input_lease.get() {
+        if let Some(lease) = self.root_lease.get() {
             return Ok(InputAuthority::LeasedRoot(lease.clone()));
         }
         let root = self

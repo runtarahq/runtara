@@ -189,6 +189,7 @@ pub struct StartGate {
     confirmation_started: Arc<Mutex<bool>>,
     confirmation_updates: watch::Sender<Option<StartGateOutcome>>,
     deadline: tokio::time::Instant,
+    root_lease: Arc<std::sync::OnceLock<runtara_core::persistence::invocations::InvocationLease>>,
 }
 
 impl std::fmt::Debug for StartGate {
@@ -218,7 +219,27 @@ impl StartGate {
             confirmation_started: Arc::new(Mutex::new(false)),
             confirmation_updates,
             deadline,
+            root_lease: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// Hand the runner the root lease the supervisor claimed when it promoted
+    /// this generation to `running`. Bind before [`Self::open`]: the runner
+    /// reads it once the gate opens and presents it on every durable write.
+    /// Returns `false` if a different lease is already bound.
+    pub fn bind_root_lease(
+        &self,
+        lease: runtara_core::persistence::invocations::InvocationLease,
+    ) -> bool {
+        match self.root_lease.set(lease) {
+            Ok(()) => true,
+            Err(lease) => self.root_lease.get() == Some(&lease),
+        }
+    }
+
+    /// The root lease bound by the supervisor, if any.
+    pub fn root_lease(&self) -> Option<runtara_core::persistence::invocations::InvocationLease> {
+        self.root_lease.get().cloned()
     }
 
     /// Require a runner-owned durable confirmation before guest preparation.

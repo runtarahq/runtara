@@ -160,6 +160,7 @@ impl WorkflowStartConfirmation for GateWorkflowStartConfirmation {
     }
 }
 
+mod root_lease;
 mod run_state;
 mod scoped;
 pub use scoped::ScopedAgentRunnerConfig;
@@ -1598,6 +1599,7 @@ impl Runner for EmbeddedWasmRunner {
         let metrics_for_task = Arc::clone(&metrics);
         let task_for_run = Arc::clone(&task);
         let instance_id = options.instance_id.clone();
+        let tenant_id = options.tenant_id.clone();
         let launch_id = options.launch_id.clone();
         let invocation_owner = handle_id.clone();
         let start_gate = options.start_gate.clone();
@@ -1615,7 +1617,7 @@ impl Runner for EmbeddedWasmRunner {
         // returns capacity and records the optional permit duration together.
         tokio::spawn(async move {
             let _completion = completion;
-            if let Some(gate) = start_gate {
+            if let Some(gate) = start_gate.as_ref() {
                 // The durable dispatcher may open the in-memory gate once it
                 // owns the running generation. Do not clear the durable
                 // marker here: Store/WASI setup below can still pause or
@@ -1655,7 +1657,50 @@ impl Runner for EmbeddedWasmRunner {
             if !supervisor_owns_lifecycle {
                 mark_running(persistence.as_ref(), &instance_id).await;
             }
+            // Own the root execution lease for the whole run. Whoever promotes
+            // the run claims it: the durable supervisor in its promotion
+            // transaction, otherwise this task, which promoted the run just
+            // above. A scoped root always owns one. Every durable write
+            // presents it, and a run that cannot own its root must not
+            // execute as a stale writer.
+            let claims_lease = !supervisor_owns_lifecycle || scoped_authority.is_some();
+            let root_lease = match start_gate.as_ref().and_then(|gate| gate.root_lease()) {
+                Some(token) => Some(root_lease::RootLease::adopt(persistence.clone(), token)),
+                None if claims_lease && persistence.invocation_fences().is_some() => {
+                    match root_lease::RootLease::claim(
+                        persistence.clone(),
+                        &tenant_id,
+                        &instance_id,
+                        &invocation_owner,
+                        root_lease::ROOT_LEASE_CONTROL_TIMEOUT,
+                    )
+                    .await
+                    {
+                        Ok(lease) => Some(lease),
+                        Err(error) => {
+                            error!(
+                                instance_id = %instance_id,
+                                launch_id = %launch_id,
+                                error = %error,
+                                "Run could not own its root; not executing"
+                            );
+                            return;
+                        }
+                    }
+                }
+                None => None,
+            };
+            if let Some(lease) = &root_lease
+                && let Err(error) = runtime_host.bind_root_lease(lease.token.clone())
+            {
+                error!(instance_id = %instance_id, %error, "Run could not bind its root lease; not executing");
+                return;
+            }
             let run = if let Some(authority) = scoped_authority {
+                let Some(lease) = root_lease.as_ref() else {
+                    error!(instance_id = %instance_id, "Scoped root requires a root lease; not executing");
+                    return;
+                };
                 scoped::execute(
                     &executor,
                     &workflow,
@@ -1665,8 +1710,7 @@ impl Runner for EmbeddedWasmRunner {
                     start_confirmation.clone(),
                     authority,
                     scoped_config.as_ref().expect("admitted scoped policy"),
-                    persistence.clone(),
-                    &invocation_owner,
+                    lease,
                 )
                 .await
             } else {
@@ -1744,6 +1788,14 @@ impl Runner for EmbeddedWasmRunner {
                 }
             } else {
                 record_unacknowledged_cancel_exit(&persistence, &instance_id).await;
+            }
+            // Nothing of this execution writes after this point. Leaving
+            // `running` already revoked the lease; this covers an exit that
+            // left the row running for the monitor to settle.
+            if let Some(lease) = &root_lease
+                && let Err(error) = lease.release().await
+            {
+                warn!(instance_id = %instance_id, error = %error, "Root lease release deferred to the status transition");
             }
         });
 
