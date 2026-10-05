@@ -65,11 +65,13 @@ function appendSchemaFieldSuggestions(
   suggestions: VariableSuggestion[]
 ): void {
   for (const field of fields) {
-    if (!field.name) {
+    // Unnamed fields, and names no reference path can spell, are left out
+    // along with their nested properties.
+    const value = appendPathSegment(valuePrefix, field.name);
+    if (value === null) {
       continue;
     }
     const path = pathPrefix ? `${pathPrefix}.${field.name}` : field.name;
-    const value = appendPathSegment(valuePrefix, field.name);
     suggestions.push({
       label: path,
       value,
@@ -192,10 +194,14 @@ export function composeVariableSuggestions(
   // Add workflow variables
   if (variables && variables.length > 0) {
     for (const variable of variables) {
-      if (variable.name) {
+      const value = appendPathSegment(
+        'workflow.inputs.variables',
+        variable.name
+      );
+      if (value !== null) {
         suggestions.push({
           label: variable.name,
-          value: appendPathSegment('workflow.inputs.variables', variable.name),
+          value,
           description: variable.description || 'Workflow variable',
           group: 'Variables',
           type: variable.type?.toLowerCase(),

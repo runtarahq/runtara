@@ -268,6 +268,31 @@ describe('field names that are not plain identifiers', () => {
     expect(values).toContain('workflow.inputs.variables.region');
     expect(values).toContain('workflow.inputs.variables["rate.limit"]');
   });
+
+  it('leaves out fields and variables no reference path can spell', () => {
+    const suggestions = composeVariableSuggestions(
+      [],
+      [
+        {
+          name: `a"]["b'c`,
+          type: 'object',
+          required: false,
+          description: '',
+          properties: [
+            { name: 'inner', type: 'string', required: false, description: '' },
+          ],
+        },
+        { name: 'ok', type: 'string', required: false, description: '' },
+      ],
+      [{ name: `x"]['y`, value: 1, type: 'Integer', description: null }]
+    );
+
+    const labels = suggestions.map((s) => s.label);
+    expect(labels).toContain('ok');
+    expect(labels).not.toContain(`a"]["b'c`);
+    expect(labels).not.toContain(`a"]["b'c.inner`);
+    expect(labels).not.toContain(`x"]['y`);
+  });
 });
 
 describe('Split item scope suggestions', () => {

@@ -31,14 +31,17 @@ describe('appendPathSegment', () => {
     expect(appendPathSegment('data', `it's "x"`)).toBe(`data.it's "x"`);
   });
 
-  it('emits a malformed path when no spelling reads back as the name', () => {
-    // Both quote characters plus a dot: the validator rejects the result
-    // instead of resolving it to some other key.
-    expect(appendPathSegment('data', `a.b'"`)).toBe(`data["a.b'""]`);
-    expect(appendPathSegment('data', '')).toBe('data[""]');
+  it('returns null when no spelling reads back as the name', () => {
+    // Quoted, the name's own `"][` would close the key and open another:
+    // `data["a"]["b'c"]` reads as the key `a`, then `b'c`.
+    expect(appendPathSegment('data', `a"]["b'c`)).toBeNull();
+    expect(appendPathSegment('data', `a']['b"c`)).toBeNull();
+    expect(appendPathSegment('data', `a.b'"`)).toBeNull();
+    expect(appendPathSegment('data', `'"]`)).toBeNull();
+    expect(appendPathSegment('data', '')).toBeNull();
   });
 
-  it('round-trips through the tokenizer for every name it can spell', () => {
+  it('round-trips through the tokenizer for hand-picked names', () => {
     const names = [
       'plain',
       'order-id',
@@ -62,16 +65,54 @@ describe('appendPathSegment', () => {
       'a.b[0]',
     ];
     for (const name of names) {
-      expect(referenceSegments(appendPathSegment('data', name))).toEqual([
-        'data',
+      expect(referenceSegments(spelled('data', name))).toEqual(['data', name]);
+      expect(referenceSegments(spelled("steps['s'].outputs", name))).toEqual([
+        'steps',
+        's',
+        'outputs',
         name,
       ]);
-      expect(
-        referenceSegments(appendPathSegment("steps['s'].outputs", name))
-      ).toEqual(['steps', 's', 'outputs', name]);
+    }
+  });
+
+  it('spells every short name so it reads back as that one key, or returns null', () => {
+    // Every name up to four characters long over the characters that matter
+    // to the tokenizer.
+    for (const name of namesOver(`a.[]"' `, 4)) {
+      const built = appendPathSegment('data', name);
+      const unspellable =
+        name.includes('"') && name.includes("'") && /[.[\]]/.test(name);
+      if (unspellable) {
+        expect(built, name).toBeNull();
+      } else {
+        expect(referenceSegments(spelled('data', name)), name).toEqual([
+          'data',
+          name,
+        ]);
+      }
     }
   });
 });
+
+/** appendPathSegment for a name the test expects to be spellable. */
+function spelled(path: string, name: string): string {
+  const built = appendPathSegment(path, name);
+  expect(built, name).not.toBeNull();
+  return built as string;
+}
+
+/** Every non-empty string of up to `maxLength` characters from `alphabet`. */
+function namesOver(alphabet: string, maxLength: number): string[] {
+  let current = [''];
+  const names: string[] = [];
+  for (let length = 1; length <= maxLength; length += 1) {
+    current = current.flatMap((prefix) =>
+      [...alphabet].map((ch) => prefix + ch)
+    );
+    names.push(...current);
+  }
+  return names;
+}
 
 describe('referenceSegments', () => {
   it('splits on dots and drops empty segments', () => {

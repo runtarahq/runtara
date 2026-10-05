@@ -152,6 +152,13 @@ function buildStepInfoList(
 
     // Process inputMapping to create StepParameters
     for (const [inputKey] of Object.entries(step.inputMapping || {})) {
+      // When referencing previous steps, use .outputs instead of .inputs
+      const inputPath = appendPathSegment(
+        `steps['${prevStepId}'].outputs`,
+        inputKey
+      );
+      if (inputPath === null) continue;
+
       let parameterType: ParameterType | undefined;
       const parameterSchema: any = null;
 
@@ -176,13 +183,7 @@ function buildStepInfoList(
       }
 
       inputs.push(
-        createStepParameter(
-          inputKey,
-          parameterType,
-          // When referencing previous steps, use .outputs instead of .inputs
-          appendPathSegment(`steps['${prevStepId}'].outputs`, inputKey),
-          parameterSchema
-        )
+        createStepParameter(inputKey, parameterType, inputPath, parameterSchema)
       );
     }
 
@@ -201,12 +202,13 @@ function buildStepInfoList(
             // object fields so steps.<id>.outputs.body.<child> is offered
             // and typed (meta.json carries the nested shape).
             for (const field of outputInfo.fields) {
-              outputs.push(
-                agentOutputFieldToParameter(
-                  field,
-                  `steps['${prevStepId}'].outputs`
-                )
+              const parameter = agentOutputFieldToParameter(
+                field,
+                `steps['${prevStepId}'].outputs`
               );
+              if (parameter) {
+                outputs.push(parameter);
+              }
             }
           } else {
             // Simple type output - show the outputs itself
@@ -245,15 +247,17 @@ function buildStepInfoList(
             if (schema.type === 'object' && schema.properties) {
               // Object with properties - show each property as a suggestion
               for (const [propName] of Object.entries<any>(schema.properties)) {
+                const propPath = appendPathSegment(
+                  `steps['${prevStepId}'].outputs`,
+                  propName
+                );
+                if (propPath === null) continue;
                 const schemaInfo = parseJsonSchema(schemaString, [propName]);
                 outputs.push(
                   createStepParameter(
                     propName,
                     schemaInfo.type,
-                    appendPathSegment(
-                      `steps['${prevStepId}'].outputs`,
-                      propName
-                    ),
+                    propPath,
                     schemaInfo.schema
                   )
                 );
@@ -301,16 +305,18 @@ function buildStepInfoList(
         for (const [fieldName, fieldDef] of Object.entries<any>(
           waitStep.responseSchema
         )) {
+          const fieldPath = appendPathSegment(
+            `steps['${prevStepId}'].outputs`,
+            fieldName
+          );
+          if (fieldPath === null) continue;
           const fieldType = fieldDef?.type as ParameterType | undefined;
           outputs.push({
             name: fieldName,
             type: isValidParameterType(fieldType ?? '')
               ? (fieldType as ParameterType)
               : 'string',
-            path: appendPathSegment(
-              `steps['${prevStepId}'].outputs`,
-              fieldName
-            ),
+            path: fieldPath,
             children: undefined,
           });
         }
@@ -368,7 +374,8 @@ function shapeTypeToParameterType(type: string): ParameterType | undefined {
  * Converts a capability OutputField (recursive: `fields` for nested objects,
  * `items` for array element types) into a StepParameter tree. Array fields
  * stay leaf-level — addressing into an array needs an index, which is not a
- * useful static suggestion.
+ * useful static suggestion. Null when no reference path can spell the field's
+ * name; it is left out along with its children.
  */
 function agentOutputFieldToParameter(
   field: {
@@ -377,14 +384,19 @@ function agentOutputFieldToParameter(
     fields?: { name: string; type?: string; fields?: unknown[] }[];
   },
   basePath: string
-): StepParameter {
+): StepParameter | null {
   const path = appendPathSegment(basePath, field.name);
-  const children = (field.fields ?? []).map((child) =>
-    agentOutputFieldToParameter(
-      child as Parameters<typeof agentOutputFieldToParameter>[0],
-      path
+  if (path === null) {
+    return null;
+  }
+  const children = (field.fields ?? [])
+    .map((child) =>
+      agentOutputFieldToParameter(
+        child as Parameters<typeof agentOutputFieldToParameter>[0],
+        path
+      )
     )
-  );
+    .filter((child): child is StepParameter => child !== null);
   return {
     name: field.name,
     type: shapeTypeToParameterType(field.type ?? ''),
@@ -414,10 +426,14 @@ function appendShapeOutputs(
   const kind = shape.outputs?.kind;
   if (kind === 'object') {
     for (const field of shape.outputs?.fields ?? []) {
+      const path = appendPathSegment(`steps['${stepId}'].outputs`, field.name);
+      if (path === null) {
+        continue;
+      }
       outputs.push({
         name: field.name,
         type: shapeTypeToParameterType(field.type),
-        path: appendPathSegment(`steps['${stepId}'].outputs`, field.name),
+        path,
         children: undefined,
       });
     }
@@ -444,18 +460,25 @@ function appendShapeOutputs(
     if (sibling.gatedBy && !stepConfig?.[sibling.gatedBy]) {
       continue;
     }
-    outputs.push(shapeSiblingParameter(sibling, stepId));
+    const parameter = shapeSiblingParameter(sibling, stepId);
+    if (parameter) {
+      outputs.push(parameter);
+    }
   }
 }
 
 function shapeSiblingParameter(
   sibling: ShapeFieldJson,
   stepId: string
-): StepParameter {
+): StepParameter | null {
+  const path = appendPathSegment(`steps['${stepId}']`, sibling.name);
+  if (path === null) {
+    return null;
+  }
   return {
     name: sibling.name,
     type: shapeTypeToParameterType(sibling.type),
-    path: appendPathSegment(`steps['${stepId}']`, sibling.name),
+    path,
     children: undefined,
   };
 }
@@ -648,6 +671,8 @@ function createStepParameter(
       for (const [childName, childSchema] of Object.entries(
         schema.properties
       )) {
+        const childPath = appendPathSegment(path, childName);
+        if (childPath === null) continue;
         const childType = (childSchema as any).type as ParameterType;
 
         if (isValidParameterType(childType)) {
@@ -655,18 +680,14 @@ function createStepParameter(
             createStepParameter(
               `${name}.${childName}`,
               childType,
-              appendPathSegment(path, childName),
+              childPath,
               childSchema
             )
           );
         } else if ((childSchema as any).$ref) {
           // Handle reference properties
           children.push(
-            createStepParameter(
-              `${name}.${childName}`,
-              'object',
-              appendPathSegment(path, childName)
-            )
+            createStepParameter(`${name}.${childName}`, 'object', childPath)
           );
         }
       }

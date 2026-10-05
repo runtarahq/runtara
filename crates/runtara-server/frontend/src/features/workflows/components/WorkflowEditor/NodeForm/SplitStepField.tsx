@@ -233,8 +233,9 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
     // Add workflow input fields that are arrays
     if (workflowInputFields && workflowInputFields.length > 0) {
       for (const field of workflowInputFields) {
-        if (field.type === 'array' && field.name) {
-          const value = appendPathSegment('data', field.name);
+        const value =
+          field.type === 'array' ? appendPathSegment('data', field.name) : null;
+        if (value !== null) {
           suggestions.push({
             label: `${value} (workflow input)`,
             value,

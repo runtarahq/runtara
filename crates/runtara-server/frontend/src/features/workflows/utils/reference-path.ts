@@ -25,12 +25,16 @@ const STRUCTURAL = /[.[\]]/;
  * Appends one key to a reference path: `.name` for plain names, otherwise
  * `["name"]` (or `['name']` when the name contains `"`).
  *
- * A name containing both quote characters has no quoted spelling. It falls
- * back to the dotted form, which still reads back as that one key unless the
- * name also contains `.`, `[` or `]`; such a name is emitted double-quoted and
- * the validator rejects it as malformed rather than resolving a different key.
+ * Returns null when no spelling reads back as exactly this key, and callers
+ * leave such a field out rather than insert a path to some other key. That is
+ * the empty name, and a name containing both quote characters plus `.`, `[` or
+ * `]`. With no escaping, its own quotes would end a quoted key early:
+ * `a"]["b'c` written as `data["a"]["b'c"]` reads as the key `a`, then `b'c`.
  */
-export function appendPathSegment(path: string, name: string): string {
+export function appendPathSegment(path: string, name: string): string | null {
+  if (!name) {
+    return null;
+  }
   if (PLAIN_SEGMENT.test(name)) {
     return `${path}.${name}`;
   }
@@ -40,10 +44,9 @@ export function appendPathSegment(path: string, name: string): string {
   if (!name.includes("'")) {
     return `${path}['${name}']`;
   }
-  if (!STRUCTURAL.test(name)) {
-    return `${path}.${name}`;
-  }
-  return `${path}["${name}"]`;
+  // Both quote characters: no quoted spelling. The dotted form reads back as
+  // this one key unless the name has structure of its own.
+  return STRUCTURAL.test(name) ? null : `${path}.${name}`;
 }
 
 /**

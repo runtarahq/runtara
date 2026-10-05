@@ -468,6 +468,65 @@ describe('composePreviousSteps field names that are not plain identifiers', () =
     expect(total?.path).toBe(`steps['embed'].outputs.total`);
     expect(total?.type).toBe('integer');
   });
+
+  it('leaves out fields no reference path can spell, with their children', () => {
+    const agents = [
+      {
+        id: 'http',
+        name: 'HTTP',
+        supportedCapabilities: {
+          'http-request': {
+            id: 'http-request',
+            inputs: [],
+            output: {
+              type: 'object',
+              fields: [
+                {
+                  name: `a"]["b'c`,
+                  type: 'object',
+                  fields: [{ name: 'inner', type: 'string' }],
+                },
+                {
+                  name: 'meta',
+                  type: 'object',
+                  fields: [
+                    { name: `x'].y["z`, type: 'string' },
+                    { name: 'ok', type: 'string' },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      },
+    ] as any;
+    const graph = {
+      entryPoint: 'fetch',
+      executionPlan: [{ fromStep: 'fetch', toStep: 'probe' }],
+      steps: {
+        fetch: {
+          id: 'fetch',
+          name: 'Fetch',
+          stepType: 'Agent',
+          agentId: 'http',
+          capabilityId: 'http-request',
+        },
+        probe: { id: 'probe', name: 'Probe', stepType: 'Agent' },
+      },
+    } as unknown as ExecutionGraph;
+
+    const [fetch] = composePreviousSteps({
+      stepId: 'probe',
+      agents,
+      executionGraph: graph,
+    });
+
+    // Quoted, `a"]["b'c` would read back as the key `a`, then `b'c`.
+    expect(pathsByName(fetch.outputs)).toEqual({
+      meta: `steps['fetch'].outputs.meta`,
+      ok: `steps['fetch'].outputs.meta.ok`,
+    });
+  });
 });
 
 describe('composeVariableSuggestions sibling labels', () => {
