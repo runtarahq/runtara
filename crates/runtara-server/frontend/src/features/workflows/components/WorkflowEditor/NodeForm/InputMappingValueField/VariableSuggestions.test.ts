@@ -208,6 +208,93 @@ describe('nested workflow input suggestions', () => {
   });
 });
 
+describe('field names that are not plain identifiers', () => {
+  const ODD_SCHEMA = [
+    { name: 'a.b', type: 'number', required: false, description: '' },
+    {
+      name: 'customer',
+      type: 'object',
+      required: false,
+      description: '',
+      properties: [
+        { name: 'x]y', type: 'string', required: false, description: '' },
+      ],
+    },
+  ];
+
+  it('bracket-quotes workflow input fields, nested ones included', () => {
+    const suggestions = composeVariableSuggestions([], ODD_SCHEMA);
+
+    const byValue = Object.fromEntries(suggestions.map((s) => [s.value, s]));
+    expect(byValue['workflow.inputs.data["a.b"]']?.type).toBe('number');
+    expect(byValue['workflow.inputs.data["a.b"]']?.label).toBe('a.b');
+    expect(byValue['workflow.inputs.data.customer["x]y"]']?.type).toBe(
+      'string'
+    );
+    expect(byValue['workflow.inputs.data.customer["x]y"]']?.label).toBe(
+      'customer.x]y'
+    );
+    // The dotted spelling would split into two keys.
+    expect(byValue['workflow.inputs.data.a.b']).toBeUndefined();
+  });
+
+  it('bracket-quotes Split item fields under data and iteration.item', () => {
+    const suggestions = composeVariableSuggestions(
+      [],
+      undefined,
+      undefined,
+      false,
+      true, // inside Split
+      false,
+      ODD_SCHEMA
+    );
+
+    const values = suggestions.map((s) => s.value);
+    expect(values).toContain('data["a.b"]');
+    expect(values).toContain('data.customer["x]y"]');
+    expect(values).toContain('iteration.item["a.b"]');
+    expect(values).toContain('iteration.item.customer["x]y"]');
+  });
+
+  it('bracket-quotes workflow variable names', () => {
+    const suggestions = composeVariableSuggestions([], undefined, [
+      { name: 'region', value: 'eu', type: 'String', description: null },
+      { name: 'rate.limit', value: 5, type: 'Integer', description: null },
+    ]);
+
+    const values = suggestions
+      .filter((s) => s.group === 'Variables')
+      .map((s) => s.value);
+    expect(values).toContain('workflow.inputs.variables.region');
+    expect(values).toContain('workflow.inputs.variables["rate.limit"]');
+  });
+
+  it('leaves out fields and variables no reference path can spell', () => {
+    const suggestions = composeVariableSuggestions(
+      [],
+      [
+        {
+          name: `a"]["b'c`,
+          type: 'object',
+          required: false,
+          description: '',
+          properties: [
+            { name: 'inner', type: 'string', required: false, description: '' },
+          ],
+        },
+        { name: 'ok', type: 'string', required: false, description: '' },
+      ],
+      [{ name: `x"]['y`, value: 1, type: 'Integer', description: null }]
+    );
+
+    const labels = suggestions.map((s) => s.label);
+    expect(labels).toContain('ok');
+    expect(labels).not.toContain(`a"]["b'c`);
+    expect(labels).not.toContain(`a"]["b'c.inner`);
+    expect(labels).not.toContain(`x"]['y`);
+  });
+});
+
 describe('Split item scope suggestions', () => {
   const ITEM_SCHEMA = [
     { name: 'sku', type: 'string', required: true, description: 'Item SKU' },

@@ -18,6 +18,7 @@ import {
   validateSchemaFieldsWithRust,
   validateWorkflowStartInputsWithRust,
 } from './rust-workflow-validation';
+import { appendPathSegment } from './reference-path';
 import { analyzeFormWithRust } from '@/shared/forms';
 import { NODE_TYPES, STEP_TYPES } from '@/features/workflows/config/workflow';
 import { canStepHaveErrorHandler } from '@/features/workflows/utils/step-error-support';
@@ -258,6 +259,69 @@ describe('rust workflow validation WASM', () => {
     expect(result.errors.join(' ')).toContain('count');
   });
 
+  it('accepts the reference paths the editor builds for non-identifier field names', async () => {
+    const names = ['a.b', 'a]b', 'a[0]', 'a..b', 'say "hi"', 'first name'];
+    const graphReferencing = (references: string[], declared = names) => ({
+      name: 'Non-identifier field names',
+      steps: {
+        finish: {
+          stepType: 'Finish',
+          id: 'finish',
+          inputMapping: Object.fromEntries(
+            references.map((value, index) => [
+              `out${index}`,
+              { valueType: 'reference', value },
+            ])
+          ),
+        },
+      },
+      entryPoint: 'finish',
+      executionPlan: [],
+      variables: {},
+      inputSchema: Object.fromEntries(
+        declared.map((name) => [name, { type: 'string', required: true }])
+      ),
+      outputSchema: {},
+    });
+
+    const built = await validateExecutionGraphWithRust(
+      graphReferencing(names.map((name) => appendPathSegment('data', name)!))
+    );
+    expect(built.errors).toEqual([]);
+
+    // Interpolated after a dot, the same names split into an undeclared key
+    // (E051) or are rejected as malformed (E011).
+    for (const [name, code] of [
+      ['a.b', 'E051'],
+      ['a[0]', 'E051'],
+      ['a]b', 'E011'],
+      ['a..b', 'E011'],
+    ]) {
+      const raw = await validateExecutionGraphWithRust(
+        graphReferencing([`data.${name}`])
+      );
+      expect(raw.errors.join('\n'), name).toContain(`[${code}]`);
+    }
+
+    // Every short name over the characters that matter to the tokenizer,
+    // validated against a schema declaring only that name: a path that split
+    // differently would reach an undeclared key (E051) or descend into the
+    // string (E059).
+    let spelled = 0;
+    for (const name of namesOver(`a.[]"' `, 4)) {
+      const reference = appendPathSegment('data', name);
+      if (reference === null) {
+        continue;
+      }
+      spelled += 1;
+      const result = await validateExecutionGraphWithRust(
+        graphReferencing([reference], [name])
+      );
+      expect(result.errors, reference).toEqual([]);
+    }
+    expect(spelled).toBeGreaterThan(2000);
+  });
+
   it('serves step types from WASM and agents from the runtime API catalog', async () => {
     const stepTypes = await getStaticStepTypesWithRust();
     const agentStepSchema = await getStaticStepTypeSchemaWithRust('Agent');
@@ -378,3 +442,16 @@ describe('rust workflow validation WASM', () => {
     expect(canStepHaveErrorHandler(waitSignal!.name)).toBe(true);
   });
 });
+
+/** Every non-empty string of up to `maxLength` characters from `alphabet`. */
+function namesOver(alphabet: string, maxLength: number): string[] {
+  let current = [''];
+  const names: string[] = [];
+  for (let length = 1; length <= maxLength; length += 1) {
+    current = current.flatMap((prefix) =>
+      [...alphabet].map((ch) => prefix + ch)
+    );
+    names.push(...current);
+  }
+  return names;
+}

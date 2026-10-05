@@ -4,6 +4,7 @@ import {
   getStepOutputShape,
   ShapeFieldJson,
 } from '@/features/workflows/utils/step-output-shapes';
+import { appendPathSegment } from '@/features/workflows/utils/reference-path';
 import { ExecutionGraph } from '../CustomNodes/utils.tsx';
 import { findAgentById } from '@/shared/utils/agent-id';
 
@@ -151,6 +152,13 @@ function buildStepInfoList(
 
     // Process inputMapping to create StepParameters
     for (const [inputKey] of Object.entries(step.inputMapping || {})) {
+      // When referencing previous steps, use .outputs instead of .inputs
+      const inputPath = appendPathSegment(
+        `steps['${prevStepId}'].outputs`,
+        inputKey
+      );
+      if (inputPath === null) continue;
+
       let parameterType: ParameterType | undefined;
       const parameterSchema: any = null;
 
@@ -175,12 +183,7 @@ function buildStepInfoList(
       }
 
       inputs.push(
-        createStepParameter(
-          inputKey,
-          parameterType,
-          prevStepId,
-          parameterSchema
-        )
+        createStepParameter(inputKey, parameterType, inputPath, parameterSchema)
       );
     }
 
@@ -199,12 +202,13 @@ function buildStepInfoList(
             // object fields so steps.<id>.outputs.body.<child> is offered
             // and typed (meta.json carries the nested shape).
             for (const field of outputInfo.fields) {
-              outputs.push(
-                agentOutputFieldToParameter(
-                  field,
-                  `steps['${prevStepId}'].outputs`
-                )
+              const parameter = agentOutputFieldToParameter(
+                field,
+                `steps['${prevStepId}'].outputs`
               );
+              if (parameter) {
+                outputs.push(parameter);
+              }
             }
           } else {
             // Simple type output - show the outputs itself
@@ -243,12 +247,17 @@ function buildStepInfoList(
             if (schema.type === 'object' && schema.properties) {
               // Object with properties - show each property as a suggestion
               for (const [propName] of Object.entries<any>(schema.properties)) {
-                const schemaInfo = parseJsonSchema(schemaString, propName);
+                const propPath = appendPathSegment(
+                  `steps['${prevStepId}'].outputs`,
+                  propName
+                );
+                if (propPath === null) continue;
+                const schemaInfo = parseJsonSchema(schemaString, [propName]);
                 outputs.push(
                   createStepParameter(
                     propName,
                     schemaInfo.type,
-                    prevStepId,
+                    propPath,
                     schemaInfo.schema
                   )
                 );
@@ -296,13 +305,18 @@ function buildStepInfoList(
         for (const [fieldName, fieldDef] of Object.entries<any>(
           waitStep.responseSchema
         )) {
+          const fieldPath = appendPathSegment(
+            `steps['${prevStepId}'].outputs`,
+            fieldName
+          );
+          if (fieldPath === null) continue;
           const fieldType = fieldDef?.type as ParameterType | undefined;
           outputs.push({
             name: fieldName,
             type: isValidParameterType(fieldType ?? '')
               ? (fieldType as ParameterType)
               : 'string',
-            path: `steps['${prevStepId}'].outputs.${fieldName}`,
+            path: fieldPath,
             children: undefined,
           });
         }
@@ -360,7 +374,8 @@ function shapeTypeToParameterType(type: string): ParameterType | undefined {
  * Converts a capability OutputField (recursive: `fields` for nested objects,
  * `items` for array element types) into a StepParameter tree. Array fields
  * stay leaf-level — addressing into an array needs an index, which is not a
- * useful static suggestion.
+ * useful static suggestion. Null when no reference path can spell the field's
+ * name; it is left out along with its children.
  */
 function agentOutputFieldToParameter(
   field: {
@@ -369,14 +384,19 @@ function agentOutputFieldToParameter(
     fields?: { name: string; type?: string; fields?: unknown[] }[];
   },
   basePath: string
-): StepParameter {
-  const path = `${basePath}.${field.name}`;
-  const children = (field.fields ?? []).map((child) =>
-    agentOutputFieldToParameter(
-      child as Parameters<typeof agentOutputFieldToParameter>[0],
-      path
+): StepParameter | null {
+  const path = appendPathSegment(basePath, field.name);
+  if (path === null) {
+    return null;
+  }
+  const children = (field.fields ?? [])
+    .map((child) =>
+      agentOutputFieldToParameter(
+        child as Parameters<typeof agentOutputFieldToParameter>[0],
+        path
+      )
     )
-  );
+    .filter((child): child is StepParameter => child !== null);
   return {
     name: field.name,
     type: shapeTypeToParameterType(field.type ?? ''),
@@ -406,10 +426,14 @@ function appendShapeOutputs(
   const kind = shape.outputs?.kind;
   if (kind === 'object') {
     for (const field of shape.outputs?.fields ?? []) {
+      const path = appendPathSegment(`steps['${stepId}'].outputs`, field.name);
+      if (path === null) {
+        continue;
+      }
       outputs.push({
         name: field.name,
         type: shapeTypeToParameterType(field.type),
-        path: `steps['${stepId}'].outputs.${field.name}`,
+        path,
         children: undefined,
       });
     }
@@ -436,18 +460,25 @@ function appendShapeOutputs(
     if (sibling.gatedBy && !stepConfig?.[sibling.gatedBy]) {
       continue;
     }
-    outputs.push(shapeSiblingParameter(sibling, stepId));
+    const parameter = shapeSiblingParameter(sibling, stepId);
+    if (parameter) {
+      outputs.push(parameter);
+    }
   }
 }
 
 function shapeSiblingParameter(
   sibling: ShapeFieldJson,
   stepId: string
-): StepParameter {
+): StepParameter | null {
+  const path = appendPathSegment(`steps['${stepId}']`, sibling.name);
+  if (path === null) {
+    return null;
+  }
   return {
     name: sibling.name,
     type: shapeTypeToParameterType(sibling.type),
-    path: `steps['${stepId}'].${sibling.name}`,
+    path,
     children: undefined,
   };
 }
@@ -509,12 +540,13 @@ function findPreviousSteps(
 }
 
 /**
- * Parse JSON schema and extract type information for a specific property path
+ * Parse JSON schema and extract type information for a property path, given
+ * as one key per segment so a property named `a.b` stays a single key.
  * Handles $defs and $ref references
  */
 function parseJsonSchema(
   schemaString: string,
-  propertyPath: string
+  propertyPath: string[]
 ): { type?: ParameterType; schema?: any } {
   try {
     const schema = JSON.parse(schemaString);
@@ -534,14 +566,13 @@ function parseJsonSchema(
       return current;
     }
 
-    // Function to find a property by its path (e.g., "body.headers")
+    // Function to find a property by its path (e.g., ["body", "headers"])
     function findProperty(
-      propPath: string,
+      parts: string[],
       currentSchema: any
     ): { type?: ParameterType; schema?: any } {
       if (!currentSchema || !currentSchema.properties) return {};
 
-      const parts = propPath.split('.');
       const firstPart = parts[0];
 
       // Handle array notation like body.messages[0].role
@@ -571,7 +602,7 @@ function parseJsonSchema(
 
           // Continue with the rest of the path
           if (parts.length > 1) {
-            return findProperty(parts.slice(1).join('.'), {
+            return findProperty(parts.slice(1), {
               properties: itemSchema,
             });
           }
@@ -599,7 +630,7 @@ function parseJsonSchema(
 
       // If this is a nested path, continue to the next part
       if (parts.length > 1) {
-        return findProperty(parts.slice(1).join('.'), property);
+        return findProperty(parts.slice(1), property);
       }
 
       // Return the property type
@@ -622,12 +653,9 @@ function parseJsonSchema(
 function createStepParameter(
   name: string,
   type: ParameterType | undefined,
-  stepId: string,
+  path: string,
   schema: any = null
 ): StepParameter {
-  // When referencing previous steps, use .outputs instead of .inputs
-  const path = `steps['${stepId}'].outputs.${name}`;
-
   const parameter: StepParameter = {
     name,
     type,
@@ -643,6 +671,8 @@ function createStepParameter(
       for (const [childName, childSchema] of Object.entries(
         schema.properties
       )) {
+        const childPath = appendPathSegment(path, childName);
+        if (childPath === null) continue;
         const childType = (childSchema as any).type as ParameterType;
 
         if (isValidParameterType(childType)) {
@@ -650,14 +680,14 @@ function createStepParameter(
             createStepParameter(
               `${name}.${childName}`,
               childType,
-              stepId,
+              childPath,
               childSchema
             )
           );
         } else if ((childSchema as any).$ref) {
           // Handle reference properties
           children.push(
-            createStepParameter(`${name}.${childName}`, 'object', stepId)
+            createStepParameter(`${name}.${childName}`, 'object', childPath)
           );
         }
       }
@@ -672,7 +702,7 @@ function createStepParameter(
               createStepParameter(
                 `${name}[${index}]`,
                 itemType,
-                stepId,
+                `${path}[${index}]`,
                 itemSchema
               )
             );
@@ -683,11 +713,18 @@ function createStepParameter(
         const itemType = schema.items.type as ParameterType;
         if (isValidParameterType(itemType)) {
           children.push(
-            createStepParameter(`${name}.item`, itemType, stepId, schema.items)
+            createStepParameter(
+              `${name}.item`,
+              itemType,
+              `${path}.item`,
+              schema.items
+            )
           );
         } else if (schema.items.$ref) {
           // Handle reference item type
-          children.push(createStepParameter(`${name}.item`, 'object', stepId));
+          children.push(
+            createStepParameter(`${name}.item`, 'object', `${path}.item`)
+          );
         }
       }
     }
