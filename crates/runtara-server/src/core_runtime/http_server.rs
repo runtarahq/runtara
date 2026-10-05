@@ -346,7 +346,7 @@ async fn checkpoint_handler(
         owner: None,
     };
 
-    match instance_handlers::handle_checkpoint(&state, request).await {
+    match instance_handlers::handle_checkpoint_call(&state, request).await {
         Ok(resp) => {
             let signal = resp.pending_signal.map(|s| SignalInfo {
                 command_id: s.command_id,

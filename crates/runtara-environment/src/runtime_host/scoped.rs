@@ -510,7 +510,7 @@ impl RuntimeHost for ScopedRuntimeHost {
         if let Some(io) = &self.io {
             return self.fenced_checkpoint(io, checkpoint_id, state).await;
         }
-        let result = handle_checkpoint(
+        let result = handle_checkpoint_call(
             &self.owner.root.state,
             CheckpointRequest {
                 instance_id: self.owner.root.instance_id.clone(),

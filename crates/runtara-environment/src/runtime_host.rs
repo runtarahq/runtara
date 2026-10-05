@@ -38,7 +38,7 @@ use runtara_component_host::runtime_host::{
 use runtara_core::instance_handlers::{
     CheckpointRequest, GetCheckpointRequest, InstanceEvent, InstanceEventType,
     InstanceHandlerState, PollSignalsRequest, RetryAttemptEvent, Signal, SignalAck, SignalType,
-    SleepRequest, handle_checkpoint, handle_get_checkpoint, handle_instance_event,
+    SleepRequest, handle_checkpoint_call, handle_get_checkpoint, handle_instance_event,
     handle_poll_signals, handle_retry_attempt, handle_signal_ack_decision, handle_sleep,
 };
 use runtara_core::persistence::Persistence;
@@ -606,7 +606,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
         state: Vec<u8>,
     ) -> Result<RuntimeCheckpointResult, String> {
         self.escalate_if_cancel_ignored().await;
-        let response = handle_checkpoint(
+        let response = handle_checkpoint_call(
             &self.state,
             CheckpointRequest {
                 instance_id: self.instance_id.clone(),
@@ -914,6 +914,28 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// The guest's empty-state `checkpoint` call is still a read: it never
+    /// writes, and after a write it returns the stored bytes.
+    #[tokio::test]
+    async fn an_empty_checkpoint_call_reads_and_never_writes() {
+        let (persistence, host, id) = setup().await;
+        let miss = host.checkpoint("probe".into(), Vec::new()).await.unwrap();
+        assert!(!miss.found);
+        assert!(
+            persistence
+                .load_checkpoint(&id, "probe")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        host.checkpoint("probe".into(), b"stored".to_vec())
+            .await
+            .unwrap();
+        let hit = host.checkpoint("probe".into(), Vec::new()).await.unwrap();
+        assert!(hit.found);
+        assert_eq!(hit.state, b"stored");
     }
 
     #[tokio::test]

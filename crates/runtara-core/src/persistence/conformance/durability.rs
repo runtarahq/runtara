@@ -382,6 +382,59 @@ pub async fn unowned_writes_yield_to_an_owning_execution(p: &dyn Persistence) {
     p.delete_instances_batch(&[id]).await.unwrap();
 }
 
+/// The fenced child lookup reads without writing and stays fenced: a
+/// superseded attempt cannot read through it either.
+pub async fn fenced_child_lookup_reads_only_under_its_fence(p: &dyn Persistence) {
+    use crate::persistence::invocations::InvocationCheckpoint;
+    let id = running(p, "child-lookup").await;
+    let lease = claim(p, &id, "runner-a").await;
+    let attempt = fences(p)
+        .begin_invocation_attempt(&lease, "child", "start")
+        .await
+        .unwrap()
+        .fence;
+    assert_eq!(
+        fences(p)
+            .invocation_checkpoint_lookup(&attempt, "child::step")
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(
+        p.load_checkpoint(&id, "child::step")
+            .await
+            .unwrap()
+            .is_none(),
+        "a lookup must not write"
+    );
+    fences(p)
+        .invocation_checkpoint(
+            &attempt,
+            &InvocationCheckpoint {
+                checkpoint_id: "child::step".into(),
+                state: b"child".to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fences(p)
+            .invocation_checkpoint_lookup(&attempt, "child::step")
+            .await
+            .unwrap(),
+        Some(b"child".to_vec())
+    );
+    relaunch(p, &id, "runner-b").await;
+    assert!(
+        fences(p)
+            .invocation_checkpoint_lookup(&attempt, "child::step")
+            .await
+            .is_err(),
+        "a superseded attempt cannot read through its fence"
+    );
+    p.delete_instances_batch(&[id]).await.unwrap();
+}
+
 /// Every single-backend case in this module.
 pub async fn run_all(p: &dyn Persistence) {
     record_checkpoint_first_write_wins(p).await;
@@ -391,4 +444,5 @@ pub async fn run_all(p: &dyn Persistence) {
     owned_completion_applies_once(p).await;
     superseded_execution_cannot_write_guest_state(p).await;
     unowned_writes_yield_to_an_owning_execution(p).await;
+    fenced_child_lookup_reads_only_under_its_fence(p).await;
 }

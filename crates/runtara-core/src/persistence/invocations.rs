@@ -258,9 +258,16 @@ pub trait InvocationFences: Send + Sync {
         fence: &AttemptFence,
         checkpoint: Option<&InvocationCheckpoint>,
     ) -> FenceResult<InvocationSettlement>;
+    /// Read one checkpoint under an active lease/attempt fence. Writes nothing.
+    async fn invocation_checkpoint_lookup(
+        &self,
+        fence: &AttemptFence,
+        checkpoint_id: &str,
+    ) -> FenceResult<Option<Vec<u8>>>;
     /// Read/insert a checkpoint and update the root's checkpoint pointer under
-    /// the same lease/attempt fence. Existing state is never overwritten. Empty
-    /// state is a probe and does not create an empty replay hit.
+    /// the same lease/attempt fence. Existing state is never overwritten.
+    /// Empty state remains a probe for compatibility and does not create an
+    /// empty replay hit; a lookup is [`Self::invocation_checkpoint_lookup`].
     async fn invocation_checkpoint(
         &self,
         fence: &AttemptFence,

@@ -402,6 +402,24 @@ impl InvocationFences for PostgresPersistence {
             checkpoint: committed,
         })
     }
+    async fn invocation_checkpoint_lookup(
+        &self,
+        token: &AttemptFence,
+        checkpoint_id: &str,
+    ) -> FenceResult<Option<Vec<u8>>> {
+        validate_identity(checkpoint_id)?;
+        let mut tx = self.invocation_write_transaction(token).await?;
+        let state = sqlx::query_scalar(
+            "SELECT state FROM checkpoints WHERE instance_id=$1 AND checkpoint_id=$2",
+        )
+        .bind(&token.lease.instance_id)
+        .bind(checkpoint_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
+        tx.commit().await.map_err(storage)?;
+        Ok(state)
+    }
     async fn invocation_checkpoint(
         &self,
         token: &AttemptFence,

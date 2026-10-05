@@ -292,6 +292,20 @@ impl InvocationFences for InMemoryPersistence {
             checkpoint: committed,
         })
     }
+    async fn invocation_checkpoint_lookup(
+        &self,
+        token: &AttemptFence,
+        checkpoint_id: &str,
+    ) -> FenceResult<Option<Vec<u8>>> {
+        validate_identity(checkpoint_id)?;
+        let store = self.store.lock().unwrap();
+        active_attempt(&store, token)?;
+        Ok(store
+            .checkpoints
+            .iter()
+            .find(|c| c.instance_id == token.lease.instance_id && c.checkpoint_id == checkpoint_id)
+            .map(|c| c.state.clone()))
+    }
     async fn invocation_checkpoint(
         &self,
         token: &AttemptFence,

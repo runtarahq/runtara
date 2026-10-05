@@ -37,7 +37,8 @@ mod types;
 pub mod mock_persistence;
 
 pub use self::checkpoint::{
-    SLEEP_POLL_INTERVAL, handle_checkpoint, handle_get_checkpoint, handle_sleep,
+    SLEEP_POLL_INTERVAL, handle_checkpoint, handle_checkpoint_call, handle_checkpoint_lookup,
+    handle_get_checkpoint, handle_sleep,
 };
 pub use self::event::{handle_instance_event, handle_retry_attempt};
 pub use self::registration::handle_register_instance;

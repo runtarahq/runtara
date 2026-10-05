@@ -86,10 +86,15 @@ interface runtime {
 
     blocking-sleep: func(ms: u64) -> result<_, string>;
 
+    /// Read a result checkpoint without writing anything.
     get-checkpoint: func(
         checkpoint-id: string,
     ) -> result<option<list<u8>>, string>;
 
+    /// Record a result checkpoint: the first committed state for the id wins,
+    /// and a later call gets that state back as `found`. Empty `state` is
+    /// accepted only for compatibility, as a read probe; use `get-checkpoint`
+    /// to read.
     checkpoint: func(
         checkpoint-id: string,
         state: list<u8>,
