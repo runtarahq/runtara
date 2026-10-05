@@ -34,6 +34,18 @@ pub enum PathDefect {
     EmptyBracketKey,
     /// A `[` with no closing `]`; the rest of the path became its body.
     UnterminatedBracket,
+    /// A `[..]` body opens with a quote that is never closed (`data["a]`,
+    /// `data['a"]`). The body is read up to the first `]` instead, keeping the
+    /// stray quote as key text.
+    UnclosedQuote,
+    /// A quoted key's closing quote is followed by something other than `]`
+    /// (`data["a"b"]`). A key cannot contain its own quote character, so this
+    /// is usually a missing quote; the body is read up to the first `]`
+    /// instead.
+    TextAfterClosingQuote,
+    /// A `]` with no open `[` (`data.a]`, `items[0]]`), kept as key text. A
+    /// key containing `]` is written quoted: `data["a]b"]`.
+    StrayCloseBracket,
     /// The path ends in a dot outside any bracket body (`data.`,
     /// `variables.x.`), so an empty final segment was dropped.
     TrailingDot,
@@ -65,9 +77,12 @@ impl TokenizedPath {
 /// Split a reference path into lookup segments.
 ///
 /// A dot separates segments; empty segments are dropped. A `[..]` body is one
-/// segment: quoted (`'..'` or `".."`) means an **opaque key** — dots inside it
-/// are part of the key, not separators — while an unquoted body is taken
-/// verbatim, covering both index tokens (`0`, `-1`) and bare keys.
+/// segment: quoted (`'..'` or `".."`) means an **opaque key** that runs to its
+/// closing quote — dots and brackets inside it are part of the key, so
+/// `data["a]b"]` names the key `a]b` — while an unquoted body ends at the first
+/// `]` and is taken verbatim, covering both index tokens (`0`, `-1`) and bare
+/// keys. There is no escaping: a key containing one quote character is written
+/// with the other (`data['say "hi"']`).
 ///
 /// Index-vs-key is decided by token shape at lookup time (see
 /// `direct_json::descend`), so both stay raw here.
@@ -107,6 +122,20 @@ pub fn tokenize_reference(path: &str) -> TokenizedPath {
                     tokenized.segments.push(std::mem::take(&mut current));
                 }
 
+                match quoted_key(chars.as_str()) {
+                    QuotedKey::Closed { key, rest } => {
+                        if key.is_empty() {
+                            tokenized.record(PathDefect::EmptyBracketKey);
+                        } else {
+                            tokenized.segments.push(key.to_string());
+                        }
+                        chars = rest.chars();
+                        continue;
+                    }
+                    QuotedKey::Plain(Some(defect)) => tokenized.record(defect),
+                    QuotedKey::Plain(None) => {}
+                }
+
                 // An unterminated `[` consumes the rest of the path, matching
                 // the historical scan: an unbalanced bracket still yields
                 // whatever key text it holds, and is reported as a defect.
@@ -132,6 +161,11 @@ pub fn tokenize_reference(path: &str) -> TokenizedPath {
                     None if closed => tokenized.record(PathDefect::EmptyBracketKey),
                     None => {}
                 }
+            }
+            ']' => {
+                tokenized.record(PathDefect::StrayCloseBracket);
+                previous_dot = false;
+                current.push(ch);
             }
             _ => {
                 previous_dot = false;
@@ -234,6 +268,40 @@ pub fn array_index(segment: &str, len: usize) -> Option<usize> {
     }
 }
 
+/// How a `[..]` body that may open with a quote is read.
+enum QuotedKey<'a> {
+    /// A quoted key closed by its quote and then `]` (whitespace allowed on
+    /// either side of the quotes), and the path after that `]`.
+    Closed { key: &'a str, rest: &'a str },
+    /// Not a well-formed quoted key: the body is read up to the first `]`.
+    /// Carries the defect when the body opens with a quote but is malformed;
+    /// `None` for an unquoted body, or a quoted one that is merely missing its
+    /// `]`, which the bracket scan reports itself.
+    Plain(Option<PathDefect>),
+}
+
+/// Read the body after a `[` as a quoted key, if it opens with one.
+fn quoted_key(after_bracket: &str) -> QuotedKey<'_> {
+    let body = after_bracket.trim_start();
+    let mut chars = body.chars();
+    let Some(quote @ ('\'' | '"')) = chars.next() else {
+        return QuotedKey::Plain(None);
+    };
+    let inner = chars.as_str();
+    let Some(end) = inner.find(quote) else {
+        return QuotedKey::Plain(Some(PathDefect::UnclosedQuote));
+    };
+    let after_quote = inner[end + quote.len_utf8()..].trim_start();
+    match after_quote.strip_prefix(']') {
+        Some(rest) => QuotedKey::Closed {
+            key: &inner[..end],
+            rest,
+        },
+        None if after_quote.is_empty() => QuotedKey::Plain(None),
+        None => QuotedKey::Plain(Some(PathDefect::TextAfterClosingQuote)),
+    }
+}
+
 /// Reduce a trimmed `[..]` body to its segment, dropping an empty one.
 fn bracket_segment(body: &str) -> Option<String> {
     let key = strip_matching_quotes(body).unwrap_or(body);
@@ -242,7 +310,9 @@ fn bracket_segment(body: &str) -> Option<String> {
 
 /// Strip one layer of quotes when the body opens and closes with the *same*
 /// quote character. A lone or mismatched quote is left in place, so it reads as
-/// part of the key rather than being silently peeled off.
+/// part of the key rather than being silently peeled off. A well-formed quoted
+/// key never reaches here — [`quoted_key`] reads it — so this only sees an
+/// unterminated one (`data["a"`) or a malformed one already reported.
 fn strip_matching_quotes(body: &str) -> Option<&str> {
     let mut chars = body.chars();
     let quote = chars.next()?;
@@ -388,6 +458,9 @@ mod tests {
             "items[-1]",
             r#"data.["a"].b"#,
             r#"data[" "]"#,
+            r#"data["a]b"]"#,
+            r#"data['x"y']"#,
+            r#"data[a"]"#,
         ] {
             assert_eq!(defects(path), [], "{path}");
         }
@@ -469,6 +542,70 @@ mod tests {
     fn keeps_mismatched_quotes_as_key_text() {
         assert_eq!(segments("foo['a\"]"), ["foo", "'a\""]);
         assert_eq!(segments("foo[\"]"), ["foo", "\""]);
+        assert_eq!(defects("foo['a\"]"), [PathDefect::UnclosedQuote]);
+        assert_eq!(defects("foo[\"]"), [PathDefect::UnclosedQuote]);
+    }
+
+    #[test]
+    fn quoted_key_runs_to_its_closing_quote() {
+        // A `]` inside the quotes belongs to the key; it used to end the body,
+        // splitting this into `"a` and `b"]`.
+        for (path, expected) in [
+            (r#"data["a]b"]"#, vec!["data", "a]b"]),
+            ("data['a]b']", vec!["data", "a]b"]),
+            (r#"data["]"]"#, vec!["data", "]"]),
+            (r#"data["a[0]"].b"#, vec!["data", "a[0]", "b"]),
+            (r#"data[ "a]b" ].c"#, vec!["data", "a]b", "c"]),
+            (r#"data["a]b"]["c]d"][0]"#, vec!["data", "a]b", "c]d", "0"]),
+            (r#"data['say "hi"']"#, vec!["data", r#"say "hi""#]),
+            (r#"data["it's"]"#, vec!["data", "it's"]),
+            (r#"data[" a ]"]"#, vec!["data", " a ]"]),
+        ] {
+            assert_eq!(segments(path), expected, "{path}");
+            assert_eq!(defects(path), [], "{path}");
+        }
+    }
+
+    #[test]
+    fn unclosed_quotes_are_reported() {
+        // The body falls back to ending at the first `]`.
+        assert_eq!(defects(r#"data["a]"#), [PathDefect::UnclosedQuote]);
+        assert_eq!(segments(r#"data["a]"#), ["data", "\"a"]);
+        assert_eq!(defects("data['a\"].b"), [PathDefect::UnclosedQuote]);
+        assert_eq!(segments("data['a\"].b"), ["data", "'a\"", "b"]);
+        // Missing both the quote and the `]`: both are reported.
+        assert_eq!(
+            defects(r#"data["a"#),
+            [PathDefect::UnclosedQuote, PathDefect::UnterminatedBracket]
+        );
+        // A closed quote that is only missing its `]` is just unterminated.
+        assert_eq!(defects(r#"data["a""#), [PathDefect::UnterminatedBracket]);
+        assert_eq!(segments(r#"data["a""#), ["data", "a"]);
+    }
+
+    #[test]
+    fn text_after_a_closing_quote_is_reported() {
+        assert_eq!(
+            defects(r#"data["a"b"]"#),
+            [PathDefect::TextAfterClosingQuote]
+        );
+        assert_eq!(segments(r#"data["a"b"]"#), ["data", "a\"b"]);
+        // A dropped closing quote: the next key's opening quote closes it.
+        assert_eq!(
+            defects(r#"data["a].b["c"]"#),
+            [PathDefect::TextAfterClosingQuote]
+        );
+        assert_eq!(segments(r#"data["a].b["c"]"#), ["data", "\"a", "b", "c"]);
+    }
+
+    #[test]
+    fn stray_close_brackets_are_reported() {
+        assert_eq!(defects("data.a]"), [PathDefect::StrayCloseBracket]);
+        assert_eq!(segments("data.a]"), ["data", "a]"]);
+        assert_eq!(defects("items[0]]"), [PathDefect::StrayCloseBracket]);
+        assert_eq!(segments("items[0]]"), ["items", "0", "]"]);
+        assert_eq!(defects("data.a]b.c"), [PathDefect::StrayCloseBracket]);
+        assert_eq!(defects("]"), [PathDefect::StrayCloseBracket]);
     }
 
     #[test]
@@ -483,6 +620,7 @@ mod tests {
         assert_eq!(to_json_pointer(r#"data["a.b"]"#), "/data/a.b");
         assert_eq!(to_json_pointer(r#"data["a/b"]"#), "/data/a~1b");
         assert_eq!(to_json_pointer(r#"data["a~b"]"#), "/data/a~0b");
+        assert_eq!(to_json_pointer(r#"data["a]/b"]"#), "/data/a]~1b");
         assert_eq!(to_json_pointer(""), "");
     }
 
@@ -497,6 +635,7 @@ mod tests {
             r#"data["a/b"].c"#,
             r#"a["b.c"][0].d"#,
             "foo[bar]",
+            r#"data["a]b"].c"#,
         ] {
             let from_pointer: Vec<String> = to_json_pointer(path)
                 .split('/')

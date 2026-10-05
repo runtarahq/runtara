@@ -3671,8 +3671,9 @@ struct TemplateStaticReferenceContext<'a> {
 /// shared tokenizer reports, so the validator never disagrees with how the
 /// runtime splits the path. Each of these would otherwise resolve silently to
 /// something other than what was written: the tokenizer drops an empty dot
-/// segment or an empty bracket key, and reads an unterminated bracket's
-/// remainder as one key.
+/// segment or an empty bracket key, reads an unterminated bracket's remainder
+/// as one key, ends a malformed quoted key at the first `]`, and keeps a stray
+/// `]` as key text.
 fn malformed_path_reason(path: &str) -> Option<&'static str> {
     tokenize_reference(path)
         .defects
@@ -3691,9 +3692,15 @@ fn defect_reason(defect: PathDefect) -> (u8, &'static str) {
         PathDefect::ConsecutiveDots => (0, "empty path segment (consecutive dots)"),
         PathDefect::EmptyBracketKey => (1, "empty bracket key"),
         PathDefect::UnterminatedBracket => (2, "unterminated bracket (missing `]`)"),
-        PathDefect::LeadingDot => (3, "empty path segment (leading dot)"),
-        PathDefect::TrailingDot => (4, "empty path segment (trailing dot)"),
-        _ => (5, "malformed reference path"),
+        PathDefect::UnclosedQuote => (3, "unclosed quote in bracket key"),
+        PathDefect::TextAfterClosingQuote => (
+            4,
+            "text after the closing quote of a bracket key (expected `]`)",
+        ),
+        PathDefect::StrayCloseBracket => (5, "stray `]` outside a bracket"),
+        PathDefect::LeadingDot => (6, "empty path segment (leading dot)"),
+        PathDefect::TrailingDot => (7, "empty path segment (trailing dot)"),
+        _ => (8, "malformed reference path"),
     }
 }
 
@@ -7949,6 +7956,17 @@ mod tests {
 
         assert_eq!(check(r#"data[""]"#), ["empty bracket key"]);
         assert_eq!(check("data[a"), ["unterminated bracket (missing `]`)"]);
+        assert_eq!(check(r#"data["a]"#), ["unclosed quote in bracket key"]);
+        assert_eq!(check("data.a]"), ["stray `]` outside a bracket"]);
+
+        let undeclared = check(r#"data["a]b"]"#);
+        assert!(
+            !undeclared.is_empty()
+                && undeclared
+                    .iter()
+                    .all(|reason| !reason.contains("quote") && !reason.contains("stray")),
+            "`a]b` is a well-formed key and must reach the schema check: {undeclared:?}"
+        );
     }
 
     /// An empty bracket key yields no segment, so `data[""]` used to resolve
@@ -7987,6 +8005,70 @@ mod tests {
             (r#"data["a"#, "unterminated bracket (missing `]`)"),
             // Consecutive dots take precedence, as before.
             ("data[a..b", "empty path segment (consecutive dots)"),
+        ] {
+            let result = validate_data_reference_with_schema_key(reference, "a");
+            assert!(
+                result.errors.iter().any(|error| matches!(
+                    error,
+                    ValidationError::InvalidReferencePath { reference_path, reason, .. }
+                        if reference_path == reference && reason == expected
+                )),
+                "`{reference}` must be rejected with `{expected}`: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    /// A quoted key runs to its closing quote, so `data["a]b"]` names the key
+    /// `a]b`. Its body used to end at the first `]`, so the schema walk looked
+    /// for a key `"a` and the runtime resolved `"a` then `b"]` to null.
+    #[test]
+    fn test_quoted_key_containing_close_bracket_is_one_key() {
+        for reference in [r#"data["a]b"]"#, "data['a]b']", r#"data[ "a]b" ]"#] {
+            let declared = validate_data_reference_with_schema_key(reference, "a]b");
+            assert!(
+                !declared.errors.iter().any(|error| matches!(
+                    error,
+                    ValidationError::InvalidReferencePath { .. }
+                        | ValidationError::UndefinedDataReference { .. }
+                )),
+                "`{reference}` must validate against declared key `a]b`: {:?}",
+                declared.errors
+            );
+        }
+
+        let undeclared = validate_data_reference_with_schema_key(r#"data["x]y"]"#, "a]b");
+        assert!(
+            undeclared.errors.iter().any(|error| matches!(
+                error,
+                ValidationError::UndefinedDataReference { field_name, .. }
+                    if field_name == "x]y"
+            )),
+            "undeclared key `x]y` must be rejected by name: {:?}",
+            undeclared.errors
+        );
+    }
+
+    /// A malformed quoted key or a stray `]` resolves to keys the author never
+    /// wrote, so it is rejected rather than checked as those keys.
+    #[test]
+    fn test_malformed_quoted_key_and_stray_close_bracket_are_rejected() {
+        let unclosed = "unclosed quote in bracket key";
+        let text_after = "text after the closing quote of a bracket key (expected `]`)";
+        let stray = "stray `]` outside a bracket";
+        for (reference, expected) in [
+            (r#"data["a]"#, unclosed),
+            ("data['a\"]", unclosed),
+            (r#"variables["a].b"#, unclosed),
+            (r#"data["a"b"]"#, text_after),
+            // A dropped closing quote, closed by the next key's opening one.
+            (r#"data["a].b["c"]"#, text_after),
+            ("data.a]", stray),
+            ("data.a]b", stray),
+            ("data.items[0]]", stray),
+            ("steps.agent.outputs.x]", stray),
+            // Missing the `]` as well: still reported as unterminated.
+            (r#"data["a"#, "unterminated bracket (missing `]`)"),
         ] {
             let result = validate_data_reference_with_schema_key(reference, "a");
             assert!(

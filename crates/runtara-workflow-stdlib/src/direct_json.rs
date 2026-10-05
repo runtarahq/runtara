@@ -8408,6 +8408,28 @@ mod tests {
         );
     }
 
+    /// A quoted key runs to its closing quote, so a `]` inside it is key text.
+    /// The body used to end at the first `]`, splitting `data["a]b"]` into the
+    /// keys `"a` and `b"]`, which resolved to null.
+    #[test]
+    fn lookup_reads_a_quoted_key_containing_a_close_bracket_whole() {
+        reset_value_store();
+        let source = json!({ "data": { "a]b": "flat", "x": { "c]d": [1, 2] } } });
+
+        assert_eq!(
+            lookup_source_path(&source, r#"data["a]b"]"#),
+            Some(json!("flat"))
+        );
+        assert_eq!(
+            lookup_source_path(&source, "data['a]b']"),
+            Some(json!("flat"))
+        );
+        assert_eq!(
+            lookup_source_path(&source, r#"data.x["c]d"][-1]"#),
+            Some(json!(2))
+        );
+    }
+
     /// An unquoted, non-numeric bracket body is a plain key. The runtime used to
     /// keep the brackets inside the segment text and look for a key literally
     /// named `data[key]`, while the validator read it as `data` then `key`.
