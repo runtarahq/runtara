@@ -8069,6 +8069,9 @@ mod tests {
             ("steps.agent.outputs.x]", stray),
             // Missing the `]` as well: still reported as unterminated.
             (r#"data["a"#, "unterminated bracket (missing `]`)"),
+            // Missing only the `]`, with one inside the quotes.
+            (r#"data["a]b""#, "unterminated bracket (missing `]`)"),
+            (r#"variables["a]b""#, "unterminated bracket (missing `]`)"),
         ] {
             let result = validate_data_reference_with_schema_key(reference, "a");
             assert!(

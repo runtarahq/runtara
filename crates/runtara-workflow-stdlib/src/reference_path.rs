@@ -275,8 +275,7 @@ enum QuotedKey<'a> {
     Closed { key: &'a str, rest: &'a str },
     /// Not a well-formed quoted key: the body is read up to the first `]`.
     /// Carries the defect when the body opens with a quote but is malformed;
-    /// `None` for an unquoted body, or a quoted one that is merely missing its
-    /// `]`, which the bracket scan reports itself.
+    /// `None` for an unquoted body.
     Plain(Option<PathDefect>),
 }
 
@@ -297,7 +296,9 @@ fn quoted_key(after_bracket: &str) -> QuotedKey<'_> {
             key: &inner[..end],
             rest,
         },
-        None if after_quote.is_empty() => QuotedKey::Plain(None),
+        // Reported here, not left to the bracket scan: a `]` inside the quotes
+        // (`data["a]b"`) would end that scan's body and read as closed.
+        None if after_quote.is_empty() => QuotedKey::Plain(Some(PathDefect::UnterminatedBracket)),
         None => QuotedKey::Plain(Some(PathDefect::TextAfterClosingQuote)),
     }
 }
@@ -581,6 +582,21 @@ mod tests {
         // A closed quote that is only missing its `]` is just unterminated.
         assert_eq!(defects(r#"data["a""#), [PathDefect::UnterminatedBracket]);
         assert_eq!(segments(r#"data["a""#), ["data", "a"]);
+    }
+
+    #[test]
+    fn quoted_key_missing_its_bracket_is_unterminated_even_with_an_inner_close_bracket() {
+        // The `]` inside the quotes ends the fallback body, so the bracket
+        // scan alone would read these as closed and report nothing.
+        for (path, expected) in [
+            (r#"data["a]b""#, vec!["data", "\"a", "b\""]),
+            (r#"data["a]""#, vec!["data", "\"a", "\""]),
+            (r#"data["].a""#, vec!["data", "\"", "a\""]),
+            (r#"data['a]b' "#, vec!["data", "'a", "b' "]),
+        ] {
+            assert_eq!(defects(path), [PathDefect::UnterminatedBracket], "{path}");
+            assert_eq!(segments(path), expected, "{path}");
+        }
     }
 
     #[test]
