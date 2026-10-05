@@ -505,6 +505,18 @@ pub struct RunnerHandle {
     pub metrics: Option<std::sync::Arc<tokio::sync::Mutex<ContainerMetrics>>>,
 }
 
+/// How an exited run ended, when its durable state cannot say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunExitReport {
+    /// The guest exited to suspend durably, but the park did not commit
+    /// after retries, so the instance is still `running`. It is resumable:
+    /// the monitor hands it to recovery rather than failing it.
+    SuspendNotParked {
+        /// The last park error.
+        error: String,
+    },
+}
+
 /// Resource metrics collected from the instance execution.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContainerMetrics {
@@ -634,6 +646,13 @@ pub trait Runner: Send + Sync {
         Err(RunnerError::Other(
             "runner does not support a cancellation grace deadline".into(),
         ))
+    }
+
+    /// Take what the runner learned about how an exited run ended that the
+    /// durable state does not show. Taken once, by the monitor that observed
+    /// the exit; `None` for an ordinary exit.
+    async fn take_exit_report(&self, _handle: &RunnerHandle) -> Option<RunExitReport> {
+        None
     }
 
     /// Collect metrics and cleanup after instance has finished.

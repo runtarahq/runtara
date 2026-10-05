@@ -295,3 +295,208 @@ async fn a_suspending_agent_parks_the_run_and_a_restarted_runner_resumes_it() {
         "the result checkpoint released the continuation"
     );
 }
+
+/// Make the next `failures` parks of `instance` fail inside the database.
+/// The countdown is a sequence because `nextval` survives the rollback the
+/// injected error causes; anything else the trigger wrote would not.
+async fn fail_parks(pool: &sqlx::PgPool, instance: &str, failures: i64) {
+    let sequence = format!("park_fault_{}", instance.replace('-', "_"));
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS test_park_faults (\
+         instance_id TEXT PRIMARY KEY, sequence_name TEXT NOT NULL, failures BIGINT NOT NULL)",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"CREATE OR REPLACE FUNCTION test_park_fault() RETURNS trigger AS $$
+        DECLARE fault test_park_faults;
+        BEGIN
+            IF OLD.status = 'running' AND NEW.status = 'suspended'
+               AND NEW.termination_reason IN ('sleeping', 'waiting_signal', 'waiting_instances') THEN
+                SELECT * INTO fault FROM test_park_faults WHERE instance_id = NEW.instance_id;
+                IF FOUND AND nextval(fault.sequence_name) <= fault.failures THEN
+                    RAISE EXCEPTION 'injected park failure';
+                END IF;
+            END IF;
+            RETURN NEW;
+        END
+        $$ LANGUAGE plpgsql"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("DROP TRIGGER IF EXISTS zz_test_park_fault ON instances")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER zz_test_park_fault BEFORE UPDATE OF status ON instances \
+         FOR EACH ROW EXECUTE FUNCTION test_park_fault()",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(&format!("CREATE SEQUENCE IF NOT EXISTS {sequence}"))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO test_park_faults VALUES ($1, $2, $3) \
+         ON CONFLICT (instance_id) DO UPDATE SET sequence_name = $2, failures = $3",
+    )
+    .bind(instance)
+    .bind(&sequence)
+    .bind(failures)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn clear_park_faults(pool: &sqlx::PgPool, instance: &str) {
+    sqlx::query("DELETE FROM test_park_faults WHERE instance_id = $1")
+        .bind(instance)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// A park that fails transiently is retried with the run's own lease until
+/// it commits: the run parks normally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_transiently_failing_park_is_retried_until_it_commits() {
+    let h = Harness::new().await;
+    let wasm = h.compile();
+    let run = format!("{}-retry", h.tenant);
+    let input = serde_json::to_vec(&json!({"data": {}, "variables": {}})).unwrap();
+    assert!(
+        h.persistence
+            .try_register_instance(&run, &h.tenant, Some(&input))
+            .await
+            .unwrap()
+    );
+    fail_parks(&h.pool, &run, 2).await;
+    h.run_to_exit(&h.runner(), &h.options(&wasm, &run, Some(input)))
+        .await;
+    clear_park_faults(&h.pool, &run).await;
+    let parked = h.persistence.get_instance(&run).await.unwrap().unwrap();
+    assert_eq!(
+        parked.status,
+        InstanceStatus::Suspended,
+        "{:?}",
+        parked.error
+    );
+    assert_eq!(parked.termination_reason.as_deref(), Some("sleeping"));
+    assert_eq!(
+        parked.sleep_until.map(|at| at.timestamp_millis()),
+        Some(WAKE_AT_MS)
+    );
+}
+
+/// The runner dies to the store between saving the agent's continuation and
+/// parking: every park attempt fails. The monitor hands the still-running
+/// row to recovery instead of failing it, and the relaunch resumes the agent
+/// from its continuation exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_park_that_never_commits_is_recovered_and_resumes_from_the_continuation() {
+    use runtara_environment::{
+        container_registry::{ContainerInfo, ContainerRegistry},
+        handlers::{DrainController, spawn_container_monitor},
+        launch_dispatcher::LaunchLifecycleObservers,
+    };
+    let h = Harness::new().await;
+    let wasm = h.compile();
+    let run = format!("{}-recovered", h.tenant);
+    let input = serde_json::to_vec(&json!({"data": {}, "variables": {}})).unwrap();
+    assert!(
+        h.persistence
+            .try_register_instance(&run, &h.tenant, Some(&input))
+            .await
+            .unwrap()
+    );
+    fail_parks(&h.pool, &run, i64::MAX).await;
+
+    let runner: Arc<dyn Runner> = Arc::new(h.runner());
+    let options = h.options(&wasm, &run, Some(input));
+    let handle = runner.try_launch_detached(&options).await.unwrap();
+    let registry = ContainerRegistry::new(h.pool.clone());
+    registry
+        .register(&ContainerInfo {
+            container_id: handle.handle_id.clone(),
+            launch_id: handle.launch_id.clone(),
+            instance_id: run.clone(),
+            tenant_id: handle.tenant_id.clone(),
+            binary_path: wasm.to_string_lossy().into_owned(),
+            started_at: handle.started_at,
+            timeout_seconds: Some(30),
+        })
+        .await
+        .unwrap();
+    spawn_container_monitor(
+        h.pool.clone(),
+        runner.clone(),
+        handle.clone(),
+        h.persistence.clone(),
+        Duration::from_secs(30),
+        DrainController::new(),
+        LaunchLifecycleObservers::default(),
+        None,
+        None,
+    );
+    let settled = tokio::time::timeout(Duration::from_secs(30), async {
+        while registry.get(&run).await.unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    if settled.is_err() {
+        let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT status::text, termination_reason::text, error FROM instances WHERE instance_id = $1",
+        )
+        .bind(&run)
+        .fetch_optional(&h.pool)
+        .await
+        .unwrap();
+        let exit: Option<(Option<serde_json::Value>,)> =
+            sqlx::query_as("SELECT observed_exit FROM container_registry WHERE instance_id = $1")
+                .bind(&run)
+                .fetch_optional(&h.pool)
+                .await
+                .unwrap();
+        panic!(
+            "the monitor did not settle: instance {row:?}, registry {exit:?}, running {}",
+            runner.is_running(&handle).await
+        );
+    }
+    clear_park_faults(&h.pool, &run).await;
+
+    let recovered = h.persistence.get_instance(&run).await.unwrap().unwrap();
+    assert_eq!(
+        recovered.status,
+        InstanceStatus::Suspended,
+        "an unparked suspension is recovered, not failed: {:?}",
+        recovered.error
+    );
+    assert_eq!(recovered.termination_reason.as_deref(), Some("park_failed"));
+    assert!(
+        recovered
+            .sleep_until
+            .is_some_and(|at| at <= chrono::Utc::now()),
+        "recovery wakes it at once"
+    );
+    assert_eq!(
+        h.continuations_of(&run).await,
+        1,
+        "the continuation is kept"
+    );
+
+    // The wake relaunches it; the agent completes with its continuation
+    // rather than suspending again.
+    h.run_to_exit(&h.runner(), &h.options(&wasm, &run, None))
+        .await;
+    let done = h.persistence.get_instance(&run).await.unwrap().unwrap();
+    assert_eq!(done.status, InstanceStatus::Completed, "{:?}", done.error);
+    let output: Value = serde_json::from_slice(done.output.as_deref().unwrap()).unwrap();
+    assert_eq!(output, json!({"plain": "capabilities", "pause": "paused"}));
+    assert_eq!(h.continuations_of(&run).await, 0);
+}

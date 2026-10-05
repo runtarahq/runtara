@@ -17,6 +17,9 @@ enum ExitKind {
     Crash,
     Timeout,
     Drain,
+    /// The run exited to suspend, but its park never committed. Recovery
+    /// resumes it from its checkpoints instead of failing it.
+    UnparkedSuspend,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -47,6 +50,15 @@ impl ObservedExit {
         }
     }
 
+    /// A run that exited to suspend but whose park failed after retries.
+    pub(crate) fn unparked_suspend(error: String) -> Self {
+        Self {
+            kind: ExitKind::UnparkedSuspend,
+            error,
+            stderr: None,
+        }
+    }
+
     pub(crate) fn is_drain(&self) -> bool {
         matches!(self.kind, ExitKind::Drain)
     }
@@ -55,6 +67,7 @@ impl ObservedExit {
     /// cannot be registered/promoted between this write and registry cleanup.
     pub(crate) async fn apply(
         &self,
+        pool: &PgPool,
         persistence: &dyn Persistence,
         instance: &str,
     ) -> Result<bool> {
@@ -62,6 +75,26 @@ impl ObservedExit {
             ExitKind::Crash => (InstanceStatus::Failed, "crashed"),
             ExitKind::Timeout => (InstanceStatus::Failed, "timeout"),
             ExitKind::Drain => (InstanceStatus::Suspended, "shutdown_requested"),
+            ExitKind::UnparkedSuspend => {
+                // Not a crash: the run reached a clean suspension point and
+                // only the park write failed. Suspend it with an immediate
+                // wake so it replays from its checkpoints (its agent
+                // continuations included), bounded by the crash-loop cap.
+                let outcome = crate::recovery::recover_or_fail_because(
+                    pool,
+                    persistence,
+                    instance,
+                    crate::recovery::RecoveryCause::ParkFailed,
+                )
+                .await?;
+                tracing::warn!(
+                    instance_id = %instance,
+                    error = %self.error,
+                    ?outcome,
+                    "Run exited to suspend but its park did not commit; handed to recovery"
+                );
+                return Ok(outcome != crate::recovery::RecoveryOutcome::Unchanged);
+            }
         };
         let mut params = CompleteInstanceParams::new(instance, status)
             .if_running()
@@ -128,7 +161,7 @@ async fn settle(
     let Some((Json(intent),)) = intent else {
         return Ok(false);
     };
-    intent.apply(persistence, &handle.instance_id).await?;
+    intent.apply(pool, persistence, &handle.instance_id).await?;
     sqlx::query("DELETE FROM container_registry WHERE instance_id = $1 AND launch_id = $2 AND container_id = $3")
         .bind(&handle.instance_id).bind(&handle.launch_id).bind(&handle.handle_id)
         .execute(&mut *guard).await?;

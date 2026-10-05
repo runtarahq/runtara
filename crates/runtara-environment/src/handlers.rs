@@ -1670,11 +1670,20 @@ pub fn spawn_container_monitor(
                 )
                 .await;
 
+                // A run that exited to suspend but could not commit its park
+                // is resumable, not crashed. A drain suspends it anyway.
+                let intent = match runner.take_exit_report(&handle).await {
+                    Some(crate::runner::RunExitReport::SuspendNotParked { error })
+                        if !drain.is_draining() =>
+                    {
+                        crate::observed_exit::ObservedExit::unparked_suspend(error)
+                    }
+                    _ => observed_unreported_exit(&drain, stderr.as_deref()),
+                };
                 // Retain the observed exit before Core cleanup. Both local retry
                 // and restart recovery keep the exact physical ownership fence.
                 if crate::observed_exit::settle_with_retry(
-                    &pool, persistence.as_ref(), &handle,
-                    observed_unreported_exit(&drain, stderr.as_deref()),
+                    &pool, persistence.as_ref(), &handle, intent,
                 ).await {
                     release_launch_after_monitor(
                         &pool, persistence.as_ref(), &handle.launch_id,

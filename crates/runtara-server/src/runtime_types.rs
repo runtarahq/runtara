@@ -134,6 +134,9 @@ pub enum TerminationReason {
     ShutdownRequested,
     /// Suspended by an environment restart, to be recovered.
     EnvironmentRestart,
+    /// Suspended for recovery after the run exited to suspend but its park
+    /// could not be committed.
+    ParkFailed,
     /// Stayed queued past its launch-queue deadline and never started.
     LaunchQueueTimeout,
     /// The runner never durably crossed the start gate, so no guest code ran.
@@ -162,6 +165,7 @@ impl TerminationReason {
             "waiting_instances" => Some(Self::WaitingInstances),
             "shutdown_requested" => Some(Self::ShutdownRequested),
             "environment_restart" => Some(Self::EnvironmentRestart),
+            "park_failed" => Some(Self::ParkFailed),
             "launch_queue_timeout" => Some(Self::LaunchQueueTimeout),
             "start_gate_failed" => Some(Self::StartGateFailed),
             _ => None,
@@ -185,6 +189,7 @@ impl TerminationReason {
             Self::WaitingInstances => "waiting_instances",
             Self::ShutdownRequested => "shutdown_requested",
             Self::EnvironmentRestart => "environment_restart",
+            Self::ParkFailed => "park_failed",
             Self::LaunchQueueTimeout => "launch_queue_timeout",
             Self::StartGateFailed => "start_gate_failed",
         }
@@ -1515,6 +1520,7 @@ mod tests {
             "waiting_instances",
             "shutdown_requested",
             "environment_restart",
+            "park_failed",
             "launch_queue_timeout",
             "start_gate_failed",
         ];
@@ -1537,6 +1543,7 @@ mod tests {
                 | TerminationReason::WaitingInstances
                 | TerminationReason::ShutdownRequested
                 | TerminationReason::EnvironmentRestart
+                | TerminationReason::ParkFailed
                 | TerminationReason::LaunchQueueTimeout
                 | TerminationReason::StartGateFailed => {}
             }

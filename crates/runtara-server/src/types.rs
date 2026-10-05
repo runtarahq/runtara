@@ -121,7 +121,9 @@ impl SuspensionReason {
             Some("waiting_signal") => Some(Self::WaitingSignal),
             Some("waiting_instances") => Some(Self::WaitingInstances),
             Some("sleeping") => Some(Self::Sleeping),
-            Some("shutdown_requested" | "environment_restart") => Some(Self::Shutdown),
+            Some("shutdown_requested" | "environment_restart" | "park_failed") => {
+                Some(Self::Shutdown)
+            }
             _ => None,
         }
     }

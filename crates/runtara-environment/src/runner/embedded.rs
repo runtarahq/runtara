@@ -51,7 +51,7 @@ use crate::config::{ProcessEnv, Vars, positive};
 use super::common::{self, WorkflowRunnerConfig};
 use super::traits::{
     CancelToken, ContainerMetrics, LaunchOptions, PreparationOccupancy, PreparedLaunch, Result,
-    Runner, RunnerError, RunnerHandle, RunnerOccupancy, StartGateOutcome,
+    RunExitReport, Runner, RunnerError, RunnerHandle, RunnerOccupancy, StartGateOutcome,
 };
 
 /// Mark a run `running`, clearing what a previous stop left behind.
@@ -222,6 +222,8 @@ pub struct EmbeddedWasmRunner {
     persistence: Arc<dyn Persistence>,
     executor: Arc<WorkflowExecutor>,
     tasks: TaskRegistry,
+    /// Exit facts a run's task left for its monitor, by handle id.
+    exit_reports: Arc<Mutex<HashMap<String, RunExitReport>>>,
     /// Independently bounds filesystem, persisted-input, and component work
     /// performed before a guest consumes a live run permit.
     preparation_permits: Arc<tokio::sync::Semaphore>,
@@ -692,6 +694,7 @@ impl EmbeddedWasmRunner {
             persistence,
             executor: Arc::new(executor),
             tasks: Arc::new(Mutex::new(HashMap::new())),
+            exit_reports: Arc::new(Mutex::new(HashMap::new())),
             handler_state,
         })
     }
@@ -1352,6 +1355,36 @@ async fn record_cleanup_aborted_exit(persistence: &Arc<dyn Persistence>, instanc
     }
 }
 
+/// Attempts at an owned park before the run is handed to recovery.
+const PARK_ATTEMPTS: u32 = 5;
+
+/// [`park_invoke_suspend`], retrying storage failures with backoff. A retry
+/// is safe because the park is owned: one whose earlier attempt committed but
+/// lost its acknowledgement comes back as `AlreadyParked`. The last error is
+/// returned once the attempts run out.
+async fn park_with_retry(
+    persistence: &dyn Persistence,
+    instance_id: &str,
+    lease: Option<&runtara_core::persistence::invocations::InvocationLease>,
+    wakes: &[runtara_component_host::lifecycle::WorkflowWake],
+    instance_waits: &[String],
+) -> std::result::Result<runtara_core::lifecycle::ParkOutcome, runtara_core::error::CoreError> {
+    let mut delay = Duration::from_millis(100);
+    let mut attempt = 1;
+    loop {
+        match park_invoke_suspend(persistence, instance_id, lease, wakes, instance_waits).await {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) if attempt < PARK_ATTEMPTS => {
+                warn!(instance_id, attempt, %error, "Park failed; retrying");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(2));
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// Park an invoke-shaped instance that returned `outcome::suspended` (the
 /// store-freeing durable-sleep / wait-for-signal paths). Stamps
 /// `status='suspended'`, plus `sleep_until=deadline` when there is a TIMED wake
@@ -1614,6 +1647,7 @@ impl Runner for EmbeddedWasmRunner {
         let tenant_id = options.tenant_id.clone();
         let launch_id = options.launch_id.clone();
         let invocation_owner = handle_id.clone();
+        let exit_reports = Arc::clone(&self.exit_reports);
         let start_gate = options.start_gate.clone();
         let start_confirmation = start_gate.as_ref().map(|gate| {
             Arc::new(GateWorkflowStartConfirmation { gate: gate.clone() })
@@ -1764,7 +1798,7 @@ impl Runner for EmbeddedWasmRunner {
                     // Store-freeing durable sleep: the guest exited with a
                     // timed wake instead of blocking; park it so the wake
                     // scheduler relaunches at the deadline.
-                    if let Err(error) = park_invoke_suspend(
+                    if let Err(error) = park_with_retry(
                         persistence.as_ref(),
                         &instance_id,
                         root_lease.as_ref().map(|lease| &lease.token),
@@ -1773,7 +1807,20 @@ impl Runner for EmbeddedWasmRunner {
                     )
                     .await
                     {
-                        warn!(instance_id, %error, "Failed to park instance after invoke suspend");
+                        // Execution stopped but the suspension is not
+                        // committed: the row is still `running`. Tell the
+                        // monitor, which hands it to recovery instead of
+                        // recording a crash.
+                        error!(instance_id, %error, "Park did not commit after retries; handing the run to recovery");
+                        exit_reports
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .insert(
+                                invocation_owner.clone(),
+                                RunExitReport::SuspendNotParked {
+                                    error: error.to_string(),
+                                },
+                            );
                     }
                 }
                 InvokeExit::Failed(_) => {
@@ -1872,6 +1919,13 @@ impl Runner for EmbeddedWasmRunner {
             return Ok(false);
         };
         Ok(task.schedule_abort(deadline))
+    }
+
+    async fn take_exit_report(&self, handle: &RunnerHandle) -> Option<RunExitReport> {
+        self.exit_reports
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&handle.handle_id)
     }
 
     async fn collect_result(
@@ -2527,6 +2581,89 @@ mod tests {
                 .expect("read signal")
                 .is_some(),
             "the self-wake must not consume the signal the replay needs"
+        );
+    }
+
+    /// The park committed but its acknowledgement was lost, so the
+    /// arrival-before-park re-check never ran. The owned retry is recognised
+    /// as already parked and still runs the re-check: the run wakes.
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn an_owned_park_retry_after_a_lost_ack_still_wakes_on_an_early_signal() {
+        use runtara_core::lifecycle::{ParkOutcome, ParkReason, ParkRequest};
+        let (persistence, instance_id) = running_instance().await;
+        let tenant = persistence
+            .get_instance_meta(&instance_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .tenant_id;
+        let lease = persistence
+            .invocation_fences()
+            .unwrap()
+            .claim_invocation_lease(&tenant, &instance_id, "runner-a", None)
+            .await
+            .unwrap();
+        persistence
+            .put_custom_signal(&instance_id, "early-sig", b"{}")
+            .await
+            .unwrap();
+        // First attempt: committed, acknowledgement lost before the re-check.
+        let signals = ["early-sig".to_string()];
+        assert_eq!(
+            persistence
+                .park_execution(
+                    &lease,
+                    ParkRequest {
+                        reason: ParkReason::Signal,
+                        deadline: None,
+                    },
+                    runtara_core::persistence::ParkTargets {
+                        signal_ids: &signals,
+                        wait_ids: &[],
+                    },
+                )
+                .await
+                .unwrap(),
+            ParkOutcome::Parked
+        );
+        assert!(
+            persistence
+                .get_instance(&instance_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .sleep_until
+                .is_none(),
+            "without the re-check the run would wait for a waker that already ran"
+        );
+
+        let retried = park_invoke_suspend(
+            persistence.as_ref(),
+            &instance_id,
+            Some(&lease),
+            &[WorkflowWake::OnSignal(SignalWait {
+                checkpoint_id: "early-sig".into(),
+                deadline_ms: None,
+            })],
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(retried, ParkOutcome::AlreadyParked);
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inst.status, CoreInstanceStatus::Suspended);
+        assert_eq!(
+            inst.wake_reason,
+            Some(runtara_core::domain::WakeReason::CustomSignal)
+        );
+        assert!(
+            inst.sleep_until.is_some(),
+            "the retry must self-wake the run"
         );
     }
 
