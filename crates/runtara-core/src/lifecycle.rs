@@ -260,6 +260,23 @@ pub fn park(status: InstanceStatus, request: ParkRequest) -> Decision {
     })
 }
 
+/// Result of a park presented with the execution's root lease.
+///
+/// Storage failures are errors, not outcomes: the caller must retry them,
+/// which is safe because a retry of a committed park is
+/// [`ParkOutcome::AlreadyParked`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkOutcome {
+    /// This call committed the park.
+    Parked,
+    /// This execution's park already committed (a retry after a lost
+    /// acknowledgement). Nothing was written again.
+    AlreadyParked,
+    /// The execution no longer owns the root: a replacement execution, a
+    /// pause, a cancel or a terminal transition won. Nothing was written.
+    Superseded,
+}
+
 /// Action performed locally after a successful command acknowledgment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionAction {

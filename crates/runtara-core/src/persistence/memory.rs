@@ -43,6 +43,8 @@ struct Store {
     input_requests: HashMap<(String, String), crate::persistence::inputs::InputRequest>,
     input_parks: HashMap<String, inputs::InputPark>,
     invocation_leases: HashMap<String, (crate::persistence::invocations::InvocationLease, bool)>,
+    /// The lease whose execution committed the instance's latest owned park.
+    parked_by: HashMap<String, crate::persistence::invocations::InvocationLease>,
     invocation_attempts: Vec<crate::persistence::invocations::InvocationAttempt>,
     invocation_parents: HashMap<(String, String), Option<String>>,
     instances: HashMap<String, InstanceRecord>,
@@ -77,6 +79,39 @@ impl Store {
         {
             *active = false;
         }
+    }
+
+    /// Evaluate the park policy and apply it with its targets.
+    fn park(
+        &mut self,
+        instance_id: &str,
+        request: lifecycle::ParkRequest,
+        targets: crate::persistence::ParkTargets<'_>,
+    ) -> Result<Decision, CoreError> {
+        let decision = lifecycle::park(self.instance_mut(instance_id)?.status, request);
+        if let Decision::Applied(effects) = decision {
+            let now = Utc::now();
+            self.apply_transition(instance_id, effects, now)?;
+            let signals =
+                request.reason == lifecycle::ParkReason::Signal && !targets.signal_ids.is_empty();
+            if signals || !targets.wait_ids.is_empty() {
+                self.input_parks.insert(
+                    instance_id.into(),
+                    inputs::InputPark {
+                        signals: targets.signal_ids.to_vec(),
+                        wake_scheduled: false,
+                        waits: targets.wait_ids.to_vec(),
+                    },
+                );
+            }
+            if signals {
+                inputs::schedule_accepted(self, instance_id, now, true);
+            }
+            if !targets.wait_ids.is_empty() {
+                waits::park_on(self, instance_id, targets.wait_ids, now);
+            }
+        }
+        Ok(decision)
     }
 
     fn next_id(&mut self) -> i64 {
@@ -587,6 +622,11 @@ impl Persistence for InMemoryPersistence {
         params: CompleteInstanceParams<'_>,
     ) -> Result<bool, CoreError> {
         let mut store = self.store.lock().unwrap();
+        if let Some(owner) = params.owner
+            && store.invocation_leases.get(params.instance_id) != Some(&(owner.clone(), true))
+        {
+            return Ok(false);
+        }
         let Some(inst) = store.instances.get_mut(params.instance_id) else {
             return match params.guard {
                 CompleteInstanceGuard::Any => Err(CoreError::InstanceNotFound {
@@ -866,30 +906,37 @@ impl Persistence for InMemoryPersistence {
         targets: crate::persistence::ParkTargets<'_>,
     ) -> Result<Decision, CoreError> {
         let mut store = self.store.lock().unwrap();
-        let decision = lifecycle::park(store.instance_mut(instance_id)?.status, request);
-        if let Decision::Applied(effects) = decision {
-            let now = Utc::now();
-            store.apply_transition(instance_id, effects, now)?;
-            let signals =
-                request.reason == lifecycle::ParkReason::Signal && !targets.signal_ids.is_empty();
-            if signals || !targets.wait_ids.is_empty() {
-                store.input_parks.insert(
-                    instance_id.into(),
-                    inputs::InputPark {
-                        signals: targets.signal_ids.to_vec(),
-                        wake_scheduled: false,
-                        waits: targets.wait_ids.to_vec(),
-                    },
-                );
+        store.park(instance_id, request, targets)
+    }
+
+    async fn park_execution(
+        &self,
+        lease: &crate::persistence::invocations::InvocationLease,
+        request: crate::lifecycle::ParkRequest,
+        targets: crate::persistence::ParkTargets<'_>,
+    ) -> Result<lifecycle::ParkOutcome, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        let instance_id = lease.instance_id.as_str();
+        let status = store.instance_mut(instance_id)?.status;
+        match store.invocation_leases.get(instance_id) {
+            Some((current, true)) if current == lease => {
+                match store.park(instance_id, request, targets)? {
+                    Decision::Applied(_) => {
+                        store.parked_by.insert(instance_id.into(), lease.clone());
+                        Ok(lifecycle::ParkOutcome::Parked)
+                    }
+                    _ => Ok(lifecycle::ParkOutcome::Superseded),
+                }
             }
-            if signals {
-                inputs::schedule_accepted(&mut store, instance_id, now, true);
+            Some((current, false))
+                if current == lease
+                    && status == CoreInstanceStatus::Suspended
+                    && store.parked_by.get(instance_id) == Some(lease) =>
+            {
+                Ok(lifecycle::ParkOutcome::AlreadyParked)
             }
-            if !targets.wait_ids.is_empty() {
-                waits::park_on(&mut store, instance_id, targets.wait_ids, now);
-            }
+            _ => Ok(lifecycle::ParkOutcome::Superseded),
         }
-        Ok(decision)
     }
 
     async fn cancel_suspended_instances(

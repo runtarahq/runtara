@@ -231,7 +231,7 @@ impl InvocationFences for PostgresPersistence {
         } else if expected_epoch.is_some() {
             return Err(denied(FenceRejection::LeaseMismatch));
         }
-        sqlx::query("INSERT INTO invocation_root_leases (instance_id,owner,epoch,active) VALUES ($1,$2,$3,true) ON CONFLICT (instance_id) DO UPDATE SET owner=EXCLUDED.owner,epoch=EXCLUDED.epoch,active=true")
+        sqlx::query("INSERT INTO invocation_root_leases (instance_id,owner,epoch,active) VALUES ($1,$2,$3,true) ON CONFLICT (instance_id) DO UPDATE SET owner=EXCLUDED.owner,epoch=EXCLUDED.epoch,active=true,parked=false")
             .bind(instance).bind(owner).bind(next).execute(&mut *tx).await.map_err(storage)?;
         tx.commit().await.map_err(storage)?;
         Ok(InvocationLease {

@@ -490,6 +490,7 @@ async fn instance_event_handler(
         payload,
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
         subtype: body.subtype,
+        owner: None,
     };
 
     match instance_handlers::handle_instance_event(&state, event).await {
@@ -547,6 +548,7 @@ async fn completed_handler(
         payload,
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
         subtype: None,
+        owner: None,
     };
 
     match instance_handlers::handle_instance_event(&state, event).await {
@@ -573,6 +575,7 @@ async fn failed_handler(
         payload: error_msg.as_bytes().to_vec(),
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
         subtype: None,
+        owner: None,
     };
 
     match instance_handlers::handle_instance_event(&state, event).await {
@@ -593,6 +596,7 @@ async fn suspended_handler(
         payload: Vec::new(),
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
         subtype: None,
+        owner: None,
     };
 
     match instance_handlers::handle_instance_event(&state, event).await {

@@ -877,38 +877,58 @@ impl Persistence for PostgresPersistence {
     ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
         let mut tx = self.pool.begin().await.db()?;
         let status = crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
-        let decision = runtara_core::lifecycle::park(status, request);
-        if let runtara_core::lifecycle::Decision::Applied(effects) = decision {
-            crate::lifecycle::apply_transition(&mut tx, &[instance_id.to_owned()], effects).await?;
-            let signals = request.reason == runtara_core::lifecycle::ParkReason::Signal
-                && !targets.signal_ids.is_empty();
-            if signals || !targets.wait_ids.is_empty() {
-                sqlx::query(
-                    "INSERT INTO instance_input_parks (instance_id, signal_ids, wait_ids) VALUES ($1,$2,$3)",
-                )
-                .bind(instance_id)
-                .bind(targets.signal_ids)
-                .bind(targets.wait_ids)
-                .execute(&mut *tx)
-                .await
-                .db()?;
-            }
-            if signals {
-                crate::inputs::schedule_accepted(&mut tx, instance_id, true)
-                    .await
-                    .db()?;
-            }
-            if !targets.wait_ids.is_empty() {
-                crate::waits::park_on(&mut tx, instance_id, targets.wait_ids)
-                    .await
-                    .map_err(|error| CoreError::PersistenceError {
-                        operation: "park_instance_on_targets".into(),
-                        details: error.to_string(),
-                    })?;
-            }
-        }
+        let decision =
+            crate::lifecycle::park(&mut tx, instance_id, status, request, targets).await?;
         tx.commit().await.db()?;
         Ok(decision)
+    }
+
+    async fn park_execution(
+        &self,
+        lease: &runtara_core::persistence::invocations::InvocationLease,
+        request: runtara_core::lifecycle::ParkRequest,
+        targets: runtara_core::persistence::ParkTargets<'_>,
+    ) -> Result<runtara_core::lifecycle::ParkOutcome, CoreError> {
+        use runtara_core::lifecycle::{Decision, ParkOutcome};
+        let instance_id = lease.instance_id.as_str();
+        let mut tx = self.pool.begin().await.db()?;
+        // Row lock first; the lease read below is a later statement, so it
+        // sees any claim or revocation that committed while this waited.
+        let status = crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
+        let stored = crate::root_owner::load(&mut tx, instance_id).await?;
+        let outcome = match stored {
+            Some(stored) if stored.is(lease) && stored.active => {
+                match crate::lifecycle::park(&mut tx, instance_id, status, request, targets).await?
+                {
+                    Decision::Applied(_) => {
+                        // Leaving `running` already revoked the lease (the
+                        // status trigger); record that this execution parked.
+                        sqlx::query(
+                            "UPDATE invocation_root_leases SET parked = TRUE \
+                             WHERE instance_id = $1 AND owner = $2 AND epoch = $3",
+                        )
+                        .bind(instance_id)
+                        .bind(&lease.owner)
+                        .bind(lease.epoch)
+                        .execute(&mut *tx)
+                        .await
+                        .db()?;
+                        ParkOutcome::Parked
+                    }
+                    Decision::Rejected | Decision::AlreadyApplied => ParkOutcome::Superseded,
+                }
+            }
+            Some(stored)
+                if stored.is(lease)
+                    && stored.parked
+                    && status == runtara_core::domain::InstanceStatus::Suspended =>
+            {
+                ParkOutcome::AlreadyParked
+            }
+            _ => ParkOutcome::Superseded,
+        };
+        tx.commit().await.db()?;
+        Ok(outcome)
     }
 
     async fn cancel_suspended_instances(

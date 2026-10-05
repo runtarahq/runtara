@@ -379,6 +379,7 @@ impl PersistenceRuntimeHost {
                 payload,
                 timestamp_ms: chrono::Utc::now().timestamp_millis(),
                 subtype,
+                owner: self.root_lease.get().cloned(),
             },
         )
         .await
@@ -767,6 +768,71 @@ mod tests {
         )
         .with_signal_poll_interval(Duration::ZERO);
         (persistence, host, instance_id)
+    }
+
+    /// Claim the next root lease for `instance_id`, as a launch does.
+    async fn claim_root(
+        persistence: &Arc<dyn Persistence>,
+        instance_id: &str,
+        owner: &str,
+    ) -> runtara_core::persistence::invocations::InvocationLease {
+        let tenant = persistence
+            .get_instance_meta(instance_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .tenant_id;
+        let fences = persistence.invocation_fences().unwrap();
+        let previous = fences
+            .get_invocation_lease(&tenant, instance_id)
+            .await
+            .unwrap()
+            .map(|state| state.lease.epoch);
+        fences
+            .claim_invocation_lease(&tenant, instance_id, owner, previous)
+            .await
+            .unwrap()
+    }
+
+    /// A host bound to a superseded execution's lease cannot publish its
+    /// terminal result over the replacement's run; the replacement can.
+    #[tokio::test]
+    async fn a_superseded_host_cannot_publish_over_its_replacement() {
+        let (persistence, stale_host, id) = setup().await;
+        stale_host
+            .bind_root_lease(claim_root(&persistence, &id, "runner-a").await)
+            .unwrap();
+        // Recovery takes the row out of `running`; the replacement promotes
+        // and claims the next epoch.
+        persistence
+            .update_instance_status(&id, CoreInstanceStatus::Suspended, None)
+            .await
+            .unwrap();
+        persistence
+            .update_instance_status(&id, CoreInstanceStatus::Running, None)
+            .await
+            .unwrap();
+        let current_host =
+            PersistenceRuntimeHost::from_persistence(Arc::clone(&persistence), id.clone(), false);
+        current_host
+            .bind_root_lease(claim_root(&persistence, &id, "runner-b").await)
+            .unwrap();
+
+        stale_host
+            .terminal(RunTerminal::Completed(b"{\"stale\":true}".to_vec()))
+            .await
+            .unwrap();
+        let instance = persistence.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(instance.status, CoreInstanceStatus::Running);
+        assert!(instance.output.is_none());
+
+        current_host
+            .terminal(RunTerminal::Completed(b"{\"current\":true}".to_vec()))
+            .await
+            .unwrap();
+        let instance = persistence.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(instance.status, CoreInstanceStatus::Completed);
+        assert_eq!(instance.output.as_deref(), Some(&b"{\"current\":true}"[..]));
     }
 
     #[tokio::test]

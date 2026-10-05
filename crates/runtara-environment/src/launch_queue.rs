@@ -1566,7 +1566,8 @@ impl LaunchRepository {
             ON CONFLICT (instance_id) DO UPDATE
             SET owner = EXCLUDED.owner,
                 epoch = invocation_root_leases.epoch + 1,
-                active = TRUE
+                active = TRUE,
+                parked = FALSE
             WHERE NOT invocation_root_leases.active
             RETURNING epoch
             "#,

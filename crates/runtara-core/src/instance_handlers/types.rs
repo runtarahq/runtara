@@ -224,6 +224,10 @@ pub struct InstanceEvent {
     pub timestamp_ms: i64,
     /// Arbitrary subtype for custom events.
     pub subtype: Option<String>,
+    /// The emitting execution's root lease. Completion, failure and
+    /// suspension apply only while it is the active lease; `None` is a
+    /// caller without one (the instance protocol over HTTP, tests).
+    pub owner: Option<crate::persistence::invocations::InvocationLease>,
 }
 
 impl InstanceEvent {

@@ -105,11 +105,14 @@ pub async fn handle_instance_event(
             if let Some(o) = output {
                 params = params.with_output(o);
             }
+            if let Some(lease) = &event.owner {
+                params = params.owned_by(lease);
+            }
             let applied = state.persistence.complete_instance(params).await?;
             if applied {
                 info!("Instance completed successfully");
             } else {
-                warn!("Instance completion skipped (already in terminal state)");
+                warn!("Instance completion skipped (not running or no longer owned)");
             }
         }
         InstanceEventType::EventFailed => {
@@ -121,18 +124,18 @@ pub async fn handle_instance_event(
             // Guard with `if_running()` to prevent race condition with PID monitor:
             // if the PID monitor already set status to "failed", don't overwrite
             // with the SDK event.
-            let applied = state
-                .persistence
-                .complete_instance(
-                    CompleteInstanceParams::new(&event.instance_id, CoreInstanceStatus::Failed)
-                        .if_running()
-                        .with_error(error),
-                )
-                .await?;
+            let mut params =
+                CompleteInstanceParams::new(&event.instance_id, CoreInstanceStatus::Failed)
+                    .if_running()
+                    .with_error(error);
+            if let Some(lease) = &event.owner {
+                params = params.owned_by(lease);
+            }
+            let applied = state.persistence.complete_instance(params).await?;
             if applied {
                 warn!(error = %error, "Instance failed");
             } else {
-                warn!(error = %error, "Instance failure event skipped (already in terminal state)");
+                warn!(error = %error, "Instance failure event skipped (not running or no longer owned)");
             }
         }
         InstanceEventType::EventSuspended => {
@@ -153,17 +156,17 @@ pub async fn handle_instance_event(
 
             // Guard with `if_running()` to prevent race condition with the PID
             // monitor.
-            let applied = state
-                .persistence
-                .complete_instance(
-                    CompleteInstanceParams::new(&event.instance_id, CoreInstanceStatus::Suspended)
-                        .if_running(),
-                )
-                .await?;
+            let mut params =
+                CompleteInstanceParams::new(&event.instance_id, CoreInstanceStatus::Suspended)
+                    .if_running();
+            if let Some(lease) = &event.owner {
+                params = params.owned_by(lease);
+            }
+            let applied = state.persistence.complete_instance(params).await?;
             if applied {
                 info!("Instance suspended");
             } else {
-                warn!("Instance suspend event skipped (already in terminal state)");
+                warn!("Instance suspend event skipped (not running or no longer owned)");
             }
         }
         InstanceEventType::EventCustom => {
@@ -248,6 +251,7 @@ mod tests {
             payload: Vec::new(),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             subtype: None,
+            owner: None,
         };
 
         let result = handle_instance_event(&state, event).await.unwrap();
@@ -275,6 +279,7 @@ mod tests {
             payload: b"result".to_vec(),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             subtype: None,
+            owner: None,
         };
 
         let result = handle_instance_event(&state, event).await.unwrap();
@@ -301,6 +306,7 @@ mod tests {
             payload: b"error message".to_vec(),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             subtype: None,
+            owner: None,
         };
 
         let result = handle_instance_event(&state, event).await.unwrap();
@@ -327,6 +333,7 @@ mod tests {
             payload: Vec::new(),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             subtype: None,
+            owner: None,
         };
 
         let result = handle_instance_event(&state, event).await.unwrap();
@@ -372,6 +379,7 @@ mod tests {
             payload: b"{}".to_vec(),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             subtype: subtype.map(str::to_string),
+            owner: None,
         };
 
         for subtype in [Some("step_debug_start"), Some("workflow_log"), None] {
@@ -415,6 +423,7 @@ mod tests {
                 payload: b"{}".to_vec(),
                 timestamp_ms: chrono::Utc::now().timestamp_millis(),
                 subtype: Some("step_debug_start".to_string()),
+                owner: None,
             },
         )
         .await
@@ -444,6 +453,7 @@ mod tests {
             payload: b"custom data".to_vec(),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             subtype: Some("my_custom_type".to_string()),
+            owner: None,
         };
 
         let result = handle_instance_event(&state, event).await.unwrap();
@@ -479,6 +489,7 @@ mod tests {
             payload: payload.to_string().into_bytes(),
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             subtype: None,
+            owner: None,
         };
 
         let result = handle_instance_event(&state, event).await.unwrap();

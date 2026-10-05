@@ -372,6 +372,22 @@ macro_rules! impl_instance_ops {
                 use crate::ops_common::error::{RowsAffected, not_found_if_empty};
                 use crate::dialect::{Dialect, EnumKind};
                 let mut tx = pool.begin().await.db()?;
+                if let Some(owner) = params.owner {
+                    // An execution's transition applies only while it owns
+                    // the root. Lock the row first and read the lease in a
+                    // later statement, so a write that waited on the lock
+                    // sees a replacement's committed claim.
+                    let locked: Option<i32> = ::sqlx::query_scalar(
+                        "SELECT 1 FROM instances WHERE instance_id = $1 FOR UPDATE",
+                    )
+                    .bind(params.instance_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .db()?;
+                    if locked.is_none() || !crate::root_owner::holds(&mut tx, owner).await? {
+                        return Ok(false);
+                    }
+                }
                 let p1 = <$Dialect>::placeholder(1);
                 let p2 = <$Dialect>::placeholder(2);
                 let p3 = <$Dialect>::placeholder(3);

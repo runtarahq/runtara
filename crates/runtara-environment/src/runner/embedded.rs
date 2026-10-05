@@ -1378,12 +1378,20 @@ async fn record_cleanup_aborted_exit(persistence: &Arc<dyn Persistence>, instanc
 /// rows the custom-signal waker may relaunch — a pause/breakpoint suspend has
 /// no marker and must never be signal-woken) or `sleeping` for pure timed
 /// parks. Relaunch clears the marker with the running transition.
+///
+/// With the run's root lease the park is owned: the store applies it only
+/// while that lease is active and recognises a retry of a committed park
+/// ([`ParkOutcome::AlreadyParked`]). Without one (a host outside a launched
+/// run) it is the unowned, running-guarded park. A storage failure is an
+/// error, never a silent no-op: the caller must retry or hand the run to
+/// recovery.
 async fn park_invoke_suspend(
     persistence: &dyn Persistence,
     instance_id: &str,
+    lease: Option<&runtara_core::persistence::invocations::InvocationLease>,
     wakes: &[runtara_component_host::lifecycle::WorkflowWake],
     instance_waits: &[String],
-) {
+) -> std::result::Result<runtara_core::lifecycle::ParkOutcome, runtara_core::error::CoreError> {
     let wakes = &with_persistence_input_deadlines(persistence, instance_id, wakes).await;
     // Instance waits arrive both from the run's own WaitForInstances steps and
     // as `instances` wakes returned through a suspension.
@@ -1397,11 +1405,11 @@ async fn park_invoke_suspend(
     }
     let instance_waits = instance_waits.as_slice();
     let deadline_ms = earliest_wake_deadline_ms(wakes);
+    use runtara_core::lifecycle::{Decision, ParkOutcome, ParkReason, ParkRequest};
     if deadline_ms.is_none() && !has_on_signal_wake(wakes) && instance_waits.is_empty() {
         // Pure on-resume: already handled by the ack path.
-        return;
+        return Ok(ParkOutcome::AlreadyParked);
     }
-    use runtara_core::lifecycle::{Decision, ParkReason, ParkRequest};
     let deadline = deadline_ms
         .and_then(|ms| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64));
     if deadline_ms.is_some() && deadline.is_none() {
@@ -1425,35 +1433,39 @@ async fn park_invoke_suspend(
         .into_iter()
         .map(str::to_owned)
         .collect();
-    match persistence
-        .park_instance_on_targets(
-            instance_id,
-            request,
-            runtara_core::persistence::ParkTargets {
-                signal_ids: &signals,
-                wait_ids: instance_waits,
-            },
-        )
-        .await
-    {
-        Ok(Decision::Applied(_)) => {}
-        Ok(_) => {
+    let targets = runtara_core::persistence::ParkTargets {
+        signal_ids: &signals,
+        wait_ids: instance_waits,
+    };
+    let outcome = match lease {
+        Some(lease) => persistence.park_execution(lease, request, targets).await?,
+        None => match persistence
+            .park_instance_on_targets(instance_id, request, targets)
+            .await?
+        {
+            Decision::Applied(_) => ParkOutcome::Parked,
+            Decision::AlreadyApplied => ParkOutcome::AlreadyParked,
+            Decision::Rejected => ParkOutcome::Superseded,
+        },
+    };
+    match outcome {
+        ParkOutcome::Superseded => {
             warn!(
                 instance_id,
-                "Invoke suspend ignored: instance is not running (terminal status preserved)"
+                "Invoke suspend not applied: the run no longer owns its root"
             );
-            return;
         }
-        Err(error) => {
-            warn!(instance_id, %error, "Failed to park instance after invoke suspend");
-            return;
+        // Close the arrival-before-park race, including on a retry whose
+        // first attempt committed but lost its acknowledgement. Later
+        // arrivals observe suspended state and schedule their own immediate
+        // wake. Never overwrite it with the timer.
+        ParkOutcome::Parked | ParkOutcome::AlreadyParked => {
+            if request.reason == ParkReason::Signal {
+                wake_if_signal_already_arrived(persistence, instance_id, wakes).await;
+            }
         }
     }
-    // Close the arrival-before-park race. Later arrivals observe suspended state
-    // and schedule their own immediate wake. Never overwrite it with the timer.
-    if request.reason == ParkReason::Signal {
-        wake_if_signal_already_arrived(persistence, instance_id, wakes).await;
-    }
+    Ok(outcome)
 }
 
 fn invoke_metrics_of(result: &runtara_component_host::InvokeRunResult) -> ContainerMetrics {
@@ -1752,13 +1764,17 @@ impl Runner for EmbeddedWasmRunner {
                     // Store-freeing durable sleep: the guest exited with a
                     // timed wake instead of blocking; park it so the wake
                     // scheduler relaunches at the deadline.
-                    park_invoke_suspend(
+                    if let Err(error) = park_invoke_suspend(
                         persistence.as_ref(),
                         &instance_id,
+                        root_lease.as_ref().map(|lease| &lease.token),
                         wakes,
                         &run.instance_waits,
                     )
-                    .await;
+                    .await
+                    {
+                        warn!(instance_id, %error, "Failed to park instance after invoke suspend");
+                    }
                 }
                 InvokeExit::Failed(_) => {
                     warn!(instance_id = %instance_id, "Embedded workflow run returned error");
@@ -2359,10 +2375,12 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &instance_id,
+            None,
             &[WorkflowWake::At(deadline_ms)],
             &[],
         )
-        .await;
+        .await
+        .unwrap();
 
         let inst = persistence
             .get_instance(&instance_id)
@@ -2395,10 +2413,12 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &instance_id,
+            None,
             &[WorkflowWake::OnResume],
             &[],
         )
-        .await;
+        .await
+        .unwrap();
 
         let inst = persistence
             .get_instance(&instance_id)
@@ -2425,13 +2445,15 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &instance_id,
+            None,
             &[WorkflowWake::OnSignal(SignalWait {
                 checkpoint_id: "wait-sig".into(),
                 deadline_ms: None,
             })],
             &[],
         )
-        .await;
+        .await
+        .unwrap();
 
         let inst = persistence
             .get_instance(&instance_id)
@@ -2472,13 +2494,15 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &instance_id,
+            None,
             &[WorkflowWake::OnSignal(SignalWait {
                 checkpoint_id: "raced-sig".into(),
                 deadline_ms: None,
             })],
             &[],
         )
-        .await;
+        .await
+        .unwrap();
 
         let inst = persistence
             .get_instance(&instance_id)
@@ -2514,13 +2538,15 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &instance_id,
+            None,
             &[WorkflowWake::OnSignal(SignalWait {
                 checkpoint_id: "quiet-sig".into(),
                 deadline_ms: None,
             })],
             &[],
         )
-        .await;
+        .await
+        .unwrap();
 
         let inst = persistence
             .get_instance(&instance_id)
@@ -2556,10 +2582,12 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &instance_id,
+            None,
             &[WorkflowWake::At(1_900_000_000_000u64)],
             &[],
         )
-        .await;
+        .await
+        .unwrap();
 
         let inst = persistence
             .get_instance(&instance_id)
@@ -2628,10 +2656,12 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &waiter,
+            None,
             &[WorkflowWake::At(deadline_ms)],
             &["op-wait".to_string()],
         )
-        .await;
+        .await
+        .unwrap();
         let parked = persistence.get_instance(&waiter).await.unwrap().unwrap();
         assert_eq!(parked.status, CoreInstanceStatus::Suspended);
         assert_eq!(
@@ -2670,10 +2700,12 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &waiter,
+            None,
             &[WorkflowWake::At(deadline_ms)],
             &["op-wait".to_string()],
         )
-        .await;
+        .await
+        .unwrap();
         let again = persistence.get_instance(&waiter).await.unwrap().unwrap();
         assert_eq!(again.status, CoreInstanceStatus::Suspended);
         assert_eq!(
@@ -2694,13 +2726,15 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &instance_id,
+            None,
             &[WorkflowWake::OnSignal(SignalWait {
                 checkpoint_id: "wait-sig".into(),
                 deadline_ms: Some(deadline_ms),
             })],
             &[],
         )
-        .await;
+        .await
+        .unwrap();
 
         let inst = persistence
             .get_instance(&instance_id)

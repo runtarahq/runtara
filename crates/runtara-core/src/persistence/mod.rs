@@ -611,6 +611,11 @@ pub struct CompleteInstanceParams<'a> {
     pub termination_reason: Option<&'a str>,
     /// Process exit code if available.
     pub exit_code: Option<i32>,
+    /// The execution's root lease. When set, the transition applies only
+    /// while that exact lease is active: a superseded execution cannot
+    /// complete, fail or suspend its replacement. Host-side writers (monitor,
+    /// recovery, API commands) leave it unset.
+    pub owner: Option<&'a invocations::InvocationLease>,
 }
 
 impl<'a> CompleteInstanceParams<'a> {
@@ -626,7 +631,17 @@ impl<'a> CompleteInstanceParams<'a> {
             checkpoint_id: None,
             termination_reason: None,
             exit_code: None,
+            owner: None,
         }
+    }
+
+    /// Apply only while `lease` is the instance's active root lease. Implies
+    /// [`Self::if_running`], since leaving `running` revokes the lease.
+    #[must_use]
+    pub fn owned_by(mut self, lease: &'a invocations::InvocationLease) -> Self {
+        self.owner = Some(lease);
+        self.guard = CompleteInstanceGuard::OnlyRunning;
+        self
     }
 
     /// Guard the update against races: only apply when the current status
@@ -1169,6 +1184,30 @@ pub trait Persistence: Send + Sync {
         }
         self.park_instance_on_signals(instance_id, request, targets.signal_ids)
             .await
+    }
+
+    /// Park the execution holding `lease`, with the same targets and in the
+    /// same transaction as [`Self::park_instance_on_targets`].
+    ///
+    /// Ownership is checked against the stored root lease under the instance
+    /// row lock, never by the caller:
+    /// - the lease is active: apply [`crate::lifecycle::park`] and record that
+    ///   this execution parked ([`crate::lifecycle::ParkOutcome::Parked`]);
+    /// - this execution already parked and the instance is still suspended:
+    ///   [`crate::lifecycle::ParkOutcome::AlreadyParked`], writing nothing, so
+    ///   a retry after a lost acknowledgement is safe;
+    /// - anything else (another epoch, a pause, a cancel, a terminal state):
+    ///   [`crate::lifecycle::ParkOutcome::Superseded`], writing nothing.
+    async fn park_execution(
+        &self,
+        _lease: &invocations::InvocationLease,
+        _request: crate::lifecycle::ParkRequest,
+        _targets: ParkTargets<'_>,
+    ) -> Result<crate::lifecycle::ParkOutcome, CoreError> {
+        Err(CoreError::PersistenceError {
+            operation: "park_execution".into(),
+            details: "owned parking is not implemented by this backend".into(),
+        })
     }
 
     /// Atomically cancel suspended instances with pending cancel commands, clear

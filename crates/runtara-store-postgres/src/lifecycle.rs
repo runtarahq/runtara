@@ -135,3 +135,45 @@ pub(crate) async fn apply_transition(
     }
     Ok(())
 }
+
+/// Evaluate the park policy against the locked `status` and apply it with
+/// its targets. The instance row must already be locked.
+pub(crate) async fn park(
+    tx: &mut Transaction<'_, Postgres>,
+    instance_id: &str,
+    status: InstanceStatus,
+    request: runtara_core::lifecycle::ParkRequest,
+    targets: runtara_core::persistence::ParkTargets<'_>,
+) -> Result<runtara_core::lifecycle::Decision, CoreError> {
+    let decision = runtara_core::lifecycle::park(status, request);
+    if let runtara_core::lifecycle::Decision::Applied(effects) = decision {
+        apply_transition(tx, &[instance_id.to_owned()], effects).await?;
+        let signals = request.reason == runtara_core::lifecycle::ParkReason::Signal
+            && !targets.signal_ids.is_empty();
+        if signals || !targets.wait_ids.is_empty() {
+            sqlx::query(
+                "INSERT INTO instance_input_parks (instance_id, signal_ids, wait_ids) VALUES ($1,$2,$3)",
+            )
+            .bind(instance_id)
+            .bind(targets.signal_ids)
+            .bind(targets.wait_ids)
+            .execute(&mut **tx)
+            .await
+            .db()?;
+        }
+        if signals {
+            crate::inputs::schedule_accepted(tx, instance_id, true)
+                .await
+                .db()?;
+        }
+        if !targets.wait_ids.is_empty() {
+            crate::waits::park_on(tx, instance_id, targets.wait_ids)
+                .await
+                .map_err(|error| CoreError::PersistenceError {
+                    operation: "park_instance_on_targets".into(),
+                    details: error.to_string(),
+                })?;
+        }
+    }
+    Ok(decision)
+}
