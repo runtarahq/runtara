@@ -5,7 +5,6 @@ import { RefreshCw } from 'lucide-react';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { Button } from '@/shared/components/ui/button';
 import { Progress } from '@/shared/components/ui/progress';
-import { Separator } from '@/shared/components/ui/separator';
 import {
   Breadcrumb,
   ConsoleErrorState,
@@ -20,12 +19,14 @@ import type { MetricsBucket } from '@/generated/RuntaraRuntimeApi';
 
 import { ActivityMap } from '../../components/ActivityMap';
 import { AnalyticsHeroCard } from '../../components/AnalyticsHeroCard';
+import { HostResourceTiles } from '../../components/HostResources';
 import {
   MetricTrendChart,
   type TrendPoint,
 } from '../../components/MetricTrendChart';
 import {
   usePreviousTenantMetrics,
+  useSystemAnalytics,
   useTenantMetrics,
 } from '../../hooks/useAnalytics';
 import { summarizeMetrics } from '../../utils/metrics-summary';
@@ -129,7 +130,7 @@ function toSeries(buckets: MetricsBucket[], period: DateRangeOption) {
 }
 
 export function Usage() {
-  usePageTitle('Usage Analytics');
+  usePageTitle('Usage');
 
   const [searchParams, setSearchParams] = useSearchParams();
   const urlPeriod = searchParams.get('period') as DateRangeOption;
@@ -155,6 +156,12 @@ export function Usage() {
     () => (tenantMetrics?.data?.metrics ?? []) as MetricsBucket[],
     [tenantMetrics]
   );
+
+  const {
+    data: systemAnalytics,
+    isLoading: systemLoading,
+    refetch: refetchSystem,
+  } = useSystemAnalytics();
 
   const { data: previousMetrics } = usePreviousTenantMetrics(dateRange);
   const previousBuckets = useMemo(
@@ -220,19 +227,15 @@ export function Usage() {
       bodyClassName="flex min-h-0 flex-col overflow-auto p-3 md:p-4"
       toolbar={
         <ConsoleToolbar
-          left={
-            <Breadcrumb
-              items={[
-                { label: 'Analytics', to: '/analytics/usage' },
-                { label: 'Usage' },
-              ]}
-            />
-          }
+          left={<Breadcrumb items={[{ label: 'Usage' }]} />}
           actions={
             <div className="flex items-center gap-2">
               <DateRangeSelector value={dateRange} onChange={setDateRange} />
               <Button
-                onClick={() => refetch()}
+                onClick={() => {
+                  refetch();
+                  refetchSystem();
+                }}
                 variant="secondary"
                 bordered
                 size="sm"
@@ -248,15 +251,15 @@ export function Usage() {
       {isError && !isLoading ? (
         <ConsoleErrorState
           error={error}
-          entityLabel="analytics"
+          entityLabel="usage"
           className="h-auto rounded-lg border bg-muted/20"
         />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-2.5">
-          {/* Widths follow how much each card carries, rather than three
-              identical boxes: the count and the rate are the headline, the
-              resource averages are reference. */}
-          <section className="grid shrink-0 gap-2.5 lg:grid-cols-[5fr_4fr_3fr]">
+          {/* One row of six compact tiles: three for the selected window,
+              three for the host as it stands now. The charts below are where
+              the page spends its height. */}
+          <section className="grid shrink-0 grid-cols-2 gap-2.5 md:grid-cols-3 xl:grid-cols-6">
             <AnalyticsHeroCard
               label="Total executions"
               value={formatNumber(metrics.totalExecutions)}
@@ -265,9 +268,9 @@ export function Usage() {
               comparisonLabel={COMPARISON_LABEL[dateRange]}
               loading={isLoading}
             >
-              <span className="mt-1 min-h-[40px] text-sm text-muted-foreground">
+              <span className="line-clamp-2 text-xs text-muted-foreground">
                 {busiest
-                  ? `Busiest interval ${formatNumber(busiest.count)} run${busiest.count === 1 ? '' : 's'} · ${busiest.when}`
+                  ? `Busiest ${formatNumber(busiest.count)} run${busiest.count === 1 ? '' : 's'} · ${busiest.when}`
                   : 'No executions in this window'}
               </span>
             </AnalyticsHeroCard>
@@ -280,32 +283,37 @@ export function Usage() {
               comparisonLabel={COMPARISON_LABEL[dateRange]}
               loading={isLoading}
             >
-              <div className="mt-1 flex flex-col gap-2">
-                <Progress
-                  value={Math.round(metrics.successRate)}
-                  className="h-1.5"
-                />
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">
-                    Failed executions
-                  </span>
-                  <span className="font-medium tabular-nums">
-                    {formatNumber(metrics.failureCount)}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">Cancelled</span>
-                  <span className="font-medium tabular-nums">
-                    {formatNumber(metrics.cancelledCount)}
-                  </span>
-                </div>
-              </div>
+              <Progress
+                value={Math.round(metrics.successRate)}
+                className="h-1"
+                aria-label="Success rate"
+              />
+              <span className="truncate text-xs text-muted-foreground">
+                {formatNumber(metrics.failureCount)} failed ·{' '}
+                {formatNumber(metrics.cancelledCount)} cancelled
+              </span>
             </AnalyticsHeroCard>
 
-            <Card2
-              duration={formatDurationSeconds(metrics.avgDurationSeconds)}
-              memory={formatMemory(metrics.avgMemory)}
+            {/* Labelled "peak" deliberately: the server aggregates
+                `AVG(memory_peak_bytes)`, an average of each run's high-water
+                mark rather than of its consumption, and "Avg memory" invited
+                the wrong reading. */}
+            <AnalyticsHeroCard
+              label="Avg duration"
+              value={formatDurationSeconds(metrics.avgDurationSeconds)}
               loading={isLoading}
+            >
+              <span className="truncate text-xs text-muted-foreground">
+                Avg peak memory{' '}
+                <span className="font-medium tabular-nums text-foreground">
+                  {formatMemory(metrics.avgMemory)}
+                </span>
+              </span>
+            </AnalyticsHeroCard>
+
+            <HostResourceTiles
+              data={systemAnalytics?.data}
+              loading={systemLoading}
             />
           </section>
 
@@ -352,52 +360,5 @@ export function Usage() {
         </div>
       )}
     </ConsoleTableShell>
-  );
-}
-
-/**
- * The two resource averages, stacked.
- *
- * Both are labelled "peak" deliberately: the server aggregates
- * `AVG(memory_peak_bytes)`, an average of each run's high-water mark rather
- * than of its consumption, and "Avg memory" invited the wrong reading.
- */
-function Card2({
-  duration,
-  memory,
-  loading,
-}: {
-  duration: string;
-  memory: string;
-  loading: boolean;
-}) {
-  return (
-    <div className="flex h-full flex-col justify-center gap-3 rounded-xl border border-border/40 bg-card p-4">
-      <div className="flex flex-col gap-1">
-        <div className="text-sm font-medium text-muted-foreground">
-          Avg duration
-        </div>
-        {loading ? (
-          <div className="h-6 w-24 animate-pulse rounded bg-muted" />
-        ) : (
-          <div className="text-2xl font-semibold tabular-nums leading-none tracking-tight">
-            {duration}
-          </div>
-        )}
-      </div>
-      <Separator />
-      <div className="flex flex-col gap-1">
-        <div className="text-sm font-medium text-muted-foreground">
-          Avg peak memory
-        </div>
-        {loading ? (
-          <div className="h-6 w-24 animate-pulse rounded bg-muted" />
-        ) : (
-          <div className="text-2xl font-semibold tabular-nums leading-none tracking-tight">
-            {memory}
-          </div>
-        )}
-      </div>
-    </div>
   );
 }

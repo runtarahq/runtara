@@ -17,12 +17,13 @@ interface AnalyticsHeroCardProps {
 }
 
 /**
- * The oversized top-of-page KPI.
+ * The compact top-of-page KPI tile.
  *
- * Replaces `shared/components/metric-card`, which despite living in `shared`
- * had exactly one consumer - this page - and has been deleted with it. Six
- * equally weighted cards gave the page no focal point; three of unequal weight
- * put the count and the success rate where the eye lands first.
+ * Six of these share the top row - the usage figures and the host readings -
+ * so each is a label, a value and a line or two of detail. The trend sits
+ * beside the value rather than on a row of its own; what it is measured
+ * against goes in the tooltip, since the date range picker already names the
+ * window on screen.
  *
  * `trend` already encodes whether a move was good, so the arrow and colour come
  * from it rather than from the sign of `change` - a falling duration is an
@@ -37,49 +38,46 @@ export function AnalyticsHeroCard({
   loading = false,
   children,
 }: AnalyticsHeroCardProps) {
+  const comparison = comparisonLabel ? ` vs ${comparisonLabel}` : '';
   return (
-    <Card className="h-full border-border/40 shadow-none">
-      <CardContent className="flex h-full flex-col gap-1 p-3.5">
-        <div className="text-sm font-medium text-muted-foreground">{label}</div>
+    <Card className="h-full min-w-0 border-border/40 shadow-none">
+      <CardContent className="flex h-full flex-col gap-1.5 p-3">
+        <div className="truncate text-xs font-medium text-muted-foreground">
+          {label}
+        </div>
         {loading ? (
-          <div className="h-9 w-32 animate-pulse rounded bg-muted" />
+          <div className="h-6 w-24 animate-pulse rounded bg-muted" />
         ) : (
-          // Values are foreground, never a status hue. Colour on this page is
-          // reserved for things that mean something: the trend arrow, the
-          // failure red in the map. A giant green number reads as a judgement
-          // the figure has not earned.
-          <div className="text-[1.75rem] font-semibold tabular-nums leading-none tracking-tight xl:text-[2.25rem]">
-            {value}
-          </div>
-        )}
-        {/* Nothing is drawn for a move inside the noise threshold. "0.0% vs
-            earlier half" is a row of pixels that tells the reader nothing, and
-            it appeared on most cards most of the time. */}
-        {change !== undefined && trend && trend !== 'stable' && !loading ? (
-          <div
-            className={cn(
-              'flex items-center gap-1.5 text-sm font-medium',
-              // The arrow follows the number; the colour says whether that is
-              // welcome. A duration falling 30% is a down arrow in green.
-              trend === 'up' ? 'text-success' : 'text-destructive'
-            )}
-          >
-            {change > 0 ? (
-              <ArrowUpIcon className="size-4" />
-            ) : (
-              <ArrowDownIcon className="size-4" />
-            )}
-            <span>
-              {`${Math.abs(change).toFixed(0)}%`}
-              {comparisonLabel ? (
-                <span className="font-normal text-muted-foreground">
-                  {` vs ${comparisonLabel}`}
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            {/* Values are foreground, never a status hue. Colour on this page
+                is reserved for things that mean something: the trend arrow,
+                the failure red in the map. */}
+            <div className="text-xl font-semibold tabular-nums leading-none tracking-tight">
+              {value}
+            </div>
+            {/* Nothing is drawn for a move inside the noise threshold. */}
+            {change !== undefined && trend && trend !== 'stable' ? (
+              <div
+                title={`${Math.abs(change).toFixed(0)}%${comparison}`}
+                className={cn(
+                  'flex items-center gap-0.5 text-xs font-medium',
+                  // The arrow follows the number; the colour says whether that
+                  // is welcome. A duration falling 30% is a down arrow in green.
+                  trend === 'up' ? 'text-success' : 'text-destructive'
+                )}
+              >
+                {change > 0 ? (
+                  <ArrowUpIcon className="size-3.5" aria-hidden />
+                ) : (
+                  <ArrowDownIcon className="size-3.5" aria-hidden />
+                )}
+                <span>
+                  {`${Math.abs(change).toFixed(0)}%`}
+                  <span className="sr-only">{comparison}</span>
                 </span>
-              ) : null}
-            </span>
+              </div>
+            ) : null}
           </div>
-        ) : (
-          <div className="h-5" />
         )}
         {children}
       </CardContent>

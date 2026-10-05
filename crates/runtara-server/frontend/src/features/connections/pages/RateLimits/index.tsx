@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router';
 import { usePageTitle } from '@/shared/hooks/usePageTitle';
 import { RefreshCw, Link, X } from 'lucide-react';
@@ -54,9 +54,13 @@ export function RateLimits() {
   usePageTitle('Rate Limits');
 
   const [searchParams, setSearchParams] = useSearchParams();
+  // `?connection=<id>` is how a row on the Connections table links straight to
+  // that connection's history.
   const [selectedConnectionId, setSelectedConnectionId] = useState<
     string | null
-  >(null);
+  >(() => searchParams.get('connection'));
+  const scrollToHistory = useRef(selectedConnectionId !== null);
+  const historyRef = useRef<HTMLElement>(null);
 
   const urlPeriod = searchParams.get('period') as DateRangeOption;
   const initialDateRange = VALID_DATE_RANGES.includes(urlPeriod)
@@ -65,10 +69,13 @@ export function RateLimits() {
   const [dateRange, setDateRange] = useState<DateRangeOption>(initialDateRange);
 
   useEffect(() => {
-    const newParams = new URLSearchParams(searchParams);
+    const newParams = new URLSearchParams();
     newParams.set('period', dateRange);
+    if (selectedConnectionId) {
+      newParams.set('connection', selectedConnectionId);
+    }
     setSearchParams(newParams, { replace: true });
-  }, [dateRange, searchParams, setSearchParams]);
+  }, [dateRange, selectedConnectionId, setSearchParams]);
 
   const {
     data: rateLimitsResponse,
@@ -132,6 +139,16 @@ export function RateLimits() {
     (r) => r.connectionId === selectedConnectionId
   );
 
+  // Arriving from a link, the history renders below every card - bring it
+  // into view once, rather than leaving the reader to find it.
+  const historyReady =
+    !!selectedConnection && !historyLoading && !timelineLoading;
+  useEffect(() => {
+    if (!scrollToHistory.current || !historyReady) return;
+    scrollToHistory.current = false;
+    historyRef.current?.scrollIntoView({ block: 'start' });
+  }, [historyReady]);
+
   return (
     <ConsoleTableShell
       bodyClassName="p-4 md:p-6"
@@ -140,8 +157,8 @@ export function RateLimits() {
           left={
             <Breadcrumb
               items={[
-                { label: 'Analytics', to: '/analytics/usage' },
-                { label: 'Rate Limits' },
+                { label: 'Connections', to: '/connections' },
+                { label: 'Rate limits' },
               ]}
             />
           }
@@ -223,7 +240,7 @@ export function RateLimits() {
 
           {/* History Section */}
           {selectedConnection && (
-            <section className="mt-4">
+            <section ref={historyRef} className="mt-4 scroll-mt-4">
               {historyLoading || timelineLoading ? (
                 <RateLimitHistorySkeleton />
               ) : (

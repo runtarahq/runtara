@@ -27,6 +27,11 @@ const Connection = lazy(() =>
     default: m.Connection,
   }))
 );
+const ConnectionRateLimits = lazy(() =>
+  import('@/features/connections/pages/RateLimits').then((m) => ({
+    default: m.RateLimits,
+  }))
+);
 const CreateConnection = lazy(() =>
   import('@/features/connections/pages/CreateConnection').then((m) => ({
     default: m.CreateConnection,
@@ -110,16 +115,6 @@ const EditObjectInstance = lazy(() =>
 const AnalyticsUsage = lazy(() =>
   import('@/features/analytics/pages/Usage').then((m) => ({
     default: m.Usage,
-  }))
-);
-const AnalyticsSystem = lazy(() =>
-  import('@/features/analytics/pages/System').then((m) => ({
-    default: m.System,
-  }))
-);
-const AnalyticsRateLimits = lazy(() =>
-  import('@/features/analytics/pages/RateLimits').then((m) => ({
-    default: m.RateLimits,
   }))
 );
 const Settings = lazy(() =>
@@ -273,6 +268,16 @@ export const router = createBrowserRouter(
           ),
         },
         {
+          path: '/connections/rate-limits',
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>
+                <ConnectionRateLimits />
+              </Suspense>
+            </PrivateRoute>
+          ),
+        },
+        {
           path: '/connections/:id',
           element: (
             <PrivateRoute>
@@ -365,15 +370,7 @@ export const router = createBrowserRouter(
           ),
         },
         {
-          path: '/analytics',
-          element: (
-            <PrivateRoute>
-              <Navigate to="/analytics/usage" replace />
-            </PrivateRoute>
-          ),
-        },
-        {
-          path: '/analytics/usage',
+          path: '/usage',
           element: (
             <PrivateRoute>
               <Suspense fallback={<PageLoader />}>
@@ -383,24 +380,23 @@ export const router = createBrowserRouter(
           ),
         },
         {
-          path: '/analytics/system',
-          element: (
-            <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <AnalyticsSystem />
-              </Suspense>
-            </PrivateRoute>
-          ),
+          // Analytics was renamed to Usage, and its System tiles folded into
+          // it; keep the old addresses working.
+          path: '/analytics',
+          element: <Navigate to="/usage" replace />,
         },
         {
+          path: '/analytics/usage',
+          element: <Navigate to="/usage" replace />,
+        },
+        {
+          path: '/analytics/system',
+          element: <Navigate to="/usage" replace />,
+        },
+        {
+          // Rate limits moved under Connections; keep old links working.
           path: '/analytics/rate-limits',
-          element: (
-            <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <AnalyticsRateLimits />
-              </Suspense>
-            </PrivateRoute>
-          ),
+          element: <Navigate to="/connections/rate-limits" replace />,
         },
         {
           path: '/operations/*',

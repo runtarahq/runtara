@@ -1,3 +1,4 @@
+import type { RateLimitStatusDto } from '@/generated/RuntaraRuntimeApi';
 import { describe, expect, it } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { FormProvider, useForm } from 'react-hook-form';
@@ -81,7 +82,7 @@ describe('RateLimitSection', () => {
     expect(screen.getByText('Requests per second')).toBeInTheDocument();
   });
 
-  it('renders a cross-link to the analytics rate-limits page', () => {
+  it('renders a cross-link to the rate-limits page', () => {
     render(
       <Wrapper>
         <RateLimitSection />
@@ -90,6 +91,33 @@ describe('RateLimitSection', () => {
     const link = screen.getByRole('link', {
       name: /view live rate-limit activity/i,
     });
-    expect(link).toHaveAttribute('href', '/analytics/rate-limits');
+    expect(link).toHaveAttribute('href', '/connections/rate-limits');
+  });
+
+  it('opens the rate-limits page on this connection when it exists', () => {
+    render(
+      <Wrapper>
+        <RateLimitSection
+          liveStatus={
+            {
+              connectionId: 'conn 1',
+              connectionTitle: 'Conn',
+              integrationId: 'http',
+              config: null,
+              state: { available: true },
+              metrics: { isRateLimited: false },
+              periodStats: null,
+            } as unknown as RateLimitStatusDto
+          }
+        />
+      </Wrapper>
+    );
+    const link = screen.getByRole('link', {
+      name: /view live rate-limit activity/i,
+    });
+    expect(link).toHaveAttribute(
+      'href',
+      '/connections/rate-limits?connection=conn%201'
+    );
   });
 });

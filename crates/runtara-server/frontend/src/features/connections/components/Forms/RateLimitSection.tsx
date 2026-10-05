@@ -146,9 +146,14 @@ export function RateLimitSection({
           </div>
         )}
 
-        {/* Cross-link to the live activity dashboard */}
+        {/* Cross-link to the live activity dashboard, opened on this
+            connection when it already exists. */}
         <Link
-          to="/analytics/rate-limits"
+          to={
+            liveStatus?.connectionId
+              ? `/connections/rate-limits?connection=${encodeURIComponent(liveStatus.connectionId)}`
+              : '/connections/rate-limits'
+          }
           className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
         >
           <ExternalLink className="size-3" />

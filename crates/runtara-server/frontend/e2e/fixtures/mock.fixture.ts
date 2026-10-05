@@ -471,7 +471,7 @@ const factory: MockApi = {
     //
     // This must match EVERY navigation document, not just the root: the dev
     // server serves the same index.html for any SPA route, and specs deep-link
-    // (`/settings/api-keys`, `/analytics/usage`, …). When an unpatched document
+    // (`/settings/api-keys`, `/usage`, …). When an unpatched document
     // is served the SPA boots in `oidc` mode, `useTenantUrlGuard` sees a JWT
     // org_id that can never match the tenant parsed from the URL, and it does
     // `window.location.replace('/ui/<org>/')` — which is outside the router's

@@ -64,10 +64,14 @@ function ConnectionUsage({ connection }: { connection: EnrichedConnection }) {
       : `${formatNumber(rateLimitStats.totalRequests)} req 24h`;
 
   return (
-    <span className="inline-flex items-center gap-1 text-xs">
-      <Activity className="size-3" />
+    <Link
+      to={`/connections/rate-limits?connection=${encodeURIComponent(connection.id)}`}
+      className="inline-flex items-center gap-1 text-xs underline-offset-2 hover:text-foreground hover:underline"
+      aria-label={`Rate limits for ${connection.title}: ${statsText}`}
+    >
+      <Activity className="size-3" aria-hidden />
       {statsText}
-    </span>
+    </Link>
   );
 }
 
