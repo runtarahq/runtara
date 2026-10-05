@@ -1,3 +1,4 @@
+import { appendPathSegment } from '@/features/workflows/utils/reference-path';
 import { SchemaField } from '../../EditorSidebar/SchemaFieldsEditor';
 import { StepInfo, StepParameter } from '../shared';
 import { SimpleVariable } from '../NodeFormContext';
@@ -51,7 +52,9 @@ function flattenStepParameters(
 
 /**
  * Recursively turns schema fields (including nested object `properties`)
- * into dotted suggestions under `<valuePrefix>.<path>`.
+ * into suggestions under `valuePrefix`. The label joins field names with dots;
+ * the value appends each name with appendPathSegment, so a field named `a.b`
+ * is referenced as one key.
  */
 function appendSchemaFieldSuggestions(
   fields: SchemaField[],
@@ -66,9 +69,10 @@ function appendSchemaFieldSuggestions(
       continue;
     }
     const path = pathPrefix ? `${pathPrefix}.${field.name}` : field.name;
+    const value = appendPathSegment(valuePrefix, field.name);
     suggestions.push({
       label: path,
-      value: `${valuePrefix}.${path}`,
+      value,
       description: field.description || defaultDescription,
       group,
       type: field.type,
@@ -77,7 +81,7 @@ function appendSchemaFieldSuggestions(
       appendSchemaFieldSuggestions(
         field.properties,
         path,
-        valuePrefix,
+        value,
         group,
         defaultDescription,
         suggestions
@@ -191,7 +195,7 @@ export function composeVariableSuggestions(
       if (variable.name) {
         suggestions.push({
           label: variable.name,
-          value: `workflow.inputs.variables.${variable.name}`,
+          value: appendPathSegment('workflow.inputs.variables', variable.name),
           description: variable.description || 'Workflow variable',
           group: 'Variables',
           type: variable.type?.toLowerCase(),

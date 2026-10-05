@@ -4,6 +4,7 @@ import {
   getStepOutputShape,
   ShapeFieldJson,
 } from '@/features/workflows/utils/step-output-shapes';
+import { appendPathSegment } from '@/features/workflows/utils/reference-path';
 import { ExecutionGraph } from '../CustomNodes/utils.tsx';
 import { findAgentById } from '@/shared/utils/agent-id';
 
@@ -178,7 +179,8 @@ function buildStepInfoList(
         createStepParameter(
           inputKey,
           parameterType,
-          prevStepId,
+          // When referencing previous steps, use .outputs instead of .inputs
+          appendPathSegment(`steps['${prevStepId}'].outputs`, inputKey),
           parameterSchema
         )
       );
@@ -243,12 +245,15 @@ function buildStepInfoList(
             if (schema.type === 'object' && schema.properties) {
               // Object with properties - show each property as a suggestion
               for (const [propName] of Object.entries<any>(schema.properties)) {
-                const schemaInfo = parseJsonSchema(schemaString, propName);
+                const schemaInfo = parseJsonSchema(schemaString, [propName]);
                 outputs.push(
                   createStepParameter(
                     propName,
                     schemaInfo.type,
-                    prevStepId,
+                    appendPathSegment(
+                      `steps['${prevStepId}'].outputs`,
+                      propName
+                    ),
                     schemaInfo.schema
                   )
                 );
@@ -302,7 +307,10 @@ function buildStepInfoList(
             type: isValidParameterType(fieldType ?? '')
               ? (fieldType as ParameterType)
               : 'string',
-            path: `steps['${prevStepId}'].outputs.${fieldName}`,
+            path: appendPathSegment(
+              `steps['${prevStepId}'].outputs`,
+              fieldName
+            ),
             children: undefined,
           });
         }
@@ -370,7 +378,7 @@ function agentOutputFieldToParameter(
   },
   basePath: string
 ): StepParameter {
-  const path = `${basePath}.${field.name}`;
+  const path = appendPathSegment(basePath, field.name);
   const children = (field.fields ?? []).map((child) =>
     agentOutputFieldToParameter(
       child as Parameters<typeof agentOutputFieldToParameter>[0],
@@ -409,7 +417,7 @@ function appendShapeOutputs(
       outputs.push({
         name: field.name,
         type: shapeTypeToParameterType(field.type),
-        path: `steps['${stepId}'].outputs.${field.name}`,
+        path: appendPathSegment(`steps['${stepId}'].outputs`, field.name),
         children: undefined,
       });
     }
@@ -447,7 +455,7 @@ function shapeSiblingParameter(
   return {
     name: sibling.name,
     type: shapeTypeToParameterType(sibling.type),
-    path: `steps['${stepId}'].${sibling.name}`,
+    path: appendPathSegment(`steps['${stepId}']`, sibling.name),
     children: undefined,
   };
 }
@@ -509,12 +517,13 @@ function findPreviousSteps(
 }
 
 /**
- * Parse JSON schema and extract type information for a specific property path
+ * Parse JSON schema and extract type information for a property path, given
+ * as one key per segment so a property named `a.b` stays a single key.
  * Handles $defs and $ref references
  */
 function parseJsonSchema(
   schemaString: string,
-  propertyPath: string
+  propertyPath: string[]
 ): { type?: ParameterType; schema?: any } {
   try {
     const schema = JSON.parse(schemaString);
@@ -534,14 +543,13 @@ function parseJsonSchema(
       return current;
     }
 
-    // Function to find a property by its path (e.g., "body.headers")
+    // Function to find a property by its path (e.g., ["body", "headers"])
     function findProperty(
-      propPath: string,
+      parts: string[],
       currentSchema: any
     ): { type?: ParameterType; schema?: any } {
       if (!currentSchema || !currentSchema.properties) return {};
 
-      const parts = propPath.split('.');
       const firstPart = parts[0];
 
       // Handle array notation like body.messages[0].role
@@ -571,7 +579,7 @@ function parseJsonSchema(
 
           // Continue with the rest of the path
           if (parts.length > 1) {
-            return findProperty(parts.slice(1).join('.'), {
+            return findProperty(parts.slice(1), {
               properties: itemSchema,
             });
           }
@@ -599,7 +607,7 @@ function parseJsonSchema(
 
       // If this is a nested path, continue to the next part
       if (parts.length > 1) {
-        return findProperty(parts.slice(1).join('.'), property);
+        return findProperty(parts.slice(1), property);
       }
 
       // Return the property type
@@ -622,12 +630,9 @@ function parseJsonSchema(
 function createStepParameter(
   name: string,
   type: ParameterType | undefined,
-  stepId: string,
+  path: string,
   schema: any = null
 ): StepParameter {
-  // When referencing previous steps, use .outputs instead of .inputs
-  const path = `steps['${stepId}'].outputs.${name}`;
-
   const parameter: StepParameter = {
     name,
     type,
@@ -650,14 +655,18 @@ function createStepParameter(
             createStepParameter(
               `${name}.${childName}`,
               childType,
-              stepId,
+              appendPathSegment(path, childName),
               childSchema
             )
           );
         } else if ((childSchema as any).$ref) {
           // Handle reference properties
           children.push(
-            createStepParameter(`${name}.${childName}`, 'object', stepId)
+            createStepParameter(
+              `${name}.${childName}`,
+              'object',
+              appendPathSegment(path, childName)
+            )
           );
         }
       }
@@ -672,7 +681,7 @@ function createStepParameter(
               createStepParameter(
                 `${name}[${index}]`,
                 itemType,
-                stepId,
+                `${path}[${index}]`,
                 itemSchema
               )
             );
@@ -683,11 +692,18 @@ function createStepParameter(
         const itemType = schema.items.type as ParameterType;
         if (isValidParameterType(itemType)) {
           children.push(
-            createStepParameter(`${name}.item`, itemType, stepId, schema.items)
+            createStepParameter(
+              `${name}.item`,
+              itemType,
+              `${path}.item`,
+              schema.items
+            )
           );
         } else if (schema.items.$ref) {
           // Handle reference item type
-          children.push(createStepParameter(`${name}.item`, 'object', stepId));
+          children.push(
+            createStepParameter(`${name}.item`, 'object', `${path}.item`)
+          );
         }
       }
     }

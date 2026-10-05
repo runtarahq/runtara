@@ -11,6 +11,7 @@
  * runtime-dependent.
  */
 import { getStepOutputShape } from '@/features/workflows/utils/step-output-shapes';
+import { referenceSegments } from '@/features/workflows/utils/reference-path';
 import { SchemaField } from '../EditorSidebar/SchemaFieldsEditor';
 import { SimpleVariable } from './NodeFormContext';
 import { StepInfo, StepParameter } from './shared';
@@ -65,6 +66,9 @@ export function describeStepReference(
   let fieldPath = parsed.rest;
   if (fieldPath.startsWith('outputs.')) {
     fieldPath = fieldPath.slice('outputs.'.length);
+  } else if (fieldPath.startsWith('outputs[')) {
+    // A bracketed key (outputs["a.b"]) keeps its brackets, as in the picker.
+    fieldPath = fieldPath.slice('outputs'.length);
   }
   return { stepName: step.name, fieldPath: fieldPath || 'outputs' };
 }
@@ -80,6 +84,10 @@ const BUILTIN_VARIABLE_TYPES: Record<string, string | undefined> = {
   _loop: 'object',
   _loop_indices: 'array',
 };
+
+/** Both spellings the editor teaches for workflow input data and variables. */
+const DATA_ROOTS = [['workflow', 'inputs', 'data'], ['data']];
+const VARIABLE_ROOTS = [['workflow', 'inputs', 'variables'], ['variables']];
 
 function flattenParameters(parameters: StepParameter[]): StepParameter[] {
   const result: StepParameter[] = [];
@@ -104,10 +112,12 @@ function resolveStepReferenceType(
   if (!step) {
     return undefined;
   }
-  // Normalize to the bracket form used by suggestion paths.
-  const normalized = `steps['${parsed.stepId}']${parsed.rest ? `.${parsed.rest}` : ''}`;
-  const match = flattenParameters(step.outputs).find(
-    (parameter) => parameter.path === normalized
+  // Compare segments, not strings, so either step spelling, either quote
+  // character, and a reference saved before its key was bracket-quoted all
+  // match the suggestion path.
+  const segments = referenceSegments(path);
+  const match = flattenParameters(step.outputs).find((parameter) =>
+    sameSegments(referenceSegments(parameter.path), segments)
   );
   return match?.type;
 }
@@ -173,8 +183,10 @@ export function resolveReferenceType(
     return resolveStepReferenceType(path, context.previousSteps ?? []);
   }
 
+  const segments = referenceSegments(path);
+
   // Workflow input data: both spellings the editor teaches.
-  const dataRest = stripPrefix(path, ['workflow.inputs.data', 'data']);
+  const dataRest = rootRemainder(segments, DATA_ROOTS);
   if (dataRest !== null) {
     if (context.insideSplitScope) {
       // `data.*` is the Split's current item here, not the workflow input —
@@ -183,30 +195,24 @@ export function resolveReferenceType(
       if (!itemFields || itemFields.length === 0) {
         return undefined;
       }
-      if (dataRest === '') {
+      if (dataRest.length === 0) {
         return 'object';
       }
-      return resolveSchemaFieldType(dataRest.split('.'), itemFields);
+      return resolveSchemaFieldType(dataRest, itemFields);
     }
     if (context.insideWaitScope) {
       // onWait scope's own schema is not modeled in the editor.
-      return dataRest === '' ? 'object' : undefined;
+      return dataRest.length === 0 ? 'object' : undefined;
     }
-    if (dataRest === '') {
+    if (dataRest.length === 0) {
       return 'object';
     }
-    return resolveSchemaFieldType(
-      dataRest.split('.'),
-      context.inputSchemaFields
-    );
+    return resolveSchemaFieldType(dataRest, context.inputSchemaFields);
   }
 
-  const variableRest = stripPrefix(path, [
-    'workflow.inputs.variables',
-    'variables',
-  ]);
-  if (variableRest !== null && variableRest !== '') {
-    const [name, ...tail] = variableRest.split('.');
+  const variableRest = rootRemainder(segments, VARIABLE_ROOTS);
+  if (variableRest !== null && variableRest.length > 0) {
+    const [name, ...tail] = variableRest;
     if (tail.length > 0) {
       return undefined;
     }
@@ -233,16 +239,13 @@ export function resolveReferenceType(
   if (path === 'iteration.indices') {
     return 'array';
   }
-  const iterationItemRest = stripPrefix(path, ['iteration.item']);
+  const iterationItemRest = rootRemainder(segments, [['iteration', 'item']]);
   if (iterationItemRest !== null) {
-    if (iterationItemRest === '') {
+    if (iterationItemRest.length === 0) {
       return context.insideSplitScope ? 'object' : undefined;
     }
     return context.insideSplitScope
-      ? resolveSchemaFieldType(
-          iterationItemRest.split('.'),
-          context.splitItemSchemaFields
-        )
+      ? resolveSchemaFieldType(iterationItemRest, context.splitItemSchemaFields)
       : undefined;
   }
 
@@ -359,12 +362,14 @@ export function validateReferencePath(
     );
   }
 
-  const dataRest = stripPrefix(path, ['workflow.inputs.data', 'data']);
-  if (dataRest !== null && dataRest !== '') {
-    // Bracket indexing (data.orders[0].sku) is normalized at runtime into
-    // separate segments — mirror the step-reference branch and skip it here
-    // rather than mismatching 'orders[0]' against the declared 'orders'.
-    if (dataRest.includes('[')) {
+  const segments = referenceSegments(path);
+
+  const dataRest = rootRemainder(segments, DATA_ROOTS);
+  if (dataRest !== null && dataRest.length > 0) {
+    // Bracket forms are left unchecked, mirroring the step-reference branch:
+    // an index segment (data.orders[0].sku) is not a declared property, and
+    // once tokenized a quoted key (data["a.b"]) looks the same as one.
+    if (path.includes('[')) {
       return null;
     }
     if (context.insideSplitScope) {
@@ -374,7 +379,7 @@ export function validateReferencePath(
         return null;
       }
       return validateSchemaFieldPath(
-        dataRest.split('.'),
+        dataRest,
         context.splitItemSchemaFields,
         'the Split iteration schema'
       );
@@ -384,19 +389,24 @@ export function validateReferencePath(
       return null;
     }
     return validateSchemaFieldPath(
-      dataRest.split('.'),
+      dataRest,
       context.inputSchemaFields,
       'the workflow input schema'
     );
   }
 
   if (path.startsWith('iteration.')) {
-    const segments = path.split('.');
-    const field = segments[1];
+    const field = segments[1] ?? '';
     if (!['index', 'indices', 'item'].includes(field)) {
       return `'iteration' has no field '${field}'. Available: index, indices, item`;
     }
-    if (field === 'item' && segments.length > 2 && context.insideSplitScope) {
+    // Bracket forms below `item` are left unchecked, as for data.* above.
+    if (
+      field === 'item' &&
+      segments.length > 2 &&
+      context.insideSplitScope &&
+      !path.includes('[')
+    ) {
       return validateSchemaFieldPath(
         segments.slice(2),
         context.splitItemSchemaFields,
@@ -493,17 +503,24 @@ function validateSchemaFieldPath(
 }
 
 /**
- * If `path` is `prefix` or starts with `prefix.`, returns the remainder
- * (possibly ''); otherwise null. Tries prefixes in order.
+ * If `segments` starts with one of `roots`, returns the segments after it
+ * (possibly none); otherwise null. Tries roots in order.
  */
-function stripPrefix(path: string, prefixes: string[]): string | null {
-  for (const prefix of prefixes) {
-    if (path === prefix) {
-      return '';
-    }
-    if (path.startsWith(`${prefix}.`)) {
-      return path.slice(prefix.length + 1);
+function rootRemainder(segments: string[], roots: string[][]): string[] | null {
+  for (const root of roots) {
+    if (
+      root.length <= segments.length &&
+      root.every((segment, index) => segments[index] === segment)
+    ) {
+      return segments.slice(root.length);
     }
   }
   return null;
+}
+
+function sameSegments(left: string[], right: string[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((segment, index) => segment === right[index])
+  );
 }

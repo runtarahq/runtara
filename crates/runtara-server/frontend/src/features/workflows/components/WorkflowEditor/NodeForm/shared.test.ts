@@ -4,7 +4,7 @@ import {
   __setStepOutputShapesForTests,
   OutputShapeJson,
 } from '@/features/workflows/utils/step-output-shapes';
-import { composePreviousSteps, findStepDeep } from './shared';
+import { composePreviousSteps, findStepDeep, StepParameter } from './shared';
 import { composeVariableSuggestions } from '../NodeForm/InputMappingValueField/VariableSuggestions';
 import type { ExecutionGraph } from '../CustomNodes/utils.tsx';
 
@@ -301,6 +301,172 @@ describe('composePreviousSteps agent output nesting', () => {
     );
     // Objects without declared children stay leaf-level.
     expect(byValue["steps['fetch'].outputs.headers"]?.type).toBe('object');
+  });
+});
+
+describe('composePreviousSteps field names that are not plain identifiers', () => {
+  afterEach(() => {
+    __resetStepOutputShapesForTests();
+  });
+
+  function pathsByName(outputs: StepParameter[]): Record<string, string> {
+    const result: Record<string, string> = {};
+    for (const output of outputs) {
+      result[output.name] = output.path;
+      Object.assign(result, pathsByName(output.children ?? []));
+    }
+    return result;
+  }
+
+  it('bracket-quotes agent output fields, nested ones included', () => {
+    const agents = [
+      {
+        id: 'http',
+        name: 'HTTP',
+        supportedCapabilities: {
+          'http-request': {
+            id: 'http-request',
+            inputs: [],
+            output: {
+              type: 'object',
+              fields: [
+                { name: 'a.b', type: 'string' },
+                {
+                  name: 'meta',
+                  type: 'object',
+                  fields: [{ name: 'x]y', type: 'integer' }],
+                },
+              ],
+            },
+          },
+        },
+      },
+    ] as any;
+    const graph = {
+      entryPoint: 'fetch',
+      executionPlan: [{ fromStep: 'fetch', toStep: 'probe' }],
+      steps: {
+        fetch: {
+          id: 'fetch',
+          name: 'Fetch',
+          stepType: 'Agent',
+          agentId: 'http',
+          capabilityId: 'http-request',
+        },
+        probe: { id: 'probe', name: 'Probe', stepType: 'Agent' },
+      },
+    } as unknown as ExecutionGraph;
+
+    const [fetch] = composePreviousSteps({
+      stepId: 'probe',
+      agents,
+      executionGraph: graph,
+    });
+
+    const paths = pathsByName(fetch.outputs);
+    expect(paths['a.b']).toBe(`steps['fetch'].outputs["a.b"]`);
+    expect(paths['meta']).toBe(`steps['fetch'].outputs.meta`);
+    expect(paths['x]y']).toBe(`steps['fetch'].outputs.meta["x]y"]`);
+  });
+
+  it('bracket-quotes shape-table output and sibling fields', () => {
+    __setStepOutputShapesForTests({
+      Custom: {
+        outputs: {
+          kind: 'object',
+          fields: [{ name: 'a.b', type: 'string' }],
+        },
+        siblingFields: [{ name: 'c[0]', type: 'boolean' }],
+      },
+    });
+
+    const [step] = previousStepsFor(
+      graphWithUpstream('custom', 'Custom', 'Custom')
+    );
+
+    const paths = step.outputs.map((o) => o.path);
+    expect(paths).toContain(`steps['custom'].outputs["a.b"]`);
+    expect(paths).toContain(`steps['custom']["c[0]"]`);
+  });
+
+  it('bracket-quotes WaitForSignal response fields', () => {
+    const graph = {
+      entryPoint: 'wait',
+      executionPlan: [{ fromStep: 'wait', toStep: 'probe' }],
+      steps: {
+        wait: {
+          id: 'wait',
+          name: 'Wait',
+          stepType: 'WaitForSignal',
+          responseSchema: {
+            'approved.by': { type: 'string' },
+            ok: { type: 'boolean' },
+          },
+        },
+        probe: { id: 'probe', name: 'Probe', stepType: 'Agent' },
+      },
+    } as unknown as ExecutionGraph;
+
+    const [wait] = previousStepsFor(graph);
+
+    const paths = pathsByName(wait.outputs);
+    expect(paths['approved.by']).toBe(`steps['wait'].outputs["approved.by"]`);
+    expect(paths['ok']).toBe(`steps['wait'].outputs.ok`);
+  });
+
+  it('types and bracket-quotes child workflow output properties', () => {
+    const graph = {
+      entryPoint: 'embed',
+      executionPlan: [{ fromStep: 'embed', toStep: 'probe' }],
+      steps: {
+        embed: {
+          id: 'embed',
+          name: 'Embed',
+          stepType: 'EmbedWorkflow',
+          childWorkflowId: 'child',
+        },
+        probe: { id: 'probe', name: 'Probe', stepType: 'Agent' },
+      },
+    } as unknown as ExecutionGraph;
+    const workflows = [
+      {
+        id: 'child',
+        outputSchema: {
+          type: 'object',
+          properties: {
+            'a.b': {
+              type: 'object',
+              properties: { 'c]d': { type: 'string' } },
+            },
+            total: { type: 'integer' },
+          },
+        },
+      },
+    ] as any;
+
+    const [embed] = composePreviousSteps({
+      stepId: 'probe',
+      agents: [],
+      executionGraph: graph,
+      workflows,
+    });
+
+    // The property schema used to be looked up by splitting `a.b` on its
+    // dot, which found nothing and left it untyped with no children.
+    const dotted = embed.outputs.find((o) => o.name === 'a.b');
+    expect(dotted?.path).toBe(`steps['embed'].outputs["a.b"]`);
+    expect(dotted?.type).toBe('object');
+    expect(dotted?.children).toEqual([
+      {
+        name: 'a.b.c]d',
+        type: 'string',
+        path: `steps['embed'].outputs["a.b"]["c]d"]`,
+      },
+    ]);
+
+    const total = embed.outputs.find((o) => o.name === 'total');
+    expect(total?.path).toBe(`steps['embed'].outputs.total`);
+    expect(total?.type).toBe('integer');
   });
 });
 

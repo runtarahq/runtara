@@ -18,6 +18,7 @@ import {
   validateSchemaFieldsWithRust,
   validateWorkflowStartInputsWithRust,
 } from './rust-workflow-validation';
+import { appendPathSegment } from './reference-path';
 import { analyzeFormWithRust } from '@/shared/forms';
 import { NODE_TYPES, STEP_TYPES } from '@/features/workflows/config/workflow';
 import { canStepHaveErrorHandler } from '@/features/workflows/utils/step-error-support';
@@ -256,6 +257,51 @@ describe('rust workflow validation WASM', () => {
     expect(result.valid).toBe(false);
     expect(result.status).toBe('invalid');
     expect(result.errors.join(' ')).toContain('count');
+  });
+
+  it('accepts the reference paths the editor builds for non-identifier field names', async () => {
+    const names = ['a.b', 'a]b', 'a[0]', 'a..b', 'say "hi"', 'first name'];
+    const graphReferencing = (references: string[]) => ({
+      name: 'Non-identifier field names',
+      steps: {
+        finish: {
+          stepType: 'Finish',
+          id: 'finish',
+          inputMapping: Object.fromEntries(
+            references.map((value, index) => [
+              `out${index}`,
+              { valueType: 'reference', value },
+            ])
+          ),
+        },
+      },
+      entryPoint: 'finish',
+      executionPlan: [],
+      variables: {},
+      inputSchema: Object.fromEntries(
+        names.map((name) => [name, { type: 'string', required: true }])
+      ),
+      outputSchema: {},
+    });
+
+    const built = await validateExecutionGraphWithRust(
+      graphReferencing(names.map((name) => appendPathSegment('data', name)))
+    );
+    expect(built.errors).toEqual([]);
+
+    // Interpolated after a dot, the same names split into an undeclared key
+    // (E051) or are rejected as malformed (E011).
+    for (const [name, code] of [
+      ['a.b', 'E051'],
+      ['a[0]', 'E051'],
+      ['a]b', 'E011'],
+      ['a..b', 'E011'],
+    ]) {
+      const raw = await validateExecutionGraphWithRust(
+        graphReferencing([`data.${name}`])
+      );
+      expect(raw.errors.join('\n'), name).toContain(`[${code}]`);
+    }
   });
 
   it('serves step types from WASM and agents from the runtime API catalog', async () => {

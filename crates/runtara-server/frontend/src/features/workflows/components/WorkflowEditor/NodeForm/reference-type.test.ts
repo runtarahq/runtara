@@ -482,3 +482,115 @@ describe('validateReferencePath', () => {
     ).toBeNull();
   });
 });
+
+describe('references with bracket-quoted keys', () => {
+  const QUOTED_STEPS: StepInfo[] = [
+    {
+      id: 'emb',
+      name: 'Embed child',
+      stepType: 'EmbedWorkflow',
+      inputs: [],
+      outputs: [
+        {
+          name: 'a.b',
+          type: 'string',
+          path: `steps['emb'].outputs["a.b"]`,
+        },
+        {
+          name: 'first name',
+          type: 'integer',
+          path: `steps['emb'].outputs["first name"]`,
+        },
+      ],
+    },
+  ];
+
+  const QUOTED_SCHEMA: SchemaField[] = [
+    { name: 'a.b', type: 'number', required: false, description: '' },
+    {
+      name: 'customer',
+      type: 'object',
+      required: false,
+      description: '',
+      properties: [
+        { name: 'x]y', type: 'boolean', required: false, description: '' },
+      ],
+    },
+  ];
+
+  const QUOTED_CONTEXT = {
+    previousSteps: QUOTED_STEPS,
+    inputSchemaFields: QUOTED_SCHEMA,
+    variables: [
+      { name: 'rate.limit', value: 5, type: 'Integer', description: null },
+    ],
+  };
+
+  it('resolves step output keys in either step spelling and either quote', () => {
+    for (const path of [
+      `steps['emb'].outputs["a.b"]`,
+      `steps['emb'].outputs['a.b']`,
+      `steps.emb.outputs["a.b"]`,
+    ]) {
+      expect(resolveReferenceType(path, QUOTED_CONTEXT)).toBe('string');
+    }
+  });
+
+  it('still types a reference saved in dotted form before its key was quoted', () => {
+    expect(
+      resolveReferenceType(`steps['emb'].outputs.first name`, QUOTED_CONTEXT)
+    ).toBe('integer');
+  });
+
+  it('labels a quoted step output key the way the picker does', () => {
+    expect(
+      describeStepReference(`steps['emb'].outputs["a.b"]`, QUOTED_STEPS)
+    ).toEqual({ stepName: 'Embed child', fieldPath: '["a.b"]' });
+  });
+
+  it('resolves quoted workflow input and variable keys', () => {
+    expect(resolveReferenceType(`data["a.b"]`, QUOTED_CONTEXT)).toBe('number');
+    expect(
+      resolveReferenceType(`workflow.inputs.data["a.b"]`, QUOTED_CONTEXT)
+    ).toBe('number');
+    expect(resolveReferenceType(`data.customer["x]y"]`, QUOTED_CONTEXT)).toBe(
+      'boolean'
+    );
+    // Dotted, `a.b` is the key `a` then `b`, which is not declared.
+    expect(resolveReferenceType('data.a.b', QUOTED_CONTEXT)).toBeUndefined();
+    expect(
+      resolveReferenceType(
+        `workflow.inputs.variables["rate.limit"]`,
+        QUOTED_CONTEXT
+      )
+    ).toBe('integer');
+  });
+
+  it('resolves quoted Split item keys under iteration.item', () => {
+    expect(
+      resolveReferenceType(`iteration.item["a.b"]`, {
+        ...QUOTED_CONTEXT,
+        insideSplitScope: true,
+        splitItemSchemaFields: QUOTED_SCHEMA,
+      })
+    ).toBe('number');
+  });
+
+  it('never flags quoted keys as undeclared or as unknown iteration fields', () => {
+    const insideSplit = {
+      ...QUOTED_CONTEXT,
+      insideSplitScope: true,
+      splitItemSchemaFields: QUOTED_SCHEMA,
+    };
+    // Split on its dot, this used to read as the iteration field 'item["a'.
+    expect(
+      validateReferencePath(`iteration.item["a.b"]`, insideSplit)
+    ).toBeNull();
+    expect(validateReferencePath(`data["a.b"]`, insideSplit)).toBeNull();
+    expect(validateReferencePath(`data["a.b"]`, QUOTED_CONTEXT)).toBeNull();
+    // The iteration field itself is still checked.
+    expect(
+      validateReferencePath(`iteration.items["a.b"]`, insideSplit)
+    ).toMatch(/'iteration' has no field 'items'/);
+  });
+});

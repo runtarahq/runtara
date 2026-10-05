@@ -33,6 +33,7 @@ import {
   buildSchemaFromFields,
   SchemaField,
 } from '@/features/workflows/utils/schema';
+import { appendPathSegment } from '@/features/workflows/utils/reference-path';
 import type {
   CompositeArrayValue,
   CompositeObjectValue,
@@ -233,9 +234,10 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
     if (workflowInputFields && workflowInputFields.length > 0) {
       for (const field of workflowInputFields) {
         if (field.type === 'array' && field.name) {
+          const value = appendPathSegment('data', field.name);
           suggestions.push({
-            label: `data.${field.name} (workflow input)`,
-            value: `data.${field.name}`,
+            label: `${value} (workflow input)`,
+            value,
           });
         }
       }
