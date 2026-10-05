@@ -10,9 +10,15 @@ import {
   CardHeader,
   CardTitle,
 } from '@/shared/components/ui/card';
-import type { SuspensionReason } from '@/generated/RuntaraRuntimeApi';
+import type {
+  ExecutionPhase,
+  SuspensionReason,
+} from '@/generated/RuntaraRuntimeApi';
 import { executionDisplayName } from '@/features/workflows/utils/run-label';
-import { suspendedStatusLabel } from '@/features/workflows/utils/suspension';
+import {
+  isWaitingInProcess,
+  suspendedStatusLabel,
+} from '@/features/workflows/utils/suspension';
 import { getAllExecutions } from '../queries';
 import {
   childRunsListPath,
@@ -27,24 +33,33 @@ type ExecutionsPage = Awaited<ReturnType<typeof getAllExecutions>>;
 
 /**
  * Execution status pill; a suspended run shows why it is suspended (Paused,
- * Waiting for signal, ...) instead of a bare "Suspended".
+ * Waiting for signal, ...) instead of a bare "Suspended", and a running run
+ * blocked in an in-process wait shows "Waiting".
  */
 export function RunStatusPill({
   status,
   suspensionReason,
+  executionPhase,
   className,
 }: {
   status: string;
   suspensionReason?: SuspensionReason | null;
+  executionPhase?: ExecutionPhase | null;
   className?: string;
 }) {
   const { tone, label, spin, pulse } = executionStatusPill(status);
   const reasonLabel = suspendedStatusLabel({ status, suspensionReason });
+  const waiting = isWaitingInProcess({ status, executionPhase });
+  const title = reasonLabel
+    ? `Suspended — ${reasonLabel}`
+    : waiting
+      ? 'Running — waiting in process; its resources stay allocated'
+      : undefined;
   return (
-    <span title={reasonLabel ? `Suspended — ${reasonLabel}` : undefined}>
+    <span title={title}>
       <StatusPill
         tone={tone}
-        label={reasonLabel ?? label}
+        label={reasonLabel ?? (waiting ? 'Waiting' : label)}
         spin={spin}
         pulse={pulse}
         className={className}

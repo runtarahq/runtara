@@ -70,8 +70,10 @@ pub enum EventType {
     Completed,
     /// Failed execution.
     Failed,
-    /// Execution suspended.
+    /// Execution suspended: durably parked or shut down, to wake on its own.
     Suspended,
+    /// Execution explicitly paused; only a resume relaunches it.
+    Paused,
     /// A producer-defined event with an optional opaque subtype.
     Custom,
 }

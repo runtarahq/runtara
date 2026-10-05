@@ -1315,9 +1315,9 @@ pub async fn run_lifecycle_command_sequence<P: Persistence>(backend: &P) {
     assert_eq!(
         events.len(),
         1,
-        "pause and its retry record exactly one suspension event"
+        "pause and its retry record exactly one pause event"
     );
-    assert_eq!(events[0].event_type, crate::domain::EventType::Suspended);
+    assert_eq!(events[0].event_type, crate::domain::EventType::Paused);
     backend
         .insert_signal(&id, Kind::Shutdown, b"")
         .await

@@ -144,6 +144,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
           <RunStatusPill
             status={status}
             suspensionReason={row.original.suspensionReason}
+            executionPhase={row.original.executionPhase}
             className="min-w-[90px]"
           />
           {hasPendingInput && (

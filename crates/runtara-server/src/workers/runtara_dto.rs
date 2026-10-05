@@ -148,6 +148,7 @@ pub fn runtara_instance_to_dto_with_info(
             .unwrap_or_else(|| inst.created_at.to_rfc3339()),
         status,
         suspension_reason: inst.suspension_reason,
+        execution_phase: execution_phase(status, inst.suspension_reason, &inst.instance_id),
         termination_type: None, // Not available from Runtara summary
         error: None,            // Summary carries only `has_error`, not the message
         workflow_id,
@@ -166,6 +167,21 @@ pub fn runtara_instance_to_dto_with_info(
         processing_overhead_seconds: None,
         has_pending_input: false,
     }
+}
+
+/// The execution's live phase. An in-process wait is known only to the
+/// runtime host of this process, which owns its tenant's runs.
+fn execution_phase(
+    status: ExecutionStatus,
+    suspension_reason: Option<crate::types::SuspensionReason>,
+    instance_id: &str,
+) -> Option<crate::types::ExecutionPhase> {
+    crate::types::ExecutionPhase::derive(
+        status,
+        suspension_reason,
+        status == ExecutionStatus::Running
+            && runtara_environment::in_process_waits::is_waiting(instance_id),
+    )
 }
 
 /// Convert Runtara `InstanceInfo` (detailed) to `WorkflowInstanceDto`.
@@ -203,6 +219,7 @@ pub fn runtara_info_to_dto(info: InstanceInfo) -> WorkflowInstanceDto {
         updated,
         status,
         suspension_reason: info.suspension_reason,
+        execution_phase: execution_phase(status, info.suspension_reason, &info.instance_id),
         termination_type: None,
         error: info.error.clone(),
         workflow_id,
@@ -258,6 +275,7 @@ pub fn runtara_info_to_execution_with_metadata(
         updated,
         status,
         suspension_reason: info.suspension_reason,
+        execution_phase: execution_phase(status, info.suspension_reason, &info.instance_id),
         termination_type: None,
         error: info.error.clone(),
         workflow_id,
@@ -376,6 +394,47 @@ pub fn parse_image_id(image_id: &str) -> (String, i32) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A running run blocked in an in-process wait on this host reports it;
+    /// once the wait ends it is plain running again.
+    #[test]
+    fn a_running_execution_reports_its_in_process_wait() {
+        let id = format!("phase-{}", uuid::Uuid::new_v4());
+        let summary = |status| crate::runtime_types::InstanceSummary {
+            run_label: None,
+            parent_instance_id: None,
+            instance_id: id.clone(),
+            tenant_id: "tenant".into(),
+            image_id: "image".into(),
+            image_name: "workflow:1".into(),
+            status,
+            created_at: chrono::Utc::now(),
+            started_at: Some(chrono::Utc::now()),
+            finished_at: None,
+            has_error: false,
+            suspension_reason: None,
+        };
+        let phase = |status| {
+            runtara_instance_to_dto_with_info(summary(status), "workflow".into(), 1, None)
+                .execution_phase
+        };
+        use crate::types::ExecutionPhase;
+        assert_eq!(
+            phase(RuntaraInstanceStatus::Running),
+            Some(ExecutionPhase::Running)
+        );
+        let wait = runtara_environment::in_process_waits::enter(&id);
+        assert_eq!(
+            phase(RuntaraInstanceStatus::Running),
+            Some(ExecutionPhase::WaitingInProcess)
+        );
+        drop(wait);
+        assert_eq!(
+            phase(RuntaraInstanceStatus::Running),
+            Some(ExecutionPhase::Running)
+        );
+        assert_eq!(phase(RuntaraInstanceStatus::Completed), None);
+    }
 
     fn input_flag_row(id: &str) -> WorkflowInstanceDto {
         serde_json::from_value(json!({

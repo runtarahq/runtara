@@ -961,6 +961,16 @@ pub struct WorkflowInstanceDto {
         rename = "suspensionReason"
     )]
     pub suspension_reason: Option<crate::types::SuspensionReason>,
+    /// Where a live execution stands: `running`, `waiting_in_process` (its
+    /// resources stay allocated while it waits), `suspended` (resources
+    /// released, wakes on its own) or `paused` (only a resume relaunches it).
+    /// Absent for an execution that is not live.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "executionPhase"
+    )]
+    pub execution_phase: Option<crate::types::ExecutionPhase>,
     /// Reason for termination (set for all terminal states including successful completion)
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "terminationType")]

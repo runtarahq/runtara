@@ -452,6 +452,10 @@ impl RuntimeHost for PersistenceRuntimeHost {
         self.trusted_launch
     }
 
+    fn in_process_wait(&self) -> Option<Box<dyn std::any::Any + Send>> {
+        Some(Box::new(crate::in_process_waits::enter(&self.instance_id)))
+    }
+
     fn instance_id(&self) -> Result<String, String> {
         Ok(self.instance_id.clone())
     }
@@ -745,6 +749,8 @@ impl RuntimeHost for PersistenceRuntimeHost {
         if self.cancelled.load(Ordering::SeqCst) {
             return Ok(());
         }
+        // The run holds its resources while it sleeps here; say so.
+        let _waiting = crate::in_process_waits::enter(&self.instance_id);
         let response = handle_sleep(
             &self.state,
             SleepRequest {
@@ -936,6 +942,44 @@ mod tests {
         let hit = host.checkpoint("probe".into(), Vec::new()).await.unwrap();
         assert!(hit.found);
         assert_eq!(hit.state, b"stored");
+    }
+
+    /// A timer wait the component host marks through the runtime host keeps
+    /// the run waiting in process until its marker drops.
+    #[tokio::test]
+    async fn a_marked_timer_wait_reports_the_run_waiting_in_process() {
+        let (_persistence, host, id) = setup().await;
+        let marker = host
+            .in_process_wait()
+            .expect("the persistence host tracks waits");
+        assert!(crate::in_process_waits::is_waiting(&id));
+        drop(marker);
+        assert!(!crate::in_process_waits::is_waiting(&id));
+    }
+
+    /// While an in-process durable sleep lasts the run is waiting in process,
+    /// and only then.
+    #[tokio::test]
+    async fn an_in_process_durable_sleep_is_reported_while_it_lasts() {
+        let (_persistence, host, id) = setup().await;
+        let host = Arc::new(host);
+        assert!(!crate::in_process_waits::is_waiting(&id));
+        let sleeping = {
+            let host = host.clone();
+            tokio::spawn(async move {
+                host.durable_sleep_checkpoint("nap".into(), b"s".to_vec(), 400)
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !crate::in_process_waits::is_waiting(&id) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the sleep must be reported while it lasts");
+        sleeping.await.unwrap().unwrap();
+        assert!(!crate::in_process_waits::is_waiting(&id));
     }
 
     #[tokio::test]

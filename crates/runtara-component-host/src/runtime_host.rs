@@ -319,6 +319,14 @@ pub trait RuntimeHost: Send + Sync {
     fn trusted_launch(&self) -> crate::trusted::TrustedLaunch {
         crate::trusted::TrustedLaunch::Start
     }
+
+    /// Note that the run is about to wait inside its execution (a timer):
+    /// it keeps its resources while it waits, unlike a durable suspension.
+    /// The returned marker covers the wait until it is dropped. The default
+    /// does not track waits; a wrapper must delegate.
+    fn in_process_wait(&self) -> Option<Box<dyn std::any::Any + Send>> {
+        None
+    }
 }
 
 /// Milliseconds since the UNIX epoch (the default `now-ms` implementation).
@@ -496,8 +504,12 @@ pub fn add_runtime_to_linker(linker: &mut Linker<WorkflowState>) -> anyhow::Resu
 
     inst.func_wrap_async(
         "blocking-sleep",
-        |_store: StoreContextMut<'_, WorkflowState>, (ms,): (u64,)| {
+        |store: StoreContextMut<'_, WorkflowState>, (ms,): (u64,)| {
+            // The run keeps its Store while it sleeps here: say so for as long
+            // as the sleep lasts.
+            let waiting = crate::host_io::HostIoContext::in_process_wait(store.data());
             Box::new(async move {
+                let _waiting = waiting;
                 // An async sleep returns after `ms`, like a blocking sleep,
                 // without pinning an executor thread.
                 tokio::time::sleep(Duration::from_millis(ms)).await;

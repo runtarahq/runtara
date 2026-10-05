@@ -261,6 +261,8 @@ pub mod heartbeat_monitor;
 
 /// Whole-run ownership retained from the durable launch queue.
 pub mod execution_lease;
+/// Runs blocked in an in-process wait on this host.
+pub mod in_process_waits;
 mod observed_exit;
 
 /// Automatic recovery of instances killed by an Environment restart.

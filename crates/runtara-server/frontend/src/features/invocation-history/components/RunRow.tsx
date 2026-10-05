@@ -43,6 +43,7 @@ export function RunContext({ run }: { run: ExecutionHistoryItem }) {
       <RunStatusPill
         status={run.status}
         suspensionReason={run.suspensionReason}
+        executionPhase={run.executionPhase}
       />
       {failed && (
         <p className="truncate text-xs text-muted-foreground">

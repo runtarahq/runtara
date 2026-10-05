@@ -74,6 +74,7 @@ export async function getAllExecutions(
       tags: instance.tags || [],
       hasPendingInput: instance.hasPendingInput ?? false,
       suspensionReason: instance.suspensionReason ?? null,
+      executionPhase: instance.executionPhase ?? null,
       parentInstanceId: instance.parentInstanceId ?? null,
     })
   );

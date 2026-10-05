@@ -10,6 +10,10 @@ pub(crate) trait HostIoContext {
     fn cleanup_alarm(&self) -> Option<&crate::cleanup_alarm::CleanupAlarmState> {
         None
     }
+    /// Mark the run as waiting in process for the duration of a timer.
+    fn in_process_wait(&self) -> Option<Box<dyn std::any::Any + Send>> {
+        None
+    }
 }
 
 pub(crate) fn add_host_io_to_linker<T: HostIoContext + Send + 'static>(
@@ -20,9 +24,13 @@ pub(crate) fn add_host_io_to_linker<T: HostIoContext + Send + 'static>(
     // instead of serializing through assembly.
     let mut timers = linker.instance(runtara_wit::host::TIMERS)?;
     timers.func_wrap_concurrent("sleep", |accessor, (ms,): (u64,)| {
-        let allowed = accessor.with(|mut access| access.get().timers_allowed());
+        let (allowed, waiting) = accessor.with(|mut access| {
+            let state = access.get();
+            (state.timers_allowed(), state.in_process_wait())
+        });
         Box::pin(async move {
             wasmtime::ensure!(allowed, "Timers are disabled in trusted execution");
+            let _waiting = waiting;
             tokio::time::sleep(Duration::from_millis(ms)).await;
             Ok(())
         })

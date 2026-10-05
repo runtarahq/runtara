@@ -1,8 +1,12 @@
-import type { SuspensionReason } from '@/generated/RuntaraRuntimeApi';
+import type {
+  ExecutionPhase,
+  SuspensionReason,
+} from '@/generated/RuntaraRuntimeApi';
 
 interface SuspendableRun {
   status?: string | null;
   suspensionReason?: SuspensionReason | null;
+  executionPhase?: ExecutionPhase | null;
 }
 
 const REASON_LABELS: Record<SuspensionReason, string> = {
@@ -82,4 +86,17 @@ export function suspendedStatusLabel(
   run: SuspendableRun | null | undefined
 ): string | null {
   return isSuspended(run) ? suspensionReasonLabel(run?.suspensionReason) : null;
+}
+
+/**
+ * A running run blocked in an in-process wait (a durable sleep inside its
+ * execution). Unlike a suspended run it still holds its resources.
+ */
+export function isWaitingInProcess(
+  run: SuspendableRun | null | undefined
+): boolean {
+  return (
+    run?.status?.toLowerCase() === 'running' &&
+    run?.executionPhase === 'waiting_in_process'
+  );
 }

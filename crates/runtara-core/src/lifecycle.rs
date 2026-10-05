@@ -147,7 +147,11 @@ pub fn acknowledge(
         SignalType::Pause | SignalType::Shutdown => {
             effects.status = Some(InstanceStatus::Suspended);
             effects.finish_now = true;
-            effects.event = Some(EventType::Suspended);
+            effects.event = Some(if command.kind == SignalType::Pause {
+                EventType::Paused
+            } else {
+                EventType::Suspended
+            });
             if command.kind == SignalType::Shutdown {
                 effects.reason = Change::Set(SuspensionReason::Shutdown);
                 effects.wake = Change::Set(WakeDeadline::Now);
@@ -356,7 +360,7 @@ mod tests {
                         true,
                         Change::Clear,
                         Change::Clear,
-                        Some(EventType::Suspended),
+                        Some(EventType::Paused),
                         false,
                     ),
                     SignalType::Shutdown => (
