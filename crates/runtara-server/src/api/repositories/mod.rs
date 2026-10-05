@@ -6,3 +6,5 @@ pub mod object_model;
 pub mod trigger_stream;
 pub mod triggers;
 pub mod workflows;
+
+pub mod operations;

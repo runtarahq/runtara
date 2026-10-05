@@ -510,6 +510,9 @@ pub struct ListInstancesOptions {
     /// Filter by published state (normalised; AND-combined).
     #[serde(default)]
     pub state_filters: Vec<runtara_environment::state_filter::StateFilter>,
+    /// Optional published-state sort, for Operations queries.
+    #[serde(default)]
+    pub state_sort: Option<runtara_environment::operations::StateSort>,
     /// Sort order.
     pub order_by: Option<ListInstancesOrder>,
     /// Maximum results to return.

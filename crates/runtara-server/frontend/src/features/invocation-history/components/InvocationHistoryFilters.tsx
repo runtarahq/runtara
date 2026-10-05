@@ -1,6 +1,6 @@
-import { ExecutionStatus } from '@/generated/RuntaraRuntimeApi';
 import { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 import { ExecutionHistoryFilters } from '../types';
+import { RUN_STATUS_OPTIONS } from '../status-options';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
 import {
@@ -34,6 +34,9 @@ export function countActiveInvocationFilters(
     filters.createdTo,
     filters.completedFrom,
     filters.completedTo,
+    filters.range === '24h' || filters.range === '7d'
+      ? filters.range
+      : undefined,
   ].filter((value) => value !== undefined && value !== null && value !== '')
     .length;
 }
@@ -57,17 +60,9 @@ const toDatetimeLocal = (isoString: string | undefined): string => {
   return `${year}-${month}-${day}T${hours}:${minutes}`;
 };
 
-const STATUS_OPTIONS: {
-  value: ExecutionStatus | typeof ALL_VALUE;
-  label: string;
-}[] = [
+const STATUS_OPTIONS = [
   { value: ALL_VALUE, label: 'All statuses' },
-  { value: 'queued', label: 'Queued' },
-  { value: 'running', label: 'Running' },
-  { value: 'suspended', label: 'Suspended' },
-  { value: 'completed', label: 'Completed' },
-  { value: 'failed', label: 'Failed' },
-  { value: 'cancelled', label: 'Cancelled' },
+  ...RUN_STATUS_OPTIONS,
 ];
 
 /**
@@ -89,13 +84,6 @@ export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
     });
   };
 
-  const handleStatusChange = (value: string) => {
-    onFiltersChange({
-      ...filters,
-      status: value === ALL_VALUE ? undefined : value,
-    });
-  };
-
   const handleDateChange = (
     field: 'createdFrom' | 'createdTo' | 'completedFrom' | 'completedTo',
     value: string
@@ -103,6 +91,7 @@ export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
     onFiltersChange({
       ...filters,
       [field]: toISOString(value),
+      range: 'custom',
     });
   };
 
@@ -173,21 +162,41 @@ export function InvocationHistoryFilters({ filters, onFiltersChange }: Props) {
 
       <div className="space-y-1.5">
         <Label className="text-xs text-muted-foreground">Status</Label>
-        <Select
-          value={filters.status || ALL_VALUE}
-          onValueChange={handleStatusChange}
-        >
-          <SelectTrigger className="h-8 w-full text-sm">
-            <SelectValue placeholder="All statuses" />
-          </SelectTrigger>
-          <SelectContent>
-            {STATUS_OPTIONS.map((option) => (
-              <SelectItem key={option.value} value={option.value}>
-                {option.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <div className="grid grid-cols-2 gap-2">
+          {STATUS_OPTIONS.filter((option) => option.value !== ALL_VALUE).map(
+            (option) => {
+              const selected =
+                filters.status
+                  ?.split(',')
+                  .map((value) => value.trim())
+                  .filter(Boolean) ?? [];
+              return (
+                <label
+                  key={option.value}
+                  className="flex items-center gap-2 text-xs"
+                >
+                  <input
+                    type="checkbox"
+                    checked={selected.includes(option.value)}
+                    onChange={(event) => {
+                      const next = event.target.checked
+                        ? [...selected, option.value]
+                        : selected.filter((value) => value !== option.value);
+                      onFiltersChange({
+                        ...filters,
+                        status: next.join(',') || undefined,
+                      });
+                    }}
+                  />
+                  {option.label}
+                </label>
+              );
+            }
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          No selection includes all statuses.
+        </p>
       </div>
 
       <div className="grid grid-cols-2 gap-2">

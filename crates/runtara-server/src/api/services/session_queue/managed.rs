@@ -139,6 +139,9 @@ pub enum DeliveryReason {
 pub struct Envelope {
     pub message_id: String,
     pub operation_id: String,
+    /// Authenticated API actor retained before asynchronous delivery.
+    #[serde(default)]
+    pub actor_id: Option<String>,
     payload_json: String,
     pub enqueued_at_ms: u64,
     pub state: DeliveryState,
@@ -350,7 +353,7 @@ pub async fn enqueue(
     operation_id: &str,
     payload: &Value,
 ) -> QueueResult<Envelope> {
-    enqueue_with_target(conn, scope, message_id, operation_id, payload, None).await
+    enqueue_with_target(conn, scope, message_id, operation_id, payload, None, None).await
 }
 
 /// Retain an explicitly selected response and its immutable target atomically.
@@ -365,7 +368,43 @@ pub async fn enqueue_targeted(
     target: &InputTarget,
 ) -> QueueResult<Envelope> {
     target.validate()?;
-    enqueue_with_target(conn, scope, message_id, operation_id, payload, Some(target)).await
+    enqueue_with_target(
+        conn,
+        scope,
+        message_id,
+        operation_id,
+        payload,
+        Some(target),
+        None,
+    )
+    .await
+}
+
+/// Capture authenticated identity with the request before the delivery worker runs.
+#[allow(clippy::too_many_arguments)]
+pub async fn enqueue_authenticated(
+    conn: &mut ConnectionManager,
+    scope: &QueueScope,
+    message_id: &str,
+    operation_id: &str,
+    payload: &Value,
+    target: &InputTarget,
+    auth: &crate::auth::AuthContext,
+) -> QueueResult<Envelope> {
+    if auth.org_id != scope.tenant_id() {
+        return Err(QueueError::Invalid);
+    }
+    target.validate()?;
+    enqueue_with_target(
+        conn,
+        scope,
+        message_id,
+        operation_id,
+        payload,
+        Some(target),
+        Some(&auth.user_id),
+    )
+    .await
 }
 
 async fn enqueue_with_target(
@@ -375,6 +414,7 @@ async fn enqueue_with_target(
     operation_id: &str,
     payload: &Value,
     target: Option<&InputTarget>,
+    actor: Option<&str>,
 ) -> QueueResult<Envelope> {
     validate_id(message_id)?;
     validate_id(operation_id)?;
@@ -391,6 +431,7 @@ async fn enqueue_with_target(
                     target
                         .map(|target| serde_json::to_string(target).expect("target"))
                         .unwrap_or_default(),
+                    actor.unwrap_or_default().to_owned(),
                 ],
             )
             .await?,
@@ -497,7 +538,15 @@ pub async fn acknowledge(
     if receipt.payload != lease.payload_json.as_bytes() {
         return Err(QueueError::Conflict);
     }
-    let value = serde_json::json!({"request_id":receipt.request_id,"operation_id":receipt.operation_id,"receipt_id":receipt.receipt_id});
+    let context: Option<Value> = receipt
+        .acceptance_context
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice(bytes).ok());
+    let actor = context
+        .as_ref()
+        .filter(|ctx| ctx["source"] == "user")
+        .and_then(|ctx| ctx["principal"].as_str());
+    let value = serde_json::json!({"request_id":receipt.request_id,"operation_id":receipt.operation_id,"receipt_id":receipt.receipt_id,"actor_id":actor});
     transition(conn, scope, lease, "ack", value.to_string(), 0).await
 }
 pub async fn retry(
@@ -648,15 +697,33 @@ pub async fn deliver_claimed(
         ));
     }
     let target = lease.target.as_ref().ok_or(QueueError::Corrupt)?;
-    let outcome = client
-        .submit_input_response(
-            scope.tenant_id(),
-            &target.instance_id,
-            &target.request_id,
-            &lease.operation_id,
-            &lease.payload()?,
-        )
-        .await;
+    let payload = lease.payload()?;
+    let outcome = if let Some(actor) = &lease.actor_id {
+        let auth = crate::auth::AuthContext::new(
+            scope.tenant_id().into(),
+            actor.clone(),
+            crate::auth::AuthMethod::Unauthenticated,
+        );
+        client
+            .submit_authenticated_input_response(
+                &auth,
+                &target.instance_id,
+                &target.request_id,
+                &lease.operation_id,
+                &payload,
+            )
+            .await
+    } else {
+        client
+            .submit_input_response(
+                scope.tenant_id(),
+                &target.instance_id,
+                &target.request_id,
+                &lease.operation_id,
+                &payload,
+            )
+            .await
+    };
     match outcome {
         Ok(receipt) => Ok(DeliveryOutcome::Accepted(
             acknowledge(conn, scope, &lease, &receipt).await?,

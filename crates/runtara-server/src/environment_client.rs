@@ -86,6 +86,69 @@ impl std::fmt::Debug for EnvironmentClient {
 }
 
 impl EnvironmentClient {
+    pub async fn execution_counts(
+        &self,
+        options: &ListInstancesOptions,
+    ) -> Result<Vec<(InstanceStatus, i64)>> {
+        Ok(self
+            .instances()
+            .execution_counts(&list_instances_options(options))
+            .await?
+            .into_iter()
+            .map(|(status, count)| (instance_status_from_core(status), count))
+            .collect())
+    }
+
+    pub async fn operation_failures(
+        &self,
+        tenant: &str,
+        ids: &[String],
+    ) -> Result<Vec<runtara_environment::operations::RunFailure>> {
+        Ok(self.instances().operation_failures(tenant, ids).await?)
+    }
+
+    /// Request-level Operations query over one workflow.
+    pub async fn operation_requests(
+        &self,
+        tenant: &str,
+        workflow: &str,
+        key: &str,
+        listing: &ListInstancesOptions,
+        fields: &[String],
+    ) -> Result<runtara_environment::operations::RequestPage> {
+        Ok(self
+            .instances()
+            .operation_requests(
+                tenant,
+                workflow,
+                key,
+                &list_instances_options(listing),
+                fields,
+            )
+            .await?)
+    }
+
+    /// Discover outstanding queues across workflow versions.
+    pub async fn active_operation_queues(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<runtara_environment::operations::ActiveQueue>> {
+        Ok(self.instances().active_operation_queues(tenant).await?)
+    }
+
+    /// Project selected state fields in one batched read.
+    pub async fn operation_state_projection(
+        &self,
+        tenant: &str,
+        ids: &[String],
+        fields: &[String],
+    ) -> Result<Vec<(String, Option<serde_json::Value>)>> {
+        Ok(self
+            .instances()
+            .operation_state_projection(tenant, ids, fields)
+            .await?)
+    }
+
     /// Resolve live workflow instances with open inputs before paging requests.
     pub async fn workflow_input_instances(
         &self,
@@ -1168,6 +1231,7 @@ fn list_instances_options(
         finished_after: options.finished_after,
         finished_before: options.finished_before,
         state_filters: options.state_filters.clone(),
+        state_sort: options.state_sort.clone(),
         order_by: options.order_by.map(|o| o.as_str().to_string()),
         limit: i64::from(options.limit),
         offset: i64::from(options.offset),

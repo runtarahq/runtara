@@ -122,6 +122,13 @@ export type SchemaFieldType =
 /** Rate limit event types */
 export type RateLimitEventType = "request" | "rate_limited" | "retry";
 
+export type OperationDisplayKind =
+  | "text"
+  | "number"
+  | "date"
+  | "datetime"
+  | "relative";
+
 /** Memory allocation tier for workflow execution */
 export type MemoryTier = "S" | "M" | "L" | "XL";
 
@@ -794,6 +801,23 @@ export interface ApiResponseMoveWorkflowResponse {
 }
 
 /** Generic API response wrapper */
+export interface ApiResponseOperationRequestPage {
+  data: {
+    content: OperationRequest[];
+    /** @format int32 */
+    number: number;
+    /** @format int32 */
+    size: number;
+    /** @format int64 */
+    totalElements: number;
+    /** @format int64 */
+    totalPages: number;
+  };
+  message: string;
+  success: boolean;
+}
+
+/** Generic API response wrapper */
 export interface ApiResponsePageWorkflowDto {
   /** Paginated response for workflow listings (matches Spring Boot Page format) */
   data: {
@@ -843,6 +867,21 @@ export interface ApiResponseRenameFolderResponse {
      * @min 0
      */
     workflowsUpdated: number;
+  };
+  message: string;
+  success: boolean;
+}
+
+/** Generic API response wrapper */
+export interface ApiResponseSavedOperationView {
+  data: {
+    /** Generic presentation choices. No domain-specific types or transformations. */
+    configuration: OperationViewConfig;
+    id: string;
+    /** @format int32 */
+    revision: number;
+    /** @format date-time */
+    updatedAt: string;
   };
   message: string;
   success: boolean;
@@ -900,6 +939,48 @@ export interface ApiResponseVecInvocationTrigger {
      * @example "workflow-456"
      */
     workflow_id: string;
+  }[];
+  message: string;
+  success: boolean;
+}
+
+/** Generic API response wrapper */
+export interface ApiResponseVecOperationProcess {
+  data: {
+    name: string;
+    stateSchema: any;
+    workflowId: string;
+  }[];
+  message: string;
+  success: boolean;
+}
+
+/** Generic API response wrapper */
+export interface ApiResponseVecOperationQueue {
+  data: {
+    actionKey: string;
+    /** @format int64 */
+    count: number;
+    name: string;
+    /** Current version metadata for display. Answer forms always use request schemas. */
+    stateSchema: any;
+    workflowId: string;
+    workflowName: string;
+  }[];
+  message: string;
+  success: boolean;
+}
+
+/** Generic API response wrapper */
+export interface ApiResponseVecSavedOperationView {
+  data: {
+    /** Generic presentation choices. No domain-specific types or transformations. */
+    configuration: OperationViewConfig;
+    id: string;
+    /** @format int32 */
+    revision: number;
+    /** @format date-time */
+    updatedAt: string;
   }[];
   message: string;
   success: boolean;
@@ -2312,6 +2393,37 @@ export interface ExecutionPlanEdge {
   toStep: string;
 }
 
+export interface ExecutionSummary {
+  /**
+   * Counts by displayed status. Filter aliases (compiling/timeout) are not
+   * counted twice: their rows display as queued/failed in execution lists.
+   */
+  counts: Partial<Record<string, number>>;
+  /** @format int64 */
+  total: number;
+}
+
+/** Non-status predicates for status totals. Counts deliberately ignore pagination. */
+export interface ExecutionSummaryRequest {
+  /** @format date-time */
+  completedFrom?: string | null;
+  /** @format date-time */
+  completedTo?: string | null;
+  /** @format date-time */
+  createdFrom?: string | null;
+  /** @format date-time */
+  createdTo?: string | null;
+  parentInstanceId?: string | null;
+  runLabel?: string | null;
+  search?: string | null;
+  workflowId?: string | null;
+}
+
+export interface ExecutionSummaryResponse {
+  data: ExecutionSummary;
+  success: boolean;
+}
+
 /**
  * API-compatible field type info.
  * Describes the type of a field, including nested structures.
@@ -3111,6 +3223,103 @@ export interface OAuthConfigDto {
   tokenUrl: string;
 }
 
+export interface OperationDisplayFormat {
+  /**
+   * @format int32
+   * @min 0
+   */
+  decimals?: number | null;
+  kind?: null | OperationDisplayKind;
+  prefix?: string | null;
+  suffix?: string | null;
+}
+
+export interface OperationErrorSummary {
+  category?: string | null;
+  code?: string | null;
+  message: string;
+  retryable?: boolean | null;
+  severity?: string | null;
+}
+
+export interface OperationProcess {
+  name: string;
+  stateSchema: any;
+  workflowId: string;
+}
+
+export interface OperationQueue {
+  actionKey: string;
+  /** @format int64 */
+  count: number;
+  name: string;
+  /** Current version metadata for display. Answer forms always use request schemas. */
+  stateSchema: any;
+  workflowId: string;
+  workflowName: string;
+}
+
+export interface OperationRequest {
+  actionKey: string;
+  context: any;
+  /** @format date-time */
+  deadline?: string | null;
+  inputSchema?: any;
+  instanceId: string;
+  label: string;
+  message?: string | null;
+  requestId: string;
+  /** @format date-time */
+  requestedAt: string;
+  runLabel?: string | null;
+  state?: any;
+  /** @format int32 */
+  usedVersion: number;
+  workflowId: string;
+}
+
+export interface OperationRequestPage {
+  content: OperationRequest[];
+  /** @format int32 */
+  number: number;
+  /** @format int32 */
+  size: number;
+  /** @format int64 */
+  totalElements: number;
+  /** @format int64 */
+  totalPages: number;
+}
+
+export interface OperationViewAnswers {
+  bulk?: boolean;
+  inline?: string | null;
+}
+
+/** Generic presentation choices. No domain-specific types or transformations. */
+export interface OperationViewConfig {
+  answers?: OperationViewAnswers;
+  columns?: string[];
+  formats?: Partial<Record<string, OperationDisplayFormat>>;
+  labels?: Partial<Record<string, string>>;
+  name: string;
+  roles?: OperationViewRoles;
+  sort?: null | StateSortDto;
+  where?: OperationViewFilter;
+  workflow: string;
+}
+
+export interface OperationViewFilter {
+  openRequest?: string | null;
+  state?: StateFilterDto[];
+  status?: string | null;
+}
+
+export interface OperationViewRoles {
+  due?: string | null;
+  key?: string | null;
+  stage?: string | null;
+}
+
 export interface OrderByEntry {
   /** Sort direction. JSON encoding is UPPERCASE (`"ASC"` / `"DESC"`). */
   direction?: SortDirection;
@@ -3248,7 +3457,7 @@ export interface Position {
 /**
  * Body of `POST /api/runtime/executions/query`: the listing filters of
  * `GET /api/runtime/executions`, plus filters on published state. Returns
- * executions, never their state.
+ * executions, optionally projecting selected state fields.
  */
 export interface QueryExecutionsRequest {
   /** @format date-time */
@@ -3276,9 +3485,24 @@ export interface QueryExecutionsRequest {
   sortOrder?: string | null;
   /** All must hold; a run without the field does not match. At most 16. */
   state?: StateFilterDto[];
+  /** Explicit top-level state projection (maximum 32); omitted returns no state. */
+  stateFields?: string[];
+  /** Optional typed state ordering, with missing values last. */
+  stateSort?: null | StateSortDto;
   /** Comma-separated statuses, as for the GET listing. */
   status?: string | null;
   workflowId?: string | null;
+}
+
+export interface QueryOperationRequests {
+  actionKey: string;
+  /**
+   * Body of `POST /api/runtime/executions/query`: the listing filters of
+   * `GET /api/runtime/executions`, plus filters on published state. Returns
+   * executions, optionally projecting selected state fields.
+   */
+  query?: QueryExecutionsRequest;
+  workflowId: string;
 }
 
 /** Rate limit configuration stored in PostgreSQL */
@@ -3542,6 +3766,26 @@ export type ResolveDeliveryRequest =
       requestId: string;
     };
 
+export interface SaveOperationView {
+  /** Generic presentation choices. No domain-specific types or transformations. */
+  configuration: OperationViewConfig;
+  /**
+   * Required when editing; a stale revision is rejected instead of losing edits.
+   * @format int32
+   */
+  revision?: number | null;
+}
+
+export interface SavedOperationView {
+  /** Generic presentation choices. No domain-specific types or transformations. */
+  configuration: OperationViewConfig;
+  id: string;
+  /** @format int32 */
+  revision: number;
+  /** @format date-time */
+  updatedAt: string;
+}
+
 export interface Schema {
   columns: ColumnDefinition[];
   createdAt: string;
@@ -3643,6 +3887,11 @@ export interface SchemaField {
   properties?: Partial<Record<string, SchemaField>> | null;
   /** Whether this field is required */
   required?: boolean;
+  /**
+   * Require this field when a sibling field matches the condition.
+   * Enforced on submitted inputs as well as in schema-driven forms.
+   */
+  requiredWhen?: null | VisibleWhen;
   /** Field type (string, integer, number, boolean, array, object) */
   type: SchemaFieldType;
   /**
@@ -3909,6 +4158,11 @@ export interface StateFilterDto {
    * UTC. There is no `now`: pass the time you mean.
    */
   value?: object;
+}
+
+export interface StateSortDto {
+  descending?: boolean;
+  field: string;
 }
 
 /** Union of all step types, discriminated by stepType field */
@@ -4881,6 +5135,8 @@ export interface WorkflowInstanceDto {
    * the SDK reporting a terminal status, so the failure is not silent in the API.
    */
   error?: string | null;
+  /** Latest failed step's structured error, batched into list results. */
+  errorSummary?: null | OperationErrorSummary;
   /** @format double */
   executionDurationSeconds?: number | null;
   /** Whether this execution has pending human input requests (AI Agent waiting for signal) */
@@ -4903,8 +5159,7 @@ export interface WorkflowInstanceDto {
   runLabel?: string | null;
   /**
    * The run's published state, as its SetState steps wrote it (declared by
-   * the workflow's `stateSchema`). Only on the single-run endpoints; lists
-   * filter by state but never return it.
+   * the workflow's `stateSchema`). Query lists return only explicitly selected fields.
    */
   state?: any;
   /** When the published state last changed (RFC 3339). */
@@ -6109,7 +6364,7 @@ export class Api<
      *
      * @tags executions-controller
      * @name QueryExecutionsHandler
-     * @summary List executions filtered by published state (plus the GET listing's filters). Returns executions, never their state.
+     * @summary List executions filtered by published state (plus the GET listing's filters), optionally projecting selected state fields.
      * @request POST:/api/runtime/executions/query
      */
     queryExecutionsHandler: (
@@ -6118,6 +6373,26 @@ export class Api<
     ) =>
       this.request<ListAllExecutionsResponse, any>({
         path: `/api/runtime/executions/query`,
+        method: "POST",
+        body: data,
+        type: "application/json",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags executions-controller
+     * @name ExecutionSummaryHandler
+     * @request POST:/api/runtime/executions/summary
+     */
+    executionSummaryHandler: (
+      data: ExecutionSummaryRequest,
+      params: RequestParams = {},
+    ) =>
+      this.request<ExecutionSummaryResponse, any>({
+        path: `/api/runtime/executions/summary`,
         method: "POST",
         body: data,
         type: "application/json",
@@ -6883,6 +7158,134 @@ export class Api<
         body: data,
         type: "application/json",
         format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags operations-controller
+     * @name OperationProcesses
+     * @request GET:/api/runtime/operations/processes
+     */
+    operationProcesses: (params: RequestParams = {}) =>
+      this.request<ApiResponseVecOperationProcess, any>({
+        path: `/api/runtime/operations/processes`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags operations-controller
+     * @name OperationQueues
+     * @request GET:/api/runtime/operations/queues
+     */
+    operationQueues: (params: RequestParams = {}) =>
+      this.request<ApiResponseVecOperationQueue, any>({
+        path: `/api/runtime/operations/queues`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags operations-controller
+     * @name QueryOperationRequests
+     * @request POST:/api/runtime/operations/requests/query
+     */
+    queryOperationRequests: (
+      data: QueryOperationRequests,
+      params: RequestParams = {},
+    ) =>
+      this.request<ApiResponseOperationRequestPage, any>({
+        path: `/api/runtime/operations/requests/query`,
+        method: "POST",
+        body: data,
+        type: "application/json",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags operations-controller
+     * @name ListOperationViews
+     * @request GET:/api/runtime/operations/views
+     */
+    listOperationViews: (params: RequestParams = {}) =>
+      this.request<ApiResponseVecSavedOperationView, any>({
+        path: `/api/runtime/operations/views`,
+        method: "GET",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags operations-controller
+     * @name CreateOperationView
+     * @request POST:/api/runtime/operations/views
+     */
+    createOperationView: (
+      data: SaveOperationView,
+      params: RequestParams = {},
+    ) =>
+      this.request<ApiResponseSavedOperationView, void>({
+        path: `/api/runtime/operations/views`,
+        method: "POST",
+        body: data,
+        type: "application/json",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags operations-controller
+     * @name UpdateOperationView
+     * @request PUT:/api/runtime/operations/views/{id}
+     */
+    updateOperationView: (
+      id: string,
+      data: SaveOperationView,
+      params: RequestParams = {},
+    ) =>
+      this.request<ApiResponseSavedOperationView, void>({
+        path: `/api/runtime/operations/views/${id}`,
+        method: "PUT",
+        body: data,
+        type: "application/json",
+        format: "json",
+        ...params,
+      }),
+
+    /**
+     * No description
+     *
+     * @tags operations-controller
+     * @name DeleteOperationView
+     * @request DELETE:/api/runtime/operations/views/{id}
+     */
+    deleteOperationView: (
+      id: string,
+      query: {
+        /** @format int32 */
+        revision: number;
+      },
+      params: RequestParams = {},
+    ) =>
+      this.request<void, void>({
+        path: `/api/runtime/operations/views/${id}`,
+        method: "DELETE",
+        query: query,
         ...params,
       }),
 

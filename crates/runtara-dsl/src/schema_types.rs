@@ -2016,6 +2016,11 @@ pub struct SchemaField {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visible_when: Option<VisibleWhen>,
 
+    /// Require this field when a sibling field matches the condition.
+    /// Enforced on submitted inputs as well as in schema-driven forms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_when: Option<VisibleWhen>,
+
     /// Whether the field value may be `null`.
     ///
     /// Form-layer hint written by the workflow editor (rendered as a
@@ -2392,6 +2397,7 @@ mod connection_field_tests {
             pattern: None,
             properties: None,
             visible_when: None,
+        required_when: None,
             nullable: None,
         };
         let json = serde_json::to_value(&field).expect("serializes");
@@ -2417,6 +2423,7 @@ mod connection_field_tests {
             pattern: None,
             properties: None,
             visible_when: None,
+        required_when: None,
             nullable: None,
         })
         .expect("serializes")

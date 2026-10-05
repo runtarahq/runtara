@@ -168,6 +168,8 @@ pub struct ListInstancesOptions {
     /// Filter by published state, normalised
     /// ([`crate::state_filter::normalize_state_filters`]); AND-combined.
     pub state_filters: Vec<crate::state_filter::StateFilter>,
+    /// Optional published-state sort.
+    pub state_sort: Option<crate::operations::StateSort>,
     /// Order by field and direction.
     pub order_by: Option<String>,
     /// Maximum results to return.

@@ -57,6 +57,8 @@ export async function getAllExecutions(
   const executionHistory: ExecutionHistoryItem[] = instances.map(
     (instance: WorkflowInstanceWithTimestamps) => ({
       instanceId: instance.id,
+      error: instance.error,
+      errorSummary: instance.errorSummary,
       workflowId: instance.workflowId,
       workflowName: instance.workflowName ?? undefined,
       runLabel: instance.runLabel ?? undefined,

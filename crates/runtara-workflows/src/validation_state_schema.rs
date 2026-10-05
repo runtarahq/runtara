@@ -198,6 +198,9 @@ pub(super) fn validate_state_schema(graph: &ExecutionGraph, result: &mut Validat
         if field.visible_when.is_some() {
             settings.push("visibleWhen".to_string());
         }
+        if field.required_when.is_some() {
+            settings.push("requiredWhen".to_string());
+        }
         if !settings.is_empty() {
             result
                 .warnings

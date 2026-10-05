@@ -226,6 +226,7 @@ pub mod approved_builtins;
 /// Narrow, capped instance reads for the control service.
 pub mod control_reads;
 
+pub mod operations;
 /// Filters over a run's published state.
 pub mod state_filter;
 

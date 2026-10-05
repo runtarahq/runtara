@@ -1,7 +1,7 @@
 import {
   BarChart3,
+  ListChecks,
   Database,
-  History,
   Link,
   Workflow,
   Zap,
@@ -68,11 +68,21 @@ export const menu: MenuItem[] = [
     allowedGroups: [],
   },
   {
-    key: 'invocation-history',
-    title: 'Invocation History',
-    to: '/invocation-history',
-    icon: <History size={16} />,
+    key: 'operations',
+    title: 'Operations',
+    to: '/operations',
+    icon: <ListChecks size={16} />,
     allowedGroups: [],
+    children: [
+      { key: 'operations-overview', title: 'Overview', to: '/operations' },
+      {
+        key: 'operations-requests',
+        title: 'Requests',
+        to: '/operations/requests',
+      },
+      { key: 'operations-queues', title: 'Queues', to: '/operations/queues' },
+      { key: 'operations-runs', title: 'Runs', to: '/operations/runs' },
+    ],
   },
   {
     key: 'objects',

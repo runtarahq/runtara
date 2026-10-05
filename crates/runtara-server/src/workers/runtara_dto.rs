@@ -134,6 +134,7 @@ pub fn runtara_instance_to_dto_with_info(
     let execution_duration_seconds = duration_seconds(inst.started_at, inst.finished_at);
 
     WorkflowInstanceDto {
+        error_summary: None,
         state: None,
         state_updated_at: None,
         id: inst.instance_id.clone(),
@@ -191,6 +192,7 @@ pub fn runtara_info_to_dto(info: InstanceInfo) -> WorkflowInstanceDto {
     let (data, variables) = extract_input_fields(info.input.as_ref());
 
     WorkflowInstanceDto {
+        error_summary: None,
         state: None,
         state_updated_at: None,
         id: info.instance_id.clone(),
@@ -245,6 +247,7 @@ pub fn runtara_info_to_execution_with_metadata(
     let (data, variables) = extract_input_fields(info.input.as_ref());
 
     let instance = WorkflowInstanceDto {
+        error_summary: None,
         state: None,
         state_updated_at: None,
         id: info.instance_id.clone(),

@@ -279,6 +279,7 @@ async fn bind_session_message(
     responses((status=200,description="Message retained or enqueue replayed",body=crate::api::dto::common::ApiResponse<DeliveryStatus>),(status=400,description="Invalid envelope"),(status=404,description="Session not found"),(status=409,description="Message identity conflict, or no/several inputs waiting"),(status=503,description="Queue unavailable")),tag="sessions")]
 pub async fn submit_event(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
+    axum::Extension(auth): axum::Extension<crate::auth::AuthContext>,
     State(runtime_client): State<Option<Arc<RuntimeClient>>>,
     State(valkey_conn): State<Option<ConnectionManager>>,
     Path(session_id): Path<String>,
@@ -346,13 +347,14 @@ pub async fn submit_event(
     };
     let enqueued = match &target {
         Some(target) => {
-            managed::enqueue_targeted(
+            managed::enqueue_authenticated(
                 &mut conn,
                 &scope,
                 &request.message_id,
                 &request.operation_id,
                 &event,
                 target,
+                &auth,
             )
             .await
         }
