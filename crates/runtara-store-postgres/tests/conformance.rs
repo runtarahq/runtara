@@ -1755,6 +1755,85 @@ async fn paired_record_rule_conformance() {
 }
 
 #[tokio::test]
+async fn durability_conformance() {
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = std::sync::Arc::new(PostgresPersistence::new(pool));
+    runtara_core::persistence::conformance::durability::run_all(backend.as_ref()).await;
+    runtara_core::persistence::conformance::durability::record_checkpoint_concurrent_writers_agree(
+        backend,
+    )
+    .await;
+}
+
+/// The guest checkpoint handler under real concurrency: writers that all
+/// miss the read race to record, and every loser resumes from the winner's
+/// bytes instead of overwriting them.
+#[tokio::test]
+async fn racing_checkpoint_handlers_adopt_the_first_committed_bytes() {
+    use runtara_core::instance_handlers::{
+        CheckpointRequest, InstanceHandlerState, handle_checkpoint,
+    };
+    use runtara_core::persistence::Persistence;
+    let (pool, _container) = postgres_test_pool().await;
+    let persistence = std::sync::Arc::new(PostgresPersistence::new(pool));
+    let id = format!("checkpoint-race-{}", uuid::Uuid::new_v4());
+    persistence
+        .register_instance(&id, "checkpoint-race")
+        .await
+        .unwrap();
+    persistence
+        .update_instance_status(&id, runtara_core::domain::InstanceStatus::Running, None)
+        .await
+        .unwrap();
+    let state = std::sync::Arc::new(InstanceHandlerState::new(persistence.clone()));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(16));
+    let writers: Vec<_> = (0..16u8)
+        .map(|n| {
+            let state = state.clone();
+            let barrier = barrier.clone();
+            let id = id.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                let response = handle_checkpoint(
+                    &state,
+                    CheckpointRequest {
+                        instance_id: id,
+                        checkpoint_id: "step".into(),
+                        state: vec![n; 4],
+                    },
+                )
+                .await
+                .unwrap();
+                (vec![n; 4], response.found, response.state)
+            })
+        })
+        .collect();
+    let mut fresh = Vec::new();
+    let mut resumed = Vec::new();
+    for writer in writers {
+        let (sent, found, returned) = writer.await.unwrap();
+        if found {
+            resumed.push(returned);
+        } else {
+            fresh.push(sent);
+        }
+    }
+    assert_eq!(
+        fresh.len(),
+        1,
+        "exactly one racing writer records the checkpoint"
+    );
+    let stored = persistence
+        .load_checkpoint(&id, "step")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, fresh[0]);
+    assert!(resumed.iter().all(|bytes| *bytes == fresh[0]));
+    persistence.delete_instances_batch(&[id]).await.unwrap();
+}
+
+#[tokio::test]
 async fn agent_continuations_conformance() {
     let (pool, _container) = postgres_test_pool().await;
     let backend = PostgresPersistence::new(pool);

@@ -32,9 +32,10 @@ use chrono::{DateTime, Utc};
 
 use crate::error::CoreError;
 use crate::persistence::{
-    CheckpointRecord, CompleteInstanceGuard, CompleteInstanceParams, CustomSignalRecord,
-    EventRecord, EventSortOrder, EventVocabulary, InstanceRecord, ListEventsFilter,
-    ListPairedRecordsFilter, PairedRecordStatus, PairedRecordSummary, Persistence, SignalRecord,
+    CheckpointRecord, CheckpointWrite, CompleteInstanceGuard, CompleteInstanceParams,
+    CustomSignalRecord, EventRecord, EventSortOrder, EventVocabulary, InstanceRecord,
+    ListEventsFilter, ListPairedRecordsFilter, PairedRecordStatus, PairedRecordSummary,
+    Persistence, SignalRecord,
 };
 
 #[derive(Default)]
@@ -664,6 +665,30 @@ impl Persistence for InMemoryPersistence {
             created_at: Utc::now(),
         });
         Ok(())
+    }
+
+    async fn record_checkpoint(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        state: &[u8],
+    ) -> Result<CheckpointWrite, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        if let Some(existing) = store
+            .checkpoints
+            .iter()
+            .find(|c| c.instance_id == instance_id && c.checkpoint_id == checkpoint_id)
+        {
+            return Ok(CheckpointWrite::Existing(existing.state.clone()));
+        }
+        store.instance_mut(instance_id)?.checkpoint_id = Some(checkpoint_id.to_string());
+        store.checkpoints.push(CheckpointRecord {
+            instance_id: instance_id.to_string(),
+            checkpoint_id: checkpoint_id.to_string(),
+            state: state.to_vec(),
+            created_at: Utc::now(),
+        });
+        Ok(CheckpointWrite::Recorded)
     }
 
     async fn load_checkpoint(
@@ -1651,6 +1676,17 @@ mod tests {
     async fn in_memory_backend_satisfies_the_paired_record_rule() {
         let backend = InMemoryPersistence::new();
         crate::persistence::conformance::paired::run_all(&backend).await;
+    }
+
+    /// Durability lifecycle contract, on the in-memory backend.
+    #[tokio::test]
+    async fn in_memory_backend_satisfies_the_durability_contract() {
+        let backend = std::sync::Arc::new(InMemoryPersistence::new());
+        crate::persistence::conformance::durability::run_all(backend.as_ref()).await;
+        crate::persistence::conformance::durability::record_checkpoint_concurrent_writers_agree(
+            backend,
+        )
+        .await;
     }
 
     /// Agent continuations, on the in-memory backend.

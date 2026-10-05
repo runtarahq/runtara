@@ -20,7 +20,7 @@ use super::types::{
     GetCheckpointResponse, Signal, SignalType, SleepRequest, SleepResponse,
 };
 use crate::error::CoreError;
-use crate::persistence::{EventRecord, Persistence};
+use crate::persistence::{CheckpointWrite, EventRecord, Persistence};
 
 /// Checkpoint handler - combines save and load semantics.
 ///
@@ -53,26 +53,7 @@ pub async fn handle_checkpoint(
             state_size = existing.state.len(),
             "Found existing checkpoint - returning for resume"
         );
-
-        // Check for pending signal even when returning existing checkpoint
-        let pending_signal =
-            get_pending_signal(state.persistence.as_ref(), &request.instance_id).await?;
-        let custom_signal = state
-            .persistence
-            .get_custom_signal(&request.instance_id, &request.checkpoint_id)
-            .await?
-            .map(|sig| CustomSignal {
-                signal_id: sig.signal_id,
-                checkpoint_id: request.checkpoint_id.clone(),
-                payload: sig.payload.unwrap_or_default(),
-            });
-
-        return Ok(CheckpointResponse {
-            found: true,
-            state: existing.state,
-            pending_signal,
-            custom_signal,
-        });
+        return found_response(state, &request, existing.state).await;
     }
 
     // 3. Checkpoint doesn't exist
@@ -90,29 +71,29 @@ pub async fn handle_checkpoint(
         });
     }
 
-    state
+    // 4. Record it. The first committed bytes win: a writer that raced past
+    // the read above gets the winner's bytes back and resumes from them, as
+    // if its read had hit. The instance's checkpoint pointer moves with the
+    // insert, in the same transaction.
+    match state
         .persistence
-        .save_checkpoint(&request.instance_id, &request.checkpoint_id, &request.state)
-        .await?;
-
-    // 4. Update instance's current checkpoint_id
-    state
-        .persistence
-        .update_instance_checkpoint(&request.instance_id, &request.checkpoint_id)
-        .await?;
+        .record_checkpoint(&request.instance_id, &request.checkpoint_id, &request.state)
+        .await?
+    {
+        CheckpointWrite::Existing(winner) => {
+            debug!(
+                checkpoint_id = %request.checkpoint_id,
+                "Checkpoint committed concurrently - adopting the first write"
+            );
+            return found_response(state, &request, winner).await;
+        }
+        CheckpointWrite::Recorded => {}
+    }
 
     // 5. Check for pending signals to include in response
     let pending_signal =
         get_pending_signal(state.persistence.as_ref(), &request.instance_id).await?;
-    let custom_signal = state
-        .persistence
-        .get_custom_signal(&request.instance_id, &request.checkpoint_id)
-        .await?
-        .map(|sig| CustomSignal {
-            signal_id: sig.signal_id,
-            checkpoint_id: request.checkpoint_id.clone(),
-            payload: sig.payload.unwrap_or_default(),
-        });
+    let custom_signal = custom_signal(state, &request).await?;
 
     if pending_signal.is_some() || custom_signal.is_some() {
         debug!(
@@ -130,6 +111,39 @@ pub async fn handle_checkpoint(
         pending_signal,
         custom_signal,
     })
+}
+
+/// A hit: hand back the stored bytes with any pending lifecycle signal and
+/// the custom signal addressed to this checkpoint.
+async fn found_response(
+    state: &InstanceHandlerState,
+    request: &CheckpointRequest,
+    stored: Vec<u8>,
+) -> Result<CheckpointResponse> {
+    let pending_signal =
+        get_pending_signal(state.persistence.as_ref(), &request.instance_id).await?;
+    let custom_signal = custom_signal(state, request).await?;
+    Ok(CheckpointResponse {
+        found: true,
+        state: stored,
+        pending_signal,
+        custom_signal,
+    })
+}
+
+async fn custom_signal(
+    state: &InstanceHandlerState,
+    request: &CheckpointRequest,
+) -> std::result::Result<Option<CustomSignal>, CoreError> {
+    Ok(state
+        .persistence
+        .get_custom_signal(&request.instance_id, &request.checkpoint_id)
+        .await?
+        .map(|sig| CustomSignal {
+            signal_id: sig.signal_id,
+            checkpoint_id: request.checkpoint_id.clone(),
+            payload: sig.payload.unwrap_or_default(),
+        }))
 }
 
 /// Validate that an instance exists and is still running.

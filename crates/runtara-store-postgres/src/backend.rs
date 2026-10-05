@@ -733,6 +733,18 @@ impl Persistence for PostgresPersistence {
         Self::op_save_checkpoint(&self.pool, instance_id, checkpoint_id, state).await
     }
 
+    async fn record_checkpoint(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        state: &[u8],
+    ) -> Result<runtara_core::persistence::CheckpointWrite, CoreError> {
+        let mut tx = self.pool.begin().await.db()?;
+        let write = crate::checkpoints::record(&mut tx, instance_id, checkpoint_id, state).await?;
+        tx.commit().await.db()?;
+        Ok(write)
+    }
+
     async fn load_checkpoint(
         &self,
         instance_id: &str,

@@ -2756,6 +2756,10 @@ pub mod continuations;
 /// fence, size cap, isolation, cascade and prune.
 pub mod run_state;
 
+/// Durability lifecycle: first-wins result checkpoints, root execution
+/// ownership and owned lifecycle transitions.
+pub mod durability;
+
 /// Paired-record rule: one record per (correlation, scope), from the first
 /// start to the first end after it (S,S,E; S,E,S,E; E,S,E).
 pub mod paired;

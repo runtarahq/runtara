@@ -294,6 +294,16 @@ pub struct CheckpointRecord {
     pub created_at: DateTime<Utc>,
 }
 
+/// Outcome of recording a result checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckpointWrite {
+    /// This call stored the bytes and moved the instance's checkpoint pointer.
+    Recorded,
+    /// Another write committed first; these are its bytes, which the caller
+    /// must adopt. Nothing was written.
+    Existing(Vec<u8>),
+}
+
 /// Event record from the persistence layer.
 #[derive(Debug, Clone)]
 pub struct EventRecord {
@@ -958,6 +968,37 @@ pub trait Persistence: Send + Sync {
         checkpoint_id: &str,
         state: &[u8],
     ) -> Result<(), CoreError>;
+
+    /// Record a result checkpoint: the first committed bytes for
+    /// `(instance_id, checkpoint_id)` win and are never replaced.
+    ///
+    /// On a fresh key this stores `state` and points the instance at it in
+    /// one transaction, returning [`CheckpointWrite::Recorded`]. When the key
+    /// already exists, including when a concurrent writer committed between
+    /// the caller's read and this write, nothing is written and the stored
+    /// bytes come back as [`CheckpointWrite::Existing`].
+    ///
+    /// Unlike [`Self::save_checkpoint`], this is the write a guest's result
+    /// checkpoint uses. `save_checkpoint` stays the replace primitive for
+    /// continuation-like state such as a durable sleep.
+    ///
+    /// The default is a non-atomic read-then-write for test doubles; durable
+    /// backends override it.
+    async fn record_checkpoint(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        state: &[u8],
+    ) -> Result<CheckpointWrite, CoreError> {
+        if let Some(existing) = self.load_checkpoint(instance_id, checkpoint_id).await? {
+            return Ok(CheckpointWrite::Existing(existing.state));
+        }
+        self.save_checkpoint(instance_id, checkpoint_id, state)
+            .await?;
+        self.update_instance_checkpoint(instance_id, checkpoint_id)
+            .await?;
+        Ok(CheckpointWrite::Recorded)
+    }
 
     /// Read back one checkpoint by `(instance_id, checkpoint_id)`.
     ///
