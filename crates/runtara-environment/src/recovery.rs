@@ -646,6 +646,8 @@ mod persistence_tests {
             assert_eq!(after["termination_reason"], "environment_restart");
             if auto_recover {
                 assert!(!after["sleep_until"].is_null());
+                // The wake scheduler refuses a wake launch without a reason.
+                assert_eq!(after["wake_reason"], "recovery");
                 assert_eq!(after["recovery_attempts"], 1);
             }
             assert_eq!(
@@ -689,6 +691,7 @@ mod persistence_tests {
             assert_eq!(after["status"], "suspended");
             assert_eq!(after["termination_reason"], "park_failed");
             assert!(!after["sleep_until"].is_null(), "recovery wakes it at once");
+            assert_eq!(after["wake_reason"], "recovery");
             assert_eq!(after["recovery_attempts"], attempt);
             // The relaunch made no progress and exited the same way.
             sqlx::query("UPDATE instances SET status = 'running' WHERE instance_id = $1")

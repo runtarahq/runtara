@@ -429,7 +429,8 @@ impl InstanceRepository {
 
     /// Suspend an instance and schedule an immediate wake so it is relaunched.
     ///
-    /// Sets `status='suspended'`, the cause's `termination_reason`
+    /// Sets `status='suspended'`, `wake_reason='recovery'` (a wake launch is
+    /// refused without one), the cause's `termination_reason`
     /// and `sleep_until=NOW()` so the wake scheduler picks it up, and stores the
     /// crash-loop counters in the same atomic UPDATE. The instance is then
     /// replayed from the start against the checkpoint cache, so completed
@@ -455,6 +456,7 @@ impl InstanceRepository {
              SET status = 'suspended'::instance_status, \
                  termination_reason = $4::termination_reason, \
                  sleep_until = NOW(), \
+                 wake_reason = 'recovery', \
                  recovery_attempts = $2, \
                  recovery_marker = $3 \
              WHERE instance_id = $1 AND status = 'running'::instance_status",
