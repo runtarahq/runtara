@@ -432,7 +432,7 @@ pub struct TraceReferenceParams {
     #[schemars(description = "Execution instance UUID")]
     pub instance_id: String,
     #[schemars(
-        description = "Reference path to resolve (e.g., 'steps.getVariant.outputs.price', 'data.orderId', 'variables.counter')"
+        description = "Reference path to resolve (e.g., 'steps.getVariant.outputs.price', 'data.orderId', 'variables.counter', 'workflow.inputs.data.orderId', 'steps.__error.message'). loop/iteration/item references need a step's scope; use inspect_step for those."
     )]
     pub reference: String,
 }
@@ -622,9 +622,9 @@ fn synthetic_summaries(steps: Vec<serde_json::Value>) -> serde_json::Value {
 }
 
 /// Collect the step ids referenced as `steps.<id>...` anywhere in a step's
-/// input mapping, plus whether the synthetic `__error`/`error` root is
-/// referenced (not a real step — it resolves to the newest failed step's
-/// error envelope). Direct references, composite payloads, condition/fn
+/// input mapping, plus whether the synthetic `__error`/`error` step (or its
+/// bare `__error.*`/`error.*` alias) is referenced (not a real step — it
+/// resolves to the newest failed step's error envelope). Direct references, composite payloads, condition/fn
 /// arguments, and immediate values all embed the same
 /// `{valueType: "reference", value: "steps..."}` envelope shape, so one
 /// uniform walk over the mapping tree covers every place a reference can
@@ -646,15 +646,16 @@ fn referenced_step_ids(mapping: &serde_json::Value) -> (std::collections::BTreeS
                     // Tokenized like the runtime reads it, so a bracketed id
                     // (`steps['fetch'].outputs`) is collected too.
                     let segments = reference_segments(path);
-                    if let [root, id, ..] = segments.as_slice()
-                        && root == "steps"
-                    {
-                        match id.as_str() {
+                    match segments.as_slice() {
+                        [root, id, ..] if root == "steps" => match id.as_str() {
                             "__error" | "error" => *wants_error = true,
                             id => {
                                 ids.insert(id.to_string());
                             }
-                        }
+                        },
+                        // The bare onError aliases read the same envelope.
+                        [root, ..] if is_error_alias(root) => *wants_error = true,
+                        _ => {}
                     }
                 }
                 for child in map.values() {
@@ -697,11 +698,12 @@ fn resolve_json_path(value: &serde_json::Value, segments: &[String]) -> Option<s
 }
 
 /// Explain why the `tail` path segments failed to resolve against `value`,
-/// distinguishing a *shape mismatch* (a named key indexed into an array, or a
-/// segment reaching into a scalar — the reporter's `steps.split.outputs.result`)
-/// from a plain missing/out-of-range field. Mirrors the workflow runtime's
-/// `descend`, so the diagnostic matches how execution now fails loud on the same
-/// path instead of silently resolving to null.
+/// telling the one *shape mismatch* the runtime rejects — a named key indexed
+/// into an array, the reporter's `steps.split.outputs.result` — apart from the
+/// misses it lets through: a missing field, an out-of-range index, or a
+/// segment reaching into a scalar or `null`. Mirrors the workflow runtime's
+/// `descend`: only the array case fails the run (unless the reference declares
+/// a `default`); every other miss quietly resolves to `null` or the default.
 ///
 /// Returns `None` when the path fully resolves (to any value, including a
 /// genuine `null`) — a real null leaf is not a mismatch and gets no reason.
@@ -758,7 +760,9 @@ fn explain_unresolved_path(
                     _ => "a scalar",
                 };
                 return Some(format!(
-                    "'{walked}' is {kind} and cannot be traversed to '{segment}'"
+                    "'{walked}' is {kind}, so '{segment}' resolves to null (or the \
+                     reference's default) at run time — the runtime does not \
+                     traverse into scalars or null"
                 ));
             }
         }
@@ -796,6 +800,35 @@ fn truncate_large_strings(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Find a step's definition in a fetched workflow, at the top level or nested
+/// in a Split/While `subgraph` or a WaitForSignal `onWait` graph. Steps inside
+/// a loop — the only ones with an iteration scope for `loop.*` / `iteration.*`
+/// to resolve against — never sit at the top level.
+fn find_step_definition<'a>(
+    workflow: &'a serde_json::Value,
+    step_id: &str,
+) -> Option<&'a serde_json::Value> {
+    let steps = workflow
+        .pointer("/data/definition/executionGraph/steps")
+        .or_else(|| workflow.pointer("/data/executionGraph/steps"))?;
+    find_step_in_graph(steps, step_id)
+}
+
+/// Depth-first search of a graph's `steps` map and the graphs nested in it.
+fn find_step_in_graph<'a>(
+    steps: &'a serde_json::Value,
+    step_id: &str,
+) -> Option<&'a serde_json::Value> {
+    let steps = steps.as_object()?;
+    steps.get(step_id).or_else(|| {
+        steps.values().find_map(|step| {
+            ["subgraph", "onWait"]
+                .into_iter()
+                .find_map(|nested| find_step_in_graph(step.get(nested)?.get("steps")?, step_id))
+        })
+    })
+}
+
 /// Helper: find a step by ID in the step summaries response.
 fn find_step_in_summaries<'a>(
     summaries: &'a serde_json::Value,
@@ -811,8 +844,12 @@ fn find_step_in_summaries<'a>(
         })
 }
 
-/// Resolve a `steps.<id>.<path>`, `data.<path>`, `variables.<path>`, or
-/// `loop.<path>` reference against step summaries / execution input.
+/// Resolve a `steps.<id>.<path>`, `data.<path>`, `variables.<path>`,
+/// `workflow.<path>`, `loop.<path>`, `iteration.<path>` or bare
+/// `__error.<path>`/`error.<path>` reference against step summaries /
+/// execution input. `item.*` and the parts of `loop`/`iteration` that only
+/// live in a running iteration resolve to `None` here; see
+/// [`runtime_only_reason`].
 ///
 /// This is the single source of truth for reference resolution in the MCP debug
 /// tools — `inspect_step`, `why_execution_failed`, and `trace_reference` all route
@@ -825,7 +862,7 @@ fn find_step_in_summaries<'a>(
 /// segment included) is walked against it directly.
 ///
 /// `scope_id` is the scope of the step whose mapping is being resolved (only
-/// `loop.*` needs it, to recover the iteration index — see
+/// `loop.*` and `iteration.*` need it, to recover the iteration index — see
 /// `loop_index_from_scope_id`).
 fn resolve_reference_value(
     ref_path: &str,
@@ -837,10 +874,22 @@ fn resolve_reference_value(
     // (`steps['fetch'].outputs`, `data["a.b"]`) resolves like the dotted one.
     let segments = reference_segments(ref_path);
     let (root, rest) = segments.split_first()?;
-    match root.as_str() {
+    resolve_root(root, rest, summaries, execution, scope_id)
+}
+
+/// The per-root half of [`resolve_reference_value`], over already-tokenized
+/// segments, so `workflow.inputs.<root>.*` can hand its tail to the same arm.
+fn resolve_root(
+    root: &str,
+    rest: &[String],
+    summaries: &serde_json::Value,
+    execution: &serde_json::Value,
+    scope_id: Option<&str>,
+) -> Option<serde_json::Value> {
+    match root {
         "steps" => {
             let (source_step_id, field_path) = rest.split_first()?;
-            if source_step_id == "__error" || source_step_id == "error" {
+            if is_error_alias(source_step_id) {
                 // `__error`/`error` aren't real steps — the runtime injects the
                 // captured onError envelope under this synthetic id when routing
                 // to a failure handler (see `error_steps` in
@@ -861,28 +910,171 @@ fn resolve_reference_value(
             let envelope = source.get("outputs")?;
             resolve_json_path(envelope, field_path)
         }
+        // The bare onError aliases: `build_source` mirrors `steps.__error` to
+        // the source root during onError dispatch, so they read the same
+        // envelope as the `steps.__error` arm above.
+        "__error" | "error" => resolve_json_path(&find_error_envelope(summaries)?, rest),
         // A bare `data` / `variables` is the whole object, as at runtime.
-        "data" => {
-            let inputs = execution
-                .pointer("/data/inputs/data")
-                .or_else(|| execution.pointer("/data/inputs"))?;
-            resolve_json_path(inputs, rest)
-        }
-        "variables" => execution
-            .pointer("/data/inputs/variables")
-            .or_else(|| execution.pointer("/data/variables"))
-            .and_then(|variables| resolve_json_path(variables, rest)),
+        "data" => resolve_json_path(instance_data(execution)?, rest),
+        "variables" => resolve_json_path(instance_variables(execution)?, rest),
+        // `build_source` sets `workflow` to `{inputs: {data, variables}}` from
+        // the same `data` and `variables` the step sees, so its two subtrees
+        // resolve exactly like those roots.
+        "workflow" => match rest {
+            [inputs, scope, tail @ ..]
+                if inputs == "inputs" && (scope == "data" || scope == "variables") =>
+            {
+                resolve_root(scope, tail, summaries, execution, scope_id)
+            }
+            _ => {
+                let workflow = json!({
+                    "inputs": {
+                        "data": instance_data(execution)?,
+                        "variables": instance_variables(execution)
+                            .cloned()
+                            .unwrap_or_else(|| json!({})),
+                    }
+                });
+                resolve_json_path(&workflow, rest)
+            }
+        },
+        // Of `loop` and `iteration` only the index is recoverable, from the
+        // step's scope id (see `loop_index_from_scope_id`). The rest —
+        // `loop.outputs`, `iteration.indices`/`.item` — only ever lived in the
+        // running iteration's variables and was never persisted, so it is
+        // absent here rather than fabricated (see `runtime_only_reason`).
         "loop" => {
-            // The iteration index is recoverable from the step's scope id (see
-            // `loop_index_from_scope_id`). `loop.outputs` is not: it only ever
-            // lived in the ephemeral per-iteration variables bag and was never
-            // persisted, so it's intentionally absent here rather than
-            // fabricated — the lookup below just returns `None` for it.
             let loop_context = json!({ "index": loop_index_from_scope_id(scope_id?)? });
             resolve_json_path(&loop_context, rest)
         }
+        "iteration" => match rest {
+            [index, tail @ ..] if index == "index" => {
+                let index = json!(loop_index_from_scope_id(scope_id?)?);
+                resolve_json_path(&index, tail)
+            }
+            _ => None,
+        },
         _ => None,
     }
+}
+
+/// The workflow input the runtime binds to `data`: the `data` half of the
+/// stored `{data, variables}` envelope, or the whole input for an invocation
+/// that wasn't wrapped in one.
+fn instance_data(execution: &serde_json::Value) -> Option<&serde_json::Value> {
+    execution
+        .pointer("/data/inputs/data")
+        .or_else(|| execution.pointer("/data/inputs"))
+}
+
+/// The instance's variables as stored with its execution record. Run them
+/// through [`with_runtime_variables`] first to see the runtime's `variables`.
+fn instance_variables(execution: &serde_json::Value) -> Option<&serde_json::Value> {
+    execution
+        .pointer("/data/inputs/variables")
+        .or_else(|| execution.pointer("/data/variables"))
+}
+
+/// True for the synthetic onError step id / bare root (`__error`, `error`).
+fn is_error_alias(segment: &str) -> bool {
+    segment == "__error" || segment == "error"
+}
+
+/// Variables the runtime sets for itself on every run or inside every loop
+/// iteration — durable-key and manifest bookkeeping, scope ids and the legacy
+/// per-iteration bindings behind `loop`/`iteration`/`item`. None of them is
+/// stored with the instance, and the tools can't rebuild them, so a reference
+/// to one is reported as runtime-only rather than as missing.
+const RUNTIME_ONLY_VARIABLES: &[&str] = &[
+    "_durable_key_version",
+    "_loop_path",
+    "_manifest_graph_path",
+    "_cache_key_prefix",
+    "_scope_id",
+    "_parent_scope_id",
+    "_loop_indices",
+    "_index",
+    "_item",
+    "_loop",
+    "_previousOutputs",
+];
+
+/// Why a reference the tools could not resolve has a value only while the
+/// workflow runs, or `None` when it is simply missing. Consulted only after
+/// [`resolve_reference_value`] comes back empty.
+fn runtime_only_reason(ref_path: &str) -> Option<&'static str> {
+    let segments = reference_segments(ref_path);
+    match segments.as_slice() {
+        [root, field, ..] if root == "loop" && field == "outputs" => Some(
+            "loop.outputs is the previous While iteration's output; it lives only in the \
+             running iteration and is never persisted, so it is known only at run time.",
+        ),
+        [root, field, ..] if root == "iteration" && field != "index" => Some(
+            "Only iteration.index can be recovered (from the step's scope id); the rest of \
+             iteration lives only in the running Split/While iteration and is known only at \
+             run time.",
+        ),
+        [root] if root == "iteration" => Some(
+            "Only iteration.index can be recovered (from the step's scope id); the whole \
+             iteration object lives only in the running Split/While iteration and is known \
+             only at run time.",
+        ),
+        [root, ..] if root == "item" => Some(
+            "item is the current Split element; it lives only in the running iteration and \
+             is never persisted, so it is known only at run time.",
+        ),
+        [root, name, ..]
+            if root == "variables" && RUNTIME_ONLY_VARIABLES.contains(&name.as_str()) =>
+        {
+            Some(
+                "This variable is set by the runtime itself and never stored with the \
+                 instance, so its value is known only at run time.",
+            )
+        }
+        _ => None,
+    }
+}
+
+/// The instance record with its variables replaced by the set the runtime
+/// resolves `variables.*` against, as far as the tools can rebuild it.
+/// `build_source` drops `_`-prefixed input variables (all but
+/// `_cache_key_prefix`) and the runtime adds `_instance_id`, `_tenant_id` and
+/// `_workflow_id` itself; those three are this instance's id, the server's
+/// tenant and the record's workflow id. The other runtime-set variables stay
+/// out (see [`RUNTIME_ONLY_VARIABLES`]).
+fn with_runtime_variables(
+    mut execution: serde_json::Value,
+    instance_id: &str,
+    workflow_id: &str,
+    tenant_id: &str,
+) -> serde_json::Value {
+    let workflow_id = execution
+        .pointer("/data/workflowId")
+        .and_then(|v| v.as_str())
+        .unwrap_or(workflow_id)
+        .to_string();
+    let mut variables = match instance_variables(&execution) {
+        Some(serde_json::Value::Object(stored)) => stored.clone(),
+        _ => serde_json::Map::new(),
+    };
+    variables.retain(|name, _| !name.starts_with('_') || name == "_cache_key_prefix");
+    variables.insert("_instance_id".into(), json!(instance_id));
+    variables.insert("_tenant_id".into(), json!(tenant_id));
+    variables.insert("_workflow_id".into(), json!(workflow_id));
+
+    // Written back where `instance_variables` reads first: inside the
+    // `{data, variables}` input envelope when there is one, else beside it.
+    let in_envelope = execution.pointer("/data/inputs/variables").is_some()
+        || execution.pointer("/data/inputs/data").is_some();
+    let target = if in_envelope {
+        execution.pointer_mut("/data/inputs")
+    } else {
+        execution.pointer_mut("/data")
+    };
+    if let Some(target) = target.and_then(|t| t.as_object_mut()) {
+        target.insert("variables".into(), serde_json::Value::Object(variables));
+    }
+    execution
 }
 
 /// Recover the iteration index the runtime encoded into a Split/While scope id
@@ -1310,9 +1502,34 @@ fn step_error(step: &serde_json::Value) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
+/// Record the references a nested mapping left unresolved on its
+/// `resolve_input_mappings` entry, keeping the ones that have a value only at
+/// run time (see [`runtime_only_reason`]) apart from the ones that are simply
+/// missing.
+fn note_unresolved_references(entry: &mut serde_json::Value, unresolved_refs: Vec<String>) {
+    if unresolved_refs.is_empty() {
+        return;
+    }
+    let mut missing = Vec::new();
+    let mut runtime_only = Vec::new();
+    for reference in unresolved_refs {
+        match runtime_only_reason(&reference) {
+            Some(reason) => runtime_only.push(json!({ "reference": reference, "reason": reason })),
+            None => missing.push(reference),
+        }
+    }
+    entry["resolutionNote"] = json!(RUNTIME_NESTED_REFERENCE_NOTE);
+    if !missing.is_empty() {
+        entry["unresolvedNestedReferences"] = json!(missing);
+    }
+    if !runtime_only.is_empty() {
+        entry["runtimeOnlyReferences"] = json!(runtime_only);
+    }
+}
+
 /// Helper: resolve inputMapping references against step summaries. `scope_id`
 /// is the scope of the step this input mapping belongs to (needed to resolve
-/// `loop.*` references — see `resolve_reference_value`).
+/// `loop.*` / `iteration.*` references — see `resolve_reference_value`).
 fn resolve_input_mappings(
     input_mapping: &serde_json::Value,
     summaries: &serde_json::Value,
@@ -1353,7 +1570,7 @@ fn resolve_input_mappings(
                         "steps" if !rest.is_empty() => {
                             let source_step_id = rest[0].as_str();
 
-                            if source_step_id == "__error" || source_step_id == "error" {
+                            if is_error_alias(source_step_id) {
                                 // Not a real step — see the matching special-case
                                 // in resolve_reference_value for why `__error`
                                 // never shows up in find_step_in_summaries.
@@ -1384,15 +1601,24 @@ fn resolve_input_mappings(
                                 entry["sourceStatus"] = json!("not_found");
                             }
                         }
+                        "__error" | "error" => {
+                            entry["source"] = json!("error_context");
+                            entry["resolvedValue"] =
+                                resolve_reference_value(ref_path, summaries, execution, scope_id)
+                                    .unwrap_or(json!(null));
+                        }
                         "data" => {
-                            if let Some(inputs) = execution
-                                .pointer("/data/inputs/data")
-                                .or_else(|| execution.pointer("/data/inputs"))
-                            {
+                            if let Some(inputs) = instance_data(execution) {
                                 entry["resolvedValue"] =
                                     resolve_json_path(inputs, rest).unwrap_or(json!(null));
                             }
                             entry["source"] = json!("workflow_input");
+                        }
+                        "workflow" => {
+                            entry["source"] = json!("workflow_input");
+                            entry["resolvedValue"] =
+                                resolve_reference_value(ref_path, summaries, execution, scope_id)
+                                    .unwrap_or(json!(null));
                         }
                         "variables" => {
                             entry["source"] = json!("variable");
@@ -1413,7 +1639,21 @@ fn resolve_input_mappings(
                                 resolve_reference_value(ref_path, summaries, execution, scope_id)
                                     .unwrap_or(json!(null));
                         }
+                        "iteration" | "item" => {
+                            entry["source"] = json!("iteration");
+                            entry["resolvedValue"] =
+                                resolve_reference_value(ref_path, summaries, execution, scope_id)
+                                    .unwrap_or(json!(null));
+                        }
                         _ => {}
+                    }
+                    if entry
+                        .get("resolvedValue")
+                        .is_none_or(serde_json::Value::is_null)
+                        && let Some(reason) = runtime_only_reason(ref_path)
+                    {
+                        entry["runtimeOnly"] = json!(true);
+                        entry["resolutionNote"] = json!(reason);
                     }
                 }
             }
@@ -1427,10 +1667,7 @@ fn resolve_input_mappings(
                     &mut unresolved_refs,
                 );
                 entry["resolvedValue"] = resolved_value;
-                if !unresolved_refs.is_empty() {
-                    entry["resolutionNote"] = json!(RUNTIME_NESTED_REFERENCE_NOTE);
-                    entry["unresolvedNestedReferences"] = json!(unresolved_refs);
-                }
+                note_unresolved_references(&mut entry, unresolved_refs);
             }
             "composite" => {
                 // Mirror the runtime's `apply_composite`: a composite payload is an
@@ -1446,10 +1683,7 @@ fn resolve_input_mappings(
                     &mut unresolved_refs,
                 );
                 entry["resolvedValue"] = resolved_value;
-                if !unresolved_refs.is_empty() {
-                    entry["resolutionNote"] = json!(RUNTIME_NESTED_REFERENCE_NOTE);
-                    entry["unresolvedNestedReferences"] = json!(unresolved_refs);
-                }
+                note_unresolved_references(&mut entry, unresolved_refs);
             }
             "template" => {
                 entry["template"] = value;
@@ -1467,10 +1701,7 @@ fn resolve_input_mappings(
                     &mut unresolved_refs,
                 );
                 entry["resolvedValue"] = resolved_value;
-                if !unresolved_refs.is_empty() {
-                    entry["resolutionNote"] = json!(RUNTIME_NESTED_REFERENCE_NOTE);
-                    entry["unresolvedNestedReferences"] = json!(unresolved_refs);
-                }
+                note_unresolved_references(&mut entry, unresolved_refs);
             }
             _ => {}
         }
@@ -1497,23 +1728,12 @@ pub async fn inspect_step(
     )
     .await?;
 
-    // Fetch execution for input data. `?full=true`: step input mappings may
-    // reference `data.X` fields the default detail fetch elides; resolve against
-    // the complete value (the MCP re-truncates its own response).
-    let execution = api_get(
-        server,
-        &format!(
-            "/api/runtime/workflows/instances/{}?full=true",
-            params.instance_id
-        ),
-    )
-    .await?;
+    // Fetch execution for input data and variables.
+    let execution =
+        fetch_execution_for_references(server, &params.workflow_id, &params.instance_id).await?;
 
     // Extract step definition from workflow graph
-    let input_mapping = workflow
-        .pointer("/data/definition/executionGraph/steps")
-        .or_else(|| workflow.pointer("/data/executionGraph/steps"))
-        .and_then(|steps| steps.get(&params.step_id))
+    let input_mapping = find_step_definition(&workflow, &params.step_id)
         .and_then(|step| step.get("inputMapping"))
         .cloned()
         .unwrap_or(json!({}));
@@ -1612,32 +1832,128 @@ pub async fn inspect_step(
 }
 
 /// Build the `trace_reference` response for a `variables.*` reference from a
-/// fetched instance execution record. Split out of the tool arm so the
-/// resolution semantics stay unit-testable: the value must come from the
-/// instance's runtime variable state via the shared resolver, never from the
-/// static defaults in the workflow definition graph.
+/// fetched instance execution record (already through
+/// [`with_runtime_variables`]). Split out of the tool arm so the resolution
+/// semantics stay unit-testable: the value must come from the instance's
+/// runtime variable state via the shared resolver, never from the static
+/// defaults in the workflow definition graph.
 fn trace_variables_response(reference: &str, execution: &serde_json::Value) -> serde_json::Value {
     let resolved =
         resolve_reference_value(reference, &synthetic_summaries(Vec::new()), execution, None)
             .unwrap_or(json!(null));
 
-    // Same lookup order as the resolver's variables arm, surfaced whole for
-    // context alongside the resolved value.
-    let variables = execution
-        .pointer("/data/inputs/variables")
-        .or_else(|| execution.pointer("/data/variables"))
-        .cloned()
-        .unwrap_or(json!({}));
+    // Same lookup as the resolver's variables arm, surfaced whole for context
+    // alongside the resolved value.
+    let variables = instance_variables(execution).cloned().unwrap_or(json!({}));
 
-    json!({
+    let mut response = json!({
         "reference": reference,
         "resolved": !resolved.is_null(),
         "value": resolved,
         "source": {
             "type": "variable",
             "allVariables": variables,
+            "note": "allVariables is the instance's stored variables plus the _instance_id, \
+                     _tenant_id and _workflow_id the runtime adds. Variables the runtime keeps \
+                     for its own bookkeeping (e.g. _durable_key_version, _loop_path, \
+                     _manifest_graph_path) are never stored and are not shown.",
         }
-    })
+    });
+    if resolved.is_null()
+        && let Some(reason) = runtime_only_reason(reference)
+    {
+        response["runtimeOnly"] = json!(true);
+        response["reason"] = json!(reason);
+    }
+    response
+}
+
+/// The `trace_reference` response for a `loop`/`iteration`/`item` reference.
+/// These resolve per iteration and `trace_reference` has no step to take a
+/// scope from, so nothing is fetched: the response says why there is no value.
+fn trace_iteration_response(reference: &str, root: &str) -> serde_json::Value {
+    let runtime_only = runtime_only_reason(reference);
+    let reason = runtime_only.unwrap_or(
+        "Recovered from the scope of the step that reads it, and trace_reference has no \
+         step to take a scope from — use inspect_step on a step inside the loop.",
+    );
+    let mut response = json!({
+        "reference": reference,
+        "resolved": false,
+        "value": null,
+        "source": {
+            "type": if root == "loop" { "loop_context" } else { "iteration" },
+        },
+        "reason": reason,
+    });
+    if runtime_only.is_some() {
+        response["runtimeOnly"] = json!(true);
+    }
+    response
+}
+
+/// Fetch the instance record for reference resolution: in full (a reference
+/// may point into a large input field the default detail fetch elides; the
+/// MCP response is re-truncated downstream, so the wire stays bounded) and
+/// with its variables as the runtime sees them ([`with_runtime_variables`]).
+async fn fetch_execution_for_references(
+    server: &SmoMcpServer,
+    workflow_id: &str,
+    instance_id: &str,
+) -> Result<serde_json::Value, rmcp::ErrorData> {
+    let execution = api_get(
+        server,
+        &format!("/api/runtime/workflows/instances/{instance_id}?full=true"),
+    )
+    .await?;
+    Ok(with_runtime_variables(
+        execution,
+        instance_id,
+        workflow_id,
+        &server.tenant_id,
+    ))
+}
+
+/// Trace an onError reference — `steps.__error.*` or its bare `__error.*` /
+/// `error.*` alias. Not a real step: the runtime injects the captured onError
+/// envelope under this synthetic id (see `error_steps` in
+/// runtara-workflow-stdlib). It resolves to the newest failed step's error
+/// envelope, so only that one record is fetched. `alias` is the `__error` /
+/// `error` segment as written.
+async fn trace_error_context(
+    server: &SmoMcpServer,
+    params: &TraceReferenceParams,
+    alias: &str,
+) -> Result<CallToolResult, rmcp::ErrorData> {
+    let failed_page = fetch_step_summaries(
+        server,
+        &params.workflow_id,
+        &params.instance_id,
+        &StepSummariesFetch {
+            step_ids: &[],
+            status: Some("failed"),
+            limit: 1,
+        },
+    )
+    .await?;
+    let summaries = synthetic_summaries(steps_from_summaries(&failed_page));
+    let resolved = resolve_reference_value(
+        &params.reference,
+        &summaries,
+        &serde_json::Value::Null,
+        None,
+    )
+    .unwrap_or(json!(null));
+
+    json_result(json!({
+        "reference": params.reference,
+        "resolved": !resolved.is_null(),
+        "value": resolved,
+        "source": {
+            "type": "error_context",
+            "stepId": alias,
+        }
+    }))
 }
 
 pub async fn trace_reference(
@@ -1667,40 +1983,8 @@ pub async fn trace_reference(
             };
             let step_id = step_id.as_str();
 
-            if step_id == "__error" || step_id == "error" {
-                // Not a real step — the runtime injects the captured onError
-                // envelope under this synthetic id (see `error_steps` in
-                // runtara-workflow-stdlib). It resolves to the newest failed
-                // step's error envelope, so only that one record is fetched.
-                let failed_page = fetch_step_summaries(
-                    server,
-                    &params.workflow_id,
-                    &params.instance_id,
-                    &StepSummariesFetch {
-                        step_ids: &[],
-                        status: Some("failed"),
-                        limit: 1,
-                    },
-                )
-                .await?;
-                let summaries = synthetic_summaries(steps_from_summaries(&failed_page));
-                let resolved = resolve_reference_value(
-                    &params.reference,
-                    &summaries,
-                    &serde_json::Value::Null,
-                    None,
-                )
-                .unwrap_or(json!(null));
-
-                return json_result(json!({
-                    "reference": params.reference,
-                    "resolved": !resolved.is_null(),
-                    "value": resolved,
-                    "source": {
-                        "type": "error_context",
-                        "stepId": step_id,
-                    }
-                }));
+            if is_error_alias(step_id) {
+                return trace_error_context(server, &params, step_id).await;
             }
 
             // Only the referenced step's newest record is needed to resolve
@@ -1754,9 +2038,11 @@ pub async fn trace_reference(
             });
             // When the path didn't resolve, say WHY instead of just `null`: a
             // named key indexed into an array (e.g. `steps.split.outputs.result`)
-            // or a scalar traversal is a shape mismatch that now fails loud at
-            // runtime and preflight — the diagnostic must not keep implying the
-            // value is simply absent. `tail` is the path after `steps.<id>`.
+            // is a shape mismatch that fails the run (and preflight), so the
+            // diagnostic must not imply the value is simply absent; a missing
+            // field, an out-of-range index or a scalar traversal resolves to
+            // null (or the default) at run time, and the reason says so.
+            // `tail` is the path after `steps.<id>`.
             if resolved.is_null()
                 && !tail.is_empty()
                 && let Some(reason) =
@@ -1766,50 +2052,21 @@ pub async fn trace_reference(
             }
             json_result(response)
         }
-        "loop" => {
-            // `trace_reference` has no step_id param, so there's no scope to
-            // resolve `loop.index` against here — this only stops the hard
-            // "Unknown reference root" rejection; the resolver-level fix (and
-            // its test coverage) is what actually proves loop.* resolves given
-            // a scope id, via inspect_step / resolve_reference_value directly.
-            // Without a scope id the resolver never consults step summaries,
-            // so none are fetched.
-            let resolved = resolve_reference_value(
-                &params.reference,
-                &synthetic_summaries(Vec::new()),
-                &serde_json::Value::Null,
-                None,
-            )
-            .unwrap_or(json!(null));
-
-            json_result(json!({
-                "reference": params.reference,
-                "resolved": !resolved.is_null(),
-                "value": resolved,
-                "source": {
-                    "type": "loop_context",
-                }
-            }))
+        // The bare onError aliases read the same envelope as `steps.__error`.
+        "__error" | "error" => trace_error_context(server, &params, root).await,
+        // `trace_reference` has no step_id param, so there's no scope to
+        // recover `loop.index` / `iteration.index` from, and the rest of these
+        // roots is runtime-only: say which instead of rejecting the root.
+        // inspect_step resolves the index given the step's scope.
+        "loop" | "iteration" | "item" => {
+            json_result(trace_iteration_response(&params.reference, root))
         }
         "data" => {
-            // `?full=true`: the reference may point *into* a large input field
-            // that the default detail fetch elides; resolve against the complete
-            // value. The MCP response is re-truncated downstream, so the wire
-            // stays bounded.
-            let execution = api_get(
-                server,
-                &format!(
-                    "/api/runtime/workflows/instances/{}?full=true",
-                    params.instance_id
-                ),
-            )
-            .await?;
+            let execution =
+                fetch_execution_for_references(server, &params.workflow_id, &params.instance_id)
+                    .await?;
 
-            let inputs = execution
-                .pointer("/data/inputs/data")
-                .or_else(|| execution.pointer("/data/inputs"))
-                .cloned()
-                .unwrap_or(json!(null));
+            let inputs = instance_data(&execution).cloned().unwrap_or(json!(null));
 
             let resolved = resolve_json_path(&inputs, rest).unwrap_or(json!(null));
 
@@ -1829,24 +2086,42 @@ pub async fn trace_reference(
             // with variable overrides diverges from the definition
             // immediately. Resolve against the instance record through the
             // shared resolver so this can never disagree with inspect_step or
-            // the runtime (see resolve_reference_value). `?full=true`: the
-            // reference may point into a large variable value the lean
-            // default fetch elides.
-            let execution = api_get(
-                server,
-                &format!(
-                    "/api/runtime/workflows/instances/{}?full=true",
-                    params.instance_id
-                ),
-            )
-            .await?;
+            // the runtime (see resolve_reference_value).
+            let execution =
+                fetch_execution_for_references(server, &params.workflow_id, &params.instance_id)
+                    .await?;
 
             json_result(trace_variables_response(&params.reference, &execution))
         }
+        "workflow" => {
+            // `workflow.inputs.data` / `.variables` are the same values as the
+            // `data` / `variables` roots; the shared resolver hands them to
+            // those arms.
+            let execution =
+                fetch_execution_for_references(server, &params.workflow_id, &params.instance_id)
+                    .await?;
+            let resolved = resolve_reference_value(
+                &params.reference,
+                &synthetic_summaries(Vec::new()),
+                &execution,
+                None,
+            )
+            .unwrap_or(json!(null));
+
+            json_result(json!({
+                "reference": params.reference,
+                "resolved": !resolved.is_null(),
+                "value": resolved,
+                "source": {
+                    "type": "workflow_input",
+                }
+            }))
+        }
         _ => Err(rmcp::ErrorData::invalid_params(
             format!(
-                "Unknown reference root '{}'. Must be 'steps', 'data', 'variables', or 'loop'.",
-                root
+                "Unknown reference root '{root}'. Must be 'steps', 'data', 'variables', \
+                 'workflow', 'loop', 'iteration', 'item', or the onError alias '__error' / \
+                 'error'."
             ),
             None,
         )),
@@ -1861,11 +2136,16 @@ pub async fn why_execution_failed(
     validate_path_param("instance_id", &params.instance_id)?;
 
     // Fetch execution status
-    let execution = api_get(
-        server,
-        &format!("/api/runtime/workflows/instances/{}", params.instance_id),
-    )
-    .await?;
+    let execution = with_runtime_variables(
+        api_get(
+            server,
+            &format!("/api/runtime/workflows/instances/{}", params.instance_id),
+        )
+        .await?,
+        &params.instance_id,
+        &params.workflow_id,
+        &server.tenant_id,
+    );
 
     let status = execution
         .pointer("/data/status")
@@ -1950,13 +2230,7 @@ pub async fn why_execution_failed(
 
         let input_mapping = workflow
             .as_ref()
-            .and_then(|s| s.pointer("/data/definition/executionGraph/steps"))
-            .or_else(|| {
-                workflow
-                    .as_ref()
-                    .and_then(|s| s.pointer("/data/executionGraph/steps"))
-            })
-            .and_then(|steps| steps.get(step_id))
+            .and_then(|workflow| find_step_definition(workflow, step_id))
             .and_then(|step| step.get("inputMapping"))
             .cloned()
             .unwrap_or(json!({}));
@@ -2125,11 +2399,17 @@ mod tests {
             .expect("missing field must produce a reason");
         assert!(reason.contains("has no field 'bogus'"), "reason: {reason}");
 
-        // Traversing into a scalar -> mismatch.
+        // Traversing into a scalar -> not a failure: the runtime's `descend`
+        // treats it as an absent value, so the reason must say it resolves to
+        // null rather than claim the run fails.
         let reason =
             explain_unresolved_path(&envelope, "steps.split_users", &segments("stepType.first"))
                 .expect("scalar traversal must produce a reason");
-        assert!(reason.contains("is a string"), "reason: {reason}");
+        assert!(
+            reason.contains("is a string") && reason.contains("resolves to null"),
+            "reason: {reason}"
+        );
+        assert!(!reason.contains("cannot be traversed"), "reason: {reason}");
 
         // A path that fully resolves (to the array, or into an element) yields no
         // reason — a real value, including a genuine null leaf, is not a mismatch.
@@ -2954,7 +3234,7 @@ mod tests {
     /// runtime resolves it before the agent sees it); a column ref, bracketed
     /// or not, stays a reference; and an `item`-rooted ref is a workflow
     /// reference the runtime resolves but persisted state cannot reproduce, so
-    /// it is reported as unresolved rather than shown as a column name.
+    /// it is reported as runtime-only rather than shown as a column name.
     #[test]
     fn score_expression_classifies_bracketed_roots_like_the_runtime() {
         let input_mapping = json!({
@@ -2988,9 +3268,14 @@ mod tests {
                 {"valueType": "reference", "value": "item.sku"}
             ])
         );
+        assert!(
+            resolved["score_expression"]
+                .get("unresolvedNestedReferences")
+                .is_none()
+        );
         assert_eq!(
-            resolved["score_expression"]["unresolvedNestedReferences"],
-            json!(["item.sku"])
+            resolved["score_expression"]["runtimeOnlyReferences"][0]["reference"],
+            json!("item.sku")
         );
     }
 
@@ -3056,5 +3341,410 @@ mod tests {
             reason.contains("is an array") && reason.contains("'result'"),
             "reason: {reason}"
         );
+    }
+
+    /// `build_source` sets `workflow` to `{inputs: {data, variables}}` from the
+    /// same values as the `data` / `variables` roots, so every spelling of the
+    /// same field must resolve to the same value.
+    #[test]
+    fn workflow_inputs_resolve_like_the_data_and_variables_roots() {
+        let resolve = |path: &str| resolve_reference_value(path, &summaries(), &execution(), None);
+
+        for (workflow_path, root_path) in [
+            ("workflow.inputs.data.customer.name", "data.customer.name"),
+            (r#"workflow["inputs"]['data'].threshold"#, "data.threshold"),
+            ("workflow.inputs.data", "data"),
+            ("workflow.inputs.variables.limit", "variables.limit"),
+            ("workflow.inputs.variables", "variables"),
+        ] {
+            assert!(resolve(root_path).is_some(), "{root_path} must resolve");
+            assert_eq!(
+                resolve(workflow_path),
+                resolve(root_path),
+                "{workflow_path}"
+            );
+        }
+
+        let inputs = json!({
+            "data": resolve("data").unwrap(),
+            "variables": resolve("variables").unwrap(),
+        });
+        assert_eq!(resolve("workflow.inputs"), Some(inputs.clone()));
+        assert_eq!(resolve("workflow"), Some(json!({ "inputs": inputs })));
+        assert_eq!(resolve("workflow.inputs.data.missing"), None);
+        assert_eq!(resolve("workflow.outputs"), None);
+
+        let resolved = resolve_input_mappings(
+            &json!({
+                "name": { "valueType": "reference", "value": "workflow.inputs.data.customer.name" },
+            }),
+            &summaries(),
+            &execution(),
+            None,
+        );
+        assert_eq!(resolved["name"]["resolvedValue"], json!("Ada"));
+        assert_eq!(resolved["name"]["source"], json!("workflow_input"));
+    }
+
+    /// The bare onError aliases are a mirror of `steps.__error`, so they read
+    /// the same envelope — and ask inspect_step to fetch the failed step.
+    #[test]
+    fn bare_error_aliases_resolve_like_steps_dunder_error() {
+        let failed = summaries_with_failed_step();
+        for (bare, qualified) in [
+            ("__error.message", "steps.__error.message"),
+            ("error.category", "steps.error.category"),
+            ("__error['code']", "steps.__error.code"),
+            ("__error", "steps.__error"),
+        ] {
+            let via_bare = resolve_reference_value(bare, &failed, &execution(), None);
+            assert!(via_bare.is_some(), "{bare} must resolve");
+            assert_eq!(
+                via_bare,
+                resolve_reference_value(qualified, &failed, &execution(), None),
+                "{bare}"
+            );
+        }
+        // No failed step, no envelope.
+        assert_eq!(
+            resolve_reference_value("__error.message", &summaries(), &execution(), None),
+            None
+        );
+
+        let mapping = json!({
+            "reason": { "valueType": "reference", "value": "__error.message" },
+        });
+        let (ids, wants_error) = referenced_step_ids(&mapping);
+        assert!(ids.is_empty());
+        assert!(wants_error);
+
+        let resolved = resolve_input_mappings(&mapping, &failed, &execution(), None);
+        assert_eq!(
+            resolved["reason"]["resolvedValue"],
+            json!("Delivery failed")
+        );
+        assert_eq!(resolved["reason"]["source"], json!("error_context"));
+    }
+
+    /// `iteration.index` is recoverable from the step's scope id, like
+    /// `loop.index`; the rest of `iteration`, and `item`, only ever exists in
+    /// the running iteration.
+    #[test]
+    fn iteration_index_resolves_from_scope_id_and_the_rest_is_runtime_only() {
+        let resolve = |path: &str, scope: Option<&str>| {
+            resolve_reference_value(path, &summaries(), &execution(), scope)
+        };
+        assert_eq!(
+            resolve("iteration.index", Some("sc_split_4")),
+            Some(json!(4))
+        );
+        assert_eq!(
+            resolve("iteration['index']", Some("sc_outer_1_split_2")),
+            Some(json!(2))
+        );
+        assert_eq!(resolve("iteration.index", None), None);
+        assert_eq!(runtime_only_reason("iteration.index"), None);
+
+        for path in [
+            "iteration",
+            "iteration.indices",
+            "iteration.indices.0",
+            "iteration.item.sku",
+            "item",
+            "item.sku",
+            "item['sku']",
+        ] {
+            assert_eq!(resolve(path, Some("sc_split_4")), None, "{path}");
+            assert!(runtime_only_reason(path).is_some(), "{path}");
+        }
+    }
+
+    #[test]
+    fn runtime_only_reason_classifies_only_runtime_held_values() {
+        for path in [
+            "loop.outputs",
+            "loop.outputs.total",
+            "variables._loop_path",
+            "variables._durable_key_version",
+            "variables['_manifest_graph_path']",
+            "variables._scope_id",
+        ] {
+            assert!(runtime_only_reason(path).is_some(), "{path}");
+        }
+        // Resolvable or genuinely missing — not runtime-only.
+        for path in [
+            "loop.index",
+            "loop",
+            "variables.missing",
+            "variables._instance_id",
+            "variables._typo",
+            "data.item",
+            "steps.item.outputs",
+        ] {
+            assert_eq!(runtime_only_reason(path), None, "{path}");
+        }
+    }
+
+    fn execution_with_stored_variables(variables: serde_json::Value) -> serde_json::Value {
+        json!({
+            "data": {
+                "id": "inst-1",
+                "workflowId": "wf-from-record",
+                "inputs": { "data": { "x": 1 }, "variables": variables },
+            }
+        })
+    }
+
+    /// The runtime's `variables` is the stored set minus `_`-prefixed input
+    /// (bar `_cache_key_prefix`) plus the identity it injects itself.
+    #[test]
+    fn with_runtime_variables_matches_the_runtime_variable_set() {
+        let execution = with_runtime_variables(
+            execution_with_stored_variables(json!({
+                "limit": 10,
+                "_instance_id": "forged",
+                "_loop_path": ["forged"],
+                "_cache_key_prefix": "ns",
+            })),
+            "inst-1",
+            "wf-from-param",
+            "tenant-a",
+        );
+
+        let variables =
+            resolve_reference_value("variables", &summaries(), &execution, None).unwrap();
+        assert_eq!(
+            variables,
+            json!({
+                "limit": 10,
+                "_cache_key_prefix": "ns",
+                "_instance_id": "inst-1",
+                "_tenant_id": "tenant-a",
+                "_workflow_id": "wf-from-record",
+            })
+        );
+        assert_eq!(
+            resolve_reference_value("variables._instance_id", &summaries(), &execution, None),
+            Some(json!("inst-1"))
+        );
+        assert_eq!(
+            resolve_reference_value("variables._loop_path", &summaries(), &execution, None),
+            None
+        );
+        assert_eq!(
+            resolve_reference_value(
+                "workflow.inputs.variables._tenant_id",
+                &summaries(),
+                &execution,
+                None
+            ),
+            Some(json!("tenant-a"))
+        );
+        // `data` is untouched.
+        assert_eq!(
+            resolve_reference_value("data", &summaries(), &execution, None),
+            Some(json!({ "x": 1 }))
+        );
+
+        // No stored variables at all, and no workflow id on the record.
+        let bare = with_runtime_variables(
+            json!({ "data": { "inputs": { "data": {} } } }),
+            "inst-2",
+            "wf-from-param",
+            "tenant-a",
+        );
+        assert_eq!(
+            instance_variables(&bare),
+            Some(&json!({
+                "_instance_id": "inst-2",
+                "_tenant_id": "tenant-a",
+                "_workflow_id": "wf-from-param",
+            }))
+        );
+    }
+
+    #[test]
+    fn trace_variables_shows_runtime_identity_and_marks_runtime_only() {
+        let execution = with_runtime_variables(
+            execution_with_stored_variables(json!({ "limit": 10 })),
+            "inst-1",
+            "wf",
+            "tenant-a",
+        );
+
+        let response = trace_variables_response("variables", &execution);
+        assert_eq!(response["resolved"], json!(true));
+        assert_eq!(response["value"]["_instance_id"], json!("inst-1"));
+        assert_eq!(response["value"]["_tenant_id"], json!("tenant-a"));
+        assert_eq!(response["value"]["_workflow_id"], json!("wf-from-record"));
+        assert_eq!(response["source"]["allVariables"], response["value"]);
+        assert!(response.get("runtimeOnly").is_none());
+
+        let response = trace_variables_response("variables._loop_path", &execution);
+        assert_eq!(response["resolved"], json!(false));
+        assert_eq!(response["runtimeOnly"], json!(true));
+        assert!(response["reason"].as_str().is_some());
+
+        let response = trace_variables_response("variables.missing", &execution);
+        assert_eq!(response["resolved"], json!(false));
+        assert!(response.get("runtimeOnly").is_none());
+    }
+
+    #[test]
+    fn trace_iteration_response_says_why_there_is_no_value() {
+        let response = trace_iteration_response("item.sku", "item");
+        assert_eq!(response["resolved"], json!(false));
+        assert_eq!(response["runtimeOnly"], json!(true));
+        assert_eq!(response["source"]["type"], json!("iteration"));
+
+        // The index is recoverable, just not without a step scope.
+        let response = trace_iteration_response("loop.index", "loop");
+        assert!(response.get("runtimeOnly").is_none());
+        assert_eq!(response["source"]["type"], json!("loop_context"));
+        assert!(
+            response["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("inspect_step")),
+            "reason: {}",
+            response["reason"]
+        );
+    }
+
+    /// A Split-scoped `item.*` inside an fn call is a workflow reference the
+    /// tools can't resolve; it must be reported as runtime-only, apart from
+    /// genuinely missing references.
+    #[test]
+    fn nested_runtime_only_references_are_listed_apart_from_missing_ones() {
+        let mapping = json!({
+            "label": {
+                "valueType": "immediate",
+                "value": {
+                    "fn": "concat",
+                    "arguments": [
+                        { "valueType": "reference", "value": "item.sku" },
+                        { "valueType": "reference", "value": "steps.ghost.outputs.x" },
+                        { "valueType": "reference", "value": "iteration.index" },
+                    ]
+                }
+            }
+        });
+
+        let resolved =
+            resolve_input_mappings(&mapping, &summaries(), &execution(), Some("sc_split_7"));
+        let label = &resolved["label"];
+        assert_eq!(
+            label["unresolvedNestedReferences"],
+            json!(["steps.ghost.outputs.x"])
+        );
+        let runtime_only = label["runtimeOnlyReferences"].as_array().unwrap();
+        assert_eq!(runtime_only.len(), 1);
+        assert_eq!(runtime_only[0]["reference"], json!("item.sku"));
+        assert!(runtime_only[0]["reason"].as_str().is_some());
+        assert_eq!(
+            label["resolvedValue"]["arguments"][2],
+            json!({ "valueType": "immediate", "value": 7 })
+        );
+
+        // Only runtime-only references: no `unresolvedNestedReferences` key.
+        let resolved = resolve_input_mappings(
+            &json!({
+                "sku": {
+                    "valueType": "composite",
+                    "value": { "sku": { "valueType": "reference", "value": "item.sku" } }
+                }
+            }),
+            &summaries(),
+            &execution(),
+            None,
+        );
+        assert!(resolved["sku"].get("unresolvedNestedReferences").is_none());
+        assert_eq!(
+            resolved["sku"]["runtimeOnlyReferences"][0]["reference"],
+            json!("item.sku")
+        );
+    }
+
+    /// A step inside a loop only exists in its container's nested graph; the
+    /// lookup must find it there, or inspect_step resolves nothing for it.
+    #[test]
+    fn find_step_definition_reaches_nested_graphs() {
+        let workflow = json!({
+            "data": {
+                "definition": {
+                    "executionGraph": {
+                        "steps": {
+                            "top": { "id": "top", "inputMapping": { "a": 1 } },
+                            "split": {
+                                "id": "split",
+                                "stepType": "Split",
+                                "subgraph": {
+                                    "steps": {
+                                        "emit": { "id": "emit", "inputMapping": { "b": 2 } },
+                                        "loop": {
+                                            "id": "loop",
+                                            "stepType": "While",
+                                            "subgraph": {
+                                                "steps": {
+                                                    "deep": { "id": "deep", "inputMapping": { "c": 3 } }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            "wait": {
+                                "id": "wait",
+                                "stepType": "WaitForSignal",
+                                "onWait": {
+                                    "steps": {
+                                        "ping": { "id": "ping", "inputMapping": { "d": 4 } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let mapping =
+            |id: &str| find_step_definition(&workflow, id).map(|step| step["inputMapping"].clone());
+        assert_eq!(mapping("top"), Some(json!({ "a": 1 })));
+        assert_eq!(mapping("emit"), Some(json!({ "b": 2 })));
+        assert_eq!(mapping("deep"), Some(json!({ "c": 3 })));
+        assert_eq!(mapping("ping"), Some(json!({ "d": 4 })));
+        assert_eq!(mapping("missing"), None);
+
+        // The legacy shape without the `definition` wrapper.
+        let legacy = json!({ "data": workflow["data"]["definition"].clone() });
+        assert!(find_step_definition(&legacy, "deep").is_some());
+    }
+
+    #[test]
+    fn direct_runtime_only_reference_is_marked() {
+        let resolved = resolve_input_mappings(
+            &json!({
+                "sku": { "valueType": "reference", "value": "item.sku" },
+                "idx": { "valueType": "reference", "value": "iteration.index" },
+                "prev": { "valueType": "reference", "value": "loop.outputs" },
+                "gone": { "valueType": "reference", "value": "variables.missing" },
+            }),
+            &summaries(),
+            &execution(),
+            Some("sc_while_3"),
+        );
+
+        assert_eq!(resolved["sku"]["source"], json!("iteration"));
+        assert_eq!(resolved["sku"]["resolvedValue"], json!(null));
+        assert_eq!(resolved["sku"]["runtimeOnly"], json!(true));
+        assert!(resolved["sku"]["resolutionNote"].as_str().is_some());
+
+        assert_eq!(resolved["idx"]["resolvedValue"], json!(3));
+        assert!(resolved["idx"].get("runtimeOnly").is_none());
+
+        assert_eq!(resolved["prev"]["runtimeOnly"], json!(true));
+
+        assert_eq!(resolved["gone"]["resolvedValue"], json!(null));
+        assert!(resolved["gone"].get("runtimeOnly").is_none());
     }
 }
