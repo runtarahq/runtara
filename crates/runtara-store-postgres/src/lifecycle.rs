@@ -135,3 +135,97 @@ pub(crate) async fn apply_transition(
     }
     Ok(())
 }
+
+/// Evaluate the park policy against the locked `status` and apply it with
+/// its targets. The instance row must already be locked.
+pub(crate) async fn park(
+    tx: &mut Transaction<'_, Postgres>,
+    instance_id: &str,
+    status: InstanceStatus,
+    request: runtara_core::lifecycle::ParkRequest,
+    targets: runtara_core::persistence::ParkTargets<'_>,
+) -> Result<runtara_core::lifecycle::Decision, CoreError> {
+    let decision = runtara_core::lifecycle::park(status, request);
+    if let runtara_core::lifecycle::Decision::Applied(effects) = decision {
+        apply_transition(tx, &[instance_id.to_owned()], effects).await?;
+        let signals = request.reason == runtara_core::lifecycle::ParkReason::Signal
+            && !targets.signal_ids.is_empty();
+        if signals || !targets.wait_ids.is_empty() {
+            sqlx::query(
+                "INSERT INTO instance_input_parks (instance_id, signal_ids, wait_ids) VALUES ($1,$2,$3)",
+            )
+            .bind(instance_id)
+            .bind(targets.signal_ids)
+            .bind(targets.wait_ids)
+            .execute(&mut **tx)
+            .await
+            .db()?;
+        }
+        if signals {
+            crate::inputs::schedule_accepted(tx, instance_id, true)
+                .await
+                .db()?;
+        }
+        if !targets.wait_ids.is_empty() {
+            crate::waits::park_on(tx, instance_id, targets.wait_ids)
+                .await
+                .map_err(|error| CoreError::PersistenceError {
+                    operation: "park_instance_on_targets".into(),
+                    details: error.to_string(),
+                })?;
+        }
+    }
+    Ok(decision)
+}
+
+/// Apply a completion request inside the caller's transaction, closing the
+/// run's managed inputs when it becomes terminal. Returns whether a row was
+/// updated (`false` for a guarded request against a non-running instance).
+pub(crate) async fn complete(
+    tx: &mut Transaction<'_, Postgres>,
+    params: &runtara_core::persistence::CompleteInstanceParams<'_>,
+) -> Result<bool, CoreError> {
+    use runtara_core::persistence::CompleteInstanceGuard;
+    let guard_clause = match params.guard {
+        CompleteInstanceGuard::Any => "",
+        CompleteInstanceGuard::OnlyRunning => " AND status = 'running'",
+    };
+    let sql = format!(
+        "UPDATE instances \
+         SET status = $2::instance_status, \
+             termination_reason = COALESCE($3::termination_reason, termination_reason), \
+             exit_code = COALESCE($4, exit_code), \
+             output = $5, \
+             error = $6, \
+             stderr = COALESCE($7, stderr), \
+             checkpoint_id = COALESCE($8, checkpoint_id), \
+             finished_at = CASE \
+                 WHEN $2 IN ('completed', 'failed', 'cancelled', 'suspended') THEN CURRENT_TIMESTAMP \
+                 ELSE finished_at \
+             END \
+         WHERE instance_id = $1{guard_clause}"
+    );
+    let updated = sqlx::query(&sql)
+        .bind(params.instance_id)
+        .bind(crate::encoding::status_to_str(params.status))
+        .bind(params.termination_reason)
+        .bind(params.exit_code)
+        .bind(params.output)
+        .bind(params.error)
+        .bind(params.stderr)
+        .bind(params.checkpoint_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| CoreError::PersistenceError {
+            operation: "complete_instance".into(),
+            details: e.to_string(),
+        })?
+        .rows_affected()
+        > 0;
+    if updated && params.status.is_terminal() {
+        crate::inputs::close_roots(tx, &[params.instance_id.to_string()])
+            .await
+            .db()?;
+    }
+    Ok(updated)
+}

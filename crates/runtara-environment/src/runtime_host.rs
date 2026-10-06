@@ -38,7 +38,7 @@ use runtara_component_host::runtime_host::{
 use runtara_core::instance_handlers::{
     CheckpointRequest, GetCheckpointRequest, InstanceEvent, InstanceEventType,
     InstanceHandlerState, PollSignalsRequest, RetryAttemptEvent, Signal, SignalAck, SignalType,
-    SleepRequest, handle_checkpoint, handle_get_checkpoint, handle_instance_event,
+    SleepRequest, handle_checkpoint_call, handle_get_checkpoint, handle_instance_event,
     handle_poll_signals, handle_retry_attempt, handle_signal_ack_decision, handle_sleep,
 };
 use runtara_core::persistence::Persistence;
@@ -50,7 +50,11 @@ const DEFAULT_SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// Persistence-backed runtime host for one workflow instance run.
 pub struct PersistenceRuntimeHost {
-    input_lease: std::sync::OnceLock<runtara_core::persistence::invocations::InvocationLease>,
+    /// The root execution lease this run presents on every durable write.
+    /// Bound once, after the supervisor promotes the run; unbound only for
+    /// hosts outside a launched run, whose writes are accepted while no
+    /// execution holds the lease.
+    root_lease: std::sync::OnceLock<runtara_core::persistence::invocations::InvocationLease>,
     state: Arc<InstanceHandlerState>,
     instance_id: String,
     debug_mode: bool,
@@ -81,7 +85,7 @@ impl PersistenceRuntimeHost {
     /// Host for `instance_id` over the environment's shared handler state.
     pub fn new(state: Arc<InstanceHandlerState>, instance_id: String, debug_mode: bool) -> Self {
         Self {
-            input_lease: std::sync::OnceLock::new(),
+            root_lease: std::sync::OnceLock::new(),
             state,
             instance_id,
             debug_mode,
@@ -95,6 +99,27 @@ impl PersistenceRuntimeHost {
             tenant: tokio::sync::OnceCell::new(),
             trusted_launch: Default::default(),
         }
+    }
+
+    /// Bind the root execution lease. A running host cannot be rebound to a
+    /// different execution owner; rebinding the same lease is a no-op.
+    pub fn bind_root_lease(
+        &self,
+        lease: runtara_core::persistence::invocations::InvocationLease,
+    ) -> Result<(), String> {
+        if lease.instance_id != self.instance_id {
+            return Err("root lease belongs to another instance".into());
+        }
+        match self.root_lease.set(lease) {
+            Ok(()) => Ok(()),
+            Err(lease) if self.root_lease.get() == Some(&lease) => Ok(()),
+            Err(_) => Err("runtime root lease is already bound".into()),
+        }
+    }
+
+    /// The bound root execution lease, if any.
+    pub fn root_lease(&self) -> Option<&runtara_core::persistence::invocations::InvocationLease> {
+        self.root_lease.get()
     }
 
     /// The kind of the durable launch this run executes (from the launch
@@ -145,6 +170,24 @@ impl PersistenceRuntimeHost {
     }
 
     fn err(error: impl std::fmt::Display) -> String {
+        error.to_string()
+    }
+
+    /// Report a refused durable write. A write refused because this execution
+    /// no longer owns its root stops the guest, as losing the execution lease
+    /// does: it must not keep running against a replacement's state.
+    fn write_err(&self, error: impl Into<anyhow::Error>) -> String {
+        let error = error.into();
+        if is_superseded(&error) {
+            tracing::warn!(instance_id = %self.instance_id, "Execution superseded; stopping the guest");
+            self.cancelled.store(true, Ordering::SeqCst);
+            if let Some(token) = &self.cancel_token {
+                token.store(true, Ordering::SeqCst);
+            }
+            if let Some(interrupt) = &self.interrupt_guest {
+                interrupt();
+            }
+        }
         error.to_string()
     }
 
@@ -329,6 +372,18 @@ impl PersistenceRuntimeHost {
         payload: Vec<u8>,
         subtype: Option<String>,
     ) -> Result<(), String> {
+        self.publish_event(event_type, checkpoint_id, payload, subtype)
+            .await
+            .map_err(|error| self.write_err(error))
+    }
+
+    async fn publish_event(
+        &self,
+        event_type: InstanceEventType,
+        checkpoint_id: Option<String>,
+        payload: Vec<u8>,
+        subtype: Option<String>,
+    ) -> anyhow::Result<()> {
         // An execution selected for full abort cannot publish a normal terminal
         // result or park itself while its epoch interrupt is taking effect.
         // Already accepted outcomes are also protected by Core's atomic guards.
@@ -354,11 +409,11 @@ impl PersistenceRuntimeHost {
                 payload,
                 timestamp_ms: chrono::Utc::now().timestamp_millis(),
                 subtype,
+                owner: self.root_lease.get().cloned(),
             },
         )
         .await
         .map(|_| ())
-        .map_err(Self::err)
     }
 
     /// Decode a handler-layer signal-type discriminant (the enum only
@@ -396,6 +451,14 @@ impl PersistenceRuntimeHost {
     }
 }
 
+/// Whether a write was refused because the execution no longer owns its root.
+fn is_superseded(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<runtara_core::error::CoreError>(),
+        Some(runtara_core::error::CoreError::Superseded { .. })
+    )
+}
+
 /// Attempts at the terminal write before the run is left to the monitor.
 const TERMINAL_WRITE_ATTEMPTS: u32 = 5;
 
@@ -403,6 +466,10 @@ const TERMINAL_WRITE_ATTEMPTS: u32 = 5;
 impl RuntimeHost for PersistenceRuntimeHost {
     fn trusted_launch(&self) -> runtara_component_host::trusted::TrustedLaunch {
         self.trusted_launch
+    }
+
+    fn in_process_wait(&self) -> Option<Box<dyn std::any::Any + Send>> {
+        Some(Box::new(crate::in_process_waits::enter(&self.instance_id)))
     }
 
     fn instance_id(&self) -> Result<String, String> {
@@ -425,8 +492,22 @@ impl RuntimeHost for PersistenceRuntimeHost {
         let mut delay = Duration::from_millis(50);
         let mut attempt = 1;
         loop {
-            match self.event(event_type, None, payload.clone(), None).await {
+            // A retry after a lost acknowledgement is recognised by the store
+            // and writes nothing, so it succeeds here. Only storage failures
+            // are retried: a superseded execution has nothing left to publish.
+            match self
+                .publish_event(event_type, None, payload.clone(), None)
+                .await
+            {
                 Ok(()) => return Ok(()),
+                Err(error) if is_superseded(&error) => {
+                    tracing::warn!(
+                        instance_id = %self.instance_id,
+                        "terminal result not published: this execution was superseded"
+                    );
+                    self.write_err(error);
+                    return Ok(());
+                }
                 Err(error) if attempt < TERMINAL_WRITE_ATTEMPTS => {
                     tracing::warn!(
                         instance_id = %self.instance_id,
@@ -438,7 +519,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
                     delay = (delay * 2).min(Duration::from_secs(2));
                     attempt += 1;
                 }
-                Err(error) => return Err(error),
+                Err(error) => return Err(self.write_err(error)),
             }
         }
     }
@@ -559,16 +640,17 @@ impl RuntimeHost for PersistenceRuntimeHost {
         state: Vec<u8>,
     ) -> Result<RuntimeCheckpointResult, String> {
         self.escalate_if_cancel_ignored().await;
-        let response = handle_checkpoint(
+        let response = handle_checkpoint_call(
             &self.state,
             CheckpointRequest {
                 instance_id: self.instance_id.clone(),
                 checkpoint_id,
                 state,
+                owner: self.root_lease.get().cloned(),
             },
         )
         .await
-        .map_err(Self::err)?;
+        .map_err(|error| self.write_err(error))?;
         Ok(RuntimeCheckpointResult {
             found: response.found,
             state: response.state,
@@ -622,11 +704,12 @@ impl RuntimeHost for PersistenceRuntimeHost {
                 timestamp_ms: chrono::Utc::now().timestamp_millis(),
                 error_message,
                 error_metadata: None,
+                owner: self.root_lease.get().cloned(),
             },
         )
         .await
         .map(|_| ())
-        .map_err(Self::err)
+        .map_err(|error| self.write_err(error))
     }
 
     async fn operation_continuation_load(
@@ -648,9 +731,15 @@ impl RuntimeHost for PersistenceRuntimeHost {
     ) -> Result<(), String> {
         self.escalate_if_cancel_ignored().await;
         self.continuations()?
-            .put(&self.instance_id, &op_hash, attempt, &state)
+            .put(
+                &self.instance_id,
+                &op_hash,
+                attempt,
+                &state,
+                self.root_lease.get(),
+            )
             .await
-            .map_err(Self::err)
+            .map_err(|error| self.write_err(error))
     }
 
     async fn operation_wait_close(&self, op_hash: String) -> Result<(), String> {
@@ -690,6 +779,8 @@ impl RuntimeHost for PersistenceRuntimeHost {
         if self.cancelled.load(Ordering::SeqCst) {
             return Ok(());
         }
+        // The run holds its resources while it sleeps here; say so.
+        let _waiting = crate::in_process_waits::enter(&self.instance_id);
         let response = handle_sleep(
             &self.state,
             SleepRequest {
@@ -697,10 +788,11 @@ impl RuntimeHost for PersistenceRuntimeHost {
                 duration_ms: ms,
                 checkpoint_id,
                 state,
+                owner: self.root_lease.get().cloned(),
             },
         )
         .await
-        .map_err(Self::err)?;
+        .map_err(|error| self.write_err(error))?;
 
         // The sleep cut itself short because a signal is pending, and a fixed
         // artifact polls `check-signals` immediately after. Clear the rate
@@ -742,6 +834,240 @@ mod tests {
         )
         .with_signal_poll_interval(Duration::ZERO);
         (persistence, host, instance_id)
+    }
+
+    /// Claim the next root lease for `instance_id`, as a launch does.
+    async fn claim_root(
+        persistence: &Arc<dyn Persistence>,
+        instance_id: &str,
+        owner: &str,
+    ) -> runtara_core::persistence::invocations::InvocationLease {
+        let tenant = persistence
+            .get_instance_meta(instance_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .tenant_id;
+        let fences = persistence.invocation_fences().unwrap();
+        let previous = fences
+            .get_invocation_lease(&tenant, instance_id)
+            .await
+            .unwrap()
+            .map(|state| state.lease.epoch);
+        fences
+            .claim_invocation_lease(&tenant, instance_id, owner, previous)
+            .await
+            .unwrap()
+    }
+
+    /// A host bound to a superseded execution's lease cannot publish its
+    /// terminal result over the replacement's run; the replacement can.
+    #[tokio::test]
+    async fn a_superseded_host_cannot_publish_over_its_replacement() {
+        let (persistence, stale_host, id) = setup().await;
+        stale_host
+            .bind_root_lease(claim_root(&persistence, &id, "runner-a").await)
+            .unwrap();
+        // Recovery takes the row out of `running`; the replacement promotes
+        // and claims the next epoch.
+        persistence
+            .update_instance_status(&id, CoreInstanceStatus::Suspended, None)
+            .await
+            .unwrap();
+        persistence
+            .update_instance_status(&id, CoreInstanceStatus::Running, None)
+            .await
+            .unwrap();
+        let current_host =
+            PersistenceRuntimeHost::from_persistence(Arc::clone(&persistence), id.clone(), false);
+        current_host
+            .bind_root_lease(claim_root(&persistence, &id, "runner-b").await)
+            .unwrap();
+
+        stale_host
+            .terminal(RunTerminal::Completed(b"{\"stale\":true}".to_vec()))
+            .await
+            .unwrap();
+        let instance = persistence.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(instance.status, CoreInstanceStatus::Running);
+        assert!(instance.output.is_none());
+
+        current_host
+            .terminal(RunTerminal::Completed(b"{\"current\":true}".to_vec()))
+            .await
+            .unwrap();
+        let instance = persistence.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(instance.status, CoreInstanceStatus::Completed);
+        assert_eq!(instance.output.as_deref(), Some(&b"{\"current\":true}"[..]));
+    }
+
+    /// A terminal result whose first write committed but lost its
+    /// acknowledgement is recognised on retry: the retry succeeds, appends
+    /// no second event, and does not take the run for superseded.
+    #[tokio::test]
+    async fn a_retried_terminal_after_a_lost_ack_is_already_applied() {
+        use runtara_core::lifecycle::TransitionOutcome;
+        use runtara_core::persistence::{CompleteInstanceParams, EventRecord, ListEventsFilter};
+        let (persistence, host, id) = setup().await;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let host = host.with_cancel_token(cancel.clone());
+        let lease = claim_root(&persistence, &id, "runner-a").await;
+        host.bind_root_lease(lease.clone()).unwrap();
+        let output = b"{\"ok\":1}".to_vec();
+        // The first attempt committed; its acknowledgement was lost.
+        assert_eq!(
+            persistence
+                .complete_execution(
+                    &lease,
+                    CompleteInstanceParams::new(&id, CoreInstanceStatus::Completed)
+                        .with_output(&output),
+                    Some(&EventRecord {
+                        id: None,
+                        instance_id: id.clone(),
+                        event_type: runtara_core::domain::EventType::Completed,
+                        checkpoint_id: None,
+                        payload: Some(output.clone()),
+                        created_at: chrono::Utc::now(),
+                        subtype: None,
+                    }),
+                )
+                .await
+                .unwrap(),
+            TransitionOutcome::Applied
+        );
+
+        host.terminal(RunTerminal::Completed(output.clone()))
+            .await
+            .unwrap();
+        assert!(
+            !cancel.load(Ordering::SeqCst),
+            "a retry of the run's own completion is not a supersession"
+        );
+        let completed = persistence
+            .count_events(
+                &id,
+                &ListEventsFilter {
+                    event_type: Some(runtara_core::domain::EventType::Completed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed, 1, "the retry must not append a second event");
+        let instance = persistence.get_instance(&id).await.unwrap().unwrap();
+        assert_eq!(instance.status, CoreInstanceStatus::Completed);
+        assert_eq!(instance.output.as_deref(), Some(&output[..]));
+    }
+
+    /// Each guest write of a superseded host is refused, and the refusal
+    /// stops the guest, as losing the execution lease does.
+    #[tokio::test]
+    async fn a_superseded_write_is_refused_and_stops_the_guest() {
+        let (persistence, stale_host, id) = setup().await;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stale_host = stale_host.with_cancel_token(cancel.clone());
+        stale_host
+            .bind_root_lease(claim_root(&persistence, &id, "runner-a").await)
+            .unwrap();
+        persistence
+            .update_instance_status(&id, CoreInstanceStatus::Suspended, None)
+            .await
+            .unwrap();
+        persistence
+            .update_instance_status(&id, CoreInstanceStatus::Running, None)
+            .await
+            .unwrap();
+        claim_root(&persistence, &id, "runner-b").await;
+
+        let refused = stale_host
+            .checkpoint("late".into(), b"late".to_vec())
+            .await
+            .unwrap_err();
+        assert!(refused.contains("superseded"), "{refused}");
+        assert!(
+            cancel.load(Ordering::SeqCst),
+            "a superseded write must stop the guest"
+        );
+        assert!(stale_host.is_cancelled().await.unwrap());
+        assert!(
+            persistence
+                .load_checkpoint(&id, "late")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            stale_host
+                .custom_event("late".into(), b"{}".to_vec())
+                .await
+                .is_err()
+        );
+        assert!(
+            stale_host
+                .record_retry_attempt("late".into(), 1, None)
+                .await
+                .is_err()
+        );
+    }
+
+    /// The guest's empty-state `checkpoint` call is still a read: it never
+    /// writes, and after a write it returns the stored bytes.
+    #[tokio::test]
+    async fn an_empty_checkpoint_call_reads_and_never_writes() {
+        let (persistence, host, id) = setup().await;
+        let miss = host.checkpoint("probe".into(), Vec::new()).await.unwrap();
+        assert!(!miss.found);
+        assert!(
+            persistence
+                .load_checkpoint(&id, "probe")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        host.checkpoint("probe".into(), b"stored".to_vec())
+            .await
+            .unwrap();
+        let hit = host.checkpoint("probe".into(), Vec::new()).await.unwrap();
+        assert!(hit.found);
+        assert_eq!(hit.state, b"stored");
+    }
+
+    /// A timer wait the component host marks through the runtime host keeps
+    /// the run waiting in process until its marker drops.
+    #[tokio::test]
+    async fn a_marked_timer_wait_reports_the_run_waiting_in_process() {
+        let (_persistence, host, id) = setup().await;
+        let marker = host
+            .in_process_wait()
+            .expect("the persistence host tracks waits");
+        assert!(crate::in_process_waits::is_waiting(&id));
+        drop(marker);
+        assert!(!crate::in_process_waits::is_waiting(&id));
+    }
+
+    /// While an in-process durable sleep lasts the run is waiting in process,
+    /// and only then.
+    #[tokio::test]
+    async fn an_in_process_durable_sleep_is_reported_while_it_lasts() {
+        let (_persistence, host, id) = setup().await;
+        let host = Arc::new(host);
+        assert!(!crate::in_process_waits::is_waiting(&id));
+        let sleeping = {
+            let host = host.clone();
+            tokio::spawn(async move {
+                host.durable_sleep_checkpoint("nap".into(), b"s".to_vec(), 400)
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !crate::in_process_waits::is_waiting(&id) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the sleep must be reported while it lasts");
+        sleeping.await.unwrap().unwrap();
+        assert!(!crate::in_process_waits::is_waiting(&id));
     }
 
     #[tokio::test]

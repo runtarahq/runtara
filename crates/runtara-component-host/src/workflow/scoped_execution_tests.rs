@@ -189,6 +189,58 @@ async fn cleanup_failure_overrides_successful_root_result() {
     );
 }
 
+/// The parent fixture, but its `invoke` exits suspended on an `at` wake
+/// instead of completing, while it still owns an unreleased pending child.
+fn suspending_parent(fx: &Fixture) -> InstancePre<WorkflowState> {
+    let wat = parent_wat("i32.const 42 return").replace(
+        r#"    (i32.store (i32.const 2056) (i32.const 0))
+    (i32.store (i32.const 2060) (i32.const 3500))
+    (i32.store (i32.const 2064) (i32.const 2))"#,
+        r#"    (i32.store8 (i32.const 2056) (i32.const 1))
+    (i32.store8 (i32.const 1536) (i32.const 0))
+    (i64.store (i32.const 1544) (i64.const 5000))
+    (i32.store (i32.const 2060) (i32.const 1536))
+    (i32.store (i32.const 2064) (i32.const 1))
+    (i32.store (i32.const 2068) (i32.const 3500))
+    (i32.store (i32.const 2072) (i32.const 2))"#,
+    );
+    let component = Component::new(fx.executor.engine(), wat).unwrap();
+    fx.executor.linker.instantiate_pre(&component).unwrap()
+}
+
+/// A saved suspension is not by itself permission to suspend: a root that
+/// exits suspended while its descendants' cleanup fails is trapped, so no
+/// suspension is published over work that could not be reconciled. With
+/// clean cleanup the same exit is a suspension.
+#[tokio::test]
+async fn cleanup_failure_overrides_a_suspended_root_exit() {
+    for fail_cleanup in [false, true] {
+        let fx = Fixture::new(false, fail_cleanup);
+        let pre = suspending_parent(&fx);
+        let executor = fx.executor.clone();
+        let context = fx.context.clone();
+        let result = bounded(tokio::spawn(async move {
+            executor
+                .execute_invoke_with_context(&pre, spec(), vec![], None, context)
+                .await
+        }))
+        .await
+        .unwrap();
+        assert!(fx.signals.cleanup_done.load(Ordering::Acquire));
+        if fail_cleanup {
+            assert!(
+                matches!(result.exit, InvokeExit::Trapped { ref reason } if reason.contains("descendant cleanup failed")),
+                "{result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result.exit, InvokeExit::Suspended(ref wakes) if wakes.len() == 1),
+                "{result:?}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn abandoned_root_future_still_reaps_owned_children() {
     let fx = Fixture::new(true, false);

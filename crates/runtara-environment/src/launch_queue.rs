@@ -10,6 +10,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use chrono::{DateTime, Utc};
+use runtara_core::persistence::invocations::InvocationLease;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use thiserror::Error;
 
@@ -221,6 +222,24 @@ pub struct WorkflowLaunchScope {
     pub workflow_id: String,
     /// Whether this logical execution must defer while the scope is active.
     pub single_instance: bool,
+}
+
+/// A generation promoted to `running`, with the root execution lease its
+/// runner presents on every durable write.
+#[derive(Debug, Clone)]
+pub struct RunningLaunch {
+    /// The promoted queue row.
+    pub launch: Launch,
+    /// Root lease claimed in the promotion transaction.
+    pub root_lease: InvocationLease,
+}
+
+impl std::ops::Deref for RunningLaunch {
+    type Target = Launch;
+
+    fn deref(&self) -> &Launch {
+        &self.launch
+    }
 }
 
 /// One persisted launch generation.
@@ -447,6 +466,13 @@ pub enum LaunchQueueError {
     /// An atomic first-launch request used a resume/wake kind.
     #[error("an initial instance claim must use a start launch")]
     InitialLaunchRequiresStart,
+    /// The instance still had an active root execution lease when this
+    /// generation tried to claim it.
+    #[error("launch {launch_id} found its instance still owned by another execution")]
+    RootLeaseHeld {
+        /// Generation that could not claim the root lease.
+        launch_id: String,
+    },
     /// A queue transition found an instance outside its matching pre-start state.
     #[error("launch {launch_id} no longer has a cancellable instance")]
     InstanceNoLongerPreStart {
@@ -1449,12 +1475,20 @@ impl LaunchRepository {
     /// gate and after it has durably registered that generation. Updating the
     /// queue row and Core lifecycle row in one transaction means no guest can
     /// observe execution while either side still says `pending`/`suspended`.
+    ///
+    /// The same transaction claims the instance's root execution lease for
+    /// `root_owner`, the runner registration that will execute this
+    /// generation. A run is therefore either `running` and owned, or neither:
+    /// every durable write it makes later presents the returned lease, and a
+    /// replacement execution's claim (which follows the trigger revoking this
+    /// one when the row leaves `running`) supersedes it.
     pub async fn mark_running(
         &self,
         launch_id: &str,
         lease_owner: &str,
         attempt_count: i32,
-    ) -> Result<Option<Launch>, LaunchQueueError> {
+        root_owner: &str,
+    ) -> Result<Option<RunningLaunch>, LaunchQueueError> {
         let mut tx = self.pool.begin().await?;
         let query = format!(
             r#"
@@ -1521,9 +1555,44 @@ impl LaunchRepository {
                 launch_id: running.launch_id,
             });
         }
+        // Leaving `running` revokes the previous execution's lease (the
+        // instance status trigger), and this row was not running, so an
+        // active lease here is an invariant breach. Refuse rather than
+        // silently displace it.
+        let epoch: Option<i64> = sqlx::query_scalar(
+            r#"
+            INSERT INTO invocation_root_leases (instance_id, owner, epoch, active)
+            VALUES ($1, $2, 1, TRUE)
+            ON CONFLICT (instance_id) DO UPDATE
+            SET owner = EXCLUDED.owner,
+                epoch = invocation_root_leases.epoch + 1,
+                active = TRUE,
+                released_by = NULL
+            WHERE NOT invocation_root_leases.active
+            RETURNING epoch
+            "#,
+        )
+        .bind(&running.instance_id)
+        .bind(root_owner)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(epoch) = epoch else {
+            return Err(LaunchQueueError::RootLeaseHeld {
+                launch_id: running.launch_id,
+            });
+        };
+        let root_lease = InvocationLease {
+            tenant_id: running.tenant_id.clone(),
+            instance_id: running.instance_id.clone(),
+            owner: root_owner.to_string(),
+            epoch,
+        };
 
         tx.commit().await?;
-        Ok(Some(self.committed(running, "runner_handoff", None)?))
+        Ok(Some(RunningLaunch {
+            launch: self.committed(running, "runner_handoff", None)?,
+            root_lease,
+        }))
     }
 
     /// Renew a live execution's existing lease after checking its exact

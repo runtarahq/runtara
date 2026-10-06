@@ -51,7 +51,7 @@ use crate::config::{ProcessEnv, Vars, positive};
 use super::common::{self, WorkflowRunnerConfig};
 use super::traits::{
     CancelToken, ContainerMetrics, LaunchOptions, PreparationOccupancy, PreparedLaunch, Result,
-    Runner, RunnerError, RunnerHandle, RunnerOccupancy, StartGateOutcome,
+    RunExitReport, Runner, RunnerError, RunnerHandle, RunnerOccupancy, StartGateOutcome,
 };
 
 /// Mark a run `running`, clearing what a previous stop left behind.
@@ -160,6 +160,7 @@ impl WorkflowStartConfirmation for GateWorkflowStartConfirmation {
     }
 }
 
+mod root_lease;
 mod run_state;
 mod scoped;
 pub use scoped::ScopedAgentRunnerConfig;
@@ -221,6 +222,8 @@ pub struct EmbeddedWasmRunner {
     persistence: Arc<dyn Persistence>,
     executor: Arc<WorkflowExecutor>,
     tasks: TaskRegistry,
+    /// Exit facts a run's task left for its monitor, by handle id.
+    exit_reports: Arc<Mutex<HashMap<String, RunExitReport>>>,
     /// Independently bounds filesystem, persisted-input, and component work
     /// performed before a guest consumes a live run permit.
     preparation_permits: Arc<tokio::sync::Semaphore>,
@@ -691,6 +694,7 @@ impl EmbeddedWasmRunner {
             persistence,
             executor: Arc::new(executor),
             tasks: Arc::new(Mutex::new(HashMap::new())),
+            exit_reports: Arc::new(Mutex::new(HashMap::new())),
             handler_state,
         })
     }
@@ -1291,19 +1295,22 @@ async fn wake_if_signal_already_arrived(
 /// Record an unacknowledged cancellation after the guest has exited. Preserve
 /// accepted terminal outcomes. The host cannot provide a guest cleanup receipt:
 /// leave the command pending and mark an unclean exit only if still running.
-async fn record_unacknowledged_cancel_exit(persistence: &Arc<dyn Persistence>, instance_id: &str) {
+/// With the run's root lease the write is owned: a superseded run cannot
+/// stamp its replacement.
+async fn record_unacknowledged_cancel_exit(
+    persistence: &Arc<dyn Persistence>,
+    instance_id: &str,
+    lease: Option<&runtara_core::persistence::invocations::InvocationLease>,
+) {
     match persistence.get_pending_signal(instance_id).await {
         Ok(Some(signal))
             if signal.signal_type == runtara_core::domain::SignalType::Cancel
                 && signal.acknowledged_at.is_none() =>
         {
-            let result = persistence
-                .complete_instance(
-                    CompleteInstanceParams::new(instance_id, CoreInstanceStatus::Cancelled)
-                        .if_running()
-                        .with_termination("aborted", None),
-                )
-                .await;
+            let params = CompleteInstanceParams::new(instance_id, CoreInstanceStatus::Cancelled)
+                .if_running()
+                .with_termination("aborted", None);
+            let result = complete_run(persistence.as_ref(), params, lease).await;
             match result {
                 Ok(true) => warn!(
                     instance_id,
@@ -1325,9 +1332,33 @@ async fn record_unacknowledged_cancel_exit(persistence: &Arc<dyn Persistence>, i
     }
 }
 
+/// Finish a run from its run task: owned by the run's root lease when it has
+/// one, so a superseded run cannot stamp its replacement. `true` when the run
+/// is in the requested state through this run's write (a retry included).
+async fn complete_run(
+    persistence: &dyn Persistence,
+    params: CompleteInstanceParams<'_>,
+    lease: Option<&runtara_core::persistence::invocations::InvocationLease>,
+) -> std::result::Result<bool, runtara_core::error::CoreError> {
+    use runtara_core::lifecycle::TransitionOutcome;
+    match lease {
+        Some(lease) => Ok(
+            match persistence.complete_execution(lease, params, None).await? {
+                TransitionOutcome::Applied | TransitionOutcome::AlreadyApplied => true,
+                TransitionOutcome::Superseded => false,
+            },
+        ),
+        None => persistence.complete_instance(params).await,
+    }
+}
+
 /// A cleanup alarm ends the whole Store without acknowledging any command.
 /// Preserve accepted terminal state and distinguish this from a normal timeout.
-async fn record_cleanup_aborted_exit(persistence: &Arc<dyn Persistence>, instance_id: &str) {
+async fn record_cleanup_aborted_exit(
+    persistence: &Arc<dyn Persistence>,
+    instance_id: &str,
+    lease: Option<&runtara_core::persistence::invocations::InvocationLease>,
+) {
     let status = match persistence.get_pending_signal(instance_id).await {
         Ok(Some(signal)) if signal.signal_type == runtara_core::domain::SignalType::Cancel => {
             CoreInstanceStatus::Cancelled
@@ -1338,16 +1369,43 @@ async fn record_cleanup_aborted_exit(persistence: &Arc<dyn Persistence>, instanc
             return;
         }
     };
-    if let Err(error) = persistence
-        .complete_instance(
-            CompleteInstanceParams::new(instance_id, status)
-                .if_running()
-                .with_error("Cooperative cleanup grace expired; whole execution aborted")
-                .with_termination("aborted", None),
-        )
-        .await
-    {
+    let params = CompleteInstanceParams::new(instance_id, status)
+        .if_running()
+        .with_error("Cooperative cleanup grace expired; whole execution aborted")
+        .with_termination("aborted", None);
+    if let Err(error) = complete_run(persistence.as_ref(), params, lease).await {
         warn!(instance_id, %error, "Could not record cleanup abort after Store disposal");
+    }
+}
+
+/// Attempts at an owned park before the run is handed to recovery.
+const PARK_ATTEMPTS: u32 = 5;
+
+/// [`park_invoke_suspend`], retrying storage failures with backoff. A retry
+/// is safe because the park is owned: one whose earlier attempt committed but
+/// lost its acknowledgement comes back as `AlreadyParked`. The last error is
+/// returned once the attempts run out.
+async fn park_with_retry(
+    persistence: &dyn Persistence,
+    instance_id: &str,
+    lease: Option<&runtara_core::persistence::invocations::InvocationLease>,
+    wakes: &[runtara_component_host::lifecycle::WorkflowWake],
+    instance_waits: &[String],
+) -> std::result::Result<runtara_core::lifecycle::TransitionOutcome, runtara_core::error::CoreError>
+{
+    let mut delay = Duration::from_millis(100);
+    let mut attempt = 1;
+    loop {
+        match park_invoke_suspend(persistence, instance_id, lease, wakes, instance_waits).await {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) if attempt < PARK_ATTEMPTS => {
+                warn!(instance_id, attempt, %error, "Park failed; retrying");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(2));
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -1377,12 +1435,21 @@ async fn record_cleanup_aborted_exit(persistence: &Arc<dyn Persistence>, instanc
 /// rows the custom-signal waker may relaunch — a pause/breakpoint suspend has
 /// no marker and must never be signal-woken) or `sleeping` for pure timed
 /// parks. Relaunch clears the marker with the running transition.
+///
+/// With the run's root lease the park is owned: the store applies it only
+/// while that lease is active and recognises a retry of a committed park
+/// ([`TransitionOutcome::AlreadyApplied`]). Without one (a host outside a launched
+/// run) it is the unowned, running-guarded park. A storage failure is an
+/// error, never a silent no-op: the caller must retry or hand the run to
+/// recovery.
 async fn park_invoke_suspend(
     persistence: &dyn Persistence,
     instance_id: &str,
+    lease: Option<&runtara_core::persistence::invocations::InvocationLease>,
     wakes: &[runtara_component_host::lifecycle::WorkflowWake],
     instance_waits: &[String],
-) {
+) -> std::result::Result<runtara_core::lifecycle::TransitionOutcome, runtara_core::error::CoreError>
+{
     let wakes = &with_persistence_input_deadlines(persistence, instance_id, wakes).await;
     // Instance waits arrive both from the run's own WaitForInstances steps and
     // as `instances` wakes returned through a suspension.
@@ -1396,11 +1463,11 @@ async fn park_invoke_suspend(
     }
     let instance_waits = instance_waits.as_slice();
     let deadline_ms = earliest_wake_deadline_ms(wakes);
+    use runtara_core::lifecycle::{Decision, ParkReason, ParkRequest, TransitionOutcome};
     if deadline_ms.is_none() && !has_on_signal_wake(wakes) && instance_waits.is_empty() {
         // Pure on-resume: already handled by the ack path.
-        return;
+        return Ok(TransitionOutcome::AlreadyApplied);
     }
-    use runtara_core::lifecycle::{Decision, ParkReason, ParkRequest};
     let deadline = deadline_ms
         .and_then(|ms| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64));
     if deadline_ms.is_some() && deadline.is_none() {
@@ -1424,35 +1491,39 @@ async fn park_invoke_suspend(
         .into_iter()
         .map(str::to_owned)
         .collect();
-    match persistence
-        .park_instance_on_targets(
-            instance_id,
-            request,
-            runtara_core::persistence::ParkTargets {
-                signal_ids: &signals,
-                wait_ids: instance_waits,
-            },
-        )
-        .await
-    {
-        Ok(Decision::Applied(_)) => {}
-        Ok(_) => {
+    let targets = runtara_core::persistence::ParkTargets {
+        signal_ids: &signals,
+        wait_ids: instance_waits,
+    };
+    let outcome = match lease {
+        Some(lease) => persistence.park_execution(lease, request, targets).await?,
+        None => match persistence
+            .park_instance_on_targets(instance_id, request, targets)
+            .await?
+        {
+            Decision::Applied(_) => TransitionOutcome::Applied,
+            Decision::AlreadyApplied => TransitionOutcome::AlreadyApplied,
+            Decision::Rejected => TransitionOutcome::Superseded,
+        },
+    };
+    match outcome {
+        TransitionOutcome::Superseded => {
             warn!(
                 instance_id,
-                "Invoke suspend ignored: instance is not running (terminal status preserved)"
+                "Invoke suspend not applied: the run no longer owns its root"
             );
-            return;
         }
-        Err(error) => {
-            warn!(instance_id, %error, "Failed to park instance after invoke suspend");
-            return;
+        // Close the arrival-before-park race, including on a retry whose
+        // first attempt committed but lost its acknowledgement. Later
+        // arrivals observe suspended state and schedule their own immediate
+        // wake. Never overwrite it with the timer.
+        TransitionOutcome::Applied | TransitionOutcome::AlreadyApplied => {
+            if request.reason == ParkReason::Signal {
+                wake_if_signal_already_arrived(persistence, instance_id, wakes).await;
+            }
         }
     }
-    // Close the arrival-before-park race. Later arrivals observe suspended state
-    // and schedule their own immediate wake. Never overwrite it with the timer.
-    if request.reason == ParkReason::Signal {
-        wake_if_signal_already_arrived(persistence, instance_id, wakes).await;
-    }
+    Ok(outcome)
 }
 
 fn invoke_metrics_of(result: &runtara_component_host::InvokeRunResult) -> ContainerMetrics {
@@ -1598,8 +1669,10 @@ impl Runner for EmbeddedWasmRunner {
         let metrics_for_task = Arc::clone(&metrics);
         let task_for_run = Arc::clone(&task);
         let instance_id = options.instance_id.clone();
+        let tenant_id = options.tenant_id.clone();
         let launch_id = options.launch_id.clone();
         let invocation_owner = handle_id.clone();
+        let exit_reports = Arc::clone(&self.exit_reports);
         let start_gate = options.start_gate.clone();
         let start_confirmation = start_gate.as_ref().map(|gate| {
             Arc::new(GateWorkflowStartConfirmation { gate: gate.clone() })
@@ -1615,7 +1688,7 @@ impl Runner for EmbeddedWasmRunner {
         // returns capacity and records the optional permit duration together.
         tokio::spawn(async move {
             let _completion = completion;
-            if let Some(gate) = start_gate {
+            if let Some(gate) = start_gate.as_ref() {
                 // The durable dispatcher may open the in-memory gate once it
                 // owns the running generation. Do not clear the durable
                 // marker here: Store/WASI setup below can still pause or
@@ -1655,7 +1728,50 @@ impl Runner for EmbeddedWasmRunner {
             if !supervisor_owns_lifecycle {
                 mark_running(persistence.as_ref(), &instance_id).await;
             }
+            // Own the root execution lease for the whole run. Whoever promotes
+            // the run claims it: the durable supervisor in its promotion
+            // transaction, otherwise this task, which promoted the run just
+            // above. A scoped root always owns one. Every durable write
+            // presents it, and a run that cannot own its root must not
+            // execute as a stale writer.
+            let claims_lease = !supervisor_owns_lifecycle || scoped_authority.is_some();
+            let root_lease = match start_gate.as_ref().and_then(|gate| gate.root_lease()) {
+                Some(token) => Some(root_lease::RootLease::adopt(persistence.clone(), token)),
+                None if claims_lease && persistence.invocation_fences().is_some() => {
+                    match root_lease::RootLease::claim(
+                        persistence.clone(),
+                        &tenant_id,
+                        &instance_id,
+                        &invocation_owner,
+                        root_lease::ROOT_LEASE_CONTROL_TIMEOUT,
+                    )
+                    .await
+                    {
+                        Ok(lease) => Some(lease),
+                        Err(error) => {
+                            error!(
+                                instance_id = %instance_id,
+                                launch_id = %launch_id,
+                                error = %error,
+                                "Run could not own its root; not executing"
+                            );
+                            return;
+                        }
+                    }
+                }
+                None => None,
+            };
+            if let Some(lease) = &root_lease
+                && let Err(error) = runtime_host.bind_root_lease(lease.token.clone())
+            {
+                error!(instance_id = %instance_id, %error, "Run could not bind its root lease; not executing");
+                return;
+            }
             let run = if let Some(authority) = scoped_authority {
+                let Some(lease) = root_lease.as_ref() else {
+                    error!(instance_id = %instance_id, "Scoped root requires a root lease; not executing");
+                    return;
+                };
                 scoped::execute(
                     &executor,
                     &workflow,
@@ -1665,8 +1781,7 @@ impl Runner for EmbeddedWasmRunner {
                     start_confirmation.clone(),
                     authority,
                     scoped_config.as_ref().expect("admitted scoped policy"),
-                    persistence.clone(),
-                    &invocation_owner,
+                    lease,
                 )
                 .await
             } else {
@@ -1708,13 +1823,30 @@ impl Runner for EmbeddedWasmRunner {
                     // Store-freeing durable sleep: the guest exited with a
                     // timed wake instead of blocking; park it so the wake
                     // scheduler relaunches at the deadline.
-                    park_invoke_suspend(
+                    if let Err(error) = park_with_retry(
                         persistence.as_ref(),
                         &instance_id,
+                        root_lease.as_ref().map(|lease| &lease.token),
                         wakes,
                         &run.instance_waits,
                     )
-                    .await;
+                    .await
+                    {
+                        // Execution stopped but the suspension is not
+                        // committed: the row is still `running`. Tell the
+                        // monitor, which hands it to recovery instead of
+                        // recording a crash.
+                        error!(instance_id, %error, "Park did not commit after retries; handing the run to recovery");
+                        exit_reports
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .insert(
+                                invocation_owner.clone(),
+                                RunExitReport::SuspendNotParked {
+                                    error: error.to_string(),
+                                },
+                            );
+                    }
                 }
                 InvokeExit::Failed(_) => {
                     warn!(instance_id = %instance_id, "Embedded workflow run returned error");
@@ -1729,7 +1861,12 @@ impl Runner for EmbeddedWasmRunner {
                     warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
                 }
                 InvokeExit::CleanupAborted => {
-                    record_cleanup_aborted_exit(&persistence, &instance_id).await;
+                    record_cleanup_aborted_exit(
+                        &persistence,
+                        &instance_id,
+                        root_lease.as_ref().map(|lease| &lease.token),
+                    )
+                    .await;
                 }
             }
             if matches!(&run.exit, InvokeExit::Suspended(_)) {
@@ -1743,7 +1880,20 @@ impl Runner for EmbeddedWasmRunner {
                     warn!(instance_id, %error, "Parked cancellation deferred to scheduler recovery");
                 }
             } else {
-                record_unacknowledged_cancel_exit(&persistence, &instance_id).await;
+                record_unacknowledged_cancel_exit(
+                    &persistence,
+                    &instance_id,
+                    root_lease.as_ref().map(|lease| &lease.token),
+                )
+                .await;
+            }
+            // Nothing of this execution writes after this point. Leaving
+            // `running` already revoked the lease; this covers an exit that
+            // left the row running for the monitor to settle.
+            if let Some(lease) = &root_lease
+                && let Err(error) = lease.release().await
+            {
+                warn!(instance_id = %instance_id, error = %error, "Root lease release deferred to the status transition");
             }
         });
 
@@ -1804,6 +1954,13 @@ impl Runner for EmbeddedWasmRunner {
             return Ok(false);
         };
         Ok(task.schedule_abort(deadline))
+    }
+
+    async fn take_exit_report(&self, handle: &RunnerHandle) -> Option<RunExitReport> {
+        self.exit_reports
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&handle.handle_id)
     }
 
     async fn collect_result(
@@ -2307,10 +2464,12 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &instance_id,
+            None,
             &[WorkflowWake::At(deadline_ms)],
             &[],
         )
-        .await;
+        .await
+        .unwrap();
 
         let inst = persistence
             .get_instance(&instance_id)
@@ -2343,10 +2502,12 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &instance_id,
+            None,
             &[WorkflowWake::OnResume],
             &[],
         )
-        .await;
+        .await
+        .unwrap();
 
         let inst = persistence
             .get_instance(&instance_id)
@@ -2373,13 +2534,15 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &instance_id,
+            None,
             &[WorkflowWake::OnSignal(SignalWait {
                 checkpoint_id: "wait-sig".into(),
                 deadline_ms: None,
             })],
             &[],
         )
-        .await;
+        .await
+        .unwrap();
 
         let inst = persistence
             .get_instance(&instance_id)
@@ -2420,13 +2583,15 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &instance_id,
+            None,
             &[WorkflowWake::OnSignal(SignalWait {
                 checkpoint_id: "raced-sig".into(),
                 deadline_ms: None,
             })],
             &[],
         )
-        .await;
+        .await
+        .unwrap();
 
         let inst = persistence
             .get_instance(&instance_id)
@@ -2454,6 +2619,89 @@ mod tests {
         );
     }
 
+    /// The park committed but its acknowledgement was lost, so the
+    /// arrival-before-park re-check never ran. The owned retry is recognised
+    /// as already parked and still runs the re-check: the run wakes.
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn an_owned_park_retry_after_a_lost_ack_still_wakes_on_an_early_signal() {
+        use runtara_core::lifecycle::{ParkReason, ParkRequest, TransitionOutcome};
+        let (persistence, instance_id) = running_instance().await;
+        let tenant = persistence
+            .get_instance_meta(&instance_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .tenant_id;
+        let lease = persistence
+            .invocation_fences()
+            .unwrap()
+            .claim_invocation_lease(&tenant, &instance_id, "runner-a", None)
+            .await
+            .unwrap();
+        persistence
+            .put_custom_signal(&instance_id, "early-sig", b"{}")
+            .await
+            .unwrap();
+        // First attempt: committed, acknowledgement lost before the re-check.
+        let signals = ["early-sig".to_string()];
+        assert_eq!(
+            persistence
+                .park_execution(
+                    &lease,
+                    ParkRequest {
+                        reason: ParkReason::Signal,
+                        deadline: None,
+                    },
+                    runtara_core::persistence::ParkTargets {
+                        signal_ids: &signals,
+                        wait_ids: &[],
+                    },
+                )
+                .await
+                .unwrap(),
+            TransitionOutcome::Applied
+        );
+        assert!(
+            persistence
+                .get_instance(&instance_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .sleep_until
+                .is_none(),
+            "without the re-check the run would wait for a waker that already ran"
+        );
+
+        let retried = park_invoke_suspend(
+            persistence.as_ref(),
+            &instance_id,
+            Some(&lease),
+            &[WorkflowWake::OnSignal(SignalWait {
+                checkpoint_id: "early-sig".into(),
+                deadline_ms: None,
+            })],
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(retried, TransitionOutcome::AlreadyApplied);
+        let inst = persistence
+            .get_instance(&instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(inst.status, CoreInstanceStatus::Suspended);
+        assert_eq!(
+            inst.wake_reason,
+            Some(runtara_core::domain::WakeReason::CustomSignal)
+        );
+        assert!(
+            inst.sleep_until.is_some(),
+            "the retry must self-wake the run"
+        );
+    }
+
     #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn park_leaves_sleep_unset_when_no_signal_has_arrived_yet() {
@@ -2462,13 +2710,15 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &instance_id,
+            None,
             &[WorkflowWake::OnSignal(SignalWait {
                 checkpoint_id: "quiet-sig".into(),
                 deadline_ms: None,
             })],
             &[],
         )
-        .await;
+        .await
+        .unwrap();
 
         let inst = persistence
             .get_instance(&instance_id)
@@ -2504,10 +2754,12 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &instance_id,
+            None,
             &[WorkflowWake::At(1_900_000_000_000u64)],
             &[],
         )
-        .await;
+        .await
+        .unwrap();
 
         let inst = persistence
             .get_instance(&instance_id)
@@ -2576,10 +2828,12 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &waiter,
+            None,
             &[WorkflowWake::At(deadline_ms)],
             &["op-wait".to_string()],
         )
-        .await;
+        .await
+        .unwrap();
         let parked = persistence.get_instance(&waiter).await.unwrap().unwrap();
         assert_eq!(parked.status, CoreInstanceStatus::Suspended);
         assert_eq!(
@@ -2618,10 +2872,12 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &waiter,
+            None,
             &[WorkflowWake::At(deadline_ms)],
             &["op-wait".to_string()],
         )
-        .await;
+        .await
+        .unwrap();
         let again = persistence.get_instance(&waiter).await.unwrap().unwrap();
         assert_eq!(again.status, CoreInstanceStatus::Suspended);
         assert_eq!(
@@ -2642,13 +2898,15 @@ mod tests {
         park_invoke_suspend(
             persistence.as_ref(),
             &instance_id,
+            None,
             &[WorkflowWake::OnSignal(SignalWait {
                 checkpoint_id: "wait-sig".into(),
                 deadline_ms: Some(deadline_ms),
             })],
             &[],
         )
-        .await;
+        .await
+        .unwrap();
 
         let inst = persistence
             .get_instance(&instance_id)
@@ -2680,7 +2938,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            record_cleanup_aborted_exit(&persistence, &id).await;
+            record_cleanup_aborted_exit(&persistence, &id, None).await;
             let after = persistence.get_instance(&id).await.unwrap().unwrap();
             assert_eq!(
                 after.status,
@@ -2727,7 +2985,7 @@ mod tests {
                 .await
                 .unwrap();
             let before = persistence.get_instance(&id).await.unwrap().unwrap();
-            record_cleanup_aborted_exit(&persistence, &id).await;
+            record_cleanup_aborted_exit(&persistence, &id, None).await;
             let after = persistence.get_instance(&id).await.unwrap().unwrap();
             assert_eq!(after.status, before.status);
             assert_eq!(after.output, before.output);
@@ -2761,7 +3019,7 @@ mod tests {
                 .await
                 .unwrap();
             let before = persistence.get_instance(&id).await.unwrap().unwrap();
-            record_unacknowledged_cancel_exit(&persistence, &id).await;
+            record_unacknowledged_cancel_exit(&persistence, &id, None).await;
             let after = persistence.get_instance(&id).await.unwrap().unwrap();
             assert_eq!(after.status, status);
             assert_eq!(after.output, before.output);
@@ -2790,7 +3048,7 @@ mod tests {
             .await
             .unwrap();
         let command = persistence.get_pending_signal(&id).await.unwrap().unwrap();
-        record_unacknowledged_cancel_exit(&persistence, &id).await;
+        record_unacknowledged_cancel_exit(&persistence, &id, None).await;
         let after = persistence.get_instance(&id).await.unwrap().unwrap();
         assert_eq!(after.status, CoreInstanceStatus::Cancelled);
         assert_eq!(after.termination_reason.as_deref(), Some("aborted"));
@@ -2798,7 +3056,7 @@ mod tests {
         let pending = persistence.get_pending_signal(&id).await.unwrap().unwrap();
         assert_eq!(pending.command_id, command.command_id);
         assert!(pending.acknowledged_at.is_none());
-        record_unacknowledged_cancel_exit(&persistence, &id).await;
+        record_unacknowledged_cancel_exit(&persistence, &id, None).await;
         assert_eq!(
             persistence
                 .get_instance(&id)
@@ -2847,7 +3105,7 @@ mod tests {
             .await
             .unwrap();
 
-        record_unacknowledged_cancel_exit(&persistence, instance_id.as_str()).await;
+        record_unacknowledged_cancel_exit(&persistence, instance_id.as_str(), None).await;
 
         assert_eq!(
             persistence
@@ -2874,7 +3132,7 @@ mod tests {
             .await
             .unwrap();
 
-        record_unacknowledged_cancel_exit(&persistence, instance_id.as_str()).await;
+        record_unacknowledged_cancel_exit(&persistence, instance_id.as_str(), None).await;
 
         assert_eq!(
             persistence

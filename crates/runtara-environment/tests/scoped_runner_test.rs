@@ -261,13 +261,11 @@ async fn scoped_runner_admits_reviewed_packages_and_keeps_legacy_execution() {
             .get_invocation_lease(&options.tenant_id, &options.instance_id)
             .await
             .unwrap();
-        if backend == "legacy" {
-            assert!(lease.is_none());
-        } else {
-            let lease = lease.expect("scoped production runner claims execution authority");
-            assert_eq!(lease.lease.owner, handle.handle_id);
-            assert!(!lease.active, "finished execution must release its lease");
-        }
+        // Every root run, legacy or scoped, owns its root under its own
+        // registration while it runs and holds nothing once it finishes.
+        let lease = lease.expect("every production root run claims execution authority");
+        assert_eq!(lease.lease.owner, handle.handle_id);
+        assert!(!lease.active, "finished execution must release its lease");
         let output: Value = serde_json::from_slice(&instance.output.unwrap()).unwrap();
         assert!((0.0..1.0).contains(&output["value"].as_f64().unwrap()));
     }

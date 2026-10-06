@@ -21,8 +21,6 @@ use crate::vocabulary::SqlVocabulary;
 pub enum EnumKind {
     /// `instances.status` — pending/running/suspended/completed/failed/cancelled.
     InstanceStatus,
-    /// `instances.termination_reason` — normal/oom/timeout/etc.
-    TerminationReason,
 }
 
 /// SQL-dialect abstraction for the persistence layer.

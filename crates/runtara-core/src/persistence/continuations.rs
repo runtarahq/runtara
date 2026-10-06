@@ -95,14 +95,17 @@ pub trait AgentContinuations: Send + Sync {
     /// Rejects state over [`MAX_CONTINUATION_BYTES`], attempt 0 and an
     /// empty, oversized or control-character `op_hash`
     /// ([`CoreError::ValidationError`]). Fenced like a checkpoint, atomically
-    /// with the write: a missing instance is [`CoreError::InstanceNotFound`]
-    /// and one that is not `running` is [`CoreError::InvalidInstanceState`].
+    /// with the write: a missing instance is [`CoreError::InstanceNotFound`],
+    /// one that is not `running` is [`CoreError::InvalidInstanceState`], and
+    /// a writer that does not own the root (see
+    /// [`super::ExecutionWriter`]) is [`CoreError::Superseded`].
     async fn put(
         &self,
         instance_id: &str,
         op_hash: &str,
         attempt: u32,
         state: &[u8],
+        owner: super::ExecutionWriter<'_>,
     ) -> Result<(), CoreError>;
 
     /// Drop the operation's continuation. Idempotent; returns whether one was

@@ -321,8 +321,11 @@ async fn load_retry_history(
 // Event Operations
 // ============================================================================
 
-/// Insert an instance event.
-async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), CoreError> {
+/// Insert an instance event, on the pool or inside a transaction.
+async fn insert_event<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    event: &EventRecord,
+) -> Result<(), CoreError> {
     sqlx::query(
         r#"
         INSERT INTO instance_events (instance_id, event_type, checkpoint_id, payload, created_at, subtype)
@@ -335,7 +338,7 @@ async fn insert_event(pool: &PgPool, event: &EventRecord) -> Result<(), CoreErro
     .bind(&event.payload)
     .bind(event.created_at)
     .bind(&event.subtype)
-    .execute(pool)
+    .execute(executor)
     .await.db()?;
 
     Ok(())
@@ -733,6 +736,47 @@ impl Persistence for PostgresPersistence {
         Self::op_save_checkpoint(&self.pool, instance_id, checkpoint_id, state).await
     }
 
+    async fn record_checkpoint(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        state: &[u8],
+        owner: runtara_core::persistence::ExecutionWriter<'_>,
+    ) -> Result<runtara_core::persistence::CheckpointWrite, CoreError> {
+        let mut tx = self.pool.begin().await.db()?;
+        crate::root_owner::admit_row_writer(&mut tx, instance_id, owner).await?;
+        let write = crate::checkpoints::record(&mut tx, instance_id, checkpoint_id, state).await?;
+        tx.commit().await.db()?;
+        Ok(write)
+    }
+
+    async fn save_sleep_checkpoint(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        state: &[u8],
+        owner: runtara_core::persistence::ExecutionWriter<'_>,
+    ) -> Result<(), CoreError> {
+        use crate::dialect::Dialect;
+        let mut tx = self.pool.begin().await.db()?;
+        crate::root_owner::admit_row_writer(&mut tx, instance_id, owner).await?;
+        sqlx::query(crate::dialect::PostgresDialect::sql_save_checkpoint())
+            .bind(instance_id)
+            .bind(checkpoint_id)
+            .bind(state)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| crate::ops_common::error::wrap_checkpoint_save(e, instance_id))?;
+        sqlx::query("UPDATE instances SET checkpoint_id = $2 WHERE instance_id = $1")
+            .bind(instance_id)
+            .bind(checkpoint_id)
+            .execute(&mut *tx)
+            .await
+            .db()?;
+        tx.commit().await.db()?;
+        Ok(())
+    }
+
     async fn load_checkpoint(
         &self,
         instance_id: &str,
@@ -781,6 +825,35 @@ impl Persistence for PostgresPersistence {
 
     async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError> {
         insert_event(&self.pool, event).await
+    }
+
+    async fn append_execution_event(
+        &self,
+        event: &EventRecord,
+        owner: runtara_core::persistence::ExecutionWriter<'_>,
+    ) -> Result<(), CoreError> {
+        let sql = format!(
+            "WITH fence AS ({}) \
+             INSERT INTO instance_events (instance_id, event_type, checkpoint_id, payload, \
+                                          created_at, subtype) \
+             SELECT instance_id, $2::instance_event_type, $3, $4, $5, $6 FROM fence",
+            crate::root_owner::fence(owner, 7, false)
+        );
+        let query = sqlx::query(&sql)
+            .bind(&event.instance_id)
+            .bind(crate::encoding::event_type_to_str(event.event_type))
+            .bind(&event.checkpoint_id)
+            .bind(&event.payload)
+            .bind(event.created_at)
+            .bind(&event.subtype);
+        let written = crate::root_owner::bind_owner(query, owner)
+            .execute(&self.pool)
+            .await
+            .db()?;
+        if written.rows_affected() == 0 {
+            return Err(crate::root_owner::refusal(&self.pool, &event.instance_id).await);
+        }
+        Ok(())
     }
 
     async fn insert_signal(
@@ -865,38 +938,93 @@ impl Persistence for PostgresPersistence {
     ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
         let mut tx = self.pool.begin().await.db()?;
         let status = crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
-        let decision = runtara_core::lifecycle::park(status, request);
-        if let runtara_core::lifecycle::Decision::Applied(effects) = decision {
-            crate::lifecycle::apply_transition(&mut tx, &[instance_id.to_owned()], effects).await?;
-            let signals = request.reason == runtara_core::lifecycle::ParkReason::Signal
-                && !targets.signal_ids.is_empty();
-            if signals || !targets.wait_ids.is_empty() {
-                sqlx::query(
-                    "INSERT INTO instance_input_parks (instance_id, signal_ids, wait_ids) VALUES ($1,$2,$3)",
-                )
-                .bind(instance_id)
-                .bind(targets.signal_ids)
-                .bind(targets.wait_ids)
-                .execute(&mut *tx)
-                .await
-                .db()?;
-            }
-            if signals {
-                crate::inputs::schedule_accepted(&mut tx, instance_id, true)
-                    .await
-                    .db()?;
-            }
-            if !targets.wait_ids.is_empty() {
-                crate::waits::park_on(&mut tx, instance_id, targets.wait_ids)
-                    .await
-                    .map_err(|error| CoreError::PersistenceError {
-                        operation: "park_instance_on_targets".into(),
-                        details: error.to_string(),
-                    })?;
-            }
-        }
+        let decision =
+            crate::lifecycle::park(&mut tx, instance_id, status, request, targets).await?;
         tx.commit().await.db()?;
         Ok(decision)
+    }
+
+    async fn park_execution(
+        &self,
+        lease: &runtara_core::persistence::invocations::InvocationLease,
+        request: runtara_core::lifecycle::ParkRequest,
+        targets: runtara_core::persistence::ParkTargets<'_>,
+    ) -> Result<runtara_core::lifecycle::TransitionOutcome, CoreError> {
+        use runtara_core::lifecycle::{Decision, LeaseRelease, TransitionOutcome};
+        let instance_id = lease.instance_id.as_str();
+        let mut tx = self.pool.begin().await.db()?;
+        // Row lock first; the lease read below is a later statement, so it
+        // sees any claim or revocation that committed while this waited.
+        let status = crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
+        let stored = crate::root_owner::load(&mut tx, instance_id).await?;
+        let outcome = match stored {
+            Some(stored) if stored.is(lease) && stored.active => {
+                match crate::lifecycle::park(&mut tx, instance_id, status, request, targets).await?
+                {
+                    Decision::Applied(_) => {
+                        crate::root_owner::record_release(&mut tx, lease, LeaseRelease::Park)
+                            .await?;
+                        TransitionOutcome::Applied
+                    }
+                    Decision::Rejected | Decision::AlreadyApplied => TransitionOutcome::Superseded,
+                }
+            }
+            Some(stored)
+                if stored.released(lease, LeaseRelease::Park)
+                    && status == runtara_core::domain::InstanceStatus::Suspended =>
+            {
+                TransitionOutcome::AlreadyApplied
+            }
+            _ => TransitionOutcome::Superseded,
+        };
+        tx.commit().await.db()?;
+        Ok(outcome)
+    }
+
+    async fn complete_execution(
+        &self,
+        lease: &runtara_core::persistence::invocations::InvocationLease,
+        params: CompleteInstanceParams<'_>,
+        event: Option<&EventRecord>,
+    ) -> Result<runtara_core::lifecycle::TransitionOutcome, CoreError> {
+        use runtara_core::lifecycle::{LeaseRelease, TransitionOutcome};
+        let instance_id = params.instance_id;
+        if lease.instance_id != instance_id {
+            return Ok(TransitionOutcome::Superseded);
+        }
+        let release = LeaseRelease::Status(params.status);
+        let mut tx = self.pool.begin().await.db()?;
+        // Row lock first; the lease read below is a later statement, so it
+        // sees any claim or revocation that committed while this waited.
+        let status = crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
+        let stored = crate::root_owner::load(&mut tx, instance_id).await?;
+        let outcome = match stored {
+            Some(stored) if stored.is(lease) && stored.active => {
+                if let Some(event) = event {
+                    insert_event(&mut *tx, event).await?;
+                }
+                // An active lease implies a running instance; the guard keeps
+                // that explicit. Nothing commits if it does not hold.
+                if !crate::lifecycle::complete(&mut tx, &params.clone().if_running()).await? {
+                    return Ok(TransitionOutcome::Superseded);
+                }
+                crate::root_owner::record_release(&mut tx, lease, release).await?;
+                TransitionOutcome::Applied
+            }
+            Some(stored) if stored.released(lease, release) && status == params.status => {
+                TransitionOutcome::AlreadyApplied
+            }
+            _ => TransitionOutcome::Superseded,
+        };
+        tx.commit().await.db()?;
+        // The run was running under this lease, so it was not terminal before.
+        if outcome == TransitionOutcome::Applied
+            && let Some(sink) = &self.metrics_sink
+            && is_reportable_terminal_status(crate::encoding::status_to_str(params.status))
+        {
+            report_completion(sink.as_ref(), &self.pool, instance_id).await;
+        }
+        Ok(outcome)
     }
 
     async fn cancel_suspended_instances(
@@ -959,6 +1087,44 @@ impl Persistence for PostgresPersistence {
             error_message,
         )
         .await
+    }
+
+    async fn record_retry_attempt(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        attempt: i32,
+        error_message: Option<&str>,
+        owner: runtara_core::persistence::ExecutionWriter<'_>,
+    ) -> Result<(), CoreError> {
+        let retry_checkpoint_id = format!("{checkpoint_id}::retry::{attempt}");
+        let sql = format!(
+            "WITH fence AS ({}) \
+             INSERT INTO checkpoints (instance_id, checkpoint_id, state, is_retry_attempt, \
+                                      attempt_number, error_message, created_at) \
+             SELECT instance_id, $2, '', true, $3, $4, NOW() FROM fence \
+             ON CONFLICT (instance_id, checkpoint_id) DO UPDATE \
+             SET attempt_number = EXCLUDED.attempt_number, \
+                 error_message = EXCLUDED.error_message, \
+                 created_at = NOW()",
+            crate::root_owner::fence(owner, 5, false)
+        );
+        let query = sqlx::query(&sql)
+            .bind(instance_id)
+            .bind(&retry_checkpoint_id)
+            .bind(attempt)
+            .bind(error_message);
+        let written = crate::root_owner::bind_owner(query, owner)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| CoreError::CheckpointSaveFailed {
+                instance_id: instance_id.to_string(),
+                reason: e.to_string(),
+            })?;
+        if written.rows_affected() == 0 {
+            return Err(crate::root_owner::refusal(&self.pool, instance_id).await);
+        }
+        Ok(())
     }
 
     async fn list_instances(

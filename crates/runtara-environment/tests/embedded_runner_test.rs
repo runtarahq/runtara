@@ -813,3 +813,104 @@ async fn the_returned_result_is_the_persisted_terminal() {
         }
     }
 }
+
+async fn root_lease_row(pool: &sqlx::PgPool, instance_id: &str) -> Option<(String, i64, bool)> {
+    sqlx::query_as("SELECT owner, epoch, active FROM invocation_root_leases WHERE instance_id = $1")
+        .bind(instance_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+}
+
+/// An ordinary (non-scoped) root run owns its root execution lease while
+/// it runs, under its own runner registration, and holds none once it ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ordinary_root_run_owns_its_root_lease_only_while_running() {
+    let h = harness().await;
+    let inst_id = unique("inst-root-lease");
+    let wasm = write_component(h.dir.path(), "lease-spin.wasm", &run_spin());
+    seed_detached_instance(&h, inst_id.as_str()).await;
+
+    let handle = h
+        .runner
+        .try_launch_detached(&options(inst_id.as_str(), &wasm))
+        .await
+        .expect("launch");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while root_lease_row(&h.pool, &inst_id).await.is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the run must claim its root lease");
+    assert_eq!(
+        root_lease_row(&h.pool, &inst_id).await,
+        Some((handle.handle_id.clone(), 1, true)),
+        "the running root must hold an active lease under its own registration"
+    );
+
+    h.runner.stop(&handle).await.expect("stop");
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+    )
+    .await
+    .expect("stopped guest must exit");
+    let (_, _, active) = root_lease_row(&h.pool, &inst_id).await.unwrap();
+    assert!(!active, "an ended run must not keep its root lease");
+}
+
+/// A run promoted by the durable supervisor adopts the lease bound into its
+/// start gate instead of claiming another epoch.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_supervised_run_adopts_the_lease_bound_into_its_gate() {
+    use runtara_core::persistence::invocations::InvocationLease;
+    let h = harness().await;
+    let inst_id = unique("inst-adopted-lease");
+    let wasm = write_component(h.dir.path(), "adopted-spin.wasm", &run_spin());
+    seed_detached_instance(&h, inst_id.as_str()).await;
+    // Stand in for the supervisor's promotion transaction.
+    h.persistence
+        .update_instance_status(
+            &inst_id,
+            runtara_core::domain::InstanceStatus::Running,
+            None,
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO invocation_root_leases (instance_id, owner, epoch, active) VALUES ($1, 'supervised', 4, TRUE)",
+    )
+    .bind(&inst_id)
+    .execute(&h.pool)
+    .await
+    .unwrap();
+    let gate = StartGate::new(Duration::from_secs(5));
+    assert!(gate.bind_root_lease(InvocationLease {
+        tenant_id: "embedded-test".into(),
+        instance_id: inst_id.clone(),
+        owner: "supervised".into(),
+        epoch: 4,
+    }));
+    let mut launch = options(inst_id.as_str(), &wasm);
+    launch.start_gate = Some(gate.clone());
+    let handle = h.runner.try_launch_detached(&launch).await.expect("launch");
+    assert!(gate.open());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(h.runner.is_running(&handle).await);
+    assert_eq!(
+        root_lease_row(&h.pool, &inst_id).await,
+        Some(("supervised".into(), 4, true)),
+        "the run must adopt the supervisor's lease, not claim a new epoch"
+    );
+    h.runner.stop(&handle).await.expect("stop");
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+    )
+    .await
+    .expect("stopped guest must exit");
+    let (_, epoch, active) = root_lease_row(&h.pool, &inst_id).await.unwrap();
+    assert_eq!(epoch, 4);
+    assert!(!active, "the run releases the adopted lease when it ends");
+}

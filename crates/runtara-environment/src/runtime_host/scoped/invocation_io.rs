@@ -86,10 +86,22 @@ impl InvocationIo {
         state: Vec<u8>,
     ) -> Result<InvocationCheckpointResult, String> {
         self.ensure_live()?;
+        let fences = self.persistence.invocation_fences().unwrap();
+        // The guest's empty-state call is a lookup; never ask the store to
+        // interpret empty bytes.
+        if state.is_empty() {
+            let stored = self.checked(
+                fences
+                    .invocation_checkpoint_lookup(&self.fence, &checkpoint_id)
+                    .await,
+            )?;
+            return Ok(InvocationCheckpointResult {
+                found: stored.is_some(),
+                state: stored.unwrap_or_default(),
+            });
+        }
         self.checked(
-            self.persistence
-                .invocation_fences()
-                .unwrap()
+            fences
                 .invocation_checkpoint(
                     &self.fence,
                     &InvocationCheckpoint {

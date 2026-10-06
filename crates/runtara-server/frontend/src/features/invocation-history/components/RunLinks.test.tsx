@@ -127,4 +127,23 @@ describe('RunStatusPill', () => {
     rerender(<RunStatusPill status="failed" />);
     expect(screen.getByText('Failed')).toBeInTheDocument();
   });
+
+  it('shows a running run waiting in process as Waiting', () => {
+    const { rerender } = render(
+      <RunStatusPill status="running" executionPhase="waiting_in_process" />
+    );
+    expect(screen.getByText('Waiting')).toBeInTheDocument();
+    expect(screen.getByTitle(/waiting in process/)).toBeInTheDocument();
+    rerender(<RunStatusPill status="running" executionPhase="running" />);
+    expect(screen.queryByText('Waiting')).not.toBeInTheDocument();
+    // A suspended run keeps its reason, whatever its phase.
+    rerender(
+      <RunStatusPill
+        status="suspended"
+        suspensionReason="paused"
+        executionPhase="paused"
+      />
+    );
+    expect(screen.getByText('Paused')).toBeInTheDocument();
+  });
 });

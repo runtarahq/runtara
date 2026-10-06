@@ -3,6 +3,7 @@
  */
 
 import {
+  ExecutionPhase,
   ExecutionStatus,
   OperationErrorSummary,
   SuspensionReason,
@@ -32,6 +33,8 @@ export interface ExecutionHistoryItem {
   hasPendingInput?: boolean;
   /** Why a suspended run is not running; only `paused` needs a resume. */
   suspensionReason?: SuspensionReason | null;
+  /** Where a live run stands; `waiting_in_process` holds its resources. */
+  executionPhase?: ExecutionPhase | null;
   /** The run whose `control:start` step started this one. */
   parentInstanceId?: string | null;
 }

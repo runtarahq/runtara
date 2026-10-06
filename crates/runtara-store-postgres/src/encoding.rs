@@ -62,6 +62,7 @@ pub fn event_type_to_str(value: EventType) -> &'static str {
         EventType::Completed => "completed",
         EventType::Failed => "failed",
         EventType::Suspended => "suspended",
+        EventType::Paused => "paused",
         EventType::Custom => "custom",
     }
 }
@@ -75,6 +76,7 @@ pub fn event_type_from_str(value: &str) -> Result<EventType, sqlx::Error> {
         "completed" => Ok(EventType::Completed),
         "failed" => Ok(EventType::Failed),
         "suspended" => Ok(EventType::Suspended),
+        "paused" => Ok(EventType::Paused),
         "custom" => Ok(EventType::Custom),
         _ => Err(sqlx::Error::Decode("unrecognized stored event_type".into())),
     }

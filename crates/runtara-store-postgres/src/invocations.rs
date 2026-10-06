@@ -231,7 +231,7 @@ impl InvocationFences for PostgresPersistence {
         } else if expected_epoch.is_some() {
             return Err(denied(FenceRejection::LeaseMismatch));
         }
-        sqlx::query("INSERT INTO invocation_root_leases (instance_id,owner,epoch,active) VALUES ($1,$2,$3,true) ON CONFLICT (instance_id) DO UPDATE SET owner=EXCLUDED.owner,epoch=EXCLUDED.epoch,active=true")
+        sqlx::query("INSERT INTO invocation_root_leases (instance_id,owner,epoch,active) VALUES ($1,$2,$3,true) ON CONFLICT (instance_id) DO UPDATE SET owner=EXCLUDED.owner,epoch=EXCLUDED.epoch,active=true,released_by=NULL")
             .bind(instance).bind(owner).bind(next).execute(&mut *tx).await.map_err(storage)?;
         tx.commit().await.map_err(storage)?;
         Ok(InvocationLease {
@@ -401,6 +401,24 @@ impl InvocationFences for PostgresPersistence {
             state,
             checkpoint: committed,
         })
+    }
+    async fn invocation_checkpoint_lookup(
+        &self,
+        token: &AttemptFence,
+        checkpoint_id: &str,
+    ) -> FenceResult<Option<Vec<u8>>> {
+        validate_identity(checkpoint_id)?;
+        let mut tx = self.invocation_write_transaction(token).await?;
+        let state = sqlx::query_scalar(
+            "SELECT state FROM checkpoints WHERE instance_id=$1 AND checkpoint_id=$2",
+        )
+        .bind(&token.lease.instance_id)
+        .bind(checkpoint_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
+        tx.commit().await.map_err(storage)?;
+        Ok(state)
     }
     async fn invocation_checkpoint(
         &self,

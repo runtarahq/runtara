@@ -1315,9 +1315,9 @@ pub async fn run_lifecycle_command_sequence<P: Persistence>(backend: &P) {
     assert_eq!(
         events.len(),
         1,
-        "pause and its retry record exactly one suspension event"
+        "pause and its retry record exactly one pause event"
     );
-    assert_eq!(events[0].event_type, crate::domain::EventType::Suspended);
+    assert_eq!(events[0].event_type, crate::domain::EventType::Paused);
     backend
         .insert_signal(&id, Kind::Shutdown, b"")
         .await
@@ -2755,6 +2755,10 @@ pub mod continuations;
 /// Run state conformance: shallow merge, replay no-op, running and tenant
 /// fence, size cap, isolation, cascade and prune.
 pub mod run_state;
+
+/// Durability lifecycle: first-wins result checkpoints, root execution
+/// ownership and owned lifecycle transitions.
+pub mod durability;
 
 /// Paired-record rule: one record per (correlation, scope), from the first
 /// start to the first end after it (S,S,E; S,E,S,E; E,S,E).

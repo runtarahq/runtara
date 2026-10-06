@@ -170,6 +170,16 @@ export type ExecutionStatus =
   | "timeout"
   | "cancelled";
 
+/**
+ * Where a live execution stands, finer than its `status`: whether it holds
+ * execution resources and what resumes it.
+ */
+export type ExecutionPhase =
+  | "running"
+  | "waiting_in_process"
+  | "suspended"
+  | "paused";
+
 /** Error severity for logging and alerting. */
 export type ErrorSeverity = "info" | "warning" | "error" | "critical";
 
@@ -5139,6 +5149,13 @@ export interface WorkflowInstanceDto {
   errorSummary?: null | OperationErrorSummary;
   /** @format double */
   executionDurationSeconds?: number | null;
+  /**
+   * Where a live execution stands: `running`, `waiting_in_process` (its
+   * resources stay allocated while it waits), `suspended` (resources
+   * released, wakes on its own) or `paused` (only a resume relaunches it).
+   * Absent for an execution that is not live.
+   */
+  executionPhase?: null | ExecutionPhase;
   /** Whether this execution has pending human input requests (AI Agent waiting for signal) */
   hasPendingInput?: boolean;
   id: string;

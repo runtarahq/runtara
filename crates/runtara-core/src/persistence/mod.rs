@@ -294,6 +294,42 @@ pub struct CheckpointRecord {
     pub created_at: DateTime<Utc>,
 }
 
+/// The execution writing a root instance's guest state.
+///
+/// A guest's own writes (result and sleep checkpoints, continuations, retry
+/// records, emitted events) are fenced by the store against the instance's
+/// root lease, atomically with the write:
+/// - `Some(lease)`: applied only while `lease` is the active root lease;
+/// - `None`, a writer outside any launched execution (the instance protocol
+///   over HTTP, tests): applied only while no execution holds the lease.
+///
+/// Otherwise the write is refused with [`CoreError::Superseded`] and nothing
+/// is written. Host-side writers (monitor, recovery, API commands) do not use
+/// these methods.
+pub type ExecutionWriter<'a> = Option<&'a invocations::InvocationLease>;
+
+/// Default trait methods cannot fence; they refuse an owned write rather
+/// than silently accepting it unfenced.
+fn unfenced_default(owner: ExecutionWriter<'_>, operation: &str) -> Result<(), CoreError> {
+    match owner {
+        None => Ok(()),
+        Some(_) => Err(CoreError::PersistenceError {
+            operation: operation.into(),
+            details: "owned writes are not implemented by this backend".into(),
+        }),
+    }
+}
+
+/// Outcome of recording a result checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckpointWrite {
+    /// This call stored the bytes and moved the instance's checkpoint pointer.
+    Recorded,
+    /// Another write committed first; these are its bytes, which the caller
+    /// must adopt. Nothing was written.
+    Existing(Vec<u8>),
+}
+
 /// Event record from the persistence layer.
 #[derive(Debug, Clone)]
 pub struct EventRecord {
@@ -959,6 +995,62 @@ pub trait Persistence: Send + Sync {
         state: &[u8],
     ) -> Result<(), CoreError>;
 
+    /// Record a result checkpoint: the first committed bytes for
+    /// `(instance_id, checkpoint_id)` win and are never replaced.
+    ///
+    /// On a fresh key this stores `state` and points the instance at it in
+    /// one transaction, returning [`CheckpointWrite::Recorded`]. When the key
+    /// already exists, including when a concurrent writer committed between
+    /// the caller's read and this write, nothing is written and the stored
+    /// bytes come back as [`CheckpointWrite::Existing`].
+    ///
+    /// Unlike [`Self::save_checkpoint`], this is the write a guest's result
+    /// checkpoint uses. `save_checkpoint` stays the replace primitive for
+    /// continuation-like state such as a durable sleep.
+    ///
+    /// The write is fenced by `owner` (see [`ExecutionWriter`]): a superseded
+    /// execution gets [`CoreError::Superseded`] and writes nothing.
+    ///
+    /// The default is a non-atomic, unfenced read-then-write for test
+    /// doubles; durable backends override it.
+    async fn record_checkpoint(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        state: &[u8],
+        owner: ExecutionWriter<'_>,
+    ) -> Result<CheckpointWrite, CoreError> {
+        unfenced_default(owner, "record_checkpoint")?;
+        if let Some(existing) = self.load_checkpoint(instance_id, checkpoint_id).await? {
+            return Ok(CheckpointWrite::Existing(existing.state));
+        }
+        self.save_checkpoint(instance_id, checkpoint_id, state)
+            .await?;
+        self.update_instance_checkpoint(instance_id, checkpoint_id)
+            .await?;
+        Ok(CheckpointWrite::Recorded)
+    }
+
+    /// Save a durable sleep's checkpoint and point the instance at it, in one
+    /// fenced transaction. Unlike [`Self::record_checkpoint`] this replaces
+    /// the stored bytes: a sleep checkpoint is continuation-like state, not a
+    /// result. Fenced by `owner` (see [`ExecutionWriter`]).
+    ///
+    /// The default is unfenced, for test doubles.
+    async fn save_sleep_checkpoint(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        state: &[u8],
+        owner: ExecutionWriter<'_>,
+    ) -> Result<(), CoreError> {
+        unfenced_default(owner, "save_sleep_checkpoint")?;
+        self.save_checkpoint(instance_id, checkpoint_id, state)
+            .await?;
+        self.update_instance_checkpoint(instance_id, checkpoint_id)
+            .await
+    }
+
     /// Read back one checkpoint by `(instance_id, checkpoint_id)`.
     ///
     /// `Ok(None)` for a pair that was never saved — a step that has not run
@@ -1025,6 +1117,20 @@ pub trait Persistence: Send + Sync {
     /// receive-time stamp silently reorders the timeline and rewrites every
     /// duration into the interval between two writes.
     async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError>;
+
+    /// Append an event an execution emits (its heartbeats, custom and debug
+    /// events, terminal events), fenced by `owner` in the same statement
+    /// (see [`ExecutionWriter`]). Host-side writers use [`Self::insert_event`].
+    ///
+    /// The default is unfenced, for test doubles.
+    async fn append_execution_event(
+        &self,
+        event: &EventRecord,
+        owner: ExecutionWriter<'_>,
+    ) -> Result<(), CoreError> {
+        unfenced_default(owner, "append_execution_event")?;
+        self.insert_event(event).await
+    }
 
     /// Store a fresh lifecycle command, replacing the previous slot. An unacknowledged
     /// cancellation dominates subsequent commands and retains its identity and payload.
@@ -1130,6 +1236,60 @@ pub trait Persistence: Send + Sync {
             .await
     }
 
+    /// Park the execution holding `lease`, with the same targets and in the
+    /// same transaction as [`Self::park_instance_on_targets`].
+    ///
+    /// Ownership is checked against the stored root lease under the instance
+    /// row lock, never by the caller:
+    /// - the lease is active: apply [`crate::lifecycle::park`] and record that
+    ///   this execution parked ([`crate::lifecycle::TransitionOutcome::Applied`]);
+    /// - this execution already parked and the instance is still suspended:
+    ///   [`crate::lifecycle::TransitionOutcome::AlreadyApplied`], writing nothing, so
+    ///   a retry after a lost acknowledgement is safe;
+    /// - anything else (another epoch, a pause, a cancel, a terminal state):
+    ///   [`crate::lifecycle::TransitionOutcome::Superseded`], writing nothing.
+    async fn park_execution(
+        &self,
+        _lease: &invocations::InvocationLease,
+        _request: crate::lifecycle::ParkRequest,
+        _targets: ParkTargets<'_>,
+    ) -> Result<crate::lifecycle::TransitionOutcome, CoreError> {
+        Err(CoreError::PersistenceError {
+            operation: "park_execution".into(),
+            details: "owned parking is not implemented by this backend".into(),
+        })
+    }
+
+    /// Complete, fail or suspend the run of the execution holding `lease`,
+    /// appending its terminal `event` (if any) in the same transaction.
+    /// `params.guard` is ignored: an active lease implies a running instance.
+    ///
+    /// Ownership is checked against the stored root lease under the instance
+    /// row lock:
+    /// - the lease is active: apply the transition, append the event, and
+    ///   record on the lease that this execution moved the run to
+    ///   `params.status` ([`crate::lifecycle::TransitionOutcome::Applied`]);
+    /// - this execution already moved the run to `params.status` and it is
+    ///   still there: [`crate::lifecycle::TransitionOutcome::AlreadyApplied`],
+    ///   writing nothing, so a retry after a lost acknowledgement appends no
+    ///   second event;
+    /// - anything else: [`crate::lifecycle::TransitionOutcome::Superseded`],
+    ///   writing nothing.
+    ///
+    /// Host-side writers (monitor, recovery, API commands) use
+    /// [`Self::complete_instance`].
+    async fn complete_execution(
+        &self,
+        _lease: &invocations::InvocationLease,
+        _params: CompleteInstanceParams<'_>,
+        _event: Option<&EventRecord>,
+    ) -> Result<crate::lifecycle::TransitionOutcome, CoreError> {
+        Err(CoreError::PersistenceError {
+            operation: "complete_execution".into(),
+            details: "owned completion is not implemented by this backend".into(),
+        })
+    }
+
     /// Atomically cancel suspended instances with pending cancel commands, clear
     /// their wake deadlines, and acknowledge those exact commands. Returns only
     /// newly cancelled instances. Active runs and terminal instances are untouched.
@@ -1190,6 +1350,23 @@ pub trait Persistence: Send + Sync {
         attempt: i32,
         error_message: Option<&str>,
     ) -> Result<(), CoreError>;
+
+    /// [`Self::save_retry_attempt`] for an executing guest, fenced by `owner`
+    /// in the same statement (see [`ExecutionWriter`]).
+    ///
+    /// The default is unfenced, for test doubles.
+    async fn record_retry_attempt(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        attempt: i32,
+        error_message: Option<&str>,
+        owner: ExecutionWriter<'_>,
+    ) -> Result<(), CoreError> {
+        unfenced_default(owner, "record_retry_attempt")?;
+        self.save_retry_attempt(instance_id, checkpoint_id, attempt, error_message)
+            .await
+    }
 
     /// Page through instances, newest first, optionally narrowed to one
     /// tenant and/or one status.

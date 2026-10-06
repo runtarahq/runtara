@@ -37,6 +37,8 @@ async fn native_root_pause_preserves_waiting_child_but_cancel_closes_it() {
             .claim_invocation_lease(&tenant, &fx.id, "first-run", None)
             .await
             .unwrap();
+        // As a launch does: the root host presents the run's lease.
+        fx.owner.root.bind_root_lease(lease.clone()).unwrap();
         let child = fences
             .begin_invocation_attempt(&lease, "waiting-child", "first-start")
             .await

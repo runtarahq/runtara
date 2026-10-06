@@ -27,6 +27,7 @@ pub mod encoding;
 pub mod fence;
 
 mod backend;
+mod checkpoints;
 mod continuations;
 mod control_receipts;
 mod dialect;
@@ -34,6 +35,7 @@ mod inputs;
 mod invocations;
 mod lifecycle;
 mod ops_common;
+mod root_owner;
 mod run_state;
 mod vocabulary;
 mod waits;

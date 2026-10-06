@@ -98,6 +98,10 @@ impl RuntimeHost for ScopedRootRuntime {
         self.owner.root.trusted_launch()
     }
 
+    fn in_process_wait(&self) -> Option<Box<dyn std::any::Any + Send>> {
+        self.owner.root.in_process_wait()
+    }
+
     fn instance_id(&self) -> Result<String, String> {
         self.owner.ensure_open()?;
         self.owner.root.instance_id()
@@ -211,6 +215,7 @@ impl RuntimeHost for ScopedRootRuntime {
         self.owner.ensure_open()?;
         // Keep persistence/sleep semantics while leaving signal observation to
         // the shared owner. Do not arm the legacy immediate-ack escalation.
+        let _waiting = crate::in_process_waits::enter(&self.owner.root.instance_id);
         let response = handle_sleep(
             &self.owner.root.state,
             SleepRequest {
@@ -218,6 +223,7 @@ impl RuntimeHost for ScopedRootRuntime {
                 checkpoint_id,
                 state,
                 duration_ms: ms,
+                owner: self.owner.root.root_lease().cloned(),
             },
         )
         .await

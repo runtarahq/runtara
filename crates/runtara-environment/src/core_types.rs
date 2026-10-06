@@ -23,6 +23,7 @@ pub(crate) fn event_name(value: EventType) -> &'static str {
         EventType::Completed => "completed",
         EventType::Failed => "failed",
         EventType::Suspended => "suspended",
+        EventType::Paused => "paused",
         EventType::Custom => "custom",
     }
 }

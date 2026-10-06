@@ -32,9 +32,10 @@ use chrono::{DateTime, Utc};
 
 use crate::error::CoreError;
 use crate::persistence::{
-    CheckpointRecord, CompleteInstanceGuard, CompleteInstanceParams, CustomSignalRecord,
-    EventRecord, EventSortOrder, EventVocabulary, InstanceRecord, ListEventsFilter,
-    ListPairedRecordsFilter, PairedRecordStatus, PairedRecordSummary, Persistence, SignalRecord,
+    CheckpointRecord, CheckpointWrite, CompleteInstanceGuard, CompleteInstanceParams,
+    CustomSignalRecord, EventRecord, EventSortOrder, EventVocabulary, InstanceRecord,
+    ListEventsFilter, ListPairedRecordsFilter, PairedRecordStatus, PairedRecordSummary,
+    Persistence, SignalRecord,
 };
 
 #[derive(Default)]
@@ -42,6 +43,15 @@ struct Store {
     input_requests: HashMap<(String, String), crate::persistence::inputs::InputRequest>,
     input_parks: HashMap<String, inputs::InputPark>,
     invocation_leases: HashMap<String, (crate::persistence::invocations::InvocationLease, bool)>,
+    /// The lease whose execution gave up the root through an owned transition,
+    /// and which transition it was.
+    released_by: HashMap<
+        String,
+        (
+            crate::persistence::invocations::InvocationLease,
+            lifecycle::LeaseRelease,
+        ),
+    >,
     invocation_attempts: Vec<crate::persistence::invocations::InvocationAttempt>,
     invocation_parents: HashMap<(String, String), Option<String>>,
     instances: HashMap<String, InstanceRecord>,
@@ -76,6 +86,134 @@ impl Store {
         {
             *active = false;
         }
+    }
+
+    /// Fence a guest write: see [`crate::persistence::ExecutionWriter`].
+    fn admit_writer(
+        &self,
+        instance_id: &str,
+        owner: crate::persistence::ExecutionWriter<'_>,
+    ) -> Result<(), CoreError> {
+        let current = self.invocation_leases.get(instance_id);
+        let admitted = match owner {
+            Some(lease) => current.is_some_and(|(held, active)| *active && held == lease),
+            None => !current.is_some_and(|(_, active)| *active),
+        };
+        if admitted {
+            Ok(())
+        } else {
+            Err(CoreError::Superseded {
+                instance_id: instance_id.to_string(),
+            })
+        }
+    }
+
+    fn push_event(&mut self, event: &EventRecord) {
+        let id = self.next_id();
+        let mut stored = event.clone();
+        // The docs are explicit: store the emitter's `created_at` verbatim.
+        stored.id = Some(id);
+        self.events.push(stored);
+    }
+
+    fn upsert_checkpoint(&mut self, instance_id: &str, checkpoint_id: &str, state: &[u8]) {
+        if let Some(existing) = self
+            .checkpoints
+            .iter_mut()
+            .find(|c| c.instance_id == instance_id && c.checkpoint_id == checkpoint_id)
+        {
+            existing.state = state.to_vec();
+            // A refresh restamps: the trait dates a checkpoint by when its
+            // state was written, and `list_checkpoints` pages on that field.
+            existing.created_at = Utc::now();
+            return;
+        }
+        self.checkpoints.push(CheckpointRecord {
+            instance_id: instance_id.to_string(),
+            checkpoint_id: checkpoint_id.to_string(),
+            state: state.to_vec(),
+            created_at: Utc::now(),
+        });
+    }
+
+    /// Apply a completion request to a locked store.
+    fn complete(&mut self, params: CompleteInstanceParams<'_>) -> Result<bool, CoreError> {
+        let Some(inst) = self.instances.get_mut(params.instance_id) else {
+            return match params.guard {
+                CompleteInstanceGuard::Any => Err(CoreError::InstanceNotFound {
+                    instance_id: params.instance_id.to_string(),
+                }),
+                CompleteInstanceGuard::OnlyRunning => Ok(false),
+            };
+        };
+        if params.guard == CompleteInstanceGuard::OnlyRunning
+            && inst.status != CoreInstanceStatus::Running
+        {
+            return Ok(false);
+        }
+
+        let was_terminal = inst.status.is_terminal();
+        inst.status = params.status;
+        // Replaced: a transition that carries no output or error clears the
+        // previous one, so a failure cannot be read as still holding a stale
+        // success payload.
+        inst.output = params.output.map(<[u8]>::to_vec);
+        inst.error = params.error.map(str::to_string);
+        // Merged: omitting these leaves what an earlier transition recorded.
+        if let Some(v) = params.termination_reason {
+            inst.termination_reason = Some(v.to_string());
+        }
+        if let Some(v) = params.exit_code {
+            inst.exit_code = Some(v);
+        }
+        if let Some(v) = params.checkpoint_id {
+            inst.checkpoint_id = Some(v.to_string());
+        }
+        if stamps_finished_at(params.status) {
+            inst.finished_at = Some(Utc::now());
+        }
+        self.revoke_inactive_execution(params.instance_id);
+        if params.status.is_terminal() {
+            let now = Utc::now();
+            inputs::close_root(self, params.instance_id, now);
+            if !was_terminal {
+                waits::target_finished(self, params.instance_id, now);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Evaluate the park policy and apply it with its targets.
+    fn park(
+        &mut self,
+        instance_id: &str,
+        request: lifecycle::ParkRequest,
+        targets: crate::persistence::ParkTargets<'_>,
+    ) -> Result<Decision, CoreError> {
+        let decision = lifecycle::park(self.instance_mut(instance_id)?.status, request);
+        if let Decision::Applied(effects) = decision {
+            let now = Utc::now();
+            self.apply_transition(instance_id, effects, now)?;
+            let signals =
+                request.reason == lifecycle::ParkReason::Signal && !targets.signal_ids.is_empty();
+            if signals || !targets.wait_ids.is_empty() {
+                self.input_parks.insert(
+                    instance_id.into(),
+                    inputs::InputPark {
+                        signals: targets.signal_ids.to_vec(),
+                        wake_scheduled: false,
+                        waits: targets.wait_ids.to_vec(),
+                    },
+                );
+            }
+            if signals {
+                inputs::schedule_accepted(self, instance_id, now, true);
+            }
+            if !targets.wait_ids.is_empty() {
+                waits::park_on(self, instance_id, targets.wait_ids, now);
+            }
+        }
+        Ok(decision)
     }
 
     fn next_id(&mut self) -> i64 {
@@ -585,50 +723,40 @@ impl Persistence for InMemoryPersistence {
         &self,
         params: CompleteInstanceParams<'_>,
     ) -> Result<bool, CoreError> {
-        let mut store = self.store.lock().unwrap();
-        let Some(inst) = store.instances.get_mut(params.instance_id) else {
-            return match params.guard {
-                CompleteInstanceGuard::Any => Err(CoreError::InstanceNotFound {
-                    instance_id: params.instance_id.to_string(),
-                }),
-                CompleteInstanceGuard::OnlyRunning => Ok(false),
-            };
-        };
-        if params.guard == CompleteInstanceGuard::OnlyRunning
-            && inst.status != CoreInstanceStatus::Running
-        {
-            return Ok(false);
-        }
+        self.store.lock().unwrap().complete(params)
+    }
 
-        let was_terminal = inst.status.is_terminal();
-        inst.status = params.status;
-        // Replaced: a transition that carries no output or error clears the
-        // previous one, so a failure cannot be read as still holding a stale
-        // success payload.
-        inst.output = params.output.map(<[u8]>::to_vec);
-        inst.error = params.error.map(str::to_string);
-        // Merged: omitting these leaves what an earlier transition recorded.
-        if let Some(v) = params.termination_reason {
-            inst.termination_reason = Some(v.to_string());
-        }
-        if let Some(v) = params.exit_code {
-            inst.exit_code = Some(v);
-        }
-        if let Some(v) = params.checkpoint_id {
-            inst.checkpoint_id = Some(v.to_string());
-        }
-        if stamps_finished_at(params.status) {
-            inst.finished_at = Some(Utc::now());
-        }
-        store.revoke_inactive_execution(params.instance_id);
-        if params.status.is_terminal() {
-            let now = Utc::now();
-            inputs::close_root(&mut store, params.instance_id, now);
-            if !was_terminal {
-                waits::target_finished(&mut store, params.instance_id, now);
+    async fn complete_execution(
+        &self,
+        lease: &crate::persistence::invocations::InvocationLease,
+        params: CompleteInstanceParams<'_>,
+        event: Option<&EventRecord>,
+    ) -> Result<lifecycle::TransitionOutcome, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        let status = store.instance_mut(params.instance_id)?.status;
+        let release = lifecycle::LeaseRelease::Status(params.status);
+        match store.invocation_leases.get(params.instance_id) {
+            Some((current, true)) if current == lease => {
+                if let Some(event) = event {
+                    store.push_event(event);
+                }
+                let instance_id = params.instance_id;
+                store.complete(params.if_running())?;
+                store
+                    .released_by
+                    .insert(instance_id.into(), (lease.clone(), release));
+                Ok(lifecycle::TransitionOutcome::Applied)
             }
+            Some((current, false))
+                if current == lease
+                    && status == params.status
+                    && store.released_by.get(params.instance_id)
+                        == Some(&(lease.clone(), release)) =>
+            {
+                Ok(lifecycle::TransitionOutcome::AlreadyApplied)
+            }
+            _ => Ok(lifecycle::TransitionOutcome::Superseded),
         }
-        Ok(true)
     }
 
     async fn store_instance_input(&self, instance_id: &str, input: &[u8]) -> Result<(), CoreError> {
@@ -645,25 +773,52 @@ impl Persistence for InMemoryPersistence {
         checkpoint_id: &str,
         state: &[u8],
     ) -> Result<(), CoreError> {
+        self.store
+            .lock()
+            .unwrap()
+            .upsert_checkpoint(instance_id, checkpoint_id, state);
+        Ok(())
+    }
+
+    async fn save_sleep_checkpoint(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        state: &[u8],
+        owner: crate::persistence::ExecutionWriter<'_>,
+    ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
+        store.instance_mut(instance_id)?;
+        store.admit_writer(instance_id, owner)?;
+        store.upsert_checkpoint(instance_id, checkpoint_id, state);
+        store.instance_mut(instance_id)?.checkpoint_id = Some(checkpoint_id.to_string());
+        Ok(())
+    }
+
+    async fn record_checkpoint(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        state: &[u8],
+        owner: crate::persistence::ExecutionWriter<'_>,
+    ) -> Result<CheckpointWrite, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        store.admit_writer(instance_id, owner)?;
         if let Some(existing) = store
             .checkpoints
-            .iter_mut()
+            .iter()
             .find(|c| c.instance_id == instance_id && c.checkpoint_id == checkpoint_id)
         {
-            existing.state = state.to_vec();
-            // A refresh restamps: the trait dates a checkpoint by when its
-            // state was written, and `list_checkpoints` pages on that field.
-            existing.created_at = Utc::now();
-            return Ok(());
+            return Ok(CheckpointWrite::Existing(existing.state.clone()));
         }
+        store.instance_mut(instance_id)?.checkpoint_id = Some(checkpoint_id.to_string());
         store.checkpoints.push(CheckpointRecord {
             instance_id: instance_id.to_string(),
             checkpoint_id: checkpoint_id.to_string(),
             state: state.to_vec(),
             created_at: Utc::now(),
         });
-        Ok(())
+        Ok(CheckpointWrite::Recorded)
     }
 
     async fn load_checkpoint(
@@ -736,12 +891,18 @@ impl Persistence for InMemoryPersistence {
     }
 
     async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError> {
+        self.store.lock().unwrap().push_event(event);
+        Ok(())
+    }
+
+    async fn append_execution_event(
+        &self,
+        event: &EventRecord,
+        owner: crate::persistence::ExecutionWriter<'_>,
+    ) -> Result<(), CoreError> {
         let mut store = self.store.lock().unwrap();
-        let id = store.next_id();
-        let mut stored = event.clone();
-        // The docs are explicit: store the emitter's `created_at` verbatim.
-        stored.id = Some(id);
-        store.events.push(stored);
+        store.admit_writer(&event.instance_id, owner)?;
+        store.push_event(event);
         Ok(())
     }
 
@@ -841,30 +1002,41 @@ impl Persistence for InMemoryPersistence {
         targets: crate::persistence::ParkTargets<'_>,
     ) -> Result<Decision, CoreError> {
         let mut store = self.store.lock().unwrap();
-        let decision = lifecycle::park(store.instance_mut(instance_id)?.status, request);
-        if let Decision::Applied(effects) = decision {
-            let now = Utc::now();
-            store.apply_transition(instance_id, effects, now)?;
-            let signals =
-                request.reason == lifecycle::ParkReason::Signal && !targets.signal_ids.is_empty();
-            if signals || !targets.wait_ids.is_empty() {
-                store.input_parks.insert(
-                    instance_id.into(),
-                    inputs::InputPark {
-                        signals: targets.signal_ids.to_vec(),
-                        wake_scheduled: false,
-                        waits: targets.wait_ids.to_vec(),
-                    },
-                );
+        store.park(instance_id, request, targets)
+    }
+
+    async fn park_execution(
+        &self,
+        lease: &crate::persistence::invocations::InvocationLease,
+        request: crate::lifecycle::ParkRequest,
+        targets: crate::persistence::ParkTargets<'_>,
+    ) -> Result<lifecycle::TransitionOutcome, CoreError> {
+        let mut store = self.store.lock().unwrap();
+        let instance_id = lease.instance_id.as_str();
+        let status = store.instance_mut(instance_id)?.status;
+        match store.invocation_leases.get(instance_id) {
+            Some((current, true)) if current == lease => {
+                match store.park(instance_id, request, targets)? {
+                    Decision::Applied(_) => {
+                        store.released_by.insert(
+                            instance_id.into(),
+                            (lease.clone(), lifecycle::LeaseRelease::Park),
+                        );
+                        Ok(lifecycle::TransitionOutcome::Applied)
+                    }
+                    _ => Ok(lifecycle::TransitionOutcome::Superseded),
+                }
             }
-            if signals {
-                inputs::schedule_accepted(&mut store, instance_id, now, true);
+            Some((current, false))
+                if current == lease
+                    && status == CoreInstanceStatus::Suspended
+                    && store.released_by.get(instance_id)
+                        == Some(&(lease.clone(), lifecycle::LeaseRelease::Park)) =>
+            {
+                Ok(lifecycle::TransitionOutcome::AlreadyApplied)
             }
-            if !targets.wait_ids.is_empty() {
-                waits::park_on(&mut store, instance_id, targets.wait_ids, now);
-            }
+            _ => Ok(lifecycle::TransitionOutcome::Superseded),
         }
-        Ok(decision)
     }
 
     async fn cancel_suspended_instances(
@@ -945,6 +1117,24 @@ impl Persistence for InMemoryPersistence {
             b"",
         )
         .await
+    }
+
+    async fn record_retry_attempt(
+        &self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        attempt: i32,
+        _error_message: Option<&str>,
+        owner: crate::persistence::ExecutionWriter<'_>,
+    ) -> Result<(), CoreError> {
+        let mut store = self.store.lock().unwrap();
+        store.admit_writer(instance_id, owner)?;
+        store.upsert_checkpoint(
+            instance_id,
+            &format!("{checkpoint_id}::retry::{attempt}"),
+            b"",
+        );
+        Ok(())
     }
 
     async fn list_instances(
@@ -1651,6 +1841,17 @@ mod tests {
     async fn in_memory_backend_satisfies_the_paired_record_rule() {
         let backend = InMemoryPersistence::new();
         crate::persistence::conformance::paired::run_all(&backend).await;
+    }
+
+    /// Durability lifecycle contract, on the in-memory backend.
+    #[tokio::test]
+    async fn in_memory_backend_satisfies_the_durability_contract() {
+        let backend = std::sync::Arc::new(InMemoryPersistence::new());
+        crate::persistence::conformance::durability::run_all(backend.as_ref()).await;
+        crate::persistence::conformance::durability::record_checkpoint_concurrent_writers_agree(
+            backend,
+        )
+        .await;
     }
 
     /// Agent continuations, on the in-memory backend.

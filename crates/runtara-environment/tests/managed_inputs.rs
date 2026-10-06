@@ -651,7 +651,7 @@ async fn nested_child_input_survives_supervised_suspend_and_lease_replay() {
             "nested-root".into(),
             false,
         ));
-        root.bind_input_lease(lease.clone()).unwrap();
+        root.bind_root_lease(lease.clone()).unwrap();
         let owner = Arc::new(ScopedRuntimeOwner::new(root));
         let scopes = ScopedInvocationFactory::new(
             owner,

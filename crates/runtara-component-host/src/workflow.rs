@@ -299,6 +299,9 @@ impl HostIoContext for WorkflowState {
     fn cleanup_alarm(&self) -> Option<&crate::cleanup_alarm::CleanupAlarmState> {
         Some(&self.cleanup_alarm)
     }
+    fn in_process_wait(&self) -> Option<Box<dyn std::any::Any + Send>> {
+        self.runtime.as_ref()?.in_process_wait()
+    }
 }
 
 impl WorkflowState {

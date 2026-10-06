@@ -429,7 +429,8 @@ impl InstanceRepository {
 
     /// Suspend an instance and schedule an immediate wake so it is relaunched.
     ///
-    /// Sets `status='suspended'`, `termination_reason='environment_restart'`
+    /// Sets `status='suspended'`, `wake_reason='recovery'` (a wake launch is
+    /// refused without one), the cause's `termination_reason`
     /// and `sleep_until=NOW()` so the wake scheduler picks it up, and stores the
     /// crash-loop counters in the same atomic UPDATE. The instance is then
     /// replayed from the start against the checkpoint cache, so completed
@@ -448,12 +449,14 @@ impl InstanceRepository {
         instance_id: &str,
         attempt: i32,
         marker: Option<&str>,
+        cause: crate::recovery::RecoveryCause,
     ) -> Result<bool> {
         let result = sqlx::query(
             "UPDATE instances \
              SET status = 'suspended'::instance_status, \
-                 termination_reason = 'environment_restart'::termination_reason, \
+                 termination_reason = $4::termination_reason, \
                  sleep_until = NOW(), \
+                 wake_reason = 'recovery', \
                  recovery_attempts = $2, \
                  recovery_marker = $3 \
              WHERE instance_id = $1 AND status = 'running'::instance_status",
@@ -461,6 +464,7 @@ impl InstanceRepository {
         .bind(instance_id)
         .bind(attempt)
         .bind(marker)
+        .bind(cause.termination_reason())
         .execute(&self.pool)
         .await
         .map_err(|e| Error::Other(format!("mark_for_recovery: {e}")))?;

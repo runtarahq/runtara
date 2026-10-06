@@ -124,7 +124,7 @@ async fn owned_running_registration(
     context: &TestContext,
 ) -> (
     LaunchFixture,
-    runtara_environment::launch_queue::Launch,
+    runtara_environment::launch_queue::RunningLaunch,
     runtara_environment::container_registry::ContainerInfo,
 ) {
     use runtara_environment::container_registry::{ContainerInfo, ContainerRegistry};
@@ -165,8 +165,14 @@ async fn owned_running_registration(
         .register(&container)
         .await
         .unwrap();
+    // The dispatcher promotes under the runner registration it registered.
     let running = repository
-        .mark_running(&id, "live-owner", claim.attempt_count)
+        .mark_running(
+            &id,
+            "live-owner",
+            claim.attempt_count,
+            &container.container_id,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -280,15 +286,9 @@ async fn expired_running_owner_cannot_renew_and_is_recovered_once() {
     );
     let persistence = PostgresPersistence::new(context.pool.clone());
     let fences = persistence.invocation_fences().unwrap();
-    let old_lease = fences
-        .claim_invocation_lease(
-            &fixture.tenant_id,
-            &fixture.instance_id,
-            &container.container_id,
-            None,
-        )
-        .await
-        .unwrap();
+    // Promotion claimed the run's root lease under its registration.
+    let old_lease = running.root_lease.clone();
+    assert_eq!(old_lease.owner, container.container_id);
     let old_attempt = fences
         .begin_invocation_attempt(&old_lease, "waiting-child", "old-start")
         .await
@@ -391,10 +391,7 @@ async fn observed_failure_survives_owner_expiry_without_reopening_its_wait() {
     let inputs = persistence.input_requests().unwrap();
     let request = inputs
         .register_input(
-            &InputAuthority::Root {
-                tenant_id: fixture.tenant_id.clone(),
-                instance_id: fixture.instance_id.clone(),
-            },
+            &InputAuthority::LeasedRoot(running.root_lease.clone()),
             &InputRequestSpec {
                 signal_id: "abandoned-wait".into(),
                 response_schema: None,
@@ -603,7 +600,12 @@ async fn launch_is_idempotent_and_parking_releases_the_active_generation() {
     );
     assert!(
         repository
-            .mark_running(&first.launch_id, "dispatcher-a", claimed[0].attempt_count)
+            .mark_running(
+                &first.launch_id,
+                "dispatcher-a",
+                claimed[0].attempt_count,
+                "root-owner"
+            )
             .await
             .expect("running transition must succeed")
             .is_some()
@@ -957,7 +959,7 @@ async fn gate_confirmation_is_fenced_by_attempt_and_real_database_time() {
         .expect("start transition must succeed")
         .expect("launch must enter starting");
     let running = repository
-        .mark_running(&launch_id, owner, claimed.attempt_count)
+        .mark_running(&launch_id, owner, claimed.attempt_count, "root-owner")
         .await
         .expect("running transition must succeed")
         .expect("launch must become running");
@@ -1122,7 +1124,7 @@ async fn a_failed_start_gate_ends_the_run_as_start_gate_failed() {
         .expect("start transition must succeed")
         .expect("launch must enter starting");
     let running = repository
-        .mark_running(&launch_id, owner, claimed.attempt_count)
+        .mark_running(&launch_id, owner, claimed.attempt_count, "root-owner")
         .await
         .expect("running transition must succeed")
         .expect("launch must become running");
@@ -1788,7 +1790,7 @@ async fn parked_cancellation_and_launch_start_are_serialized() {
         }
         let (cancelled, started) = tokio::join!(
             persistence.cancel_suspended_instances(Some(&fixture.instance_id), 1),
-            repository.mark_running(&launch_id, "cancel-race", claim.attempt_count),
+            repository.mark_running(&launch_id, "cancel-race", claim.attempt_count, "root-owner"),
         );
         let cancelled = cancelled.unwrap();
         let instance = persistence
@@ -2109,7 +2111,7 @@ async fn pause_invalidates_claimed_and_queued_wakes_without_failing_the_root() {
         if let Some(claim) = claim {
             assert!(
                 repository
-                    .mark_running(&launch_id, "pause-race", claim.attempt_count)
+                    .mark_running(&launch_id, "pause-race", claim.attempt_count, "root-owner")
                     .await
                     .unwrap()
                     .is_none()
@@ -2167,7 +2169,12 @@ async fn pause_invalidates_claimed_and_queued_wakes_without_failing_the_root() {
             .unwrap();
         assert!(
             repository
-                .mark_running(&resume_id, "resume-owner", claim.attempt_count)
+                .mark_running(
+                    &resume_id,
+                    "resume-owner",
+                    claim.attempt_count,
+                    "root-owner"
+                )
                 .await
                 .unwrap()
                 .is_some()
@@ -2240,7 +2247,7 @@ async fn explicit_resume_authorizes_a_queued_wake_invalidated_by_pause() {
         .unwrap();
     assert!(
         repository
-            .mark_running(&wake_id, "resume-queued", claim.attempt_count)
+            .mark_running(&wake_id, "resume-queued", claim.attempt_count, "root-owner")
             .await
             .unwrap()
             .is_some()
@@ -2396,7 +2403,7 @@ async fn a_pause_after_a_queued_resume_wins_and_a_later_resume_launches() {
     );
     assert!(
         repository
-            .mark_running(&resume_id, "resume-race", claim.attempt_count)
+            .mark_running(&resume_id, "resume-race", claim.attempt_count, "root-owner")
             .await
             .unwrap()
             .is_none(),
@@ -2436,7 +2443,7 @@ async fn a_pause_after_a_queued_resume_wins_and_a_later_resume_launches() {
         .unwrap();
     assert!(
         repository
-            .mark_running(&later, "resume-race", claim.attempt_count)
+            .mark_running(&later, "resume-race", claim.attempt_count, "root-owner")
             .await
             .unwrap()
             .is_some()
@@ -2553,4 +2560,115 @@ async fn launch_queue_terminal_writers_wake_instance_waiters() {
         woken(&persistence, &waiter).await,
         "a pre-start cancel wakes the waiter"
     );
+}
+
+async fn root_lease(pool: &PgPool, instance_id: &str) -> Option<(String, i64, bool)> {
+    sqlx::query_as("SELECT owner, epoch, active FROM invocation_root_leases WHERE instance_id = $1")
+        .bind(instance_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+}
+
+async fn promote(
+    repository: &LaunchRepository,
+    fixture: &LaunchFixture,
+    kind: LaunchKind,
+    root_owner: &str,
+) -> Result<Option<runtara_environment::launch_queue::RunningLaunch>, LaunchQueueError> {
+    let id = Uuid::new_v4().to_string();
+    repository
+        .enqueue(request(fixture, &id, kind, Duration::from_secs(60)))
+        .await
+        .unwrap();
+    let claim = repository
+        .claim_ready("lease-owner", Duration::from_secs(60), 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(claim.launch_id, id);
+    repository
+        .begin_start(&id, "lease-owner", claim.attempt_count)
+        .await
+        .unwrap()
+        .unwrap();
+    repository
+        .mark_running(&id, "lease-owner", claim.attempt_count, root_owner)
+        .await
+}
+
+/// Promotion to `running` claims the root execution lease in the same
+/// transaction, and each later generation claims the next epoch once the
+/// previous one left `running`.
+#[tokio::test]
+async fn promotion_claims_the_root_lease_and_each_generation_supersedes_the_last() {
+    let context = TestContext::new().await.unwrap();
+    let fixture = fixture(&context).await;
+    let repository = LaunchRepository::new(context.pool.clone());
+
+    let first = promote(&repository, &fixture, LaunchKind::Start, "handle-one")
+        .await
+        .unwrap()
+        .expect("start must promote");
+    assert_eq!(first.root_lease.instance_id, fixture.instance_id);
+    assert_eq!(first.root_lease.tenant_id, fixture.tenant_id);
+    assert_eq!(first.root_lease.owner, "handle-one");
+    assert_eq!(first.root_lease.epoch, 1);
+    assert_eq!(
+        root_lease(&context.pool, &fixture.instance_id).await,
+        Some(("handle-one".into(), 1, true))
+    );
+
+    // Leaving `running` revokes it; the next generation claims epoch 2.
+    set_instance_status(&context.pool, &fixture.instance_id, "suspended").await;
+    assert_eq!(
+        root_lease(&context.pool, &fixture.instance_id).await,
+        Some(("handle-one".into(), 1, false))
+    );
+    repository
+        .reconcile_released_instance(&fixture.instance_id)
+        .await
+        .unwrap();
+    let second = promote(&repository, &fixture, LaunchKind::Resume, "handle-two")
+        .await
+        .unwrap()
+        .expect("resume must promote");
+    assert_eq!(second.root_lease.owner, "handle-two");
+    assert_eq!(second.root_lease.epoch, 2);
+    assert_eq!(
+        root_lease(&context.pool, &fixture.instance_id).await,
+        Some(("handle-two".into(), 2, true))
+    );
+    context.cleanup_tenant(&fixture.tenant_id).await;
+}
+
+/// A run is either `running` and owned, or neither: an instance whose root
+/// lease is still active refuses promotion and the whole transaction rolls
+/// back, leaving the instance pending and the lease untouched.
+#[tokio::test]
+async fn promotion_refuses_an_active_root_lease_and_rolls_back() {
+    let context = TestContext::new().await.unwrap();
+    let fixture = fixture(&context).await;
+    let repository = LaunchRepository::new(context.pool.clone());
+    sqlx::query(
+        "INSERT INTO invocation_root_leases (instance_id, owner, epoch, active) VALUES ($1, 'squatter', 7, TRUE)",
+    )
+    .bind(&fixture.instance_id)
+    .execute(&context.pool)
+    .await
+    .unwrap();
+
+    let refused = promote(&repository, &fixture, LaunchKind::Start, "handle-one").await;
+    assert!(
+        matches!(refused, Err(LaunchQueueError::RootLeaseHeld { .. })),
+        "{refused:?}"
+    );
+    let (status, _, _) = instance_result(&context.pool, &fixture.instance_id).await;
+    assert_eq!(status, "pending", "promotion must roll back with the claim");
+    assert_eq!(
+        root_lease(&context.pool, &fixture.instance_id).await,
+        Some(("squatter".into(), 7, true))
+    );
+    context.cleanup_tenant(&fixture.tenant_id).await;
 }

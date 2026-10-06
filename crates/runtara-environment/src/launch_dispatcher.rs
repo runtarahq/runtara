@@ -840,10 +840,20 @@ impl LaunchDispatcher {
                 }
 
                 let running = match repository
-                    .mark_running(&launch.launch_id, &self.owner, launch.attempt_count)
+                    .mark_running(
+                        &launch.launch_id,
+                        &self.owner,
+                        launch.attempt_count,
+                        &handle.handle_id,
+                    )
                     .await
                 {
-                    Ok(Some(running)) => running,
+                    Ok(Some(running)) => {
+                        // The runner reads this once the gate opens; every
+                        // durable write of the run presents it.
+                        gate.bind_root_lease(running.root_lease.clone());
+                        running
+                    }
                     Ok(None) => {
                         // A cancellation, deadline, or recovery won before
                         // this owner could atomically promote Core. The gate is

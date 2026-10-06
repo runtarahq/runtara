@@ -1,8 +1,12 @@
-//! One physical runner's bounded invocation ownership. Never steals a live lease.
+//! A run's root execution lease: the token every durable write of the run
+//! presents. Never steals a live lease; release revokes only this exact token.
 use super::*;
 use runtara_core::persistence::invocations::{
     FenceRejection, InvocationFenceError, InvocationLease,
 };
+
+/// Bounded deadline for one lease control call (claim, release).
+pub(super) const ROOT_LEASE_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) struct RootLease {
     persistence: Arc<dyn Persistence>,
@@ -11,6 +15,16 @@ pub(super) struct RootLease {
 }
 
 impl RootLease {
+    /// Own a lease the supervisor already claimed when it promoted the run.
+    pub fn adopt(persistence: Arc<dyn Persistence>, token: InvocationLease) -> Self {
+        Self {
+            persistence,
+            token,
+            timeout: ROOT_LEASE_CONTROL_TIMEOUT,
+        }
+    }
+
+    /// Claim the next epoch for a run promoted without a supervisor lease.
     pub async fn claim(
         persistence: Arc<dyn Persistence>,
         tenant: &str,
@@ -21,7 +35,7 @@ impl RootLease {
         anyhow::ensure!(!timeout.is_zero(), "root lease budget exhausted");
         let fences = persistence
             .invocation_fences()
-            .ok_or_else(|| anyhow::anyhow!("scoped execution requires invocation fencing"))?;
+            .ok_or_else(|| anyhow::anyhow!("root lease requires invocation fencing"))?;
         let previous =
             tokio::time::timeout(timeout, fences.get_invocation_lease(tenant, instance)).await??;
         anyhow::ensure!(

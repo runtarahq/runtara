@@ -36,30 +36,31 @@ impl AgentContinuations for PostgresPersistence {
         op_hash: &str,
         attempt: u32,
         state: &[u8],
+        owner: runtara_core::persistence::ExecutionWriter<'_>,
     ) -> Result<(), CoreError> {
         validate_continuation(instance_id, op_hash, attempt, Some(state))?;
-        // The running fence and the write are one statement. `FOR SHARE`
-        // re-checks the status against the latest committed row version and
-        // holds off any status change until the write commits, so a
-        // continuation is never stored for an instance that stopped running.
-        let written = sqlx::query(
-            "WITH fence AS ( \
-                 SELECT instance_id FROM instances \
-                 WHERE instance_id = $1 AND status = 'running' \
-                 FOR SHARE \
-             ) \
+        // The ownership fence and the write are one statement. An owned
+        // write holds its exact active lease row `FOR SHARE`, which leaving
+        // `running` must update, so a continuation is never stored for an
+        // execution that stopped running or was superseded. An unowned one
+        // holds the running instance row the same way.
+        let sql = format!(
+            "WITH fence AS ({}) \
              INSERT INTO instance_agent_continuations (instance_id, op_hash, attempt, state) \
              SELECT instance_id, $2, $3, $4 FROM fence \
              ON CONFLICT (instance_id, op_hash) DO UPDATE \
              SET attempt = EXCLUDED.attempt, state = EXCLUDED.state, \
                  updated_at = clock_timestamp()",
-        )
-        .bind(instance_id)
-        .bind(op_hash)
-        .bind(attempt as i32)
-        .bind(state)
-        .execute(&self.pool)
-        .await;
+            crate::root_owner::fence(owner, 5, true)
+        );
+        let query = sqlx::query(&sql)
+            .bind(instance_id)
+            .bind(op_hash)
+            .bind(attempt as i32)
+            .bind(state);
+        let written = crate::root_owner::bind_owner(query, owner)
+            .execute(&self.pool)
+            .await;
         let written = match written {
             // Defensive: the fence's row lock keeps the instance in place.
             Err(sqlx::Error::Database(error)) if error.is_foreign_key_violation() => {
@@ -80,12 +81,10 @@ impl AgentContinuations for PostgresPersistence {
             Some(meta) if meta.status != InstanceStatus::Running => {
                 Err(not_running(instance_id, meta.status))
             }
-            // It was running when re-read but not when written: report the
-            // state the fence saw rather than retrying the write.
-            Some(_) => Err(CoreError::InvalidInstanceState {
+            // Running, but this writer does not own it (or it was not
+            // running when written, which the lease fence cannot tell apart).
+            Some(_) => Err(CoreError::Superseded {
                 instance_id: instance_id.to_owned(),
-                expected: "running".to_owned(),
-                actual: "not running at write".to_owned(),
             }),
         }
     }

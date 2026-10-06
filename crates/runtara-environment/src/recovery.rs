@@ -170,7 +170,10 @@ pub async fn recover_registered_with(
     // An observed physical failure is not a lost Environment process. Complete
     // its retained lifecycle transition before considering normal auto-resume.
     let outcome = if let Some(sqlx::types::Json(intent)) = observed_exit {
-        if intent.apply(persistence, &container.instance_id).await? {
+        if intent
+            .apply(pool, persistence, &container.instance_id)
+            .await?
+        {
             if intent.is_drain() {
                 RecoveryOutcome::Recovered
             } else {
@@ -279,6 +282,44 @@ pub async fn recover_or_fail(
     recover_or_fail_with(pool, persistence, instance_id, RecoveryPolicy::from_env()).await
 }
 
+/// Why a still-`running` instance is being handed to recovery. It names the
+/// suspension (or failure) recovery records, and nothing else differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryCause {
+    /// The Environment restarted or lost the execution.
+    EnvironmentRestart,
+    /// The run exited to suspend, but its park could not be committed.
+    ParkFailed,
+}
+
+impl RecoveryCause {
+    /// The `termination_reason` recovery records.
+    pub fn termination_reason(self) -> &'static str {
+        match self {
+            Self::EnvironmentRestart => "environment_restart",
+            Self::ParkFailed => "park_failed",
+        }
+    }
+}
+
+/// [`recover_or_fail`] for a given cause, under the Environment's policy.
+/// The crash-loop cap applies to every cause.
+pub async fn recover_or_fail_because(
+    pool: &sqlx::PgPool,
+    persistence: &dyn Persistence,
+    instance_id: &str,
+    cause: RecoveryCause,
+) -> Result<RecoveryOutcome> {
+    recover_or_fail_for(
+        pool,
+        persistence,
+        instance_id,
+        RecoveryPolicy::from_env(),
+        cause,
+    )
+    .await
+}
+
 /// [`recover_or_fail`] with the policy supplied rather than read from the
 /// process environment.
 async fn recover_or_fail_with(
@@ -286,6 +327,23 @@ async fn recover_or_fail_with(
     persistence: &dyn Persistence,
     instance_id: &str,
     policy: RecoveryPolicy,
+) -> Result<RecoveryOutcome> {
+    recover_or_fail_for(
+        pool,
+        persistence,
+        instance_id,
+        policy,
+        RecoveryCause::EnvironmentRestart,
+    )
+    .await
+}
+
+pub(crate) async fn recover_or_fail_for(
+    pool: &sqlx::PgPool,
+    persistence: &dyn Persistence,
+    instance_id: &str,
+    policy: RecoveryPolicy,
+    cause: RecoveryCause,
 ) -> Result<RecoveryOutcome> {
     let RecoveryPolicy {
         auto_recover,
@@ -322,7 +380,7 @@ async fn recover_or_fail_with(
                         runtara_core::domain::InstanceStatus::Failed,
                     )
                     .if_running()
-                    .with_termination("environment_restart", None)
+                    .with_termination(cause.termination_reason(), None)
                     .with_error(&err),
                 )
                 .await?;
@@ -339,7 +397,7 @@ async fn recover_or_fail_with(
         }
         Decision::Recover { attempt } => {
             let applied = crate::instance_repository::InstanceRepository::new(pool.clone())
-                .mark_for_recovery(instance_id, attempt, Some(&marker))
+                .mark_for_recovery(instance_id, attempt, Some(&marker), cause)
                 .await?;
             if !applied {
                 return Ok(RecoveryOutcome::Unchanged);
@@ -477,7 +535,9 @@ mod tests {
 
 #[cfg(all(test, feature = "db-integration-tests"))]
 mod persistence_tests {
-    use super::{RecoveryOutcome, RecoveryPolicy, recover_or_fail_with};
+    use super::{
+        RecoveryCause, RecoveryOutcome, RecoveryPolicy, recover_or_fail_for, recover_or_fail_with,
+    };
     use crate::instance_repository::InstanceRepository;
     use runtara_store_postgres::PostgresPersistence;
 
@@ -536,7 +596,7 @@ mod persistence_tests {
             let before = snapshot(&pool, &id).await;
             assert!(
                 !repository
-                    .mark_for_recovery(&id, 4, Some("8"))
+                    .mark_for_recovery(&id, 4, Some("8"), RecoveryCause::EnvironmentRestart)
                     .await
                     .expect("attempt stale recovery")
             );
@@ -586,6 +646,8 @@ mod persistence_tests {
             assert_eq!(after["termination_reason"], "environment_restart");
             if auto_recover {
                 assert!(!after["sleep_until"].is_null());
+                // The wake scheduler refuses a wake launch without a reason.
+                assert_eq!(after["wake_reason"], "recovery");
                 assert_eq!(after["recovery_attempts"], 1);
             }
             assert_eq!(
@@ -596,6 +658,57 @@ mod persistence_tests {
             );
             assert_eq!(snapshot(&pool, &id).await, after);
         }
+    }
+
+    /// A run whose park never committed is suspended for recovery under its
+    /// own cause, and the crash-loop cap still bounds it: a store that keeps
+    /// refusing the park ends in a terminal failure, not an endless loop.
+    #[tokio::test]
+    async fn an_unparked_suspension_recovers_under_its_cause_until_the_cap() {
+        let pool = crate::test_support::pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+        let id = crate::test_support::unique_id("recovery-park-failed");
+        sqlx::query(
+            "INSERT INTO instances (instance_id, tenant_id, status) \
+             VALUES ($1, 'recovery-test', 'running')",
+        )
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .expect("create running instance");
+        let policy = RecoveryPolicy {
+            auto_recover: true,
+            max_auto_restarts: 2,
+        };
+        for attempt in 1..=2 {
+            assert_eq!(
+                recover_or_fail_for(&pool, &persistence, &id, policy, RecoveryCause::ParkFailed)
+                    .await
+                    .expect("recover"),
+                RecoveryOutcome::Recovered
+            );
+            let after = snapshot(&pool, &id).await;
+            assert_eq!(after["status"], "suspended");
+            assert_eq!(after["termination_reason"], "park_failed");
+            assert!(!after["sleep_until"].is_null(), "recovery wakes it at once");
+            assert_eq!(after["wake_reason"], "recovery");
+            assert_eq!(after["recovery_attempts"], attempt);
+            // The relaunch made no progress and exited the same way.
+            sqlx::query("UPDATE instances SET status = 'running' WHERE instance_id = $1")
+                .bind(&id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            recover_or_fail_for(&pool, &persistence, &id, policy, RecoveryCause::ParkFailed)
+                .await
+                .expect("cap"),
+            RecoveryOutcome::Failed
+        );
+        let after = snapshot(&pool, &id).await;
+        assert_eq!(after["status"], "failed");
+        assert_eq!(after["termination_reason"], "park_failed");
     }
 
     #[tokio::test]

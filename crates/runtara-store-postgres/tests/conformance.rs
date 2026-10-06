@@ -1022,6 +1022,157 @@ async fn invocation_write_waiting_on_a_database_lock_observes_committed_fence() 
     writer_pool.close().await;
 }
 
+/// A superseded root execution's write that is blocked on the root row while
+/// recovery revokes its lease and a replacement claims the next epoch must
+/// observe the replacement once it runs, not the snapshot it started with.
+#[tokio::test]
+async fn stale_root_write_waiting_on_a_lock_observes_the_replacement() {
+    use runtara_core::{
+        domain::{EventType, InstanceStatus},
+        error::CoreError,
+        persistence::{EventRecord, Persistence, invocations::*},
+    };
+    use std::time::Duration;
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool.clone());
+    let writer_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&writer_pool)
+        .await
+        .unwrap();
+    for family in ["checkpoint", "sleep", "retry", "event", "continuation"] {
+        let id = uuid::Uuid::new_v4().to_string();
+        backend
+            .register_instance(&id, "blocked-root")
+            .await
+            .unwrap();
+        backend
+            .update_instance_status(&id, InstanceStatus::Running, None)
+            .await
+            .unwrap();
+        let stale = backend
+            .claim_invocation_lease("blocked-root", &id, "runner-a", None)
+            .await
+            .unwrap();
+        let mut control = pool.begin().await.unwrap();
+        sqlx::query("SELECT instance_id FROM instances WHERE instance_id=$1 FOR UPDATE")
+            .bind(&id)
+            .fetch_one(&mut *control)
+            .await
+            .unwrap();
+        let writer = PostgresPersistence::new(writer_pool.clone());
+        let write_id = id.clone();
+        let pending = tokio::spawn(async move {
+            let owner = Some(&stale);
+            match family {
+                "checkpoint" => writer
+                    .record_checkpoint(&write_id, "late", b"late", owner)
+                    .await
+                    .map(|_| ()),
+                "sleep" => {
+                    writer
+                        .save_sleep_checkpoint(&write_id, "late-sleep", b"late", owner)
+                        .await
+                }
+                "retry" => {
+                    writer
+                        .record_retry_attempt(&write_id, "late", 1, None, owner)
+                        .await
+                }
+                "event" => {
+                    writer
+                        .append_execution_event(
+                            &EventRecord {
+                                id: None,
+                                instance_id: write_id.clone(),
+                                event_type: EventType::Heartbeat,
+                                checkpoint_id: None,
+                                payload: None,
+                                created_at: chrono::Utc::now(),
+                                subtype: None,
+                            },
+                            owner,
+                        )
+                        .await
+                }
+                "continuation" => {
+                    writer
+                        .agent_continuations()
+                        .unwrap()
+                        .put(&write_id, &"ab".repeat(32), 1, b"late", owner)
+                        .await
+                }
+                _ => unreachable!(),
+            }
+        });
+        let blocked = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event: Option<String> =
+                    sqlx::query_scalar("SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1")
+                        .bind(writer_pid)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                if event.as_deref() == Some("Lock") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if blocked.is_err() {
+            pending.abort();
+            panic!("the {family} writer never reached the controlled row lock");
+        }
+        // Recovery takes the row out of `running` (the trigger revokes the
+        // stale lease) and the replacement promotes and claims the next epoch,
+        // all while the stale write waits.
+        sqlx::query("UPDATE instances SET status='suspended' WHERE instance_id=$1")
+            .bind(&id)
+            .execute(&mut *control)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE instances SET status='running' WHERE instance_id=$1")
+            .bind(&id)
+            .execute(&mut *control)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE invocation_root_leases SET owner='runner-b', epoch=epoch+1, active=true \
+             WHERE instance_id=$1",
+        )
+        .bind(&id)
+        .execute(&mut *control)
+        .await
+        .unwrap();
+        control.commit().await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .expect("the blocked write must finish once the lock is released")
+            .unwrap();
+        assert!(
+            matches!(result, Err(CoreError::Superseded { .. })),
+            "{family}: a stale write must observe the replacement, got {result:?}"
+        );
+        let landed: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM checkpoints WHERE instance_id=$1) \
+                  + (SELECT count(*) FROM instance_events WHERE instance_id=$1) \
+                  + (SELECT count(*) FROM instance_agent_continuations WHERE instance_id=$1)",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(landed, 0, "{family}: nothing of the stale write may land");
+        backend.delete_instances_batch(&[id]).await.unwrap();
+    }
+    writer_pool.close().await;
+}
+
 #[tokio::test]
 async fn invocation_fences_child_write_semantics() {
     let (pool, _container) = postgres_test_pool().await;
@@ -1752,6 +1903,86 @@ async fn paired_record_rule_conformance() {
     let (pool, _container) = postgres_test_pool().await;
     let backend = PostgresPersistence::new(pool);
     runtara_core::persistence::conformance::paired::run_all(&backend).await;
+}
+
+#[tokio::test]
+async fn durability_conformance() {
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = std::sync::Arc::new(PostgresPersistence::new(pool));
+    runtara_core::persistence::conformance::durability::run_all(backend.as_ref()).await;
+    runtara_core::persistence::conformance::durability::record_checkpoint_concurrent_writers_agree(
+        backend,
+    )
+    .await;
+}
+
+/// The guest checkpoint handler under real concurrency: writers that all
+/// miss the read race to record, and every loser resumes from the winner's
+/// bytes instead of overwriting them.
+#[tokio::test]
+async fn racing_checkpoint_handlers_adopt_the_first_committed_bytes() {
+    use runtara_core::instance_handlers::{
+        CheckpointRequest, InstanceHandlerState, handle_checkpoint,
+    };
+    use runtara_core::persistence::Persistence;
+    let (pool, _container) = postgres_test_pool().await;
+    let persistence = std::sync::Arc::new(PostgresPersistence::new(pool));
+    let id = format!("checkpoint-race-{}", uuid::Uuid::new_v4());
+    persistence
+        .register_instance(&id, "checkpoint-race")
+        .await
+        .unwrap();
+    persistence
+        .update_instance_status(&id, runtara_core::domain::InstanceStatus::Running, None)
+        .await
+        .unwrap();
+    let state = std::sync::Arc::new(InstanceHandlerState::new(persistence.clone()));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(16));
+    let writers: Vec<_> = (0..16u8)
+        .map(|n| {
+            let state = state.clone();
+            let barrier = barrier.clone();
+            let id = id.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                let response = handle_checkpoint(
+                    &state,
+                    CheckpointRequest {
+                        instance_id: id,
+                        checkpoint_id: "step".into(),
+                        state: vec![n; 4],
+                        owner: None,
+                    },
+                )
+                .await
+                .unwrap();
+                (vec![n; 4], response.found, response.state)
+            })
+        })
+        .collect();
+    let mut fresh = Vec::new();
+    let mut resumed = Vec::new();
+    for writer in writers {
+        let (sent, found, returned) = writer.await.unwrap();
+        if found {
+            resumed.push(returned);
+        } else {
+            fresh.push(sent);
+        }
+    }
+    assert_eq!(
+        fresh.len(),
+        1,
+        "exactly one racing writer records the checkpoint"
+    );
+    let stored = persistence
+        .load_checkpoint(&id, "step")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, fresh[0]);
+    assert!(resumed.iter().all(|bytes| *bytes == fresh[0]));
+    persistence.delete_instances_batch(&[id]).await.unwrap();
 }
 
 #[tokio::test]

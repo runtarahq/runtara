@@ -20,15 +20,73 @@ use super::types::{
     GetCheckpointResponse, Signal, SignalType, SleepRequest, SleepResponse,
 };
 use crate::error::CoreError;
-use crate::persistence::{EventRecord, Persistence};
+use crate::persistence::{CheckpointWrite, EventRecord, Persistence};
 
-/// Checkpoint handler - combines save and load semantics.
+/// The external `checkpoint(id, state)` call, as the guest protocol and the
+/// instance API define it: empty `state` is a read-only probe (kept for
+/// compatibility; new callers use `get-checkpoint`), anything else a
+/// first-wins write. Transports call this; internally the two meanings are
+/// separate handlers, [`handle_checkpoint_lookup`] and [`handle_checkpoint`].
+pub async fn handle_checkpoint_call(
+    state: &InstanceHandlerState,
+    request: CheckpointRequest,
+) -> Result<CheckpointResponse> {
+    if request.state.is_empty() {
+        return handle_checkpoint_lookup(
+            state,
+            GetCheckpointRequest {
+                instance_id: request.instance_id,
+                checkpoint_id: request.checkpoint_id,
+            },
+        )
+        .await;
+    }
+    handle_checkpoint(state, request).await
+}
+
+/// Read-only checkpoint lookup that also reports signals, like a write does:
+/// the stored bytes on a hit, with the pending lifecycle signal and the
+/// custom signal addressed to this checkpoint; on a miss, only the pending
+/// lifecycle signal. Writes nothing.
+#[instrument(skip(state, request), fields(instance_id = %request.instance_id, checkpoint_id = %request.checkpoint_id))]
+pub async fn handle_checkpoint_lookup(
+    state: &InstanceHandlerState,
+    request: GetCheckpointRequest,
+) -> Result<CheckpointResponse> {
+    ensure_instance_running(state.persistence.as_ref(), &request.instance_id).await?;
+    if let Some(existing) = state
+        .persistence
+        .load_checkpoint(&request.instance_id, &request.checkpoint_id)
+        .await?
+    {
+        return found_response(
+            state,
+            &request.instance_id,
+            &request.checkpoint_id,
+            existing.state,
+        )
+        .await;
+    }
+    Ok(CheckpointResponse {
+        found: false,
+        state: vec![],
+        pending_signal: get_pending_signal(state.persistence.as_ref(), &request.instance_id)
+            .await?,
+        custom_signal: None,
+    })
+}
+
+/// Record a result checkpoint; the first committed bytes win.
 ///
 /// - If checkpoint with this ID exists, returns the existing state (for resume)
 /// - If checkpoint doesn't exist, saves the state and returns empty (fresh execution)
 ///
 /// Also serves as heartbeat - updates instance's last activity timestamp.
 /// Includes pending signal information so instance can react to cancel/pause.
+///
+/// This is a write only. Empty `state` is refused rather than read as a
+/// probe: storing it would make an empty checkpoint every later write
+/// adopts, and a lookup is [`handle_checkpoint_lookup`].
 #[instrument(skip(state, request), fields(instance_id = %request.instance_id, checkpoint_id = %request.checkpoint_id))]
 pub async fn handle_checkpoint(
     state: &InstanceHandlerState,
@@ -38,9 +96,20 @@ pub async fn handle_checkpoint(
         state_size = request.state.len(),
         "Processing checkpoint request"
     );
+    if request.state.is_empty() {
+        return Err(CoreError::ValidationError {
+            field: "state".to_string(),
+            message: "an empty checkpoint is a lookup, not a write".to_string(),
+        }
+        .into());
+    }
 
-    // 1. Validate instance exists and is running
-    ensure_instance_running(state.persistence.as_ref(), &request.instance_id).await?;
+    // 1. Validate instance exists and is running. An owned write is fenced by
+    // the store atomically with the write, which also requires `running`;
+    // only a writer without a lease needs this separate read.
+    if request.owner.is_none() {
+        ensure_instance_running(state.persistence.as_ref(), &request.instance_id).await?;
+    }
 
     // 2. Check if checkpoint already exists
     if let Some(existing) = state
@@ -53,66 +122,44 @@ pub async fn handle_checkpoint(
             state_size = existing.state.len(),
             "Found existing checkpoint - returning for resume"
         );
-
-        // Check for pending signal even when returning existing checkpoint
-        let pending_signal =
-            get_pending_signal(state.persistence.as_ref(), &request.instance_id).await?;
-        let custom_signal = state
-            .persistence
-            .get_custom_signal(&request.instance_id, &request.checkpoint_id)
-            .await?
-            .map(|sig| CustomSignal {
-                signal_id: sig.signal_id,
-                checkpoint_id: request.checkpoint_id.clone(),
-                payload: sig.payload.unwrap_or_default(),
-            });
-
-        return Ok(CheckpointResponse {
-            found: true,
-            state: existing.state,
-            pending_signal,
-            custom_signal,
-        });
+        return found_response(
+            state,
+            &request.instance_id,
+            &request.checkpoint_id,
+            existing.state,
+        )
+        .await;
     }
 
-    // 3. Checkpoint doesn't exist
-    // Only save if state is non-empty. The SDK's get_checkpoint() calls this
-    // endpoint with empty state as a read-only probe. If we saved empty state,
-    // subsequent save attempts with real state would find the empty checkpoint
-    // and return it instead of overwriting — corrupting the checkpoint permanently.
-    if request.state.is_empty() {
-        return Ok(CheckpointResponse {
-            found: false,
-            state: vec![],
-            pending_signal: get_pending_signal(state.persistence.as_ref(), &request.instance_id)
-                .await?,
-            custom_signal: None,
-        });
+    // 4. Record it. The first committed bytes win: a writer that raced past
+    // the read above gets the winner's bytes back and resumes from them, as
+    // if its read had hit. The instance's checkpoint pointer moves with the
+    // insert, in the same transaction.
+    match state
+        .persistence
+        .record_checkpoint(
+            &request.instance_id,
+            &request.checkpoint_id,
+            &request.state,
+            request.owner.as_ref(),
+        )
+        .await?
+    {
+        CheckpointWrite::Existing(winner) => {
+            debug!(
+                checkpoint_id = %request.checkpoint_id,
+                "Checkpoint committed concurrently - adopting the first write"
+            );
+            return found_response(state, &request.instance_id, &request.checkpoint_id, winner)
+                .await;
+        }
+        CheckpointWrite::Recorded => {}
     }
-
-    state
-        .persistence
-        .save_checkpoint(&request.instance_id, &request.checkpoint_id, &request.state)
-        .await?;
-
-    // 4. Update instance's current checkpoint_id
-    state
-        .persistence
-        .update_instance_checkpoint(&request.instance_id, &request.checkpoint_id)
-        .await?;
 
     // 5. Check for pending signals to include in response
     let pending_signal =
         get_pending_signal(state.persistence.as_ref(), &request.instance_id).await?;
-    let custom_signal = state
-        .persistence
-        .get_custom_signal(&request.instance_id, &request.checkpoint_id)
-        .await?
-        .map(|sig| CustomSignal {
-            signal_id: sig.signal_id,
-            checkpoint_id: request.checkpoint_id.clone(),
-            payload: sig.payload.unwrap_or_default(),
-        });
+    let custom_signal = custom_signal(state, &request.instance_id, &request.checkpoint_id).await?;
 
     if pending_signal.is_some() || custom_signal.is_some() {
         debug!(
@@ -130,6 +177,40 @@ pub async fn handle_checkpoint(
         pending_signal,
         custom_signal,
     })
+}
+
+/// A hit: hand back the stored bytes with any pending lifecycle signal and
+/// the custom signal addressed to this checkpoint.
+async fn found_response(
+    state: &InstanceHandlerState,
+    instance_id: &str,
+    checkpoint_id: &str,
+    stored: Vec<u8>,
+) -> Result<CheckpointResponse> {
+    let pending_signal = get_pending_signal(state.persistence.as_ref(), instance_id).await?;
+    let custom_signal = custom_signal(state, instance_id, checkpoint_id).await?;
+    Ok(CheckpointResponse {
+        found: true,
+        state: stored,
+        pending_signal,
+        custom_signal,
+    })
+}
+
+async fn custom_signal(
+    state: &InstanceHandlerState,
+    instance_id: &str,
+    checkpoint_id: &str,
+) -> std::result::Result<Option<CustomSignal>, CoreError> {
+    Ok(state
+        .persistence
+        .get_custom_signal(instance_id, checkpoint_id)
+        .await?
+        .map(|sig| CustomSignal {
+            signal_id: sig.signal_id,
+            checkpoint_id: checkpoint_id.to_string(),
+            payload: sig.payload.unwrap_or_default(),
+        }))
 }
 
 /// Validate that an instance exists and is still running.
@@ -255,19 +336,21 @@ pub async fn handle_sleep(
     // failure — a retryable-looking error for a caller mistake. The check is
     // unconditional: sleeping out the clock on behalf of an instance that
     // isn't running is just as wrong when there is no checkpoint to save.
-    ensure_instance_running(state.persistence.as_ref(), &request.instance_id).await?;
+    if request.owner.is_none() {
+        ensure_instance_running(state.persistence.as_ref(), &request.instance_id).await?;
+    }
 
-    // 2. Save checkpoint before sleeping (for durability)
+    // 2. Save checkpoint before sleeping (for durability), and point the
+    // instance at it, in one fenced write.
     if !request.checkpoint_id.is_empty() {
         state
             .persistence
-            .save_checkpoint(&request.instance_id, &request.checkpoint_id, &request.state)
-            .await?;
-
-        // Update instance's current checkpoint_id
-        state
-            .persistence
-            .update_instance_checkpoint(&request.instance_id, &request.checkpoint_id)
+            .save_sleep_checkpoint(
+                &request.instance_id,
+                &request.checkpoint_id,
+                &request.state,
+                request.owner.as_ref(),
+            )
             .await?;
 
         debug!(checkpoint_id = %request.checkpoint_id, "Sleep checkpoint saved");
@@ -295,7 +378,7 @@ pub async fn handle_sleep(
 
         // Proof of life for the staleness reaper, which judges liveness from
         // `instance_events` and counts any event.
-        record_sleep_heartbeat(state, &request.instance_id).await;
+        record_sleep_heartbeat(state, &request.instance_id, request.owner.as_ref()).await?;
 
         if let Some(signal) = get_pending_signal(state.persistence.as_ref(), &request.instance_id)
             .await?
@@ -325,7 +408,14 @@ fn interrupts_sleep(signal: &Signal) -> bool {
 /// Best-effort: a heartbeat that fails to persist must not fail the sleep, since
 /// the sleep itself is still perfectly valid. The worst case is the instance
 /// looking stale, which is exactly the pre-existing behaviour.
-async fn record_sleep_heartbeat(state: &InstanceHandlerState, instance_id: &str) {
+///
+/// The one failure that does end the sleep is losing the root: a superseded
+/// execution must stop, not sleep out its clock on a run it no longer owns.
+async fn record_sleep_heartbeat(
+    state: &InstanceHandlerState,
+    instance_id: &str,
+    owner: crate::persistence::ExecutionWriter<'_>,
+) -> std::result::Result<(), CoreError> {
     let event = EventRecord {
         id: None,
         instance_id: instance_id.to_string(),
@@ -335,8 +425,17 @@ async fn record_sleep_heartbeat(state: &InstanceHandlerState, instance_id: &str)
         created_at: Utc::now(),
         subtype: None,
     };
-    if let Err(error) = state.persistence.insert_event(&event).await {
-        debug!(%error, "Failed to record sleep heartbeat");
+    match state
+        .persistence
+        .append_execution_event(&event, owner)
+        .await
+    {
+        Err(error @ CoreError::Superseded { .. }) => Err(error),
+        Err(error) => {
+            debug!(%error, "Failed to record sleep heartbeat");
+            Ok(())
+        }
+        Ok(()) => Ok(()),
     }
 }
 
@@ -361,6 +460,7 @@ mod tests {
             instance_id: "nonexistent".to_string(),
             checkpoint_id: "cp-1".to_string(),
             state: b"test state".to_vec(),
+            owner: None,
         };
 
         let result = handle_checkpoint(&state, request).await;
@@ -380,6 +480,7 @@ mod tests {
             instance_id: "inst-1".to_string(),
             checkpoint_id: "cp-1".to_string(),
             state: b"test state".to_vec(),
+            owner: None,
         };
 
         let result = handle_checkpoint(&state, request).await;
@@ -399,10 +500,93 @@ mod tests {
             instance_id: "inst-1".to_string(),
             checkpoint_id: "cp-1".to_string(),
             state: b"test state".to_vec(),
+            owner: None,
         };
 
         let result = handle_checkpoint(&state, request).await.unwrap();
         assert!(!result.found); // New checkpoint, not found
+    }
+
+    /// The write handler is a write only: empty state is refused and
+    /// nothing is stored, so no empty checkpoint can become the first write.
+    #[tokio::test]
+    async fn checkpoint_write_refuses_empty_state() {
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            CoreInstanceStatus::Running,
+        )));
+        let state = InstanceHandlerState::new(persistence.clone());
+        let Err(error) = handle_checkpoint(
+            &state,
+            CheckpointRequest {
+                instance_id: "inst-1".to_string(),
+                checkpoint_id: "cp-1".to_string(),
+                state: Vec::new(),
+                owner: None,
+            },
+        )
+        .await
+        else {
+            panic!("an empty write must be refused");
+        };
+        assert!(matches!(
+            error.downcast_ref::<CoreError>(),
+            Some(CoreError::ValidationError { .. })
+        ));
+        assert!(
+            persistence
+                .load_checkpoint("inst-1", "cp-1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// The external call keeps its contract: empty state reads (and never
+    /// writes), anything else records first-wins.
+    #[tokio::test]
+    async fn checkpoint_call_reads_on_empty_state_and_records_otherwise() {
+        let persistence = Arc::new(MockPersistence::new().with_instance(make_instance(
+            "inst-1",
+            "tenant-1",
+            CoreInstanceStatus::Running,
+        )));
+        let state = InstanceHandlerState::new(persistence.clone());
+        let call = |bytes: &[u8]| CheckpointRequest {
+            instance_id: "inst-1".to_string(),
+            checkpoint_id: "cp-1".to_string(),
+            state: bytes.to_vec(),
+            owner: None,
+        };
+        let miss = handle_checkpoint_call(&state, call(b"")).await.unwrap();
+        assert!(!miss.found);
+        assert!(
+            persistence
+                .load_checkpoint("inst-1", "cp-1")
+                .await
+                .unwrap()
+                .is_none(),
+            "a probe must not write"
+        );
+        let first = handle_checkpoint_call(&state, call(b"first"))
+            .await
+            .unwrap();
+        assert!(!first.found);
+        let hit = handle_checkpoint_call(&state, call(b"")).await.unwrap();
+        assert!(hit.found);
+        assert_eq!(hit.state, b"first");
+        let lookup = handle_checkpoint_lookup(
+            &state,
+            GetCheckpointRequest {
+                instance_id: "inst-1".to_string(),
+                checkpoint_id: "cp-1".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(lookup.found);
+        assert_eq!(lookup.state, b"first");
     }
 
     #[tokio::test]
@@ -422,6 +606,7 @@ mod tests {
             instance_id: "inst-1".to_string(),
             checkpoint_id: "cp-1".to_string(),
             state: b"new state".to_vec(), // This should be ignored
+            owner: None,
         };
 
         let result = handle_checkpoint(&state, request).await.unwrap();
@@ -446,6 +631,7 @@ mod tests {
             instance_id: "inst-1".to_string(),
             checkpoint_id: "cp-1".to_string(),
             state: b"test state".to_vec(),
+            owner: None,
         };
 
         let result = handle_checkpoint(&state, request).await.unwrap();
@@ -478,6 +664,7 @@ mod tests {
             instance_id: "inst-1".to_string(),
             checkpoint_id: "cp-1".to_string(),
             state: b"test state".to_vec(),
+            owner: None,
         };
 
         let result = handle_checkpoint(&state, request).await.unwrap();
@@ -499,6 +686,7 @@ mod tests {
             duration_ms: 30_000,
             checkpoint_id: "delay-1".to_string(),
             state: b"sleep state".to_vec(),
+            owner: None,
         };
         let Err(error) = handle_sleep(&state, request).await else {
             panic!("an unknown instance must be rejected, not slept on");
@@ -573,6 +761,7 @@ mod tests {
             duration_ms,
             checkpoint_id: String::new(),
             state: Vec::new(),
+            owner: None,
         }
     }
 
@@ -748,6 +937,7 @@ mod tests {
             duration_ms: 30_000,
             checkpoint_id: "delay-1".to_string(),
             state: b"sleep state".to_vec(),
+            owner: None,
         };
         let response = handle_sleep(&state, request).await.unwrap();
 

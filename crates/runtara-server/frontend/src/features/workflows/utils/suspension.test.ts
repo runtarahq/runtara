@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   canResume,
   isAtBreakpoint,
+  isWaitingInProcess,
   isWaitingSuspension,
   suspendedStatusLabel,
   suspensionReasonLabel,
@@ -9,6 +10,22 @@ import {
 } from './suspension';
 
 describe('suspension helpers', () => {
+  it('treats only a running run in an in-process wait as waiting in process', () => {
+    expect(
+      isWaitingInProcess({
+        status: 'running',
+        executionPhase: 'waiting_in_process',
+      })
+    ).toBe(true);
+    expect(
+      isWaitingInProcess({ status: 'running', executionPhase: 'running' })
+    ).toBe(false);
+    expect(isWaitingInProcess({ status: 'running' })).toBe(false);
+    expect(
+      isWaitingInProcess({ status: 'suspended', executionPhase: 'suspended' })
+    ).toBe(false);
+  });
+
   it('offers Resume only for a paused suspended run', () => {
     expect(canResume({ status: 'suspended', suspensionReason: 'paused' })).toBe(
       true

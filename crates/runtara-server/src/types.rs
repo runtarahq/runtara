@@ -86,6 +86,44 @@ impl fmt::Display for ExecutionStatus {
     }
 }
 
+/// Where a live execution stands, finer than its `status`: whether it holds
+/// execution resources and what resumes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionPhase {
+    /// Executing guest work.
+    Running,
+    /// Waiting inside its execution (an in-process durable sleep): its
+    /// resources stay allocated while it waits.
+    WaitingInProcess,
+    /// Durably suspended: its resources are released, and it wakes on its
+    /// own (a timer, a signal, the runs it waits on, or recovery).
+    Suspended,
+    /// Explicitly paused: only a resume relaunches it.
+    Paused,
+}
+
+impl ExecutionPhase {
+    /// Project the phase of an execution from its status and suspension
+    /// reason, and whether its host reports an in-process wait. `None` for
+    /// an execution that is not live (queued, compiling or terminal).
+    pub fn derive(
+        status: ExecutionStatus,
+        suspension_reason: Option<SuspensionReason>,
+        waiting_in_process: bool,
+    ) -> Option<Self> {
+        match status {
+            ExecutionStatus::Running if waiting_in_process => Some(Self::WaitingInProcess),
+            ExecutionStatus::Running => Some(Self::Running),
+            ExecutionStatus::Suspended => Some(match suspension_reason {
+                Some(SuspensionReason::Paused) => Self::Paused,
+                _ => Self::Suspended,
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// Why a `suspended` execution is not running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -121,7 +159,9 @@ impl SuspensionReason {
             Some("waiting_signal") => Some(Self::WaitingSignal),
             Some("waiting_instances") => Some(Self::WaitingInstances),
             Some("sleeping") => Some(Self::Sleeping),
-            Some("shutdown_requested" | "environment_restart") => Some(Self::Shutdown),
+            Some("shutdown_requested" | "environment_restart" | "park_failed") => {
+                Some(Self::Shutdown)
+            }
             _ => None,
         }
     }
@@ -306,6 +346,43 @@ impl<'q> sqlx::Encode<'q, sqlx::Postgres> for MemoryTier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_phase_distinguishes_waiting_suspended_and_paused() {
+        use ExecutionPhase as P;
+        use ExecutionStatus as S;
+        assert_eq!(P::derive(S::Running, None, false), Some(P::Running));
+        assert_eq!(P::derive(S::Running, None, true), Some(P::WaitingInProcess));
+        for reason in [
+            SuspensionReason::WaitingSignal,
+            SuspensionReason::WaitingInstances,
+            SuspensionReason::Sleeping,
+            SuspensionReason::Shutdown,
+        ] {
+            assert_eq!(
+                P::derive(S::Suspended, Some(reason), false),
+                Some(P::Suspended)
+            );
+        }
+        assert_eq!(
+            P::derive(S::Suspended, Some(SuspensionReason::Paused), false),
+            Some(P::Paused)
+        );
+        for status in [
+            S::Queued,
+            S::Compiling,
+            S::Completed,
+            S::Failed,
+            S::Timeout,
+            S::Cancelled,
+        ] {
+            assert_eq!(P::derive(status, None, true), None, "{status:?}");
+        }
+        assert_eq!(
+            serde_json::to_value(P::WaitingInProcess).unwrap(),
+            serde_json::json!("waiting_in_process")
+        );
+    }
 
     #[test]
     fn suspension_reason_maps_stored_markers() {

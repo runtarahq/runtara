@@ -1,4 +1,5 @@
 //! Opt-in runner admission and ownership for compiler-scoped Agent packages.
+use super::root_lease::RootLease;
 use super::*;
 use crate::runtime_host::{
     PersistenceRuntimeHost,
@@ -10,7 +11,6 @@ use runtara_component_host::execution_host::ExecutionContext;
 use runtara_component_host::isolated_tasks::IsolatedTasks;
 use runtara_component_host::{InvokeExit, InvokeRunResult, PreparedInvocationLauncher};
 use std::collections::{BTreeMap, BTreeSet};
-mod lease;
 
 /// Operator-reviewed packages and per-root bounds for the opt-in scoped runner.
 /// Approval covers fresh-store semantics and the compiler checkpoint contract.
@@ -118,32 +118,9 @@ pub(super) async fn execute(
     confirmation: Option<Arc<dyn WorkflowStartConfirmation>>,
     authority: Arc<CompilerInvocationAuthority>,
     config: &ScopedAgentRunnerConfig,
-    persistence: Arc<dyn Persistence>,
-    physical_owner: &str,
+    lease: &RootLease,
 ) -> InvokeRunResult {
     let started = Instant::now();
-    let claim = match (
-        spec.trusted_tenant.as_deref(),
-        spec.trusted_instance.as_deref(),
-    ) {
-        (Some(tenant), Some(instance)) => {
-            lease::RootLease::claim(
-                persistence,
-                tenant,
-                instance,
-                physical_owner,
-                spec.timeout.min(Duration::from_secs(5)),
-            )
-            .await
-        }
-        _ => Err(anyhow::anyhow!(
-            "scoped root requires trusted tenant and instance"
-        )),
-    };
-    let lease = match claim {
-        Ok(lease) => lease,
-        Err(error) => return failed(started, format!("scoped root admission: {error:#}")),
-    };
     let owner = Arc::new(ScopedRuntimeOwner::new(root));
     let runtime = owner.root_runtime();
     let setup = || -> anyhow::Result<_> {
@@ -184,13 +161,7 @@ pub(super) async fn execute(
     };
     let execution = match setup() {
         Ok(execution) => execution,
-        Err(error) => {
-            let release = lease.release().await;
-            return failed(
-                started,
-                format!("scoped root setup: {error:#}; lease cleanup: {release:?}"),
-            );
-        }
+        Err(error) => return failed(started, format!("scoped root setup: {error:#}")),
     };
     spec.runtime = Some(runtime.clone());
     spec.timeout = spec.timeout.saturating_sub(started.elapsed());
@@ -204,11 +175,8 @@ pub(super) async fn execute(
             Some(runtime),
         )
         .await;
-    if let Err(error) = lease.release().await {
-        run.exit = InvokeExit::Trapped {
-            reason: format!("scoped root lease cleanup: {error:#}"),
-        };
-    }
+    // The run task releases the root lease after it has parked or settled
+    // the exit, which must still present it.
     run.duration = started.elapsed();
     run
 }

@@ -147,7 +147,11 @@ pub fn acknowledge(
         SignalType::Pause | SignalType::Shutdown => {
             effects.status = Some(InstanceStatus::Suspended);
             effects.finish_now = true;
-            effects.event = Some(EventType::Suspended);
+            effects.event = Some(if command.kind == SignalType::Pause {
+                EventType::Paused
+            } else {
+                EventType::Suspended
+            });
             if command.kind == SignalType::Shutdown {
                 effects.reason = Change::Set(SuspensionReason::Shutdown);
                 effects.wake = Change::Set(WakeDeadline::Now);
@@ -260,6 +264,50 @@ pub fn park(status: InstanceStatus, request: ParkRequest) -> Decision {
     })
 }
 
+/// Result of a lifecycle transition (a park or a completion) presented with
+/// the execution's root lease.
+///
+/// Storage failures are errors, not outcomes: the caller must retry them,
+/// which is safe because a retry of a committed transition is
+/// [`TransitionOutcome::AlreadyApplied`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransitionOutcome {
+    /// This call committed the transition.
+    Applied,
+    /// This execution already committed this transition (a retry after a
+    /// lost acknowledgement). Nothing was written again.
+    AlreadyApplied,
+    /// The execution no longer owns the root: a replacement execution, a
+    /// pause, a cancel, or another transition won. Nothing was written.
+    Superseded,
+}
+
+/// The transition an execution committed when it gave up its root lease.
+/// Recorded on the lease so a retry from the same lease can be recognised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseRelease {
+    /// The execution parked its run.
+    Park,
+    /// The execution moved its run to this status (completed, failed,
+    /// suspended or cancelled).
+    Status(InstanceStatus),
+}
+
+impl LeaseRelease {
+    /// Stable storage label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Park => "park",
+            Self::Status(InstanceStatus::Completed) => "completed",
+            Self::Status(InstanceStatus::Failed) => "failed",
+            Self::Status(InstanceStatus::Suspended) => "suspended",
+            Self::Status(InstanceStatus::Cancelled) => "cancelled",
+            Self::Status(InstanceStatus::Running) => "running",
+            Self::Status(InstanceStatus::Pending) => "pending",
+        }
+    }
+}
+
 /// Action performed locally after a successful command acknowledgment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionAction {
@@ -339,7 +387,7 @@ mod tests {
                         true,
                         Change::Clear,
                         Change::Clear,
-                        Some(EventType::Suspended),
+                        Some(EventType::Paused),
                         false,
                     ),
                     SignalType::Shutdown => (

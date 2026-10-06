@@ -1291,6 +1291,7 @@ fn parse_event_type(value: &str) -> Option<runtara_core::domain::EventType> {
         "completed" => Some(EventType::Completed),
         "failed" => Some(EventType::Failed),
         "suspended" => Some(EventType::Suspended),
+        "paused" => Some(EventType::Paused),
         "custom" => Some(EventType::Custom),
         _ => None,
     }
@@ -1313,6 +1314,7 @@ mod tests {
             ("completed", EventType::Completed),
             ("failed", EventType::Failed),
             ("suspended", EventType::Suspended),
+            ("paused", EventType::Paused),
             ("custom", EventType::Custom),
         ];
         for (_, event_type) in events {
@@ -1355,7 +1357,7 @@ mod tests {
             .list_events("event-filter-test", ListEventsOptions::new())
             .await
             .unwrap();
-        assert_eq!(all.total_count, 7);
+        assert_eq!(all.total_count as usize, events.len());
         for name in ["unknown", "CUSTOM", ""] {
             let page = client
                 .list_events(

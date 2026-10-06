@@ -50,7 +50,6 @@ impl Dialect for PostgresDialect {
     fn enum_cast(kind: EnumKind) -> &'static str {
         match kind {
             EnumKind::InstanceStatus => "::instance_status",
-            EnumKind::TerminationReason => "::termination_reason",
         }
     }
 
