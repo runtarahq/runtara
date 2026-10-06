@@ -550,6 +550,8 @@ struct StepSummariesFetch<'a> {
     step_ids: &'a [String],
     /// Restrict to a status ("running", "completed", "failed").
     status: Option<&'a str>,
+    /// Restrict to records from this scope (one Split/While iteration).
+    scope_id: Option<&'a str>,
     /// Maximum records returned; the response's `totalCount` still reflects
     /// everything matching the filter. `0` fetches counts only.
     limit: u32,
@@ -564,6 +566,20 @@ async fn fetch_step_summaries(
     instance_id: &str,
     fetch: &StepSummariesFetch<'_>,
 ) -> Result<serde_json::Value, rmcp::ErrorData> {
+    api_get(
+        server,
+        &format!(
+            "/api/runtime/workflows/{}/instances/{}/steps?{}",
+            workflow_id,
+            instance_id,
+            step_summaries_query(fetch)
+        ),
+    )
+    .await
+}
+
+/// The `/steps` query string for a targeted fetch.
+fn step_summaries_query(fetch: &StepSummariesFetch<'_>) -> String {
     let mut query = Vec::new();
     if !fetch.step_ids.is_empty() {
         push_query_param(&mut query, "stepIds", &fetch.step_ids.join(","));
@@ -571,17 +587,11 @@ async fn fetch_step_summaries(
     if let Some(status) = fetch.status {
         push_query_param(&mut query, "status", status);
     }
+    if let Some(scope_id) = fetch.scope_id {
+        push_query_param(&mut query, "scopeId", scope_id);
+    }
     query.push(format!("limit={}", fetch.limit));
-    api_get(
-        server,
-        &format!(
-            "/api/runtime/workflows/{}/instances/{}/steps?{}",
-            workflow_id,
-            instance_id,
-            query.join("&")
-        ),
-    )
-    .await
+    query.join("&")
 }
 
 /// Extract the step records from a summaries response.
@@ -861,6 +871,15 @@ impl StepScope {
         }
     }
 
+    /// The scope to fetch referenced step records under. A placed step reads
+    /// records only from its own iteration (see [`scoped_step_record`]), so
+    /// fetching just those keeps a busy loop's other iterations from crowding
+    /// them out of a capped page. `None` at the top level, or when the step
+    /// isn't placed and reads the newest record of any scope.
+    fn records_scope(&self) -> Option<&str> {
+        self.placement.as_ref().and(self.scope_id.as_deref())
+    }
+
     /// Each enclosing loop's iteration index, outermost first. The runtime
     /// builds the scope id as `sc_<loop>_<i>` and appends `_<loop>_<i>` per
     /// nested loop; reading it against the known loop ids keeps the parse
@@ -1016,6 +1035,18 @@ impl Resolution {
         match self {
             Self::Found(value) => Some(value),
             _ => None,
+        }
+    }
+
+    /// The reference's `default`, when the runtime would use it: as its
+    /// `resolve_lookup` does, a found `null` or a miss falls back to it. Never
+    /// for a runtime-only value, which the runtime does have.
+    fn default_from(&self, envelope: &serde_json::Value) -> Option<serde_json::Value> {
+        match self {
+            Self::Found(serde_json::Value::Null) | Self::Missing(_) => {
+                envelope.get("default").cloned()
+            }
+            Self::Found(_) | Self::RuntimeOnly(_) => None,
         }
     }
 }
@@ -1454,10 +1485,9 @@ fn recover_error_envelope(text: &str) -> serde_json::Value {
 }
 
 /// What a reference envelope (`{valueType: "reference", value, default?}`)
-/// hands the step, applying its `default` the way the runtime's
-/// `resolve_lookup` does: a found `null` or a miss falls back to it. `None`
-/// when the value isn't known here — missing with no default, or runtime-only,
-/// where a default would only stand in for a value the runtime does have.
+/// hands the step, its `default` applied (see [`Resolution::default_from`]).
+/// `None` when the value isn't known here: missing with no default, or
+/// runtime-only.
 fn resolve_envelope_reference(
     envelope: &serde_json::Value,
     ref_path: &str,
@@ -1465,15 +1495,10 @@ fn resolve_envelope_reference(
     execution: &serde_json::Value,
     scope: &StepScope,
 ) -> Option<serde_json::Value> {
-    let default = envelope.get("default").cloned();
-    match resolve_reference(ref_path, summaries, execution, scope) {
-        Resolution::Found(serde_json::Value::Null) => {
-            Some(default.unwrap_or(serde_json::Value::Null))
-        }
-        Resolution::Found(value) => Some(value),
-        Resolution::Missing(_) => default,
-        Resolution::RuntimeOnly(_) => None,
-    }
+    let resolution = resolve_reference(ref_path, summaries, execution, scope);
+    resolution
+        .default_from(envelope)
+        .or_else(|| resolution.found())
 }
 
 fn resolve_nested_reference_envelopes(
@@ -1931,14 +1956,23 @@ fn resolve_input_mappings(
                     }
                     // Every root's value comes from the shared resolver, so
                     // this can never diverge from the runtime (see
-                    // resolve_reference).
-                    match resolve_reference(ref_path, summaries, execution, scope) {
-                        Resolution::Found(resolved) => {
-                            if has_value {
-                                entry["resolvedValue"] = resolved;
+                    // resolve_reference), with the mapping's `default`
+                    // applied the same way as for nested references.
+                    let resolution = resolve_reference(ref_path, summaries, execution, scope);
+                    match (resolution.default_from(mapping_value), resolution) {
+                        (Some(default), resolution) => {
+                            entry["resolvedValue"] = default;
+                            entry["defaultApplied"] = json!(true);
+                            if let Resolution::Missing(Some(reason)) = resolution {
+                                entry["resolutionNote"] = json!(reason);
                             }
                         }
-                        Resolution::Missing(reason) => {
+                        (None, Resolution::Found(value)) => {
+                            if has_value {
+                                entry["resolvedValue"] = value;
+                            }
+                        }
+                        (None, Resolution::Missing(reason)) => {
                             if has_value {
                                 entry["resolvedValue"] = json!(null);
                             }
@@ -1946,7 +1980,7 @@ fn resolve_input_mappings(
                                 entry["resolutionNote"] = json!(reason);
                             }
                         }
-                        Resolution::RuntimeOnly(reason) => {
+                        (None, Resolution::RuntimeOnly(reason)) => {
                             entry["resolvedValue"] = json!(null);
                             entry["runtimeOnly"] = json!(true);
                             entry["resolutionNote"] = json!(reason);
@@ -2058,6 +2092,7 @@ pub async fn inspect_step(
         &StepSummariesFetch {
             step_ids: std::slice::from_ref(&params.step_id),
             status: None,
+            scope_id: None,
             limit: 1,
         },
     )
@@ -2075,6 +2110,11 @@ pub async fn inspect_step(
             )
         })?;
 
+    let scope = StepScope::new(
+        target.get("scopeId").and_then(|v| v.as_str()),
+        located.map(|(_, placement)| placement),
+    );
+
     // Steps referenced by the mapping are fetched as one batch; anything the
     // mapping doesn't reference never crosses the wire.
     let (mut ref_ids, wants_error) = referenced_step_ids(&input_mapping);
@@ -2090,6 +2130,7 @@ pub async fn inspect_step(
             &StepSummariesFetch {
                 step_ids: &ref_ids,
                 status: None,
+                scope_id: scope.records_scope(),
                 limit: STEP_SUMMARY_FETCH_LIMIT,
             },
         )
@@ -2108,6 +2149,7 @@ pub async fn inspect_step(
             &StepSummariesFetch {
                 step_ids: &[],
                 status: Some("failed"),
+                scope_id: None,
                 limit: 1,
             },
         )
@@ -2116,10 +2158,6 @@ pub async fn inspect_step(
     }
     let summaries = synthetic_summaries(steps);
 
-    let scope = StepScope::new(
-        target.get("scopeId").and_then(|v| v.as_str()),
-        located.map(|(_, placement)| placement),
-    );
     let resolved_inputs = resolve_input_mappings(&input_mapping, &summaries, &execution, &scope);
 
     let mut response = json!({
@@ -2298,6 +2336,7 @@ async fn trace_error_context(
         &StepSummariesFetch {
             step_ids: &[],
             status: Some("failed"),
+            scope_id: None,
             limit: 1,
         },
     )
@@ -2361,6 +2400,7 @@ pub async fn trace_reference(
                 &StepSummariesFetch {
                     step_ids: &[step_id.to_string()],
                     status: None,
+                    scope_id: None,
                     limit: 1,
                 },
             )
@@ -2514,6 +2554,7 @@ pub async fn why_execution_failed(
         &StepSummariesFetch {
             step_ids: &[],
             status: Some("failed"),
+            scope_id: None,
             limit: 1,
         },
     )
@@ -2528,6 +2569,7 @@ pub async fn why_execution_failed(
         &StepSummariesFetch {
             step_ids: &[],
             status: Some("running"),
+            scope_id: None,
             limit: IN_FLIGHT_FETCH_LIMIT,
         },
     )
@@ -2542,6 +2584,7 @@ pub async fn why_execution_failed(
         &StepSummariesFetch {
             step_ids: &[],
             status: None,
+            scope_id: None,
             limit: 0,
         },
     )
@@ -2592,6 +2635,11 @@ pub async fn why_execution_failed(
             .cloned()
             .unwrap_or(json!({}));
 
+        let scope = StepScope::new(
+            first_failed.get("scopeId").and_then(|v| v.as_str()),
+            located.map(|(_, placement)| placement),
+        );
+
         // Fetch only the steps the failing step's mapping references; its
         // own record already carries the error, so a `steps.__error`
         // reference resolves against it without another fetch.
@@ -2607,6 +2655,7 @@ pub async fn why_execution_failed(
                 &StepSummariesFetch {
                     step_ids: &ref_ids,
                     status: None,
+                    scope_id: scope.records_scope(),
                     limit: STEP_SUMMARY_FETCH_LIMIT,
                 },
             )
@@ -2615,10 +2664,6 @@ pub async fn why_execution_failed(
         }
         let summaries = synthetic_summaries(steps);
 
-        let scope = StepScope::new(
-            first_failed.get("scopeId").and_then(|v| v.as_str()),
-            located.map(|(_, placement)| placement),
-        );
         let resolved_inputs =
             resolve_input_mappings(&input_mapping, &summaries, &execution, &scope);
 
@@ -4441,5 +4486,102 @@ mod tests {
         assert_eq!(resolved["prev"]["runtimeOnly"], json!(true));
         assert_eq!(resolved["gone"]["resolvedValue"], json!(null));
         assert!(resolved["gone"].get("runtimeOnly").is_none());
+    }
+
+    /// A placed step reads referenced records only from its own iteration,
+    /// so they are fetched from that scope alone: a busy loop's other
+    /// iterations can't crowd them out of the capped page.
+    #[test]
+    fn referenced_records_are_fetched_from_the_steps_own_scope() {
+        let in_split = in_loops("sc_split_0", &[("split", true)], &["fetch"]);
+        assert_eq!(in_split.records_scope(), Some("sc_split_0"));
+        // Top level, and unplaced: no scope filter.
+        assert_eq!(
+            StepScope::new(None, Some(Placement::default())).records_scope(),
+            None
+        );
+        assert_eq!(
+            StepScope::new(Some("sc_split_0"), None).records_scope(),
+            None
+        );
+
+        let ids = ["fetch".to_string(), "enrich".to_string()];
+        let query = step_summaries_query(&StepSummariesFetch {
+            step_ids: &ids,
+            status: None,
+            scope_id: in_split.records_scope(),
+            limit: STEP_SUMMARY_FETCH_LIMIT,
+        });
+        assert_eq!(query, "stepIds=fetch%2Cenrich&scopeId=sc_split_0&limit=500");
+        let query = step_summaries_query(&StepSummariesFetch {
+            step_ids: &[],
+            status: Some("failed"),
+            scope_id: None,
+            limit: 1,
+        });
+        assert_eq!(query, "status=failed&limit=1");
+    }
+
+    /// A direct reference mapping's `default` applies the way the runtime's
+    /// `resolve_lookup` applies it — to a found `null` or a miss — exactly as
+    /// for the same reference nested in a composite; never to a runtime-only
+    /// value.
+    #[test]
+    fn direct_reference_default_applies_like_the_runtime() {
+        let execution = json!({
+            "data": {
+                "inputs": {
+                    "data": { "null_value": null, "threshold": 7 },
+                    "variables": {}
+                }
+            }
+        });
+        let reference = |path: &str, default: serde_json::Value| json!({ "valueType": "reference", "value": path, "default": default });
+        let mapping = json!({
+            "null_field": reference("workflow.inputs.data.null_value", json!("fallback")),
+            "missing": reference("data.missing", json!("fb")),
+            "present": reference("data.threshold", json!(1)),
+        });
+
+        let resolved = resolve_input_mappings(&mapping, &summaries(), &execution, &top());
+        assert_eq!(resolved["null_field"]["resolvedValue"], json!("fallback"));
+        assert_eq!(resolved["null_field"]["defaultApplied"], json!(true));
+        assert_eq!(resolved["missing"]["resolvedValue"], json!("fb"));
+        assert_eq!(resolved["missing"]["defaultApplied"], json!(true));
+        assert_eq!(resolved["present"]["resolvedValue"], json!(7));
+        assert!(resolved["present"].get("defaultApplied").is_none());
+
+        // The same references nested in a composite resolve the same way.
+        let composite = resolve_input_mappings(
+            &json!({ "all": { "valueType": "composite", "value": mapping } }),
+            &summaries(),
+            &execution,
+            &top(),
+        );
+        assert_eq!(
+            composite["all"]["resolvedValue"],
+            json!({ "null_field": "fallback", "missing": "fb", "present": 7 })
+        );
+
+        // Runtime-only stays runtime-only; a miss with a reason keeps it.
+        let in_split = in_loops("sc_split_0", &[("split", true)], &["use"]);
+        let resolved = resolve_input_mappings(
+            &json!({
+                "sku": reference("item.sku", json!("x")),
+                "outer": reference("steps.outer.outputs.ok", json!(false)),
+            }),
+            &summaries(),
+            &execution,
+            &in_split,
+        );
+        assert_eq!(resolved["sku"]["runtimeOnly"], json!(true));
+        assert_eq!(resolved["sku"]["resolvedValue"], json!(null));
+        assert!(resolved["sku"].get("defaultApplied").is_none());
+        assert_eq!(resolved["outer"]["resolvedValue"], json!(false));
+        assert_eq!(resolved["outer"]["defaultApplied"], json!(true));
+        assert_eq!(
+            resolved["outer"]["resolutionNote"],
+            json!(STEP_OUTSIDE_GRAPH)
+        );
     }
 }
