@@ -29,6 +29,14 @@ fn platform_http_client(connect_timeout: Duration, request_timeout: Duration) ->
         .expect("failed to build reqwest client")
 }
 
+/// Map a failed platform call to a `WebhookError` without the request URL.
+/// Telegram puts the bot token in the URL path, and reqwest's error text
+/// includes the URL, so keeping it would leak the token wherever the error
+/// is logged.
+fn platform_error(error: reqwest::Error) -> WebhookError {
+    WebhookError::PlatformError(error.without_url().to_string())
+}
+
 /// Manages webhook registration with external platforms.
 ///
 /// Called by the trigger service when Channel triggers are created/updated/deleted.
@@ -237,12 +245,9 @@ impl WebhookManager {
             }))
             .send()
             .await
-            .map_err(|e| WebhookError::PlatformError(e.to_string()))?;
+            .map_err(platform_error)?;
 
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| WebhookError::PlatformError(e.to_string()))?;
+        let body: Value = resp.json().await.map_err(platform_error)?;
 
         if body["ok"].as_bool() != Some(true) {
             return Err(WebhookError::PlatformError(format!(
@@ -261,12 +266,9 @@ impl WebhookManager {
             .post(&url)
             .send()
             .await
-            .map_err(|e| WebhookError::PlatformError(e.to_string()))?;
+            .map_err(platform_error)?;
 
-        let body: Value = resp
-            .json()
-            .await
-            .map_err(|e| WebhookError::PlatformError(e.to_string()))?;
+        let body: Value = resp.json().await.map_err(platform_error)?;
 
         if body["ok"].as_bool() != Some(true) {
             warn!("Telegram deleteWebhook returned: {}", body);
@@ -353,11 +355,12 @@ impl std::fmt::Display for WebhookError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
     use std::time::Instant;
 
-    #[tokio::test]
-    async fn platform_client_gives_up_on_a_platform_that_never_answers() {
-        // Accept connections and hold them open without ever responding.
+    /// A platform that accepts connections and holds them open without ever
+    /// responding.
+    async fn silent_platform() -> SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -366,6 +369,12 @@ mod tests {
                 held.push(stream);
             }
         });
+        addr
+    }
+
+    #[tokio::test]
+    async fn platform_client_gives_up_on_a_platform_that_never_answers() {
+        let addr = silent_platform().await;
 
         let client = platform_http_client(Duration::from_secs(1), Duration::from_millis(300));
         let started = Instant::now();
@@ -379,5 +388,26 @@ mod tests {
         let error = result.expect_err("a platform that never answers is an error");
         assert!(error.is_timeout(), "expected a timeout, got: {error}");
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn platform_error_does_not_leak_the_bot_token_in_the_url() {
+        let addr = silent_platform().await;
+        let client = platform_http_client(Duration::from_secs(1), Duration::from_millis(300));
+        let token = "123456:token-that-must-not-be-logged";
+
+        let error = client
+            .post(format!("http://{addr}/bot{token}/setWebhook"))
+            .send()
+            .await
+            .expect_err("a platform that never answers is an error");
+        assert!(
+            error.to_string().contains(token),
+            "precondition: reqwest's own error text carries the URL"
+        );
+
+        let message = platform_error(error).to_string();
+        assert!(!message.contains(token), "token leaked: {message}");
+        assert!(!message.contains("/bot"), "URL leaked: {message}");
     }
 }
