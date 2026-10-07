@@ -6,8 +6,12 @@
 
 use runtara_connections::ConnectionsFacade;
 use serde_json::{Value, json};
+use sqlx::PgPool;
 use std::sync::Arc;
 use tracing::{info, warn};
+
+use crate::api::dto::triggers::{InvocationTrigger, TriggerType};
+use crate::api::repositories::triggers::TriggerRepository;
 
 /// Manages webhook registration with external platforms.
 ///
@@ -269,6 +273,42 @@ pub fn extract_connection_id(configuration: &Option<Value>) -> Option<&str> {
         .as_ref()
         .and_then(|c| c.get("connection_id"))
         .and_then(|v| v.as_str())
+}
+
+/// Best-effort webhook registration for an active Channel trigger.
+/// Stores the webhook secret in the trigger's configuration for request validation.
+pub async fn register_trigger_webhook(
+    pool: &PgPool,
+    connections: &Arc<ConnectionsFacade>,
+    trigger: &InvocationTrigger,
+    tenant_id: &str,
+) {
+    if trigger.trigger_type == TriggerType::Channel
+        && trigger.active
+        && let Some(conn_id) = extract_connection_id(&trigger.configuration)
+    {
+        let manager = WebhookManager::new(connections.clone());
+        match manager.register(conn_id, tenant_id).await {
+            Ok(registration) => {
+                // Store webhook secret and platform in the trigger's configuration.
+                let mut config = trigger.configuration.clone().unwrap_or_else(|| json!({}));
+                if let Some(obj) = config.as_object_mut() {
+                    obj.insert(
+                        "webhook_secret".to_string(),
+                        Value::String(registration.webhook_secret),
+                    );
+                    obj.insert("platform".to_string(), Value::String(registration.platform));
+                }
+                let repo = TriggerRepository::new(pool.clone());
+                if let Err(e) = repo.update_configuration(&trigger.id, &config).await {
+                    warn!(error = %e, "Failed to store webhook secret in trigger");
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, connection_id = %conn_id, "Failed to register webhook");
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
