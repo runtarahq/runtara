@@ -3,8 +3,11 @@
 //! Business logic for workflow management
 //! Handles validation, orchestration, and error mapping
 
+use crate::api::dto::triggers::{InvocationTrigger, TriggerType};
 use crate::api::dto::workflows::*;
+use crate::api::repositories::triggers::TriggerRepository;
 use crate::api::repositories::workflows::WorkflowRepository;
+use crate::api::services::webhook_manager::{WebhookManager, extract_connection_id};
 use crate::api::utils::pagination::{normalize_page, normalize_page_size};
 use crate::api::utils::validation::is_valid_identifier;
 use crate::types::MemoryTier;
@@ -12,6 +15,7 @@ use runtara_connections::ConnectionsFacade;
 use runtara_dsl::agent_meta::AgentCatalog;
 use runtara_workflows::validation::validate_workflow;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -1022,7 +1026,75 @@ impl WorkflowService {
             );
         }
 
-        Ok(deleted)
+        if !deleted.deactivated_triggers.is_empty() {
+            let trigger_ids: Vec<&str> = deleted
+                .deactivated_triggers
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect();
+            tracing::info!(
+                tenant_id,
+                workflow_id,
+                ?trigger_ids,
+                "Deactivated triggers of deleted workflow"
+            );
+            self.unregister_channel_webhooks(tenant_id, &deleted.deactivated_triggers)
+                .await;
+        }
+
+        Ok(deleted.definitions_deleted)
+    }
+
+    /// Unregister the platform webhooks of deactivated Channel triggers, the
+    /// same cleanup deactivating a Channel trigger through the trigger API
+    /// does. A webhook is registered per connection, so it is kept while any
+    /// other active Channel trigger still uses that connection. Best-effort —
+    /// a failure here must not resurrect the workflow.
+    async fn unregister_channel_webhooks(&self, tenant_id: &str, triggers: &[InvocationTrigger]) {
+        let connection_ids: BTreeSet<&str> = triggers
+            .iter()
+            .filter(|t| t.trigger_type == TriggerType::Channel)
+            .filter_map(|t| extract_connection_id(&t.configuration))
+            .collect();
+        if connection_ids.is_empty() {
+            return;
+        }
+
+        let trigger_repository = TriggerRepository::new(self.repository.pool().clone());
+        let manager = WebhookManager::new(self.connections.clone());
+        for connection_id in connection_ids {
+            match trigger_repository
+                .connection_has_active_channel_trigger(connection_id, tenant_id)
+                .await
+            {
+                Ok(false) => {}
+                Ok(true) => {
+                    tracing::info!(
+                        tenant_id,
+                        connection_id,
+                        "Keeping channel webhook registered: another active trigger uses the connection"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        tenant_id,
+                        connection_id,
+                        error = %e,
+                        "Failed to check other channel triggers; keeping webhook registered"
+                    );
+                    continue;
+                }
+            }
+            if let Err(e) = manager.unregister(connection_id, tenant_id).await {
+                tracing::warn!(
+                    tenant_id,
+                    connection_id,
+                    error = %e,
+                    "Failed to unregister channel webhook of deleted workflow"
+                );
+            }
+        }
     }
 
     /// Clone a workflow with a new name

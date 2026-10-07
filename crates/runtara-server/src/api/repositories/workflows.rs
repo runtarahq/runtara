@@ -4,6 +4,7 @@ use serde_json::Value;
 use sha2::Digest;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
+use crate::api::dto::triggers::InvocationTrigger;
 use crate::api::dto::workflows::{
     Note, VersionSchemasResponse, WorkflowDto, WorkflowVersionInfoDto, graph_supports_chat,
     state_schema_from_definition,
@@ -201,6 +202,16 @@ pub struct RegisteredImageRecord<'a> {
     pub compiler_mode: Option<&'a str>,
     pub track_events: bool,
     pub trusted_pins: &'a [String],
+}
+
+/// Outcome of [`WorkflowRepository::delete_workflow`].
+#[derive(Debug)]
+pub struct DeletedWorkflow {
+    /// Number of workflow definitions (versions) marked as deleted.
+    pub definitions_deleted: u64,
+    /// Triggers that were active and are now deactivated, as they read after
+    /// the update (`active = false`).
+    pub deactivated_triggers: Vec<InvocationTrigger>,
 }
 
 /// Repository for workflow CRUD operations
@@ -675,44 +686,6 @@ impl WorkflowRepository {
         .await?;
 
         Ok(row.is_some())
-    }
-
-    /// Soft delete a workflow (marks as deleted, does not remove from database)
-    /// Returns the number of rows affected
-    pub async fn delete(&self, tenant_id: &str, workflow_id: &str) -> Result<u64, sqlx::Error> {
-        // Use a transaction to ensure atomicity - both tables must be updated together
-        let mut tx = self.pool.begin().await?;
-
-        // First, mark all workflow definitions as deleted
-        sqlx::query!(
-            r#"
-            UPDATE workflow_definitions
-            SET deleted_at = NOW()
-            WHERE tenant_id = $1 AND workflow_id = $2 AND deleted_at IS NULL
-            "#,
-            tenant_id,
-            workflow_id
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        // Then mark the workflow metadata as deleted
-        let result = sqlx::query!(
-            r#"
-            UPDATE workflows
-            SET deleted_at = NOW()
-            WHERE tenant_id = $1 AND workflow_id = $2 AND deleted_at IS NULL
-            "#,
-            tenant_id,
-            workflow_id
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        // Commit the transaction
-        tx.commit().await?;
-
-        Ok(result.rows_affected())
     }
 
     /// List all workflows (metadata only) with pagination and optional folder filtering
@@ -2106,13 +2079,18 @@ impl WorkflowRepository {
 
     /// Soft delete a workflow and all its versions
     ///
-    /// Marks the workflow and all its definitions as deleted.
-    /// Returns the number of definitions deleted.
+    /// Marks the workflow and all its definitions as deleted and deactivates
+    /// the workflow's invocation triggers, all in one transaction. Triggers
+    /// have no foreign key to `workflows`, so without this they would keep
+    /// firing against a workflow that can never run again. They are
+    /// deactivated rather than deleted so they stay auditable.
     pub async fn delete_workflow(
         &self,
         tenant_id: &str,
         workflow_id: &str,
-    ) -> Result<u64, sqlx::Error> {
+    ) -> Result<DeletedWorkflow, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
         // Delete all definitions
         let definitions_result = sqlx::query!(
             r#"
@@ -2123,7 +2101,7 @@ impl WorkflowRepository {
             tenant_id,
             workflow_id
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         // Delete workflow metadata
@@ -2136,10 +2114,34 @@ impl WorkflowRepository {
             tenant_id,
             workflow_id
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
-        Ok(definitions_result.rows_affected())
+        // Global (NULL-tenant) triggers are included: the cron scheduler fires
+        // them for every tenant, so leaving them active would leave exactly
+        // the orphan this guards against.
+        let deactivated_triggers = sqlx::query_as::<_, InvocationTrigger>(
+            r#"
+            UPDATE invocation_trigger
+            SET active = false, updated_at = NOW()
+            WHERE workflow_id = $2
+              AND (tenant_id = $1 OR tenant_id IS NULL)
+              AND active = true
+            RETURNING id, tenant_id, workflow_id, trigger_type, active, configuration,
+                      created_at, last_run, updated_at, remote_tenant_id, single_instance
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(workflow_id)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(DeletedWorkflow {
+            definitions_deleted: definitions_result.rows_affected(),
+            deactivated_triggers,
+        })
     }
 
     /// Clone a workflow to a new workflow ID with a new name

@@ -46,6 +46,11 @@ path = "tests/authz_ownership.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
+name = "workflow_trigger_cleanup"
+path = "tests/workflow_trigger_cleanup.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
 name = "runtime_types"
 path = "tests/runtime_types.rs"
 

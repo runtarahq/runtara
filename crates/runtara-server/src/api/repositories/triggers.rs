@@ -234,4 +234,61 @@ impl TriggerRepository {
         .await?;
         Ok(())
     }
+
+    /// Whether any active Channel trigger visible to `tenant_id` is still
+    /// bound to `connection_id`. Channel webhooks are registered per
+    /// connection, so one must stay registered while any trigger still uses it.
+    pub async fn connection_has_active_channel_trigger(
+        &self,
+        connection_id: &str,
+        tenant_id: &str,
+    ) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM public.invocation_trigger
+                WHERE trigger_type = 'CHANNEL'
+                  AND active = true
+                  AND configuration->>'connection_id' = $1
+                  AND (tenant_id = $2 OR tenant_id IS NULL)
+            )
+            "#,
+        )
+        .bind(connection_id)
+        .bind(tenant_id)
+        .fetch_one(&self.pool)
+        .await
+    }
+
+    /// Deactivate every active trigger visible to `tenant_id` whose workflow
+    /// is deleted or missing, returning the deactivated rows.
+    ///
+    /// Triggers have no foreign key to `workflows`, so a trigger whose
+    /// workflow was deleted without deactivating it would otherwise keep
+    /// firing indefinitely. The workflow lookup is deliberately not
+    /// tenant-scoped: a trigger is only treated as orphaned when no tenant has
+    /// a live workflow with that id, so a global (NULL-tenant) trigger is
+    /// never switched off from one tenant's point of view.
+    pub async fn deactivate_orphaned(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<InvocationTrigger>, sqlx::Error> {
+        sqlx::query_as::<_, InvocationTrigger>(
+            r#"
+            UPDATE public.invocation_trigger t
+            SET active = false, updated_at = NOW()
+            WHERE t.active = true
+              AND (t.tenant_id = $1 OR t.tenant_id IS NULL)
+              AND NOT EXISTS (
+                  SELECT 1 FROM workflows w
+                  WHERE w.workflow_id = t.workflow_id AND w.deleted_at IS NULL
+              )
+            RETURNING t.id, t.tenant_id, t.workflow_id, t.trigger_type, t.active, t.configuration,
+                      t.created_at, t.last_run, t.updated_at, t.remote_tenant_id, t.single_instance
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await
+    }
 }

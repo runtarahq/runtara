@@ -1,7 +1,8 @@
 //! Cron Scheduler Worker
 //!
 //! Polls the invocation_trigger table for active CRON triggers and durably
-//! enqueues events when their schedules match the current time.
+//! enqueues events when their schedules match the current time. Each poll
+//! first deactivates triggers whose workflow no longer exists.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +16,7 @@ use uuid::Uuid;
 
 use crate::api::dto::trigger_event::TriggerEvent;
 use crate::api::dto::triggers::InvocationTrigger;
+use crate::api::repositories::triggers::TriggerRepository;
 use crate::shutdown::ShutdownSignal;
 use crate::workers::execution_engine::ExecutionEngine;
 use crate::workers::execution_outbox::source_idempotency_key;
@@ -85,6 +87,11 @@ pub async fn run(
 
         debug!(scheduler_id = %scheduler_id, "Checking for due cron triggers");
 
+        // Switch off triggers whose workflow no longer exists before reading
+        // the active set, so they stop firing. A failure here must not hold
+        // back live triggers, so it is logged and the tick carries on.
+        deactivate_orphaned_triggers(&pool, &tenant_id).await;
+
         // Get all active CRON triggers for this tenant
         let triggers = match get_active_cron_triggers(&pool, &tenant_id).await {
             Ok(triggers) => triggers,
@@ -145,6 +152,34 @@ pub async fn run(
                     );
                 }
             }
+        }
+    }
+}
+
+/// Deactivate this tenant's triggers whose workflow is deleted or missing.
+///
+/// Covers every trigger type, not only CRON: an orphaned trigger of any type
+/// points at a workflow that can never run. This is the scheduler's job only
+/// because it is the existing per-tenant poll loop. Each deactivation is
+/// logged at warn level because it changes user-visible state without any
+/// user action.
+async fn deactivate_orphaned_triggers(pool: &PgPool, tenant_id: &str) {
+    match TriggerRepository::new(pool.clone())
+        .deactivate_orphaned(tenant_id)
+        .await
+    {
+        Ok(deactivated) => {
+            for trigger in deactivated {
+                warn!(
+                    trigger_id = %trigger.id,
+                    workflow_id = %trigger.workflow_id,
+                    trigger_type = ?trigger.trigger_type,
+                    "Deactivated trigger whose workflow no longer exists"
+                );
+            }
+        }
+        Err(e) => {
+            error!(error = %e, "Failed to deactivate orphaned triggers");
         }
     }
 }
