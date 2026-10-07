@@ -1057,9 +1057,10 @@ impl WorkflowService {
     /// it. So for each connection:
     /// - no live trigger left: unregister, as deactivating a Channel trigger
     ///   through the trigger API does;
-    /// - a deactivated trigger was newer than the newest survivor: the
-    ///   platform holds the deactivated trigger's secret, so register again
-    ///   for the survivor;
+    /// - a deactivated trigger was not older than the newest survivor: the
+    ///   platform may hold the deactivated trigger's secret (validation order
+    ///   is undefined on a `created_at` tie), so register again for the
+    ///   survivor;
     /// - otherwise the survivor's secret is already the one in use; leave it.
     async fn reconcile_channel_webhooks(&self, tenant_id: &str, triggers: &[InvocationTrigger]) {
         // Newest deactivated trigger per connection.
@@ -1097,7 +1098,7 @@ impl WorkflowService {
                         );
                     }
                 }
-                Ok(Some(survivor)) if survivor.created_at < newest_deactivated_at => {
+                Ok(Some(survivor)) if survivor.created_at <= newest_deactivated_at => {
                     tracing::info!(
                         tenant_id,
                         connection_id,
