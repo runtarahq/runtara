@@ -15,52 +15,12 @@ use crate::api::dto::common::ApiResponse;
 use crate::api::dto::triggers::*;
 use crate::api::repositories::triggers::TriggerRepository;
 use crate::api::services::triggers::{ServiceError, TriggerService};
-use crate::api::services::webhook_manager::{WebhookManager, extract_connection_id};
+use crate::api::services::webhook_manager::{
+    WebhookManager, extract_connection_id, register_trigger_webhook,
+};
 use crate::auth::AuthContext;
 use crate::middleware::tenant_auth::Source;
 use crate::product_events::{EventType, ProductEvent, ProductEventSink};
-
-/// Best-effort webhook registration after a Channel trigger is created/activated.
-/// Stores the webhook secret in the trigger's configuration for request validation.
-async fn maybe_register_webhook(
-    pool: &PgPool,
-    connections: &Arc<runtara_connections::ConnectionsFacade>,
-    trigger: &InvocationTrigger,
-    tenant_id: &str,
-) {
-    if trigger.trigger_type == TriggerType::Channel
-        && trigger.active
-        && let Some(conn_id) = extract_connection_id(&trigger.configuration)
-    {
-        let manager = WebhookManager::new(connections.clone());
-        match manager.register(conn_id, tenant_id).await {
-            Ok(registration) => {
-                // Store webhook secret and platform in the trigger's configuration.
-                let mut config = trigger
-                    .configuration
-                    .clone()
-                    .unwrap_or_else(|| serde_json::json!({}));
-                if let Some(obj) = config.as_object_mut() {
-                    obj.insert(
-                        "webhook_secret".to_string(),
-                        serde_json::Value::String(registration.webhook_secret),
-                    );
-                    obj.insert(
-                        "platform".to_string(),
-                        serde_json::Value::String(registration.platform),
-                    );
-                }
-                let repo = TriggerRepository::new(pool.clone());
-                if let Err(e) = repo.update_configuration(&trigger.id, &config).await {
-                    tracing::warn!(error = %e, "Failed to store webhook secret in trigger");
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, connection_id = %conn_id, "Failed to register webhook");
-            }
-        }
-    }
-}
 
 /// Best-effort webhook unregistration after a Channel trigger is deactivated/deleted.
 async fn maybe_unregister_webhook(
@@ -117,7 +77,7 @@ pub async fn create_invocation_trigger(
                     .properties(json!({"trigger_type": &trigger.trigger_type}))
                     .source(source),
             );
-            maybe_register_webhook(&pool, &connections, &trigger, &tenant_id).await;
+            register_trigger_webhook(&pool, &connections, &trigger, &tenant_id).await;
 
             // Re-read the trigger to get updated config (webhook_secret, platform).
             let trigger = service
@@ -308,7 +268,7 @@ pub async fn update_invocation_trigger(
             let is_active_channel = trigger.trigger_type == TriggerType::Channel && trigger.active;
 
             if !was_active_channel && is_active_channel {
-                maybe_register_webhook(&pool, &connections, &trigger, &tenant_id).await;
+                register_trigger_webhook(&pool, &connections, &trigger, &tenant_id).await;
             } else if was_active_channel
                 && !is_active_channel
                 && let Some(ref old) = old_trigger

@@ -235,28 +235,42 @@ impl TriggerRepository {
         Ok(())
     }
 
-    /// Whether any active Channel trigger visible to `tenant_id` is still
-    /// bound to `connection_id`. Channel webhooks are registered per
-    /// connection, so one must stay registered while any trigger still uses it.
-    pub async fn connection_has_active_channel_trigger(
+    /// The newest active Channel trigger visible to `tenant_id` that is bound
+    /// to `connection_id` and whose workflow is still live, or `None`.
+    ///
+    /// Channel webhooks are registered per connection, and inbound requests
+    /// are validated against the newest active Channel trigger on it (by
+    /// `created_at`), so this is the trigger whose secret the platform must
+    /// hold. Triggers of a dead workflow are skipped: they are about to be
+    /// deactivated, so the webhook must not be kept alive for them. Liveness
+    /// follows the orphan rule of [`Self::deactivate_orphaned`].
+    pub async fn newest_live_channel_trigger(
         &self,
         connection_id: &str,
         tenant_id: &str,
-    ) -> Result<bool, sqlx::Error> {
-        sqlx::query_scalar(
+    ) -> Result<Option<InvocationTrigger>, sqlx::Error> {
+        sqlx::query_as::<_, InvocationTrigger>(
             r#"
-            SELECT EXISTS (
-                SELECT 1 FROM public.invocation_trigger
-                WHERE trigger_type = 'CHANNEL'
-                  AND active = true
-                  AND configuration->>'connection_id' = $1
-                  AND (tenant_id = $2 OR tenant_id IS NULL)
-            )
+            SELECT t.id, t.tenant_id, t.workflow_id, t.trigger_type, t.active, t.configuration,
+                   t.created_at, t.last_run, t.updated_at, t.remote_tenant_id, t.single_instance
+            FROM public.invocation_trigger t
+            WHERE t.trigger_type = 'CHANNEL'
+              AND t.active = true
+              AND t.configuration->>'connection_id' = $1
+              AND (t.tenant_id = $2 OR t.tenant_id IS NULL)
+              AND EXISTS (
+                  SELECT 1 FROM workflows w
+                  WHERE w.workflow_id = t.workflow_id
+                    AND w.deleted_at IS NULL
+                    AND (t.tenant_id IS NULL OR w.tenant_id = t.tenant_id)
+              )
+            ORDER BY t.created_at DESC
+            LIMIT 1
             "#,
         )
         .bind(connection_id)
         .bind(tenant_id)
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await
     }
 
@@ -265,10 +279,12 @@ impl TriggerRepository {
     ///
     /// Triggers have no foreign key to `workflows`, so a trigger whose
     /// workflow was deleted without deactivating it would otherwise keep
-    /// firing indefinitely. The workflow lookup is deliberately not
-    /// tenant-scoped: a trigger is only treated as orphaned when no tenant has
-    /// a live workflow with that id, so a global (NULL-tenant) trigger is
-    /// never switched off from one tenant's point of view.
+    /// firing indefinitely. Workflow ids are only unique per tenant, so a
+    /// tenant's trigger needs a live workflow in that same tenant, while a
+    /// global (NULL-tenant) trigger is only orphaned once no tenant has a live
+    /// workflow with that id — it is never switched off from one tenant's
+    /// point of view. `WorkflowRepository::delete_workflow` applies the same
+    /// rule.
     pub async fn deactivate_orphaned(
         &self,
         tenant_id: &str,
@@ -281,7 +297,9 @@ impl TriggerRepository {
               AND (t.tenant_id = $1 OR t.tenant_id IS NULL)
               AND NOT EXISTS (
                   SELECT 1 FROM workflows w
-                  WHERE w.workflow_id = t.workflow_id AND w.deleted_at IS NULL
+                  WHERE w.workflow_id = t.workflow_id
+                    AND w.deleted_at IS NULL
+                    AND (t.tenant_id IS NULL OR w.tenant_id = t.tenant_id)
               )
             RETURNING t.id, t.tenant_id, t.workflow_id, t.trigger_type, t.active, t.configuration,
                       t.created_at, t.last_run, t.updated_at, t.remote_tenant_id, t.single_instance

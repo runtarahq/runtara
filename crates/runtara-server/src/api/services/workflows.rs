@@ -7,15 +7,18 @@ use crate::api::dto::triggers::{InvocationTrigger, TriggerType};
 use crate::api::dto::workflows::*;
 use crate::api::repositories::triggers::TriggerRepository;
 use crate::api::repositories::workflows::WorkflowRepository;
-use crate::api::services::webhook_manager::{WebhookManager, extract_connection_id};
+use crate::api::services::webhook_manager::{
+    WebhookManager, extract_connection_id, register_trigger_webhook,
+};
 use crate::api::utils::pagination::{normalize_page, normalize_page_size};
 use crate::api::utils::validation::is_valid_identifier;
 use crate::types::MemoryTier;
+use chrono::{DateTime, Utc};
 use runtara_connections::ConnectionsFacade;
 use runtara_dsl::agent_meta::AgentCatalog;
 use runtara_workflows::validation::validate_workflow;
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -1038,61 +1041,87 @@ impl WorkflowService {
                 ?trigger_ids,
                 "Deactivated triggers of deleted workflow"
             );
-            self.unregister_channel_webhooks(tenant_id, &deleted.deactivated_triggers)
+            self.reconcile_channel_webhooks(tenant_id, &deleted.deactivated_triggers)
                 .await;
         }
 
         Ok(deleted.definitions_deleted)
     }
 
-    /// Unregister the platform webhooks of deactivated Channel triggers, the
-    /// same cleanup deactivating a Channel trigger through the trigger API
-    /// does. A webhook is registered per connection, so it is kept while any
-    /// other active Channel trigger still uses that connection. Best-effort —
-    /// a failure here must not resurrect the workflow.
-    async fn unregister_channel_webhooks(&self, tenant_id: &str, triggers: &[InvocationTrigger]) {
-        let connection_ids: BTreeSet<&str> = triggers
+    /// Bring the platform webhooks of deactivated Channel triggers in line
+    /// with the triggers that remain. Best-effort — a failure here must not
+    /// resurrect the workflow.
+    ///
+    /// A webhook is registered per connection, and inbound requests are
+    /// validated against the secret of the newest active Channel trigger on
+    /// it. So for each connection:
+    /// - no live trigger left: unregister, as deactivating a Channel trigger
+    ///   through the trigger API does;
+    /// - a deactivated trigger was newer than the newest survivor: the
+    ///   platform holds the deactivated trigger's secret, so register again
+    ///   for the survivor;
+    /// - otherwise the survivor's secret is already the one in use; leave it.
+    async fn reconcile_channel_webhooks(&self, tenant_id: &str, triggers: &[InvocationTrigger]) {
+        // Newest deactivated trigger per connection.
+        let mut newest_deactivated: BTreeMap<&str, DateTime<Utc>> = BTreeMap::new();
+        for trigger in triggers
             .iter()
             .filter(|t| t.trigger_type == TriggerType::Channel)
-            .filter_map(|t| extract_connection_id(&t.configuration))
-            .collect();
-        if connection_ids.is_empty() {
+        {
+            if let Some(connection_id) = extract_connection_id(&trigger.configuration) {
+                let newest = newest_deactivated
+                    .entry(connection_id)
+                    .or_insert(trigger.created_at);
+                *newest = (*newest).max(trigger.created_at);
+            }
+        }
+        if newest_deactivated.is_empty() {
             return;
         }
 
-        let trigger_repository = TriggerRepository::new(self.repository.pool().clone());
+        let pool = self.repository.pool();
+        let trigger_repository = TriggerRepository::new(pool.clone());
         let manager = WebhookManager::new(self.connections.clone());
-        for connection_id in connection_ids {
+        for (connection_id, newest_deactivated_at) in newest_deactivated {
             match trigger_repository
-                .connection_has_active_channel_trigger(connection_id, tenant_id)
+                .newest_live_channel_trigger(connection_id, tenant_id)
                 .await
             {
-                Ok(false) => {}
-                Ok(true) => {
+                Ok(None) => {
+                    if let Err(e) = manager.unregister(connection_id, tenant_id).await {
+                        tracing::warn!(
+                            tenant_id,
+                            connection_id,
+                            error = %e,
+                            "Failed to unregister channel webhook of deleted workflow"
+                        );
+                    }
+                }
+                Ok(Some(survivor)) if survivor.created_at < newest_deactivated_at => {
                     tracing::info!(
                         tenant_id,
                         connection_id,
-                        "Keeping channel webhook registered: another active trigger uses the connection"
+                        trigger_id = %survivor.id,
+                        "Re-registering channel webhook for the newest remaining trigger"
                     );
-                    continue;
+                    register_trigger_webhook(pool, &self.connections, &survivor, tenant_id).await;
+                }
+                Ok(Some(survivor)) => {
+                    tracing::info!(
+                        tenant_id,
+                        connection_id,
+                        trigger_id = %survivor.id,
+                        "Keeping channel webhook registered: a newer trigger still uses the connection"
+                    );
                 }
                 Err(e) => {
                     tracing::warn!(
                         tenant_id,
                         connection_id,
                         error = %e,
-                        "Failed to check other channel triggers; keeping webhook registered"
+                        "Failed to look up remaining channel triggers; leaving webhook as is"
                     );
-                    continue;
                 }
-            }
-            if let Err(e) = manager.unregister(connection_id, tenant_id).await {
-                tracing::warn!(
-                    tenant_id,
-                    connection_id,
-                    error = %e,
-                    "Failed to unregister channel webhook of deleted workflow"
-                );
             }
         }
     }
