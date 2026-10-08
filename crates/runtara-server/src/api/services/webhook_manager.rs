@@ -33,8 +33,19 @@ fn platform_http_client(connect_timeout: Duration, request_timeout: Duration) ->
 /// Telegram puts the bot token in the URL path, and reqwest's error text
 /// includes the URL, so keeping it would leak the token wherever the error
 /// is logged.
+///
+/// A connect failure means the request never reached the platform, so it
+/// certainly applied nothing. Any later failure (a timeout waiting for the
+/// reply, a dropped connection, an unreadable reply) leaves the outcome
+/// unknown: the platform may have applied the request.
 fn platform_error(error: reqwest::Error) -> WebhookError {
-    WebhookError::PlatformError(error.without_url().to_string())
+    let unreached = error.is_connect();
+    let message = error.without_url().to_string();
+    if unreached {
+        WebhookError::NotApplied(message)
+    } else {
+        WebhookError::PlatformError(message)
+    }
 }
 
 /// Manages webhook registration with external platforms.
@@ -62,7 +73,7 @@ impl WebhookManager {
         }
     }
 
-    #[cfg(all(test, feature = "db-integration-tests"))]
+    #[cfg(test)]
     fn for_test(
         facade: Arc<ConnectionsFacade>,
         base_url: Option<String>,
@@ -70,7 +81,7 @@ impl WebhookManager {
     ) -> Self {
         Self {
             facade,
-            http_client: platform_http_client(PLATFORM_CONNECT_TIMEOUT, PLATFORM_REQUEST_TIMEOUT),
+            http_client: platform_http_client(Duration::from_secs(1), Duration::from_millis(500)),
             base_url,
             telegram_api_base,
         }
@@ -266,8 +277,8 @@ impl WebhookManager {
         let body: Value = resp.json().await.map_err(platform_error)?;
 
         if body["ok"].as_bool() != Some(true) {
-            return Err(WebhookError::PlatformError(format!(
-                "Telegram setWebhook failed: {}",
+            return Err(WebhookError::NotApplied(format!(
+                "Telegram setWebhook refused: {}",
                 body
             )));
         }
@@ -318,31 +329,48 @@ pub fn stored_webhook_secret(configuration: &Option<Value>) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// The secret a registration sends, and whether the trigger does not hold it
-/// yet and so must store it before the platform is contacted.
+/// Whether Telegram accepts `secret` as a webhook `secret_token`: 1 to 256
+/// characters of `A-Z`, `a-z`, `0-9`, `_` and `-`. Stored secrets are reused
+/// as they are, so one the platform would refuse must be replaced instead.
+fn usable_webhook_secret(secret: &str) -> bool {
+    (1..=256).contains(&secret.len())
+        && secret
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// The secret a registration sends, whether the trigger does not hold it yet
+/// and so must store it before the platform is contacted, and whether it was
+/// generated for this registration (so the platform cannot hold it unless
+/// this registration applied it).
 #[derive(Debug, PartialEq)]
 struct SecretChoice {
     secret: String,
     store_first: bool,
+    generated: bool,
 }
 
 /// Pick the secret to register: `preferred` when given, else the trigger's
-/// `stored` secret, else a new one. Reusing the stored secret keeps
-/// re-registration idempotent, so a failed call cannot strand the platform
-/// on a secret the trigger never kept.
+/// `stored` secret, else a new one; a secret the platform would refuse is
+/// skipped. Reusing the stored secret keeps re-registration idempotent, so a
+/// failed call cannot strand the platform on a secret the trigger never kept.
 fn choose_webhook_secret(stored: Option<&str>, preferred: Option<&str>) -> SecretChoice {
-    match (preferred, stored) {
+    let stored = stored.filter(|s| usable_webhook_secret(s));
+    match (preferred.filter(|s| usable_webhook_secret(s)), stored) {
         (Some(preferred), stored) => SecretChoice {
             secret: preferred.to_string(),
             store_first: stored != Some(preferred),
+            generated: false,
         },
         (None, Some(stored)) => SecretChoice {
             secret: stored.to_string(),
             store_first: false,
+            generated: false,
         },
         (None, None) => SecretChoice {
             secret: generate_webhook_secret(),
             store_first: true,
+            generated: true,
         },
     }
 }
@@ -354,6 +382,12 @@ fn choose_webhook_secret(stored: Option<&str>, preferred: Option<&str>) -> Secre
 /// times out, so a secret the trigger does not hold yet is stored first:
 /// whatever the outcome, the platform can only end up holding a secret the
 /// trigger holds too. If that write fails, the platform is not contacted.
+///
+/// When the platform certainly did not apply the call (it was never reached,
+/// or it refused), a secret generated for this registration is rolled back:
+/// the platform cannot hold it, and keeping it would reject every update the
+/// platform keeps sending with its previous secret. A preferred secret is
+/// kept, because it is chosen as the one the platform already holds.
 pub async fn register_trigger_webhook(
     pool: &PgPool,
     manager: &WebhookManager,
@@ -366,13 +400,15 @@ pub async fn register_trigger_webhook(
         && let Some(conn_id) = extract_connection_id(&trigger.configuration)
     {
         let repo = TriggerRepository::new(pool.clone());
-        let mut config = trigger.configuration.clone().unwrap_or_else(|| json!({}));
+        let original_config = trigger.configuration.clone().unwrap_or_else(|| json!({}));
+        let mut config = original_config.clone();
         let choice = choose_webhook_secret(
             stored_webhook_secret(&trigger.configuration),
             preferred_secret,
         );
 
-        if choice.store_first && manager.auto_registers() {
+        let stored_first = choice.store_first && manager.auto_registers();
+        if stored_first {
             if let Some(obj) = config.as_object_mut() {
                 obj.insert(
                     "webhook_secret".to_string(),
@@ -402,6 +438,22 @@ pub async fn register_trigger_webhook(
             }
             Err(e) => {
                 warn!(error = %e, connection_id = %conn_id, "Failed to register webhook");
+                if stored_first && choice.generated && e.platform_unchanged() {
+                    match repo
+                        .update_configuration(&trigger.id, &original_config)
+                        .await
+                    {
+                        Ok(()) => info!(
+                            trigger_id = %trigger.id,
+                            "Platform did not apply the webhook; restored the previous secret"
+                        ),
+                        Err(e) => warn!(
+                            error = %e,
+                            trigger_id = %trigger.id,
+                            "Failed to restore the previous webhook secret"
+                        ),
+                    }
+                }
             }
         }
     }
@@ -413,10 +465,23 @@ pub enum WebhookError {
     NotConfigured(String),
     /// Connection not found or missing required fields.
     InvalidConnection(String),
-    /// Platform API call failed.
+    /// Platform API call failed with an unknown outcome: the platform may
+    /// have applied the request before the failure.
     PlatformError(String),
+    /// The platform certainly did not apply the request: it never reached
+    /// the platform, or the platform refused it.
+    NotApplied(String),
     /// Database error.
     DatabaseError(String),
+}
+
+impl WebhookError {
+    /// Whether the platform's state is certainly unchanged by the failed
+    /// call. Every variant but `PlatformError` fails either before the
+    /// platform is contacted or with the platform's explicit refusal.
+    pub fn platform_unchanged(&self) -> bool {
+        !matches!(self, Self::PlatformError(_))
+    }
 }
 
 impl std::fmt::Display for WebhookError {
@@ -425,6 +490,7 @@ impl std::fmt::Display for WebhookError {
             Self::NotConfigured(msg) => write!(f, "Not configured: {}", msg),
             Self::InvalidConnection(msg) => write!(f, "Invalid connection: {}", msg),
             Self::PlatformError(msg) => write!(f, "Platform error: {}", msg),
+            Self::NotApplied(msg) => write!(f, "Not applied by platform: {}", msg),
             Self::DatabaseError(msg) => write!(f, "Database error: {}", msg),
         }
     }
@@ -433,6 +499,7 @@ impl std::fmt::Display for WebhookError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
     use std::net::SocketAddr;
     use std::time::Instant;
 
@@ -448,6 +515,79 @@ mod tests {
             }
         });
         addr
+    }
+
+    /// `setWebhook` secret tokens a fake Telegram received, in order.
+    pub(super) type Received = Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// Telegram applied the request, but the reply that reached us is not
+    /// Telegram's: the outcome is unknown to the caller.
+    pub(super) const APPLIED_REPLY_LOST: (StatusCode, &str) = (
+        StatusCode::BAD_GATEWAY,
+        "applied, but the reply never made it",
+    );
+    /// Telegram refused the request.
+    pub(super) const REFUSED: (StatusCode, &str) = (
+        StatusCode::TOO_MANY_REQUESTS,
+        r#"{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 5"}"#,
+    );
+    const ACCEPTED: (StatusCode, &str) = (StatusCode::OK, r#"{"ok":true,"result":true}"#);
+
+    /// A fake Telegram Bot API whose `setWebhook` records the secret_token it
+    /// was sent and answers with `reply`.
+    pub(super) async fn fake_telegram(reply: (StatusCode, &'static str)) -> (String, Received) {
+        let received = Received::default();
+        let recorder = received.clone();
+        let app = axum::Router::new().route(
+            "/{bot}/setWebhook",
+            axum::routing::post(move |axum::Json(body): axum::Json<Value>| async move {
+                let secret = body["secret_token"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                recorder.lock().unwrap().push(secret);
+                reply
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), received)
+    }
+
+    pub(super) fn connections_facade(pool: PgPool) -> Arc<ConnectionsFacade> {
+        use runtara_connections::{
+            ConnectionsConfig, ConnectionsState, crypto::noop::NoOpCipher,
+            integration_compatibility::IntegrationCompatibility,
+        };
+        Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
+            ConnectionsConfig {
+                db_pool: pool,
+                redis_manager: None,
+                public_base_url: "http://localhost".into(),
+                http_client: runtara_connections::net::build_hardened_client(),
+                cipher: Arc::new(NoOpCipher),
+                compatibility: Arc::new(IntegrationCompatibility::new(Default::default())),
+                agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                    Vec::new(),
+                )),
+                connection_events: None,
+            },
+        )))
+    }
+
+    /// One `setWebhook` call against `telegram_api_base`, with no database.
+    async fn set_webhook_against(telegram_api_base: String) -> Result<(), WebhookError> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost:1/unused")
+            .unwrap();
+        WebhookManager::for_test(
+            connections_facade(pool),
+            Some("http://runtime.test".into()),
+            telegram_api_base,
+        )
+        .telegram_set_webhook("000000:test-token", "http://runtime.test/hook", "secret")
+        .await
     }
 
     #[tokio::test]
@@ -489,6 +629,52 @@ mod tests {
         assert!(!message.contains("/bot"), "URL leaked: {message}");
     }
 
+    #[tokio::test]
+    async fn a_refusal_from_telegram_is_known_not_to_have_applied() {
+        let (base, received) = fake_telegram(REFUSED).await;
+        let error = set_webhook_against(base).await.unwrap_err();
+        assert!(matches!(error, WebhookError::NotApplied(_)), "{error}");
+        assert!(error.platform_unchanged());
+        assert_eq!(received.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_platform_is_known_not_to_have_applied() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let error = set_webhook_against(format!("http://{addr}"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, WebhookError::NotApplied(_)), "{error}");
+        assert!(error.platform_unchanged());
+    }
+
+    #[tokio::test]
+    async fn a_lost_reply_leaves_the_outcome_unknown() {
+        let (base, received) = fake_telegram(APPLIED_REPLY_LOST).await;
+        let error = set_webhook_against(base).await.unwrap_err();
+        assert!(matches!(error, WebhookError::PlatformError(_)), "{error}");
+        assert!(!error.platform_unchanged());
+        assert_eq!(received.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_reply_that_never_comes_leaves_the_outcome_unknown() {
+        let addr = silent_platform().await;
+        let error = set_webhook_against(format!("http://{addr}"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, WebhookError::PlatformError(_)), "{error}");
+        assert!(!error.platform_unchanged());
+    }
+
+    #[tokio::test]
+    async fn an_accepted_set_webhook_succeeds() {
+        let (base, _) = fake_telegram(ACCEPTED).await;
+        set_webhook_against(base).await.unwrap();
+    }
+
     #[test]
     fn a_stored_secret_is_reused_without_storing_again() {
         assert_eq!(
@@ -496,6 +682,7 @@ mod tests {
             SecretChoice {
                 secret: "stored".into(),
                 store_first: false,
+                generated: false,
             }
         );
     }
@@ -504,6 +691,7 @@ mod tests {
     fn a_new_secret_is_stored_before_the_platform_sees_it() {
         let choice = choose_webhook_secret(None, None);
         assert!(choice.store_first);
+        assert!(choice.generated);
         assert_eq!(choice.secret.len(), 64);
         assert!(choice.secret.bytes().all(|b| b.is_ascii_hexdigit()));
     }
@@ -515,6 +703,7 @@ mod tests {
             SecretChoice {
                 secret: "preferred".into(),
                 store_first: true,
+                generated: false,
             }
         );
         assert_eq!(
@@ -522,6 +711,7 @@ mod tests {
             SecretChoice {
                 secret: "preferred".into(),
                 store_first: true,
+                generated: false,
             }
         );
         assert_eq!(
@@ -529,6 +719,29 @@ mod tests {
             SecretChoice {
                 secret: "same".into(),
                 store_first: false,
+                generated: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_secret_telegram_would_refuse_is_never_sent() {
+        assert!(usable_webhook_secret("aZ09_-"));
+        assert!(usable_webhook_secret(&"a".repeat(256)));
+        assert!(!usable_webhook_secret(""));
+        assert!(!usable_webhook_secret(&"a".repeat(257)));
+        assert!(!usable_webhook_secret("has space"));
+        assert!(!usable_webhook_secret("dot."));
+
+        // An unusable stored secret is replaced, an unusable preferred one ignored.
+        let choice = choose_webhook_secret(Some("not usable!"), None);
+        assert!(choice.generated && choice.store_first);
+        assert_eq!(
+            choose_webhook_secret(Some("stored"), Some("not usable!")),
+            SecretChoice {
+                secret: "stored".into(),
+                store_first: false,
+                generated: false,
             }
         );
     }
@@ -547,51 +760,17 @@ mod tests {
     }
 }
 
-/// `register_trigger_webhook` against a real database and a fake Telegram
-/// that applies every `setWebhook` and then answers with an error, which is
-/// the outcome that used to strand Telegram on a secret the trigger never
-/// stored.
+/// `register_trigger_webhook` against a real database and a fake Telegram.
+/// The fake either applies every `setWebhook` and then fails the reply (the
+/// outcome that used to strand Telegram on a secret the trigger never
+/// stored) or refuses it outright.
 #[cfg(all(test, feature = "db-integration-tests"))]
 mod registration_tests {
+    use super::tests::{APPLIED_REPLY_LOST, REFUSED, Received, connections_facade, fake_telegram};
     use super::*;
     use crate::api::dto::triggers::CreateInvocationTriggerRequest;
-    use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
-    use runtara_connections::{
-        ConnectionsConfig, ConnectionsState, crypto::noop::NoOpCipher,
-        integration_compatibility::IntegrationCompatibility,
-    };
-    use std::sync::Mutex;
+    use axum::http::StatusCode;
     use uuid::Uuid;
-
-    type Received = Arc<Mutex<Vec<String>>>;
-
-    /// A Telegram Bot API that records each `setWebhook` secret_token as
-    /// applied, then fails the call.
-    async fn applying_but_failing_telegram() -> (String, Received) {
-        async fn set_webhook(
-            State(received): State<Received>,
-            Json(body): Json<Value>,
-        ) -> (StatusCode, &'static str) {
-            let secret = body["secret_token"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
-            received.lock().unwrap().push(secret);
-            (
-                StatusCode::BAD_GATEWAY,
-                "applied, but the reply never made it",
-            )
-        }
-
-        let received = Received::default();
-        let app = Router::new()
-            .route("/{bot}/setWebhook", post(set_webhook))
-            .with_state(received.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        (format!("http://{addr}"), received)
-    }
 
     struct Harness {
         pool: PgPool,
@@ -602,7 +781,7 @@ mod registration_tests {
     }
 
     impl Harness {
-        async fn new() -> Self {
+        async fn new(reply: (StatusCode, &'static str)) -> Self {
             let url = std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL")
                 .expect("db-integration-tests requires TEST_RUNTARA_SERVER_DATABASE_URL");
             let pool = PgPool::connect(&url).await.expect("server database");
@@ -622,23 +801,9 @@ mod registration_tests {
             .await
             .unwrap();
 
-            let facade = Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
-                ConnectionsConfig {
-                    db_pool: pool.clone(),
-                    redis_manager: None,
-                    public_base_url: "http://localhost".into(),
-                    http_client: runtara_connections::net::build_hardened_client(),
-                    cipher: Arc::new(NoOpCipher),
-                    compatibility: Arc::new(IntegrationCompatibility::new(Default::default())),
-                    agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
-                        Vec::new(),
-                    )),
-                    connection_events: None,
-                },
-            )));
-            let (telegram_api_base, received) = applying_but_failing_telegram().await;
+            let (telegram_api_base, received) = fake_telegram(reply).await;
             let manager = WebhookManager::for_test(
-                facade,
+                connections_facade(pool.clone()),
                 Some("http://runtime.test".into()),
                 telegram_api_base,
             );
@@ -670,6 +835,17 @@ mod registration_tests {
                 .unwrap()
         }
 
+        async fn register(&self, trigger: &InvocationTrigger, preferred_secret: Option<&str>) {
+            register_trigger_webhook(
+                &self.pool,
+                &self.manager,
+                trigger,
+                &self.tenant,
+                preferred_secret,
+            )
+            .await;
+        }
+
         async fn stored_secret(&self, trigger: &InvocationTrigger) -> Option<String> {
             let trigger = TriggerRepository::new(self.pool.clone())
                 .get_by_id(&trigger.id, Some(&self.tenant))
@@ -697,17 +873,10 @@ mod registration_tests {
 
     #[tokio::test]
     async fn a_new_trigger_stores_the_secret_telegram_was_sent_even_when_the_call_fails() {
-        let harness = Harness::new().await;
+        let harness = Harness::new(APPLIED_REPLY_LOST).await;
         let trigger = harness.channel_trigger(None).await;
 
-        register_trigger_webhook(
-            &harness.pool,
-            &harness.manager,
-            &trigger,
-            &harness.tenant,
-            None,
-        )
-        .await;
+        harness.register(&trigger, None).await;
 
         let sent = harness.sent_secrets();
         assert_eq!(sent.len(), 1, "Telegram was asked once");
@@ -720,17 +889,10 @@ mod registration_tests {
 
     #[tokio::test]
     async fn re_registering_sends_the_stored_secret_instead_of_a_new_one() {
-        let harness = Harness::new().await;
+        let harness = Harness::new(APPLIED_REPLY_LOST).await;
         let trigger = harness.channel_trigger(Some("stored-secret")).await;
 
-        register_trigger_webhook(
-            &harness.pool,
-            &harness.manager,
-            &trigger,
-            &harness.tenant,
-            None,
-        )
-        .await;
+        harness.register(&trigger, None).await;
 
         assert_eq!(harness.sent_secrets(), vec!["stored-secret".to_string()]);
         assert_eq!(
@@ -742,17 +904,12 @@ mod registration_tests {
 
     #[tokio::test]
     async fn a_preferred_secret_is_adopted_before_telegram_is_asked() {
-        let harness = Harness::new().await;
+        let harness = Harness::new(APPLIED_REPLY_LOST).await;
         let trigger = harness.channel_trigger(Some("own-secret")).await;
 
-        register_trigger_webhook(
-            &harness.pool,
-            &harness.manager,
-            &trigger,
-            &harness.tenant,
-            Some("secret-telegram-holds"),
-        )
-        .await;
+        harness
+            .register(&trigger, Some("secret-telegram-holds"))
+            .await;
 
         assert_eq!(
             harness.sent_secrets(),
@@ -761,6 +918,39 @@ mod registration_tests {
         assert_eq!(
             harness.stored_secret(&trigger).await.as_deref(),
             Some("secret-telegram-holds")
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn a_new_secret_telegram_refused_is_rolled_back() {
+        let harness = Harness::new(REFUSED).await;
+        let trigger = harness.channel_trigger(None).await;
+
+        harness.register(&trigger, None).await;
+
+        assert_eq!(harness.sent_secrets().len(), 1, "Telegram was asked once");
+        assert_eq!(
+            harness.stored_secret(&trigger).await,
+            None,
+            "Telegram cannot hold a secret it refused"
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn an_adopted_secret_is_kept_when_telegram_refuses() {
+        let harness = Harness::new(REFUSED).await;
+        let trigger = harness.channel_trigger(Some("own-secret")).await;
+
+        harness
+            .register(&trigger, Some("secret-telegram-holds"))
+            .await;
+
+        assert_eq!(
+            harness.stored_secret(&trigger).await.as_deref(),
+            Some("secret-telegram-holds"),
+            "the adopted secret is the one Telegram already holds"
         );
         harness.cleanup().await;
     }

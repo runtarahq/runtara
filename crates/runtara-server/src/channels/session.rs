@@ -227,11 +227,8 @@ impl ChannelRouter {
             anyhow::bail!("No active Channel trigger for connection {}", connection_id);
         };
 
-        let stored_secret = trigger
-            .configuration
-            .as_ref()
-            .and_then(|c| c.get("webhook_secret"))
-            .and_then(|v| v.as_str());
+        let stored_secret =
+            crate::api::services::webhook_manager::stored_webhook_secret(&trigger.configuration);
 
         match (stored_secret, secret_header) {
             (Some(stored), Some(header)) if stored == header => Ok(()),

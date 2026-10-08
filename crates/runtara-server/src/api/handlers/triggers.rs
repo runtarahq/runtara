@@ -77,14 +77,16 @@ pub async fn create_invocation_trigger(
                     .properties(json!({"trigger_type": &trigger.trigger_type}))
                     .source(source),
             );
-            register_trigger_webhook(
-                &pool,
-                &WebhookManager::new(connections.clone()),
-                &trigger,
-                &tenant_id,
-                None,
-            )
-            .await;
+            if trigger.trigger_type == TriggerType::Channel {
+                register_trigger_webhook(
+                    &pool,
+                    &WebhookManager::new(connections.clone()),
+                    &trigger,
+                    &tenant_id,
+                    None,
+                )
+                .await;
+            }
 
             // Re-read the trigger to get updated config (webhook_secret, platform).
             let trigger = service
