@@ -77,7 +77,16 @@ pub async fn create_invocation_trigger(
                     .properties(json!({"trigger_type": &trigger.trigger_type}))
                     .source(source),
             );
-            register_trigger_webhook(&pool, &connections, &trigger, &tenant_id).await;
+            if trigger.trigger_type == TriggerType::Channel {
+                register_trigger_webhook(
+                    &pool,
+                    &WebhookManager::new(connections.clone()),
+                    &trigger,
+                    &tenant_id,
+                    None,
+                )
+                .await;
+            }
 
             // Re-read the trigger to get updated config (webhook_secret, platform).
             let trigger = service
@@ -268,7 +277,14 @@ pub async fn update_invocation_trigger(
             let is_active_channel = trigger.trigger_type == TriggerType::Channel && trigger.active;
 
             if !was_active_channel && is_active_channel {
-                register_trigger_webhook(&pool, &connections, &trigger, &tenant_id).await;
+                register_trigger_webhook(
+                    &pool,
+                    &WebhookManager::new(connections.clone()),
+                    &trigger,
+                    &tenant_id,
+                    None,
+                )
+                .await;
             } else if was_active_channel
                 && !is_active_channel
                 && let Some(ref old) = old_trigger

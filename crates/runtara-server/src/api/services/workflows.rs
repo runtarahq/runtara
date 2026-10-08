@@ -8,12 +8,11 @@ use crate::api::dto::workflows::*;
 use crate::api::repositories::triggers::TriggerRepository;
 use crate::api::repositories::workflows::WorkflowRepository;
 use crate::api::services::webhook_manager::{
-    WebhookManager, extract_connection_id, register_trigger_webhook,
+    WebhookManager, extract_connection_id, register_trigger_webhook, stored_webhook_secret,
 };
 use crate::api::utils::pagination::{normalize_page, normalize_page_size};
 use crate::api::utils::validation::is_valid_identifier;
 use crate::types::MemoryTier;
-use chrono::{DateTime, Utc};
 use runtara_connections::ConnectionsFacade;
 use runtara_dsl::agent_meta::AgentCatalog;
 use runtara_workflows::validation::validate_workflow;
@@ -1060,20 +1059,22 @@ impl WorkflowService {
     /// - a deactivated trigger was not older than the newest survivor: the
     ///   platform may hold the deactivated trigger's secret (validation order
     ///   is undefined on a `created_at` tie), so register again for the
-    ///   survivor;
+    ///   survivor. The survivor adopts that secret rather than sending its
+    ///   own: the platform most likely holds it already, so even a failed
+    ///   call leaves the platform and the survivor in agreement;
     /// - otherwise the survivor's secret is already the one in use; leave it.
     async fn reconcile_channel_webhooks(&self, tenant_id: &str, triggers: &[InvocationTrigger]) {
         // Newest deactivated trigger per connection.
-        let mut newest_deactivated: BTreeMap<&str, DateTime<Utc>> = BTreeMap::new();
+        let mut newest_deactivated: BTreeMap<&str, &InvocationTrigger> = BTreeMap::new();
         for trigger in triggers
             .iter()
             .filter(|t| t.trigger_type == TriggerType::Channel)
         {
             if let Some(connection_id) = extract_connection_id(&trigger.configuration) {
-                let newest = newest_deactivated
-                    .entry(connection_id)
-                    .or_insert(trigger.created_at);
-                *newest = (*newest).max(trigger.created_at);
+                let newest = newest_deactivated.entry(connection_id).or_insert(trigger);
+                if trigger.created_at > newest.created_at {
+                    *newest = trigger;
+                }
             }
         }
         if newest_deactivated.is_empty() {
@@ -1083,7 +1084,7 @@ impl WorkflowService {
         let pool = self.repository.pool();
         let trigger_repository = TriggerRepository::new(pool.clone());
         let manager = WebhookManager::new(self.connections.clone());
-        for (connection_id, newest_deactivated_at) in newest_deactivated {
+        for (connection_id, deactivated) in newest_deactivated {
             match trigger_repository
                 .newest_live_channel_trigger(connection_id, tenant_id)
                 .await
@@ -1098,14 +1099,21 @@ impl WorkflowService {
                         );
                     }
                 }
-                Ok(Some(survivor)) if survivor.created_at <= newest_deactivated_at => {
+                Ok(Some(survivor)) if survivor.created_at <= deactivated.created_at => {
                     tracing::info!(
                         tenant_id,
                         connection_id,
                         trigger_id = %survivor.id,
                         "Re-registering channel webhook for the newest remaining trigger"
                     );
-                    register_trigger_webhook(pool, &self.connections, &survivor, tenant_id).await;
+                    register_trigger_webhook(
+                        pool,
+                        &manager,
+                        &survivor,
+                        tenant_id,
+                        stored_webhook_secret(&deactivated.configuration),
+                    )
+                    .await;
                 }
                 Ok(Some(survivor)) => {
                     tracing::info!(
