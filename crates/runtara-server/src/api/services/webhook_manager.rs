@@ -45,15 +45,11 @@ pub struct WebhookManager {
     http_client: reqwest::Client,
     /// Public base URL of this runtime instance (e.g. "https://runtime.example.com")
     base_url: Option<String>,
+    /// Base URL of the Telegram Bot API.
+    telegram_api_base: String,
 }
 
-/// Result of a webhook registration, including any secrets to store.
-pub struct WebhookRegistration {
-    /// Secret token to store in the trigger configuration for request validation.
-    pub webhook_secret: String,
-    /// Platform identifier for URL construction (e.g. "telegram", "slack").
-    pub platform: String,
-}
+const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 
 impl WebhookManager {
     pub fn new(facade: Arc<ConnectionsFacade>) -> Self {
@@ -62,18 +58,44 @@ impl WebhookManager {
             facade,
             http_client: platform_http_client(PLATFORM_CONNECT_TIMEOUT, PLATFORM_REQUEST_TIMEOUT),
             base_url,
+            telegram_api_base: TELEGRAM_API_BASE.to_string(),
         }
     }
 
-    /// Register a webhook for a Channel trigger.
+    #[cfg(all(test, feature = "db-integration-tests"))]
+    fn for_test(
+        facade: Arc<ConnectionsFacade>,
+        base_url: Option<String>,
+        telegram_api_base: String,
+    ) -> Self {
+        Self {
+            facade,
+            http_client: platform_http_client(PLATFORM_CONNECT_TIMEOUT, PLATFORM_REQUEST_TIMEOUT),
+            base_url,
+            telegram_api_base,
+        }
+    }
+
+    /// Whether this runtime registers webhooks with platforms itself, i.e.
+    /// knows its own public URL. Without it `register` always fails before
+    /// contacting a platform.
+    pub fn auto_registers(&self) -> bool {
+        self.base_url.is_some()
+    }
+
+    /// Register a webhook for a Channel trigger, sending `webhook_secret` to
+    /// platforms that echo it back on every request (Telegram).
     ///
-    /// Returns a `WebhookRegistration` containing the secret token that should
-    /// be stored in the trigger's configuration for validating incoming requests.
+    /// Returns the platform identifier to store alongside the secret in the
+    /// trigger's configuration. The caller owns the secret: it must be stored
+    /// before this is called, because a platform can apply it even when the
+    /// call itself fails or times out.
     pub async fn register(
         &self,
         connection_id: &str,
         tenant_id: &str,
-    ) -> Result<WebhookRegistration, WebhookError> {
+        webhook_secret: &str,
+    ) -> Result<String, WebhookError> {
         let base_url = self
             .base_url
             .as_deref()
@@ -89,9 +111,6 @@ impl WebhookManager {
         let params = conn.connection_parameters.as_ref().ok_or_else(|| {
             WebhookError::InvalidConnection("Connection has no parameters".into())
         })?;
-
-        // Generate a random webhook secret (used for all platform types).
-        let webhook_secret = generate_webhook_secret();
 
         // Map integration_id to platform URL segment.
         let platform = match integration_id {
@@ -113,7 +132,7 @@ impl WebhookManager {
                     "{}/api/events/{}/webhook/telegram/{}",
                     base_url, tenant_id, connection_id
                 );
-                self.telegram_set_webhook(bot_token, &webhook_url, &webhook_secret)
+                self.telegram_set_webhook(bot_token, &webhook_url, webhook_secret)
                     .await?;
                 info!(
                     connection_id = %connection_id,
@@ -166,10 +185,7 @@ impl WebhookManager {
             }
         }
 
-        Ok(WebhookRegistration {
-            webhook_secret,
-            platform,
-        })
+        Ok(platform)
     }
 
     /// Unregister a webhook for a Channel trigger.
@@ -234,7 +250,7 @@ impl WebhookManager {
         webhook_url: &str,
         secret_token: &str,
     ) -> Result<(), WebhookError> {
-        let url = format!("https://api.telegram.org/bot{}/setWebhook", bot_token);
+        let url = format!("{}/bot{}/setWebhook", self.telegram_api_base, bot_token);
         let resp = self
             .http_client
             .post(&url)
@@ -260,7 +276,7 @@ impl WebhookManager {
     }
 
     async fn telegram_delete_webhook(&self, bot_token: &str) -> Result<(), WebhookError> {
-        let url = format!("https://api.telegram.org/bot{}/deleteWebhook", bot_token);
+        let url = format!("{}/bot{}/deleteWebhook", self.telegram_api_base, bot_token);
         let resp = self
             .http_client
             .post(&url)
@@ -293,31 +309,93 @@ pub fn extract_connection_id(configuration: &Option<Value>) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
+/// The webhook secret stored in a Channel trigger's configuration, if any.
+pub fn stored_webhook_secret(configuration: &Option<Value>) -> Option<&str> {
+    configuration
+        .as_ref()
+        .and_then(|c| c.get("webhook_secret"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+}
+
+/// The secret a registration sends, and whether the trigger does not hold it
+/// yet and so must store it before the platform is contacted.
+#[derive(Debug, PartialEq)]
+struct SecretChoice {
+    secret: String,
+    store_first: bool,
+}
+
+/// Pick the secret to register: `preferred` when given, else the trigger's
+/// `stored` secret, else a new one. Reusing the stored secret keeps
+/// re-registration idempotent, so a failed call cannot strand the platform
+/// on a secret the trigger never kept.
+fn choose_webhook_secret(stored: Option<&str>, preferred: Option<&str>) -> SecretChoice {
+    match (preferred, stored) {
+        (Some(preferred), stored) => SecretChoice {
+            secret: preferred.to_string(),
+            store_first: stored != Some(preferred),
+        },
+        (None, Some(stored)) => SecretChoice {
+            secret: stored.to_string(),
+            store_first: false,
+        },
+        (None, None) => SecretChoice {
+            secret: generate_webhook_secret(),
+            store_first: true,
+        },
+    }
+}
+
 /// Best-effort webhook registration for an active Channel trigger.
-/// Stores the webhook secret in the trigger's configuration for request validation.
+///
+/// Sends `preferred_secret` when given, else the trigger's stored secret, else
+/// a new one. A platform can apply the secret even when the call fails or
+/// times out, so a secret the trigger does not hold yet is stored first:
+/// whatever the outcome, the platform can only end up holding a secret the
+/// trigger holds too. If that write fails, the platform is not contacted.
 pub async fn register_trigger_webhook(
     pool: &PgPool,
-    connections: &Arc<ConnectionsFacade>,
+    manager: &WebhookManager,
     trigger: &InvocationTrigger,
     tenant_id: &str,
+    preferred_secret: Option<&str>,
 ) {
     if trigger.trigger_type == TriggerType::Channel
         && trigger.active
         && let Some(conn_id) = extract_connection_id(&trigger.configuration)
     {
-        let manager = WebhookManager::new(connections.clone());
-        match manager.register(conn_id, tenant_id).await {
-            Ok(registration) => {
+        let repo = TriggerRepository::new(pool.clone());
+        let mut config = trigger.configuration.clone().unwrap_or_else(|| json!({}));
+        let choice = choose_webhook_secret(
+            stored_webhook_secret(&trigger.configuration),
+            preferred_secret,
+        );
+
+        if choice.store_first && manager.auto_registers() {
+            if let Some(obj) = config.as_object_mut() {
+                obj.insert(
+                    "webhook_secret".to_string(),
+                    Value::String(choice.secret.clone()),
+                );
+            }
+            if let Err(e) = repo.update_configuration(&trigger.id, &config).await {
+                warn!(
+                    error = %e,
+                    trigger_id = %trigger.id,
+                    "Failed to store webhook secret; not registering the webhook"
+                );
+                return;
+            }
+        }
+
+        match manager.register(conn_id, tenant_id, &choice.secret).await {
+            Ok(platform) => {
                 // Store webhook secret and platform in the trigger's configuration.
-                let mut config = trigger.configuration.clone().unwrap_or_else(|| json!({}));
                 if let Some(obj) = config.as_object_mut() {
-                    obj.insert(
-                        "webhook_secret".to_string(),
-                        Value::String(registration.webhook_secret),
-                    );
-                    obj.insert("platform".to_string(), Value::String(registration.platform));
+                    obj.insert("webhook_secret".to_string(), Value::String(choice.secret));
+                    obj.insert("platform".to_string(), Value::String(platform));
                 }
-                let repo = TriggerRepository::new(pool.clone());
                 if let Err(e) = repo.update_configuration(&trigger.id, &config).await {
                     warn!(error = %e, "Failed to store webhook secret in trigger");
                 }
@@ -409,5 +487,281 @@ mod tests {
         let message = platform_error(error).to_string();
         assert!(!message.contains(token), "token leaked: {message}");
         assert!(!message.contains("/bot"), "URL leaked: {message}");
+    }
+
+    #[test]
+    fn a_stored_secret_is_reused_without_storing_again() {
+        assert_eq!(
+            choose_webhook_secret(Some("stored"), None),
+            SecretChoice {
+                secret: "stored".into(),
+                store_first: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_new_secret_is_stored_before_the_platform_sees_it() {
+        let choice = choose_webhook_secret(None, None);
+        assert!(choice.store_first);
+        assert_eq!(choice.secret.len(), 64);
+        assert!(choice.secret.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn a_preferred_secret_wins_and_is_stored_first_when_it_differs() {
+        assert_eq!(
+            choose_webhook_secret(Some("stored"), Some("preferred")),
+            SecretChoice {
+                secret: "preferred".into(),
+                store_first: true,
+            }
+        );
+        assert_eq!(
+            choose_webhook_secret(None, Some("preferred")),
+            SecretChoice {
+                secret: "preferred".into(),
+                store_first: true,
+            }
+        );
+        assert_eq!(
+            choose_webhook_secret(Some("same"), Some("same")),
+            SecretChoice {
+                secret: "same".into(),
+                store_first: false,
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_stored_secret_counts_as_none() {
+        assert_eq!(
+            stored_webhook_secret(&Some(json!({"webhook_secret": ""}))),
+            None
+        );
+        assert_eq!(stored_webhook_secret(&Some(json!({}))), None);
+        assert_eq!(
+            stored_webhook_secret(&Some(json!({"webhook_secret": "s"}))),
+            Some("s")
+        );
+    }
+}
+
+/// `register_trigger_webhook` against a real database and a fake Telegram
+/// that applies every `setWebhook` and then answers with an error, which is
+/// the outcome that used to strand Telegram on a secret the trigger never
+/// stored.
+#[cfg(all(test, feature = "db-integration-tests"))]
+mod registration_tests {
+    use super::*;
+    use crate::api::dto::triggers::CreateInvocationTriggerRequest;
+    use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+    use runtara_connections::{
+        ConnectionsConfig, ConnectionsState, crypto::noop::NoOpCipher,
+        integration_compatibility::IntegrationCompatibility,
+    };
+    use std::sync::Mutex;
+    use uuid::Uuid;
+
+    type Received = Arc<Mutex<Vec<String>>>;
+
+    /// A Telegram Bot API that records each `setWebhook` secret_token as
+    /// applied, then fails the call.
+    async fn applying_but_failing_telegram() -> (String, Received) {
+        async fn set_webhook(
+            State(received): State<Received>,
+            Json(body): Json<Value>,
+        ) -> (StatusCode, &'static str) {
+            let secret = body["secret_token"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            received.lock().unwrap().push(secret);
+            (
+                StatusCode::BAD_GATEWAY,
+                "applied, but the reply never made it",
+            )
+        }
+
+        let received = Received::default();
+        let app = Router::new()
+            .route("/{bot}/setWebhook", post(set_webhook))
+            .with_state(received.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), received)
+    }
+
+    struct Harness {
+        pool: PgPool,
+        manager: WebhookManager,
+        received: Received,
+        tenant: String,
+        connection_id: String,
+    }
+
+    impl Harness {
+        async fn new() -> Self {
+            let url = std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL")
+                .expect("db-integration-tests requires TEST_RUNTARA_SERVER_DATABASE_URL");
+            let pool = PgPool::connect(&url).await.expect("server database");
+            sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+            let tenant = format!("t-{}", Uuid::new_v4());
+            let connection_id = Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO connection_data_entity (id, tenant_id, title, integration_id, connection_parameters, status)
+                 VALUES ($1, $2, $3, 'telegram_bot', $4, 'ACTIVE')",
+            )
+            .bind(&connection_id)
+            .bind(&tenant)
+            .bind(format!("telegram {connection_id}"))
+            .bind(json!({"bot_token": "000000:test-token"}))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            let facade = Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
+                ConnectionsConfig {
+                    db_pool: pool.clone(),
+                    redis_manager: None,
+                    public_base_url: "http://localhost".into(),
+                    http_client: runtara_connections::net::build_hardened_client(),
+                    cipher: Arc::new(NoOpCipher),
+                    compatibility: Arc::new(IntegrationCompatibility::new(Default::default())),
+                    agent_catalog: Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+                        Vec::new(),
+                    )),
+                    connection_events: None,
+                },
+            )));
+            let (telegram_api_base, received) = applying_but_failing_telegram().await;
+            let manager = WebhookManager::for_test(
+                facade,
+                Some("http://runtime.test".into()),
+                telegram_api_base,
+            );
+            Self {
+                pool,
+                manager,
+                received,
+                tenant,
+                connection_id,
+            }
+        }
+
+        async fn channel_trigger(&self, webhook_secret: Option<&str>) -> InvocationTrigger {
+            let mut configuration = json!({"connection_id": self.connection_id});
+            if let Some(secret) = webhook_secret {
+                configuration["webhook_secret"] = json!(secret);
+            }
+            let request = CreateInvocationTriggerRequest {
+                workflow_id: Uuid::new_v4().to_string(),
+                trigger_type: TriggerType::Channel,
+                active: true,
+                configuration: Some(configuration),
+                remote_tenant_id: None,
+                single_instance: false,
+            };
+            TriggerRepository::new(self.pool.clone())
+                .create(&request, Some(&self.tenant), None)
+                .await
+                .unwrap()
+        }
+
+        async fn stored_secret(&self, trigger: &InvocationTrigger) -> Option<String> {
+            let trigger = TriggerRepository::new(self.pool.clone())
+                .get_by_id(&trigger.id, Some(&self.tenant))
+                .await
+                .unwrap()
+                .expect("trigger exists");
+            stored_webhook_secret(&trigger.configuration).map(str::to_string)
+        }
+
+        fn sent_secrets(&self) -> Vec<String> {
+            self.received.lock().unwrap().clone()
+        }
+
+        async fn cleanup(&self) {
+            let _ = sqlx::query("DELETE FROM invocation_trigger WHERE tenant_id = $1")
+                .bind(&self.tenant)
+                .execute(&self.pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM connection_data_entity WHERE id = $1")
+                .bind(&self.connection_id)
+                .execute(&self.pool)
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_trigger_stores_the_secret_telegram_was_sent_even_when_the_call_fails() {
+        let harness = Harness::new().await;
+        let trigger = harness.channel_trigger(None).await;
+
+        register_trigger_webhook(
+            &harness.pool,
+            &harness.manager,
+            &trigger,
+            &harness.tenant,
+            None,
+        )
+        .await;
+
+        let sent = harness.sent_secrets();
+        assert_eq!(sent.len(), 1, "Telegram was asked once");
+        assert_eq!(
+            harness.stored_secret(&trigger).await.as_deref(),
+            Some(sent[0].as_str())
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn re_registering_sends_the_stored_secret_instead_of_a_new_one() {
+        let harness = Harness::new().await;
+        let trigger = harness.channel_trigger(Some("stored-secret")).await;
+
+        register_trigger_webhook(
+            &harness.pool,
+            &harness.manager,
+            &trigger,
+            &harness.tenant,
+            None,
+        )
+        .await;
+
+        assert_eq!(harness.sent_secrets(), vec!["stored-secret".to_string()]);
+        assert_eq!(
+            harness.stored_secret(&trigger).await.as_deref(),
+            Some("stored-secret")
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn a_preferred_secret_is_adopted_before_telegram_is_asked() {
+        let harness = Harness::new().await;
+        let trigger = harness.channel_trigger(Some("own-secret")).await;
+
+        register_trigger_webhook(
+            &harness.pool,
+            &harness.manager,
+            &trigger,
+            &harness.tenant,
+            Some("secret-telegram-holds"),
+        )
+        .await;
+
+        assert_eq!(
+            harness.sent_secrets(),
+            vec!["secret-telegram-holds".to_string()]
+        );
+        assert_eq!(
+            harness.stored_secret(&trigger).await.as_deref(),
+            Some("secret-telegram-holds")
+        );
+        harness.cleanup().await;
     }
 }
