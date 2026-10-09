@@ -79,10 +79,11 @@ impl WebhookManager {
         facade: Arc<ConnectionsFacade>,
         base_url: Option<String>,
         telegram_api_base: String,
+        request_timeout: Duration,
     ) -> Self {
         Self {
             facade,
-            http_client: platform_http_client(Duration::from_secs(1), Duration::from_millis(500)),
+            http_client: platform_http_client(Duration::from_secs(1), request_timeout),
             base_url,
             telegram_api_base,
         }
@@ -388,7 +389,13 @@ fn choose_webhook_secret(stored: Option<&str>, preferred: Option<&str>) -> Secre
 /// or it refused), a secret generated for this registration is rolled back:
 /// the platform cannot hold it, and keeping it would reject every update the
 /// platform keeps sending with its previous secret. A preferred secret is
-/// kept, because it is chosen as the one the platform already holds.
+/// kept, because it is chosen as the one the platform already holds. The
+/// rollback only applies while the trigger still holds the generated secret,
+/// so one stored since by another registration is left alone.
+///
+/// The platform call can take seconds, so every write merges only the keys
+/// registration manages (`webhook_secret`, `platform`): an edit saved in the
+/// meantime is kept.
 pub async fn register_trigger_webhook(
     pool: &PgPool,
     manager: &WebhookManager,
@@ -401,39 +408,37 @@ pub async fn register_trigger_webhook(
         && let Some(conn_id) = extract_connection_id(&trigger.configuration)
     {
         let repo = TriggerRepository::new(pool.clone());
-        let original_config = trigger.configuration.clone().unwrap_or_else(|| json!({}));
-        let mut config = original_config.clone();
+        let previous_secret = trigger
+            .configuration
+            .as_ref()
+            .and_then(|c| c.get("webhook_secret"))
+            .and_then(Value::as_str);
         let choice = choose_webhook_secret(
             stored_webhook_secret(&trigger.configuration),
             preferred_secret,
         );
 
+        // Every write below merges only the keys registration manages, so an
+        // edit saved while the platform is being called is kept.
         let stored_first = choice.store_first && manager.auto_registers();
-        if stored_first {
-            if let Some(obj) = config.as_object_mut() {
-                obj.insert(
-                    "webhook_secret".to_string(),
-                    Value::String(choice.secret.clone()),
-                );
-            }
-            if let Err(e) = repo.update_configuration(&trigger.id, &config).await {
-                warn!(
-                    error = %e,
-                    trigger_id = %trigger.id,
-                    "Failed to store webhook secret; not registering the webhook"
-                );
-                return;
-            }
+        if stored_first
+            && let Err(e) = repo
+                .merge_configuration(&trigger.id, &json!({"webhook_secret": choice.secret}))
+                .await
+        {
+            warn!(
+                error = %e,
+                trigger_id = %trigger.id,
+                "Failed to store webhook secret; not registering the webhook"
+            );
+            return;
         }
 
         match manager.register(conn_id, tenant_id, &choice.secret).await {
             Ok(platform) => {
                 // Store webhook secret and platform in the trigger's configuration.
-                if let Some(obj) = config.as_object_mut() {
-                    obj.insert("webhook_secret".to_string(), Value::String(choice.secret));
-                    obj.insert("platform".to_string(), Value::String(platform));
-                }
-                if let Err(e) = repo.update_configuration(&trigger.id, &config).await {
+                let patch = json!({"webhook_secret": choice.secret, "platform": platform});
+                if let Err(e) = repo.merge_configuration(&trigger.id, &patch).await {
                     warn!(error = %e, "Failed to store webhook secret in trigger");
                 }
             }
@@ -441,12 +446,16 @@ pub async fn register_trigger_webhook(
                 warn!(error = %e, connection_id = %conn_id, "Failed to register webhook");
                 if stored_first && choice.generated && e.platform_unchanged() {
                     match repo
-                        .update_configuration(&trigger.id, &original_config)
+                        .restore_webhook_secret(&trigger.id, &choice.secret, previous_secret)
                         .await
                     {
-                        Ok(()) => info!(
+                        Ok(true) => info!(
                             trigger_id = %trigger.id,
                             "Platform did not apply the webhook; restored the previous secret"
+                        ),
+                        Ok(false) => info!(
+                            trigger_id = %trigger.id,
+                            "Platform did not apply the webhook; the secret has been replaced since, leaving it"
                         ),
                         Err(e) => warn!(
                             error = %e,
@@ -741,6 +750,16 @@ mod tests {
     /// secret_token it was sent) and `deleteWebhook`, and answers both with
     /// `reply`.
     pub(super) async fn fake_telegram(reply: (StatusCode, &'static str)) -> (String, Received) {
+        fake_telegram_holding(reply, None).await
+    }
+
+    /// [`fake_telegram`], but when `hold` is given, each `setWebhook` waits
+    /// for a permit from it before answering, so a test can act while the
+    /// call is in flight.
+    pub(super) async fn fake_telegram_holding(
+        reply: (StatusCode, &'static str),
+        hold: Option<Arc<tokio::sync::Semaphore>>,
+    ) -> (String, Received) {
         let received = Received::default();
         let set_recorder = received.clone();
         let delete_recorder = received.clone();
@@ -758,6 +777,9 @@ mod tests {
                             .lock()
                             .unwrap()
                             .push((bot, TelegramCall::SetWebhook(secret)));
+                        if let Some(hold) = hold {
+                            hold.acquire().await.unwrap().forget();
+                        }
                         reply
                     },
                 ),
@@ -810,6 +832,7 @@ mod tests {
             connections_facade(pool),
             Some("http://runtime.test".into()),
             telegram_api_base,
+            Duration::from_millis(500),
         )
         .telegram_set_webhook("000000:test-token", "http://runtime.test/hook", "secret")
         .await
@@ -993,10 +1016,11 @@ mod tests {
 mod registration_tests {
     use super::tests::{
         ACCEPTED, APPLIED_REPLY_LOST, REFUSED, Received, TelegramCall, connections_facade,
-        fake_telegram,
+        fake_telegram_holding,
     };
     use super::*;
     use crate::api::dto::triggers::CreateInvocationTriggerRequest;
+    use crate::api::dto::triggers::UpdateInvocationTriggerRequest;
     use crate::api::repositories::workflows::WorkflowRepository;
     use axum::http::StatusCode;
     use uuid::Uuid;
@@ -1030,6 +1054,20 @@ mod registration_tests {
 
     impl Harness {
         async fn new(reply: (StatusCode, &'static str)) -> Self {
+            Self::with_hold(reply, None).await
+        }
+
+        /// A harness whose fake Telegram holds every `setWebhook` until the
+        /// returned semaphore gets a permit.
+        async fn holding(reply: (StatusCode, &'static str)) -> (Self, Arc<tokio::sync::Semaphore>) {
+            let hold = Arc::new(tokio::sync::Semaphore::new(0));
+            (Self::with_hold(reply, Some(hold.clone())).await, hold)
+        }
+
+        async fn with_hold(
+            reply: (StatusCode, &'static str),
+            hold: Option<Arc<tokio::sync::Semaphore>>,
+        ) -> Self {
             let url = std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL")
                 .expect("db-integration-tests requires TEST_RUNTARA_SERVER_DATABASE_URL");
             let pool = PgPool::connect(&url).await.expect("server database");
@@ -1038,11 +1076,12 @@ mod registration_tests {
             let tenant = format!("t-{}", Uuid::new_v4());
             let connection_id = insert_bot(&pool, &tenant, BOT_TOKEN).await;
 
-            let (telegram_api_base, received) = fake_telegram(reply).await;
+            let (telegram_api_base, received) = fake_telegram_holding(reply, hold).await;
             let manager = WebhookManager::for_test(
                 connections_facade(pool.clone()),
                 Some("http://runtime.test".into()),
                 telegram_api_base,
+                Duration::from_secs(5),
             );
             Self {
                 pool,
@@ -1174,6 +1213,45 @@ mod registration_tests {
             .fetch_one(&self.pool)
             .await
             .unwrap()
+        }
+
+        /// Save `configuration` for `trigger` through the trigger update, as a
+        /// client edit does.
+        async fn edit(&self, trigger: &InvocationTrigger, configuration: Value) {
+            let request = UpdateInvocationTriggerRequest {
+                workflow_id: trigger.workflow_id.clone(),
+                trigger_type: trigger.trigger_type.clone(),
+                active: trigger.active,
+                configuration: Some(configuration),
+                remote_tenant_id: trigger.remote_tenant_id.clone(),
+                single_instance: trigger.single_instance,
+            };
+            TriggerRepository::new(self.pool.clone())
+                .update(&trigger.id, &request, Some(&self.tenant))
+                .await
+                .unwrap()
+                .expect("trigger exists");
+        }
+
+        /// Wait until the fake Telegram has received `count` calls.
+        async fn wait_for_calls(&self, count: usize) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while self.received.lock().unwrap().len() < count {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("Telegram was called");
+        }
+
+        async fn stored_configuration(&self, trigger: &InvocationTrigger) -> Value {
+            TriggerRepository::new(self.pool.clone())
+                .get_by_id(&trigger.id, Some(&self.tenant))
+                .await
+                .unwrap()
+                .expect("trigger exists")
+                .configuration
+                .unwrap_or(Value::Null)
         }
 
         async fn update(&self, before: &InvocationTrigger, after: &InvocationTrigger) {
@@ -1557,6 +1635,85 @@ mod registration_tests {
                 TelegramCall::DeleteWebhook,
                 TelegramCall::SetWebhook("own".into())
             ]
+        );
+        harness.cleanup().await;
+    }
+
+    /// Run `register` for `trigger` while `during` acts on the held platform
+    /// call, then release the call.
+    async fn register_while(
+        harness: &Harness,
+        hold: &tokio::sync::Semaphore,
+        trigger: &InvocationTrigger,
+        during: impl std::future::Future<Output = ()>,
+    ) {
+        let act = async {
+            harness.wait_for_calls(1).await;
+            during.await;
+            hold.add_permits(1);
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(harness.register(trigger, None), act)
+        })
+        .await
+        .expect("registration finishes");
+    }
+
+    #[tokio::test]
+    async fn an_edit_saved_while_telegram_answers_survives_registration() {
+        let (harness, hold) = Harness::holding(ACCEPTED).await;
+        let trigger = harness.channel_trigger(None).await;
+        let edited =
+            json!({"connection_id": harness.connection_id, "session_mode": "per_conversation"});
+
+        register_while(&harness, &hold, &trigger, harness.edit(&trigger, edited)).await;
+
+        let sent = harness.sent_secrets();
+        assert_eq!(
+            harness.stored_configuration(&trigger).await,
+            json!({
+                "connection_id": harness.connection_id,
+                "session_mode": "per_conversation",
+                "webhook_secret": sent[0],
+                "platform": "telegram",
+            })
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn an_edit_saved_while_telegram_refuses_survives_the_rollback() {
+        let (harness, hold) = Harness::holding(REFUSED).await;
+        let trigger = harness.channel_trigger(None).await;
+        let edited =
+            json!({"connection_id": harness.connection_id, "session_mode": "per_conversation"});
+
+        register_while(&harness, &hold, &trigger, harness.edit(&trigger, edited)).await;
+
+        assert_eq!(
+            harness.stored_configuration(&trigger).await,
+            json!({"connection_id": harness.connection_id, "session_mode": "per_conversation"}),
+            "only the refused secret is rolled back"
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn a_rollback_leaves_a_secret_stored_since_alone() {
+        let (harness, hold) = Harness::holding(REFUSED).await;
+        let trigger = harness.channel_trigger(None).await;
+        let other_registration = async {
+            TriggerRepository::new(harness.pool.clone())
+                .merge_configuration(&trigger.id, &json!({"webhook_secret": "stored-since"}))
+                .await
+                .unwrap();
+        };
+
+        register_while(&harness, &hold, &trigger, other_registration).await;
+
+        assert_eq!(
+            harness.stored_secret(&trigger).await.as_deref(),
+            Some("stored-since")
         );
         harness.cleanup().await;
     }

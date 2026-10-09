@@ -5,7 +5,8 @@
 //!
 //! These drive the real trigger handlers through a router: the secret is
 //! stripped from every response, ignored in create and update requests, and
-//! kept across updates even though clients can no longer send it back.
+//! kept across updates even though clients can no longer send it back. The
+//! `platform` registration stores is kept across updates that leave it out.
 //! Triggers stay inactive, so no webhook is registered and no platform is
 //! contacted.
 //!
@@ -215,13 +216,9 @@ async fn the_webhook_secret_is_never_returned_and_never_taken_from_clients() {
 
     // Registration stores the secret and platform.
     TriggerRepository::new(fixture.pool.clone())
-        .update_configuration(
+        .merge_configuration(
             &id,
-            &json!({
-                "connection_id": connection_id,
-                "platform": "telegram",
-                "webhook_secret": "registered-secret",
-            }),
+            &json!({"platform": "telegram", "webhook_secret": "registered-secret"}),
         )
         .await
         .unwrap();
@@ -288,10 +285,7 @@ async fn the_webhook_secret_is_never_returned_and_never_taken_from_clients() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        body["data"]["configuration"],
-        json!({"connection_id": connection_id})
-    );
+    assert_eq!(body["data"]["configuration"], visible);
     assert_eq!(
         fixture.stored_configuration(&id).await["webhook_secret"],
         json!("registered-secret")
@@ -344,6 +338,81 @@ async fn an_update_carries_over_only_a_secret_stored_in_an_object() {
     assert_eq!(
         fixture.stored_configuration(&id).await,
         json!({"path": "after"})
+    );
+
+    fixture.cleanup(&id).await;
+}
+
+#[tokio::test]
+async fn an_update_keeps_the_platform_unless_the_trigger_moves() {
+    let fixture = Fixture::start().await;
+    let workflow_id = Uuid::new_v4().to_string();
+    let connection_id = Uuid::new_v4().to_string();
+    let channel_request = |configuration: Value| {
+        json!({
+            "workflow_id": workflow_id,
+            "trigger_type": "CHANNEL",
+            "active": false,
+            "configuration": configuration,
+            "single_instance": false,
+        })
+    };
+    let (status, body) = fixture
+        .call(
+            "POST",
+            "/api/runtime/triggers",
+            Some(channel_request(json!({"connection_id": connection_id}))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["data"]["id"].as_str().expect("trigger id").to_string();
+    TriggerRepository::new(fixture.pool.clone())
+        .merge_configuration(
+            &id,
+            &json!({"platform": "telegram", "webhook_secret": "registered-secret"}),
+        )
+        .await
+        .unwrap();
+
+    // An edit that leaves the platform out keeps it.
+    let (status, body) = fixture
+        .call(
+            "PUT",
+            &format!("/api/runtime/triggers/{id}"),
+            Some(channel_request(json!({
+                "connection_id": connection_id,
+                "session_mode": "per_conversation",
+            }))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        fixture.stored_configuration(&id).await,
+        json!({
+            "connection_id": connection_id,
+            "session_mode": "per_conversation",
+            "platform": "telegram",
+            "webhook_secret": "registered-secret",
+        })
+    );
+
+    // A move to another connection drops it: that connection's platform is
+    // stored when the trigger is registered there.
+    let other_connection = Uuid::new_v4().to_string();
+    let (status, body) = fixture
+        .call(
+            "PUT",
+            &format!("/api/runtime/triggers/{id}"),
+            Some(channel_request(json!({"connection_id": other_connection}))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        fixture.stored_configuration(&id).await,
+        json!({
+            "connection_id": other_connection,
+            "webhook_secret": "registered-secret",
+        })
     );
 
     fixture.cleanup(&id).await;
