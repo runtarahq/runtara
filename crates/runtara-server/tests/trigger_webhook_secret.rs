@@ -6,7 +6,8 @@
 //! These drive the real trigger handlers through a router: the secret is
 //! stripped from every response, ignored in create and update requests, and
 //! kept across updates even though clients can no longer send it back. The
-//! `platform` registration stores is kept across updates that leave it out.
+//! `platform` registration stores is likewise never taken from clients, and
+//! kept across updates while the trigger stays on its connection.
 //! Triggers stay inactive, so no webhook is registered and no platform is
 //! contacted.
 //!
@@ -216,8 +217,9 @@ async fn the_webhook_secret_is_never_returned_and_never_taken_from_clients() {
 
     // Registration stores the secret and platform.
     TriggerRepository::new(fixture.pool.clone())
-        .merge_configuration(
+        .merge_webhook_keys(
             &id,
+            &connection_id,
             &json!({"platform": "telegram", "webhook_secret": "registered-secret"}),
         )
         .await
@@ -344,7 +346,7 @@ async fn an_update_carries_over_only_a_secret_stored_in_an_object() {
 }
 
 #[tokio::test]
-async fn an_update_keeps_the_platform_unless_the_trigger_moves() {
+async fn the_platform_stays_with_its_connection_and_is_never_taken_from_clients() {
     let fixture = Fixture::start().await;
     let workflow_id = Uuid::new_v4().to_string();
     let connection_id = Uuid::new_v4().to_string();
@@ -357,53 +359,77 @@ async fn an_update_keeps_the_platform_unless_the_trigger_moves() {
             "single_instance": false,
         })
     };
+
+    // Create: a client-chosen platform is dropped.
     let (status, body) = fixture
         .call(
             "POST",
             "/api/runtime/triggers",
-            Some(channel_request(json!({"connection_id": connection_id}))),
+            Some(channel_request(json!({
+                "connection_id": connection_id,
+                "platform": "slack",
+            }))),
         )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let id = body["data"]["id"].as_str().expect("trigger id").to_string();
+    assert_eq!(
+        fixture.stored_configuration(&id).await,
+        json!({"connection_id": connection_id})
+    );
+
+    // Registration stores the platform and secret.
     TriggerRepository::new(fixture.pool.clone())
-        .merge_configuration(
+        .merge_webhook_keys(
             &id,
+            &connection_id,
             &json!({"platform": "telegram", "webhook_secret": "registered-secret"}),
         )
         .await
         .unwrap();
 
-    // An edit that leaves the platform out keeps it.
-    let (status, body) = fixture
-        .call(
-            "PUT",
-            &format!("/api/runtime/triggers/{id}"),
-            Some(channel_request(json!({
-                "connection_id": connection_id,
-                "session_mode": "per_conversation",
-            }))),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        fixture.stored_configuration(&id).await,
-        json!({
+    // An edit that leaves the platform out keeps it, and one that tries to
+    // change it cannot.
+    for platform in [None, Some("slack")] {
+        let mut configuration = json!({
             "connection_id": connection_id,
             "session_mode": "per_conversation",
-            "platform": "telegram",
-            "webhook_secret": "registered-secret",
-        })
-    );
+        });
+        if let Some(platform) = platform {
+            configuration["platform"] = json!(platform);
+        }
+        let (status, body) = fixture
+            .call(
+                "PUT",
+                &format!("/api/runtime/triggers/{id}"),
+                Some(channel_request(configuration)),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            fixture.stored_configuration(&id).await,
+            json!({
+                "connection_id": connection_id,
+                "session_mode": "per_conversation",
+                "platform": "telegram",
+                "webhook_secret": "registered-secret",
+            }),
+            "client platform: {platform:?}"
+        );
+    }
 
-    // A move to another connection drops it: that connection's platform is
-    // stored when the trigger is registered there.
+    // A move to another connection drops it, even when the client sends back
+    // the platform it read: that connection's platform is stored when the
+    // trigger is registered there.
     let other_connection = Uuid::new_v4().to_string();
     let (status, body) = fixture
         .call(
             "PUT",
             &format!("/api/runtime/triggers/{id}"),
-            Some(channel_request(json!({"connection_id": other_connection}))),
+            Some(channel_request(json!({
+                "connection_id": other_connection,
+                "platform": "telegram",
+            }))),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");

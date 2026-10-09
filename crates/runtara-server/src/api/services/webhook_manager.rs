@@ -395,7 +395,9 @@ fn choose_webhook_secret(stored: Option<&str>, preferred: Option<&str>) -> Secre
 ///
 /// The platform call can take seconds, so every write merges only the keys
 /// registration manages (`webhook_secret`, `platform`): an edit saved in the
-/// meantime is kept.
+/// meantime is kept. Each write also applies only while the trigger is still
+/// bound to the connection being registered, so a trigger moved meanwhile
+/// does not take this connection's platform or secret.
 pub async fn register_trigger_webhook(
     pool: &PgPool,
     manager: &WebhookManager,
@@ -421,32 +423,59 @@ pub async fn register_trigger_webhook(
         // Every write below merges only the keys registration manages, so an
         // edit saved while the platform is being called is kept.
         let stored_first = choice.store_first && manager.auto_registers();
-        if stored_first
-            && let Err(e) = repo
-                .merge_configuration(&trigger.id, &json!({"webhook_secret": choice.secret}))
+        if stored_first {
+            match repo
+                .merge_webhook_keys(
+                    &trigger.id,
+                    conn_id,
+                    &json!({"webhook_secret": choice.secret}),
+                )
                 .await
-        {
-            warn!(
-                error = %e,
-                trigger_id = %trigger.id,
-                "Failed to store webhook secret; not registering the webhook"
-            );
-            return;
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    info!(
+                        trigger_id = %trigger.id,
+                        connection_id = %conn_id,
+                        "Trigger is no longer bound to the connection; not registering the webhook"
+                    );
+                    return;
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        trigger_id = %trigger.id,
+                        "Failed to store webhook secret; not registering the webhook"
+                    );
+                    return;
+                }
+            }
         }
 
         match manager.register(conn_id, tenant_id, &choice.secret).await {
             Ok(platform) => {
                 // Store webhook secret and platform in the trigger's configuration.
                 let patch = json!({"webhook_secret": choice.secret, "platform": platform});
-                if let Err(e) = repo.merge_configuration(&trigger.id, &patch).await {
-                    warn!(error = %e, "Failed to store webhook secret in trigger");
+                match repo.merge_webhook_keys(&trigger.id, conn_id, &patch).await {
+                    Ok(true) => {}
+                    Ok(false) => info!(
+                        trigger_id = %trigger.id,
+                        connection_id = %conn_id,
+                        "Trigger was moved to another connection meanwhile; not storing the registration"
+                    ),
+                    Err(e) => warn!(error = %e, "Failed to store webhook secret in trigger"),
                 }
             }
             Err(e) => {
                 warn!(error = %e, connection_id = %conn_id, "Failed to register webhook");
                 if stored_first && choice.generated && e.platform_unchanged() {
                     match repo
-                        .restore_webhook_secret(&trigger.id, &choice.secret, previous_secret)
+                        .restore_webhook_secret(
+                            &trigger.id,
+                            conn_id,
+                            &choice.secret,
+                            previous_secret,
+                        )
                         .await
                     {
                         Ok(true) => info!(
@@ -455,7 +484,7 @@ pub async fn register_trigger_webhook(
                         ),
                         Ok(false) => info!(
                             trigger_id = %trigger.id,
-                            "Platform did not apply the webhook; the secret has been replaced since, leaving it"
+                            "Platform did not apply the webhook; the trigger has changed since, leaving its secret"
                         ),
                         Err(e) => warn!(
                             error = %e,
@@ -1704,7 +1733,11 @@ mod registration_tests {
         let trigger = harness.channel_trigger(None).await;
         let other_registration = async {
             TriggerRepository::new(harness.pool.clone())
-                .merge_configuration(&trigger.id, &json!({"webhook_secret": "stored-since"}))
+                .merge_webhook_keys(
+                    &trigger.id,
+                    &harness.connection_id,
+                    &json!({"webhook_secret": "stored-since"}),
+                )
                 .await
                 .unwrap();
         };
@@ -1714,6 +1747,60 @@ mod registration_tests {
         assert_eq!(
             harness.stored_secret(&trigger).await.as_deref(),
             Some("stored-since")
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn a_registration_for_a_trigger_moved_before_it_starts_contacts_nobody() {
+        let harness = Harness::new(ACCEPTED).await;
+        let trigger = harness.channel_trigger(None).await;
+        let other_bot = harness.another_bot("111111:other-token").await;
+        harness.move_to(&trigger, &other_bot).await;
+
+        // `trigger` is the row read before the move.
+        harness.register(&trigger, None).await;
+
+        assert_eq!(harness.calls(), Vec::<TelegramCall>::new());
+        assert_eq!(
+            harness.stored_configuration(&trigger).await,
+            json!({"connection_id": other_bot})
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn a_registration_does_not_store_its_platform_on_a_trigger_moved_meanwhile() {
+        let (harness, hold) = Harness::holding(ACCEPTED).await;
+        let trigger = harness.channel_trigger(None).await;
+        let other_bot = harness.another_bot("111111:other-token").await;
+
+        let moved = json!({"connection_id": other_bot});
+        register_while(&harness, &hold, &trigger, harness.edit(&trigger, moved)).await;
+
+        let sent = harness.sent_secrets();
+        assert_eq!(
+            harness.stored_configuration(&trigger).await,
+            json!({"connection_id": other_bot, "webhook_secret": sent[0]}),
+            "the platform of the connection it left is not stored"
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn a_refused_registration_leaves_a_trigger_moved_meanwhile_alone() {
+        let (harness, hold) = Harness::holding(REFUSED).await;
+        let trigger = harness.channel_trigger(None).await;
+        let other_bot = harness.another_bot("111111:other-token").await;
+
+        let moved = json!({"connection_id": other_bot});
+        register_while(&harness, &hold, &trigger, harness.edit(&trigger, moved)).await;
+
+        let sent = harness.sent_secrets();
+        assert_eq!(
+            harness.stored_secret(&trigger).await.as_deref(),
+            Some(sent[0].as_str()),
+            "the secret it carries to its new connection is not rolled back"
         );
         harness.cleanup().await;
     }

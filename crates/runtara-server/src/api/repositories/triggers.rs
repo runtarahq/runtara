@@ -127,13 +127,13 @@ impl TriggerRepository {
 
     /// Update an invocation trigger by ID with optional tenant filtering.
     ///
-    /// The configuration is replaced, except for the keys webhook
-    /// registration manages:
+    /// The configuration is replaced, except for the keys only webhook
+    /// registration writes (requests cannot set them):
     /// - a stored `webhook_secret` is kept: it is never sent to clients, so
     ///   their configuration cannot carry it;
-    /// - a stored `platform` is kept when the configuration leaves it out and
-    ///   still names the same connection. A trigger moved to another
-    ///   connection gets the platform of that one when it is registered.
+    /// - a stored `platform` is kept while the configuration names the same
+    ///   connection. A trigger moved to another connection gets the platform
+    ///   of that one when it is registered there.
     ///
     /// Doing this in the statement itself means an update never drops a key
     /// that a concurrent registration has just stored.
@@ -151,13 +151,13 @@ impl TriggerRepository {
                 active = $4,
                 configuration = CASE
                     WHEN jsonb_typeof($5) = 'object' AND jsonb_typeof(configuration) = 'object'
-                        THEN CASE
+                        THEN $5
+                            || CASE
                                 WHEN configuration ? 'platform'
                                     AND configuration->'connection_id' IS NOT DISTINCT FROM $5->'connection_id'
                                     THEN jsonb_build_object('platform', configuration->'platform')
                                 ELSE '{}'::jsonb
                             END
-                            || $5
                             || CASE
                                 WHEN configuration ? 'webhook_secret'
                                     THEN jsonb_build_object('webhook_secret', configuration->'webhook_secret')
@@ -212,36 +212,43 @@ impl TriggerRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Merge `patch`'s top-level keys into a trigger's configuration, leaving
-    /// every other key as it is. Used by webhook registration to store the
-    /// keys it manages (`webhook_secret`, `platform`) without overwriting an
-    /// edit saved while the platform was being called.
-    pub async fn merge_configuration(
+    /// Merge `patch` (the keys webhook registration manages: `webhook_secret`,
+    /// `platform`) into a trigger's configuration, leaving every other key as
+    /// it is, so an edit saved while the platform was being called is kept.
+    ///
+    /// Applies only while the trigger is still bound to `connection_id`, the
+    /// connection that was registered: a trigger moved to another one since
+    /// must not take this one's platform or secret. Returns whether it applied.
+    pub async fn merge_webhook_keys(
         &self,
         id: &str,
+        connection_id: &str,
         patch: &serde_json::Value,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
             r#"
             UPDATE public.invocation_trigger
-            SET configuration = COALESCE(configuration, '{}'::jsonb) || $2, updated_at = NOW()
-            WHERE id = $1
+            SET configuration = configuration || $3, updated_at = NOW()
+            WHERE id = $1 AND configuration->>'connection_id' = $2
             "#,
         )
         .bind(id)
+        .bind(connection_id)
         .bind(patch)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
     }
 
     /// Put a trigger's `webhook_secret` back to `previous`, or remove it when
-    /// there was none, but only while it still holds `expected`: a secret
-    /// stored since, e.g. by another registration, is left alone. Returns
-    /// whether the secret was restored.
+    /// there was none, but only while it still holds `expected` and is still
+    /// bound to `connection_id`: a secret stored since, e.g. by another
+    /// registration, or a trigger moved to another connection, is left
+    /// alone. Returns whether the secret was restored.
     pub async fn restore_webhook_secret(
         &self,
         id: &str,
+        connection_id: &str,
         expected: &str,
         previous: Option<&str>,
     ) -> Result<bool, sqlx::Error> {
@@ -249,14 +256,17 @@ impl TriggerRepository {
             r#"
             UPDATE public.invocation_trigger
             SET configuration = CASE
-                    WHEN $3::text IS NULL THEN configuration - 'webhook_secret'
-                    ELSE configuration || jsonb_build_object('webhook_secret', $3::text)
+                    WHEN $4::text IS NULL THEN configuration - 'webhook_secret'
+                    ELSE configuration || jsonb_build_object('webhook_secret', $4::text)
                 END,
                 updated_at = NOW()
-            WHERE id = $1 AND configuration->>'webhook_secret' = $2
+            WHERE id = $1
+              AND configuration->>'connection_id' = $2
+              AND configuration->>'webhook_secret' = $3
             "#,
         )
         .bind(id)
+        .bind(connection_id)
         .bind(expected)
         .bind(previous)
         .execute(&self.pool)
