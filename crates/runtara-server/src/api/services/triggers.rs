@@ -15,13 +15,16 @@ impl TriggerService {
         Self { repository }
     }
 
-    /// Create a new invocation trigger
+    /// Create a new invocation trigger. A `webhook_secret` in the request's
+    /// configuration is ignored: webhook registration manages it.
     pub async fn create_trigger(
         &self,
-        request: CreateInvocationTriggerRequest,
+        mut request: CreateInvocationTriggerRequest,
         tenant_id: Option<&str>,
         created_by: &str,
     ) -> Result<InvocationTrigger, ServiceError> {
+        strip_webhook_secret(&mut request.configuration);
+
         // Validation: workflow_id should not be empty
         if request.workflow_id.trim().is_empty() {
             return Err(ServiceError::ValidationError(
@@ -64,13 +67,16 @@ impl TriggerService {
             .map_err(|e| ServiceError::DatabaseError(e.to_string()))
     }
 
-    /// Update an invocation trigger
+    /// Update an invocation trigger. The stored `webhook_secret` is kept, and
+    /// one in the request's configuration is ignored: webhook registration
+    /// manages it.
     pub async fn update_trigger(
         &self,
         id: &str,
-        request: UpdateInvocationTriggerRequest,
+        mut request: UpdateInvocationTriggerRequest,
         tenant_id: Option<&str>,
     ) -> Result<Option<InvocationTrigger>, ServiceError> {
+        strip_webhook_secret(&mut request.configuration);
         // Validation: workflow_id should not be empty
         if request.workflow_id.trim().is_empty() {
             return Err(ServiceError::ValidationError(

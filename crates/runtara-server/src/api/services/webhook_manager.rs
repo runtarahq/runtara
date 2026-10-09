@@ -528,6 +528,41 @@ pub async fn activate_channel_webhook(
     }
 }
 
+/// Best-effort: bring the platform webhooks in line after a trigger update,
+/// given the trigger before the update (when it could be read) and after it.
+///
+/// A Channel trigger stops being live on a connection when it is switched
+/// off, turned into another trigger type, or moved to another connection, and
+/// becomes live on one when it is switched on or moved to it. Moving an
+/// active trigger does both: the connection it left is reconciled with the
+/// triggers that remain there, and the one it moved to is registered for it.
+pub async fn update_channel_webhooks(
+    pool: &PgPool,
+    manager: &WebhookManager,
+    before: Option<&InvocationTrigger>,
+    after: &InvocationTrigger,
+    tenant_id: &str,
+) {
+    let was_live = before.filter(|t| t.trigger_type == TriggerType::Channel && t.active);
+    let is_live = after.trigger_type == TriggerType::Channel && after.active;
+    let moved = is_live
+        && was_live.is_some_and(|before| {
+            extract_connection_id(&before.configuration)
+                != extract_connection_id(&after.configuration)
+        });
+
+    if let Some(before) = was_live
+        && (!is_live || moved)
+    {
+        // The pre-update row: its connection and secret are the ones the
+        // platform knows.
+        reconcile_channel_webhooks(pool, manager, std::slice::from_ref(before), tenant_id).await;
+    }
+    if is_live && (was_live.is_none() || moved) {
+        activate_channel_webhook(pool, manager, after, tenant_id).await;
+    }
+}
+
 /// Best-effort: bring the platform webhooks of Channel triggers that are no
 /// longer live (deactivated or deleted) in line with the triggers that
 /// remain.
@@ -684,8 +719,9 @@ mod tests {
         DeleteWebhook,
     }
 
-    /// Calls a fake Telegram received, in order.
-    pub(super) type Received = Arc<std::sync::Mutex<Vec<TelegramCall>>>;
+    /// Calls a fake Telegram received, in order, each with the bot path
+    /// segment (`bot<token>`) it was made for.
+    pub(super) type Received = Arc<std::sync::Mutex<Vec<(String, TelegramCall)>>>;
 
     /// Telegram applied the request, but the reply that reached us is not
     /// Telegram's: the outcome is unknown to the caller.
@@ -711,27 +747,32 @@ mod tests {
         let app = axum::Router::new()
             .route(
                 "/{bot}/setWebhook",
-                axum::routing::post(move |axum::Json(body): axum::Json<Value>| async move {
-                    let secret = body["secret_token"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string();
-                    set_recorder
-                        .lock()
-                        .unwrap()
-                        .push(TelegramCall::SetWebhook(secret));
-                    reply
-                }),
+                axum::routing::post(
+                    move |axum::extract::Path(bot): axum::extract::Path<String>,
+                          axum::Json(body): axum::Json<Value>| async move {
+                        let secret = body["secret_token"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                        set_recorder
+                            .lock()
+                            .unwrap()
+                            .push((bot, TelegramCall::SetWebhook(secret)));
+                        reply
+                    },
+                ),
             )
             .route(
                 "/{bot}/deleteWebhook",
-                axum::routing::post(move || async move {
-                    delete_recorder
-                        .lock()
-                        .unwrap()
-                        .push(TelegramCall::DeleteWebhook);
-                    reply
-                }),
+                axum::routing::post(
+                    move |axum::extract::Path(bot): axum::extract::Path<String>| async move {
+                        delete_recorder
+                            .lock()
+                            .unwrap()
+                            .push((bot, TelegramCall::DeleteWebhook));
+                        reply
+                    },
+                ),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -960,6 +1001,25 @@ mod registration_tests {
     use axum::http::StatusCode;
     use uuid::Uuid;
 
+    const BOT_TOKEN: &str = "000000:test-token";
+
+    /// A `telegram_bot` connection with `bot_token`, returning its id.
+    async fn insert_bot(pool: &PgPool, tenant: &str, bot_token: &str) -> String {
+        let connection_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO connection_data_entity (id, tenant_id, title, integration_id, connection_parameters, status)
+             VALUES ($1, $2, $3, 'telegram_bot', $4, 'ACTIVE')",
+        )
+        .bind(&connection_id)
+        .bind(tenant)
+        .bind(format!("telegram {connection_id}"))
+        .bind(json!({"bot_token": bot_token}))
+        .execute(pool)
+        .await
+        .unwrap();
+        connection_id
+    }
+
     struct Harness {
         pool: PgPool,
         manager: WebhookManager,
@@ -976,18 +1036,7 @@ mod registration_tests {
             sqlx::migrate!("./migrations").run(&pool).await.unwrap();
 
             let tenant = format!("t-{}", Uuid::new_v4());
-            let connection_id = Uuid::new_v4().to_string();
-            sqlx::query(
-                "INSERT INTO connection_data_entity (id, tenant_id, title, integration_id, connection_parameters, status)
-                 VALUES ($1, $2, $3, 'telegram_bot', $4, 'ACTIVE')",
-            )
-            .bind(&connection_id)
-            .bind(&tenant)
-            .bind(format!("telegram {connection_id}"))
-            .bind(json!({"bot_token": "000000:test-token"}))
-            .execute(&pool)
-            .await
-            .unwrap();
+            let connection_id = insert_bot(&pool, &tenant, BOT_TOKEN).await;
 
             let (telegram_api_base, received) = fake_telegram(reply).await;
             let manager = WebhookManager::for_test(
@@ -1089,6 +1138,49 @@ mod registration_tests {
             activate_channel_webhook(&self.pool, &self.manager, trigger, &self.tenant).await;
         }
 
+        /// A second bot in the harness's tenant, returning its connection id.
+        async fn another_bot(&self, bot_token: &str) -> String {
+            insert_bot(&self.pool, &self.tenant, bot_token).await
+        }
+
+        /// Point `trigger` at another connection, returning the updated row.
+        async fn move_to(
+            &self,
+            trigger: &InvocationTrigger,
+            connection_id: &str,
+        ) -> InvocationTrigger {
+            self.set_configuration(trigger, "connection_id", json!(connection_id))
+                .await
+        }
+
+        /// Set one key of `trigger`'s configuration, returning the updated row.
+        async fn set_configuration(
+            &self,
+            trigger: &InvocationTrigger,
+            key: &str,
+            value: Value,
+        ) -> InvocationTrigger {
+            sqlx::query_as::<_, InvocationTrigger>(
+                r#"
+                UPDATE invocation_trigger SET configuration = configuration || jsonb_build_object($2::text, $3::jsonb)
+                WHERE id = $1
+                RETURNING id, tenant_id, workflow_id, trigger_type, active, configuration,
+                          created_at, last_run, updated_at, remote_tenant_id, single_instance
+                "#,
+            )
+            .bind(&trigger.id)
+            .bind(key)
+            .bind(value)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap()
+        }
+
+        async fn update(&self, before: &InvocationTrigger, after: &InvocationTrigger) {
+            update_channel_webhooks(&self.pool, &self.manager, Some(before), after, &self.tenant)
+                .await;
+        }
+
         async fn reconcile(&self, removed: &InvocationTrigger) {
             reconcile_channel_webhooks(
                 &self.pool,
@@ -1131,7 +1223,24 @@ mod registration_tests {
         }
 
         fn calls(&self) -> Vec<TelegramCall> {
-            self.received.lock().unwrap().clone()
+            self.received
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, call)| call.clone())
+                .collect()
+        }
+
+        /// The calls made for the bot with `bot_token`, in order.
+        fn calls_to(&self, bot_token: &str) -> Vec<TelegramCall> {
+            let bot = format!("bot{bot_token}");
+            self.received
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(b, _)| *b == bot)
+                .map(|(_, call)| call.clone())
+                .collect()
         }
 
         async fn cleanup(&self) {
@@ -1143,8 +1252,8 @@ mod registration_tests {
                 .bind(&self.tenant)
                 .execute(&self.pool)
                 .await;
-            let _ = sqlx::query("DELETE FROM connection_data_entity WHERE id = $1")
-                .bind(&self.connection_id)
+            let _ = sqlx::query("DELETE FROM connection_data_entity WHERE tenant_id = $1")
+                .bind(&self.tenant)
                 .execute(&self.pool)
                 .await;
         }
@@ -1384,6 +1493,71 @@ mod registration_tests {
         harness.reconcile(&trigger).await;
 
         assert_eq!(harness.calls(), vec![TelegramCall::DeleteWebhook]);
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn moving_a_live_trigger_to_another_bot_hands_over_both_webhooks() {
+        let harness = Harness::new(ACCEPTED).await;
+        let other_bot = harness.another_bot("111111:other-token").await;
+        let survivor = harness.channel_trigger_created(Some("older"), 20).await;
+        let moving = harness.channel_trigger_created(Some("newer"), 10).await;
+
+        let moved = harness.move_to(&moving, &other_bot).await;
+        harness.update(&moving, &moved).await;
+
+        assert_eq!(
+            harness.calls_to(BOT_TOKEN),
+            vec![TelegramCall::SetWebhook("newer".into())],
+            "the bot it left is re-registered for the trigger that stays there"
+        );
+        assert_eq!(
+            harness.stored_secret(&survivor).await.as_deref(),
+            Some("newer")
+        );
+        assert_eq!(
+            harness.calls_to("111111:other-token"),
+            vec![TelegramCall::SetWebhook("newer".into())],
+            "the bot it moved to is registered with the secret it validates"
+        );
+        assert_eq!(
+            harness.stored_secret(&moved).await.as_deref(),
+            Some("newer")
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn an_update_that_keeps_a_trigger_live_on_its_bot_leaves_the_webhook_alone() {
+        let harness = Harness::new(ACCEPTED).await;
+        let trigger = harness.channel_trigger(Some("own")).await;
+
+        let edited = harness
+            .set_configuration(&trigger, "session_mode", json!("per_conversation"))
+            .await;
+        harness.update(&trigger, &edited).await;
+
+        assert_eq!(harness.calls(), Vec::<TelegramCall>::new());
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn an_update_switching_a_trigger_off_and_on_unregisters_and_registers() {
+        let harness = Harness::new(ACCEPTED).await;
+        let trigger = harness.channel_trigger(Some("own")).await;
+
+        let off = harness.set_active(&trigger, false).await;
+        harness.update(&trigger, &off).await;
+        let on = harness.set_active(&off, true).await;
+        harness.update(&off, &on).await;
+
+        assert_eq!(
+            harness.calls(),
+            vec![
+                TelegramCall::DeleteWebhook,
+                TelegramCall::SetWebhook("own".into())
+            ]
+        );
         harness.cleanup().await;
     }
 }
