@@ -244,10 +244,14 @@ impl TriggerRepository {
     /// hold. Triggers of a dead workflow are skipped: they are about to be
     /// deactivated, so the webhook must not be kept alive for them. Liveness
     /// follows the orphan rule of [`Self::deactivate_orphaned`].
+    ///
+    /// `except_trigger_id` leaves one trigger out, to find the trigger whose
+    /// secret was in use before that one became active.
     pub async fn newest_live_channel_trigger(
         &self,
         connection_id: &str,
         tenant_id: &str,
+        except_trigger_id: Option<&str>,
     ) -> Result<Option<InvocationTrigger>, sqlx::Error> {
         sqlx::query_as::<_, InvocationTrigger>(
             r#"
@@ -258,6 +262,7 @@ impl TriggerRepository {
               AND t.active = true
               AND t.configuration->>'connection_id' = $1
               AND (t.tenant_id = $2 OR t.tenant_id IS NULL)
+              AND ($3::text IS NULL OR t.id <> $3)
               AND EXISTS (
                   SELECT 1 FROM workflows w
                   WHERE w.workflow_id = t.workflow_id
@@ -270,6 +275,7 @@ impl TriggerRepository {
         )
         .bind(connection_id)
         .bind(tenant_id)
+        .bind(except_trigger_id)
         .fetch_optional(&self.pool)
         .await
     }

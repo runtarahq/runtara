@@ -3,13 +3,10 @@
 //! Business logic for workflow management
 //! Handles validation, orchestration, and error mapping
 
-use crate::api::dto::triggers::{InvocationTrigger, TriggerType};
+use crate::api::dto::triggers::TriggerType;
 use crate::api::dto::workflows::*;
-use crate::api::repositories::triggers::TriggerRepository;
 use crate::api::repositories::workflows::WorkflowRepository;
-use crate::api::services::webhook_manager::{
-    WebhookManager, extract_connection_id, register_trigger_webhook, stored_webhook_secret,
-};
+use crate::api::services::webhook_manager::{WebhookManager, reconcile_channel_webhooks};
 use crate::api::utils::pagination::{normalize_page, normalize_page_size};
 use crate::api::utils::validation::is_valid_identifier;
 use crate::types::MemoryTier;
@@ -17,7 +14,6 @@ use runtara_connections::ConnectionsFacade;
 use runtara_dsl::agent_meta::AgentCatalog;
 use runtara_workflows::validation::validate_workflow;
 use serde_json::Value;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -1040,99 +1036,23 @@ impl WorkflowService {
                 ?trigger_ids,
                 "Deactivated triggers of deleted workflow"
             );
-            self.reconcile_channel_webhooks(tenant_id, &deleted.deactivated_triggers)
+            // Best-effort: a webhook failure must not resurrect the workflow.
+            if deleted
+                .deactivated_triggers
+                .iter()
+                .any(|t| t.trigger_type == TriggerType::Channel)
+            {
+                reconcile_channel_webhooks(
+                    self.repository.pool(),
+                    &WebhookManager::new(self.connections.clone()),
+                    &deleted.deactivated_triggers,
+                    tenant_id,
+                )
                 .await;
+            }
         }
 
         Ok(deleted.definitions_deleted)
-    }
-
-    /// Bring the platform webhooks of deactivated Channel triggers in line
-    /// with the triggers that remain. Best-effort — a failure here must not
-    /// resurrect the workflow.
-    ///
-    /// A webhook is registered per connection, and inbound requests are
-    /// validated against the secret of the newest active Channel trigger on
-    /// it. So for each connection:
-    /// - no live trigger left: unregister, as deactivating a Channel trigger
-    ///   through the trigger API does;
-    /// - a deactivated trigger was not older than the newest survivor: the
-    ///   platform may hold the deactivated trigger's secret (validation order
-    ///   is undefined on a `created_at` tie), so register again for the
-    ///   survivor. The survivor adopts that secret rather than sending its
-    ///   own: the platform most likely holds it already, so even a failed
-    ///   call leaves the platform and the survivor in agreement;
-    /// - otherwise the survivor's secret is already the one in use; leave it.
-    async fn reconcile_channel_webhooks(&self, tenant_id: &str, triggers: &[InvocationTrigger]) {
-        // Newest deactivated trigger per connection.
-        let mut newest_deactivated: BTreeMap<&str, &InvocationTrigger> = BTreeMap::new();
-        for trigger in triggers
-            .iter()
-            .filter(|t| t.trigger_type == TriggerType::Channel)
-        {
-            if let Some(connection_id) = extract_connection_id(&trigger.configuration) {
-                let newest = newest_deactivated.entry(connection_id).or_insert(trigger);
-                if trigger.created_at > newest.created_at {
-                    *newest = trigger;
-                }
-            }
-        }
-        if newest_deactivated.is_empty() {
-            return;
-        }
-
-        let pool = self.repository.pool();
-        let trigger_repository = TriggerRepository::new(pool.clone());
-        let manager = WebhookManager::new(self.connections.clone());
-        for (connection_id, deactivated) in newest_deactivated {
-            match trigger_repository
-                .newest_live_channel_trigger(connection_id, tenant_id)
-                .await
-            {
-                Ok(None) => {
-                    if let Err(e) = manager.unregister(connection_id, tenant_id).await {
-                        tracing::warn!(
-                            tenant_id,
-                            connection_id,
-                            error = %e,
-                            "Failed to unregister channel webhook of deleted workflow"
-                        );
-                    }
-                }
-                Ok(Some(survivor)) if survivor.created_at <= deactivated.created_at => {
-                    tracing::info!(
-                        tenant_id,
-                        connection_id,
-                        trigger_id = %survivor.id,
-                        "Re-registering channel webhook for the newest remaining trigger"
-                    );
-                    register_trigger_webhook(
-                        pool,
-                        &manager,
-                        &survivor,
-                        tenant_id,
-                        stored_webhook_secret(&deactivated.configuration),
-                    )
-                    .await;
-                }
-                Ok(Some(survivor)) => {
-                    tracing::info!(
-                        tenant_id,
-                        connection_id,
-                        trigger_id = %survivor.id,
-                        "Keeping channel webhook registered: a newer trigger still uses the connection"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        tenant_id,
-                        connection_id,
-                        error = %e,
-                        "Failed to look up remaining channel triggers; leaving webhook as is"
-                    );
-                }
-            }
-        }
     }
 
     /// Clone a workflow with a new name
