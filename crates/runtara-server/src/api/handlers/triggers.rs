@@ -74,7 +74,7 @@ pub async fn create_invocation_trigger(
                 .await;
             }
 
-            // Re-read the trigger to get updated config (webhook_secret, platform).
+            // Re-read the trigger to get the config registration updated (platform).
             let trigger = service
                 .get_trigger(&trigger.id, Some(&tenant_id))
                 .await

@@ -125,7 +125,13 @@ impl TriggerRepository {
         Ok(trigger)
     }
 
-    /// Update an invocation trigger by ID with optional tenant filtering
+    /// Update an invocation trigger by ID with optional tenant filtering.
+    ///
+    /// The configuration is replaced, except for a stored `webhook_secret`,
+    /// which is kept: it is managed by webhook registration and never sent to
+    /// clients, so their configuration cannot carry it. Doing this in the
+    /// statement itself means an update never drops a secret that a
+    /// concurrent registration has just stored.
     pub async fn update(
         &self,
         id: &str,
@@ -139,7 +145,11 @@ impl TriggerRepository {
                 SET workflow_id = $2,
                     trigger_type = $3,
                     active = $4,
-                    configuration = $5,
+                    configuration = CASE
+                        WHEN jsonb_typeof($5) = 'object' AND configuration ? 'webhook_secret'
+                            THEN $5 || jsonb_build_object('webhook_secret', configuration->'webhook_secret')
+                        ELSE $5
+                    END,
                     remote_tenant_id = $6,
                     single_instance = $7
                 WHERE id = $1 AND (tenant_id = $8 OR tenant_id IS NULL)
@@ -164,7 +174,11 @@ impl TriggerRepository {
                 SET workflow_id = $2,
                     trigger_type = $3,
                     active = $4,
-                    configuration = $5,
+                    configuration = CASE
+                        WHEN jsonb_typeof($5) = 'object' AND configuration ? 'webhook_secret'
+                            THEN $5 || jsonb_build_object('webhook_secret', configuration->'webhook_secret')
+                        ELSE $5
+                    END,
                     remote_tenant_id = $6,
                     single_instance = $7
                 WHERE id = $1

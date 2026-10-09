@@ -51,6 +51,11 @@ path = "tests/workflow_trigger_cleanup.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
+name = "trigger_webhook_secret"
+path = "tests/trigger_webhook_secret.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
 name = "runtime_types"
 path = "tests/runtime_types.rs"
 

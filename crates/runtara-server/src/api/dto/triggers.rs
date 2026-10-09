@@ -144,6 +144,9 @@ pub struct UpdateInvocationTriggerRequest {
 // ============================================================================
 
 /// Trigger response with computed fields (e.g. webhook_url for Channel triggers).
+///
+/// The configuration never carries `webhook_secret`: it authenticates inbound
+/// platform calls, so anyone who could read it could forge them.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct InvocationTriggerResponse {
@@ -158,9 +161,11 @@ pub struct InvocationTriggerResponse {
 }
 
 impl InvocationTriggerResponse {
-    /// Enrich a trigger with a computed webhook_url if applicable.
-    pub fn from_trigger(trigger: InvocationTrigger, tenant_id: &str) -> Self {
+    /// Enrich a trigger with a computed webhook_url if applicable, and drop
+    /// its webhook secret.
+    pub fn from_trigger(mut trigger: InvocationTrigger, tenant_id: &str) -> Self {
         let webhook_url = compute_webhook_url(&trigger, tenant_id);
+        strip_webhook_secret(&mut trigger.configuration);
         Self {
             trigger,
             webhook_url,
@@ -202,10 +207,76 @@ fn compute_webhook_url(trigger: &InvocationTrigger, tenant_id: &str) -> Option<S
 // Helper Functions
 // ============================================================================
 
+/// Remove the server-managed `webhook_secret` from a trigger configuration.
+///
+/// The secret is generated and stored by webhook registration only: it is
+/// never returned to clients, and never taken from them.
+pub fn strip_webhook_secret(configuration: &mut Option<Value>) {
+    if let Some(Value::Object(config)) = configuration {
+        config.remove("webhook_secret");
+    }
+}
+
 fn default_active() -> bool {
     true
 }
 
 fn default_single_instance() -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn channel_trigger(configuration: Option<Value>) -> InvocationTrigger {
+        InvocationTrigger {
+            id: "trigger-1".into(),
+            tenant_id: Some("tenant-1".into()),
+            workflow_id: "workflow-1".into(),
+            trigger_type: TriggerType::Channel,
+            active: true,
+            configuration,
+            created_at: Utc::now(),
+            last_run: None,
+            updated_at: Utc::now(),
+            remote_tenant_id: None,
+            single_instance: false,
+        }
+    }
+
+    #[test]
+    fn a_response_never_carries_the_webhook_secret() {
+        let trigger = channel_trigger(Some(json!({
+            "connection_id": "conn-1",
+            "platform": "telegram",
+            "webhook_secret": "do-not-leak",
+        })));
+
+        let response = InvocationTriggerResponse::from_trigger(trigger, "tenant-1");
+
+        assert_eq!(
+            response.trigger.configuration,
+            Some(json!({"connection_id": "conn-1", "platform": "telegram"}))
+        );
+        let body = serde_json::to_string(&response).unwrap();
+        assert!(!body.contains("do-not-leak"), "{body}");
+        assert!(!body.contains("webhook_secret"), "{body}");
+    }
+
+    #[test]
+    fn stripping_leaves_other_configurations_alone() {
+        let mut none = None;
+        strip_webhook_secret(&mut none);
+        assert_eq!(none, None);
+
+        let mut not_an_object = Some(json!(["webhook_secret"]));
+        strip_webhook_secret(&mut not_an_object);
+        assert_eq!(not_an_object, Some(json!(["webhook_secret"])));
+
+        let mut without_secret = Some(json!({"expression": "* * * * *"}));
+        strip_webhook_secret(&mut without_secret);
+        assert_eq!(without_secret, Some(json!({"expression": "* * * * *"})));
+    }
 }
