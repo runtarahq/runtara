@@ -127,81 +127,61 @@ impl TriggerRepository {
 
     /// Update an invocation trigger by ID with optional tenant filtering.
     ///
-    /// The configuration is replaced, except for a stored `webhook_secret`,
-    /// which is kept: it is managed by webhook registration and never sent to
-    /// clients, so their configuration cannot carry it. Doing this in the
-    /// statement itself means an update never drops a secret that a
-    /// concurrent registration has just stored.
+    /// The configuration is replaced, except for the keys only webhook
+    /// registration writes (requests cannot set them):
+    /// - a stored `webhook_secret` is kept: it is never sent to clients, so
+    ///   their configuration cannot carry it;
+    /// - a stored `platform` is kept while the configuration names the same
+    ///   connection. A trigger moved to another connection gets the platform
+    ///   of that one when it is registered there.
+    ///
+    /// Doing this in the statement itself means an update never drops a key
+    /// that a concurrent registration has just stored.
     pub async fn update(
         &self,
         id: &str,
         request: &UpdateInvocationTriggerRequest,
         tenant_id: Option<&str>,
     ) -> Result<Option<InvocationTrigger>, sqlx::Error> {
-        let trigger = if let Some(tid) = tenant_id {
-            sqlx::query_as::<_, InvocationTrigger>(
-                r#"
-                UPDATE public.invocation_trigger
-                SET workflow_id = $2,
-                    trigger_type = $3,
-                    active = $4,
-                    configuration = CASE
-                        WHEN jsonb_typeof($5) = 'object'
-                            AND jsonb_typeof(configuration) = 'object'
-                            AND configuration ? 'webhook_secret'
-                            THEN $5 || jsonb_build_object('webhook_secret', configuration->'webhook_secret')
-                        ELSE $5
-                    END,
-                    remote_tenant_id = $6,
-                    single_instance = $7
-                WHERE id = $1 AND (tenant_id = $8 OR tenant_id IS NULL)
-                RETURNING id, tenant_id, workflow_id, trigger_type, active, configuration,
-                          created_at, last_run, updated_at, remote_tenant_id, single_instance
-                "#,
-            )
-            .bind(id)
-            .bind(&request.workflow_id)
-            .bind(&request.trigger_type)
-            .bind(request.active)
-            .bind(&request.configuration)
-            .bind(&request.remote_tenant_id)
-            .bind(request.single_instance)
-            .bind(tid)
-            .fetch_optional(&self.pool)
-            .await?
-        } else {
-            sqlx::query_as::<_, InvocationTrigger>(
-                r#"
-                UPDATE public.invocation_trigger
-                SET workflow_id = $2,
-                    trigger_type = $3,
-                    active = $4,
-                    configuration = CASE
-                        WHEN jsonb_typeof($5) = 'object'
-                            AND jsonb_typeof(configuration) = 'object'
-                            AND configuration ? 'webhook_secret'
-                            THEN $5 || jsonb_build_object('webhook_secret', configuration->'webhook_secret')
-                        ELSE $5
-                    END,
-                    remote_tenant_id = $6,
-                    single_instance = $7
-                WHERE id = $1
-                RETURNING id, tenant_id, workflow_id, trigger_type, active, configuration,
-                          created_at, last_run, updated_at, remote_tenant_id, single_instance
-                "#,
-            )
-            .bind(id)
-            .bind(&request.workflow_id)
-            .bind(&request.trigger_type)
-            .bind(request.active)
-            .bind(&request.configuration)
-            .bind(&request.remote_tenant_id)
-            .bind(request.single_instance)
-            .fetch_optional(&self.pool)
-            .await?
-        };
-
-        Ok(trigger)
+        sqlx::query_as::<_, InvocationTrigger>(
+            r#"
+            UPDATE public.invocation_trigger
+            SET workflow_id = $2,
+                trigger_type = $3,
+                active = $4,
+                configuration = CASE
+                    WHEN jsonb_typeof($5) = 'object' AND jsonb_typeof(configuration) = 'object'
+                        THEN $5
+                            || CASE
+                                WHEN configuration ? 'platform'
+                                    AND configuration->'connection_id' IS NOT DISTINCT FROM $5->'connection_id'
+                                    THEN jsonb_build_object('platform', configuration->'platform')
+                                ELSE '{}'::jsonb
+                            END
+                            || CASE
+                                WHEN configuration ? 'webhook_secret'
+                                    THEN jsonb_build_object('webhook_secret', configuration->'webhook_secret')
+                                ELSE '{}'::jsonb
+                            END
+                    ELSE $5
+                END,
+                remote_tenant_id = $6,
+                single_instance = $7
+            WHERE id = $1 AND ($8::text IS NULL OR tenant_id = $8 OR tenant_id IS NULL)
+            RETURNING id, tenant_id, workflow_id, trigger_type, active, configuration,
+                      created_at, last_run, updated_at, remote_tenant_id, single_instance
+            "#,
+        )
+        .bind(id)
+        .bind(&request.workflow_id)
+        .bind(&request.trigger_type)
+        .bind(request.active)
+        .bind(&request.configuration)
+        .bind(&request.remote_tenant_id)
+        .bind(request.single_instance)
+        .bind(tenant_id)
+        .fetch_optional(&self.pool)
+        .await
     }
 
     /// Delete an invocation trigger by ID with optional tenant filtering
@@ -232,25 +212,66 @@ impl TriggerRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Update only the configuration field of a trigger.
-    /// Used to store webhook secrets after registration.
-    pub async fn update_configuration(
+    /// Merge `patch` (the keys webhook registration manages: `webhook_secret`,
+    /// `platform`) into a trigger's configuration, leaving every other key as
+    /// it is, so an edit saved while the platform was being called is kept.
+    ///
+    /// Applies only while the trigger is still bound to `connection_id`, the
+    /// connection that was registered: a trigger moved to another one since
+    /// must not take this one's platform or secret. Returns whether it applied.
+    pub async fn merge_webhook_keys(
         &self,
         id: &str,
-        configuration: &serde_json::Value,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
+        connection_id: &str,
+        patch: &serde_json::Value,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
             r#"
             UPDATE public.invocation_trigger
-            SET configuration = $2, updated_at = NOW()
-            WHERE id = $1
+            SET configuration = configuration || $3, updated_at = NOW()
+            WHERE id = $1 AND configuration->>'connection_id' = $2
             "#,
         )
         .bind(id)
-        .bind(configuration)
+        .bind(connection_id)
+        .bind(patch)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Put a trigger's `webhook_secret` back to `previous`, or remove it when
+    /// there was none, but only while it still holds `expected` and is still
+    /// bound to `connection_id`: a secret stored since, e.g. by another
+    /// registration, or a trigger moved to another connection, is left
+    /// alone. Returns whether the secret was restored.
+    pub async fn restore_webhook_secret(
+        &self,
+        id: &str,
+        connection_id: &str,
+        expected: &str,
+        previous: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE public.invocation_trigger
+            SET configuration = CASE
+                    WHEN $4::text IS NULL THEN configuration - 'webhook_secret'
+                    ELSE configuration || jsonb_build_object('webhook_secret', $4::text)
+                END,
+                updated_at = NOW()
+            WHERE id = $1
+              AND configuration->>'connection_id' = $2
+              AND configuration->>'webhook_secret' = $3
+            "#,
+        )
+        .bind(id)
+        .bind(connection_id)
+        .bind(expected)
+        .bind(previous)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// The newest active Channel trigger visible to `tenant_id` that is bound

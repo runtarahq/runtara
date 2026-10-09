@@ -217,6 +217,17 @@ pub fn strip_webhook_secret(configuration: &mut Option<Value>) {
     }
 }
 
+/// Remove the keys only webhook registration writes (`webhook_secret`,
+/// `platform`) from a client's trigger configuration. Registration derives
+/// `platform` from the connection; a client's copy of it is stale as soon as
+/// the trigger moves to another connection.
+pub fn strip_server_managed_keys(configuration: &mut Option<Value>) {
+    if let Some(Value::Object(config)) = configuration {
+        config.remove("webhook_secret");
+        config.remove("platform");
+    }
+}
+
 fn default_active() -> bool {
     true
 }
@@ -263,6 +274,21 @@ mod tests {
         let body = serde_json::to_string(&response).unwrap();
         assert!(!body.contains("do-not-leak"), "{body}");
         assert!(!body.contains("webhook_secret"), "{body}");
+    }
+
+    #[test]
+    fn a_request_cannot_carry_the_keys_registration_manages() {
+        let mut configuration = Some(json!({
+            "connection_id": "conn-1",
+            "platform": "slack",
+            "webhook_secret": "client-chosen",
+            "session_mode": "per_conversation",
+        }));
+        strip_server_managed_keys(&mut configuration);
+        assert_eq!(
+            configuration,
+            Some(json!({"connection_id": "conn-1", "session_mode": "per_conversation"}))
+        );
     }
 
     #[test]
