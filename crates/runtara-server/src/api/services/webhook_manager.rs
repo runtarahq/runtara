@@ -466,14 +466,20 @@ pub async fn register_trigger_webhook(
 /// A webhook is registered per connection, and inbound requests are
 /// validated against the secret of the newest active Channel trigger on it.
 /// So what to register depends on the other live triggers on the connection:
-/// - a newer one: its secret is the one validated, and the one the platform
-///   holds, so leave the webhook as it is;
+/// - a newer one: its secret is the one validated, so register again for
+///   that trigger, reusing its stored secret. That is idempotent, and
+///   repairs a webhook that is missing or stale, e.g. one removed while that
+///   trigger stayed active;
 /// - an older one (or one created at the same instant): this trigger is now
 ///   the one validated. It adopts that trigger's secret rather than sending
 ///   its own: the platform most likely holds it already, so even a failed
 ///   call leaves the platform and this trigger in agreement, and on a
 ///   `created_at` tie both triggers hold the same secret;
 /// - none: register with this trigger's own secret.
+///
+/// When the other triggers cannot be looked up, the webhook is left as it
+/// is: registering this trigger's own secret could replace the one a newer
+/// trigger is validated with.
 pub async fn activate_channel_webhook(
     pool: &PgPool,
     manager: &WebhookManager,
@@ -497,9 +503,9 @@ pub async fn activate_channel_webhook(
                 error = %e,
                 connection_id,
                 trigger_id = %trigger.id,
-                "Failed to look up other channel triggers; registering with the trigger's own secret"
+                "Failed to look up other channel triggers; leaving webhook as is"
             );
-            None
+            return;
         }
     };
 
@@ -509,8 +515,9 @@ pub async fn activate_channel_webhook(
                 connection_id,
                 trigger_id = %trigger.id,
                 newer_trigger_id = %newer.id,
-                "Not registering channel webhook: a newer trigger's secret is the one in use"
+                "Re-registering channel webhook for the newer trigger, whose secret is the one in use"
             );
+            register_trigger_webhook(pool, manager, &newer, tenant_id, None).await;
         }
         other => {
             let preferred_secret = other
@@ -1228,10 +1235,10 @@ mod registration_tests {
     }
 
     #[tokio::test]
-    async fn activating_a_trigger_older_than_a_live_one_leaves_the_webhook_alone() {
+    async fn activating_a_trigger_older_than_a_live_one_re_registers_the_newer_one() {
         let harness = Harness::new(ACCEPTED).await;
         let older = harness.channel_trigger_created(Some("older"), 20).await;
-        let _newer = harness.channel_trigger_created(Some("newer"), 10).await;
+        let newer = harness.channel_trigger_created(Some("newer"), 10).await;
         let older = harness.set_active(&older, false).await;
 
         let older = harness.set_active(&older, true).await;
@@ -1239,12 +1246,35 @@ mod registration_tests {
 
         assert_eq!(
             harness.calls(),
-            Vec::<TelegramCall>::new(),
-            "Telegram keeps the newer trigger's secret, the one validated"
+            vec![TelegramCall::SetWebhook("newer".into())],
+            "Telegram gets the newer trigger's secret, the one validated"
         );
         assert_eq!(
             harness.stored_secret(&older).await.as_deref(),
             Some("older")
+        );
+        assert_eq!(
+            harness.stored_secret(&newer).await.as_deref(),
+            Some("newer")
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_lookup_leaves_the_webhook_alone() {
+        let harness = Harness::new(ACCEPTED).await;
+        let trigger = harness.channel_trigger(Some("own")).await;
+        let unreachable = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgresql://localhost:1/unused")
+            .unwrap();
+
+        activate_channel_webhook(&unreachable, &harness.manager, &trigger, &harness.tenant).await;
+
+        assert_eq!(
+            harness.calls(),
+            Vec::<TelegramCall>::new(),
+            "without the other triggers, this one's secret could replace the one validated"
         );
         harness.cleanup().await;
     }
