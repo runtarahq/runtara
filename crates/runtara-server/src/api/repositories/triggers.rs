@@ -146,7 +146,9 @@ impl TriggerRepository {
                     trigger_type = $3,
                     active = $4,
                     configuration = CASE
-                        WHEN jsonb_typeof($5) = 'object' AND configuration ? 'webhook_secret'
+                        WHEN jsonb_typeof($5) = 'object'
+                            AND jsonb_typeof(configuration) = 'object'
+                            AND configuration ? 'webhook_secret'
                             THEN $5 || jsonb_build_object('webhook_secret', configuration->'webhook_secret')
                         ELSE $5
                     END,
@@ -175,7 +177,9 @@ impl TriggerRepository {
                     trigger_type = $3,
                     active = $4,
                     configuration = CASE
-                        WHEN jsonb_typeof($5) = 'object' AND configuration ? 'webhook_secret'
+                        WHEN jsonb_typeof($5) = 'object'
+                            AND jsonb_typeof(configuration) = 'object'
+                            AND configuration ? 'webhook_secret'
                             THEN $5 || jsonb_build_object('webhook_secret', configuration->'webhook_secret')
                         ELSE $5
                     END,

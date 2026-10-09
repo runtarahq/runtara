@@ -299,3 +299,52 @@ async fn the_webhook_secret_is_never_returned_and_never_taken_from_clients() {
 
     fixture.cleanup(&id).await;
 }
+
+#[tokio::test]
+async fn an_update_carries_over_only_a_secret_stored_in_an_object() {
+    let fixture = Fixture::start().await;
+    let workflow_id = Uuid::new_v4().to_string();
+    let http_request = |configuration: Value| {
+        json!({
+            "workflow_id": workflow_id,
+            "trigger_type": "HTTP",
+            "active": false,
+            "configuration": configuration,
+            "single_instance": false,
+        })
+    };
+    let (status, body) = fixture
+        .call(
+            "POST",
+            "/api/runtime/triggers",
+            Some(http_request(json!({"path": "before"}))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["data"]["id"].as_str().expect("trigger id").to_string();
+
+    // A stored configuration that is not an object, but contains the key's
+    // name as an element, holds no secret to carry over.
+    sqlx::query(
+        "UPDATE invocation_trigger SET configuration = '[\"webhook_secret\"]' WHERE id = $1",
+    )
+    .bind(&id)
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+
+    let (status, body) = fixture
+        .call(
+            "PUT",
+            &format!("/api/runtime/triggers/{id}"),
+            Some(http_request(json!({"path": "after"}))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        fixture.stored_configuration(&id).await,
+        json!({"path": "after"})
+    );
+
+    fixture.cleanup(&id).await;
+}
