@@ -139,7 +139,7 @@ async fn newest_live_channel_trigger_id(
     tenant: &str,
 ) -> Option<String> {
     triggers
-        .newest_live_channel_trigger(connection_id, tenant)
+        .newest_live_channel_trigger(connection_id, tenant, None)
         .await
         .expect("newest live channel trigger lookup")
         .map(|t| t.id)
@@ -374,6 +374,15 @@ async fn newest_live_channel_trigger_skips_inactive_and_dead_workflow_triggers()
     assert_eq!(
         newest_live_channel_trigger_id(&triggers, &connection, &tenant).await,
         Some(newer.clone())
+    );
+    assert_eq!(
+        triggers
+            .newest_live_channel_trigger(&connection, &tenant, Some(&newer))
+            .await
+            .expect("newest live channel trigger lookup")
+            .map(|t| t.id),
+        Some(older.clone()),
+        "an excepted trigger is skipped"
     );
 
     sqlx::query("UPDATE invocation_trigger SET active = false WHERE id = $1")

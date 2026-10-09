@@ -16,27 +16,14 @@ use crate::api::dto::triggers::*;
 use crate::api::repositories::triggers::TriggerRepository;
 use crate::api::services::triggers::{ServiceError, TriggerService};
 use crate::api::services::webhook_manager::{
-    WebhookManager, extract_connection_id, register_trigger_webhook,
+    WebhookManager, activate_channel_webhook, reconcile_channel_webhooks,
 };
 use crate::auth::AuthContext;
 use crate::middleware::tenant_auth::Source;
 use crate::product_events::{EventType, ProductEvent, ProductEventSink};
 
-/// Best-effort webhook unregistration after a Channel trigger is deactivated/deleted.
-async fn maybe_unregister_webhook(
-    connections: &Arc<runtara_connections::ConnectionsFacade>,
-    trigger: &InvocationTrigger,
-    tenant_id: &str,
-) {
-    if trigger.trigger_type == TriggerType::Channel
-        && trigger.active
-        && let Some(conn_id) = extract_connection_id(&trigger.configuration)
-    {
-        let manager = WebhookManager::new(connections.clone());
-        if let Err(e) = manager.unregister(conn_id, tenant_id).await {
-            tracing::warn!(error = %e, connection_id = %conn_id, "Failed to unregister webhook");
-        }
-    }
+fn is_active_channel_trigger(trigger: &InvocationTrigger) -> bool {
+    trigger.trigger_type == TriggerType::Channel && trigger.active
 }
 
 /// Create a new invocation trigger
@@ -77,13 +64,12 @@ pub async fn create_invocation_trigger(
                     .properties(json!({"trigger_type": &trigger.trigger_type}))
                     .source(source),
             );
-            if trigger.trigger_type == TriggerType::Channel {
-                register_trigger_webhook(
+            if is_active_channel_trigger(&trigger) {
+                activate_channel_webhook(
                     &pool,
                     &WebhookManager::new(connections.clone()),
                     &trigger,
                     &tenant_id,
-                    None,
                 )
                 .await;
             }
@@ -269,27 +255,33 @@ pub async fn update_invocation_trigger(
 
     match service.update_trigger(&id, request, Some(&tenant_id)).await {
         Ok(Some(trigger)) => {
-            // Handle webhook lifecycle on state transitions.
-            let was_active_channel = old_trigger
-                .as_ref()
-                .map(|t| t.trigger_type == TriggerType::Channel && t.active)
-                .unwrap_or(false);
-            let is_active_channel = trigger.trigger_type == TriggerType::Channel && trigger.active;
+            // Handle webhook lifecycle on state transitions. A bot's webhook
+            // is shared by every Channel trigger on its connection, so these
+            // take the connection's other triggers into account.
+            let was_active_channel = old_trigger.as_ref().is_some_and(is_active_channel_trigger);
+            let is_active_channel = is_active_channel_trigger(&trigger);
 
             if !was_active_channel && is_active_channel {
-                register_trigger_webhook(
+                activate_channel_webhook(
                     &pool,
                     &WebhookManager::new(connections.clone()),
                     &trigger,
                     &tenant_id,
-                    None,
                 )
                 .await;
             } else if was_active_channel
                 && !is_active_channel
                 && let Some(ref old) = old_trigger
             {
-                maybe_unregister_webhook(&connections, old, &tenant_id).await;
+                // The pre-update row: its connection and secret are the ones
+                // the platform knows.
+                reconcile_channel_webhooks(
+                    &pool,
+                    &WebhookManager::new(connections.clone()),
+                    std::slice::from_ref(old),
+                    &tenant_id,
+                )
+                .await;
             }
 
             // Re-read to get updated config.
@@ -384,8 +376,16 @@ pub async fn delete_invocation_trigger(
 
     match service.delete_trigger(&id, Some(&tenant_id)).await {
         Ok(true) => {
-            if let Some(ref old) = old_trigger {
-                maybe_unregister_webhook(&connections, old, &tenant_id).await;
+            if let Some(ref old) = old_trigger
+                && is_active_channel_trigger(old)
+            {
+                reconcile_channel_webhooks(
+                    &pool,
+                    &WebhookManager::new(connections.clone()),
+                    std::slice::from_ref(old),
+                    &tenant_id,
+                )
+                .await;
             }
 
             let response = json!({

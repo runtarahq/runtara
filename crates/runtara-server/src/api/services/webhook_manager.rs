@@ -7,6 +7,7 @@
 use runtara_connections::ConnectionsFacade;
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -459,6 +460,164 @@ pub async fn register_trigger_webhook(
     }
 }
 
+/// Best-effort webhook registration for a Channel trigger that has just
+/// become active, by being created or switched on.
+///
+/// A webhook is registered per connection, and inbound requests are
+/// validated against the secret of the newest active Channel trigger on it.
+/// So what to register depends on the other live triggers on the connection:
+/// - a newer one: its secret is the one validated, so register again for
+///   that trigger, reusing its stored secret. That is idempotent, and
+///   repairs a webhook that is missing or stale, e.g. one removed while that
+///   trigger stayed active;
+/// - an older one (or one created at the same instant): this trigger is now
+///   the one validated. It adopts that trigger's secret rather than sending
+///   its own: the platform most likely holds it already, so even a failed
+///   call leaves the platform and this trigger in agreement, and on a
+///   `created_at` tie both triggers hold the same secret;
+/// - none: register with this trigger's own secret.
+///
+/// When the other triggers cannot be looked up, the webhook is left as it
+/// is: registering this trigger's own secret could replace the one a newer
+/// trigger is validated with.
+pub async fn activate_channel_webhook(
+    pool: &PgPool,
+    manager: &WebhookManager,
+    trigger: &InvocationTrigger,
+    tenant_id: &str,
+) {
+    if trigger.trigger_type != TriggerType::Channel || !trigger.active {
+        return;
+    }
+    let Some(connection_id) = extract_connection_id(&trigger.configuration) else {
+        return;
+    };
+
+    let other = match TriggerRepository::new(pool.clone())
+        .newest_live_channel_trigger(connection_id, tenant_id, Some(&trigger.id))
+        .await
+    {
+        Ok(other) => other,
+        Err(e) => {
+            warn!(
+                error = %e,
+                connection_id,
+                trigger_id = %trigger.id,
+                "Failed to look up other channel triggers; leaving webhook as is"
+            );
+            return;
+        }
+    };
+
+    match other {
+        Some(newer) if newer.created_at > trigger.created_at => {
+            info!(
+                connection_id,
+                trigger_id = %trigger.id,
+                newer_trigger_id = %newer.id,
+                "Re-registering channel webhook for the newer trigger, whose secret is the one in use"
+            );
+            register_trigger_webhook(pool, manager, &newer, tenant_id, None).await;
+        }
+        other => {
+            let preferred_secret = other
+                .as_ref()
+                .and_then(|o| stored_webhook_secret(&o.configuration));
+            register_trigger_webhook(pool, manager, trigger, tenant_id, preferred_secret).await;
+        }
+    }
+}
+
+/// Best-effort: bring the platform webhooks of Channel triggers that are no
+/// longer live (deactivated or deleted) in line with the triggers that
+/// remain.
+///
+/// Pass only triggers that were active before the change. Their rows may
+/// already read inactive, so this cannot tell on its own.
+///
+/// A webhook is registered per connection, and inbound requests are
+/// validated against the secret of the newest active Channel trigger on it.
+/// So for each connection:
+/// - no live trigger left: unregister;
+/// - a removed trigger was not older than the newest survivor: the platform
+///   may hold the removed trigger's secret (validation order is undefined on
+///   a `created_at` tie), so register again for the survivor. The survivor
+///   adopts that secret rather than sending its own: the platform most
+///   likely holds it already, so even a failed call leaves the platform and
+///   the survivor in agreement;
+/// - otherwise the survivor's secret is already the one in use; leave it.
+pub async fn reconcile_channel_webhooks(
+    pool: &PgPool,
+    manager: &WebhookManager,
+    removed: &[InvocationTrigger],
+    tenant_id: &str,
+) {
+    // Newest removed trigger per connection.
+    let mut newest_removed: BTreeMap<&str, &InvocationTrigger> = BTreeMap::new();
+    for trigger in removed
+        .iter()
+        .filter(|t| t.trigger_type == TriggerType::Channel)
+    {
+        if let Some(connection_id) = extract_connection_id(&trigger.configuration) {
+            let newest = newest_removed.entry(connection_id).or_insert(trigger);
+            if trigger.created_at > newest.created_at {
+                *newest = trigger;
+            }
+        }
+    }
+
+    let trigger_repository = TriggerRepository::new(pool.clone());
+    for (connection_id, removed) in newest_removed {
+        match trigger_repository
+            .newest_live_channel_trigger(connection_id, tenant_id, None)
+            .await
+        {
+            Ok(None) => {
+                if let Err(e) = manager.unregister(connection_id, tenant_id).await {
+                    warn!(
+                        tenant_id,
+                        connection_id,
+                        error = %e,
+                        "Failed to unregister channel webhook"
+                    );
+                }
+            }
+            Ok(Some(survivor)) if survivor.created_at <= removed.created_at => {
+                info!(
+                    tenant_id,
+                    connection_id,
+                    trigger_id = %survivor.id,
+                    "Re-registering channel webhook for the newest remaining trigger"
+                );
+                register_trigger_webhook(
+                    pool,
+                    manager,
+                    &survivor,
+                    tenant_id,
+                    stored_webhook_secret(&removed.configuration),
+                )
+                .await;
+            }
+            Ok(Some(survivor)) => {
+                info!(
+                    tenant_id,
+                    connection_id,
+                    trigger_id = %survivor.id,
+                    "Keeping channel webhook registered: a newer trigger still uses the connection"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    tenant_id,
+                    connection_id,
+                    error = %e,
+                    "Failed to look up remaining channel triggers; leaving webhook as is"
+                );
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum WebhookError {
     /// WEBHOOK_BASE_URL not set.
@@ -517,8 +676,16 @@ mod tests {
         addr
     }
 
-    /// `setWebhook` secret tokens a fake Telegram received, in order.
-    pub(super) type Received = Arc<std::sync::Mutex<Vec<String>>>;
+    /// A call a fake Telegram received.
+    #[derive(Debug, Clone, PartialEq)]
+    pub(super) enum TelegramCall {
+        /// `setWebhook`, with the secret_token it was sent.
+        SetWebhook(String),
+        DeleteWebhook,
+    }
+
+    /// Calls a fake Telegram received, in order.
+    pub(super) type Received = Arc<std::sync::Mutex<Vec<TelegramCall>>>;
 
     /// Telegram applied the request, but the reply that reached us is not
     /// Telegram's: the outcome is unknown to the caller.
@@ -531,24 +698,41 @@ mod tests {
         StatusCode::TOO_MANY_REQUESTS,
         r#"{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 5"}"#,
     );
-    const ACCEPTED: (StatusCode, &str) = (StatusCode::OK, r#"{"ok":true,"result":true}"#);
+    pub(super) const ACCEPTED: (StatusCode, &str) =
+        (StatusCode::OK, r#"{"ok":true,"result":true}"#);
 
-    /// A fake Telegram Bot API whose `setWebhook` records the secret_token it
-    /// was sent and answers with `reply`.
+    /// A fake Telegram Bot API that records every `setWebhook` (with the
+    /// secret_token it was sent) and `deleteWebhook`, and answers both with
+    /// `reply`.
     pub(super) async fn fake_telegram(reply: (StatusCode, &'static str)) -> (String, Received) {
         let received = Received::default();
-        let recorder = received.clone();
-        let app = axum::Router::new().route(
-            "/{bot}/setWebhook",
-            axum::routing::post(move |axum::Json(body): axum::Json<Value>| async move {
-                let secret = body["secret_token"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-                recorder.lock().unwrap().push(secret);
-                reply
-            }),
-        );
+        let set_recorder = received.clone();
+        let delete_recorder = received.clone();
+        let app = axum::Router::new()
+            .route(
+                "/{bot}/setWebhook",
+                axum::routing::post(move |axum::Json(body): axum::Json<Value>| async move {
+                    let secret = body["secret_token"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    set_recorder
+                        .lock()
+                        .unwrap()
+                        .push(TelegramCall::SetWebhook(secret));
+                    reply
+                }),
+            )
+            .route(
+                "/{bot}/deleteWebhook",
+                axum::routing::post(move || async move {
+                    delete_recorder
+                        .lock()
+                        .unwrap()
+                        .push(TelegramCall::DeleteWebhook);
+                    reply
+                }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -766,9 +950,13 @@ mod tests {
 /// stored) or refuses it outright.
 #[cfg(all(test, feature = "db-integration-tests"))]
 mod registration_tests {
-    use super::tests::{APPLIED_REPLY_LOST, REFUSED, Received, connections_facade, fake_telegram};
+    use super::tests::{
+        ACCEPTED, APPLIED_REPLY_LOST, REFUSED, Received, TelegramCall, connections_facade,
+        fake_telegram,
+    };
     use super::*;
     use crate::api::dto::triggers::CreateInvocationTriggerRequest;
+    use crate::api::repositories::workflows::WorkflowRepository;
     use axum::http::StatusCode;
     use uuid::Uuid;
 
@@ -817,22 +1005,98 @@ mod registration_tests {
         }
 
         async fn channel_trigger(&self, webhook_secret: Option<&str>) -> InvocationTrigger {
+            self.channel_trigger_created(webhook_secret, 0).await
+        }
+
+        /// An active Channel trigger on the harness's bot, for a live
+        /// workflow, created `minutes_ago` so tests control which trigger is
+        /// newest.
+        async fn channel_trigger_created(
+            &self,
+            webhook_secret: Option<&str>,
+            minutes_ago: i32,
+        ) -> InvocationTrigger {
+            let workflow_id = Uuid::new_v4().to_string();
+            WorkflowRepository::new(self.pool.clone())
+                .create(
+                    &self.tenant,
+                    &workflow_id,
+                    None,
+                    &format!("wf-{workflow_id}"),
+                    "/",
+                )
+                .await
+                .unwrap();
+
             let mut configuration = json!({"connection_id": self.connection_id});
             if let Some(secret) = webhook_secret {
                 configuration["webhook_secret"] = json!(secret);
             }
             let request = CreateInvocationTriggerRequest {
-                workflow_id: Uuid::new_v4().to_string(),
+                workflow_id,
                 trigger_type: TriggerType::Channel,
                 active: true,
                 configuration: Some(configuration),
                 remote_tenant_id: None,
                 single_instance: false,
             };
-            TriggerRepository::new(self.pool.clone())
+            let trigger = TriggerRepository::new(self.pool.clone())
                 .create(&request, Some(&self.tenant), None)
                 .await
-                .unwrap()
+                .unwrap();
+            sqlx::query_as::<_, InvocationTrigger>(
+                r#"
+                UPDATE invocation_trigger
+                SET created_at = NOW() - make_interval(mins => $2)
+                WHERE id = $1
+                RETURNING id, tenant_id, workflow_id, trigger_type, active, configuration,
+                          created_at, last_run, updated_at, remote_tenant_id, single_instance
+                "#,
+            )
+            .bind(&trigger.id)
+            .bind(minutes_ago)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap()
+        }
+
+        /// Switch `trigger` on or off, returning the updated row.
+        async fn set_active(&self, trigger: &InvocationTrigger, active: bool) -> InvocationTrigger {
+            sqlx::query_as::<_, InvocationTrigger>(
+                r#"
+                UPDATE invocation_trigger SET active = $2 WHERE id = $1
+                RETURNING id, tenant_id, workflow_id, trigger_type, active, configuration,
+                          created_at, last_run, updated_at, remote_tenant_id, single_instance
+                "#,
+            )
+            .bind(&trigger.id)
+            .bind(active)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap()
+        }
+
+        async fn delete(&self, trigger: &InvocationTrigger) {
+            assert!(
+                TriggerRepository::new(self.pool.clone())
+                    .delete(&trigger.id, Some(&self.tenant))
+                    .await
+                    .unwrap()
+            );
+        }
+
+        async fn activate(&self, trigger: &InvocationTrigger) {
+            activate_channel_webhook(&self.pool, &self.manager, trigger, &self.tenant).await;
+        }
+
+        async fn reconcile(&self, removed: &InvocationTrigger) {
+            reconcile_channel_webhooks(
+                &self.pool,
+                &self.manager,
+                std::slice::from_ref(removed),
+                &self.tenant,
+            )
+            .await;
         }
 
         async fn register(&self, trigger: &InvocationTrigger, preferred_secret: Option<&str>) {
@@ -855,12 +1119,27 @@ mod registration_tests {
             stored_webhook_secret(&trigger.configuration).map(str::to_string)
         }
 
+        /// The secrets sent with `setWebhook`, in order.
         fn sent_secrets(&self) -> Vec<String> {
+            self.calls()
+                .into_iter()
+                .filter_map(|call| match call {
+                    TelegramCall::SetWebhook(secret) => Some(secret),
+                    TelegramCall::DeleteWebhook => None,
+                })
+                .collect()
+        }
+
+        fn calls(&self) -> Vec<TelegramCall> {
             self.received.lock().unwrap().clone()
         }
 
         async fn cleanup(&self) {
             let _ = sqlx::query("DELETE FROM invocation_trigger WHERE tenant_id = $1")
+                .bind(&self.tenant)
+                .execute(&self.pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM workflows WHERE tenant_id = $1")
                 .bind(&self.tenant)
                 .execute(&self.pool)
                 .await;
@@ -952,6 +1231,159 @@ mod registration_tests {
             Some("secret-telegram-holds"),
             "the adopted secret is the one Telegram already holds"
         );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn activating_a_trigger_older_than_a_live_one_re_registers_the_newer_one() {
+        let harness = Harness::new(ACCEPTED).await;
+        let older = harness.channel_trigger_created(Some("older"), 20).await;
+        let newer = harness.channel_trigger_created(Some("newer"), 10).await;
+        let older = harness.set_active(&older, false).await;
+
+        let older = harness.set_active(&older, true).await;
+        harness.activate(&older).await;
+
+        assert_eq!(
+            harness.calls(),
+            vec![TelegramCall::SetWebhook("newer".into())],
+            "Telegram gets the newer trigger's secret, the one validated"
+        );
+        assert_eq!(
+            harness.stored_secret(&older).await.as_deref(),
+            Some("older")
+        );
+        assert_eq!(
+            harness.stored_secret(&newer).await.as_deref(),
+            Some("newer")
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_lookup_leaves_the_webhook_alone() {
+        let harness = Harness::new(ACCEPTED).await;
+        let trigger = harness.channel_trigger(Some("own")).await;
+        let unreachable = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgresql://localhost:1/unused")
+            .unwrap();
+
+        activate_channel_webhook(&unreachable, &harness.manager, &trigger, &harness.tenant).await;
+
+        assert_eq!(
+            harness.calls(),
+            Vec::<TelegramCall>::new(),
+            "without the other triggers, this one's secret could replace the one validated"
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn activating_the_newest_trigger_adopts_the_secret_telegram_holds() {
+        // Even a refused call must leave the trigger now validated holding
+        // the secret Telegram still has.
+        let harness = Harness::new(REFUSED).await;
+        let _older = harness.channel_trigger_created(Some("older"), 20).await;
+        let newer = harness.channel_trigger_created(None, 10).await;
+
+        harness.activate(&newer).await;
+
+        assert_eq!(harness.sent_secrets(), vec!["older".to_string()]);
+        assert_eq!(
+            harness.stored_secret(&newer).await.as_deref(),
+            Some("older")
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn activating_the_only_trigger_registers_its_own_secret() {
+        let harness = Harness::new(ACCEPTED).await;
+        let trigger = harness.channel_trigger(Some("own")).await;
+
+        harness.activate(&trigger).await;
+
+        assert_eq!(harness.sent_secrets(), vec!["own".to_string()]);
+        assert_eq!(
+            harness.stored_secret(&trigger).await.as_deref(),
+            Some("own")
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn deactivating_the_newest_trigger_hands_its_secret_to_the_survivor() {
+        let harness = Harness::new(ACCEPTED).await;
+        let older = harness.channel_trigger_created(Some("older"), 20).await;
+        let newer = harness.channel_trigger_created(Some("newer"), 10).await;
+
+        harness.set_active(&newer, false).await;
+        harness.reconcile(&newer).await;
+
+        assert_eq!(
+            harness.calls(),
+            vec![TelegramCall::SetWebhook("newer".into())],
+            "re-registered with the secret Telegram holds, not unregistered"
+        );
+        assert_eq!(
+            harness.stored_secret(&older).await.as_deref(),
+            Some("newer")
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn deleting_the_newest_trigger_hands_its_secret_to_the_survivor() {
+        let harness = Harness::new(ACCEPTED).await;
+        let older = harness.channel_trigger_created(Some("older"), 20).await;
+        let newer = harness.channel_trigger_created(Some("newer"), 10).await;
+
+        harness.delete(&newer).await;
+        harness.reconcile(&newer).await;
+
+        assert_eq!(
+            harness.calls(),
+            vec![TelegramCall::SetWebhook("newer".into())],
+            "re-registered with the secret Telegram holds, not unregistered"
+        );
+        assert_eq!(
+            harness.stored_secret(&older).await.as_deref(),
+            Some("newer")
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn deactivating_an_older_trigger_leaves_the_webhook_alone() {
+        let harness = Harness::new(ACCEPTED).await;
+        let older = harness.channel_trigger_created(Some("older"), 20).await;
+        let newer = harness.channel_trigger_created(Some("newer"), 10).await;
+
+        harness.set_active(&older, false).await;
+        harness.reconcile(&older).await;
+
+        assert_eq!(
+            harness.calls(),
+            Vec::<TelegramCall>::new(),
+            "the newer trigger still receives updates"
+        );
+        assert_eq!(
+            harness.stored_secret(&newer).await.as_deref(),
+            Some("newer")
+        );
+        harness.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn deactivating_the_last_trigger_unregisters() {
+        let harness = Harness::new(ACCEPTED).await;
+        let trigger = harness.channel_trigger(Some("own")).await;
+
+        harness.set_active(&trigger, false).await;
+        harness.reconcile(&trigger).await;
+
+        assert_eq!(harness.calls(), vec![TelegramCall::DeleteWebhook]);
         harness.cleanup().await;
     }
 }
