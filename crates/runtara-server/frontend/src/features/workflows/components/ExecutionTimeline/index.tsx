@@ -30,12 +30,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Badge } from '@/shared/components/ui/badge';
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from '@/shared/components/ui/card';
+import { Card, CardContent } from '@/shared/components/ui/card';
 import { useHierarchicalTimeline } from '@/features/workflows/hooks/useHierarchicalTimeline';
 import {
   HierarchicalStep,
@@ -57,11 +52,22 @@ import { isActiveStatus } from '@/shared/utils/status-display';
 import { StepStatusBadge } from '@/features/workflows/components/StepStatusBadge';
 import { getRunEventsEmptyState } from '@/features/workflows/utils/run-empty-state';
 import { Spinner } from '@/shared/components/ui/spinner';
+import { WithTooltip } from '@/shared/components/ui/tooltip';
 
 interface ExecutionTimelineProps {
   workflowId: string;
   instanceId: string;
   showInputs?: boolean;
+  /** Receives time spent per step type whenever the visible steps change. */
+  onStatsChange?: (stats: ExecutionStats) => void;
+}
+
+/** Time spent per step type across the visible steps, out of `total`. */
+export interface ExecutionStats {
+  total: number;
+  byType: Record<string, number>;
+  /** Top-level steps the run executed. */
+  stepCount: number;
 }
 
 // Categorical step-type IDENTITY colors (raw palette classes are intentional
@@ -238,6 +244,28 @@ const formatTimestamp = (ts: number): string => {
   return date.toISOString().split('T')[1].replace('Z', '');
 };
 
+/** Per-step-type share of the run's time, colored like the timeline bars. */
+export function ExecutionSummary({ stats }: { stats: ExecutionStats }) {
+  return (
+    <div className="flex flex-wrap gap-6 text-sm">
+      {Object.entries(stats.byType).map(([type, duration]) => {
+        const config = stepTypeConfig[type] || stepTypeConfig.Default;
+        const percentage = stats.total
+          ? ((duration / stats.total) * 100).toFixed(1)
+          : '0';
+        return (
+          <div key={type} className="flex items-center gap-2">
+            <div className={`size-3 rounded-sm ${config.dot}`} />
+            <span className="text-muted-foreground">{type}:</span>
+            <span className="font-mono">{formatTime(duration)}</span>
+            <span className="text-muted-foreground">({percentage}%)</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // Indentation per depth level
 const INDENT_PX = 24;
 
@@ -253,6 +281,7 @@ function ExecutionTimelineContent({
   workflowId,
   instanceId,
   showInputs = true,
+  onStatsChange,
 }: ExecutionTimelineProps) {
   const [selectedStep, setSelectedStep] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -264,12 +293,21 @@ function ExecutionTimelineContent({
   const {
     visibleSteps,
     totalDuration,
+    totalRootCount,
     stats,
     isLoadingRoot,
     hasMoreRootSteps,
     loadMoreRoot,
     toggleExpand,
   } = useHierarchicalTimeline(workflowId, instanceId);
+
+  useEffect(() => {
+    onStatsChange?.({
+      total: stats.total,
+      byType: stats.byType,
+      stepCount: Math.max(totalRootCount, stats.rootStepCount),
+    });
+  }, [stats, totalRootCount, onStatsChange]);
 
   // Poll instance data for status
   const { data: instanceData } = useCustomQuery({
@@ -437,54 +475,6 @@ function ExecutionTimelineContent({
 
   return (
     <div className="space-y-6">
-      {/* Stats Bar */}
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs text-muted-foreground">
-              Total Duration
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-xl font-bold">{formatTime(stats.total)}</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs text-muted-foreground">
-              Steps
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-xl font-bold">{stats.rootStepCount}</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs text-muted-foreground">
-              Agent Time
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-xl font-bold text-blue-500">
-              {formatTime(stats.byType.Agent || 0)}
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs text-muted-foreground">
-              Connection Time
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-xl font-bold text-purple-500">
-              {formatTime(stats.byType.Connection || 0)}
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
       {inputCards}
 
       {/* Playback Controls */}
@@ -658,12 +648,16 @@ function ExecutionTimelineContent({
                     <div className="w-5" /> // Spacer for alignment
                   )}
 
-                  {/* Step Icon */}
-                  <div
-                    className={`flex size-6 shrink-0 items-center justify-center rounded ${config.bg}`}
-                  >
-                    <Icon size={14} className={config.text} />
-                  </div>
+                  {/* Step Icon — its tooltip names the step type */}
+                  <WithTooltip label={config.label}>
+                    <div
+                      className={`flex size-6 shrink-0 items-center justify-center rounded ${config.bg}`}
+                      aria-label={config.label}
+                      role="img"
+                    >
+                      <Icon size={14} className={config.text} />
+                    </div>
+                  </WithTooltip>
 
                   {/* Step Name */}
                   <div className="min-w-0 flex-1">
@@ -759,25 +753,6 @@ function ExecutionTimelineContent({
           )}
         </CardContent>
       </Card>
-
-      {/* Legend */}
-      <div className="flex flex-wrap gap-4">
-        {Object.entries(stepTypeConfig)
-          .filter(([k]) => k !== 'Default')
-          .map(([key, value]) => {
-            const Icon = value.icon;
-            return (
-              <div key={key} className="flex items-center gap-2 text-sm">
-                <div
-                  className={`flex size-5 items-center justify-center rounded border ${value.bg} ${value.border}`}
-                >
-                  <Icon size={12} className={value.text} />
-                </div>
-                <span className="text-muted-foreground">{value.label}</span>
-              </div>
-            );
-          })}
-      </div>
 
       {/* Selected Step Details */}
       {selectedStep && (
@@ -933,33 +908,6 @@ function ExecutionTimelineContent({
           </CardContent>
         </Card>
       )}
-
-      {/* Execution Summary */}
-      <Card className="bg-muted/30">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm font-medium">
-            Execution Summary
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap gap-6 text-sm">
-            {Object.entries(stats.byType).map(([type, duration]) => {
-              const config = stepTypeConfig[type] || stepTypeConfig.Default;
-              const percentage = stats.total
-                ? ((duration / stats.total) * 100).toFixed(1)
-                : '0';
-              return (
-                <div key={type} className="flex items-center gap-2">
-                  <div className={`size-3 rounded-sm ${config.dot}`} />
-                  <span className="text-muted-foreground">{type}:</span>
-                  <span className="font-mono">{formatTime(duration)}</span>
-                  <span className="text-muted-foreground">({percentage}%)</span>
-                </div>
-              );
-            })}
-          </div>
-        </CardContent>
-      </Card>
     </div>
   );
 }
