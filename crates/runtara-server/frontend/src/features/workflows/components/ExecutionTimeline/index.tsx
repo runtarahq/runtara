@@ -15,7 +15,6 @@ import {
 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Badge } from '@/shared/components/ui/badge';
-import { Card, CardContent } from '@/shared/components/ui/card';
 import { useHierarchicalTimeline } from '@/features/workflows/hooks/useHierarchicalTimeline';
 import {
   HierarchicalStep,
@@ -316,13 +315,15 @@ function ExecutionTimelineContent({
     );
   }
 
+  // Renders flush inside its host card: the waterfall runs edge to edge and
+  // the selected step's details follow as a section, not a nested card.
   return (
-    <div className="space-y-6">
-      {inputCards}
+    <div>
+      {inputCards && <div className="space-y-4 p-6 pb-0">{inputCards}</div>}
 
       {/* Timeline */}
-      <Card className="overflow-hidden">
-        <CardContent className="p-0">
+      <div className="overflow-hidden">
+        <div>
           {/* Time scale doubles as the playback control: play/pause and the
               playhead time on the left, click or drag the scale to seek. */}
           <div className="relative flex h-10 items-center border-b bg-muted/50">
@@ -601,13 +602,13 @@ function ExecutionTimelineContent({
               </Button>
             </div>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      </div>
 
       {/* Selected Step Details */}
       {selectedStep && (
-        <Card>
-          <CardContent className="pt-6">
+        <div className="border-t">
+          <div className="p-6">
             {(() => {
               const step = visibleSteps.find((s) => s.stepId === selectedStep);
               if (!step) return null;
@@ -755,8 +756,8 @@ function ExecutionTimelineContent({
                 </div>
               );
             })()}
-          </CardContent>
-        </Card>
+          </div>
+        </div>
       )}
     </div>
   );

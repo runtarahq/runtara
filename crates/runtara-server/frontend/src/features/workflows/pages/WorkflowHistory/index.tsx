@@ -12,13 +12,10 @@ import { Badge } from '@/shared/components/ui/badge.tsx';
 import { Button } from '@/shared/components/ui/button';
 import {
   ChevronLeft,
-  FileText,
-  Hash,
   Copy,
   Sparkles,
   ChevronRight,
   Database,
-  Info,
 } from 'lucide-react';
 import {
   getWorkflowInstance,
@@ -39,11 +36,8 @@ import {
   CardHeader,
   CardTitle,
 } from '@/shared/components/ui/card';
-import { Separator } from '@/shared/components/ui/separator';
 import { toast } from 'sonner';
 import {
-  getTerminationTypeDisplay,
-  getStatusDisplay,
   isActiveStatus,
   isFinishedStatus,
 } from '@/shared/utils/status-display';
@@ -53,15 +47,8 @@ import {
   type ExecutionStats,
 } from '@/features/workflows/components/ExecutionTimeline';
 import { RunOverviewCard } from './RunOverviewCard';
-import { Spinner } from '@/shared/components/ui/spinner';
-import {
-  canResume,
-  suspendedStatusLabel,
-} from '@/features/workflows/utils/suspension';
-import {
-  ChildRunsCard,
-  ParentRunLink,
-} from '@/features/invocation-history/components/RunLinks';
+import { canResume } from '@/features/workflows/utils/suspension';
+import { ChildRunsCard } from '@/features/invocation-history/components/RunLinks';
 import {
   hasElidedPayload,
   mapElidedForDisplay,
@@ -240,7 +227,7 @@ function WorkflowHistoryContent() {
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
       {/* Header Section */}
       <div className="mb-8">
-        <div className="mb-4 flex items-center gap-3">
+        <div className="flex items-center gap-3">
           <Button
             variant="secondary"
             size="icon"
@@ -264,136 +251,7 @@ function WorkflowHistoryContent() {
               </p>
             )}
           </div>
-          <div className="flex gap-2">
-            {data && data.id && (
-              <>
-                <Button
-                  variant="secondary"
-                  bordered
-                  size="sm"
-                  onClick={() =>
-                    navigate(`/workflows/${workflowId}/history/${data.id}/logs`)
-                  }
-                  className="flex items-center gap-2"
-                >
-                  <FileText className="size-4" />
-                  View Logs
-                </Button>
-                {isActiveStatus(data.status) ? (
-                  <>
-                    {/* Only a paused run needs a resume; a waiting run wakes
-                        on its own. */}
-                    {canResume(data) && (
-                      <ResumeButton
-                        instanceId={data.id}
-                        variant="secondary"
-                        size="sm"
-                      />
-                    )}
-                    {/* The pause handler only accepts instances in the
-                        'running' state (suspended is a no-op, anything else
-                        is a 400), so gate on the exact status. */}
-                    {data.status?.toLowerCase() === 'running' && (
-                      <PauseButton
-                        instanceId={data.id}
-                        variant="secondary"
-                        size="sm"
-                      />
-                    )}
-                    <StopButton
-                      instanceId={data.id}
-                      variant="secondary"
-                      size="sm"
-                    />
-                  </>
-                ) : (
-                  <ReplayButton
-                    instanceId={data.id}
-                    error={data.metadata?.errorMessage}
-                    variant="secondary"
-                    size="sm"
-                  />
-                )}
-              </>
-            )}
-          </div>
         </div>
-
-        {/* Status Overview Bar */}
-        {data && (
-          <div className="flex items-center gap-4 rounded-lg border bg-muted/50 p-4">
-            <div
-              className="flex cursor-help items-center gap-2"
-              title="Execution Status - Shows the current state of your workflow execution"
-            >
-              {(() => {
-                const statusInfo = getStatusDisplay(data.status);
-                return (
-                  <>
-                    {statusInfo.showSpinner && <Spinner className="size-4" />}
-                    <Badge variant={statusInfo.variant}>
-                      {statusInfo.text}
-                    </Badge>
-                    {suspendedStatusLabel(data) && (
-                      <Badge
-                        variant="warning"
-                        title="Why this run is suspended"
-                      >
-                        {suspendedStatusLabel(data)}
-                      </Badge>
-                    )}
-                  </>
-                );
-              })()}
-            </div>
-            {(() => {
-              const terminationInfo = getTerminationTypeDisplay(
-                data.terminationType
-              );
-
-              return (
-                terminationInfo && (
-                  <>
-                    <Separator orientation="vertical" className="h-6" />
-                    <div
-                      className="flex cursor-help items-center gap-2"
-                      title="Termination Type - Provides context for why this execution terminated"
-                    >
-                      <Info className="size-4 text-muted-foreground" />
-                      <Badge variant={terminationInfo.variant}>
-                        {terminationInfo.text}
-                      </Badge>
-                    </div>
-                  </>
-                )
-              );
-            })()}
-            {data.id && (
-              <>
-                <Separator orientation="vertical" className="h-6" />
-                <div
-                  className="flex cursor-help items-center gap-2 text-sm text-muted-foreground"
-                  title="Unique identifier for this workflow execution. Use this ID when reporting issues or tracking specific runs."
-                >
-                  <Hash className="size-4" />
-                  <span className="font-mono">{data.id}</span>
-                </div>
-              </>
-            )}
-            {data.parentInstanceId && (
-              <>
-                <Separator orientation="vertical" className="h-6" />
-                <div
-                  className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground"
-                  data-testid="started-by"
-                >
-                  <span>Started by</span>
-                  <ParentRunLink parentInstanceId={data.parentInstanceId} />
-                </div>
-              </>
-            )}
-          </div>
-        )}
       </div>
 
       <InputRetryPanel
@@ -425,7 +283,51 @@ function WorkflowHistoryContent() {
       )}
 
       <div className="space-y-6">
-        <RunOverviewCard run={data} executionStats={executionStats} />
+        <RunOverviewCard
+          run={data}
+          executionStats={executionStats}
+          actions={
+            data.id ? (
+              <>
+                {isActiveStatus(data.status) ? (
+                  <>
+                    {/* Only a paused run needs a resume; a waiting run wakes
+                      on its own. */}
+                    {canResume(data) && (
+                      <ResumeButton
+                        instanceId={data.id}
+                        variant="secondary"
+                        size="sm"
+                      />
+                    )}
+                    {/* The pause handler only accepts instances in the
+                      'running' state (suspended is a no-op, anything else
+                      is a 400), so gate on the exact status. */}
+                    {data.status?.toLowerCase() === 'running' && (
+                      <PauseButton
+                        instanceId={data.id}
+                        variant="secondary"
+                        size="sm"
+                      />
+                    )}
+                    <StopButton
+                      instanceId={data.id}
+                      variant="secondary"
+                      size="sm"
+                    />
+                  </>
+                ) : (
+                  <ReplayButton
+                    instanceId={data.id}
+                    error={data.metadata?.errorMessage}
+                    variant="secondary"
+                    size="sm"
+                  />
+                )}
+              </>
+            ) : null
+          }
+        />
 
         {/* Runs this run started through control:start */}
         {data.id && <ChildRunsCard instanceId={data.id} />}
@@ -601,7 +503,7 @@ function WorkflowHistoryContent() {
               step in your workflow
             </p>
           </CardHeader>
-          <CardContent className="p-6">
+          <CardContent className="p-0">
             <ExecutionTimeline
               showInputs={false}
               onStatsChange={setExecutionStats}

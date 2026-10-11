@@ -82,12 +82,6 @@ export interface MockApi {
       instanceId: string,
       body: unknown
     ) => Promise<void>;
-    logs: (
-      page: Page,
-      workflowId: string,
-      instanceId: string,
-      body: unknown
-    ) => Promise<void>;
     instanceDetail: (
       page: Page,
       workflowId: string,
@@ -256,11 +250,6 @@ const factory: MockApi = {
     instance: (page, workflowId, instanceId, body) =>
       page.route(
         runtimeUrl(`workflows/${workflowId}/history/${instanceId}`),
-        (route) => fulfill(route, body as JsonBody)
-      ),
-    logs: (page, workflowId, instanceId, body) =>
-      page.route(
-        runtimeUrl(`workflows/${workflowId}/history/${instanceId}/logs`),
         (route) => fulfill(route, body as JsonBody)
       ),
     // `GET /workflows/{id}/instances/{id}` — what getWorkflowInstance() actually

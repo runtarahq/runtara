@@ -112,37 +112,3 @@ export function resolvePayloadForCopy(data: unknown): string {
   }
   return JSON.stringify(data, null, 2);
 }
-
-/**
- * Resolves truncated payloads within a record's top-level values.
- * Returns a new object where any truncated payload values are replaced
- * with their parsed preview content, plus a `_truncation_info` field
- * summarizing which keys were truncated.
- */
-export function resolveRecordPayloads(
-  data: Record<string, unknown>
-): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  const truncatedKeys: string[] = [];
-
-  for (const [key, value] of Object.entries(data)) {
-    if (isTruncatedPayload(value)) {
-      truncatedKeys.push(
-        `${key} (original: ${formatBytes(value._original_size)})`
-      );
-      try {
-        result[key] = JSON.parse(value._preview);
-      } catch {
-        result[key] = value._preview;
-      }
-    } else {
-      result[key] = value;
-    }
-  }
-
-  if (truncatedKeys.length > 0) {
-    result._truncation_info = `Truncated fields: ${truncatedKeys.join(', ')}`;
-  }
-
-  return result;
-}

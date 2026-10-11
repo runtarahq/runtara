@@ -8,8 +8,12 @@ import { WithTooltip } from '@/shared/components/ui/tooltip';
 import { StructuredErrorDisplay } from '@/shared/components/StructuredErrorDisplay';
 import {
   getStatusDisplay,
+  getTerminationTypeDisplay,
   isActiveStatus,
 } from '@/shared/utils/status-display';
+import { Spinner } from '@/shared/components/ui/spinner';
+import { suspendedStatusLabel } from '@/features/workflows/utils/suspension';
+import { ParentRunLink } from '@/features/invocation-history/components/RunLinks';
 import type { ExecutionStats } from '@/features/workflows/components/ExecutionTimeline';
 import { getStepTypeStyle } from '@/features/workflows/components/ExecutionTimeline/step-type-style';
 import type { WorkflowInstanceWithMetadata } from '@/features/workflows/queries';
@@ -18,6 +22,8 @@ interface RunOverviewCardProps {
   run: WorkflowInstanceWithMetadata;
   /** Per-step-type timing reported by the Events timeline, once loaded. */
   executionStats: ExecutionStats | null;
+  /** Run controls (replay, or pause/resume/stop while active). */
+  actions?: ReactNode;
 }
 
 /**
@@ -25,17 +31,24 @@ interface RunOverviewCardProps {
  * key figures, then two bars showing queued vs. running time and time by
  * step type.
  */
-export function RunOverviewCard({ run, executionStats }: RunOverviewCardProps) {
+export function RunOverviewCard({
+  run,
+  executionStats,
+  actions,
+}: RunOverviewCardProps) {
   const status = getStatusDisplay(run.status);
   const active = isActiveStatus(run.status);
   const startedAt = run.metadata?.startedAt;
   const completedAt = run.metadata?.completedAt;
   const lastEvent = completedAt ?? startedAt ?? run.created;
+  // The status badge says what happened; the headline says when.
   const headline = active
     ? startedAt
-      ? `Started ${formatRelativeTime(startedAt)}, still running`
-      : `Waiting to start, created ${formatRelativeTime(run.created)}`
-    : `${status.text} ${formatRelativeTime(lastEvent)}`;
+      ? `Started ${formatRelativeTime(startedAt)}`
+      : `Created ${formatRelativeTime(run.created)}, waiting to start`
+    : `Finished ${formatRelativeTime(lastEvent)}`;
+  const suspendedLabel = suspendedStatusLabel(run);
+  const termination = getTerminationTypeDisplay(run.terminationType);
 
   const retryCount = run.metadata?.retryCount;
   const maxRetries = run.metadata?.maxRetries;
@@ -57,11 +70,33 @@ export function RunOverviewCard({ run, executionStats }: RunOverviewCardProps) {
   return (
     <Card>
       <CardContent className="space-y-4 p-4">
-        {/* Headline */}
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <h2 className="text-sm font-semibold">Run overview</h2>
-          <span className="text-sm text-muted-foreground">{headline}</span>
-          <div className="ml-auto flex flex-wrap items-center gap-1.5">
+        {/* Identity, status and controls */}
+        <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
+          <div className="min-w-0 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="truncate text-base font-semibold">
+                {run.runLabel || 'Run'}
+              </h2>
+              <span className="flex items-center gap-1 font-mono text-xs text-muted-foreground">
+                {run.id}
+                <CopyButton value={run.id} label="Copy run ID" />
+              </span>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {headline}
+              {run.parentInstanceId && (
+                <span
+                  className="inline-flex items-center gap-1"
+                  data-testid="started-by"
+                >
+                  <span className="px-1">·</span>
+                  Started by
+                  <ParentRunLink parentInstanceId={run.parentInstanceId} />
+                </span>
+              )}
+            </p>
+          </div>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
             {tags.map((tag) => (
               <Badge key={tag} variant="secondary" className="px-2 py-0">
                 {tag}
@@ -72,6 +107,21 @@ export function RunOverviewCard({ run, executionStats }: RunOverviewCardProps) {
                 <Badge variant="secondary">v{run.usedVersion}</Badge>
               </WithTooltip>
             )}
+            <Badge variant={status.variant} className="gap-1">
+              {status.showSpinner && <Spinner className="size-3" />}
+              {status.text}
+            </Badge>
+            {suspendedLabel && (
+              <Badge variant="warning" title="Why this run is suspended">
+                {suspendedLabel}
+              </Badge>
+            )}
+            {termination && (
+              <WithTooltip label="Why this run ended">
+                <Badge variant={termination.variant}>{termination.text}</Badge>
+              </WithTooltip>
+            )}
+            {actions}
           </div>
         </div>
 
