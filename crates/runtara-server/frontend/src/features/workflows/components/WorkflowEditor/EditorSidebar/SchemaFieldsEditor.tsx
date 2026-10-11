@@ -996,6 +996,12 @@ interface SchemaFieldsEditorProps {
   hideLabel?: boolean;
   showEnum?: boolean;
   mode?: SchemaFieldsEditorMode;
+  /**
+   * `table` (default) is the wide grid for the workflow settings panel.
+   * `stacked` renders one card per field for the 520px step panel, where the
+   * table needed ~980px and scrolled sideways.
+   */
+  layout?: 'table' | 'stacked';
 }
 
 export function SchemaFieldsEditor({
@@ -1007,6 +1013,7 @@ export function SchemaFieldsEditor({
   hideLabel = false,
   showEnum = false,
   mode = 'form',
+  layout = 'table',
 }: SchemaFieldsEditorProps) {
   const formSettings = mode === 'form';
   const [schemaFieldValidationErrors, setSchemaFieldValidationErrors] =
@@ -1078,6 +1085,198 @@ export function SchemaFieldsEditor({
     newFields[index] = { ...newFields[index], [field]: value };
     onChange(newFields);
   };
+
+  const renderAdvanced = (field: SchemaField, index: number) => (
+    <AdvancedSchemaFieldDialog
+      field={field}
+      readOnly={readOnly}
+      showEnum={showEnum}
+      mode={mode}
+      siblingNames={fields
+        .filter((_, otherIndex) => otherIndex !== index)
+        .map((other) => other.name)
+        .filter(Boolean)}
+      onApply={(updatedField) => {
+        const newFields = [...fields];
+        newFields[index] = updatedField;
+        onChange(newFields);
+      }}
+    />
+  );
+
+  const addButton = !readOnly && (
+    <Button
+      type="button"
+      variant="secondary"
+      bordered
+      size="sm"
+      onClick={handleAdd}
+      className="w-full"
+    >
+      <Plus className="mr-2 size-4" />
+      Add Field
+    </Button>
+  );
+
+  if (layout === 'stacked') {
+    return (
+      <div className="min-w-0 space-y-2">
+        {!hideLabel && <Label className="text-sm font-medium">{label}</Label>}
+        {fields.length === 0 ? (
+          <p className="rounded-lg border border-dashed px-3 py-2 text-sm text-muted-foreground">
+            {emptyMessage}
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {fields.map((field, index) => {
+              const fieldNameError = fieldNameErrorsByIndex.get(index) ?? null;
+              const fieldNameErrorId = fieldNameError
+                ? `${errorIdPrefix}-${index}-name-error`
+                : undefined;
+
+              return (
+                <div
+                  key={index}
+                  className="min-w-0 space-y-2 rounded-lg border bg-background p-2.5"
+                >
+                  <div className="flex min-w-0 items-start gap-2">
+                    <div className="min-w-0 flex-1">
+                      <Input
+                        value={field.name}
+                        onChange={(e) =>
+                          handleChange(index, 'name', e.target.value)
+                        }
+                        placeholder="fieldName"
+                        aria-label="Field name"
+                        disabled={readOnly}
+                        aria-invalid={!!fieldNameError}
+                        aria-describedby={fieldNameErrorId}
+                        className={cn(
+                          'h-8 font-mono text-sm',
+                          fieldNameError &&
+                            'border-destructive text-destructive focus-visible:ring-destructive'
+                        )}
+                      />
+                      {fieldNameError && (
+                        <p
+                          id={fieldNameErrorId}
+                          className="mt-1 text-xs text-destructive"
+                        >
+                          {fieldNameError}
+                        </p>
+                      )}
+                    </div>
+                    <Select
+                      value={field.type || 'string'}
+                      onValueChange={(value) =>
+                        handleChange(index, 'type', value)
+                      }
+                      disabled={readOnly}
+                    >
+                      <SelectTrigger
+                        className="h-8 w-28 shrink-0 text-sm"
+                        aria-label="Field type"
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {SUPPORTED_TYPES.map((type) => (
+                          <SelectItem key={type.value} value={type.value}>
+                            {type.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {renderAdvanced(field, index)}
+                    {!readOnly && (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="icon-sm"
+                        onClick={() => handleRemove(index)}
+                        className="shrink-0"
+                        aria-label={`Remove ${field.name || 'field'}`}
+                      >
+                        <Trash2 className="size-3.5" />
+                      </Button>
+                    )}
+                  </div>
+                  <Input
+                    value={field.description}
+                    onChange={(e) =>
+                      handleChange(index, 'description', e.target.value)
+                    }
+                    placeholder="Description"
+                    aria-label="Field description"
+                    disabled={readOnly}
+                    className="h-8 text-sm"
+                  />
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
+                    {formSettings && (
+                      <label className="flex items-center gap-1.5 text-sm">
+                        <Checkbox
+                          checked={field.required}
+                          onCheckedChange={(checked) =>
+                            handleChange(index, 'required', !!checked)
+                          }
+                          disabled={readOnly}
+                        />
+                        Required
+                      </label>
+                    )}
+                    <label className="flex items-center gap-1.5 text-sm">
+                      <Checkbox
+                        checked={!!field.nullable}
+                        onCheckedChange={(checked) =>
+                          handleChange(index, 'nullable', !!checked)
+                        }
+                        disabled={readOnly}
+                      />
+                      Nullable
+                    </label>
+                    {formSettings && (
+                      <Input
+                        value={formatFieldValue(field.defaultValue)}
+                        onChange={(e) =>
+                          handleChange(
+                            index,
+                            'defaultValue',
+                            parseDefaultValue(e.target.value, field.type)
+                          )
+                        }
+                        placeholder="Default value"
+                        aria-label="Default value"
+                        disabled={readOnly}
+                        className="h-8 min-w-0 flex-1 basis-32 font-mono text-sm"
+                      />
+                    )}
+                  </div>
+                  {showEnum && (
+                    <Input
+                      value={formatEnumValue(field.enum)}
+                      onChange={(e) => {
+                        const newFields = [...fields];
+                        newFields[index] = {
+                          ...newFields[index],
+                          enum: parseEnumValue(e.target.value),
+                        };
+                        onChange(newFields);
+                      }}
+                      placeholder="Allowed values: val1, val2, ..."
+                      aria-label="Allowed values"
+                      disabled={readOnly}
+                      className="h-8 font-mono text-sm"
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {addButton}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-2">
@@ -1242,21 +1441,7 @@ export function SchemaFieldsEditor({
                     </td>
                   )}
                   <td className="w-20 p-2 text-center align-top">
-                    <AdvancedSchemaFieldDialog
-                      field={field}
-                      readOnly={readOnly}
-                      showEnum={showEnum}
-                      mode={mode}
-                      siblingNames={fields
-                        .filter((_, otherIndex) => otherIndex !== index)
-                        .map((other) => other.name)
-                        .filter(Boolean)}
-                      onApply={(updatedField) => {
-                        const newFields = [...fields];
-                        newFields[index] = updatedField;
-                        onChange(newFields);
-                      }}
-                    />
+                    {renderAdvanced(field, index)}
                   </td>
                   {!readOnly && (
                     <td className="w-16 p-2 text-center align-top">
@@ -1291,19 +1476,7 @@ export function SchemaFieldsEditor({
           </tbody>
         </table>
       </div>
-      {!readOnly && (
-        <Button
-          type="button"
-          variant="secondary"
-          bordered
-          size="sm"
-          onClick={handleAdd}
-          className="w-full"
-        >
-          <Plus className="mr-2 size-4" />
-          Add Field
-        </Button>
-      )}
+      {addButton}
     </div>
   );
 }

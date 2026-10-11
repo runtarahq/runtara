@@ -826,9 +826,11 @@ export function SimpleInputMappingEditor({
         <Table className="w-full table-fixed">
           {/* No Type column: at the docked panel's width a dedicated column
               costs more room than it explains, and the value controls were
-              being clipped. The type is in the parameter's info hint. */}
+              being clipped. The type is in the parameter's info hint.
+              32%: labels wrap if they must, values wrap instead of clipping
+              and need the room more. */}
           <colgroup>
-            <col style={{ width: '38%' }} />
+            <col style={{ width: '32%' }} />
             <col />
             <col style={{ width: '40px' }} />
           </colgroup>

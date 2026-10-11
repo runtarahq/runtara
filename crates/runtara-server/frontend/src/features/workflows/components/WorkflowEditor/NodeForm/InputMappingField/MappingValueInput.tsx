@@ -14,6 +14,7 @@ import {
 import { Icons } from '@/shared/components/icons';
 import { WithTooltip } from '@/shared/components/ui/tooltip';
 import { ReferencePill } from './ReferencePill';
+import { WrappingLineInput } from './WrappingLineInput';
 import { ModeToggleButton } from './ModeToggleButton';
 import { VariablePickerModal } from './VariablePickerModal';
 import { TemplateEditorModal } from './TemplateEditorModal';
@@ -368,12 +369,19 @@ export function MappingValueInput({
       const isArrayComposite = isArrayFieldType(lowerFieldType);
       const CompositeIcon = isArrayComposite ? Icons.list : Icons.braces;
       return (
-        <div className="flex min-h-9 flex-1 items-center rounded-md border border-green-200 bg-green-50 px-3 py-1 dark:border-green-800 dark:bg-green-950/30">
+        // One short line: in a value cell the old "Composite object -
+        // configure below" wrapped to four lines and pushed the row tall.
+        <div
+          className="flex h-9 min-w-0 flex-1 items-center rounded-md border border-green-200 bg-green-50 px-3 dark:border-green-800 dark:bg-green-950/30"
+          title={
+            isArrayComposite
+              ? 'List built from the fields below'
+              : 'Object built from the fields below'
+          }
+        >
           <CompositeIcon className="mr-2 size-4 shrink-0 text-green-600 dark:text-green-400" />
-          <span className="text-sm text-green-700 dark:text-green-300">
-            {isArrayComposite
-              ? 'Composite array - configure below'
-              : 'Composite object - configure below'}
+          <span className="truncate text-sm text-green-700 dark:text-green-300">
+            {isArrayComposite ? 'List · built below' : 'Object · built below'}
           </span>
         </div>
       );
@@ -382,16 +390,15 @@ export function MappingValueInput({
     // Template mode - show text input for template string
     if (isTemplate) {
       return (
-        <Input
-          type="text"
+        <WrappingLineInput
           value={stringValue}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={onChange}
           placeholder={
             placeholder ||
             'e.g., Bearer {{ steps.my_conn.outputs.parameters.api_key }}'
           }
           disabled={disabled}
-          className="flex-1 border-0 font-mono shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
+          className="font-mono"
         />
       );
     }
@@ -501,15 +508,13 @@ export function MappingValueInput({
       );
     }
 
-    // Default: text input
+    // Default: text that wraps rather than clipping in a narrow cell.
     return (
-      <Input
-        type="text"
+      <WrappingLineInput
         value={stringValue}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={onChange}
         placeholder={placeholder}
         disabled={disabled}
-        className="flex-1 border-0 shadow-none focus-visible:ring-0 focus-visible:ring-offset-0"
       />
     );
   };
@@ -530,8 +535,9 @@ export function MappingValueInput({
           <div
             className={cn(
               'flex flex-1 overflow-hidden rounded-md border border-input bg-background focus-within:ring-1 focus-within:ring-ring',
-              // h-9 would clamp the autosizing textarea back to one line.
-              isLongForm ? 'items-stretch' : 'h-9 items-center'
+              // A fixed h-9 would clamp the autosizing and wrapping text
+              // controls back to one line.
+              isLongForm ? 'items-stretch' : 'min-h-9 items-center'
             )}
           >
             {renderInput()}

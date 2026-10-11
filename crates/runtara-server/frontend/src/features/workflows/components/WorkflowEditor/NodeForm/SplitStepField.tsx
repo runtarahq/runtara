@@ -305,6 +305,7 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
           inside the subgraph.
         </p>
         <SchemaFieldsEditor
+          layout="stacked"
           label="Item Schema (Input)"
           fields={(inputSchemaValues || []) as any}
           onChange={(fields) =>
@@ -334,6 +335,7 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
           .
         </p>
         <SchemaFieldsEditor
+          layout="stacked"
           label="Output Schema"
           fields={(outputSchemaValues || []) as any}
           onChange={(fields) =>

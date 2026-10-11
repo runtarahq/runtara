@@ -1039,6 +1039,7 @@ export function AiAgentStepField({ name }: AiAgentStepFieldProps) {
             matching this shape.
           </p>
           <SchemaFieldsEditor
+            layout="stacked"
             label="Output Schema"
             hideLabel
             showEnum

@@ -130,9 +130,7 @@ describe('WaitForInstancesStepField', () => {
       'waitRuns'
     );
 
-    expect(
-      screen.getByText('Composite array - configure below')
-    ).toBeInTheDocument();
+    expect(screen.getByText('List · built below')).toBeInTheDocument();
     expect(
       screen.getByText(/steps\.startA\.outputs\.instanceId/)
     ).toBeInTheDocument();

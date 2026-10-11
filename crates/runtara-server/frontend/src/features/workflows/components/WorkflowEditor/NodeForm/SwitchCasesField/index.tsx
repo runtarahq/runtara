@@ -35,7 +35,7 @@ import {
 import { Switch as ToggleSwitch } from '@/shared/components/ui/switch.tsx';
 import { Label } from '@/shared/components/ui/label.tsx';
 import { FieldError } from '@/shared/components/ui/form';
-import { useContext, useEffect, useState } from 'react';
+import { Fragment, useContext, useEffect, useState } from 'react';
 import { NodeFormContext } from '../NodeFormContext';
 import { ValueType } from '../TypeHintSelector';
 import { EditorTh } from '@/features/workflows/components/WorkflowEditor/EditorTable';
@@ -652,7 +652,7 @@ export function SwitchCasesField(props: any) {
   };
 
   // Total columns in the cases table (dynamic based on routing mode)
-  const totalColumns = isRoutingMode ? 5 : 4;
+  const totalColumns = isRoutingMode ? 4 : 3;
 
   return (
     <div>
@@ -705,7 +705,6 @@ export function SwitchCasesField(props: any) {
               <tr className="border-b">
                 <EditorTh className="w-32">Match Type</EditorTh>
                 <EditorTh>Match Pattern</EditorTh>
-                <EditorTh>Output</EditorTh>
                 {isRoutingMode && <EditorTh className="w-28">Route</EditorTh>}
                 <EditorTh className="w-16 text-center">Actions</EditorTh>
               </tr>
@@ -722,121 +721,132 @@ export function SwitchCasesField(props: any) {
                 const isExistence = EXISTENCE_OPERATORS.has(matchType);
 
                 return (
-                  <tr key={index} className="border-b hover:bg-muted/30">
-                    <td className="p-2">
-                      <Select
-                        value={matchType}
-                        onValueChange={(value) =>
-                          updateCaseMatchType(index, value as MatchType)
-                        }
-                      >
-                        <SelectTrigger className="h-7 border-0 text-xs focus-visible:ring-0">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {MATCH_TYPE_GROUPS.map((group, groupIdx) => (
-                            <SelectGroup key={group.label}>
-                              {groupIdx > 0 && <SelectSeparator />}
-                              <SelectLabel className="text-xs">
-                                {group.label}
-                              </SelectLabel>
-                              {group.items.map((type) => (
-                                <SelectItem
-                                  key={type.value}
-                                  value={type.value}
-                                  className="text-xs"
-                                >
-                                  <div className="flex items-center gap-2">
-                                    <span className="min-w-[24px] font-semibold">
-                                      {type.label}
-                                    </span>
-                                    <span className="text-muted-foreground">
-                                      {type.description}
-                                    </span>
-                                  </div>
-                                </SelectItem>
-                              ))}
-                            </SelectGroup>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </td>
-                    <td className="p-2">
-                      {isExistence ? (
-                        <span className="px-1 text-xs italic text-muted-foreground">
-                          No value needed
-                        </span>
-                      ) : (
-                        <div className="flex items-center gap-1">
-                          <Input
-                            data-testid={`switch-case-match-${index}`}
-                            defaultValue={formatMatchValue(
-                              matchValue,
-                              matchType
-                            )}
-                            onBlur={(e) => {
-                              const parsed = parseMatchValue(
-                                e.target.value,
-                                matchType
-                              );
-                              updateCaseMatch(index, parsed);
-                            }}
-                            key={`${index}-${matchType}-${formatMatchValue(matchValue, matchType)}`}
-                            className="h-auto min-w-0 flex-1 border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
-                            placeholder={getMatchPlaceholder(matchType)}
-                          />
-                          <Button
-                            type="button"
-                            variant="secondary"
-                            size="icon"
-                            className="size-6 shrink-0"
-                            onClick={() =>
-                              openEditDialog(
-                                'caseMatch',
-                                formatMatchValue(matchValue, matchType),
-                                index
-                              )
-                            }
-                          >
-                            <Icons.edit className="size-3" />
-                          </Button>
-                        </div>
-                      )}
-                    </td>
-                    <td className="p-2">
-                      <div className="flex items-center gap-1">
-                        <SwitchOutputCell
-                          testId={`switch-case-output-${index}`}
-                          output={outputValue}
-                          onChange={(next) => updateCaseOutput(index, next)}
-                        />
-                      </div>
-                    </td>
-                    {isRoutingMode && (
+                  <Fragment key={index}>
+                    <tr className="hover:bg-transparent">
                       <td className="p-2">
-                        <Input
-                          data-testid={`switch-case-route-${index}`}
-                          value={routeValue}
-                          onChange={(e) =>
-                            updateCaseRoute(index, e.target.value)
+                        <Select
+                          value={matchType}
+                          onValueChange={(value) =>
+                            updateCaseMatchType(index, value as MatchType)
                           }
-                          className="h-auto min-w-0 border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
-                          placeholder={`case_${index + 1}`}
-                        />
+                        >
+                          <SelectTrigger className="h-7 border-0 text-xs focus-visible:ring-0">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {MATCH_TYPE_GROUPS.map((group, groupIdx) => (
+                              <SelectGroup key={group.label}>
+                                {groupIdx > 0 && <SelectSeparator />}
+                                <SelectLabel className="text-xs">
+                                  {group.label}
+                                </SelectLabel>
+                                {group.items.map((type) => (
+                                  <SelectItem
+                                    key={type.value}
+                                    value={type.value}
+                                    className="text-xs"
+                                  >
+                                    <div className="flex items-center gap-2">
+                                      <span className="min-w-[24px] font-semibold">
+                                        {type.label}
+                                      </span>
+                                      <span className="text-muted-foreground">
+                                        {type.description}
+                                      </span>
+                                    </div>
+                                  </SelectItem>
+                                ))}
+                              </SelectGroup>
+                            ))}
+                          </SelectContent>
+                        </Select>
                       </td>
-                    )}
-                    <td className="w-16 p-2 text-center">
-                      <Button
-                        type="button"
-                        size="icon"
-                        variant="secondary"
-                        onClick={() => removeCase(index)}
-                        className="size-8"
-                      >
-                        <Icons.remove className="size-4" />
-                      </Button>
-                    </td>
-                  </tr>
+                      <td className="p-2">
+                        {isExistence ? (
+                          <span className="px-1 text-xs italic text-muted-foreground">
+                            No value needed
+                          </span>
+                        ) : (
+                          <div className="flex items-center gap-1">
+                            <Input
+                              data-testid={`switch-case-match-${index}`}
+                              defaultValue={formatMatchValue(
+                                matchValue,
+                                matchType
+                              )}
+                              onBlur={(e) => {
+                                const parsed = parseMatchValue(
+                                  e.target.value,
+                                  matchType
+                                );
+                                updateCaseMatch(index, parsed);
+                              }}
+                              key={`${index}-${matchType}-${formatMatchValue(matchValue, matchType)}`}
+                              className="h-auto min-w-0 flex-1 border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
+                              placeholder={getMatchPlaceholder(matchType)}
+                            />
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              size="icon"
+                              className="size-6 shrink-0"
+                              onClick={() =>
+                                openEditDialog(
+                                  'caseMatch',
+                                  formatMatchValue(matchValue, matchType),
+                                  index
+                                )
+                              }
+                            >
+                              <Icons.edit className="size-3" />
+                            </Button>
+                          </div>
+                        )}
+                      </td>
+                      {isRoutingMode && (
+                        <td className="p-2">
+                          <Input
+                            data-testid={`switch-case-route-${index}`}
+                            value={routeValue}
+                            onChange={(e) =>
+                              updateCaseRoute(index, e.target.value)
+                            }
+                            className="h-auto min-w-0 border-0 p-1 font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0"
+                            placeholder={`case_${index + 1}`}
+                          />
+                        </td>
+                      )}
+                      <td className="w-16 p-2 text-center">
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="secondary"
+                          onClick={() => removeCase(index)}
+                          className="size-8"
+                        >
+                          <Icons.remove className="size-4" />
+                        </Button>
+                      </td>
+                    </tr>
+                    {/* The output gets the table's full width in a sibling
+                      row, like every other expandable mapping editor: in its
+                      own cell an object output was squeezed to ~100px and
+                      spilled past the panel edge. */}
+                    <tr className="border-b hover:bg-transparent">
+                      <td colSpan={totalColumns} className="px-2 pb-2 pt-0">
+                        <div className="flex min-w-0 items-start gap-2">
+                          <span className="w-14 shrink-0 pt-2 text-xs font-medium text-muted-foreground">
+                            Output
+                          </span>
+                          <SwitchOutputCell
+                            testId={`switch-case-output-${index}`}
+                            output={outputValue}
+                            onChange={(next) => updateCaseOutput(index, next)}
+                          />
+                        </div>
+                      </td>
+                    </tr>
+                  </Fragment>
                 );
               })}
               {casesArray.length === 0 && (

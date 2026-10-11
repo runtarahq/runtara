@@ -217,6 +217,7 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
       {/* Response Schema */}
       <div className="space-y-2">
         <SchemaFieldsEditor
+          layout="stacked"
           label="Response Schema"
           fields={responseSchemaFields}
           onChange={(fields) => updateField('responseSchema', fields)}
