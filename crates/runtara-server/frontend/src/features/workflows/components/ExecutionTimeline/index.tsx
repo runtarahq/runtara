@@ -7,35 +7,13 @@ import React, { useState, useEffect, useLayoutEffect } from 'react';
 import {
   Play,
   Pause,
-  RotateCcw,
-  Zap,
-  Globe,
   Clock,
-  Flag,
-  Cpu,
-  ArrowRight,
-  GitBranch,
-  Repeat,
-  MessageSquare,
-  Split,
-  ToggleLeft,
   ChevronRight,
   ChevronDown,
-  Sparkles,
-  Wrench,
   Hand,
-  Brain,
-  Merge,
-  Database,
 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Badge } from '@/shared/components/ui/badge';
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from '@/shared/components/ui/card';
 import { useHierarchicalTimeline } from '@/features/workflows/hooks/useHierarchicalTimeline';
 import {
   HierarchicalStep,
@@ -44,7 +22,7 @@ import {
   timelineBarPosition,
 } from '@/features/workflows/types/timeline';
 import { stepStatusDisplay } from '@/features/workflows/utils/step-status';
-import { PayloadPreBlock } from '@/shared/components/PayloadPreBlock';
+import { PayloadExplorer } from '@/shared/components/PayloadExplorer';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import {
@@ -57,164 +35,24 @@ import { isActiveStatus } from '@/shared/utils/status-display';
 import { StepStatusBadge } from '@/features/workflows/components/StepStatusBadge';
 import { getRunEventsEmptyState } from '@/features/workflows/utils/run-empty-state';
 import { Spinner } from '@/shared/components/ui/spinner';
+import { WithTooltip } from '@/shared/components/ui/tooltip';
+import { stepTypeConfig } from './step-type-style';
 
 interface ExecutionTimelineProps {
   workflowId: string;
   instanceId: string;
   showInputs?: boolean;
+  /** Receives time spent per step type whenever the visible steps change. */
+  onStatsChange?: (stats: ExecutionStats) => void;
 }
 
-// Categorical step-type IDENTITY colors (raw palette classes are intentional
-// here — these are not status colors). text/bg/border/dot are Tailwind class
-// equivalents of the previous hex + rgba inline styles.
-const stepTypeConfig: Record<
-  string,
-  {
-    text: string;
-    bg: string;
-    border: string;
-    dot: string;
-    label: string;
-    icon: React.ElementType;
-  }
-> = {
-  Agent: {
-    text: 'text-blue-500',
-    bg: 'bg-blue-500/10',
-    border: 'border-blue-500',
-    dot: 'bg-blue-500',
-    label: 'Agent',
-    icon: Globe,
-  },
-  Connection: {
-    text: 'text-violet-500',
-    bg: 'bg-violet-500/10',
-    border: 'border-violet-500',
-    dot: 'bg-violet-500',
-    label: 'Connection',
-    icon: Zap,
-  },
-  Finish: {
-    text: 'text-green-500',
-    bg: 'bg-green-500/10',
-    border: 'border-green-500',
-    dot: 'bg-green-500',
-    label: 'Finish',
-    icon: Flag,
-  },
-  Conditional: {
-    text: 'text-pink-500',
-    bg: 'bg-pink-500/10',
-    border: 'border-pink-500',
-    dot: 'bg-pink-500',
-    label: 'Conditional',
-    icon: GitBranch,
-  },
-  While: {
-    text: 'text-orange-500',
-    bg: 'bg-orange-500/10',
-    border: 'border-orange-500',
-    dot: 'bg-orange-500',
-    label: 'While',
-    icon: Repeat,
-  },
-  Log: {
-    text: 'text-indigo-500',
-    bg: 'bg-indigo-500/10',
-    border: 'border-indigo-500',
-    dot: 'bg-indigo-500',
-    label: 'Log',
-    icon: MessageSquare,
-  },
-  Split: {
-    text: 'text-teal-500',
-    bg: 'bg-teal-500/10',
-    border: 'border-teal-500',
-    dot: 'bg-teal-500',
-    label: 'Split',
-    icon: Split,
-  },
-  Switch: {
-    text: 'text-purple-500',
-    bg: 'bg-purple-500/10',
-    border: 'border-purple-500',
-    dot: 'bg-purple-500',
-    label: 'Switch',
-    icon: ToggleLeft,
-  },
-  EmbedWorkflow: {
-    text: 'text-amber-500',
-    bg: 'bg-amber-500/10',
-    border: 'border-amber-500',
-    dot: 'bg-amber-500',
-    label: 'Start Workflow',
-    icon: Zap,
-  },
-  AiAgent: {
-    text: 'text-violet-500',
-    bg: 'bg-violet-500/10',
-    border: 'border-violet-500',
-    dot: 'bg-violet-500',
-    label: 'AI Agent',
-    icon: Sparkles,
-  },
-  AiAgentToolCall: {
-    text: 'text-indigo-500',
-    bg: 'bg-indigo-500/10',
-    border: 'border-indigo-500',
-    dot: 'bg-indigo-500',
-    label: 'Tool Call',
-    icon: Wrench,
-  },
-  AiAgentMemoryCompaction: {
-    text: 'text-blue-500',
-    bg: 'bg-blue-500/10',
-    border: 'border-blue-500',
-    dot: 'bg-blue-500',
-    label: 'Memory Compaction',
-    icon: Brain,
-  },
-  WaitForSignal: {
-    text: 'text-amber-500',
-    bg: 'bg-amber-500/10',
-    border: 'border-amber-500',
-    dot: 'bg-amber-500',
-    label: 'Wait for Signal',
-    icon: Hand,
-  },
-  WaitForInstances: {
-    text: 'text-amber-500',
-    bg: 'bg-amber-500/10',
-    border: 'border-amber-500',
-    dot: 'bg-amber-500',
-    label: 'Wait for Instances',
-    icon: Merge,
-  },
-  SetState: {
-    text: 'text-cyan-500',
-    bg: 'bg-cyan-500/10',
-    border: 'border-cyan-500',
-    dot: 'bg-cyan-500',
-    label: 'Set State',
-    icon: Database,
-  },
-  GetState: {
-    text: 'text-cyan-500',
-    bg: 'bg-cyan-500/10',
-    border: 'border-cyan-500',
-    dot: 'bg-cyan-500',
-    label: 'Get State',
-    icon: Database,
-  },
-  Default: {
-    text: 'text-gray-500',
-    bg: 'bg-gray-500/10',
-    border: 'border-gray-500',
-    dot: 'bg-gray-500',
-    label: 'Step',
-    icon: Cpu,
-  },
-};
+/** Time spent per step type across the visible steps, out of `total`. */
+export interface ExecutionStats {
+  total: number;
+  byType: Record<string, number>;
+  /** Top-level steps the run executed. */
+  stepCount: number;
+}
 
 // Status text colors via theme tokens (dark mode + theming for free).
 const statusTextClasses: Record<string, string> = {
@@ -253,6 +91,7 @@ function ExecutionTimelineContent({
   workflowId,
   instanceId,
   showInputs = true,
+  onStatsChange,
 }: ExecutionTimelineProps) {
   const [selectedStep, setSelectedStep] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -264,12 +103,21 @@ function ExecutionTimelineContent({
   const {
     visibleSteps,
     totalDuration,
+    totalRootCount,
     stats,
     isLoadingRoot,
     hasMoreRootSteps,
     loadMoreRoot,
     toggleExpand,
   } = useHierarchicalTimeline(workflowId, instanceId);
+
+  useEffect(() => {
+    onStatsChange?.({
+      total: stats.total,
+      byType: stats.byType,
+      stepCount: Math.max(totalRootCount, stats.rootStepCount),
+    });
+  }, [stats, totalRootCount, onStatsChange]);
 
   // Poll instance data for status
   const { data: instanceData } = useCustomQuery({
@@ -342,6 +190,37 @@ function ExecutionTimelineContent({
     }, 50);
     return () => clearInterval(interval);
   }, [isPlaying, totalDuration]);
+
+  // Playing from the end starts the replay over.
+  const togglePlay = () => {
+    if (!isPlaying && playhead >= totalDuration) setPlayhead(0);
+    setIsPlaying(!isPlaying);
+  };
+
+  const seekToPointer = (e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    setPlayhead(frac * totalDuration);
+  };
+
+  const onScaleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = totalDuration / 100;
+    const next =
+      e.key === 'ArrowLeft'
+        ? playhead - step
+        : e.key === 'ArrowRight'
+          ? playhead + step
+          : e.key === 'Home'
+            ? 0
+            : e.key === 'End'
+              ? totalDuration
+              : null;
+    if (next === null) return;
+    e.preventDefault();
+    setIsPlaying(false);
+    setPlayhead(Math.min(totalDuration, Math.max(0, next)));
+  };
 
   const getStepPosition = (step: HierarchicalStep) =>
     timelineBarPosition(step, totalDuration);
@@ -435,118 +314,79 @@ function ExecutionTimelineContent({
     );
   }
 
+  // Renders flush inside its host card: the waterfall runs edge to edge and
+  // the selected step's details follow as a section, not a nested card.
   return (
-    <div className="space-y-6">
-      {/* Stats Bar */}
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs text-muted-foreground">
-              Total Duration
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-xl font-bold">{formatTime(stats.total)}</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs text-muted-foreground">
-              Steps
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-xl font-bold">{stats.rootStepCount}</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs text-muted-foreground">
-              Agent Time
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-xl font-bold text-blue-500">
-              {formatTime(stats.byType.Agent || 0)}
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-xs text-muted-foreground">
-              Connection Time
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-xl font-bold text-purple-500">
-              {formatTime(stats.byType.Connection || 0)}
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {inputCards}
-
-      {/* Playback Controls */}
-      <Card>
-        <CardContent className="py-4">
-          <div className="flex items-center gap-4">
-            <Button
-              variant="secondary"
-              bordered
-              size="icon"
-              onClick={() => setIsPlaying(!isPlaying)}
-              className="rounded-full"
-            >
-              {isPlaying ? (
-                <Pause className="size-4" />
-              ) : (
-                <Play className="size-4" />
-              )}
-            </Button>
-            <Button
-              variant="secondary"
-              bordered
-              size="icon"
-              onClick={() => {
-                setPlayhead(0);
-                setIsPlaying(false);
-              }}
-              className="rounded-full"
-            >
-              <RotateCcw className="size-4" />
-            </Button>
-            <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
-              <div
-                className="duration-50 h-full bg-purple-500 transition-all"
-                style={{ width: `${(playhead / totalDuration) * 100}%` }}
-              />
-            </div>
-            <span className="w-20 text-right font-mono text-sm text-muted-foreground">
-              {formatTime(Math.round(playhead))}
-            </span>
-          </div>
-        </CardContent>
-      </Card>
+    <div>
+      {inputCards && <div className="space-y-4 p-6 pb-0">{inputCards}</div>}
 
       {/* Timeline */}
-      <Card className="overflow-hidden">
-        <CardContent className="p-0">
-          {/* Time Scale */}
-          <div className="relative flex h-8 items-center border-b bg-muted/50">
-            <div className="w-48 shrink-0 px-4 text-xs text-muted-foreground">
-              Time →
+      <div className="overflow-hidden">
+        <div>
+          {/* Time scale doubles as the playback control: play/pause and the
+              playhead time on the left, click or drag the scale to seek. */}
+          <div className="relative flex h-10 items-center border-b bg-muted/50">
+            <div className="flex w-48 shrink-0 items-center gap-2 px-3">
+              <Button
+                variant="secondary"
+                bordered
+                size="icon-sm"
+                onClick={togglePlay}
+                className="rounded-full"
+                aria-label={isPlaying ? 'Pause replay' : 'Replay run'}
+              >
+                {isPlaying ? (
+                  <Pause className="size-3.5" />
+                ) : (
+                  <Play className="size-3.5" />
+                )}
+              </Button>
+              <span className="font-mono text-xs tabular-nums text-muted-foreground">
+                {formatTime(Math.round(playhead))}
+              </span>
             </div>
-            <div className="relative flex-1" ref={setTrackEl}>
+            <div
+              ref={setTrackEl}
+              role="slider"
+              tabIndex={0}
+              aria-label="Replay position"
+              aria-valuemin={0}
+              aria-valuemax={Math.round(totalDuration)}
+              aria-valuenow={Math.round(playhead)}
+              aria-valuetext={formatTime(Math.round(playhead))}
+              className="relative h-full flex-1 cursor-ew-resize touch-none select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+              onPointerDown={(e) => {
+                e.currentTarget.setPointerCapture(e.pointerId);
+                setIsPlaying(false);
+                seekToPointer(e);
+              }}
+              onPointerMove={(e) => {
+                if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                  seekToPointer(e);
+                }
+              }}
+              onKeyDown={onScaleKeyDown}
+            >
               {[0, 25, 50, 75, 100].map((pct) => (
                 <div
                   key={pct}
-                  className="absolute -translate-x-1/2 transform text-xs text-muted-foreground"
+                  className={`pointer-events-none absolute top-1/2 -translate-y-1/2 px-1 text-xs text-muted-foreground ${
+                    pct === 0
+                      ? ''
+                      : pct === 100
+                        ? '-translate-x-full'
+                        : '-translate-x-1/2'
+                  }`}
                   style={{ left: `${pct}%` }}
                 >
                   {formatTime(Math.round((pct / 100) * totalDuration))}
                 </div>
               ))}
+              {/* Playhead handle; the line continues down through the rows */}
+              <div
+                className="pointer-events-none absolute -bottom-1.5 z-30 size-3 -translate-x-1/2 rounded-full border-2 border-background bg-red-500"
+                style={{ left: `${(playhead / totalDuration) * 100}%` }}
+              />
             </div>
           </div>
 
@@ -658,12 +498,16 @@ function ExecutionTimelineContent({
                     <div className="w-5" /> // Spacer for alignment
                   )}
 
-                  {/* Step Icon */}
-                  <div
-                    className={`flex size-6 shrink-0 items-center justify-center rounded ${config.bg}`}
-                  >
-                    <Icon size={14} className={config.text} />
-                  </div>
+                  {/* Step Icon — its tooltip names the step type */}
+                  <WithTooltip label={config.label}>
+                    <div
+                      className={`flex size-6 shrink-0 items-center justify-center rounded ${config.bg}`}
+                      aria-label={config.label}
+                      role="img"
+                    >
+                      <Icon size={14} className={config.text} />
+                    </div>
+                  </WithTooltip>
 
                   {/* Step Name */}
                   <div className="min-w-0 flex-1">
@@ -757,32 +601,13 @@ function ExecutionTimelineContent({
               </Button>
             </div>
           )}
-        </CardContent>
-      </Card>
-
-      {/* Legend */}
-      <div className="flex flex-wrap gap-4">
-        {Object.entries(stepTypeConfig)
-          .filter(([k]) => k !== 'Default')
-          .map(([key, value]) => {
-            const Icon = value.icon;
-            return (
-              <div key={key} className="flex items-center gap-2 text-sm">
-                <div
-                  className={`flex size-5 items-center justify-center rounded border ${value.bg} ${value.border}`}
-                >
-                  <Icon size={12} className={value.text} />
-                </div>
-                <span className="text-muted-foreground">{value.label}</span>
-              </div>
-            );
-          })}
+        </div>
       </div>
 
       {/* Selected Step Details */}
       {selectedStep && (
-        <Card>
-          <CardContent className="pt-6">
+        <div className="border-t">
+          <div className="p-6">
             {(() => {
               const step = visibleSteps.find((s) => s.stepId === selectedStep);
               if (!step) return null;
@@ -883,38 +708,30 @@ function ExecutionTimelineContent({
                   </div>
 
                   {/* Inputs/Outputs */}
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div>
-                      <div className="mb-1 flex items-center gap-1 text-xs text-muted-foreground">
-                        <ArrowRight size={12} /> Inputs
-                      </div>
-                      {parsedInputs ? (
-                        <PayloadPreBlock
-                          data={parsedInputs}
-                          className="max-h-32 p-3"
-                        />
-                      ) : (
-                        <pre className="max-h-32 overflow-auto rounded bg-muted p-3 font-mono text-xs text-foreground">
-                          (none)
-                        </pre>
-                      )}
-                    </div>
-                    <div>
-                      <div className="mb-1 flex items-center gap-1 text-xs text-muted-foreground">
-                        <ArrowRight size={12} className="rotate-180" /> Outputs
-                      </div>
-                      {parsedOutputs ? (
-                        <PayloadPreBlock
-                          data={parsedOutputs}
-                          className="max-h-32 p-3"
-                        />
-                      ) : (
-                        <pre className="max-h-32 overflow-auto rounded bg-muted p-3 font-mono text-xs text-foreground">
-                          (none)
-                        </pre>
-                      )}
-                    </div>
-                  </div>
+                  <PayloadExplorer
+                    key={step.stepId}
+                    compact
+                    ariaLabel={`${step.stepName || step.stepId} data`}
+                    defaultSectionId={
+                      parsedOutputs !== null && parsedOutputs !== undefined
+                        ? 'output'
+                        : 'input'
+                    }
+                    sections={[
+                      {
+                        id: 'input',
+                        label: 'Inputs',
+                        value: parsedInputs ?? null,
+                        emptyState: { title: 'No inputs' },
+                      },
+                      {
+                        id: 'output',
+                        label: 'Outputs',
+                        value: parsedOutputs ?? null,
+                        emptyState: { title: 'No outputs' },
+                      },
+                    ]}
+                  />
 
                   {/* Error if present */}
                   {step.error && (
@@ -930,36 +747,9 @@ function ExecutionTimelineContent({
                 </div>
               );
             })()}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Execution Summary */}
-      <Card className="bg-muted/30">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm font-medium">
-            Execution Summary
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap gap-6 text-sm">
-            {Object.entries(stats.byType).map(([type, duration]) => {
-              const config = stepTypeConfig[type] || stepTypeConfig.Default;
-              const percentage = stats.total
-                ? ((duration / stats.total) * 100).toFixed(1)
-                : '0';
-              return (
-                <div key={type} className="flex items-center gap-2">
-                  <div className={`size-3 rounded-sm ${config.dot}`} />
-                  <span className="text-muted-foreground">{type}:</span>
-                  <span className="font-mono">{formatTime(duration)}</span>
-                  <span className="text-muted-foreground">({percentage}%)</span>
-                </div>
-              );
-            })}
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      )}
     </div>
   );
 }

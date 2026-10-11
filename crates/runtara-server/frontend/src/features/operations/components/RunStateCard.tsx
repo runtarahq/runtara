@@ -5,10 +5,6 @@ import {
   CardHeader,
   CardTitle,
 } from '@/shared/components/ui/card';
-import { useCustomQuery } from '@/shared/hooks/api';
-import { RuntimeREST } from '@/shared/queries';
-import { createAuthHeaders } from '@/shared/queries/utils';
-import { queryKeys } from '@/shared/queries/query-keys';
 import { StateValue, type StateField } from './StateValue';
 
 export function StatePanel({
@@ -88,45 +84,5 @@ export function StatePanel({
         )}
       </CardContent>
     </Card>
-  );
-}
-
-export function RunStateCard({
-  workflowId,
-  version,
-  state,
-  updatedAt,
-}: {
-  workflowId: string;
-  version: number;
-  state?: Record<string, unknown> | null;
-  updatedAt?: string | null;
-}) {
-  const { data, error } = useCustomQuery({
-    queryKey: queryKeys.workflows.schemas(workflowId, version),
-    queryFn: async (token: string) =>
-      (
-        await RuntimeREST.api.getVersionSchemasHandler(
-          workflowId,
-          version,
-          createAuthHeaders(token)
-        )
-      ).data,
-    enabled: Boolean(workflowId) && version > 0,
-    placeholderData: undefined,
-  });
-  return (
-    <div className="space-y-2">
-      <StatePanel
-        state={state}
-        schema={data?.stateSchema ?? {}}
-        updatedAt={updatedAt}
-      />
-      {error && (
-        <p role="status" className="text-xs text-muted-foreground">
-          Field labels are unavailable. Showing stored values.
-        </p>
-      )}
-    </div>
   );
 }

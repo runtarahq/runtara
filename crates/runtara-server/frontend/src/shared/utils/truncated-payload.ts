@@ -1,16 +1,7 @@
-import { formatBytes } from '@/features/analytics/utils';
-
 interface TruncatedPayload {
   _original_size: number;
   _preview: string;
   _truncated: true;
-}
-
-interface PayloadDisplayInfo {
-  text: string;
-  truncated: boolean;
-  originalSize?: number;
-  originalSizeFormatted?: string;
 }
 
 export function isTruncatedPayload(data: unknown): data is TruncatedPayload {
@@ -28,9 +19,13 @@ export function isTruncatedPayload(data: unknown): data is TruncatedPayload {
  * inline base64 file uploads) on the default instance-detail fetch. The full
  * value is retrievable via the `?full=true` detail fetch.
  */
-function isElidedStub(
-  data: unknown
-): data is { _elided: true; _original_size: number; _preview?: string } {
+export interface ElidedStub {
+  _elided: true;
+  _original_size: number;
+  _preview?: string;
+}
+
+export function isElidedStub(data: unknown): data is ElidedStub {
   if (typeof data !== 'object' || data === null) return false;
   const obj = data as Record<string, unknown>;
   return obj._elided === true && typeof obj._original_size === 'number';
@@ -46,103 +41,4 @@ export function hasElidedPayload(data: unknown): boolean {
     );
   }
   return false;
-}
-
-/**
- * Replace `_elided` stubs anywhere in the tree with a compact, human-readable
- * placeholder so a payload renders cleanly instead of dumping the raw
- * `{_truncated,_elided,...}` object. The full value is available via Copy
- * (which re-fetches with `?full=true`).
- */
-export function mapElidedForDisplay(data: unknown): unknown {
-  if (isElidedStub(data)) {
-    return `⟨large value elided · ${formatBytes(
-      data._original_size
-    )} · use Copy for the full value⟩`;
-  }
-  if (Array.isArray(data)) return data.map(mapElidedForDisplay);
-  if (typeof data === 'object' && data !== null) {
-    const out: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(
-      data as Record<string, unknown>
-    )) {
-      out[key] = mapElidedForDisplay(value);
-    }
-    return out;
-  }
-  return data;
-}
-
-/**
- * Resolves a payload for display. If the payload is a truncated wrapper,
- * returns the preview content and truncation metadata. Otherwise returns
- * the JSON-stringified payload as-is.
- */
-export function formatPayloadForDisplay(data: unknown): PayloadDisplayInfo {
-  if (isTruncatedPayload(data)) {
-    // Try to pretty-print the preview string if it's valid JSON
-    let text = data._preview;
-    try {
-      text = JSON.stringify(JSON.parse(data._preview), null, 2);
-    } catch {
-      // Preview is not valid JSON (possibly truncated mid-string), use as-is
-    }
-
-    return {
-      text,
-      truncated: true,
-      originalSize: data._original_size,
-      originalSizeFormatted: formatBytes(data._original_size),
-    };
-  }
-
-  return {
-    text: JSON.stringify(data, null, 2),
-    truncated: false,
-  };
-}
-
-/**
- * Resolves a payload value for copying. If truncated, returns the preview content
- * rather than the wrapper object.
- */
-export function resolvePayloadForCopy(data: unknown): string {
-  if (isTruncatedPayload(data)) {
-    return data._preview;
-  }
-  return JSON.stringify(data, null, 2);
-}
-
-/**
- * Resolves truncated payloads within a record's top-level values.
- * Returns a new object where any truncated payload values are replaced
- * with their parsed preview content, plus a `_truncation_info` field
- * summarizing which keys were truncated.
- */
-export function resolveRecordPayloads(
-  data: Record<string, unknown>
-): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  const truncatedKeys: string[] = [];
-
-  for (const [key, value] of Object.entries(data)) {
-    if (isTruncatedPayload(value)) {
-      truncatedKeys.push(
-        `${key} (original: ${formatBytes(value._original_size)})`
-      );
-      try {
-        result[key] = JSON.parse(value._preview);
-      } catch {
-        result[key] = value._preview;
-      }
-    } else {
-      result[key] = value;
-    }
-  }
-
-  if (truncatedKeys.length > 0) {
-    result._truncation_info = `Truncated fields: ${truncatedKeys.join(', ')}`;
-  }
-
-  return result;
 }

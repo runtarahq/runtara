@@ -1,5 +1,8 @@
 import { useManagedInputSubmissions } from '@/features/workflows/hooks/useManagedInputSubmissions';
-import { RunStateCard } from '@/features/operations/components/RunStateCard';
+import { useVersionStateSchema } from '@/features/operations/state-schema';
+import { stateLabel } from '@/features/operations/state-label';
+import { PayloadExplorer } from '@/shared/components/PayloadExplorer';
+import { formatRelativeTime } from '@/lib/utils';
 import {
   ManagedInputScope,
   InputRetryPanel,
@@ -8,42 +11,14 @@ import { useNavigate, useParams } from 'react-router';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { Loader } from '@/shared/components/loader.tsx';
-import { formatDate } from '@/lib/utils.ts';
-import { Badge } from '@/shared/components/ui/badge.tsx';
 import { Button } from '@/shared/components/ui/button';
-import {
-  ChevronLeft,
-  ChevronDown,
-  FileText,
-  Clock,
-  Calendar,
-  Timer,
-  MemoryStick,
-  RotateCw,
-  XCircle,
-  Tag,
-  Server,
-  Hash,
-  Copy,
-  Sparkles,
-  Flag,
-  Zap,
-  ChevronRight,
-  Database,
-  Info,
-  List,
-  BarChart3,
-  ChevronsLeft,
-  ChevronsRight,
-  Network,
-} from 'lucide-react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import {
   getWorkflowInstance,
-  getStepSummaries,
   getPendingInput,
   type PendingInput,
 } from '@/features/workflows/queries';
-import { useRef, useState, useMemo, useCallback } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { useToken } from '@/shared/hooks';
 import { HumanInputCard } from '@/features/workflows/components/ExecutionPanel/HumanInputCard';
 import { PauseButton } from '@/features/workflows/components/PauseButton';
@@ -57,39 +32,28 @@ import {
   CardHeader,
   CardTitle,
 } from '@/shared/components/ui/card';
-import { Separator } from '@/shared/components/ui/separator';
-import { toast } from 'sonner';
-import { StructuredErrorDisplay } from '@/shared/components/StructuredErrorDisplay';
 import {
-  getTerminationTypeDisplay,
-  getStatusDisplay,
   isActiveStatus,
   isFinishedStatus,
 } from '@/shared/utils/status-display';
+import { getRunOutputEmptyState } from '@/features/workflows/utils/run-empty-state';
 import {
-  getRunEventsEmptyState,
-  getRunOutputEmptyState,
-} from '@/features/workflows/utils/run-empty-state';
-import { ExecutionTimeline } from '@/features/workflows/components/ExecutionTimeline';
-import { ReplayView } from '@/features/workflows/components/Replay';
-import { Tabs, TabsList, TabsTrigger } from '@/shared/components/ui/tabs';
-import { Spinner } from '@/shared/components/ui/spinner';
-import { stepStatusDisplay } from '@/features/workflows/utils/step-status';
-import { StepStatusBadge } from '@/features/workflows/components/StepStatusBadge';
-import {
-  canResume,
-  suspendedStatusLabel,
-} from '@/features/workflows/utils/suspension';
-import {
-  ChildRunsCard,
-  ParentRunLink,
-} from '@/features/invocation-history/components/RunLinks';
-import {
-  hasElidedPayload,
-  mapElidedForDisplay,
-} from '@/shared/utils/truncated-payload';
+  ExecutionTimeline,
+  type ExecutionStats,
+} from '@/features/workflows/components/ExecutionTimeline';
+import { RunOverviewCard } from './RunOverviewCard';
+import { canResume } from '@/features/workflows/utils/suspension';
+import { ChildRunsCard } from '@/features/invocation-history/components/RunLinks';
 
-const LIST_PAGE_SIZE = 20;
+/** Outputs may be stored as a JSON string; show them parsed when they are. */
+function parseRunOutputs(outputs: unknown): unknown {
+  if (typeof outputs !== 'string') return outputs ?? null;
+  try {
+    return JSON.parse(outputs);
+  } catch {
+    return outputs;
+  }
+}
 
 export function WorkflowHistory() {
   return (
@@ -103,12 +67,10 @@ function WorkflowHistoryContent() {
   const { workflowId, instanceId } = useParams();
   const navigate = useNavigate();
   const isInitialLoadRef = useRef(true);
-
-  const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set());
-  const [eventsViewMode, setEventsViewMode] = useState<
-    'list' | 'timeline' | 'graph'
-  >('timeline');
-  const [listPageIndex, setListPageIndex] = useState(0);
+  // Reported by the Events timeline; summarized under Timeline & Details.
+  const [executionStats, setExecutionStats] = useState<ExecutionStats | null>(
+    null
+  );
 
   const token = useToken();
   const submissions = useManagedInputSubmissions();
@@ -169,102 +131,43 @@ function WorkflowHistoryContent() {
     );
   };
 
-  // Briefly swap the copy button's icon to a checkmark for feedback.
-  const flashCopied = (btnId: string) => {
-    const btn = document.getElementById(btnId);
-    if (!btn) return;
-    btn.innerHTML =
-      '<svg class="size-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>';
-    setTimeout(() => {
-      btn.innerHTML =
-        '<svg class="size-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>';
-    }, 2000);
-  };
-
-  // Copy the input/output payload. When the value was elided by the server,
-  // re-fetch the instance with `?full=true` so the clipboard gets the real,
-  // byte-complete value (e.g. a base64 file) rather than the preview stub.
-  const copyPayload = async (
-    which: 'inputs' | 'outputs',
-    current: unknown,
-    btnId: string
-  ) => {
-    let value = current;
-    if (hasElidedPayload(current) && workflowId && instanceId) {
-      try {
-        const full = await getWorkflowInstance(token, workflowId, instanceId, {
-          full: true,
-        });
-        value = which === 'inputs' ? full.inputs : full.outputs;
-      } catch {
-        toast.error(
-          'Could not load the full value; copied the preview instead'
-        );
-      }
-    }
-    const text =
-      typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-    try {
-      await navigator.clipboard.writeText(text);
-      flashCopied(btnId);
-    } catch {
-      toast.error('Copy failed');
-    }
-  };
-
-  // Filters for list view with pagination (oldest first)
-  const listFilters = useMemo(
-    () => ({
-      limit: LIST_PAGE_SIZE,
-      offset: listPageIndex * LIST_PAGE_SIZE,
-      sortOrder: 'asc' as const,
-    }),
-    [listPageIndex]
+  // Run data for the explorer. Outputs can arrive as a JSON string; parse it
+  // once per fetch so the explorer's per-value caches stay warm.
+  const outputValue = useMemo(
+    () => parseRunOutputs(data?.outputs),
+    [data?.outputs]
   );
-
-  // Fetch step summaries for list view (paginated, paired events)
-  const { data: stepSummariesData, isFetching: isListFetching } =
-    useCustomQuery({
-      queryKey: queryKeys.workflows.stepSummaries(
-        workflowId ?? '',
-        instanceId ?? '',
-        listFilters
+  const stateValue = useMemo(
+    () =>
+      data?.state && Object.keys(data.state).length > 0 ? data.state : null,
+    [data?.state]
+  );
+  const { schema: stateSchema } = useVersionStateSchema(
+    workflowId ?? '',
+    data?.usedVersion ?? 0
+  );
+  const stateFieldLabels = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.entries(stateSchema).map(([key, field]) => [
+          key,
+          { label: stateLabel(key, field), description: field.description },
+        ])
       ),
-      queryFn: (token: string) =>
-        getStepSummaries(token, workflowId!, instanceId!, listFilters),
-      enabled: !!workflowId && !!instanceId && eventsViewMode === 'list',
-      refetchInterval: isActiveStatus(data?.status) ? 10000 : false,
-    });
-
-  // Step summaries for list view (paired events from API)
-  const stepSummaries = stepSummariesData?.data?.steps || [];
-
-  // Pagination info for list view
-  const totalCount = stepSummariesData?.data?.totalCount || 0;
-  const totalPages = Math.ceil(totalCount / LIST_PAGE_SIZE);
-
-  // Reset page when switching to list view
-  const handleViewModeChange = useCallback(
-    (mode: 'list' | 'timeline' | 'graph') => {
-      setEventsViewMode(mode);
-      if (mode === 'list') {
-        setListPageIndex(0);
-      }
-    },
-    []
+    [stateSchema]
   );
-
-  const toggleStepExpanded = (index: number) => {
-    setExpandedSteps((prev) => {
-      const next = new Set(prev);
-      if (next.has(index)) {
-        next.delete(index);
-      } else {
-        next.add(index);
-      }
-      return next;
-    });
-  };
+  // Elided placeholders (large uploads) are re-fetched in full on request.
+  const loadFullRunValue = useCallback(
+    async (sectionId: string) => {
+      const full = await getWorkflowInstance(token, workflowId!, instanceId!, {
+        full: true,
+      });
+      if (sectionId === 'input') return full.inputs;
+      if (sectionId === 'output') return parseRunOutputs(full.outputs);
+      return full.state;
+    },
+    [token, workflowId, instanceId]
+  );
 
   // Set page title with workflow name from metadata if available
   usePageTitle(
@@ -315,18 +218,20 @@ function WorkflowHistoryContent() {
 
   // Empty-state wording depends on whether the run can still produce something.
   const outputEmptyState = getRunOutputEmptyState(data.status);
-  const eventsEmptyState = getRunEventsEmptyState(data.status, 'Events');
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
       {/* Header Section */}
       <div className="mb-8">
-        <div className="mb-4 flex items-center gap-3">
+        <div className="flex items-center gap-3">
+          {/* -ml-2 cancels the icon button's inner padding so the arrow
+              lines up with the cards' left edge. */}
           <Button
             variant="secondary"
             size="icon"
-            className="rounded-full hover:bg-muted"
+            className="-ml-2 rounded-full hover:bg-muted"
             onClick={handleBack}
+            aria-label="Back"
           >
             <ChevronLeft className="size-5" />
           </Button>
@@ -345,136 +250,7 @@ function WorkflowHistoryContent() {
               </p>
             )}
           </div>
-          <div className="flex gap-2">
-            {data && data.id && (
-              <>
-                <Button
-                  variant="secondary"
-                  bordered
-                  size="sm"
-                  onClick={() =>
-                    navigate(`/workflows/${workflowId}/history/${data.id}/logs`)
-                  }
-                  className="flex items-center gap-2"
-                >
-                  <FileText className="size-4" />
-                  View Logs
-                </Button>
-                {isActiveStatus(data.status) ? (
-                  <>
-                    {/* Only a paused run needs a resume; a waiting run wakes
-                        on its own. */}
-                    {canResume(data) && (
-                      <ResumeButton
-                        instanceId={data.id}
-                        variant="secondary"
-                        size="sm"
-                      />
-                    )}
-                    {/* The pause handler only accepts instances in the
-                        'running' state (suspended is a no-op, anything else
-                        is a 400), so gate on the exact status. */}
-                    {data.status?.toLowerCase() === 'running' && (
-                      <PauseButton
-                        instanceId={data.id}
-                        variant="secondary"
-                        size="sm"
-                      />
-                    )}
-                    <StopButton
-                      instanceId={data.id}
-                      variant="secondary"
-                      size="sm"
-                    />
-                  </>
-                ) : (
-                  <ReplayButton
-                    instanceId={data.id}
-                    error={data.metadata?.errorMessage}
-                    variant="secondary"
-                    size="sm"
-                  />
-                )}
-              </>
-            )}
-          </div>
         </div>
-
-        {/* Status Overview Bar */}
-        {data && (
-          <div className="flex items-center gap-4 rounded-lg border bg-muted/50 p-4">
-            <div
-              className="flex cursor-help items-center gap-2"
-              title="Execution Status - Shows the current state of your workflow execution"
-            >
-              {(() => {
-                const statusInfo = getStatusDisplay(data.status);
-                return (
-                  <>
-                    {statusInfo.showSpinner && <Spinner className="size-4" />}
-                    <Badge variant={statusInfo.variant}>
-                      {statusInfo.text}
-                    </Badge>
-                    {suspendedStatusLabel(data) && (
-                      <Badge
-                        variant="warning"
-                        title="Why this run is suspended"
-                      >
-                        {suspendedStatusLabel(data)}
-                      </Badge>
-                    )}
-                  </>
-                );
-              })()}
-            </div>
-            {(() => {
-              const terminationInfo = getTerminationTypeDisplay(
-                data.terminationType
-              );
-
-              return (
-                terminationInfo && (
-                  <>
-                    <Separator orientation="vertical" className="h-6" />
-                    <div
-                      className="flex cursor-help items-center gap-2"
-                      title="Termination Type - Provides context for why this execution terminated"
-                    >
-                      <Info className="size-4 text-muted-foreground" />
-                      <Badge variant={terminationInfo.variant}>
-                        {terminationInfo.text}
-                      </Badge>
-                    </div>
-                  </>
-                )
-              );
-            })()}
-            {data.id && (
-              <>
-                <Separator orientation="vertical" className="h-6" />
-                <div
-                  className="flex cursor-help items-center gap-2 text-sm text-muted-foreground"
-                  title="Unique identifier for this workflow execution. Use this ID when reporting issues or tracking specific runs."
-                >
-                  <Hash className="size-4" />
-                  <span className="font-mono">{data.id}</span>
-                </div>
-              </>
-            )}
-            {data.parentInstanceId && (
-              <>
-                <Separator orientation="vertical" className="h-6" />
-                <div
-                  className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground"
-                  data-testid="started-by"
-                >
-                  <span>Started by</span>
-                  <ParentRunLink parentInstanceId={data.parentInstanceId} />
-                </div>
-              </>
-            )}
-          </div>
-        )}
       </div>
 
       <InputRetryPanel
@@ -506,670 +282,110 @@ function WorkflowHistoryContent() {
       )}
 
       <div className="space-y-6">
-        <RunStateCard
-          workflowId={workflowId!}
-          version={data.usedVersion}
-          state={data.state}
-          updatedAt={data.stateUpdatedAt}
-        />
-        {/* Timing and Performance Metrics */}
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-          {/* Execution Duration Card */}
-          {data.executionDurationSeconds !== undefined &&
-            data.executionDurationSeconds !== null && (
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle
-                    className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
-                    title="The total time spent actively running your workflow, from start to finish. This doesn't include time waiting in queue."
-                  >
-                    <Timer className="size-4" />
-                    Execution Time
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">
-                    {data.executionDurationSeconds.toFixed(2)}s
-                  </div>
-                </CardContent>
-              </Card>
-            )}
-
-          {/* Queue Duration Card */}
-          {data.queueDurationSeconds !== undefined &&
-            data.queueDurationSeconds !== null && (
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle
-                    className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
-                    title="The time your workflow spent waiting before it could start running. During busy periods, workflows may need to wait for available resources."
-                  >
-                    <Clock className="size-4" />
-                    Queue Time
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">
-                    {data.queueDurationSeconds.toFixed(2)}s
-                  </div>
-                </CardContent>
-              </Card>
-            )}
-
-          {/* Memory Usage Card */}
-          {data.maxMemoryMb !== undefined && data.maxMemoryMb !== null && (
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle
-                  className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
-                  title="The maximum amount of memory (RAM) used while running this workflow. Higher values indicate more data was being processed at once."
-                >
-                  <MemoryStick className="size-4" />
-                  Max Memory
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">
-                  {data.maxMemoryMb.toFixed(1)} MB
-                </div>
-              </CardContent>
-            </Card>
-          )}
-
-          {/* Retries Card */}
-          {data.metadata?.retryCount !== undefined &&
-            data.metadata?.maxRetries !== undefined && (
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle
-                    className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
-                    title="Shows how many times this workflow was retried after encountering issues (current / maximum allowed). Automatic retries help ensure your workflows complete successfully."
-                  >
-                    <RotateCw className="size-4" />
-                    Retries
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">
-                    {data.metadata.retryCount} / {data.metadata.maxRetries}
-                  </div>
-                </CardContent>
-              </Card>
-            )}
-        </div>
-
-        {/* Instance Details Card */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Calendar className="size-5" />
-              Timeline & Details
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-              {/* Timeline */}
-              <div className="space-y-4">
-                <div className="flex items-start gap-3">
-                  <div className="bg-muted/500/10 mt-0.5 rounded-full p-2">
-                    <Calendar className="size-4 text-muted-foreground" />
-                  </div>
-                  <div className="flex-1 space-y-1">
-                    <p className="text-sm font-medium">Created</p>
-                    <p className="text-sm text-muted-foreground">
-                      {data.created
-                        ? formatDate(
-                            new Date(data.created),
-                            'yyyy-MM-dd HH:mm:ss'
-                          )
-                        : 'N/A'}
-                    </p>
-                  </div>
-                </div>
-
-                {data.metadata?.startedAt && (
-                  <div className="flex items-start gap-3">
-                    <div className="mt-0.5 rounded-full bg-info/10 p-2">
-                      <Zap className="size-4 text-info" />
-                    </div>
-                    <div className="flex-1 space-y-1">
-                      <p className="text-sm font-medium">Started Execution</p>
-                      <p className="text-sm text-muted-foreground">
-                        {formatDate(
-                          new Date(data.metadata.startedAt),
-                          'yyyy-MM-dd HH:mm:ss'
-                        )}
-                      </p>
-                    </div>
-                  </div>
-                )}
-
-                {data.metadata?.completedAt && (
-                  <div className="flex items-start gap-3">
-                    <div className="mt-0.5 rounded-full bg-success/10 p-2">
-                      <Flag className="size-4 text-success" />
-                    </div>
-                    <div className="flex-1 space-y-1">
-                      <p className="text-sm font-medium">Completed</p>
-                      <p className="text-sm text-muted-foreground">
-                        {formatDate(
-                          new Date(data.metadata.completedAt),
-                          'yyyy-MM-dd HH:mm:ss'
-                        )}
-                      </p>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Additional Details */}
-              <div className="space-y-4">
-                {data.usedVersion !== undefined && (
-                  <div className="flex items-center justify-between border-b py-2">
-                    <span className="text-sm text-muted-foreground">
-                      Version
-                    </span>
-                    <Badge variant="secondary">v{data.usedVersion}</Badge>
-                  </div>
-                )}
-
-                {data.processingOverheadSeconds !== undefined &&
-                  data.processingOverheadSeconds !== null && (
-                    <div className="flex items-center justify-between border-b py-2">
-                      <span
-                        className="flex cursor-help items-center gap-1 text-sm text-muted-foreground"
-                        title="The time spent on setup and coordination tasks before and after running your workflow. This is separate from the actual execution time."
-                      >
-                        Processing Overhead
-                      </span>
-                      <span className="text-sm font-medium">
-                        {data.processingOverheadSeconds.toFixed(2)}s
-                      </span>
-                    </div>
-                  )}
-
-                {data.metadata?.workerId && (
-                  <div className="flex items-center justify-between border-b py-2">
-                    <span
-                      className="flex cursor-help items-center gap-2 text-sm text-muted-foreground"
-                      title="A unique identifier for the server that processed this workflow. Useful for troubleshooting and tracking which server handled your request."
-                    >
-                      <Server className="size-4" />
-                      Worker ID
-                    </span>
-                    <span className="font-mono text-sm text-muted-foreground">
-                      {data.metadata.workerId}
-                    </span>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Error Message */}
-            {data.metadata?.errorMessage && (
-              <div className="mt-6">
-                <div className="mb-2 flex items-start gap-2">
-                  <XCircle className="mt-0.5 size-5 text-destructive" />
-                  <p className="font-semibold text-destructive">
-                    Error Message
-                  </p>
-                </div>
-                <StructuredErrorDisplay
-                  error={data.metadata.errorMessage}
-                  mode="expanded"
-                  showGuidance
-                />
-              </div>
-            )}
-
-            {/* Tags */}
-            {data.tags && data.tags.length > 0 && (
-              <div className="mt-6">
-                <div className="mb-3 flex items-center gap-2">
-                  <Tag className="size-4 text-muted-foreground" />
-                  <span className="text-sm font-medium">Tags</span>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {data.tags.map((tag: string, index: number) => (
-                    <Badge
-                      key={index}
+        <RunOverviewCard
+          run={data}
+          executionStats={executionStats}
+          actions={
+            data.id ? (
+              <>
+                {isActiveStatus(data.status) ? (
+                  <>
+                    {/* Only a paused run needs a resume; a waiting run wakes
+                      on its own. */}
+                    {canResume(data) && (
+                      <ResumeButton
+                        instanceId={data.id}
+                        variant="secondary"
+                        size="sm"
+                      />
+                    )}
+                    {/* The pause handler only accepts instances in the
+                      'running' state (suspended is a no-op, anything else
+                      is a 400), so gate on the exact status. */}
+                    {data.status?.toLowerCase() === 'running' && (
+                      <PauseButton
+                        instanceId={data.id}
+                        variant="secondary"
+                        size="sm"
+                      />
+                    )}
+                    <StopButton
+                      instanceId={data.id}
                       variant="secondary"
-                      className="px-3 py-1"
-                    >
-                      {tag}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+                      size="sm"
+                    />
+                  </>
+                ) : (
+                  <ReplayButton
+                    instanceId={data.id}
+                    error={data.metadata?.errorMessage}
+                    variant="secondary"
+                    size="sm"
+                  />
+                )}
+              </>
+            ) : null
+          }
+        />
 
         {/* Runs this run started through control:start */}
         {data.id && <ChildRunsCard instanceId={data.id} />}
 
-        {/* Inputs & Outputs */}
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-          <Card className="overflow-hidden">
-            <CardHeader className="border-b bg-gradient-to-r from-info/10 to-info/5">
-              <div className="flex items-center justify-between">
-                <CardTitle className="flex items-center gap-2 text-lg">
-                  <div className="rounded-lg bg-info/10 p-2">
-                    <Database className="size-5 text-info" />
-                  </div>
-                  Input Data
-                </CardTitle>
-                {data.inputs && (
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className="h-8 gap-2"
-                    onClick={() =>
-                      void copyPayload('inputs', data.inputs, 'copy-inputs')
-                    }
-                  >
-                    <span id="copy-inputs">
-                      <Copy className="size-4" />
-                    </span>
-                    Copy
-                  </Button>
-                )}
-              </div>
-            </CardHeader>
-            <CardContent className="bg-muted/30 p-0">
-              {data.inputs ? (
-                <div className="relative">
-                  <pre className="max-h-[500px] overflow-auto p-6 font-mono text-xs">
-                    <code className="text-foreground">
-                      {JSON.stringify(
-                        mapElidedForDisplay(data.inputs),
-                        null,
-                        2
-                      )}
-                    </code>
-                  </pre>
-                  {hasElidedPayload(data.inputs) && (
-                    <div className="px-6 pb-3">
-                      <Badge
-                        variant="secondary"
-                        className="text-3xs text-muted-foreground"
-                      >
-                        Large values elided — use Copy for the full value
-                      </Badge>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="p-12 text-center">
-                  <div className="mb-3 inline-flex size-12 items-center justify-center rounded-full bg-muted">
-                    <Database className="size-6 text-muted-foreground" />
-                  </div>
-                  <p className="mb-1 text-sm text-muted-foreground">
-                    No input data
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    This workflow was executed without input parameters
-                  </p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card className="overflow-hidden">
-            <CardHeader className="border-b bg-gradient-to-r from-success/10 to-success/5">
-              <div className="flex items-center justify-between">
-                <CardTitle className="flex items-center gap-2 text-lg">
-                  <div className="rounded-lg bg-success/10 p-2">
-                    <Sparkles className="size-5 text-success" />
-                  </div>
-                  Output Data
-                </CardTitle>
-                {data.outputs && (
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className="h-8 gap-2"
-                    onClick={() =>
-                      void copyPayload('outputs', data.outputs, 'copy-outputs')
-                    }
-                  >
-                    <span id="copy-outputs">
-                      <Copy className="size-4" />
-                    </span>
-                    Copy
-                  </Button>
-                )}
-              </div>
-            </CardHeader>
-            <CardContent className="p-0">
-              {data.outputs ? (
-                <div className="relative bg-muted/30">
-                  <pre className="max-h-[500px] overflow-auto p-6 font-mono text-xs">
-                    <code className="text-foreground">
-                      {(() => {
-                        try {
-                          // If outputs is already an object, stringify it
-                          // (eliding any large values for display).
-                          if (typeof data.outputs === 'object') {
-                            return JSON.stringify(
-                              mapElidedForDisplay(data.outputs),
-                              null,
-                              2
-                            );
-                          }
-                          // If outputs is a string, try to parse and re-stringify
-                          return JSON.stringify(
-                            JSON.parse(data.outputs),
-                            null,
-                            2
-                          );
-                        } catch {
-                          // If all else fails, convert to string
-                          return String(data.outputs);
-                        }
-                      })()}
-                    </code>
-                  </pre>
-                  {hasElidedPayload(data.outputs) && (
-                    <div className="px-6 pb-3">
-                      <Badge
-                        variant="secondary"
-                        className="text-3xs text-muted-foreground"
-                      >
-                        Large values elided — use Copy for the full value
-                      </Badge>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="p-12 text-center">
-                  <div className="mb-3 inline-flex size-12 items-center justify-center rounded-full bg-muted">
-                    <Sparkles className="size-6 text-muted-foreground" />
-                  </div>
-                  <p className="mb-1 text-sm text-muted-foreground">
-                    {outputEmptyState.title}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {outputEmptyState.description}
-                  </p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
+        <PayloadExplorer
+          ariaLabel="Run data"
+          defaultSectionId="output"
+          loadFullValue={loadFullRunValue}
+          sections={[
+            {
+              id: 'input',
+              label: 'Input',
+              value: data.inputs ?? null,
+              emptyState: {
+                title: 'No input data',
+                description:
+                  'This workflow was executed without input parameters',
+              },
+            },
+            {
+              id: 'output',
+              label: 'Output',
+              value: outputValue,
+              emptyState: outputEmptyState,
+            },
+            {
+              id: 'state',
+              label: 'State',
+              value: stateValue,
+              meta: data.stateUpdatedAt
+                ? `Updated ${formatRelativeTime(data.stateUpdatedAt)}`
+                : undefined,
+              emptyState: { title: 'No state published yet' },
+              fieldLabels: stateFieldLabels,
+            },
+          ]}
+        />
 
         {/* Events Section */}
         <Card className="overflow-hidden">
           <CardHeader className="border-b bg-gradient-to-r from-purple-500/10 to-purple-500/5">
-            <div className="flex items-center justify-between">
-              <CardTitle className="flex items-center gap-2 text-lg">
-                <div className="rounded-lg bg-purple-500/10 p-2">
-                  <ChevronRight className="size-5 text-purple-600" />
-                </div>
-                Events
-              </CardTitle>
-              <Tabs
-                value={eventsViewMode}
-                onValueChange={(v) =>
-                  handleViewModeChange(v as 'list' | 'timeline' | 'graph')
-                }
-              >
-                <TabsList className="grid w-[300px] grid-cols-3">
-                  <TabsTrigger
-                    value="timeline"
-                    className="flex items-center gap-1"
-                  >
-                    <BarChart3 className="size-4" />
-                    Timeline
-                  </TabsTrigger>
-                  <TabsTrigger
-                    value="graph"
-                    className="flex items-center gap-1"
-                    data-testid="events-view-graph"
-                  >
-                    <Network className="size-4" />
-                    Graph
-                  </TabsTrigger>
-                  <TabsTrigger value="list" className="flex items-center gap-1">
-                    <List className="size-4" />
-                    List
-                  </TabsTrigger>
-                </TabsList>
-              </Tabs>
-            </div>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <div className="rounded-lg bg-purple-500/10 p-2">
+                <ChevronRight className="size-5 text-purple-600" />
+              </div>
+              Events
+            </CardTitle>
             <p className="mt-2 text-sm text-muted-foreground">
               Step execution events showing inputs, outputs, and status for each
               step in your workflow
             </p>
           </CardHeader>
-          <CardContent className="p-6">
-            {eventsViewMode === 'graph' ? (
-              <ReplayView workflowId={workflowId!} instanceId={instanceId!} />
-            ) : eventsViewMode === 'timeline' ? (
-              <ExecutionTimeline
-                showInputs={false}
-                workflowId={workflowId!}
-                instanceId={instanceId!}
-              />
-            ) : isListFetching ? (
-              <div className="flex items-center justify-center py-16">
-                <Spinner className="size-8 text-muted-foreground" />
-              </div>
-            ) : stepSummaries.length > 0 ? (
-              <div className="space-y-3">
-                {stepSummaries.map((step: any, index: number) => {
-                  // Calculate global sequence number based on pagination
-                  const globalSequence = listPageIndex * LIST_PAGE_SIZE + index;
-                  const isExpanded = expandedSteps.has(index);
-
-                  // Badge, tint and label for the step summary status
-                  // (including `suspended` for a parked step).
-                  const statusDisplay = stepStatusDisplay(step.status);
-
-                  return (
-                    <div
-                      key={step.stepId || index}
-                      className={`space-y-3 rounded-lg border p-4 transition-colors ${statusDisplay.rowClass}`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <button
-                          onClick={() => toggleStepExpanded(index)}
-                          className="flex items-center gap-2 font-medium transition-colors hover:text-purple-600"
-                        >
-                          {isExpanded ? (
-                            <ChevronDown className="size-4" />
-                          ) : (
-                            <ChevronRight className="size-4" />
-                          )}
-                          <span className="font-semibold">
-                            #{globalSequence + 1} -{' '}
-                            {step.stepName || step.stepId}
-                          </span>
-                        </button>
-                        <StepStatusBadge status={step.status} />
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-                        <Badge
-                          variant="secondary"
-                          className="font-mono text-xs"
-                        >
-                          {step.stepType}
-                        </Badge>
-                        {step.startedAt && (
-                          <>
-                            <span>•</span>
-                            <span className="flex items-center gap-1">
-                              <Calendar className="size-3" />
-                              {formatDate(step.startedAt)}
-                            </span>
-                          </>
-                        )}
-                        {step.durationMs !== undefined &&
-                          step.durationMs !== null && (
-                            <>
-                              <span>•</span>
-                              <span className="flex items-center gap-1">
-                                <Clock className="size-3" />
-                                {step.durationMs}ms
-                              </span>
-                            </>
-                          )}
-                      </div>
-
-                      {step.error && (
-                        <StructuredErrorDisplay
-                          error={step.error}
-                          mode="compact"
-                        />
-                      )}
-
-                      {/* Expandable Inputs/Outputs */}
-                      {isExpanded && (
-                        <div className="mt-3 space-y-4 border-t pt-3">
-                          {/* Inputs */}
-                          {step.inputs && (
-                            <div>
-                              <div className="mb-2 flex items-center justify-between">
-                                <span className="flex items-center gap-1 text-sm font-semibold text-muted-foreground">
-                                  <Database className="size-3" />
-                                  Inputs
-                                </span>
-                                <Button
-                                  variant="secondary"
-                                  size="sm"
-                                  className="h-6 text-xs"
-                                  onClick={() => {
-                                    navigator.clipboard.writeText(
-                                      JSON.stringify(step.inputs, null, 2)
-                                    );
-                                    toast.success('Inputs copied');
-                                  }}
-                                >
-                                  <Copy className="mr-1 size-3" />
-                                  Copy
-                                </Button>
-                              </div>
-                              <pre className="max-h-60 overflow-x-auto overflow-y-auto rounded bg-muted p-3 font-mono text-xs">
-                                {JSON.stringify(step.inputs, null, 2)}
-                              </pre>
-                            </div>
-                          )}
-
-                          {/* Outputs */}
-                          {step.outputs && (
-                            <div>
-                              <div className="mb-2 flex items-center justify-between">
-                                <span className="flex items-center gap-1 text-sm font-semibold text-muted-foreground">
-                                  <Sparkles className="size-3" />
-                                  Outputs
-                                </span>
-                                <Button
-                                  variant="secondary"
-                                  size="sm"
-                                  className="h-6 text-xs"
-                                  onClick={() => {
-                                    navigator.clipboard.writeText(
-                                      JSON.stringify(step.outputs, null, 2)
-                                    );
-                                    toast.success('Outputs copied');
-                                  }}
-                                >
-                                  <Copy className="mr-1 size-3" />
-                                  Copy
-                                </Button>
-                              </div>
-                              <pre className="max-h-60 overflow-x-auto overflow-y-auto rounded bg-muted p-3 font-mono text-xs">
-                                {JSON.stringify(step.outputs, null, 2)}
-                              </pre>
-                            </div>
-                          )}
-
-                          {!step.inputs && !step.outputs && (
-                            <p className="text-sm text-muted-foreground">
-                              No input/output data available for this step.
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-
-                {/* Pagination Controls */}
-                {totalPages > 1 && (
-                  <div className="mt-4 flex items-center justify-between border-t pt-4">
-                    <div className="text-sm text-muted-foreground">
-                      Showing {listPageIndex * LIST_PAGE_SIZE + 1} -{' '}
-                      {Math.min(
-                        (listPageIndex + 1) * LIST_PAGE_SIZE,
-                        totalCount
-                      )}{' '}
-                      of {totalCount} events
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        variant="secondary"
-                        bordered
-                        size="sm"
-                        onClick={() => setListPageIndex(0)}
-                        disabled={listPageIndex === 0}
-                      >
-                        <ChevronsLeft className="size-4" />
-                      </Button>
-                      <Button
-                        variant="secondary"
-                        bordered
-                        size="sm"
-                        onClick={() =>
-                          setListPageIndex((prev) => Math.max(0, prev - 1))
-                        }
-                        disabled={listPageIndex === 0}
-                      >
-                        <ChevronLeft className="size-4" />
-                      </Button>
-                      <span className="px-2 text-sm text-muted-foreground">
-                        Page {listPageIndex + 1} of {totalPages}
-                      </span>
-                      <Button
-                        variant="secondary"
-                        bordered
-                        size="sm"
-                        onClick={() =>
-                          setListPageIndex((prev) =>
-                            Math.min(totalPages - 1, prev + 1)
-                          )
-                        }
-                        disabled={listPageIndex >= totalPages - 1}
-                      >
-                        <ChevronRight className="size-4" />
-                      </Button>
-                      <Button
-                        variant="secondary"
-                        bordered
-                        size="sm"
-                        onClick={() => setListPageIndex(totalPages - 1)}
-                        disabled={listPageIndex >= totalPages - 1}
-                      >
-                        <ChevronsRight className="size-4" />
-                      </Button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="px-6 py-16 text-center">
-                <div className="mb-4 inline-flex size-16 items-center justify-center rounded-full bg-purple-500/10">
-                  <ChevronRight className="size-8 text-purple-600" />
-                </div>
-                <h3 className="mb-2 text-lg font-semibold">
-                  {eventsEmptyState.title}
-                </h3>
-                <p className="mx-auto max-w-md text-sm text-muted-foreground">
-                  {eventsEmptyState.description}
-                </p>
-              </div>
-            )}
+          <CardContent className="p-0">
+            <ExecutionTimeline
+              showInputs={false}
+              onStatsChange={setExecutionStats}
+              workflowId={workflowId!}
+              instanceId={instanceId!}
+            />
           </CardContent>
         </Card>
       </div>

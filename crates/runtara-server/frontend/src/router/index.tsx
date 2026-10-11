@@ -72,11 +72,6 @@ const WorkflowHistory = lazy(() =>
     default: m.WorkflowHistory,
   }))
 );
-const WorkflowLogs = lazy(() =>
-  import('@/features/workflows/pages/WorkflowLogs').then((m) => ({
-    default: m.WorkflowLogs,
-  }))
-);
 const ChatPage = lazy(() =>
   import('@/features/workflows/pages/Chat').then((m) => ({
     default: m.ChatPage,
@@ -192,16 +187,6 @@ export const router = createBrowserRouter(
             <PrivateRoute>
               <Suspense fallback={<PageLoader />}>
                 <WorkflowHistory />
-              </Suspense>
-            </PrivateRoute>
-          ),
-        },
-        {
-          path: '/workflows/:workflowId/history/:instanceId/logs',
-          element: (
-            <PrivateRoute>
-              <Suspense fallback={<PageLoader />}>
-                <WorkflowLogs />
               </Suspense>
             </PrivateRoute>
           ),

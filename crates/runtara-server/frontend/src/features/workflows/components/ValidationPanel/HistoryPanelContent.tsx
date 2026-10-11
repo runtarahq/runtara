@@ -12,27 +12,21 @@ import { formatDate } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import { Icons } from '@/shared/components/icons';
 import { Badge } from '@/shared/components/ui/badge';
-import { Button } from '@/shared/components/ui/button';
 import { SectionLabel } from '@/shared/components/section-label';
 import {
   ExternalLink,
   Zap,
   ChevronRight,
   ChevronDown,
-  Copy,
-  Database,
-  Sparkles,
   Bug,
 } from 'lucide-react';
 import {
   getStatusDisplay,
   isActiveStatus,
 } from '@/shared/utils/status-display';
-import { toast } from 'sonner';
 import { StructuredErrorDisplay } from '@/shared/components/StructuredErrorDisplay';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
-import { resolvePayloadForCopy } from '@/shared/utils/truncated-payload';
-import { PayloadPreBlock } from '@/shared/components/PayloadPreBlock';
+import { PayloadExplorer } from '@/shared/components/PayloadExplorer';
 import { Spinner } from '@/shared/components/ui/spinner';
 import { StepStatusBadge } from '@/features/workflows/components/StepStatusBadge';
 import {
@@ -371,11 +365,6 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
     return '';
   };
 
-  const handleCopy = (data: unknown, label: string) => {
-    navigator.clipboard.writeText(resolvePayloadForCopy(data));
-    toast.success(`${label} copied`);
-  };
-
   return (
     <>
       <tr
@@ -423,60 +412,27 @@ function EventRow({ step, sequence }: { step: StepSummary; sequence: number }) {
                 <StructuredErrorDisplay error={errorString} mode="compact" />
               )}
 
-              {hasInputs && (
-                <div>
-                  <div className="mb-1 flex items-center justify-between">
-                    <span className="flex items-center gap-1 text-3xs font-semibold text-muted-foreground">
-                      <Database className="size-2.5" />
-                      Inputs
-                    </span>
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      className="h-5 px-1 text-3xs"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleCopy(step.inputs, 'Inputs');
-                      }}
-                    >
-                      <Copy className="mr-0.5 size-2.5" />
-                      Copy
-                    </Button>
-                  </div>
-                  <PayloadPreBlock
-                    data={step.inputs}
-                    className="max-h-24"
-                    textClassName="text-3xs"
-                  />
-                </div>
-              )}
-
-              {hasOutputs && (
-                <div>
-                  <div className="mb-1 flex items-center justify-between">
-                    <span className="flex items-center gap-1 text-3xs font-semibold text-muted-foreground">
-                      <Sparkles className="size-2.5" />
-                      Outputs
-                    </span>
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      className="h-5 px-1 text-3xs"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleCopy(step.outputs, 'Outputs');
-                      }}
-                    >
-                      <Copy className="mr-0.5 size-2.5" />
-                      Copy
-                    </Button>
-                  </div>
-                  <PayloadPreBlock
-                    data={step.outputs}
-                    className="max-h-24"
-                    textClassName="text-3xs"
-                  />
-                </div>
+              {(hasInputs || hasOutputs) && (
+                <PayloadExplorer
+                  compact
+                  ariaLabel={`${step.stepName || step.stepId} data`}
+                  maxHeight={200}
+                  defaultSectionId={hasOutputs ? 'output' : 'input'}
+                  sections={[
+                    {
+                      id: 'input',
+                      label: 'Inputs',
+                      value: hasInputs ? step.inputs : null,
+                      emptyState: { title: 'No inputs' },
+                    },
+                    {
+                      id: 'output',
+                      label: 'Outputs',
+                      value: hasOutputs ? step.outputs : null,
+                      emptyState: { title: 'No outputs' },
+                    },
+                  ]}
+                />
               )}
 
               {!hasInputs && !hasOutputs && !hasError && (
