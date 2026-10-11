@@ -223,7 +223,7 @@ export const BaseNode = forwardRef<
       if (subtitle) {
         return { text: subtitle, className: 'text-muted-foreground' };
       }
-      // Same summary as the timeline card: description, or what the step does.
+      // The step's description, or what the step does.
       const summary = stepDescription(
         { stepType, agentId, capabilityId, description },
         agentName,

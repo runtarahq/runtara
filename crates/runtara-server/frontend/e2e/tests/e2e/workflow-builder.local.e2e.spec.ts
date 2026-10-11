@@ -51,16 +51,14 @@ test.describe.serial('Workflow builder local UI', () => {
     createdConnectionNames = [];
   });
 
-  test('timeline-only adds, persists, and removes linear steps', async ({
-    page,
-  }) => {
+  test('canvas adds, persists, and removes linear steps', async ({ page }) => {
     const builder = new WorkflowBuilderPage(page);
-    await rememberWorkflow(builder, workflowName('timeline-linear'));
+    await rememberWorkflow(builder, workflowName('canvas-linear'));
 
-    await builder.addFirstTimelineStep(randomDoubleStep, {
+    await builder.addFirstCanvasStep(randomDoubleStep, {
       name: 'Generate number',
     });
-    await builder.addTimelineStepAfter('Generate number', randomDoubleStep, {
+    await builder.addCanvasStepAfter('Generate number', randomDoubleStep, {
       name: 'Double again',
     });
 
@@ -69,26 +67,24 @@ test.describe.serial('Workflow builder local UI', () => {
     await builder.expectStepVisible('Generate number');
     await builder.expectStepVisible('Double again');
 
-    await builder.deleteTimelineStep('Double again');
+    await builder.deleteCanvasStep('Double again');
     await builder.saveWorkflow();
     await builder.reloadAndWait();
     await builder.expectStepVisible('Generate number');
     await builder.expectStepHidden('Double again');
   });
 
-  test('timeline-only adds and removes conditional branch steps', async ({
-    page,
-  }) => {
+  test('canvas adds and removes conditional branch steps', async ({ page }) => {
     const builder = new WorkflowBuilderPage(page);
     await rememberWorkflow(builder, workflowName('conditional-branches'));
 
-    await builder.beginFirstTimelineStep(stepType('Conditional'));
+    await builder.beginFirstCanvasStep(stepType('Conditional'));
     await builder.configureOpenCondition();
-    await builder.saveOpenTimelinePanel({ name: 'Decision' });
-    await builder.addTimelineRouteStep('Decision', 'true', randomDoubleStep, {
+    await builder.saveOpenCanvasDialog({ name: 'Decision' });
+    await builder.addCanvasRouteStep('Decision', 'true', randomDoubleStep, {
       name: 'Approved branch',
     });
-    await builder.addTimelineRouteStep('Decision', 'false', randomDoubleStep, {
+    await builder.addCanvasRouteStep('Decision', 'false', randomDoubleStep, {
       name: 'Rejected branch',
     });
 
@@ -97,34 +93,24 @@ test.describe.serial('Workflow builder local UI', () => {
     await builder.expectStepVisible('Decision');
     await builder.expectStepVisible('Approved branch');
     await builder.expectStepVisible('Rejected branch');
-    await builder.expectStepInTimelineRoute(
-      'Approved branch',
-      'Decision',
-      'true'
-    );
-    await builder.expectStepInTimelineRoute(
-      'Rejected branch',
-      'Decision',
-      'false'
-    );
+    await builder.expectStepOnRoute('Approved branch', 'Decision', 'true');
+    await builder.expectStepOnRoute('Rejected branch', 'Decision', 'false');
 
-    await builder.deleteTimelineStep('Rejected branch');
+    await builder.deleteCanvasStep('Rejected branch');
     await builder.saveWorkflow();
     await builder.reloadAndWait();
     await builder.expectStepVisible('Approved branch');
     await builder.expectStepHidden('Rejected branch');
   });
 
-  test('timeline-only adds switch case and default routes', async ({
-    page,
-  }) => {
+  test('canvas adds switch case and default routes', async ({ page }) => {
     const builder = new WorkflowBuilderPage(page);
     await rememberWorkflow(builder, workflowName('switch-routes'));
 
-    await builder.beginFirstTimelineStep(stepType('Switch'));
+    await builder.beginFirstCanvasStep(stepType('Switch'));
     await builder.configureOpenSwitchRouting('status', 'approved');
-    await builder.saveOpenTimelinePanel({ name: 'Route switch' });
-    await builder.addTimelineRouteStep(
+    await builder.saveOpenCanvasDialog({ name: 'Route switch' });
+    await builder.addCanvasRouteStep(
       'Route switch',
       'case-0',
       randomDoubleStep,
@@ -132,7 +118,7 @@ test.describe.serial('Workflow builder local UI', () => {
         name: 'Approved route',
       }
     );
-    await builder.addTimelineRouteStep(
+    await builder.addCanvasRouteStep(
       'Route switch',
       'default',
       randomDoubleStep,
@@ -146,31 +132,25 @@ test.describe.serial('Workflow builder local UI', () => {
     await builder.expectStepVisible('Route switch');
     await builder.expectStepVisible('Approved route');
     await builder.expectStepVisible('Fallback route');
-    await builder.expectStepInTimelineRoute(
-      'Approved route',
-      'Route switch',
-      'case-0'
-    );
-    await builder.expectStepInTimelineRoute(
+    await builder.expectStepOnRoute('Approved route', 'Route switch', 'case-0');
+    await builder.expectStepOnRoute(
       'Fallback route',
       'Route switch',
       'default'
     );
   });
 
-  test('timeline-only adds a persisted error handler route', async ({
-    page,
-  }) => {
+  test('canvas adds a persisted error handler route', async ({ page }) => {
     const builder = new WorkflowBuilderPage(page);
     await rememberWorkflow(builder, workflowName('error-route'));
 
-    await builder.beginFirstTimelineStep(stepType('While'));
+    await builder.beginFirstCanvasStep(stepType('While'));
     await builder.configureOpenCondition();
-    await builder.saveOpenTimelinePanel({ name: 'Risky loop' });
-    await builder.addNestedTimelineStep('Risky loop', randomDoubleStep, {
+    await builder.saveOpenCanvasDialog({ name: 'Risky loop' });
+    await builder.addNestedCanvasStep('Risky loop', randomDoubleStep, {
       name: 'Loop work',
     });
-    await builder.addTimelineErrorHandler('Risky loop', {
+    await builder.addCanvasErrorHandler('Risky loop', {
       name: 'Loop error handler',
     });
 
@@ -180,29 +160,27 @@ test.describe.serial('Workflow builder local UI', () => {
     await builder.expectStepVisible('Loop work');
     await builder.expectStepVisible('Loop error handler');
     await builder.expectStepNestedUnder('Loop work', 'Risky loop');
-    await builder.expectStepInTimelineRoute(
+    await builder.expectStepOnRoute(
       'Loop error handler',
       'Risky loop',
       'onError'
     );
   });
 
-  test('timeline-only wires AI Agent tool and memory controls', async ({
-    page,
-  }) => {
+  test('canvas wires AI Agent tool and memory controls', async ({ page }) => {
     const builder = new WorkflowBuilderPage(page);
     const connectionName = `E2E Workflow Builder OpenAI ${runId}`;
     await builder.createOpenAiConnection(connectionName);
     createdConnectionNames.push(connectionName);
     await rememberWorkflow(builder, workflowName('ai-agent-routes'));
 
-    await builder.beginFirstTimelineStep(stepType('AiAgent'));
+    await builder.beginFirstCanvasStep(stepType('AiAgent'));
     await builder.configureOpenAiAgent(connectionName);
-    await builder.saveOpenTimelinePanel({ name: 'AI coordinator' });
-    await builder.addTimelineAiTool('AI coordinator', randomDoubleStep, {
+    await builder.saveOpenCanvasDialog({ name: 'AI coordinator' });
+    await builder.addCanvasAiTool('AI coordinator', randomDoubleStep, {
       name: 'Tool random double',
     });
-    await builder.addTimelineAiMemory('AI coordinator');
+    await builder.addCanvasAiMemory('AI coordinator');
 
     await builder.saveWorkflow();
     await builder.reloadAndWait();
@@ -216,17 +194,17 @@ test.describe.serial('Workflow builder local UI', () => {
     const builder = new WorkflowBuilderPage(page);
     await rememberWorkflow(builder, workflowName('split-lifecycle'));
 
-    await builder.addFirstTimelineStep(randomDoubleStep, {
+    await builder.addFirstCanvasStep(randomDoubleStep, {
       name: 'Prepare items',
     });
-    await builder.addTimelineStepAfter('Prepare items', stepType('Split'), {
+    await builder.addCanvasStepAfter('Prepare items', stepType('Split'), {
       name: 'For each item',
     });
     await builder.configureSplitSource('For each item');
-    await builder.addNestedTimelineStep('For each item', randomDoubleStep, {
+    await builder.addNestedCanvasStep('For each item', randomDoubleStep, {
       name: 'Process item',
     });
-    await builder.addTimelineStepAfter('Process item', randomDoubleStep, {
+    await builder.addCanvasStepAfter('Process item', randomDoubleStep, {
       name: 'Finalize item',
     });
 
@@ -239,7 +217,7 @@ test.describe.serial('Workflow builder local UI', () => {
     await builder.expectStepNestedUnder('Process item', 'For each item');
     await builder.expectStepNestedUnder('Finalize item', 'For each item');
 
-    await builder.deleteTimelineStep('Process item');
+    await builder.deleteCanvasStep('Process item');
     await builder.saveWorkflow();
     await builder.reloadAndWait();
     await builder.expectStepVisible('Prepare items');
@@ -247,7 +225,7 @@ test.describe.serial('Workflow builder local UI', () => {
     await builder.expectStepVisible('Finalize item');
     await builder.expectStepHidden('Process item');
 
-    await builder.deleteTimelineStep('For each item');
+    await builder.deleteCanvasStep('For each item');
     await builder.saveWorkflow();
     await builder.reloadAndWait();
     await builder.expectStepVisible('Prepare items');
@@ -255,18 +233,18 @@ test.describe.serial('Workflow builder local UI', () => {
     await builder.expectStepHidden('Finalize item');
   });
 
-  test('timeline-only nests a split inside a while loop', async ({ page }) => {
+  test('canvas nests a split inside a while loop', async ({ page }) => {
     const builder = new WorkflowBuilderPage(page);
     await rememberWorkflow(builder, workflowName('while-with-split'));
 
-    await builder.beginFirstTimelineStep(stepType('While'));
+    await builder.beginFirstCanvasStep(stepType('While'));
     await builder.configureOpenCondition();
-    await builder.saveOpenTimelinePanel({ name: 'Retry loop' });
-    await builder.addNestedTimelineStep('Retry loop', stepType('Split'), {
+    await builder.saveOpenCanvasDialog({ name: 'Retry loop' });
+    await builder.addNestedCanvasStep('Retry loop', stepType('Split'), {
       name: 'Loop items',
     });
     await builder.configureSplitSource('Loop items');
-    await builder.addNestedTimelineStep('Loop items', randomDoubleStep, {
+    await builder.addNestedCanvasStep('Loop items', randomDoubleStep, {
       name: 'Loop item work',
     });
 
@@ -283,16 +261,16 @@ test.describe.serial('Workflow builder local UI', () => {
     const builder = new WorkflowBuilderPage(page);
     await rememberWorkflow(builder, workflowName('while-descendant-remove'));
 
-    await builder.addFirstTimelineStep(randomDoubleStep, {
+    await builder.addFirstCanvasStep(randomDoubleStep, {
       name: 'Stable root',
     });
-    await builder.beginTimelineStepAfter('Stable root', stepType('While'));
+    await builder.beginCanvasStepAfter('Stable root', stepType('While'));
     await builder.configureOpenCondition();
-    await builder.saveOpenTimelinePanel({ name: 'Removable loop' });
-    await builder.addNestedTimelineStep('Removable loop', randomDoubleStep, {
+    await builder.saveOpenCanvasDialog({ name: 'Removable loop' });
+    await builder.addNestedCanvasStep('Removable loop', randomDoubleStep, {
       name: 'Loop child',
     });
-    await builder.addTimelineStepAfter('Loop child', randomDoubleStep, {
+    await builder.addCanvasStepAfter('Loop child', randomDoubleStep, {
       name: 'Loop descendant',
     });
 
@@ -305,7 +283,7 @@ test.describe.serial('Workflow builder local UI', () => {
     await builder.expectStepNestedUnder('Loop child', 'Removable loop');
     await builder.expectStepNestedUnder('Loop descendant', 'Removable loop');
 
-    await builder.deleteTimelineStep('Removable loop');
+    await builder.deleteCanvasStep('Removable loop');
     await builder.saveWorkflow();
     await builder.reloadAndWait();
     await builder.expectStepVisible('Stable root');
@@ -318,21 +296,21 @@ test.describe.serial('Workflow builder local UI', () => {
     const builder = new WorkflowBuilderPage(page);
     await rememberWorkflow(builder, workflowName('deep-nesting'));
 
-    await builder.beginFirstTimelineStep(stepType('While'));
+    await builder.beginFirstCanvasStep(stepType('While'));
     await builder.configureOpenCondition();
-    await builder.saveOpenTimelinePanel({ name: 'Outer while' });
-    await builder.addNestedTimelineStep('Outer while', stepType('Split'), {
+    await builder.saveOpenCanvasDialog({ name: 'Outer while' });
+    await builder.addNestedCanvasStep('Outer while', stepType('Split'), {
       name: 'Outer split',
     });
     await builder.configureSplitSource('Outer split', 'data.outerItems');
-    await builder.addNestedTimelineStep('Outer split', stepType('Split'), {
+    await builder.addNestedCanvasStep('Outer split', stepType('Split'), {
       name: 'Inner split',
     });
     await builder.configureSplitSource('Inner split', 'data.innerItems');
-    await builder.addNestedTimelineStep('Inner split', randomDoubleStep, {
+    await builder.addNestedCanvasStep('Inner split', randomDoubleStep, {
       name: 'Deep child',
     });
-    await builder.addTimelineStepAfter('Inner split', randomDoubleStep, {
+    await builder.addCanvasStepAfter('Inner split', randomDoubleStep, {
       name: 'Outer split survivor',
     });
 
@@ -343,7 +321,7 @@ test.describe.serial('Workflow builder local UI', () => {
     await builder.expectStepNestedUnder('Deep child', 'Inner split');
     await builder.expectStepNestedUnder('Outer split survivor', 'Outer split');
 
-    await builder.deleteTimelineStep('Inner split');
+    await builder.deleteCanvasStep('Inner split');
     await builder.saveWorkflow();
     await builder.reloadAndWait();
     await builder.expectStepVisible('Outer while');
@@ -355,63 +333,23 @@ test.describe.serial('Workflow builder local UI', () => {
     await builder.expectStepNestedUnder('Outer split survivor', 'Outer split');
   });
 
-  test('reorders timeline root and nested steps with drag handles', async ({
-    page,
-  }) => {
-    const builder = new WorkflowBuilderPage(page);
-    await rememberWorkflow(builder, workflowName('timeline-reorder'));
-
-    await builder.addFirstTimelineStep(randomDoubleStep, { name: 'Root A' });
-    await builder.addTimelineStepAfter('Root A', randomDoubleStep, {
-      name: 'Root B',
-    });
-    await builder.addTimelineStepAfter('Root B', randomDoubleStep, {
-      name: 'Root C',
-    });
-    await builder.beginTimelineStepAfter('Root C', stepType('While'));
-    await builder.configureOpenCondition();
-    await builder.saveOpenTimelinePanel({ name: 'Root Loop' });
-    await builder.addNestedTimelineStep('Root Loop', randomDoubleStep, {
-      name: 'Nested 1',
-    });
-    await builder.addTimelineStepAfter('Nested 1', randomDoubleStep, {
-      name: 'Nested 2',
-    });
-
-    await builder.dragTimelineStep('Root C', 'Root A', 'before');
-    await builder.dragTimelineStep('Nested 2', 'Nested 1', 'before');
-
-    await builder.saveWorkflow();
-    await builder.reloadAndWait();
-    await builder.expectTimelineOrder([
-      'Root C',
-      'Root A',
-      'Root B',
-      'Root Loop',
-    ]);
-    await builder.expectTimelineChildOrder('Root Loop', [
-      'Nested 2',
-      'Nested 1',
-    ]);
-  });
-
   test('shows validation for empty split and invalid while saves', async ({
     page,
   }) => {
     const builder = new WorkflowBuilderPage(page);
     await rememberWorkflow(builder, workflowName('invalid-containers'));
 
-    await builder.addFirstTimelineStep(stepType('Split'), {
+    await builder.addFirstCanvasStep(stepType('Split'), {
       name: 'Empty split',
     });
     await builder.expectSaveValidationFailure();
-    await builder.deleteTimelineStep('Empty split');
+    await builder.deleteCanvasStep('Empty split');
     await builder.clearValidationMessages();
 
-    await builder.beginFirstTimelineStep(stepType('While'));
-    await builder.saveOpenTimelinePanel({ name: 'Invalid while' });
+    await builder.beginFirstCanvasStep(stepType('While'));
+    await builder.saveOpenCanvasDialog({ name: 'Invalid while' });
     await builder.expectSaveValidationFailure();
-    await builder.deleteTimelineStep('Invalid while');
+    await builder.deleteCanvasStep('Invalid while');
   });
 
   test('calls another workflow from a parent workflow through the UI', async ({
@@ -422,15 +360,15 @@ test.describe.serial('Workflow builder local UI', () => {
     const parentWorkflowName = workflowName('calling-parent');
 
     await rememberWorkflow(builder, childWorkflowName);
-    await builder.addFirstTimelineStep(randomDoubleStep, {
+    await builder.addFirstCanvasStep(randomDoubleStep, {
       name: 'Child work',
     });
     await builder.saveWorkflow();
 
     await rememberWorkflow(builder, parentWorkflowName);
-    await builder.beginFirstTimelineStep(stepType('EmbedWorkflow'));
+    await builder.beginFirstCanvasStep(stepType('EmbedWorkflow'));
     await builder.configureOpenEmbedWorkflow(childWorkflowName);
-    await builder.saveOpenTimelinePanel({ name: 'Call child workflow' });
+    await builder.saveOpenCanvasDialog({ name: 'Call child workflow' });
 
     await builder.saveWorkflow();
     await builder.reloadAndWait();
@@ -445,24 +383,24 @@ test.describe.serial('Workflow builder local UI', () => {
     const parentWorkflowName = workflowName('versioned-parent');
 
     await rememberWorkflow(builder, childWorkflowName);
-    await builder.addFirstTimelineStep(randomDoubleStep, {
+    await builder.addFirstCanvasStep(randomDoubleStep, {
       name: 'Child v2 work',
     });
     await builder.saveWorkflow();
-    await builder.addTimelineStepAfter('Child v2 work', randomDoubleStep, {
+    await builder.addCanvasStepAfter('Child v2 work', randomDoubleStep, {
       name: 'Child v3 work',
     });
     await builder.saveWorkflow();
 
     await rememberWorkflow(builder, parentWorkflowName);
-    await builder.beginFirstTimelineStep(stepType('EmbedWorkflow'));
+    await builder.beginFirstCanvasStep(stepType('EmbedWorkflow'));
     await builder.configureOpenEmbedWorkflow(childWorkflowName);
     await builder.configureOpenEmbedWorkflowVersion(2);
-    await builder.saveOpenTimelinePanel({ name: 'Call child v2' });
+    await builder.saveOpenCanvasDialog({ name: 'Call child v2' });
 
     await builder.saveWorkflow();
     await builder.reloadAndWait();
-    await builder.editTimelineStep('Call child v2');
+    await builder.editCanvasStep('Call child v2');
     await builder.expectOpenEmbedWorkflowVersion(2);
   });
 

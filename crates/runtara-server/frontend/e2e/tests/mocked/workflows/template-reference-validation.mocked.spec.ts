@@ -115,16 +115,20 @@ test.describe('Template reference Rust validation (mocked)', () => {
 
     await page.goto(`/workflows/${workflowId}`);
     await expect(page.locator('main')).toBeVisible();
-    // The step's Edit button lives on the timeline card; the editor opens on
-    // the canvas by default.
-    await page.getByTestId('workflow-view-timeline').click();
     await expect(
-      page.getByRole('button', { name: /Summary Output Finish/ })
+      page.locator(
+        '[data-testid="workflow-canvas-node"][data-step-name="Summary Output"]'
+      )
     ).toBeVisible({
       timeout: 10_000,
     });
 
-    await page.getByRole('button', { name: 'Edit Source Log' }).click();
+    // A step's editor opens on double-click.
+    await page
+      .locator(
+        '[data-testid="workflow-canvas-node"][data-step-name="Source Log"]'
+      )
+      .dblclick();
     const panel = page.getByTestId('node-config-dialog');
     await expect(panel).toBeVisible({ timeout: 5_000 });
     await panel.getByPlaceholder('Enter log message...').fill('source updated');
@@ -158,7 +162,9 @@ test.describe('Template reference Rust validation (mocked)', () => {
 
       await expect(page.getByText(/\[W052\]/).first()).toBeVisible();
       await expect(page.getByText(/\[W000\]/)).toHaveCount(0);
-      await expect(page.getByText(/missing_archive/)).toBeVisible();
+      await expect(
+        page.getByTestId('validation-message').getByText(/missing_archive/)
+      ).toBeVisible();
       await expect(page.getByText(/does not exist/)).toBeVisible();
       await expect(page.getByText('Step: finish')).toBeVisible();
     } finally {

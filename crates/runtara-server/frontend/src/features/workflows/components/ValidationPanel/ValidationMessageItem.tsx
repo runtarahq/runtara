@@ -32,6 +32,7 @@ export function ValidationMessageItem({
         hasStep && 'cursor-pointer hover:bg-muted/50'
       )}
       onClick={handleClick}
+      data-testid="validation-message"
     >
       {/* Severity Icon */}
       <div className="mt-0.5 shrink-0">

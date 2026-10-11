@@ -30,6 +30,7 @@ import { useNodeConfigContext } from '../NodeConfigContext';
 import { NodeFormProvider } from '../NodeForm/NodeFormProvider';
 import { StepPickerModal, StepPickerResult } from '../NodeForm/StepPickerModal';
 import { Spinner } from '@/shared/components/ui/spinner';
+import { AddMcpToolsetRow } from './AddMcpToolsetRow';
 
 /** Shorten model identifiers for badge display */
 function formatModelName(model: string): string {
@@ -545,6 +546,9 @@ function AiAgentNodeComponent({
             {/* Add tool row. Kept (invisible) while executing so the card
                 height does not depend on execution state. */}
             <div
+              role="button"
+              tabIndex={isExecuting ? -1 : 0}
+              aria-label={`Add tool to ${data.name || id}`}
               aria-hidden={isExecuting || undefined}
               className={cn(
                 'nodrag nopan -mx-0.5 flex h-[22px] cursor-pointer items-center gap-1.5 rounded-sm px-0.5 hover:bg-muted/30',
@@ -553,6 +557,12 @@ function AiAgentNodeComponent({
               onClick={(e) => {
                 e.stopPropagation();
                 if (isExecuting) return;
+                setStepPickerMode('tool');
+              }}
+              onKeyDown={(e) => {
+                if (isExecuting || (e.key !== 'Enter' && e.key !== ' ')) return;
+                e.preventDefault();
+                e.stopPropagation();
                 setStepPickerMode('tool');
               }}
             >
@@ -570,6 +580,11 @@ function AiAgentNodeComponent({
                 <Plus />
               </Button>
             </div>
+            <AddMcpToolsetRow
+              agentNodeId={id}
+              agentName={data.name || id}
+              disabled={isExecuting}
+            />
           </div>
 
           {/* Memory section */}
@@ -609,6 +624,9 @@ function AiAgentNodeComponent({
             {/* Add memory row (invisible while executing, like Add tool) */}
             {!hasMemory && (
               <div
+                role="button"
+                tabIndex={isExecuting ? -1 : 0}
+                aria-label={`Add memory to ${data.name || id}`}
                 aria-hidden={isExecuting || undefined}
                 className={cn(
                   'nodrag nopan -mx-0.5 flex h-[22px] cursor-pointer items-center gap-1.5 rounded-sm px-0.5 hover:bg-muted/30',
@@ -617,6 +635,13 @@ function AiAgentNodeComponent({
                 onClick={(e) => {
                   e.stopPropagation();
                   if (isExecuting) return;
+                  setStepPickerMode('memory');
+                }}
+                onKeyDown={(e) => {
+                  if (isExecuting || (e.key !== 'Enter' && e.key !== ' '))
+                    return;
+                  e.preventDefault();
+                  e.stopPropagation();
                   setStepPickerMode('memory');
                 }}
               >

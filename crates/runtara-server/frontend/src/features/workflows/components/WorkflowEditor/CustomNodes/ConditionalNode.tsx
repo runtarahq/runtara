@@ -244,6 +244,7 @@ function ConditionalNodeComponent({
         onToggleBreakpoint={handleToggleBreakpoint}
         subtitle={conditionSummary}
         detailRows={[]}
+        data-parent-node-id={parentId}
         style={{ width: cardSize.width, height: cardSize.height }}
       >
         {/* True handle - pill centered on the right border, positioned at 30% from top */}

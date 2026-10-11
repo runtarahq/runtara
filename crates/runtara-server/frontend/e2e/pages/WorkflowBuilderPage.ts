@@ -19,9 +19,7 @@ type StepCreateOptions = {
   name?: string;
 };
 
-type TimelineDropPlacement = 'before' | 'after';
-type TimelineRouteHandle =
-  'true' | 'false' | 'default' | 'onError' | `case-${number}`;
+type RouteHandle = 'true' | 'false' | 'default' | 'onError' | `case-${number}`;
 
 function attrValue(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -69,38 +67,19 @@ export class WorkflowBuilderPage {
 
   async waitForEditor(): Promise<void> {
     await this.page.waitForLoadState('domcontentloaded');
-    // The editor opens on the canvas by default; the timeline stays mounted
-    // (hidden) behind it, so accept whichever view is showing.
-    await expect(
-      this.page
-        .locator('.react-flow')
-        .or(this.page.getByTestId('workflow-timeline'))
-        .or(this.page.getByTestId('workflow-timeline-empty'))
-        .filter({ visible: true })
-        .first()
-    ).toBeVisible({ timeout: 15000 });
-  }
-
-  async useTimelineOnly(): Promise<void> {
-    await this.page.getByTestId('workflow-view-timeline').click();
-    await expect(
-      this.page
-        .getByTestId('workflow-timeline')
-        .or(this.page.getByTestId('workflow-timeline-empty'))
-    ).toBeVisible();
-  }
-
-  async useCanvas(): Promise<void> {
-    await this.page.getByTestId('workflow-view-canvas').click();
     await expect(this.page.locator('.react-flow')).toBeVisible({
       timeout: 15000,
     });
   }
 
-  timelineStep(name: string): Locator {
-    return this.page.locator(
-      `[data-testid="timeline-step"][data-step-name="${attrValue(name)}"]`
-    );
+  /**
+   * Fits the whole workflow into view. The canvas opens at a readable zoom
+   * anchored on the start, so steps far down a long workflow can sit outside
+   * the pane, where they cannot be clicked.
+   */
+  async useCanvas(): Promise<void> {
+    await this.waitForEditor();
+    await this.page.locator('.react-flow__controls-fitview').click();
   }
 
   canvasStep(name: string): Locator {
@@ -109,20 +88,13 @@ export class WorkflowBuilderPage {
     );
   }
 
-  /** The step in whichever view is showing (canvas or timeline). */
-  visibleStep(name: string): Locator {
-    return this.timelineStep(name)
-      .or(this.canvasStep(name))
-      .filter({ visible: true })
-      .first();
-  }
-
   async expectStepVisible(name: string): Promise<void> {
-    await expect(this.visibleStep(name)).toBeVisible({ timeout: 15000 });
+    await expect(this.canvasStep(name).first()).toBeVisible({
+      timeout: 15000,
+    });
   }
 
   async expectStepHidden(name: string): Promise<void> {
-    await expect(this.timelineStep(name)).toHaveCount(0);
     await expect(this.canvasStep(name)).toHaveCount(0);
   }
 
@@ -130,87 +102,36 @@ export class WorkflowBuilderPage {
     childStepName: string,
     parentStepName: string
   ): Promise<void> {
-    const parentNodeId = await this.timelineNodeId(parentStepName);
-    await expect(this.timelineStep(childStepName)).toHaveAttribute(
+    const parentNodeId = await this.canvasNodeId(parentStepName);
+    await expect(this.canvasStep(childStepName).first()).toHaveAttribute(
       'data-parent-node-id',
       parentNodeId
     );
   }
 
-  async expectTimelineOrder(stepNames: string[]): Promise<void> {
-    await this.useTimelineOnly();
-    const actualNames = await this.page
-      .getByTestId('timeline-step')
-      .evaluateAll((steps, names) => {
-        const expected = new Set(names as string[]);
-        return steps
-          .map((step) => step.getAttribute('data-step-name'))
-          .filter(
-            (name): name is string => Boolean(name) && expected.has(name)
-          );
-      }, stepNames);
-
-    expect(actualNames).toEqual(stepNames);
-  }
-
-  async expectTimelineChildOrder(
-    parentStepName: string,
-    childStepNames: string[]
-  ): Promise<void> {
-    await this.useTimelineOnly();
-    const parentNodeId = await this.timelineNodeId(parentStepName);
-    const actualNames = await this.page
-      .getByTestId('timeline-step')
-      .evaluateAll(
-        (steps, args) => {
-          const { parentId, names } = args as {
-            parentId: string;
-            names: string[];
-          };
-          const expected = new Set(names);
-          return steps
-            .filter(
-              (step) => step.getAttribute('data-parent-node-id') === parentId
-            )
-            .map((step) => step.getAttribute('data-step-name'))
-            .filter(
-              (name): name is string => Boolean(name) && expected.has(name)
-            );
-        },
-        { parentId: parentNodeId, names: childStepNames }
-      );
-
-    expect(actualNames).toEqual(childStepNames);
-  }
-
-  async expectStepInTimelineRoute(
+  /** The canvas draws an edge from the source step's handle to the child. */
+  async expectStepOnRoute(
     childStepName: string,
     sourceStepName: string,
-    sourceHandle: TimelineRouteHandle
+    sourceHandle: RouteHandle
   ): Promise<void> {
-    await this.useTimelineOnly();
-    const sourceNodeId = await this.timelineNodeId(sourceStepName);
-    await expect(this.timelineStep(childStepName)).toHaveAttribute(
-      'data-timeline-context-key',
-      new RegExp(`^lane:[^:]+:${sourceNodeId}:${sourceHandle}$`)
-    );
+    const sourceNodeId = await this.canvasNodeId(sourceStepName);
+    const childNodeId = await this.canvasNodeId(childStepName);
+    await expect(
+      this.page.locator(
+        `[data-edge-source="${attrValue(sourceNodeId)}"][data-edge-target="${attrValue(childNodeId)}"][data-edge-handle="${attrValue(sourceHandle)}"]`
+      )
+    ).toHaveCount(1);
   }
 
-  async timelineNodeId(name: string): Promise<string> {
-    await this.expectStepVisible(name);
-    const nodeId = await this.timelineStep(name).getAttribute(
-      'data-timeline-node-id'
+  async canvasNodeId(name: string): Promise<string> {
+    const step = this.canvasStep(name).first();
+    await expect(step).toBeAttached({ timeout: 15000 });
+    const nodeId = await step.evaluate((element) =>
+      element.closest('.react-flow__node')?.getAttribute('data-id')
     );
-    if (!nodeId) throw new Error(`Timeline step ${name} has no node id`);
+    if (!nodeId) throw new Error(`Canvas step ${name} has no node id`);
     return nodeId;
-  }
-
-  async addFirstTimelineStep(
-    kind: AddStepKind,
-    options: StepCreateOptions = {}
-  ): Promise<void> {
-    await this.beginFirstTimelineStep(kind);
-    await this.saveOpenTimelinePanel(options);
   }
 
   async addFirstCanvasStep(
@@ -239,39 +160,22 @@ export class WorkflowBuilderPage {
     await this.saveOpenCanvasDialog(options);
   }
 
-  async addTimelineStepAfter(
+  async addCanvasRouteStep(
     sourceStepName: string,
+    sourceHandle: RouteHandle,
     kind: AddStepKind,
     options: StepCreateOptions = {}
   ) {
-    await this.beginTimelineStepAfter(sourceStepName, kind);
-    await this.saveOpenTimelinePanel(options);
+    await this.beginCanvasRouteStep(sourceStepName, sourceHandle, kind);
+    await this.saveOpenCanvasDialog(options);
   }
 
-  async addNestedTimelineStep(
-    parentStepName: string,
-    kind: AddStepKind,
-    options: StepCreateOptions = {}
-  ) {
-    await this.beginNestedTimelineStep(parentStepName, kind);
-    await this.saveOpenTimelinePanel(options);
-  }
-
-  async addTimelineRouteStep(
-    sourceStepName: string,
-    sourceHandle: TimelineRouteHandle,
-    kind: AddStepKind,
-    options: StepCreateOptions = {}
-  ) {
-    await this.beginTimelineRouteStep(sourceStepName, sourceHandle, kind);
-    await this.saveOpenTimelinePanel(options);
-  }
-
-  async addTimelineErrorHandler(
+  /** The error-handler button shows once the step is selected. */
+  async addCanvasErrorHandler(
     sourceStepName: string,
     options: StepCreateOptions = {}
   ) {
-    await this.useTimelineOnly();
+    await this.selectCanvasStep(sourceStepName);
     await this.page
       .getByRole('button', {
         name: `Add error handler from ${sourceStepName}`,
@@ -280,62 +184,23 @@ export class WorkflowBuilderPage {
     await expect(this.page.getByTestId('node-config-dialog')).toBeVisible({
       timeout: 10000,
     });
-    await this.saveOpenTimelinePanel(options);
+    await this.saveOpenCanvasDialog(options);
   }
 
-  async beginFirstTimelineStep(kind: AddStepKind): Promise<void> {
-    await this.useTimelineOnly();
-    await this.page.getByTestId('timeline-add-step').first().click();
-    await this.pickStep(kind);
-    await expect(this.page.getByTestId('node-config-dialog')).toBeVisible({
-      timeout: 10000,
-    });
+  async selectCanvasStep(name: string): Promise<void> {
+    await this.useCanvas();
+    await this.canvasStep(name).first().click();
   }
 
-  async beginTimelineStepAfter(
+  async beginCanvasRouteStep(
     sourceStepName: string,
+    sourceHandle: RouteHandle,
     kind: AddStepKind
   ): Promise<void> {
-    await this.useTimelineOnly();
-    const sourceNodeId = await this.timelineNodeId(sourceStepName);
-    await this.page
-      .locator(
-        `[data-testid="timeline-add-step"][data-source-node-id="${attrValue(sourceNodeId)}"]`
-      )
-      .click();
-    await this.pickStep(kind);
-    await expect(this.page.getByTestId('node-config-dialog')).toBeVisible({
-      timeout: 10000,
-    });
-  }
-
-  async beginNestedTimelineStep(
-    parentStepName: string,
-    kind: AddStepKind
-  ): Promise<void> {
-    await this.useTimelineOnly();
-    const parentNodeId = await this.timelineNodeId(parentStepName);
-    await this.page
-      .locator(
-        `[data-testid="timeline-add-step"][data-parent-node-id="${attrValue(parentNodeId)}"]`
-      )
-      .first()
-      .click();
-    await this.pickStep(kind);
-    await expect(this.page.getByTestId('node-config-dialog')).toBeVisible({
-      timeout: 10000,
-    });
-  }
-
-  async beginTimelineRouteStep(
-    sourceStepName: string,
-    sourceHandle: TimelineRouteHandle,
-    kind: AddStepKind
-  ): Promise<void> {
-    await this.useTimelineOnly();
+    await this.useCanvas();
     await this.page
       .getByRole('button', {
-        name: this.timelineRouteButtonName(sourceStepName, sourceHandle),
+        name: this.routeButtonName(sourceStepName, sourceHandle),
       })
       .click();
     await this.pickStep(kind);
@@ -423,7 +288,7 @@ export class WorkflowBuilderPage {
   }
 
   async configureSplitSource(stepName: string, source = 'data.items') {
-    await this.editTimelineStep(stepName);
+    await this.editCanvasStep(stepName);
     const panel = this.page.getByTestId('node-config-dialog');
     await panel
       .getByPlaceholder("e.g., steps['fetch'].outputs.items")
@@ -479,18 +344,11 @@ export class WorkflowBuilderPage {
     await panel.getByTestId('switch-case-match-0').blur();
   }
 
-  async editTimelineStep(stepName: string): Promise<void> {
-    await this.useTimelineOnly();
-    await this.timelineStep(stepName)
-      .getByRole('button', { name: `Edit ${stepName}` })
-      .click();
+  /** Opens the step's editor (double-click) — the only way into it on the canvas. */
+  async editCanvasStep(stepName: string): Promise<void> {
+    await this.useCanvas();
+    await this.canvasStep(stepName).first().dblclick();
     await expect(this.page.getByTestId('node-config-dialog')).toBeVisible();
-  }
-
-  async deleteTimelineStep(stepName: string): Promise<void> {
-    await this.editTimelineStep(stepName);
-    await this.page.getByTestId('node-config-delete').click();
-    await expect(this.timelineStep(stepName)).toHaveCount(0);
   }
 
   async deleteCanvasStep(stepName: string): Promise<void> {
@@ -500,43 +358,6 @@ export class WorkflowBuilderPage {
     await node.click();
     await this.page.keyboard.press('Delete');
     await expect(this.canvasStep(stepName)).toHaveCount(0);
-  }
-
-  async dragTimelineStep(
-    sourceStepName: string,
-    targetStepName: string,
-    placement: TimelineDropPlacement
-  ): Promise<void> {
-    await this.useTimelineOnly();
-    const sourceStep = this.timelineStep(sourceStepName);
-    const targetStep = this.timelineStep(targetStepName);
-    const handle = sourceStep.getByRole('button', {
-      name: `Move ${sourceStepName} with nested steps`,
-    });
-
-    await handle.scrollIntoViewIfNeeded();
-    await targetStep.scrollIntoViewIfNeeded();
-
-    const handleBox = await handle.boundingBox();
-    const targetBox = await targetStep.boundingBox();
-    if (!handleBox || !targetBox) {
-      throw new Error(
-        `Could not locate drag source ${sourceStepName} or target ${targetStepName}`
-      );
-    }
-
-    const startX = handleBox.x + handleBox.width / 2;
-    const startY = handleBox.y + handleBox.height / 2;
-    const targetX = targetBox.x + targetBox.width / 2;
-    const targetY =
-      placement === 'before'
-        ? targetBox.y + Math.min(6, targetBox.height / 4)
-        : targetBox.y + targetBox.height - Math.min(6, targetBox.height / 4);
-
-    await this.page.mouse.move(startX, startY);
-    await this.page.mouse.down();
-    await this.page.mouse.move(targetX, targetY, { steps: 10 });
-    await this.page.mouse.up();
   }
 
   async saveWorkflow(): Promise<void> {
@@ -659,20 +480,6 @@ export class WorkflowBuilderPage {
     await expect(card).toHaveCount(0, { timeout: 15000 });
   }
 
-  async saveOpenTimelinePanel(options: StepCreateOptions = {}): Promise<void> {
-    const panel = this.page.getByTestId('node-config-dialog');
-    await expect(panel).toBeVisible({ timeout: 10000 });
-
-    if (options.name) {
-      const nameInput = panel.getByPlaceholder('Step name');
-      await nameInput.clear();
-      await nameInput.fill(options.name);
-    }
-
-    await panel.getByTestId('node-config-save').click();
-    await expect(panel).toHaveCount(0);
-  }
-
   async configureOpenAiAgent(connectionName: string): Promise<void> {
     const panel = this.page.getByTestId('node-config-dialog');
     await panel.getByRole('combobox').first().click();
@@ -695,12 +502,12 @@ export class WorkflowBuilderPage {
     await this.page.getByRole('option', { name: /GPT-4o Mini/ }).click();
   }
 
-  async addTimelineAiTool(
+  async addCanvasAiTool(
     sourceStepName: string,
     kind: AddStepKind,
     options: StepCreateOptions = {}
   ): Promise<void> {
-    await this.useTimelineOnly();
+    await this.useCanvas();
     await this.page
       .getByRole('button', { name: `Add tool to ${sourceStepName}` })
       .click();
@@ -708,11 +515,11 @@ export class WorkflowBuilderPage {
     await expect(this.page.getByTestId('node-config-dialog')).toBeVisible({
       timeout: 10000,
     });
-    await this.saveOpenTimelinePanel(options);
+    await this.saveOpenCanvasDialog(options);
   }
 
-  async addTimelineAiMemory(sourceStepName: string): Promise<void> {
-    await this.useTimelineOnly();
+  async addCanvasAiMemory(sourceStepName: string): Promise<void> {
+    await this.useCanvas();
     await this.page
       .getByRole('button', { name: `Add memory to ${sourceStepName}` })
       .click();
@@ -730,7 +537,7 @@ export class WorkflowBuilderPage {
     stepName: string,
     toolName = 'random_double'
   ): Promise<void> {
-    await this.editTimelineStep(stepName);
+    await this.editCanvasStep(stepName);
     const panel = this.page.getByTestId('node-config-dialog');
     await expect(panel.getByText(toolName, { exact: true })).toBeVisible({
       timeout: 15000,
@@ -772,9 +579,9 @@ export class WorkflowBuilderPage {
     await result.click();
   }
 
-  private timelineRouteButtonName(
+  private routeButtonName(
     sourceStepName: string,
-    sourceHandle: TimelineRouteHandle
+    sourceHandle: RouteHandle
   ): string {
     if (sourceHandle === 'true' || sourceHandle === 'false') {
       return `Add ${sourceHandle} branch from ${sourceStepName}`;

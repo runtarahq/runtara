@@ -1,6 +1,6 @@
 import { humanizeKey } from './step-details';
 
-/** One-line summaries shared by the canvas nodes and the timeline cards. */
+/** One-line step summaries for the canvas cards. */
 export interface StepSummaryData {
   stepType?: string;
   agentId?: string;

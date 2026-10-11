@@ -41,7 +41,7 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
   const [showOnWaitJson, setShowOnWaitJson] = useState(false);
 
   // A WaitForSignal step with an onWait graph is rendered as a container
-  // node; its onWait flow is edited visually (timeline/canvas) and the
+  // node; its onWait flow is edited visually on the canvas and the
   // container is the single source of truth.
   const isOnWaitContainer = useWorkflowStore((state) => {
     if (!nodeId) return false;
@@ -358,9 +358,9 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
                 <FormDescription>
                   Runs before the workflow suspends. Edited visually — add,
                   connect and configure the steps inside this container on the
-                  timeline or canvas. Inside the flow,{' '}
-                  <code>variables._signal_id</code> holds the signal id external
-                  systems must use to resume this step.
+                  canvas. Inside the flow, <code>variables._signal_id</code>{' '}
+                  holds the signal id external systems must use to resume this
+                  step.
                 </FormDescription>
               ) : showOnWaitJson ? (
                 <>
@@ -404,9 +404,8 @@ export function WaitForSignalStepField({ name }: WaitForSignalStepFieldProps) {
                 </>
               ) : (
                 <FormDescription>
-                  Optional flow that runs before the workflow suspends. Create
-                  this step first, then add the on-wait flow from the timeline
-                  or canvas.
+                  Optional flow that runs before the workflow suspends. Add this
+                  step first, then open it again to add the on-wait flow.
                 </FormDescription>
               )}
             </FormItem>

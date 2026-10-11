@@ -99,12 +99,15 @@ export function getAiAgentToolCount(data: NodeData | undefined): number {
   return Array.isArray(tools) ? tools.length : 0;
 }
 
-/** AiAgent card height: header, one row per tool plus "Add tool", memory. */
+/**
+ * AiAgent card height: header, one row per tool plus "Add tool" and
+ * "Add MCP toolset", then memory.
+ */
 export function aiAgentNodeHeight(toolCount: number): number {
   const toolsSection =
     AI_AGENT_TOOLS_PADDING +
     AI_AGENT_SECTION_LABEL_HEIGHT +
-    (toolCount + 1) * AI_AGENT_ROW_HEIGHT;
+    (toolCount + 2) * AI_AGENT_ROW_HEIGHT;
   return oddGridCeil(
     AI_AGENT_HEADER_HEIGHT + toolsSection + AI_AGENT_MEMORY_SECTION
   );

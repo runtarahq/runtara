@@ -10,6 +10,7 @@ import { Plus, AlertTriangle } from 'lucide-react';
 import { ButtonHandle } from '../ButtonHandle.tsx';
 import { Button } from '@/shared/components/ui/button.tsx';
 import * as form from '@/features/workflows/components/WorkflowEditor/NodeForm/NodeFormItem.tsx';
+import { defaultErrorHandlerInputMapping } from './error-handler-defaults';
 import { BASE_GROUP_WIDTH } from './utils.tsx';
 import { BaseResizableNode } from './BaseResizableNode.tsx';
 import {
@@ -32,6 +33,7 @@ function Container({
   data,
   isConnectable,
   selected,
+  parentId,
 }: NodeProps<ContainerNodeProps>) {
   const [showStepPicker, setShowStepPicker] = useState<boolean>(false);
   const [isCreatingInside, setIsCreatingInside] = useState<boolean>(false);
@@ -186,6 +188,7 @@ function Container({
       ...form.initialValues,
       stepType: 'Error',
       name: 'Error handler',
+      inputMapping: defaultErrorHandlerInputMapping(),
     } as form.SchemaType;
 
     const newNodeSize = NODE_TYPE_SIZES[NODE_TYPES.BasicNode];
@@ -220,6 +223,9 @@ function Container({
         id={id}
         name="" // Don't show name inside the node
         selected={selected}
+        data-step-name={data.name}
+        data-step-type={data.stepType}
+        data-parent-node-id={parentId}
         hasValidationError={hasValidationError}
       >
         {/* Placeholder button when container is empty - hidden during execution */}
@@ -285,6 +291,7 @@ function Container({
           size="icon"
           onClick={handleOpenCreateError}
           title="Add error handler"
+          aria-label={`Add error handler from ${data.name || id || 'container'}`}
         >
           <AlertTriangle className="text-destructive" />
         </Button>

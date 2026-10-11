@@ -36,10 +36,12 @@ and adds step details to the canvas. The remaining findings are listed under
 | F5 | High | Fit-to-view could not fit long workflows. React Flow's default minimum zoom of 0.5 can't fit tenant-provision (~4,600px wide), so both ends were clipped and the Fit button did nothing. The initial fit also ran on a 100ms timer before nodes were measured. A two-step workflow was zoomed to 1.9×. | Minimum zoom is 0.1 and fitting never zooms past 100%. Nodes get their size up front (`measured`), so React Flow knows they're initialized and the fit runs on real bounds. |
 | F6 | Medium | Fitting a long workflow made its text unreadable (~0.25 zoom). | The first view fits the whole workflow only if the zoom stays at 0.8 or above. Otherwise it opens at 0.8, anchored on Start. The Fit button still shows everything. |
 | F7 | Low | The view was re-fitted whenever any node moved or changed size, so it would jump while a step was being edited. | The view is re-fitted only when steps or edges are added or removed, or the detail level changes. |
-| F8 | Product | Timeline was the default view. | Canvas is the default. Each viewer's last choice is remembered (`editor-preferences.ts`). |
+| F8 | Product | The editor had two views, Timeline (the default) and Canvas, with different capabilities. | The Timeline view is removed and the canvas is the only view. Its unique features moved to the canvas: route condition/priority (cog on a selected edge), parallel step (fork icon on a selected edge, building the re-converging shape E073 requires), and Add MCP toolset (AI Agent card). New error handlers keep the Timeline's pre-filled code, message, category and severity. |
 | F9 | High | The canvas showed only a step's name and type, plus agent/capability. Its inputs were visible only in the editor, and when shown they echoed the DSL (`instance_id data.id`, `data { … }`). | **Details** mode (the default) shows each card's inputs as a small two-column table, at most three rows plus "+N more". Labels come from the capability's display names. References name their source ("Input › id", or the source step's name), and an object lists the fields it sets. Conditions read as sentences (`Input · stage is "intake"`), and the header is just the name plus an icon-only "Agent disabled" warning. **Compact** keeps cards name-only; there, hovering a step shows all its inputs. The toggle is at the bottom right of the canvas. |
 | F10 | Medium | Moving between step editors needed a close and a double-click each time. | While an editor is open, a single click on another step switches the editor to that step. Unsaved edits stay staged on the step where they were made. |
 | F11 | Medium | Card memo comparators ignored some data changes: a Basic card ignored `description`, and a Conditional card ignored `inputMapping`. Cards could show stale text after an edit. | The comparators now include those fields, plus the fields the detail rows read. |
+| F12 | High | Double-click, the only way into a step's editor on the canvas, did nothing and zoomed the view 2×. React Flow's zoom-on-double-click stops the event at the pane, and non-draggable nodes lack the class that exempts them. The Timeline's Edit buttons hid this. | Zoom on double-click is off, so double-click opens the editor. |
+| F13 | Medium | The AI Agent "Add tool…" / "Add memory…" rows and the Switch route and error-handler buttons had no accessible names, and the rows weren't keyboard-reachable. | They're labelled buttons ("Add case 2 route from Router", "Add error handler from Fetch"). The AI rows respond to Enter and Space. |
 
 Verification:
 
@@ -82,11 +84,11 @@ Ordered by impact.
 8. **Containers look selected at rest.** Split and While containers draw a
    primary-coloured border with corner handles, which is the same treatment as
    selection.
-9. **Inserting a step between two others is hidden.** On the canvas, the "+" on
-   an edge appears only after you select the edge, and handle buttons appear
-   only on unconnected handles. The timeline shows "Add step", "Add parallel
-   branch" and "Add error" everywhere. Recommend a hover "+" on each edge
-   midpoint.
+9. **Inserting a step between two others is hidden.** The "+" on an edge,
+   and the new parallel-step and route-settings buttons, appear only after you
+   select the edge. Handle buttons appear only on unconnected handles, and
+   error-handler buttons only on the selected step. Recommend a hover toolbar
+   at each edge's midpoint.
 10. **Card text is small.** It's 9–12px at 100% zoom, so typically 7–10px after
     fitting. Consider a larger base size and fewer chips per card.
 11. **Notes probably can't be resized.** `handleNodesChange` drops every

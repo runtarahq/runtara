@@ -1825,8 +1825,8 @@ function normalizeNodesAndEdges(
     }
 
     // WaitForSignal steps with an onWait graph render as containers so the
-    // existing Split/While container machinery (canvas group node, timeline
-    // scope, child drag/drop) applies unchanged.
+    // existing Split/While container machinery (canvas group node, child
+    // scope) applies unchanged.
     const nodeType = onWaitGraph
       ? NODE_TYPES.ContainerNode
       : step.stepType

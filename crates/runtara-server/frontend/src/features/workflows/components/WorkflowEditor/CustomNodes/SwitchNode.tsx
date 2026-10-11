@@ -156,6 +156,7 @@ function SwitchNodeComponent({
   data,
   isConnectable,
   selected,
+  parentId,
 }: NodeProps<SwitchNodeProps>) {
   const [showStepPicker, setShowStepPicker] = useState<boolean>(false);
   const [activeSource, setActiveSource] = useState<string | null>(null);
@@ -338,6 +339,7 @@ function SwitchNodeComponent({
         breakpoint={!!(data as any).breakpoint}
         onToggleBreakpoint={handleToggleBreakpoint}
         detailRows={detailRows}
+        data-parent-node-id={parentId}
         style={{ width: cardSize.width, height: cardSize.height }}
         rightReservedWidth={isRoutingMode ? 75 : undefined}
       >
@@ -381,6 +383,7 @@ function SwitchNodeComponent({
                           setActiveSource(handleId);
                           setShowStepPicker(true);
                         }}
+                        aria-label={`Add case ${index + 1} route from ${data.name || id || 'switch'}`}
                       >
                         <Plus />
                       </Button>
@@ -432,6 +435,7 @@ function SwitchNodeComponent({
                     setActiveSource('default');
                     setShowStepPicker(true);
                   }}
+                  aria-label={`Add default route from ${data.name || id || 'switch'}`}
                 >
                   <Plus />
                 </Button>

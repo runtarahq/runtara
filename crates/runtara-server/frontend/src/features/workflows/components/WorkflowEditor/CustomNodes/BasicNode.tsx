@@ -5,6 +5,7 @@ import { BaseNode } from '../BaseNode.tsx';
 import { ButtonHandle } from '../ButtonHandle.tsx';
 import { Plus, AlertTriangle } from 'lucide-react';
 import * as form from '@/features/workflows/components/WorkflowEditor/NodeForm/NodeFormItem.tsx';
+import { defaultErrorHandlerInputMapping } from './error-handler-defaults';
 import { BASE_WIDTH } from './utils.tsx';
 import {
   generateStepId,
@@ -267,6 +268,7 @@ function BasicNodeComponent({
       ...form.initialValues,
       stepType: 'Error',
       name: 'Error handler',
+      inputMapping: defaultErrorHandlerInputMapping(),
     } as form.SchemaType;
 
     const newNodeSize = NODE_TYPE_SIZES[NODE_TYPES.BasicNode];
@@ -441,6 +443,7 @@ function BasicNodeComponent({
         breakpoint={!!(data as any).breakpoint}
         onToggleBreakpoint={isStartStep ? undefined : handleToggleBreakpoint}
         detailRows={detailRows}
+        data-parent-node-id={parentId}
         style={{ width: cardSize.width, height: cardSize.height }}
       >
         {/* Only show source handle for non-Finish steps */}
@@ -509,6 +512,7 @@ function BasicNodeComponent({
               size="icon"
               onClick={handleOpenCreateError}
               title="Add error handler"
+              aria-label={`Add error handler from ${data.name || id || 'step'}`}
             >
               <AlertTriangle className="text-destructive" />
             </Button>

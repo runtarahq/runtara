@@ -77,11 +77,13 @@ test.describe('Step edit Rust validation (mocked)', () => {
 
     await page.goto(`/workflows/${workflowId}`);
     await expect(page.locator('main')).toBeVisible();
-    // The step's Edit button lives on the timeline card; the editor opens on
-    // the canvas by default.
-    await page.getByTestId('workflow-view-timeline').click();
 
-    await page.getByRole('button', { name: 'Edit Validation Target' }).click();
+    // A step's editor opens on double-click.
+    await page
+      .locator(
+        '[data-testid="workflow-canvas-node"][data-step-name="Validation Target"]'
+      )
+      .dblclick();
 
     const panel = page.getByTestId('node-config-dialog');
     await expect(panel).toBeVisible({ timeout: 5_000 });
@@ -92,10 +94,11 @@ test.describe('Step edit Rust validation (mocked)', () => {
     await panel.getByTestId('node-config-save').click();
 
     await expect(panel).toBeVisible();
-    // The parse error surfaces both in the panel and as a toast (toasts render
-    // for real since the sonner migration), so scope to the in-page copy.
+    // The parse error surfaces in the panel, as a toast (toasts render for
+    // real since the sonner migration) and on the step's canvas card, so
+    // scope to the panel's copy.
     await expect(
-      page.getByRole('main').getByText(/Failed to parse graph/)
+      page.getByTestId('validation-message').getByText(/Failed to parse graph/)
     ).toBeVisible({
       timeout: 10_000,
     });
