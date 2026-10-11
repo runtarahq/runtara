@@ -24,7 +24,7 @@ wasi = ["dep:wit-bindgen"]
 
 [dependencies]
 # Typed outbound host transport bindings.
-wit-bindgen = { version = "0.58", optional = true }
+wit-bindgen = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "2"

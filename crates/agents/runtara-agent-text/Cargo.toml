@@ -13,7 +13,7 @@ categories = ["wasm", "text-processing"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-wit-bindgen = "0.58"
+wit-bindgen = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
@@ -21,13 +21,7 @@ sha2 = { workspace = true }
 regex = "1"
 # `json` enables the `tojson` filter (default features stay on).
 minijinja = { version = "2.5", features = ["json"] }
-# Capability metadata stays beside the code: `#[capability_input]`,
-# `#[capability_output]`, `#[capability]` emit `&'static CapabilityMeta` /
-# `&'static InputTypeMeta` / `&'static OutputTypeMeta` items, and the host-only
-# `agent_info()` fn collects them into a `runtara_dsl::agent_meta::AgentInfo`.
-# A workspace `emit-meta` binary then serializes that to `meta.json` next to
-# the `.wasm` — the JSON is a build artifact, never hand-edited.
-runtara-agent-macro = { path = "../../runtara-agent-macro" }
-runtara-dsl = { path = "../../runtara-dsl", default-features = false }
+runtara-agent-macro = { workspace = true }
+runtara-dsl = { workspace = true }
 runtara-agent-encoding = { path = "../../runtara-agent-encoding" }
 strum = { version = "0.26", features = ["derive"] }

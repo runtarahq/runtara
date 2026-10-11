@@ -37,33 +37,9 @@ members = [
     # Isolated child-component package and invocation-path contract
     "crates/runtara-invocation-contract",
     "crates/runtara-component-host",
-    "crates/agents/runtara-agent-crypto",
-    "crates/agents/runtara-agent-xml",
-    "crates/agents/runtara-agent-csv",
-    "crates/agents/runtara-agent-utils",
-    "crates/agents/runtara-agent-datetime",
-    "crates/agents/runtara-agent-transform",
-    "crates/agents/runtara-agent-text",
-    "crates/agents/runtara-agent-http",
-    "crates/agents/runtara-agent-mailgun",
-    "crates/agents/runtara-agent-slack",
-    "crates/agents/runtara-agent-teams",
-    "crates/agents/runtara-agent-openai",
-    "crates/agents/runtara-agent-ai-tools",
-    "crates/agents/runtara-agent-bedrock",
-    "crates/agents/runtara-agent-object-model",
-    "crates/agents/runtara-agent-s3-storage",
-    "crates/agents/runtara-agent-sqs",
-    "crates/agents/runtara-agent-azure-blob-storage",
-    "crates/agents/runtara-agent-sharepoint",
-    "crates/agents/runtara-agent-stripe",
-    "crates/agents/runtara-agent-hubspot",
-    "crates/agents/runtara-agent-quickbooks",
-    "crates/agents/runtara-agent-shopify",
-    "crates/agents/runtara-agent-compression",
-    "crates/agents/runtara-agent-mcp",
-    "crates/agents/runtara-agent-xlsx",
-    "crates/agents/runtara-agent-control",
+    # Every workflow agent component; scripts/build-agent-components.sh builds
+    # each crate it finds here.
+    "crates/agents/*",
     # Build tool: emits per-agent meta.json siblings to each .wasm by walking
     # the macro-emitted statics in every agent crate. Run by
     # scripts/build-agent-components.sh after `cargo component build`.
@@ -91,6 +67,20 @@ categories = ["asynchronous", "development-tools"]
 
 [workspace.dependencies]
 runtara-http = { path = "crates/runtara-http", version = "8.9", default-features = false }
+# Shared by every agent component under crates/agents. Agents pick runtara-http's
+# `native` feature (ureq) on the host and `wasi` (typed outbound host calls) in
+# WASM; connection IDs and routing controls are explicit request fields, and
+# credential injection and request signing stay in the native host service.
+# Capability metadata stays beside the code: runtara-agent-macro's
+# `#[capability_input]`, `#[capability_output]` and `#[capability]` emit static
+# metadata items, the host-only `agent_info()` fn collects them into a
+# `runtara_dsl::agent_meta::AgentInfo`, and `emit-meta` serializes that to the
+# `meta.json` beside each `.wasm` — the JSON is a build artifact, never
+# hand-edited. runtara-dsl's default features are off to keep them out of the
+# `.wasm`.
+wit-bindgen = "0.58"
+runtara-agent-macro = { path = "crates/runtara-agent-macro", version = "8.9" }
+runtara-dsl = { path = "crates/runtara-dsl", version = "8.9", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }

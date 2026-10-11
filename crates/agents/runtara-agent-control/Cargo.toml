@@ -13,11 +13,9 @@ categories = ["wasm"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-wit-bindgen = "0.58"
+wit-bindgen = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 runtara-control-contract = { path = "../../runtara-control-contract" }
-# Capability metadata stays beside the code; `runtara-agent-bundle-emit`
-# serializes `agent_info()` to the sidecar meta.json.
-runtara-agent-macro = { path = "../../runtara-agent-macro" }
-runtara-dsl = { path = "../../runtara-dsl", default-features = false }
+runtara-agent-macro = { workspace = true }
+runtara-dsl = { workspace = true }
