@@ -20,8 +20,6 @@ import {
   NODE_TYPE_SIZES,
 } from '@/features/workflows/config/workflow.ts';
 
-const BASIC_NODE_WIDTH = NODE_TYPE_SIZES[NODE_TYPES.BasicNode].width;
-const BASIC_NODE_HEIGHT = NODE_TYPE_SIZES[NODE_TYPES.BasicNode].height;
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { NodeFormProvider } from '../NodeForm/NodeFormProvider';
 import { StepPickerModal, StepPickerResult } from '../NodeForm/StepPickerModal';
@@ -32,6 +30,9 @@ import { canStepHaveErrorHandler } from '@/features/workflows/utils/step-error-s
 import { useEntitlements } from '@/shared/hooks/useEntitlements';
 import { agentEnabled, enabledAgentSet } from '@/shared/entitlements';
 import { findAgentById } from '@/shared/utils/agent-id';
+import { useCanvasDisplay } from '../CanvasDisplayContext';
+import { stepDetailRows } from '../step-details';
+import { getStepNodeSize } from './node-size';
 
 // Note: Node editing is now handled by the sidebar (EditorSidebar) via double-click on ReactFlow.
 // The dialogs below are only for creating new nodes via the + button handles.
@@ -394,6 +395,13 @@ function BasicNodeComponent({
   // Split, While, WaitForSignal, WaitForInstances) offers the error handle.
   const canFail = canStepHaveErrorHandler(data.stepType);
 
+  const { detailLevel } = useCanvasDisplay();
+  const detailRows = useMemo(() => stepDetailRows(data), [data]);
+  const cardSize = getStepNodeSize(NODE_TYPES.BasicNode, data, detailLevel) ?? {
+    width: NODE_TYPE_SIZES[NODE_TYPES.BasicNode].width,
+    height: NODE_TYPE_SIZES[NODE_TYPES.BasicNode].height,
+  };
+
   return (
     <>
       <BaseNode
@@ -415,7 +423,8 @@ function BasicNodeComponent({
         isExecutionReadOnly={isExecuting}
         breakpoint={!!(data as any).breakpoint}
         onToggleBreakpoint={isStartStep ? undefined : handleToggleBreakpoint}
-        style={{ width: BASIC_NODE_WIDTH, height: BASIC_NODE_HEIGHT }}
+        detailRows={detailRows}
+        style={{ width: cardSize.width, height: cardSize.height }}
       >
         {/* Only show source handle for non-Finish steps */}
         {!isFinishStep && (
@@ -535,7 +544,10 @@ function arePropsEqual(
       prevData.stepType !== nextData.stepType ||
       prevData.agentId !== nextData.agentId ||
       prevData.capabilityId !== nextData.capabilityId ||
-      (prevData as any).breakpoint !== (nextData as any).breakpoint
+      (prevData as any).breakpoint !== (nextData as any).breakpoint ||
+      (prevData as any).description !== (nextData as any).description ||
+      (prevData as any).childVersion !== (nextData as any).childVersion ||
+      (prevData as any).splitParallelism !== (nextData as any).splitParallelism
     ) {
       return false;
     }

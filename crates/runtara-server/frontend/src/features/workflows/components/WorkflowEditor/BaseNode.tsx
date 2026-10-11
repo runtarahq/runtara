@@ -1,7 +1,16 @@
-import { forwardRef, HTMLAttributes, MouseEvent } from 'react';
+import { forwardRef, HTMLAttributes, MouseEvent, ReactNode } from 'react';
 import { Badge } from '@/shared/components/ui/badge';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/shared/components/ui/tooltip';
 import { stepBadgeVariant, stepDescription } from './step-summary';
 import { stepIdLabel } from './step-label';
+import { cardDetailLayout, type StepDetailRow } from './step-details';
+import { useCanvasDisplay } from './CanvasDisplayContext';
+import { COMPACT_CARD_HEIGHT } from './CustomNodes/node-size';
 import { useNavigate } from 'react-router';
 import { cn } from '@/lib/utils.ts';
 import { StepTypeIcon } from '@/features/workflows/components/StepTypeIcon';
@@ -54,6 +63,11 @@ export const BaseNode = forwardRef<
     rightReservedWidth?: number;
     breakpoint?: boolean;
     onToggleBreakpoint?: () => void;
+    /**
+     * The step's configured inputs. Listed on the card when the canvas is in
+     * detailed mode, and in full in the hover preview.
+     */
+    detailRows?: StepDetailRow[];
   }
 >(
   (
@@ -80,12 +94,19 @@ export const BaseNode = forwardRef<
       rightReservedWidth,
       breakpoint,
       onToggleBreakpoint,
+      detailRows,
       onClick,
       ...props
     },
     ref
   ) => {
     const navigate = useNavigate();
+    const { detailLevel, stepPreviews, editable } = useCanvasDisplay();
+    const cardDetails =
+      detailRows && detailLevel === 'detailed'
+        ? cardDetailLayout(detailRows)
+        : null;
+    const showCardDetails = !!cardDetails && cardDetails.lineCount > 0;
     const isSuspendedExecution = useExecutionStore((s) => s.isSuspended);
 
     const getExecutionBorderClass = (status: ExecutionStatus) => {
@@ -233,11 +254,12 @@ export const BaseNode = forwardRef<
       }
     };
 
-    return (
+    const card = (
       <div
         ref={ref}
         className={cn(
           'group relative h-full w-full',
+          showCardDetails && 'flex flex-col',
           'rounded-md bg-card text-muted-foreground',
           'border shadow-sm transition-all duration-200 hover:shadow-md',
           // Priority: validation error > warning > execution > selected > unsaved.
@@ -308,12 +330,16 @@ export const BaseNode = forwardRef<
         {/* Horizontal pill layout: icon left, name + status center/right */}
         {(stepType !== undefined || name) && (
           <div
-            className="flex h-full w-full items-center gap-1.5 px-1.5"
-            style={
-              rightReservedWidth
+            className={cn(
+              'flex w-full items-center gap-1.5 px-1.5',
+              showCardDetails ? 'shrink-0' : 'h-full'
+            )}
+            style={{
+              ...(rightReservedWidth
                 ? { paddingRight: rightReservedWidth }
-                : undefined
-            }
+                : {}),
+              ...(showCardDetails ? { height: COMPACT_CARD_HEIGHT } : {}),
+            }}
           >
             {/* Left: Icon */}
             {stepType && (
@@ -401,8 +427,146 @@ export const BaseNode = forwardRef<
             </div>
           </div>
         )}
+        {showCardDetails && cardDetails && (
+          <div
+            className="flex min-h-0 flex-1 flex-col justify-center border-t border-border/60 px-2"
+            data-testid="step-card-details"
+          >
+            {cardDetails.visible.map((row) => (
+              <StepDetailLine key={row.key} row={row} />
+            ))}
+            {cardDetails.hiddenCount > 0 && (
+              <span className="h-4 text-[10px] leading-4 text-muted-foreground">
+                +{cardDetails.hiddenCount} more
+              </span>
+            )}
+          </div>
+        )}
         {children}
       </div>
     );
+
+    if (!stepPreviews || (stepType === undefined && !name)) {
+      return card;
+    }
+
+    return (
+      <TooltipProvider delayDuration={450} skipDelayDuration={150}>
+        <Tooltip>
+          <TooltipTrigger asChild>{card}</TooltipTrigger>
+          <TooltipContent
+            side="bottom"
+            align="start"
+            collisionPadding={12}
+            className="w-80 max-w-[min(20rem,calc(100vw-24px))] rounded-md border bg-popover p-3 text-popover-foreground shadow-lg"
+            data-testid="step-preview"
+          >
+            <StepPreview
+              id={id}
+              name={name}
+              stepType={stepType}
+              summary={subtitleContent?.text}
+              summaryIsError={subtitleContent?.className === 'text-destructive'}
+              rows={detailRows ?? []}
+              editable={editable}
+            />
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    );
   }
 );
+
+function detailValueClass(row: StepDetailRow): string {
+  switch (row.kind) {
+    case 'reference':
+      return 'font-mono text-primary-text';
+    case 'template':
+      return 'font-mono text-foreground';
+    case 'composite':
+      return 'font-mono text-muted-foreground';
+    default:
+      return 'text-foreground';
+  }
+}
+
+function StepDetailLine({ row }: { row: StepDetailRow }) {
+  return (
+    <div
+      className="flex h-4 min-w-0 items-center gap-1.5 text-[10px] leading-4"
+      title={`${row.label}: ${row.value}`}
+    >
+      <span className="max-w-[45%] shrink-0 truncate text-muted-foreground">
+        {row.label}
+      </span>
+      <span className={cn('min-w-0 truncate', detailValueClass(row))}>
+        {row.value}
+      </span>
+    </div>
+  );
+}
+
+/** Hover preview: everything a step is configured with, untruncated. */
+function StepPreview({
+  id,
+  name,
+  stepType,
+  summary,
+  summaryIsError,
+  rows,
+  editable,
+}: {
+  id?: string;
+  name?: string;
+  stepType?: string;
+  summary?: string;
+  summaryIsError?: boolean;
+  rows: StepDetailRow[];
+  editable: boolean;
+}): ReactNode {
+  return (
+    <div className="space-y-2 text-xs">
+      <div className="flex min-w-0 items-center gap-2">
+        <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+          {name || stepIdLabel(id) || 'Unnamed step'}
+        </span>
+        {stepType && (
+          <Badge
+            variant={stepBadgeVariant(stepType)}
+            className="shrink-0 px-1.5 py-0 text-[10px]"
+          >
+            {stepType}
+          </Badge>
+        )}
+      </div>
+      {summary && (
+        <p
+          className={cn(
+            'break-words leading-snug',
+            summaryIsError ? 'text-destructive' : 'text-muted-foreground'
+          )}
+        >
+          {summary}
+        </p>
+      )}
+      {rows.length > 0 && (
+        <dl className="grid grid-cols-[minmax(0,auto)_minmax(0,1fr)] gap-x-3 gap-y-1 border-t pt-2">
+          {rows.map((row) => (
+            <div key={row.key} className="contents">
+              <dt className="truncate text-muted-foreground">{row.label}</dt>
+              <dd
+                className={cn('line-clamp-3 break-all', detailValueClass(row))}
+              >
+                {row.value}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      <div className="flex items-center justify-between gap-2 border-t pt-1.5 text-[10px] text-muted-foreground">
+        <span className="truncate font-mono">{id}</span>
+        {editable && <span className="shrink-0">Double-click to edit</span>}
+      </div>
+    </div>
+  );
+}

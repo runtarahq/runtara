@@ -15,6 +15,8 @@ import {
   STEP_TYPES,
 } from '@/features/workflows/config/workflow.ts';
 import { BASE_WIDTH } from './utils.tsx';
+import { getStepNodeSize } from './node-size';
+import { useCanvasDisplay } from '../CanvasDisplayContext';
 import * as form from '@/features/workflows/components/WorkflowEditor/NodeForm/NodeFormItem.tsx';
 import {
   generateStepId,
@@ -210,6 +212,11 @@ function ConditionalNodeComponent({
     [id, activeSource, setPendingNewNode]
   );
 
+  const { detailLevel } = useCanvasDisplay();
+  const cardSize =
+    getStepNodeSize(NODE_TYPES.ConditionalNode, data, detailLevel) ??
+    NODE_TYPE_SIZES[NODE_TYPES.ConditionalNode];
+
   return (
     <>
       <BaseNode
@@ -227,10 +234,8 @@ function ConditionalNodeComponent({
         breakpoint={!!(data as any).breakpoint}
         onToggleBreakpoint={handleToggleBreakpoint}
         subtitle={conditionSummary}
-        style={{
-          width: NODE_TYPE_SIZES[NODE_TYPES.ConditionalNode].width,
-          height: NODE_TYPE_SIZES[NODE_TYPES.ConditionalNode].height,
-        }}
+        detailRows={[]}
+        style={{ width: cardSize.width, height: cardSize.height }}
       >
         {/* True handle - pill centered on the right border, positioned at 30% from top */}
         <Handle
@@ -344,7 +349,8 @@ function arePropsEqual(
       prevData.name !== nextData.name ||
       prevData.stepType !== nextData.stepType ||
       prevData.agentId !== nextData.agentId ||
-      prevData.capabilityId !== nextData.capabilityId
+      prevData.capabilityId !== nextData.capabilityId ||
+      prevData.inputMapping !== nextData.inputMapping
     ) {
       return false;
     }

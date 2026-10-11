@@ -77,6 +77,9 @@ test.describe('Step edit Rust validation (mocked)', () => {
 
     await page.goto(`/workflows/${workflowId}`);
     await expect(page.locator('main')).toBeVisible();
+    // The step's Edit button lives on the timeline card; the editor opens on
+    // the canvas by default.
+    await page.getByTestId('workflow-view-timeline').click();
 
     await page.getByRole('button', { name: 'Edit Validation Target' }).click();
 

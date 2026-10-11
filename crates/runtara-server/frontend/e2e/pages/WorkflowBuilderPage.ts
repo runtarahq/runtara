@@ -69,10 +69,15 @@ export class WorkflowBuilderPage {
 
   async waitForEditor(): Promise<void> {
     await this.page.waitForLoadState('domcontentloaded');
+    // The editor opens on the canvas by default; the timeline stays mounted
+    // (hidden) behind it, so accept whichever view is showing.
     await expect(
       this.page
-        .getByTestId('workflow-timeline')
+        .locator('.react-flow')
+        .or(this.page.getByTestId('workflow-timeline'))
         .or(this.page.getByTestId('workflow-timeline-empty'))
+        .filter({ visible: true })
+        .first()
     ).toBeVisible({ timeout: 15000 });
   }
 
@@ -104,12 +109,21 @@ export class WorkflowBuilderPage {
     );
   }
 
+  /** The step in whichever view is showing (canvas or timeline). */
+  visibleStep(name: string): Locator {
+    return this.timelineStep(name)
+      .or(this.canvasStep(name))
+      .filter({ visible: true })
+      .first();
+  }
+
   async expectStepVisible(name: string): Promise<void> {
-    await expect(this.timelineStep(name)).toBeVisible({ timeout: 15000 });
+    await expect(this.visibleStep(name)).toBeVisible({ timeout: 15000 });
   }
 
   async expectStepHidden(name: string): Promise<void> {
     await expect(this.timelineStep(name)).toHaveCount(0);
+    await expect(this.canvasStep(name)).toHaveCount(0);
   }
 
   async expectStepNestedUnder(

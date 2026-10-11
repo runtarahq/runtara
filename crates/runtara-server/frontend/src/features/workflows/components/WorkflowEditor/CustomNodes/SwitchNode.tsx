@@ -24,7 +24,13 @@ import {
 } from '@/features/workflows/config/workflow.ts';
 import { NodeFormProvider } from '../NodeForm/NodeFormProvider';
 import { StepPickerModal, StepPickerResult } from '../NodeForm/StepPickerModal';
-import { SWITCH_FIRST_HANDLE_TOP, SWITCH_HANDLE_SPACING } from './layout';
+import {
+  SWITCH_FIRST_HANDLE_TOP,
+  SWITCH_HANDLE_SPACING,
+  getStepNodeSize,
+} from './node-size';
+import { useCanvasDisplay } from '../CanvasDisplayContext';
+import { stepDetailRows } from '../step-details';
 import { CANVAS_Z } from '@/features/workflows/components/WorkflowEditor/canvas-z';
 
 type SwitchNodeProps = Node<form.SchemaType>;
@@ -298,18 +304,22 @@ function SwitchNodeComponent({
     [id, activeSource, cases.length, setPendingNewNode]
   );
 
-  // Calculate total node height based on number of cases
-  const handleSpacing = SWITCH_HANDLE_SPACING;
-  const firstHandleTop = SWITCH_FIRST_HANDLE_TOP;
-
-  // In routing mode: dynamic height for case handles + default
-  // In value mode: standard height (single output)
-  const totalHandles = isRoutingMode ? cases.length + 1 : 0; // cases + default
-  const minHeight = isRoutingMode ? 72 : 36;
-  const lastHandleTop = firstHandleTop + (totalHandles - 1) * handleSpacing;
-  const requiredHeight = isRoutingMode
-    ? Math.max(minHeight, lastHandleTop + 24) // 24px padding at bottom
-    : minHeight;
+  // Height comes from node-size so the layout reserves exactly what renders:
+  // one handle per case plus default in routing mode, the card (and its
+  // detail lines) otherwise.
+  const { detailLevel } = useCanvasDisplay();
+  const detailRows = useMemo(
+    () => (isRoutingMode ? [] : stepDetailRows(data)),
+    [data, isRoutingMode]
+  );
+  const cardSize = getStepNodeSize(
+    NODE_TYPES.SwitchNode,
+    data,
+    detailLevel
+  ) ?? {
+    width: NODE_TYPE_SIZES[NODE_TYPES.SwitchNode].width,
+    height: NODE_TYPE_SIZES[NODE_TYPES.SwitchNode].height,
+  };
 
   return (
     <>
@@ -327,10 +337,8 @@ function SwitchNodeComponent({
         isExecutionReadOnly={isExecuting}
         breakpoint={!!(data as any).breakpoint}
         onToggleBreakpoint={handleToggleBreakpoint}
-        style={{
-          width: NODE_TYPE_SIZES[NODE_TYPES.SwitchNode].width,
-          height: requiredHeight,
-        }}
+        detailRows={detailRows}
+        style={{ width: cardSize.width, height: cardSize.height }}
         rightReservedWidth={isRoutingMode ? 75 : undefined}
       >
         {isRoutingMode ? (
@@ -339,7 +347,7 @@ function SwitchNodeComponent({
             {cases.map((caseItem: any, index: number) => {
               const handleId = `case-${index}`;
               const label = getCaseLabel(caseItem, index, true);
-              const topPosition = firstHandleTop + index * handleSpacing;
+              const topPosition = SWITCH_FIRST_HANDLE_TOP + index * SWITCH_HANDLE_SPACING;
 
               return (
                 <div key={handleId}>
@@ -399,7 +407,7 @@ function SwitchNodeComponent({
               position={Position.Right}
               className="!h-2 !w-2 !rounded-full !border-0 !bg-muted-foreground/40"
               style={{
-                top: `${firstHandleTop + cases.length * handleSpacing}px`,
+                top: `${SWITCH_FIRST_HANDLE_TOP + cases.length * SWITCH_HANDLE_SPACING}px`,
               }}
               isConnectable={isConnectable && !isExecuting}
             />
@@ -408,7 +416,7 @@ function SwitchNodeComponent({
                 className="pointer-events-none absolute flex items-center"
                 style={{
                   right: '-40px',
-                  top: `${firstHandleTop + cases.length * handleSpacing}px`,
+                  top: `${SWITCH_FIRST_HANDLE_TOP + cases.length * SWITCH_HANDLE_SPACING}px`,
                   transform: 'translateY(-50%)',
                 }}
               >
@@ -433,7 +441,7 @@ function SwitchNodeComponent({
               className="pointer-events-none absolute whitespace-nowrap text-3xs text-muted-foreground"
               style={{
                 right: '12px',
-                top: `${firstHandleTop + cases.length * handleSpacing}px`,
+                top: `${SWITCH_FIRST_HANDLE_TOP + cases.length * SWITCH_HANDLE_SPACING}px`,
                 transform: 'translateY(-50%)',
               }}
             >

@@ -9,11 +9,20 @@ import {
   NodeTypes,
   ReactFlow,
   ReactFlowProvider,
+  getViewportForBounds,
+  Panel,
+  useNodesInitialized,
   useReactFlow,
   useStoreApi,
   OnConnectEnd,
 } from '@xyflow/react';
-import { ListTree, Network, Plus } from 'lucide-react';
+import {
+  ListTree,
+  Network,
+  Plus,
+  RectangleHorizontal,
+  Rows3,
+} from 'lucide-react';
 import {
   generateStepId,
   useWorkflowStore,
@@ -73,6 +82,15 @@ import {
   StepPickerResult,
 } from './NodeForm/StepPickerModal';
 import { NodeConfigProvider } from './NodeConfigContext';
+import { CanvasDisplayProvider } from './CanvasDisplayContext';
+import type { CanvasDetailLevel } from './CustomNodes/node-size';
+import {
+  readCanvasDetail,
+  readEditorView,
+  writeCanvasDetail,
+  writeEditorView,
+  type WorkflowEditorView,
+} from './editor-preferences';
 import {
   type TimelineAddStepRequest,
   WorkflowTimelineView,
@@ -309,8 +327,57 @@ type WorkflowEditorProps = {
   onResetNodeChanges?: (nodeId: string) => void;
 };
 
-type WorkflowEditorView = 'canvas' | 'timeline';
 type NodeEditSurface = 'dialog' | 'timeline';
+
+// Long workflows are several thousand pixels wide; React Flow's default
+// minimum zoom (0.5) cannot fit them, so fit-to-view silently clipped both
+// ends. Fitting never zooms past 100%: a two-step workflow blown up to 2x
+// reads as broken, not as "fitted".
+const CANVAS_MIN_ZOOM = 0.1;
+const CANVAS_FIT_VIEW_OPTIONS = { padding: 0.15, maxZoom: 1 };
+// Below this zoom card text is unreadable. A workflow too long to fit above it
+// opens at this zoom, anchored on its start, and the Fit button shows it all.
+const CANVAS_READABLE_ZOOM = 0.8;
+const CANVAS_VIEW_MARGIN = 48;
+
+function CanvasDetailToggle({
+  value,
+  onChange,
+}: {
+  value: CanvasDetailLevel;
+  onChange: (value: CanvasDetailLevel) => void;
+}) {
+  return (
+    <Tabs
+      value={value}
+      onValueChange={(next) => onChange(next as CanvasDetailLevel)}
+    >
+      <TabsList
+        className="pointer-events-auto shadow-sm"
+        aria-label="Step card detail"
+      >
+        <TabsTrigger
+          value="detailed"
+          className="gap-2"
+          data-testid="canvas-detail-detailed"
+          title="Show each step's configured inputs on its card"
+        >
+          <Rows3 className="size-4" aria-hidden="true" />
+          Details
+        </TabsTrigger>
+        <TabsTrigger
+          value="compact"
+          className="gap-2"
+          data-testid="canvas-detail-compact"
+          title="Show step names only; hover a step for its inputs"
+        >
+          <RectangleHorizontal className="size-4" aria-hidden="true" />
+          Compact
+        </TabsTrigger>
+      </TabsList>
+    </Tabs>
+  );
+}
 
 export function WorkflowEditor(props: WorkflowEditorProps) {
   return (
@@ -345,7 +412,29 @@ function WorkflowEditorContent({
   // Dialog states
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [showStepPicker, setShowStepPicker] = useState(false);
-  const [editorView, setEditorView] = useState<WorkflowEditorView>('timeline');
+  // Canvas is the default view; a viewer's last choice is remembered.
+  const [editorView, setEditorViewState] =
+    useState<WorkflowEditorView>(readEditorView);
+  const setEditorView = useCallback((view: WorkflowEditorView) => {
+    setEditorViewState(view);
+    writeEditorView(view);
+  }, []);
+  // Detailed cards list each step's configured inputs, so the workflow reads
+  // without opening every step's editor.
+  const [canvasDetail, setCanvasDetailState] =
+    useState<CanvasDetailLevel>(readCanvasDetail);
+  const setCanvasDetail = useCallback((detail: CanvasDetailLevel) => {
+    setCanvasDetailState(detail);
+    writeCanvasDetail(detail);
+  }, []);
+  const canvasDisplayValue = useMemo(
+    () => ({
+      detailLevel: canvasDetail,
+      stepPreviews: true,
+      editable: !readOnly && !!workflow,
+    }),
+    [canvasDetail, readOnly, workflow]
+  );
 
   // Pending new node state from store (for deferred creation until user confirms)
   const pendingNewNode = useWorkflowStore((state) => state.pendingNewNode);
@@ -422,9 +511,11 @@ function WorkflowEditorContent({
 
   const {
     getIntersectingNodes,
+    getNodesBounds,
     screenToFlowPosition,
     fitView,
     setCenter,
+    setViewport,
     getZoom,
   } = useReactFlow();
   const reactFlowStore = useStoreApi();
@@ -676,7 +767,9 @@ function WorkflowEditorContent({
   );
 
   const layoutedCanvas = useMemo(() => {
-    const layout = getLayoutedElements(visibleCanvasNodes, visibleCanvasEdges);
+    const layout = getLayoutedElements(visibleCanvasNodes, visibleCanvasEdges, {
+      detailLevel: canvasDetail,
+    });
 
     return {
       nodes: layout.nodes.map((node) => ({
@@ -685,7 +778,7 @@ function WorkflowEditorContent({
       })),
       edgeRoutes: layout.edgeRoutes ?? {},
     };
-  }, [visibleCanvasEdges, visibleCanvasNodes]);
+  }, [canvasDetail, visibleCanvasEdges, visibleCanvasNodes]);
   const layoutedCanvasNodes = layoutedCanvas.nodes;
   const layoutedCanvasEdgeRoutes = layoutedCanvas.edgeRoutes;
 
@@ -772,9 +865,22 @@ function WorkflowEditorContent({
     };
   }, [entryPointId]);
 
+  // Every canvas node renders at exactly its layout size (see node-size.ts),
+  // so React Flow is told that size up front instead of measuring it. This
+  // canvas drops React Flow's dimension changes (the measurements must not
+  // reach the workflow store), so without `measured` React Flow never
+  // considers the nodes initialized and the viewport is never fitted.
   const nodesWithStartIndicator = useMemo(() => {
-    if (!startIndicatorNode) return layoutedCanvasNodes;
-    return [startIndicatorNode, ...layoutedCanvasNodes];
+    const canvasNodes = startIndicatorNode
+      ? [startIndicatorNode, ...layoutedCanvasNodes]
+      : layoutedCanvasNodes;
+    return canvasNodes.map((node) => {
+      const width = node.style?.width;
+      const height = node.style?.height;
+      return typeof width === 'number' && typeof height === 'number'
+        ? { ...node, measured: { width, height } }
+        : node;
+    });
   }, [layoutedCanvasNodes, startIndicatorNode]);
 
   const edgesWithStartIndicator = useMemo(() => {
@@ -865,6 +971,59 @@ function WorkflowEditorContent({
     [edgesWithStartIndicator, nodesWithStartIndicator]
   );
 
+  // What the viewport is fitted to: which steps and edges exist, and the
+  // detail level. Deliberately not sizes or positions — editing a step can
+  // grow its card, and re-fitting on that would yank the view mid-edit.
+  const canvasFitKey = useMemo(
+    () =>
+      JSON.stringify({
+        detail: canvasDetail,
+        nodes: nodesWithStartIndicator.map((node) => node.id),
+        edges: edgesWithStartIndicator.map((edge) => edge.id),
+      }),
+    [canvasDetail, edgesWithStartIndicator, nodesWithStartIndicator]
+  );
+
+  const fitCanvasReadable = useCallback(() => {
+    const { width, height } = reactFlowStore.getState();
+    const bounds = getNodesBounds(nodesWithStartIndicator);
+    if (!width || !height || bounds.width === 0 || bounds.height === 0) {
+      fitView({ duration: 200, ...CANVAS_FIT_VIEW_OPTIONS });
+      return;
+    }
+    const fitted = getViewportForBounds(
+      bounds,
+      width,
+      height,
+      CANVAS_MIN_ZOOM,
+      CANVAS_FIT_VIEW_OPTIONS.maxZoom,
+      CANVAS_FIT_VIEW_OPTIONS.padding
+    );
+    if (fitted.zoom >= CANVAS_READABLE_ZOOM) {
+      setViewport(fitted, { duration: 200 });
+      return;
+    }
+    const zoom = CANVAS_READABLE_ZOOM;
+    const contentHeight = bounds.height * zoom;
+    setViewport(
+      {
+        zoom,
+        x: CANVAS_VIEW_MARGIN - bounds.x * zoom,
+        y:
+          contentHeight + CANVAS_VIEW_MARGIN * 2 <= height
+            ? (height - contentHeight) / 2 - bounds.y * zoom
+            : CANVAS_VIEW_MARGIN - bounds.y * zoom,
+      },
+      { duration: 200 }
+    );
+  }, [
+    fitView,
+    getNodesBounds,
+    nodesWithStartIndicator,
+    reactFlowStore,
+    setViewport,
+  ]);
+
   // Initialize the canvas viewport only while the canvas is visible. React Flow
   // measures a hidden canvas poorly, which leaves the workflow in a corner on
   // first switch from the timeline.
@@ -874,17 +1033,21 @@ function WorkflowEditorContent({
     }
   }, [editorView]);
 
+  // Fit only once React Flow has measured every node: fitting earlier uses
+  // partial bounds and leaves part of the workflow off-screen.
+  const nodesInitialized = useNodesInitialized();
   useEffect(() => {
     if (
       editorView !== 'canvas' ||
-      lastFittedCanvasLayoutRef.current === canvasLayoutKey
+      lastFittedCanvasLayoutRef.current === canvasFitKey ||
+      (visibleCanvasNodes.length > 0 && !nodesInitialized)
     ) {
       return;
     }
 
     const timeoutId = window.setTimeout(() => {
       if (visibleCanvasNodes.length > 0) {
-        fitView({ duration: 200, padding: 0.2 });
+        fitCanvasReadable();
       } else {
         const startIndicatorSize =
           NODE_TYPE_SIZES[NODE_TYPES.StartIndicatorNode];
@@ -893,14 +1056,15 @@ function WorkflowEditorContent({
         setCenter(startCenterX, startCenterY, { zoom: 1, duration: 200 });
       }
 
-      lastFittedCanvasLayoutRef.current = canvasLayoutKey;
+      lastFittedCanvasLayoutRef.current = canvasFitKey;
     }, 100);
 
     return () => window.clearTimeout(timeoutId);
   }, [
-    canvasLayoutKey,
+    canvasFitKey,
     editorView,
-    fitView,
+    fitCanvasReadable,
+    nodesInitialized,
     setCenter,
     visibleCanvasNodes.length,
   ]);
@@ -2029,104 +2193,121 @@ function WorkflowEditorContent({
             className={cn('m-0 h-full', editorView !== 'canvas' && 'hidden')}
           >
             <NodeConfigProvider value={nodeConfigContextValue}>
-              <EdgeContextProvider
-                onInsertClick={handleEdgeInsertClick}
-                allEdges={edges}
-                edgeRoutes={layoutedCanvasEdgeRoutes}
-              >
-                <ReactFlow
-                  ref={ref}
-                  nodes={nodesWithStartIndicator}
-                  edges={edgesWithStartIndicator}
-                  edgeTypes={edgeTypes}
-                  nodeTypes={nodeTypes}
-                  onNodesChange={handleNodesChange}
-                  onEdgesChange={onEdgesChange}
-                  onConnect={readOnly ? undefined : onConnect}
-                  onConnectEnd={readOnly ? undefined : onConnectEnd}
-                  isValidConnection={readOnly ? undefined : isValidConnection}
-                  proOptions={{ hideAttribution: true }}
-                  defaultEdgeOptions={{ zIndex: CANVAS_Z.edge }}
-                  onNodeDoubleClick={(_event, node) => {
-                    // Don't open dialog for special nodes
-                    if (
-                      node.type === NODE_TYPES.CreateNode ||
-                      node.type === NODE_TYPES.NoteNode ||
-                      node.type === NODE_TYPES.StartIndicatorNode
-                    ) {
-                      return;
-                    }
-                    // Open dialog for editing on double-click
-                    if (workflow && !readOnly) {
-                      setEditingNodeId(node.id);
-                    }
-                  }}
-                  onNodeClick={(event, node) => {
-                    // Don't select special nodes
-                    if (
-                      node.type === NODE_TYPES.CreateNode ||
-                      node.type === NODE_TYPES.NoteNode ||
-                      node.type === NODE_TYPES.StartIndicatorNode
-                    ) {
-                      setSelectedNodeId(null);
-                      setSelectedEdgeId(null);
-                      return;
-                    }
-                    // Don't select if clicking on a button
-                    const target = event.target as HTMLElement;
-                    if (target.closest('button')) {
-                      return;
-                    }
-                    // In debug inspect mode, allow selecting executed nodes only
-                    if (debugInspectMode) {
-                      const nodeStatus = useExecutionStore
-                        .getState()
-                        .nodeExecutionStatus.get(node.id);
-                      if (nodeStatus) {
+              <CanvasDisplayProvider value={canvasDisplayValue}>
+                <EdgeContextProvider
+                  onInsertClick={handleEdgeInsertClick}
+                  allEdges={edges}
+                  edgeRoutes={layoutedCanvasEdgeRoutes}
+                >
+                  <ReactFlow
+                    ref={ref}
+                    nodes={nodesWithStartIndicator}
+                    edges={edgesWithStartIndicator}
+                    edgeTypes={edgeTypes}
+                    nodeTypes={nodeTypes}
+                    onNodesChange={handleNodesChange}
+                    onEdgesChange={onEdgesChange}
+                    onConnect={readOnly ? undefined : onConnect}
+                    onConnectEnd={readOnly ? undefined : onConnectEnd}
+                    isValidConnection={readOnly ? undefined : isValidConnection}
+                    proOptions={{ hideAttribution: true }}
+                    minZoom={CANVAS_MIN_ZOOM}
+                    maxZoom={2}
+                    defaultEdgeOptions={{ zIndex: CANVAS_Z.edge }}
+                    onNodeDoubleClick={(_event, node) => {
+                      // Don't open dialog for special nodes
+                      if (
+                        node.type === NODE_TYPES.CreateNode ||
+                        node.type === NODE_TYPES.NoteNode ||
+                        node.type === NODE_TYPES.StartIndicatorNode
+                      ) {
+                        return;
+                      }
+                      // Open dialog for editing on double-click
+                      if (workflow && !readOnly) {
+                        setEditingNodeId(node.id);
+                      }
+                    }}
+                    onNodeClick={(event, node) => {
+                      // Don't select special nodes
+                      if (
+                        node.type === NODE_TYPES.CreateNode ||
+                        node.type === NODE_TYPES.NoteNode ||
+                        node.type === NODE_TYPES.StartIndicatorNode
+                      ) {
+                        setSelectedNodeId(null);
+                        setSelectedEdgeId(null);
+                        return;
+                      }
+                      // Don't select if clicking on a button
+                      const target = event.target as HTMLElement;
+                      if (target.closest('button')) {
+                        return;
+                      }
+                      // In debug inspect mode, allow selecting executed nodes only
+                      if (debugInspectMode) {
+                        const nodeStatus = useExecutionStore
+                          .getState()
+                          .nodeExecutionStatus.get(node.id);
+                        if (nodeStatus) {
+                          setSelectedNodeId(node.id);
+                          setSelectedEdgeId(null);
+                        }
+                        return;
+                      }
+                      // Select node on single click (for moving, keyboard delete, etc.)
+                      if (workflow && !readOnly) {
                         setSelectedNodeId(node.id);
                         setSelectedEdgeId(null);
+                        // With a step's editor already open, a click moves it to
+                        // the clicked step: reading through steps should not
+                        // need a close and a double-click per step. Unsaved
+                        // edits stay staged on the step they were made on.
+                        if (editingNodeId && editingNodeId !== node.id) {
+                          openNodeConfig(node.id);
+                        }
                       }
-                      return;
-                    }
-                    // Select node on single click (for moving, keyboard delete, etc.)
-                    if (workflow && !readOnly) {
-                      setSelectedNodeId(node.id);
-                      setSelectedEdgeId(null);
-                    }
-                  }}
-                  onEdgeClick={(_event, edge) => {
-                    setSelectedEdgeId(edge.id);
-                    setSelectedNodeId(null);
-                  }}
-                  onPaneClick={() => {
-                    const { selectedNodeId: currentSelectedNodeId } =
-                      useWorkflowStore.getState();
-                    if (currentSelectedNodeId) {
+                    }}
+                    onEdgeClick={(_event, edge) => {
+                      setSelectedEdgeId(edge.id);
                       setSelectedNodeId(null);
-                    }
-                    if (selectedEdgeId) {
-                      setSelectedEdgeId(null);
-                    }
-                  }}
-                  snapToGrid={true}
-                  snapGrid={[SNAP_GRID_SIZE, SNAP_GRID_SIZE]}
-                  elevateEdgesOnSelect={true}
-                  edgesReconnectable={false}
-                  disableKeyboardA11y={true}
-                  elementsSelectable={!readOnly || debugInspectMode}
-                  nodesDraggable={false}
-                  nodesConnectable={!readOnly}
-                  nodesFocusable={!readOnly}
-                  edgesFocusable={!readOnly}
-                >
-                  <Controls />
-                  <Background
-                    gap={SNAP_GRID_SIZE}
-                    size={1}
-                    color={isDark ? '#262626' : undefined}
-                  />
-                </ReactFlow>
-              </EdgeContextProvider>
+                    }}
+                    onPaneClick={() => {
+                      const { selectedNodeId: currentSelectedNodeId } =
+                        useWorkflowStore.getState();
+                      if (currentSelectedNodeId) {
+                        setSelectedNodeId(null);
+                      }
+                      if (selectedEdgeId) {
+                        setSelectedEdgeId(null);
+                      }
+                    }}
+                    snapToGrid={true}
+                    snapGrid={[SNAP_GRID_SIZE, SNAP_GRID_SIZE]}
+                    elevateEdgesOnSelect={true}
+                    edgesReconnectable={false}
+                    disableKeyboardA11y={true}
+                    elementsSelectable={!readOnly || debugInspectMode}
+                    nodesDraggable={false}
+                    nodesConnectable={!readOnly}
+                    nodesFocusable={!readOnly}
+                    edgesFocusable={!readOnly}
+                  >
+                    <Controls fitViewOptions={CANVAS_FIT_VIEW_OPTIONS} />
+                    <Panel position="bottom-right">
+                      <CanvasDetailToggle
+                        value={canvasDetail}
+                        onChange={setCanvasDetail}
+                      />
+                    </Panel>
+                    <Background
+                      gap={SNAP_GRID_SIZE}
+                      size={1}
+                      color={isDark ? '#262626' : undefined}
+                    />
+                  </ReactFlow>
+                </EdgeContextProvider>
+              </CanvasDisplayProvider>
             </NodeConfigProvider>
           </TabsContent>
 

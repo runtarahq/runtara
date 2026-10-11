@@ -17,6 +17,11 @@ import {
 } from '@/features/workflows/stores/validationStore';
 import { snapPositionToGrid } from '@/features/workflows/config/workflow-editor';
 import {
+  AI_AGENT_HEADER_HEIGHT,
+  AI_AGENT_SECTION_LABEL_HEIGHT,
+  aiAgentNodeHeight,
+} from './node-size';
+import {
   NODE_TYPE_SIZES,
   NODE_TYPES,
 } from '@/features/workflows/config/workflow.ts';
@@ -448,11 +453,19 @@ function AiAgentNodeComponent({
         isExecutionReadOnly={isExecuting}
         breakpoint={!!(data as any).breakpoint}
         onToggleBreakpoint={handleToggleBreakpoint}
-        style={{ width: NODE_TYPE_SIZES[NODE_TYPES.AiAgentNode].width }}
+        style={{
+          width: NODE_TYPE_SIZES[NODE_TYPES.AiAgentNode].width,
+          height: aiAgentNodeHeight(toolNames.length),
+        }}
       >
-        <div className="flex h-full w-full flex-col">
+        {/* Fixed row heights: aiAgentNodeHeight sizes the layout box from
+            them, so a row that grows here makes the card overflow its box. */}
+        <div className="flex h-full w-full flex-col overflow-hidden">
           {/* Header */}
-          <div className="flex items-center gap-1.5 border-b border-border/50 px-2 py-1.5">
+          <div
+            className="flex shrink-0 items-center gap-1.5 border-b border-border/50 px-2"
+            style={{ height: AI_AGENT_HEADER_HEIGHT }}
+          >
             {data.stepType && (
               <div className="flex size-4 flex-shrink-0 items-center justify-center rounded-sm bg-muted/30 [&_svg]:h-2.5 [&_svg]:w-2.5">
                 <StepTypeIcon type={data.stepType} />
@@ -484,8 +497,14 @@ function AiAgentNodeComponent({
           </div>
 
           {/* Tools section */}
-          <div className="px-2 pb-1 pt-1.5">
-            <span className="text-[8px] font-semibold uppercase leading-none tracking-wider text-muted-foreground">
+          <div className="shrink-0 px-2 pb-1 pt-1.5">
+            <span
+              className="block text-[8px] font-semibold uppercase tracking-wider text-muted-foreground"
+              style={{
+                height: AI_AGENT_SECTION_LABEL_HEIGHT,
+                lineHeight: `${AI_AGENT_SECTION_LABEL_HEIGHT}px`,
+              }}
+            >
               Tools
             </span>
             {toolNames.map((toolName: string) => {
@@ -523,35 +542,45 @@ function AiAgentNodeComponent({
                 </div>
               );
             })}
-            {/* Add tool row */}
-            {!isExecuting && (
-              <div
-                className="nodrag nopan -mx-0.5 flex h-[22px] cursor-pointer items-center gap-1.5 rounded-sm px-0.5 hover:bg-muted/30"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setStepPickerMode('tool');
-                }}
+            {/* Add tool row. Kept (invisible) while executing so the card
+                height does not depend on execution state. */}
+            <div
+              aria-hidden={isExecuting || undefined}
+              className={cn(
+                'nodrag nopan -mx-0.5 flex h-[22px] cursor-pointer items-center gap-1.5 rounded-sm px-0.5 hover:bg-muted/30',
+                isExecuting && 'pointer-events-none invisible'
+              )}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (isExecuting) return;
+                setStepPickerMode('tool');
+              }}
+            >
+              <div className="size-1.5 flex-shrink-0" />
+              <span className="flex-1 text-3xs italic text-muted-foreground/60">
+                Add tool…
+              </span>
+              <Button
+                className="pointer-events-none size-4 flex-shrink-0 rounded-full shadow-sm [&_svg]:size-2"
+                variant="secondary"
+                bordered
+                size="icon"
+                tabIndex={-1}
               >
-                <div className="size-1.5 flex-shrink-0" />
-                <span className="flex-1 text-3xs italic text-muted-foreground/60">
-                  Add tool…
-                </span>
-                <Button
-                  className="pointer-events-none size-4 flex-shrink-0 rounded-full shadow-sm [&_svg]:size-2"
-                  variant="secondary"
-                  bordered
-                  size="icon"
-                  tabIndex={-1}
-                >
-                  <Plus />
-                </Button>
-              </div>
-            )}
+                <Plus />
+              </Button>
+            </div>
           </div>
 
           {/* Memory section */}
-          <div className="border-t border-border/30 px-2 pb-1.5 pt-1">
-            <span className="text-[8px] font-semibold uppercase leading-none tracking-wider text-muted-foreground">
+          <div className="shrink-0 border-t border-border/30 px-2 pb-1.5 pt-1">
+            <span
+              className="block text-[8px] font-semibold uppercase tracking-wider text-muted-foreground"
+              style={{
+                height: AI_AGENT_SECTION_LABEL_HEIGHT,
+                lineHeight: `${AI_AGENT_SECTION_LABEL_HEIGHT}px`,
+              }}
+            >
               Memory
             </span>
             {hasMemory && (
@@ -577,12 +606,17 @@ function AiAgentNodeComponent({
                 </span>
               </div>
             )}
-            {/* Add memory row */}
-            {!isExecuting && !hasMemory && (
+            {/* Add memory row (invisible while executing, like Add tool) */}
+            {!hasMemory && (
               <div
-                className="nodrag nopan -mx-0.5 flex h-[22px] cursor-pointer items-center gap-1.5 rounded-sm px-0.5 hover:bg-muted/30"
+                aria-hidden={isExecuting || undefined}
+                className={cn(
+                  'nodrag nopan -mx-0.5 flex h-[22px] cursor-pointer items-center gap-1.5 rounded-sm px-0.5 hover:bg-muted/30',
+                  isExecuting && 'pointer-events-none invisible'
+                )}
                 onClick={(e) => {
                   e.stopPropagation();
+                  if (isExecuting) return;
                   setStepPickerMode('memory');
                 }}
               >

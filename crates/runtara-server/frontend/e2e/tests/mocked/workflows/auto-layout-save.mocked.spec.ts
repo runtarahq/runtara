@@ -223,9 +223,8 @@ test.describe('Auto-layout + save preserves step data (mocked)', () => {
     await page.goto(appPath(`/workflows/${workflowId}`));
     await expect(page.locator('main')).toBeVisible();
 
-    // The editor boots into the Timeline view and the canvas TabsContent is not
-    // force-mounted (src/features/workflows/components/WorkflowEditor/index.tsx),
-    // so ReactFlow only mounts once the Canvas tab is selected.
+    // The editor opens on the Canvas view by default; selecting it explicitly
+    // keeps the test independent of a remembered view preference.
     await page.getByTestId('workflow-view-canvas').click();
 
     // Wait for React Flow to mount a node so we know the editor finished loading.
