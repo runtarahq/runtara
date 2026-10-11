@@ -30,9 +30,7 @@ export function describeArrayValue(
   if (!value) return EMPTY_VALUE_LABEL;
   if (valueType === 'reference') return `Reference: ${value}`;
   if (valueType === 'composite') {
-    return Array.isArray(value)
-      ? `Composite: ${items(value.length)}`
-      : 'Composite Array';
+    return Array.isArray(value) ? `List · ${items(value.length)}` : 'List';
   }
   // Immediate array held as a real array (MCP / API authored).
   if (Array.isArray(value)) return items(value.length);
@@ -56,8 +54,8 @@ export function describeObjectValue(
   if (valueType === 'reference') return `Reference: ${value}`;
   if (valueType === 'composite') {
     return isPlainObject(value)
-      ? `Composite: ${fields(Object.keys(value).length)}`
-      : 'Composite Object';
+      ? `Object · ${fields(Object.keys(value).length)}`
+      : 'Object';
   }
   // Immediate object held as a real object (MCP / API authored).
   if (isPlainObject(value)) return fields(Object.keys(value).length);

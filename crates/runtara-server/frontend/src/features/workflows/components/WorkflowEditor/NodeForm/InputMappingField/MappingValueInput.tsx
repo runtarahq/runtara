@@ -15,6 +15,7 @@ import { Icons } from '@/shared/components/icons';
 import { WithTooltip } from '@/shared/components/ui/tooltip';
 import { ReferencePill } from './ReferencePill';
 import { WrappingLineInput } from './WrappingLineInput';
+import { StructuredValueSummary } from './StructuredValueSummary';
 import { ModeToggleButton } from './ModeToggleButton';
 import { VariablePickerModal } from './VariablePickerModal';
 import { TemplateEditorModal } from './TemplateEditorModal';
@@ -364,26 +365,17 @@ export function MappingValueInput({
       }
     }
 
-    // Composite mode - show indicator (parent renders the actual editor)
+    // Composite mode - the parent renders the editor below; this cell shows
+    // the same summary as every other built value.
     if (isComposite) {
       const isArrayComposite = isArrayFieldType(lowerFieldType);
-      const CompositeIcon = isArrayComposite ? Icons.list : Icons.braces;
       return (
-        // One short line: in a value cell the old "Composite object -
-        // configure below" wrapped to four lines and pushed the row tall.
-        <div
-          className="flex h-9 min-w-0 flex-1 items-center rounded-md border border-green-200 bg-green-50 px-3 dark:border-green-800 dark:bg-green-950/30"
-          title={
-            isArrayComposite
-              ? 'List built from the fields below'
-              : 'Object built from the fields below'
+        <StructuredValueSummary
+          kind={isArrayComposite ? 'array' : 'object'}
+          summary={
+            isArrayComposite ? 'List · built below' : 'Object · built below'
           }
-        >
-          <CompositeIcon className="mr-2 size-4 shrink-0 text-green-600 dark:text-green-400" />
-          <span className="truncate text-sm text-green-700 dark:text-green-300">
-            {isArrayComposite ? 'List · built below' : 'Object · built below'}
-          </span>
-        </div>
+        />
       );
     }
 
