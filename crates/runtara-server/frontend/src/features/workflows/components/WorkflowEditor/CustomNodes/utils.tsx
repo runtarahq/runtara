@@ -36,6 +36,8 @@ import {
   layoutReactFlowElements,
 } from './layout';
 
+import { isResizableNodeType, type CanvasDetailLevel } from './node-size';
+
 export { BASE_GROUP_WIDTH, BASE_WIDTH } from './layout';
 
 export type ExecutionGraphTransition = Required<ExecutionGraphTransitionDto>;
@@ -101,8 +103,12 @@ function normalizeSchemaFieldForEditor(field: SchemaField): SchemaField {
   };
 }
 
-export function getLayoutedElements(nodes: Node[], edges: Edge[]) {
-  return layoutReactFlowElements(nodes, edges);
+export function getLayoutedElements(
+  nodes: Node[],
+  edges: Edge[],
+  options?: { detailLevel?: CanvasDetailLevel }
+) {
+  return layoutReactFlowElements(nodes, edges, options);
 }
 
 export const getNodePositionInsideParent = (
@@ -436,12 +442,17 @@ function applyStoredNodeVisualState(nodes: Node[], storedNodes: unknown) {
             y: visualState.position.y,
           })
         : node.position;
+    // Only resizable nodes keep a saved size. Every other card renders at a
+    // size fixed by its type, and an old saved size (say 132x36 from before
+    // the card redesign) would make the layout pack cards into boxes smaller
+    // than they draw, so they overlap and edges run underneath them.
+    const resizable = isResizableNodeType(node.type);
     const width =
-      typeof visualState.width === 'number'
+      resizable && typeof visualState.width === 'number'
         ? snapToGrid(visualState.width)
         : node.width;
     const height =
-      typeof visualState.height === 'number'
+      resizable && typeof visualState.height === 'number'
         ? snapToGrid(visualState.height)
         : node.height;
 
@@ -1814,8 +1825,8 @@ function normalizeNodesAndEdges(
     }
 
     // WaitForSignal steps with an onWait graph render as containers so the
-    // existing Split/While container machinery (canvas group node, timeline
-    // scope, child drag/drop) applies unchanged.
+    // existing Split/While container machinery (canvas group node, child
+    // scope) applies unchanged.
     const nodeType = onWaitGraph
       ? NODE_TYPES.ContainerNode
       : step.stepType

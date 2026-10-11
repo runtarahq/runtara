@@ -78,23 +78,13 @@ function useAnchorRect(nodeId: string, enabled: boolean): Rect | null {
 
     let frame = 0;
     const measure = () => {
-      // Anchor to whichever representation of the step is on screen. React
-      // Flow stamps data-id on each canvas node (a DOM read picks up pan and
-      // zoom for free rather than re-deriving the viewport transform), and the
-      // timeline stamps data-timeline-node-id on each row. One panel serves
-      // both views.
+      // Anchor to the step's canvas node. React Flow stamps data-id on each
+      // node, and a DOM read picks up pan and zoom for free rather than
+      // re-deriving the viewport transform.
       const id = CSS.escape(nodeId);
-      const el =
-        document.querySelector<HTMLElement>(
-          `.react-flow__node[data-id="${id}"]`
-        ) ??
-        // The card, not the row wrapper: the wrapper also contains the
-        // add-branch/add-error controls, which drags its centre below the
-        // visible tile.
-        document.querySelector<HTMLElement>(
-          `[data-timeline-node-card="${id}"]`
-        ) ??
-        document.querySelector<HTMLElement>(`[data-timeline-node-id="${id}"]`);
+      const el = document.querySelector<HTMLElement>(
+        `.react-flow__node[data-id="${id}"]`
+      );
       if (!el) {
         setRect(null);
         return;
@@ -184,9 +174,8 @@ export function NodeConfigPanel({
   }, [open, nodeData]);
 
   const docked = isDocked(viewport);
-  // A pending node has no canvas node, but the timeline renders a placeholder
-  // card for it under the same id — so the lookup is worth attempting either
-  // way, and simply finds nothing on the canvas.
+  // A pending node has no canvas node yet, so its lookup finds nothing and
+  // the connector stays hidden until the step is added.
   const anchorRect = useAnchorRect(nodeId, open && docked);
   const geo = panelGeometry(
     bounds ?? {

@@ -20,6 +20,7 @@ import {
 } from './graph';
 import { routeOrthogonalEdges, type OrthogonalRoute } from './edges';
 import { layoutScope } from './place';
+import type { CanvasDetailLevel } from '../node-size';
 
 const LAYOUT_CONFIG = {
   rankSep: 75,
@@ -206,7 +207,8 @@ function rootEdgesForNodes(rootNodes: LayoutNode[], edges: LayoutEdge[]) {
 
 export function layoutReactFlowElements(
   nodes: Node[],
-  edges: Edge[]
+  edges: Edge[],
+  options: { detailLevel?: CanvasDetailLevel } = {}
 ): WorkflowLayoutResult {
   const noteNodes = nodes.filter((node) => node.type === NODE_TYPES.NoteNode);
   const layoutReactFlowNodes = nodes.filter(
@@ -215,7 +217,11 @@ export function layoutReactFlowElements(
   const reactFlowNodeById = new Map(
     layoutReactFlowNodes.map((node) => [node.id, node])
   );
-  const graph = buildLayoutGraph(layoutReactFlowNodes, edges);
+  const graph = buildLayoutGraph(
+    layoutReactFlowNodes,
+    edges,
+    options.detailLevel
+  );
   const nodesByParent = groupNodesByParent(graph.nodes);
   const computedSizes = new Map<string, LayoutSize>();
 

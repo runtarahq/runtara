@@ -1,4 +1,6 @@
-/** One-line summaries shared by the canvas nodes and the timeline cards. */
+import { humanizeKey } from './step-details';
+
+/** One-line step summaries for the canvas cards. */
 export interface StepSummaryData {
   stepType?: string;
   agentId?: string;
@@ -6,15 +8,26 @@ export interface StepSummaryData {
   description?: string;
 }
 
-/** What a step does, in one line: its description, or a summary by type. */
+/**
+ * What a step does, in one line: its description, or a summary by type.
+ * Agent steps read "Object Model · Update instance": the agent's and the
+ * capability's display names when known, humanized ids otherwise.
+ */
 export function stepDescription(
   data: StepSummaryData,
-  agentName?: string
+  agentName?: string,
+  capabilityName?: string
 ): string | undefined {
   if (data.description) return data.description;
   switch (data.stepType) {
-    case 'Agent':
-      return `${agentName || data.agentId || 'agent'} / ${data.capabilityId || 'capability'}`;
+    case 'Agent': {
+      const agent =
+        agentName || (data.agentId ? humanizeKey(data.agentId) : 'Agent');
+      const capability =
+        capabilityName ||
+        (data.capabilityId ? humanizeKey(data.capabilityId) : '');
+      return capability ? `${agent} · ${capability}` : agent;
+    }
     case 'Conditional':
       return 'Routes execution by condition.';
     case 'Switch':
@@ -30,6 +43,12 @@ export function stepDescription(
     default:
       return undefined;
   }
+}
+
+/** `WaitForSignal` → "Wait for signal", `AiAgent` → "AI agent". */
+export function stepTypeLabel(stepType: string): string {
+  if (stepType === 'AiAgent') return 'AI agent';
+  return humanizeKey(stepType);
 }
 
 export function stepBadgeVariant(stepType: string) {

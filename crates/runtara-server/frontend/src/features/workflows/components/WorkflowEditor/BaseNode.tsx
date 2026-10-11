@@ -1,7 +1,20 @@
-import { forwardRef, HTMLAttributes, MouseEvent } from 'react';
+import { forwardRef, HTMLAttributes, MouseEvent, ReactNode } from 'react';
 import { Badge } from '@/shared/components/ui/badge';
-import { stepBadgeVariant, stepDescription } from './step-summary';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/shared/components/ui/tooltip';
+import {
+  stepBadgeVariant,
+  stepDescription,
+  stepTypeLabel,
+} from './step-summary';
 import { stepIdLabel } from './step-label';
+import { cardDetailLayout, type StepDetailRow } from './step-details';
+import { useCanvasDisplay } from './CanvasDisplayContext';
+import { COMPACT_CARD_HEIGHT } from './CustomNodes/node-size';
 import { useNavigate } from 'react-router';
 import { cn } from '@/lib/utils.ts';
 import { StepTypeIcon } from '@/features/workflows/components/StepTypeIcon';
@@ -32,6 +45,8 @@ export const BaseNode = forwardRef<
     agentName?: string;
     /** Agent capability, shown with the agent as the step summary. */
     capabilityId?: string;
+    /** The capability's display name, used in the step summary. */
+    capabilityName?: string;
     /** The step's own description, shown instead of the type summary. */
     description?: string;
     inputMapping?: Array<{
@@ -54,6 +69,11 @@ export const BaseNode = forwardRef<
     rightReservedWidth?: number;
     breakpoint?: boolean;
     onToggleBreakpoint?: () => void;
+    /**
+     * The step's configured inputs. Listed on the card when the canvas is in
+     * detailed mode, and in full in the hover preview.
+     */
+    detailRows?: StepDetailRow[];
   }
 >(
   (
@@ -67,6 +87,7 @@ export const BaseNode = forwardRef<
       agentId,
       agentName,
       capabilityId,
+      capabilityName,
       description,
       inputMapping,
       executionStatus,
@@ -80,12 +101,19 @@ export const BaseNode = forwardRef<
       rightReservedWidth,
       breakpoint,
       onToggleBreakpoint,
+      detailRows,
       onClick,
       ...props
     },
     ref
   ) => {
     const navigate = useNavigate();
+    const { detailLevel, stepPreviews, editable } = useCanvasDisplay();
+    const cardDetails =
+      detailRows && detailLevel === 'detailed'
+        ? cardDetailLayout(detailRows)
+        : null;
+    const showCardDetails = !!cardDetails && cardDetails.lineCount > 0;
     const isSuspendedExecution = useExecutionStore((s) => s.isSuspended);
 
     const getExecutionBorderClass = (status: ExecutionStatus) => {
@@ -195,14 +223,16 @@ export const BaseNode = forwardRef<
       if (subtitle) {
         return { text: subtitle, className: 'text-muted-foreground' };
       }
-      // Same summary as the timeline card: description, or what the step does.
+      // The step's description, or what the step does.
       const summary = stepDescription(
         { stepType, agentId, capabilityId, description },
-        agentName
+        agentName,
+        capabilityName
       );
-      return summary
-        ? { text: summary, className: 'text-muted-foreground' }
-        : null;
+      // Without a summary, the readable step type ("Wait for signal") keeps
+      // the card saying what kind of step it is now the type chip is gone.
+      const text = summary || (stepType ? stepTypeLabel(stepType) : undefined);
+      return text ? { text, className: 'text-muted-foreground' } : null;
     };
 
     const subtitleContent = getSubtitleContent();
@@ -233,11 +263,12 @@ export const BaseNode = forwardRef<
       }
     };
 
-    return (
+    const card = (
       <div
         ref={ref}
         className={cn(
           'group relative h-full w-full',
+          showCardDetails && 'flex flex-col',
           'rounded-md bg-card text-muted-foreground',
           'border shadow-sm transition-all duration-200 hover:shadow-md',
           // Priority: validation error > warning > execution > selected > unsaved.
@@ -308,12 +339,16 @@ export const BaseNode = forwardRef<
         {/* Horizontal pill layout: icon left, name + status center/right */}
         {(stepType !== undefined || name) && (
           <div
-            className="flex h-full w-full items-center gap-1.5 px-1.5"
-            style={
-              rightReservedWidth
+            className={cn(
+              'flex w-full items-center gap-1.5 px-1.5',
+              showCardDetails ? 'shrink-0' : 'h-full'
+            )}
+            style={{
+              ...(rightReservedWidth
                 ? { paddingRight: rightReservedWidth }
-                : undefined
-            }
+                : {}),
+              ...(showCardDetails ? { height: COMPACT_CARD_HEIGHT } : {}),
+            }}
           >
             {/* Left: Icon */}
             {stepType && (
@@ -347,14 +382,9 @@ export const BaseNode = forwardRef<
                     Unnamed step
                   </span>
                 )}
-                {stepType && (
-                  <Badge
-                    variant={stepBadgeVariant(stepType)}
-                    className="shrink-0 px-1 py-0 text-[9px] font-medium leading-tight"
-                  >
-                    {stepType}
-                  </Badge>
-                )}
+                {/* No step-type chip here: the icon and the subtitle already
+                    say what the step is, and a chip (plus the stale-agent one)
+                    truncated the step name. The hover preview shows the type. */}
                 {/* Stale-agent badge — entitlement allowlist excludes this
                     step's agent. Workflow can't be saved/run until either the
                     entitlement is restored or the step is swapped. */}
@@ -366,7 +396,6 @@ export const BaseNode = forwardRef<
                     className="flex shrink-0 items-center gap-0.5 rounded-full bg-warning/10 px-1 py-0.5 text-[9px] font-medium leading-none text-warning"
                   >
                     <AlertTriangle className="size-2.5" />
-                    <span className="hidden md:inline">Agent disabled</span>
                   </span>
                 )}
                 {/* Inline status pill */}
@@ -401,8 +430,212 @@ export const BaseNode = forwardRef<
             </div>
           </div>
         )}
+        {showCardDetails && cardDetails && (
+          <div
+            // A two-column table: shaded labels, a divider, a rule per row.
+            className="flex min-h-0 flex-1 flex-col divide-y divide-border/70 overflow-hidden rounded-b-md border-t border-border/70 text-[10px]"
+            data-testid="step-card-details"
+            role="table"
+            aria-label="Step inputs"
+          >
+            {cardDetails.visible.map((row) => (
+              <StepDetailLine key={row.key} row={row} />
+            ))}
+            {cardDetails.hiddenCount > 0 && (
+              <div
+                role="row"
+                className="flex min-h-0 flex-1 items-center bg-muted/30 px-2 text-muted-foreground"
+              >
+                <span role="cell">+{cardDetails.hiddenCount} more</span>
+              </div>
+            )}
+          </div>
+        )}
         {children}
       </div>
     );
+
+    // The hover preview is for compact cards only: a card that already shows
+    // its inputs as a table would just pop the same rows up again.
+    if (
+      !stepPreviews ||
+      detailLevel === 'detailed' ||
+      (stepType === undefined && !name)
+    ) {
+      return card;
+    }
+
+    return (
+      <TooltipProvider delayDuration={450} skipDelayDuration={150}>
+        <Tooltip>
+          <TooltipTrigger asChild>{card}</TooltipTrigger>
+          <TooltipContent
+            side="bottom"
+            align="start"
+            collisionPadding={12}
+            className="w-80 max-w-[min(20rem,calc(100vw-24px))] rounded-md border bg-popover p-3 text-popover-foreground shadow-lg"
+            data-testid="step-preview"
+          >
+            <StepPreview
+              id={id}
+              name={name}
+              stepType={stepType}
+              summary={subtitleContent?.text}
+              summaryIsError={subtitleContent?.className === 'text-destructive'}
+              rows={detailRows ?? []}
+              editable={editable}
+              hasStaleAgent={hasStaleAgent}
+            />
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    );
   }
 );
+
+/** A row's value: references read "Source › field", the field emphasised. */
+function DetailValue({ row }: { row: StepDetailRow }) {
+  if (row.kind === 'reference' && row.reference) {
+    const { source, path } = row.reference;
+    if (!source || !path) {
+      return (
+        <span className="font-medium text-primary-text">{source || path}</span>
+      );
+    }
+    return (
+      <>
+        <span className="text-muted-foreground">{source}</span>
+        <span className="px-0.5 text-muted-foreground/60" aria-hidden="true">
+          ›
+        </span>
+        <span className="sr-only"> field </span>
+        <span className="font-medium text-primary-text">{path}</span>
+      </>
+    );
+  }
+  return <span className="text-foreground">{row.value}</span>;
+}
+
+function StepDetailLine({ row }: { row: StepDetailRow }) {
+  return (
+    <div
+      role="row"
+      className="grid min-h-0 flex-1 grid-cols-[minmax(0,40%)_minmax(0,1fr)] items-stretch"
+    >
+      <span
+        role="rowheader"
+        className="flex min-w-0 items-center border-r border-border/70 bg-muted/40 px-2 text-muted-foreground"
+      >
+        <span className="truncate">{row.label}</span>
+      </span>
+      <span role="cell" className="flex min-w-0 items-center px-2">
+        <span className="truncate">
+          <DetailValue row={row} />
+        </span>
+      </span>
+    </div>
+  );
+}
+
+function PreviewRows({
+  rows,
+  nested = false,
+}: {
+  rows: StepDetailRow[];
+  nested?: boolean;
+}) {
+  return (
+    <>
+      {rows.map((row) => (
+        <div key={row.key} className="contents">
+          <dt
+            className={cn(
+              'truncate text-muted-foreground',
+              nested && 'pl-3 before:mr-1 before:content-["↳"]'
+            )}
+          >
+            {row.label}
+          </dt>
+          <dd className="line-clamp-3 break-words">
+            {row.children && row.children.length > 0 ? (
+              <span className="text-muted-foreground">
+                {row.children.length} field
+                {row.children.length === 1 ? '' : 's'}
+              </span>
+            ) : (
+              <DetailValue row={row} />
+            )}
+          </dd>
+          {row.children && row.children.length > 0 && (
+            <PreviewRows rows={row.children} nested />
+          )}
+        </div>
+      ))}
+    </>
+  );
+}
+
+/** Hover preview: everything a step is configured with, untruncated. */
+function StepPreview({
+  id,
+  name,
+  stepType,
+  summary,
+  summaryIsError,
+  rows,
+  editable,
+  hasStaleAgent,
+}: {
+  id?: string;
+  name?: string;
+  stepType?: string;
+  summary?: string;
+  summaryIsError?: boolean;
+  rows: StepDetailRow[];
+  editable: boolean;
+  hasStaleAgent?: boolean;
+}): ReactNode {
+  return (
+    <div className="space-y-2 text-xs">
+      <div className="flex min-w-0 items-center gap-2">
+        <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+          {name || stepIdLabel(id) || 'Unnamed step'}
+        </span>
+        {stepType && (
+          <Badge
+            variant={stepBadgeVariant(stepType)}
+            className="shrink-0 px-1.5 py-0 text-[10px]"
+          >
+            {stepType}
+          </Badge>
+        )}
+      </div>
+      {summary && (
+        <p
+          className={cn(
+            'break-words leading-snug',
+            summaryIsError ? 'text-destructive' : 'text-muted-foreground'
+          )}
+        >
+          {summary}
+        </p>
+      )}
+      {hasStaleAgent && (
+        <p className="flex items-center gap-1.5 text-warning">
+          <AlertTriangle className="size-3.5 shrink-0" aria-hidden="true" />
+          Agent disabled — the workflow can&apos;t be saved or run until
+          it&apos;s enabled or this step is replaced.
+        </p>
+      )}
+      {rows.length > 0 && (
+        <dl className="grid grid-cols-[minmax(0,auto)_minmax(0,1fr)] gap-x-3 gap-y-1 border-t pt-2">
+          <PreviewRows rows={rows} />
+        </dl>
+      )}
+      <div className="flex items-center justify-between gap-2 border-t pt-1.5 text-[10px] text-muted-foreground">
+        <span className="truncate font-mono">{id}</span>
+        {editable && <span className="shrink-0">Double-click to edit</span>}
+      </div>
+    </div>
+  );
+}

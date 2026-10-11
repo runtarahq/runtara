@@ -2695,10 +2695,13 @@ describe('Workflow canvas auto-layout', () => {
     expect(getLayoutNode(layoutedNodes, 'case-2-step').position.y).toBeLessThan(
       getLayoutNode(layoutedNodes, 'default-step').position.y
     );
+    // Four lanes stay packed: three steps of one card plus the 48px node gap.
     expect(
       getLayoutNode(layoutedNodes, 'default-step').position.y -
         getLayoutNode(layoutedNodes, 'case-0-step').position.y
-    ).toBeLessThan(300);
+    ).toBeLessThanOrEqual(
+      3 * (NODE_TYPE_SIZES[NODE_TYPES.BasicNode].height + 48)
+    );
   });
 
   it('lays out container children without overlaps and expands the parent', () => {

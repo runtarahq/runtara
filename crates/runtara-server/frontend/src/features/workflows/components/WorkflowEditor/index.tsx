@@ -9,11 +9,14 @@ import {
   NodeTypes,
   ReactFlow,
   ReactFlowProvider,
+  getViewportForBounds,
+  Panel,
+  useNodesInitialized,
   useReactFlow,
   useStoreApi,
   OnConnectEnd,
 } from '@xyflow/react';
-import { ListTree, Network, Plus } from 'lucide-react';
+import { RectangleHorizontal, Rows3 } from 'lucide-react';
 import {
   generateStepId,
   useWorkflowStore,
@@ -22,13 +25,7 @@ import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { useValidationStore } from '@/features/workflows/stores/validationStore';
 import { toast } from 'sonner';
 import { useIsDarkTheme } from '@/shared/stores/themeStore';
-import { cn } from '@/lib/utils.ts';
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from '@/shared/components/ui/tabs';
+import { Tabs, TabsList, TabsTrigger } from '@/shared/components/ui/tabs';
 import {
   NODE_TYPE_SIZES,
   NODE_TYPES,
@@ -62,21 +59,19 @@ import {
   getLayoutedElements,
 } from './CustomNodes/utils.tsx';
 import { NodeConfigPanel } from './NodeConfigPanel';
-import {
-  canvasInset,
-  NODE_CONFIG_PANEL_WIDTH,
-} from './NodeConfigPanel/dock-position';
 import { NodeFormProvider } from './NodeForm/NodeFormProvider';
-import {
-  StepPickerModal,
-  StepPickerPanel,
-  StepPickerResult,
-} from './NodeForm/StepPickerModal';
+import { StepPickerModal, StepPickerResult } from './NodeForm/StepPickerModal';
 import { NodeConfigProvider } from './NodeConfigContext';
+import { CanvasDisplayProvider } from './CanvasDisplayContext';
+import type { EdgeRouteActions } from './CustomEdges/EdgeContext';
+import { composeConditionSuggestions } from './NodeForm/InputMappingValueField/VariableSuggestions';
 import {
-  type TimelineAddStepRequest,
-  WorkflowTimelineView,
-} from './TimelineView';
+  resolveContainerScope,
+  splitItemSchemaFieldsFromScope,
+  type ScopeNode,
+} from '@/features/workflows/utils/container-scope';
+import type { CanvasDetailLevel } from './CustomNodes/node-size';
+import { readCanvasDetail, writeCanvasDetail } from './editor-preferences';
 import { CANVAS_Z } from '@/features/workflows/components/WorkflowEditor/canvas-z';
 import {
   validateNodeEditWithRust,
@@ -151,112 +146,6 @@ function generateUniqueStepName(
   return `${baseName} ${counter}`;
 }
 
-type WorkflowInputMappingItem = {
-  type?: string;
-  value?: unknown;
-  typeHint?: string;
-  valueType?: string;
-  [key: string]: unknown;
-};
-
-function generateUniqueAiToolName(result: StepPickerResult, nodes: Node[]) {
-  const allToolNames = new Set<string>();
-
-  for (const node of nodes) {
-    if (node.type !== NODE_TYPES.AiAgentNode) continue;
-    const inputMapping = (node.data?.inputMapping || []) as
-      WorkflowInputMappingItem[] | undefined;
-    const toolsField = inputMapping?.find((item) => item.type === 'tools');
-    if (Array.isArray(toolsField?.value)) {
-      for (const toolName of toolsField.value) {
-        if (typeof toolName === 'string') allToolNames.add(toolName);
-      }
-    }
-  }
-
-  const baseName = (result.name || 'tool')
-    .toLowerCase()
-    .replace(/[^a-z0-9_]/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_|_$/g, '');
-  const normalizedBaseName = baseName || 'tool';
-  let toolName = normalizedBaseName;
-  let index = 1;
-
-  while (allToolNames.has(toolName)) {
-    toolName = `${normalizedBaseName}_${index++}`;
-  }
-
-  return toolName;
-}
-
-function appendToolToInputMapping(
-  inputMapping: WorkflowInputMappingItem[],
-  toolName: string
-) {
-  const updatedMapping = [...inputMapping];
-  const toolsIndex = updatedMapping.findIndex((item) => item.type === 'tools');
-
-  if (toolsIndex >= 0) {
-    const existingTools = Array.isArray(updatedMapping[toolsIndex].value)
-      ? (updatedMapping[toolsIndex].value as unknown[])
-      : [];
-    updatedMapping[toolsIndex] = {
-      ...updatedMapping[toolsIndex],
-      value: [...existingTools, toolName],
-    };
-    return updatedMapping;
-  }
-
-  return [
-    ...updatedMapping,
-    {
-      type: 'tools',
-      value: [toolName],
-      typeHint: 'json',
-      valueType: 'immediate',
-    },
-  ];
-}
-
-function setOrAddInputMappingValue(
-  inputMapping: WorkflowInputMappingItem[],
-  type: string,
-  value: unknown,
-  typeHint: string,
-  valueType = 'immediate'
-) {
-  const index = inputMapping.findIndex((item) => item.type === type);
-  if (index >= 0) {
-    inputMapping[index] = {
-      ...inputMapping[index],
-      value,
-      valueType,
-    };
-    return;
-  }
-
-  inputMapping.push({ type, value, typeHint, valueType });
-}
-
-function createMemoryProviderInputMapping(): WorkflowInputMappingItem[] {
-  return [
-    {
-      type: 'conversation_id',
-      value: '',
-      valueType: 'reference',
-      typeHint: 'string',
-    },
-    {
-      type: 'messages',
-      value: '',
-      valueType: 'reference',
-      typeHint: 'json',
-    },
-  ];
-}
-
-// Type for staged node changes
 type StagedNodeChanges = Record<string, form.SchemaType>;
 
 type WorkflowEditorProps = {
@@ -309,8 +198,55 @@ type WorkflowEditorProps = {
   onResetNodeChanges?: (nodeId: string) => void;
 };
 
-type WorkflowEditorView = 'canvas' | 'timeline';
-type NodeEditSurface = 'dialog' | 'timeline';
+// Long workflows are several thousand pixels wide; React Flow's default
+// minimum zoom (0.5) cannot fit them, so fit-to-view silently clipped both
+// ends. Fitting never zooms past 100%: a two-step workflow blown up to 2x
+// reads as broken, not as "fitted".
+const CANVAS_MIN_ZOOM = 0.1;
+const CANVAS_FIT_VIEW_OPTIONS = { padding: 0.15, maxZoom: 1 };
+// Below this zoom card text is unreadable. A workflow too long to fit above it
+// opens at this zoom, anchored on its start, and the Fit button shows it all.
+const CANVAS_READABLE_ZOOM = 0.8;
+const CANVAS_VIEW_MARGIN = 48;
+
+function CanvasDetailToggle({
+  value,
+  onChange,
+}: {
+  value: CanvasDetailLevel;
+  onChange: (value: CanvasDetailLevel) => void;
+}) {
+  return (
+    <Tabs
+      value={value}
+      onValueChange={(next) => onChange(next as CanvasDetailLevel)}
+    >
+      <TabsList
+        className="pointer-events-auto shadow-sm"
+        aria-label="Step card detail"
+      >
+        <TabsTrigger
+          value="detailed"
+          className="gap-2"
+          data-testid="canvas-detail-detailed"
+          title="Show each step's configured inputs on its card"
+        >
+          <Rows3 className="size-4" aria-hidden="true" />
+          Details
+        </TabsTrigger>
+        <TabsTrigger
+          value="compact"
+          className="gap-2"
+          data-testid="canvas-detail-compact"
+          title="Show step names only; hover a step for its inputs"
+        >
+          <RectangleHorizontal className="size-4" aria-hidden="true" />
+          Compact
+        </TabsTrigger>
+      </TabsList>
+    </Tabs>
+  );
+}
 
 export function WorkflowEditor(props: WorkflowEditorProps) {
   return (
@@ -334,10 +270,6 @@ function WorkflowEditorContent({
   // Context for creating new steps
   const [createStepContext, setCreateStepContext] =
     useState<CreateStepContext | null>(null);
-  const [createStepSurface, setCreateStepSurface] =
-    useState<NodeEditSurface | null>(null);
-  const [timelineAddStepRequest, setTimelineAddStepRequest] =
-    useState<TimelineAddStepRequest | null>(null);
 
   // Track selected edge ID for showing "+" button
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
@@ -345,7 +277,14 @@ function WorkflowEditorContent({
   // Dialog states
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [showStepPicker, setShowStepPicker] = useState(false);
-  const [editorView, setEditorView] = useState<WorkflowEditorView>('timeline');
+  // Detailed cards list each step's configured inputs, so the workflow reads
+  // without opening every step's editor.
+  const [canvasDetail, setCanvasDetailState] =
+    useState<CanvasDetailLevel>(readCanvasDetail);
+  const setCanvasDetail = useCallback((detail: CanvasDetailLevel) => {
+    setCanvasDetailState(detail);
+    writeCanvasDetail(detail);
+  }, []);
 
   // Pending new node state from store (for deferred creation until user confirms)
   const pendingNewNode = useWorkflowStore((state) => state.pendingNewNode);
@@ -361,39 +300,46 @@ function WorkflowEditorContent({
     (nodeId: string) => {
       if (workflow && !readOnly) {
         setCreateStepContext(null);
-        setCreateStepSurface(null);
-        setTimelineAddStepRequest(null);
         setPendingNewNode(null);
         setEditingNodeId(nodeId);
       }
     },
     [workflow, readOnly, setPendingNewNode]
   );
-  const openTimelineNodeConfig = useCallback(
-    (nodeId: string) => {
-      if (workflow && !readOnly && !debugInspectMode) {
-        setCreateStepContext(null);
-        setCreateStepSurface(null);
-        setTimelineAddStepRequest(null);
-        setPendingNewNode(null);
-        setEditingNodeId(nodeId);
-      }
-    },
-    [debugInspectMode, workflow, readOnly, setPendingNewNode]
-  );
   const nodeConfigContextValue = useMemo(
     () => ({ openNodeConfig }),
     [openNodeConfig]
-  );
-  const timelineNodeConfigContextValue = useMemo(
-    () => ({ openNodeConfig: openTimelineNodeConfig }),
-    [openTimelineNodeConfig]
   );
 
   const ref = useRef(null);
 
   // Get state from Zustand store
   const nodes = useWorkflowStore((state) => state.nodes);
+  // Rebuilt only when a step is added, removed, renamed or retyped, so cards
+  // do not all re-render on every selection or position change.
+  const stepIndexKey = useMemo(
+    () =>
+      JSON.stringify(
+        nodes.map((node) => [
+          node.id,
+          (node.data as { name?: string })?.name ?? '',
+          (node.data as { stepType?: string })?.stepType ?? '',
+        ])
+      ),
+    [nodes]
+  );
+  const canvasDisplayValue = useMemo(() => {
+    const entries = JSON.parse(stepIndexKey) as Array<[string, string, string]>;
+    return {
+      detailLevel: canvasDetail,
+      stepPreviews: true,
+      editable: !readOnly && !!workflow,
+      stepNames: new Map(
+        entries.filter(([, name]) => name).map(([id, name]) => [id, name])
+      ),
+      stepTypes: new Map(entries.map(([id, , stepType]) => [id, stepType])),
+    };
+  }, [canvasDetail, readOnly, stepIndexKey, workflow]);
   const edges = useWorkflowStore((state) => state.edges);
   const pendingCenterNodeId = useWorkflowStore(
     (state) => state.pendingCenterNodeId
@@ -422,21 +368,23 @@ function WorkflowEditorContent({
 
   const {
     getIntersectingNodes,
+    getNodesBounds,
     screenToFlowPosition,
     fitView,
     setCenter,
+    setViewport,
     getZoom,
   } = useReactFlow();
   const reactFlowStore = useStoreApi();
 
   // Show step picker when createStepContext changes
   useEffect(() => {
-    if (createStepContext && !readOnly && createStepSurface !== 'timeline') {
+    if (createStepContext && !readOnly) {
       setShowStepPicker(true);
     } else {
       setShowStepPicker(false);
     }
-  }, [createStepContext, createStepSurface, readOnly]);
+  }, [createStepContext, readOnly]);
 
   // Get editing node data
   const editingNodeData = useMemo(() => {
@@ -450,30 +398,6 @@ function WorkflowEditorContent({
       originalData: node.data as form.SchemaType,
     };
   }, [editingNodeId, nodes, stagedNodeChanges]);
-
-  // Reserve the right gutter while the docked inspector is open so it does not
-  // cover the steps it is anchored to.
-  //
-  // Timeline only, deliberately. The timeline is normal flow layout and
-  // reflows into the narrower width. React Flow is a fixed-coordinate viewport:
-  // shrinking its container does not move the nodes, it clips them — a node
-  // beyond the new right edge becomes invisible *and unhittable*, which reads
-  // as "clicks stopped working on the canvas". The canvas lets the panel
-  // overlay instead, and the connector hides for a node underneath it.
-  const dockedPanelOpen = !!editingNodeId || !!pendingNewNode;
-  const [viewportWidth, setViewportWidth] = useState(() =>
-    typeof window === 'undefined' ? 1600 : window.innerWidth
-  );
-  useEffect(() => {
-    const onResize = () => setViewportWidth(window.innerWidth);
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
-  const editorInset = canvasInset(
-    { width: viewportWidth, height: 0 },
-    NODE_CONFIG_PANEL_WIDTH,
-    dockedPanelOpen && editorView === 'timeline'
-  );
 
   const closeNodeConfig = useCallback(() => {
     setEditingNodeId(null);
@@ -494,8 +418,6 @@ function WorkflowEditorContent({
 
   const closeCreateStep = useCallback(() => {
     setCreateStepContext(null);
-    setCreateStepSurface(null);
-    setTimelineAddStepRequest(null);
     setSelectedEdgeId(null);
     setShowStepPicker(false);
   }, []);
@@ -676,7 +598,9 @@ function WorkflowEditorContent({
   );
 
   const layoutedCanvas = useMemo(() => {
-    const layout = getLayoutedElements(visibleCanvasNodes, visibleCanvasEdges);
+    const layout = getLayoutedElements(visibleCanvasNodes, visibleCanvasEdges, {
+      detailLevel: canvasDetail,
+    });
 
     return {
       nodes: layout.nodes.map((node) => ({
@@ -685,7 +609,7 @@ function WorkflowEditorContent({
       })),
       edgeRoutes: layout.edgeRoutes ?? {},
     };
-  }, [visibleCanvasEdges, visibleCanvasNodes]);
+  }, [canvasDetail, visibleCanvasEdges, visibleCanvasNodes]);
   const layoutedCanvasNodes = layoutedCanvas.nodes;
   const layoutedCanvasEdgeRoutes = layoutedCanvas.edgeRoutes;
 
@@ -735,8 +659,6 @@ function WorkflowEditorContent({
         hasEntryPoint: false,
         onAddFirstStep: () => {
           const defaultNodeHeight = 48;
-          setCreateStepSurface('dialog');
-          setTimelineAddStepRequest(null);
           setCreateStepContext({
             position: {
               x: startIndicatorSize.width + 60,
@@ -772,9 +694,22 @@ function WorkflowEditorContent({
     };
   }, [entryPointId]);
 
+  // Every canvas node renders at exactly its layout size (see node-size.ts),
+  // so React Flow is told that size up front instead of measuring it. This
+  // canvas drops React Flow's dimension changes (the measurements must not
+  // reach the workflow store), so without `measured` React Flow never
+  // considers the nodes initialized and the viewport is never fitted.
   const nodesWithStartIndicator = useMemo(() => {
-    if (!startIndicatorNode) return layoutedCanvasNodes;
-    return [startIndicatorNode, ...layoutedCanvasNodes];
+    const canvasNodes = startIndicatorNode
+      ? [startIndicatorNode, ...layoutedCanvasNodes]
+      : layoutedCanvasNodes;
+    return canvasNodes.map((node) => {
+      const width = node.style?.width;
+      const height = node.style?.height;
+      return typeof width === 'number' && typeof height === 'number'
+        ? { ...node, measured: { width, height } }
+        : node;
+    });
   }, [layoutedCanvasNodes, startIndicatorNode]);
 
   const edgesWithStartIndicator = useMemo(() => {
@@ -865,26 +800,73 @@ function WorkflowEditorContent({
     [edgesWithStartIndicator, nodesWithStartIndicator]
   );
 
-  // Initialize the canvas viewport only while the canvas is visible. React Flow
-  // measures a hidden canvas poorly, which leaves the workflow in a corner on
-  // first switch from the timeline.
-  useEffect(() => {
-    if (editorView !== 'canvas') {
-      lastFittedCanvasLayoutRef.current = null;
-    }
-  }, [editorView]);
+  // What the viewport is fitted to: which steps and edges exist, and the
+  // detail level. Deliberately not sizes or positions — editing a step can
+  // grow its card, and re-fitting on that would yank the view mid-edit.
+  const canvasFitKey = useMemo(
+    () =>
+      JSON.stringify({
+        detail: canvasDetail,
+        nodes: nodesWithStartIndicator.map((node) => node.id),
+        edges: edgesWithStartIndicator.map((edge) => edge.id),
+      }),
+    [canvasDetail, edgesWithStartIndicator, nodesWithStartIndicator]
+  );
 
+  const fitCanvasReadable = useCallback(() => {
+    const { width, height } = reactFlowStore.getState();
+    const bounds = getNodesBounds(nodesWithStartIndicator);
+    if (!width || !height || bounds.width === 0 || bounds.height === 0) {
+      fitView({ duration: 200, ...CANVAS_FIT_VIEW_OPTIONS });
+      return;
+    }
+    const fitted = getViewportForBounds(
+      bounds,
+      width,
+      height,
+      CANVAS_MIN_ZOOM,
+      CANVAS_FIT_VIEW_OPTIONS.maxZoom,
+      CANVAS_FIT_VIEW_OPTIONS.padding
+    );
+    if (fitted.zoom >= CANVAS_READABLE_ZOOM) {
+      setViewport(fitted, { duration: 200 });
+      return;
+    }
+    const zoom = CANVAS_READABLE_ZOOM;
+    const contentHeight = bounds.height * zoom;
+    setViewport(
+      {
+        zoom,
+        x: CANVAS_VIEW_MARGIN - bounds.x * zoom,
+        y:
+          contentHeight + CANVAS_VIEW_MARGIN * 2 <= height
+            ? (height - contentHeight) / 2 - bounds.y * zoom
+            : CANVAS_VIEW_MARGIN - bounds.y * zoom,
+      },
+      { duration: 200 }
+    );
+  }, [
+    fitView,
+    getNodesBounds,
+    nodesWithStartIndicator,
+    reactFlowStore,
+    setViewport,
+  ]);
+
+  // Fit only once React Flow has measured every node: fitting earlier uses
+  // partial bounds and leaves part of the workflow off-screen.
+  const nodesInitialized = useNodesInitialized();
   useEffect(() => {
     if (
-      editorView !== 'canvas' ||
-      lastFittedCanvasLayoutRef.current === canvasLayoutKey
+      lastFittedCanvasLayoutRef.current === canvasFitKey ||
+      (visibleCanvasNodes.length > 0 && !nodesInitialized)
     ) {
       return;
     }
 
     const timeoutId = window.setTimeout(() => {
       if (visibleCanvasNodes.length > 0) {
-        fitView({ duration: 200, padding: 0.2 });
+        fitCanvasReadable();
       } else {
         const startIndicatorSize =
           NODE_TYPE_SIZES[NODE_TYPES.StartIndicatorNode];
@@ -893,21 +875,19 @@ function WorkflowEditorContent({
         setCenter(startCenterX, startCenterY, { zoom: 1, duration: 200 });
       }
 
-      lastFittedCanvasLayoutRef.current = canvasLayoutKey;
+      lastFittedCanvasLayoutRef.current = canvasFitKey;
     }, 100);
 
     return () => window.clearTimeout(timeoutId);
   }, [
-    canvasLayoutKey,
-    editorView,
-    fitView,
+    canvasFitKey,
+    fitCanvasReadable,
+    nodesInitialized,
     setCenter,
     visibleCanvasNodes.length,
   ]);
 
   useEffect(() => {
-    if (editorView !== 'canvas') return;
-
     // React Flow needs handle bounds before it can draw edges. In the locked
     // auto-layout canvas, those measurements are render-only and must not flow
     // back into the workflow store.
@@ -951,7 +931,7 @@ function WorkflowEditorContent({
       window.cancelAnimationFrame(animationFrameId);
       timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId));
     };
-  }, [canvasLayoutKey, editorView, nodesWithStartIndicator, reactFlowStore]);
+  }, [canvasLayoutKey, nodesWithStartIndicator, reactFlowStore]);
 
   const onConnect = useCallback(
     (connection: Edge | Connection) => {
@@ -1042,8 +1022,6 @@ function WorkflowEditorContent({
             y: verticalPosition,
           });
 
-          setCreateStepSurface('dialog');
-          setTimelineAddStepRequest(null);
           setCreateStepContext({
             position: calculatedPosition,
             connection: {
@@ -1065,8 +1043,6 @@ function WorkflowEditorContent({
       sourceHandle: string;
       position: { x: number; y: number };
     }) => {
-      setCreateStepSurface('dialog');
-      setTimelineAddStepRequest(null);
       setCreateStepContext({
         position: edgeData.position,
         insertionEdge: {
@@ -1079,207 +1055,56 @@ function WorkflowEditorContent({
     []
   );
 
-  const handleTimelineAddStep = useCallback(
-    (request: TimelineAddStepRequest) => {
-      const sourceNode = request.sourceNodeId
-        ? nodes.find((node) => node.id === request.sourceNodeId)
-        : undefined;
-      const targetNode = request.targetNodeId
-        ? nodes.find((node) => node.id === request.targetNodeId)
-        : undefined;
-
-      setCreateStepSurface('timeline');
-      setPendingNewNode(null);
-      setTimelineAddStepRequest(request);
-      closeNodeConfig();
-
-      const getAbsolutePosition = (node: Node): { x: number; y: number } => {
-        if (!node.parentId) return node.position;
-
-        const parent = nodes.find(
-          (candidate) => candidate.id === node.parentId
-        );
-        if (!parent) return node.position;
-
-        const parentPosition = getAbsolutePosition(parent);
-        return {
-          x: parentPosition.x + node.position.x,
-          y: parentPosition.y + node.position.y,
-        };
-      };
-
-      const getNodeSize = (node: Node): { width: number; height: number } => {
-        const nodeType = node.type || NODE_TYPES.BasicNode;
-        const fallbackSize = NODE_TYPE_SIZES[nodeType] || {
-          width: 180,
-          height: 48,
-        };
-
-        return {
-          width:
-            typeof node.style?.width === 'number'
-              ? node.style.width
-              : typeof node.width === 'number'
-                ? node.width
-                : fallbackSize.width,
-          height:
-            typeof node.style?.height === 'number'
-              ? node.style.height
-              : typeof node.height === 'number'
-                ? node.height
-                : fallbackSize.height,
-        };
-      };
-
-      let position = snapPositionToGrid({ x: 0, y: 0 });
-
-      if (request.directStep) {
-        const data = {
-          ...form.initialValues,
-          stepType: request.directStep.stepType,
-          name: generateUniqueStepName(request.directStep.name, nodes),
-          agentId: request.directStep.agentId || '',
-          capabilityId: request.directStep.capabilityId || '',
-          inputMapping: request.directStep.inputMapping || [],
-        } as form.SchemaType;
-        let finalPosition = position;
-        let parentId = request.parentId;
-
-        if (sourceNode) {
-          const sourcePosition = getAbsolutePosition(sourceNode);
-          const sourceSize = getNodeSize(sourceNode);
-          const absolutePosition = snapPositionToGrid({
-            x: sourcePosition.x + sourceSize.width + 180,
-            y: sourcePosition.y,
-          });
-
-          parentId = sourceNode.parentId || request.parentId;
-          finalPosition = absolutePosition;
-          if (sourceNode.parentId) {
-            const parentNode = nodes.find(
-              (node) => node.id === sourceNode.parentId
-            );
-            if (parentNode) {
-              const parentPosition = getAbsolutePosition(parentNode);
-              finalPosition = {
-                x: absolutePosition.x - parentPosition.x,
-                y: absolutePosition.y - parentPosition.y,
-              };
-            }
-          }
-        }
-
-        setPendingNewNode({
-          id: generateStepId(
-            data.name,
-            nodes.map((node) => node.id)
-          ),
-          data: data as any,
-          position: finalPosition,
-          parentId,
-          sourceNodeId: request.sourceNodeId,
-          sourceHandle: request.sourceHandle,
-        });
-        setCreateStepContext(null);
-        return;
-      }
-
-      if (request.parallelBranch && sourceNode && targetNode) {
-        const sourcePosition = getAbsolutePosition(sourceNode);
-        const targetPosition = getAbsolutePosition(targetNode);
-        const sourceSize = getNodeSize(sourceNode);
-        const targetSize = getNodeSize(targetNode);
-
-        // The diamond keeps the existing source->target edge, so place the
-        // parallel step between them horizontally but below the current lane.
-        position = snapPositionToGrid({
-          x: (sourcePosition.x + sourceSize.width + targetPosition.x) / 2,
-          y:
-            Math.max(
-              sourcePosition.y + sourceSize.height,
-              targetPosition.y + targetSize.height
-            ) + 96,
-        });
-
-        setCreateStepContext({
-          position,
-          parallelBranch: {
-            source: sourceNode.id,
-            target: targetNode.id,
-            sourceHandle: request.sourceHandle || 'source',
-          },
-        });
-        return;
-      }
-
-      if (sourceNode && targetNode) {
-        const sourcePosition = getAbsolutePosition(sourceNode);
-        const targetPosition = getAbsolutePosition(targetNode);
-        const sourceSize = getNodeSize(sourceNode);
-        const targetSize = getNodeSize(targetNode);
-
-        position = snapPositionToGrid({
-          x: (sourcePosition.x + sourceSize.width + targetPosition.x) / 2,
-          y:
-            targetPosition.y +
-            targetSize.height / 2 -
-            (NODE_TYPE_SIZES[NODE_TYPES.BasicNode]?.height || 48) / 2,
-        });
-
-        setCreateStepContext({
-          position,
-          insertionEdge: {
-            source: sourceNode.id,
-            target: targetNode.id,
-            sourceHandle: request.sourceHandle || 'source',
-          },
-        });
-        return;
-      }
-
-      if (sourceNode) {
-        const sourcePosition = getAbsolutePosition(sourceNode);
-        const sourceSize = getNodeSize(sourceNode);
-
-        position = snapPositionToGrid({
-          x: sourcePosition.x + sourceSize.width + 180,
-          y: sourcePosition.y,
-        });
-
-        setCreateStepContext({
-          position,
-          connection: {
-            source: sourceNode.id,
-            sourceHandle: request.sourceHandle || 'source',
-          },
-        });
-        return;
-      }
-
-      if (targetNode) {
-        const targetPosition = getAbsolutePosition(targetNode);
-        position = snapPositionToGrid({
-          x: Math.max(0, targetPosition.x - 288),
-          y: targetPosition.y,
-        });
-
-        setCreateStepContext({
-          position,
-          insertionEdge: {
-            source: '__start_indicator__',
-            target: targetNode.id,
-            sourceHandle: 'source',
-          },
-        });
-        return;
-      }
-
+  const handleEdgeParallelClick = useCallback(
+    (edgeData: {
+      source: string;
+      target: string;
+      sourceHandle: string;
+      position: { x: number; y: number };
+    }) => {
       setCreateStepContext({
-        position,
-        parentId: request.parentId,
+        position: edgeData.position,
+        parallelBranch: {
+          source: edgeData.source,
+          target: edgeData.target,
+          sourceHandle: edgeData.sourceHandle,
+        },
       });
     },
-    [nodes, setPendingNewNode, closeNodeConfig]
+    []
+  );
+
+  // Route condition/priority editing on a selected edge. Conditions share the
+  // canonical suggestion pipeline, scoped to the container the edge is in.
+  const updateEdgeData = useWorkflowStore((state) => state.updateEdgeData);
+  const edgeRouteActions = useMemo<EdgeRouteActions>(
+    () => ({
+      onUpdateRouteData: (edgeId, updates) => updateEdgeData(edgeId, updates),
+      onDeleteRoute: (edgeId) =>
+        onEdgesChange([{ id: edgeId, type: 'remove' }]),
+      stepName: (stepId) => canvasDisplayValue.stepNames.get(stepId) || stepId,
+      conditionSuggestionsForEdge: (edge) => {
+        const container = nodes.find((n) => n.id === edge.source)?.parentId;
+        const scope = resolveContainerScope(nodes as ScopeNode[], container);
+        return composeConditionSuggestions({
+          previousSteps: [],
+          inputSchemaFields: workflow?.inputSchemaFields,
+          variables: workflow?.variables,
+          isInsideWhileLoop: scope.isInsideWhileLoop,
+          isInsideSplit: scope.isInsideSplit,
+          isInsideWaitScope: scope.isInsideWaitScope,
+          splitItemSchemaFields: splitItemSchemaFieldsFromScope(scope),
+        });
+      },
+    }),
+    [
+      canvasDisplayValue.stepNames,
+      nodes,
+      onEdgesChange,
+      updateEdgeData,
+      workflow?.inputSchemaFields,
+      workflow?.variables,
+    ]
   );
 
   // Handle step picker selection - stores pending node for user confirmation
@@ -1299,167 +1124,6 @@ function WorkflowEditorContent({
         agentId: result.agentId || '',
         capabilityId: result.capabilityId || '',
       } as form.SchemaType;
-      const getPendingPositionFromSource = (sourceNode: Node) => {
-        const type = STEP_TYPES[data.stepType] || NODE_TYPES.BasicNode;
-        const newNodeSize =
-          NODE_TYPE_SIZES[type] || NODE_TYPE_SIZES[NODE_TYPES.BasicNode];
-
-        let finalPosition = createStepContext.position;
-        let parentId: string | undefined;
-
-        const getAbsolutePosition = (node: Node): { x: number; y: number } => {
-          if (!node.parentId) return node.position;
-          const parent = nodes.find((n) => n.id === node.parentId);
-          if (!parent) return node.position;
-          const parentAbsolute = getAbsolutePosition(parent);
-          return {
-            x: parentAbsolute.x + node.position.x,
-            y: parentAbsolute.y + node.position.y,
-          };
-        };
-
-        const sourceAbsolute = getAbsolutePosition(sourceNode);
-        const sourceHandleY = sourceAbsolute.y + (sourceNode.height || 48) / 2;
-        const newNodeHandleOffset = newNodeSize.height / 2;
-
-        const absolutePosition = {
-          x: createStepContext.position.x,
-          y: sourceHandleY - newNodeHandleOffset,
-        };
-
-        if (sourceNode.parentId) {
-          parentId = sourceNode.parentId;
-          const parentNode = nodes.find((n) => n.id === parentId);
-          if (parentNode) {
-            const parentAbsolute = getAbsolutePosition(parentNode);
-            finalPosition = {
-              x: absolutePosition.x - parentAbsolute.x,
-              y: absolutePosition.y - parentAbsolute.y,
-            };
-          }
-        } else {
-          finalPosition = absolutePosition;
-        }
-
-        return { finalPosition, parentId };
-      };
-
-      if (
-        createStepSurface === 'timeline' &&
-        timelineAddStepRequest?.aiAgentTool &&
-        timelineAddStepRequest.sourceNodeId
-      ) {
-        const sourceNode = nodes.find(
-          (node) => node.id === timelineAddStepRequest.sourceNodeId
-        );
-        if (!sourceNode) return;
-
-        const toolName = generateUniqueAiToolName(result, nodes);
-        const sourceInputMapping = [
-          ...((sourceNode.data?.inputMapping ||
-            []) as WorkflowInputMappingItem[]),
-        ];
-        updateNode(sourceNode.id, {
-          inputMapping: appendToolToInputMapping(sourceInputMapping, toolName),
-        } as any);
-
-        const { finalPosition, parentId } =
-          getPendingPositionFromSource(sourceNode);
-        setPendingNewNode({
-          id: newNodeId,
-          data: data as any,
-          position: finalPosition,
-          parentId,
-          sourceNodeId: sourceNode.id,
-          sourceHandle: toolName,
-        });
-
-        setCreateStepContext(null);
-        setSelectedEdgeId(null);
-        setShowStepPicker(false);
-        return;
-      }
-
-      if (
-        createStepSurface === 'timeline' &&
-        timelineAddStepRequest?.aiAgentMemory &&
-        timelineAddStepRequest.sourceNodeId
-      ) {
-        const sourceNode = nodes.find(
-          (node) => node.id === timelineAddStepRequest.sourceNodeId
-        );
-        if (!sourceNode) return;
-
-        const memoryNodeId = newNodeId;
-        const memoryStepName = generateUniqueStepName(
-          `${result.name || 'Memory provider'} (memory)`,
-          nodes
-        );
-        const memoryNodeData = {
-          ...form.initialValues,
-          id: memoryNodeId,
-          stepType: result.stepType,
-          name: memoryStepName,
-          agentId: result.agentId || '',
-          capabilityId: result.capabilityId || '',
-          inputMapping: createMemoryProviderInputMapping(),
-        } as form.SchemaType;
-        const { finalPosition, parentId } =
-          getPendingPositionFromSource(sourceNode);
-        const createdNodeId = addNode(
-          memoryNodeData as any,
-          finalPosition,
-          parentId
-        );
-
-        if (createdNodeId) {
-          addStoreEdge(sourceNode.id, createdNodeId, 'memory');
-
-          const sourceInputMapping = [
-            ...((sourceNode.data?.inputMapping ||
-              []) as WorkflowInputMappingItem[]),
-          ];
-          setOrAddInputMappingValue(
-            sourceInputMapping,
-            'memoryEnabled',
-            true,
-            'boolean'
-          );
-          setOrAddInputMappingValue(
-            sourceInputMapping,
-            'memoryProviderStepId',
-            createdNodeId,
-            'string'
-          );
-          setOrAddInputMappingValue(
-            sourceInputMapping,
-            'memoryConversationId',
-            '',
-            'string',
-            'reference'
-          );
-          setOrAddInputMappingValue(
-            sourceInputMapping,
-            'memoryMaxMessages',
-            50,
-            'integer'
-          );
-          // No memoryStrategy: leave compaction strategy unset so the DSL
-          // default (SlidingWindow) applies, matching the canvas add-memory.
-          updateNode(sourceNode.id, {
-            inputMapping: sourceInputMapping,
-          } as any);
-          setPendingCenterNodeId(sourceNode.id);
-          setSelectedNodeId(sourceNode.id);
-        }
-
-        setCreateStepContext(null);
-        setSelectedEdgeId(null);
-        setShowStepPicker(false);
-        setTimelineAddStepRequest(null);
-        setCreateStepSurface(null);
-        return;
-      }
 
       // Parallel branch over an existing edge: defer creation like the other
       // flows; the diamond edges are wired in handlePendingNodeSave.
@@ -1672,19 +1336,7 @@ function WorkflowEditorContent({
       setSelectedEdgeId(null);
       setShowStepPicker(false);
     },
-    [
-      createStepContext,
-      createStepSurface,
-      timelineAddStepRequest,
-      addNode,
-      addStoreEdge,
-      getIntersectingNodes,
-      nodes,
-      setPendingNewNode,
-      setPendingCenterNodeId,
-      setSelectedNodeId,
-      updateNode,
-    ]
+    [createStepContext, getIntersectingNodes, nodes, setPendingNewNode]
   );
 
   const handleCancelCreate = useCallback(() => {
@@ -1878,8 +1530,6 @@ function WorkflowEditorContent({
       }
 
       setPendingNewNode(null);
-      setTimelineAddStepRequest(null);
-      setCreateStepSurface(null);
       return true;
     },
     [
@@ -1897,84 +1547,7 @@ function WorkflowEditorContent({
 
   const handlePendingNodeCancel = useCallback(() => {
     setPendingNewNode(null);
-    setTimelineAddStepRequest(null);
-    setCreateStepSurface(null);
   }, [setPendingNewNode]);
-
-  /**
-   * The timeline slot's contents while a step is being added.
-   *
-   * Two states: the picker, then a placeholder for the step being configured.
-   * Configuration itself happens in the docked panel, the same surface that
-   * edits an existing step — the timeline used to render its own inline form
-   * here, which made a third editing surface with its own width, chrome and
-   * save button.
-   *
-   * The placeholder is not decoration. A pending node exists only in the store
-   * until it is saved, so without it the slot collapses to a plain "Add step"
-   * row and nothing on screen says where the step is about to land. It also
-   * gives the panel's connector something to point at, via the same
-   * data-timeline-node-card hook a real step card uses.
-   */
-  const renderTimelineInlineAddStep = useCallback(() => {
-    if (!workflow) return null;
-
-    if (pendingNewNode) {
-      const data = pendingNewNode.data as unknown as form.SchemaType;
-      return (
-        <div
-          data-timeline-node-card={pendingNewNode.id}
-          className="flex items-center gap-3 px-4 py-3"
-        >
-          <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-            <Plus className="size-4" aria-hidden="true" />
-          </span>
-          <div className="min-w-0">
-            <div className="truncate text-sm font-medium text-foreground">
-              {data.name || 'New step'}
-            </div>
-            <div className="truncate text-xs text-muted-foreground">
-              Configuring in the panel — not added yet
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    if (createStepSurface !== 'timeline' || !createStepContext) return null;
-
-    return (
-      <NodeFormProvider
-        isAddingBefore={nodes.length === 0}
-        parentNodeId={
-          createStepContext.connection?.source ||
-          createStepContext.insertionEdge?.source ||
-          createStepContext.parallelBranch?.source
-        }
-        createContainerId={createStepContext.parentId ?? null}
-      >
-        <StepPickerPanel
-          active
-          onSelect={handleStepPickerSelect}
-          onCancel={handleCancelCreate}
-          allowFinish={
-            !createStepContext.insertionEdge &&
-            !createStepContext.parallelBranch
-          }
-          mode={timelineAddStepRequest?.pickerMode || 'all'}
-        />
-      </NodeFormProvider>
-    );
-  }, [
-    workflow,
-    pendingNewNode,
-    createStepSurface,
-    createStepContext,
-    timelineAddStepRequest?.pickerMode,
-    nodes.length,
-    handleStepPickerSelect,
-    handleCancelCreate,
-  ]);
 
   const handleNodesChange = useCallback(
     (changes: import('@xyflow/react').NodeChange[]) => {
@@ -1990,166 +1563,131 @@ function WorkflowEditorContent({
 
   return (
     <>
-      <div
-        // No transition on the padding: the connector is measured from live
-        // DOM rects, and animating the squeeze leaves it pointing at a stale
-        // position for the duration of the animation.
-        data-workflow-editor-root=""
-        className="relative h-full w-full"
-        style={editorInset ? { paddingRight: editorInset } : undefined}
-      >
-        <Tabs
-          value={editorView}
-          onValueChange={(value) => setEditorView(value as WorkflowEditorView)}
-          className="h-full"
-        >
-          <div className="pointer-events-none absolute left-4 top-4 z-20">
-            <TabsList className="pointer-events-auto shadow-sm">
-              <TabsTrigger
-                value="canvas"
-                className="gap-2"
-                data-testid="workflow-view-canvas"
-              >
-                <Network className="size-4" aria-hidden="true" />
-                Canvas
-              </TabsTrigger>
-              <TabsTrigger
-                value="timeline"
-                className="gap-2"
-                data-testid="workflow-view-timeline"
-              >
-                <ListTree className="size-4" aria-hidden="true" />
-                Timeline
-              </TabsTrigger>
-            </TabsList>
-          </div>
-
-          <TabsContent
-            value="canvas"
-            className={cn('m-0 h-full', editorView !== 'canvas' && 'hidden')}
-          >
-            <NodeConfigProvider value={nodeConfigContextValue}>
-              <EdgeContextProvider
-                onInsertClick={handleEdgeInsertClick}
-                allEdges={edges}
-                edgeRoutes={layoutedCanvasEdgeRoutes}
-              >
-                <ReactFlow
-                  ref={ref}
-                  nodes={nodesWithStartIndicator}
-                  edges={edgesWithStartIndicator}
-                  edgeTypes={edgeTypes}
-                  nodeTypes={nodeTypes}
-                  onNodesChange={handleNodesChange}
-                  onEdgesChange={onEdgesChange}
-                  onConnect={readOnly ? undefined : onConnect}
-                  onConnectEnd={readOnly ? undefined : onConnectEnd}
-                  isValidConnection={readOnly ? undefined : isValidConnection}
-                  proOptions={{ hideAttribution: true }}
-                  defaultEdgeOptions={{ zIndex: CANVAS_Z.edge }}
-                  onNodeDoubleClick={(_event, node) => {
-                    // Don't open dialog for special nodes
-                    if (
-                      node.type === NODE_TYPES.CreateNode ||
-                      node.type === NODE_TYPES.NoteNode ||
-                      node.type === NODE_TYPES.StartIndicatorNode
-                    ) {
-                      return;
-                    }
-                    // Open dialog for editing on double-click
-                    if (workflow && !readOnly) {
-                      setEditingNodeId(node.id);
-                    }
-                  }}
-                  onNodeClick={(event, node) => {
-                    // Don't select special nodes
-                    if (
-                      node.type === NODE_TYPES.CreateNode ||
-                      node.type === NODE_TYPES.NoteNode ||
-                      node.type === NODE_TYPES.StartIndicatorNode
-                    ) {
-                      setSelectedNodeId(null);
-                      setSelectedEdgeId(null);
-                      return;
-                    }
-                    // Don't select if clicking on a button
-                    const target = event.target as HTMLElement;
-                    if (target.closest('button')) {
-                      return;
-                    }
-                    // In debug inspect mode, allow selecting executed nodes only
-                    if (debugInspectMode) {
-                      const nodeStatus = useExecutionStore
-                        .getState()
-                        .nodeExecutionStatus.get(node.id);
-                      if (nodeStatus) {
-                        setSelectedNodeId(node.id);
-                        setSelectedEdgeId(null);
-                      }
-                      return;
-                    }
-                    // Select node on single click (for moving, keyboard delete, etc.)
-                    if (workflow && !readOnly) {
+      <div data-workflow-editor-root="" className="relative h-full w-full">
+        <NodeConfigProvider value={nodeConfigContextValue}>
+          <CanvasDisplayProvider value={canvasDisplayValue}>
+            <EdgeContextProvider
+              onInsertClick={readOnly ? undefined : handleEdgeInsertClick}
+              onParallelClick={readOnly ? undefined : handleEdgeParallelClick}
+              routeActions={readOnly ? undefined : edgeRouteActions}
+              allEdges={edges}
+              edgeRoutes={layoutedCanvasEdgeRoutes}
+            >
+              <ReactFlow
+                ref={ref}
+                nodes={nodesWithStartIndicator}
+                edges={edgesWithStartIndicator}
+                edgeTypes={edgeTypes}
+                nodeTypes={nodeTypes}
+                onNodesChange={handleNodesChange}
+                onEdgesChange={onEdgesChange}
+                onConnect={readOnly ? undefined : onConnect}
+                onConnectEnd={readOnly ? undefined : onConnectEnd}
+                isValidConnection={readOnly ? undefined : isValidConnection}
+                proOptions={{ hideAttribution: true }}
+                minZoom={CANVAS_MIN_ZOOM}
+                maxZoom={2}
+                // Double-click opens a step's editor. React Flow's zoom-on-
+                // double-click (d3-zoom) stops the event at the pane, and with
+                // nodes not draggable they lack the class that exempts them,
+                // so onNodeDoubleClick never fired.
+                zoomOnDoubleClick={false}
+                defaultEdgeOptions={{ zIndex: CANVAS_Z.edge }}
+                onNodeDoubleClick={(_event, node) => {
+                  // Don't open dialog for special nodes
+                  if (
+                    node.type === NODE_TYPES.CreateNode ||
+                    node.type === NODE_TYPES.NoteNode ||
+                    node.type === NODE_TYPES.StartIndicatorNode
+                  ) {
+                    return;
+                  }
+                  // Open dialog for editing on double-click
+                  if (workflow && !readOnly) {
+                    setEditingNodeId(node.id);
+                  }
+                }}
+                onNodeClick={(event, node) => {
+                  // Don't select special nodes
+                  if (
+                    node.type === NODE_TYPES.CreateNode ||
+                    node.type === NODE_TYPES.NoteNode ||
+                    node.type === NODE_TYPES.StartIndicatorNode
+                  ) {
+                    setSelectedNodeId(null);
+                    setSelectedEdgeId(null);
+                    return;
+                  }
+                  // Don't select if clicking on a button
+                  const target = event.target as HTMLElement;
+                  if (target.closest('button')) {
+                    return;
+                  }
+                  // In debug inspect mode, allow selecting executed nodes only
+                  if (debugInspectMode) {
+                    const nodeStatus = useExecutionStore
+                      .getState()
+                      .nodeExecutionStatus.get(node.id);
+                    if (nodeStatus) {
                       setSelectedNodeId(node.id);
                       setSelectedEdgeId(null);
                     }
-                  }}
-                  onEdgeClick={(_event, edge) => {
-                    setSelectedEdgeId(edge.id);
+                    return;
+                  }
+                  // Select node on single click (for moving, keyboard delete, etc.)
+                  if (workflow && !readOnly) {
+                    setSelectedNodeId(node.id);
+                    setSelectedEdgeId(null);
+                    // With a step's editor already open, a click moves it to
+                    // the clicked step: reading through steps should not
+                    // need a close and a double-click per step. Unsaved
+                    // edits stay staged on the step they were made on.
+                    if (editingNodeId && editingNodeId !== node.id) {
+                      openNodeConfig(node.id);
+                    }
+                  }
+                }}
+                onEdgeClick={(_event, edge) => {
+                  setSelectedEdgeId(edge.id);
+                  setSelectedNodeId(null);
+                }}
+                onPaneClick={() => {
+                  const { selectedNodeId: currentSelectedNodeId } =
+                    useWorkflowStore.getState();
+                  if (currentSelectedNodeId) {
                     setSelectedNodeId(null);
-                  }}
-                  onPaneClick={() => {
-                    const { selectedNodeId: currentSelectedNodeId } =
-                      useWorkflowStore.getState();
-                    if (currentSelectedNodeId) {
-                      setSelectedNodeId(null);
-                    }
-                    if (selectedEdgeId) {
-                      setSelectedEdgeId(null);
-                    }
-                  }}
-                  snapToGrid={true}
-                  snapGrid={[SNAP_GRID_SIZE, SNAP_GRID_SIZE]}
-                  elevateEdgesOnSelect={true}
-                  edgesReconnectable={false}
-                  disableKeyboardA11y={true}
-                  elementsSelectable={!readOnly || debugInspectMode}
-                  nodesDraggable={false}
-                  nodesConnectable={!readOnly}
-                  nodesFocusable={!readOnly}
-                  edgesFocusable={!readOnly}
-                >
-                  <Controls />
-                  <Background
-                    gap={SNAP_GRID_SIZE}
-                    size={1}
-                    color={isDark ? '#262626' : undefined}
+                  }
+                  if (selectedEdgeId) {
+                    setSelectedEdgeId(null);
+                  }
+                }}
+                snapToGrid={true}
+                snapGrid={[SNAP_GRID_SIZE, SNAP_GRID_SIZE]}
+                elevateEdgesOnSelect={true}
+                edgesReconnectable={false}
+                disableKeyboardA11y={true}
+                elementsSelectable={!readOnly || debugInspectMode}
+                nodesDraggable={false}
+                nodesConnectable={!readOnly}
+                nodesFocusable={!readOnly}
+                edgesFocusable={!readOnly}
+              >
+                <Controls fitViewOptions={CANVAS_FIT_VIEW_OPTIONS} />
+                <Panel position="bottom-right">
+                  <CanvasDetailToggle
+                    value={canvasDetail}
+                    onChange={setCanvasDetail}
                   />
-                </ReactFlow>
-              </EdgeContextProvider>
-            </NodeConfigProvider>
-          </TabsContent>
-
-          <TabsContent
-            forceMount
-            value="timeline"
-            className={cn('m-0 h-full', editorView !== 'timeline' && 'hidden')}
-          >
-            <NodeConfigProvider value={timelineNodeConfigContextValue}>
-              <WorkflowTimelineView
-                readOnly={readOnly}
-                debugInspectMode={debugInspectMode}
-                onEditNode={openTimelineNodeConfig}
-                editingNodeId={editingNodeId}
-                activeAddStepRequest={timelineAddStepRequest}
-                renderInlineAddStep={renderTimelineInlineAddStep}
-                onAddStep={handleTimelineAddStep}
-                inputSchemaFields={workflow?.inputSchemaFields}
-                variables={workflow?.variables}
-              />
-            </NodeConfigProvider>
-          </TabsContent>
-        </Tabs>
+                </Panel>
+                <Background
+                  gap={SNAP_GRID_SIZE}
+                  size={1}
+                  color={isDark ? '#262626' : undefined}
+                />
+              </ReactFlow>
+            </EdgeContextProvider>
+          </CanvasDisplayProvider>
+        </NodeConfigProvider>
       </div>
 
       {/* Step Picker Modal */}
@@ -2157,7 +1695,8 @@ function WorkflowEditorContent({
         isAddingBefore={nodes.length === 0}
         parentNodeId={
           createStepContext?.connection?.source ||
-          createStepContext?.insertionEdge?.source
+          createStepContext?.insertionEdge?.source ||
+          createStepContext?.parallelBranch?.source
         }
         createContainerId={createStepContext?.parentId ?? null}
       >
@@ -2169,7 +1708,10 @@ function WorkflowEditorContent({
             }
           }}
           onSelect={handleStepPickerSelect}
-          allowFinish={!createStepContext?.insertionEdge}
+          allowFinish={
+            !createStepContext?.insertionEdge &&
+            !createStepContext?.parallelBranch
+          }
           closeOnSelect={false}
         />
       </NodeFormProvider>

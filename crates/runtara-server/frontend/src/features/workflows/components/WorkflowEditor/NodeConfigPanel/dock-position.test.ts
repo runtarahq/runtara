@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
 import {
-  canvasInset,
   connectorGeometry,
   DOCK_GAP,
   DOCK_MIN_WIDTH,
@@ -101,21 +100,5 @@ describe('connectorGeometry', () => {
 
   it('hides when there is no anchored node', () => {
     expect(connectorGeometry(null, panel).visible).toBe(false);
-  });
-});
-
-describe('canvasInset', () => {
-  it('reserves room for the panel when docked and open', () => {
-    expect(canvasInset({ width: 1600, height: 1000 }, 520, true)).toBe(
-      520 + DOCK_GAP * 2
-    );
-  });
-
-  it('reserves nothing when closed', () => {
-    expect(canvasInset({ width: 1600, height: 1000 }, 520, false)).toBe(0);
-  });
-
-  it('reserves nothing in sheet mode — the sheet overlays the bottom', () => {
-    expect(canvasInset({ width: 900, height: 1000 }, 520, true)).toBe(0);
   });
 });

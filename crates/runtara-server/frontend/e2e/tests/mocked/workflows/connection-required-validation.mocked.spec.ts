@@ -140,7 +140,9 @@ test.describe('Connection-required Rust validation (mocked)', () => {
     await page.goto(appPath(`/workflows/${workflowId}`));
     await expect(page.locator('main')).toBeVisible();
     await expect(
-      page.getByRole('button', { name: 'Edit Source Log' })
+      page.locator(
+        '[data-testid="workflow-canvas-node"][data-step-name="Source Log"]'
+      )
     ).toBeVisible({
       timeout: 10_000,
     });
@@ -155,7 +157,17 @@ test.describe('Connection-required Rust validation (mocked)', () => {
       page.getByRole('button', { name: 'Errors (1)' })
     ).toBeVisible();
     await expect(page.getByText(/\[E026\]/).first()).toBeVisible();
-    await expect(page.getByText(/requires connection_id/)).toBeVisible();
+    // The message shows in the Problems panel and on the step's canvas card.
+    await expect(
+      page.getByTestId('validation-message').getByText(/requires connection_id/)
+    ).toBeVisible();
+    await expect(
+      page
+        .locator(
+          '[data-testid="workflow-canvas-node"][data-step-name="Query Records"]'
+        )
+        .getByText(/requires connection_id/)
+    ).toBeVisible();
     await expect(page.getByText('Step: query_records').first()).toBeVisible();
     expect(updateReached).toBe(false);
   });

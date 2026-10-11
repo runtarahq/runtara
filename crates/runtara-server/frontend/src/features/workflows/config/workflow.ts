@@ -44,17 +44,22 @@ export const STEP_TYPES: Record<string, string> = {
   Error: NODE_TYPES.BasicNode,
 };
 
-// All node sizes must be multiples of 12px grid for proper alignment
-// Compact pill-shaped nodes for clean aesthetic
+// All node sizes must be multiples of 12px grid for proper alignment, and
+// heights must be odd multiples of 12 (36, 60, 84, ...) so every node's
+// vertical center lands on the same grid phase — see
+// snapContainerHeightToGrid. A height that breaks this is silently snapped by
+// the layout and the card no longer matches its handles and edges.
+// These are the compact sizes; the canvas computes the rendered size per node
+// in CustomNodes/node-size.ts.
 export const NODE_TYPE_SIZES: Record<
   string,
   { width: number; height: number }
 > = {
-  [NODE_TYPES.CreateNode]: { width: 216, height: 52 },
-  [NODE_TYPES.BasicNode]: { width: 216, height: 52 },
-  [NODE_TYPES.ConditionalNode]: { width: 216, height: 52 },
-  [NODE_TYPES.SwitchNode]: { width: 216, height: 52 }, // Base size, dynamically adjusted based on cases
-  [NODE_TYPES.AiAgentNode]: { width: 252, height: 96 }, // Card layout, dynamically adjusted based on tools/memory
+  [NODE_TYPES.CreateNode]: { width: 216, height: 60 },
+  [NODE_TYPES.BasicNode]: { width: 216, height: 60 },
+  [NODE_TYPES.ConditionalNode]: { width: 216, height: 60 },
+  [NODE_TYPES.SwitchNode]: { width: 216, height: 60 }, // Base size, dynamically adjusted based on cases
+  [NODE_TYPES.AiAgentNode]: { width: 252, height: 132 }, // Card layout, dynamically adjusted based on tools/memory
   [NODE_TYPES.ContainerNode]: { width: 168, height: 132 },
   [NODE_TYPES.NoteNode]: { width: 192, height: 96 },
   [NODE_TYPES.StartIndicatorNode]: { width: 72, height: 36 },

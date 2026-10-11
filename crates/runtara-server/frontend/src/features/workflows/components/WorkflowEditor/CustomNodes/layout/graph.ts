@@ -7,6 +7,11 @@ import {
   SNAP_GRID_SIZE,
   snapToGrid,
 } from '@/features/workflows/config/workflow-editor';
+import {
+  getStepNodeSize,
+  isResizableNodeType,
+  type CanvasDetailLevel,
+} from '../node-size';
 
 // Derived from NODE_TYPE_SIZES — the single source of truth for node
 // dimensions (workflow.ts). Do not re-declare pixel literals here.
@@ -15,8 +20,7 @@ export const BASE_HEIGHT = NODE_TYPE_SIZES[NODE_TYPES.BasicNode].height;
 export const BASE_GROUP_WIDTH = NODE_TYPE_SIZES[NODE_TYPES.ContainerNode].width;
 export const BASE_GROUP_HEIGHT =
   NODE_TYPE_SIZES[NODE_TYPES.ContainerNode].height;
-export const SWITCH_HANDLE_SPACING = 24;
-export const SWITCH_FIRST_HANDLE_TOP = 28;
+export { SWITCH_FIRST_HANDLE_TOP, SWITCH_HANDLE_SPACING } from '../node-size';
 
 export type LayoutPoint = { x: number; y: number };
 export type LayoutSize = { width: number; height: number };
@@ -187,7 +191,22 @@ function getSwitchCaseLabel(
   }
 }
 
-export function getReactFlowNodeSize(node: Node): LayoutSize {
+export function getReactFlowNodeSize(
+  node: Node,
+  detailLevel: CanvasDetailLevel = 'compact'
+): LayoutSize {
+  // Fixed-size nodes render at a size derived from their type and data, so
+  // the layout must use exactly that — never a width/height stored with the
+  // workflow, which goes stale whenever the card design changes.
+  if (!isResizableNodeType(node.type)) {
+    const intrinsic = getStepNodeSize(
+      node.type,
+      node.data as Parameters<typeof getStepNodeSize>[1],
+      detailLevel
+    );
+    if (intrinsic) return intrinsic;
+  }
+
   const configuredSize =
     NODE_TYPE_SIZES[node.type || NODE_TYPES.BasicNode] ??
     NODE_TYPE_SIZES[NODE_TYPES.BasicNode];
@@ -198,22 +217,9 @@ export function getReactFlowNodeSize(node: Node): LayoutSize {
   const nodeWidth = typeof node.width === 'number' ? node.width : undefined;
   const nodeHeight = typeof node.height === 'number' ? node.height : undefined;
 
-  const width = styleWidth ?? nodeWidth ?? configuredSize.width;
-  let height = styleHeight ?? nodeHeight ?? configuredSize.height;
-
-  if (node.type === NODE_TYPES.SwitchNode) {
-    const cases = getSwitchCases(node);
-    if (isSwitchRoutingMode(node, cases)) {
-      const totalHandles = cases.length + 1;
-      const lastHandleTop =
-        SWITCH_FIRST_HANDLE_TOP + (totalHandles - 1) * SWITCH_HANDLE_SPACING;
-      height = Math.max(height, snapToGrid(lastHandleTop + 24));
-    }
-  }
-
   return {
-    width: snapToGrid(width),
-    height: snapToGrid(height),
+    width: snapToGrid(styleWidth ?? nodeWidth ?? configuredSize.width),
+    height: snapToGrid(styleHeight ?? nodeHeight ?? configuredSize.height),
   };
 }
 
@@ -313,7 +319,11 @@ export function compareLayoutEdges(a: LayoutEdge, b: LayoutEdge): number {
   return a.id.localeCompare(b.id);
 }
 
-export function buildLayoutGraph(nodes: Node[], edges: Edge[]): LayoutGraph {
+export function buildLayoutGraph(
+  nodes: Node[],
+  edges: Edge[],
+  detailLevel: CanvasDetailLevel = 'compact'
+): LayoutGraph {
   const childrenByParent = new Map<string, string[]>();
   nodes.forEach((node) => {
     if (!node.parentId) return;
@@ -326,7 +336,7 @@ export function buildLayoutGraph(nodes: Node[], edges: Edge[]): LayoutGraph {
     id: node.id,
     type: toLayoutNodeType(node.type),
     parentId: node.parentId,
-    size: getReactFlowNodeSize(node),
+    size: getReactFlowNodeSize(node, detailLevel),
     ports: buildPorts(node),
     children: childrenByParent.get(node.id),
     order: index,

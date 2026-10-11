@@ -5,6 +5,7 @@ import { BaseNode } from '../BaseNode.tsx';
 import { ButtonHandle } from '../ButtonHandle.tsx';
 import { Plus, AlertTriangle } from 'lucide-react';
 import * as form from '@/features/workflows/components/WorkflowEditor/NodeForm/NodeFormItem.tsx';
+import { defaultErrorHandlerInputMapping } from './error-handler-defaults';
 import { BASE_WIDTH } from './utils.tsx';
 import {
   generateStepId,
@@ -20,8 +21,6 @@ import {
   NODE_TYPE_SIZES,
 } from '@/features/workflows/config/workflow.ts';
 
-const BASIC_NODE_WIDTH = NODE_TYPE_SIZES[NODE_TYPES.BasicNode].width;
-const BASIC_NODE_HEIGHT = NODE_TYPE_SIZES[NODE_TYPES.BasicNode].height;
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { NodeFormProvider } from '../NodeForm/NodeFormProvider';
 import { StepPickerModal, StepPickerResult } from '../NodeForm/StepPickerModal';
@@ -32,6 +31,9 @@ import { canStepHaveErrorHandler } from '@/features/workflows/utils/step-error-s
 import { useEntitlements } from '@/shared/hooks/useEntitlements';
 import { agentEnabled, enabledAgentSet } from '@/shared/entitlements';
 import { findAgentById } from '@/shared/utils/agent-id';
+import { useCanvasDisplay } from '../CanvasDisplayContext';
+import { stepDetailRows } from '../step-details';
+import { getStepNodeSize } from './node-size';
 
 // Note: Node editing is now handled by the sidebar (EditorSidebar) via double-click on ReactFlow.
 // The dialogs below are only for creating new nodes via the + button handles.
@@ -43,6 +45,7 @@ function BasicNodeComponent({
   data,
   isConnectable,
   selected,
+  parentId,
 }: NodeProps<BasicNodeProps>) {
   const [showStepPicker, setShowStepPicker] = useState<boolean>(false);
   const [isAddingBefore, setIsAddingBefore] = useState<boolean>(false);
@@ -108,13 +111,19 @@ function BasicNodeComponent({
   });
 
   // Lookup agent name for Agent steps
-  const agentName = useMemo(() => {
+  const agent = useMemo(() => {
     if (data.stepType !== 'Agent' || !data.agentId) return undefined;
     const agents =
       (agentsQuery.data as { agents: ExtendedAgent[] })?.agents || [];
-    const agent = findAgentById(agents, data.agentId);
-    return agent?.name;
+    return findAgentById(agents, data.agentId);
   }, [data.stepType, data.agentId, agentsQuery.data]);
+  const agentName = agent?.name;
+  // The capability's metadata gives the card its labels ("Instance ID" for
+  // instance_id) and puts required inputs first.
+  const capability = data.capabilityId
+    ? agent?.supportedCapabilities?.[data.capabilityId]
+    : undefined;
+  const capabilityName = capability?.displayName || capability?.name;
 
   // Stale-agent flag. Set when an existing Agent step references a module
   // that's no longer in the entitlement allowlist. Surfaces as a canvas
@@ -259,6 +268,7 @@ function BasicNodeComponent({
       ...form.initialValues,
       stepType: 'Error',
       name: 'Error handler',
+      inputMapping: defaultErrorHandlerInputMapping(),
     } as form.SchemaType;
 
     const newNodeSize = NODE_TYPE_SIZES[NODE_TYPES.BasicNode];
@@ -394,6 +404,22 @@ function BasicNodeComponent({
   // Split, While, WaitForSignal, WaitForInstances) offers the error handle.
   const canFail = canStepHaveErrorHandler(data.stepType);
 
+  const { detailLevel, stepNames, stepTypes } = useCanvasDisplay();
+  const parentStepType = parentId ? stepTypes.get(parentId) : undefined;
+  const detailRows = useMemo(
+    () =>
+      stepDetailRows(data, {
+        inputFields: capability?.inputs,
+        stepNames,
+        dataScope: parentStepType === 'Split' ? 'item' : 'input',
+      }),
+    [capability, data, parentStepType, stepNames]
+  );
+  const cardSize = getStepNodeSize(NODE_TYPES.BasicNode, data, detailLevel) ?? {
+    width: NODE_TYPE_SIZES[NODE_TYPES.BasicNode].width,
+    height: NODE_TYPE_SIZES[NODE_TYPES.BasicNode].height,
+  };
+
   return (
     <>
       <BaseNode
@@ -403,6 +429,7 @@ function BasicNodeComponent({
         agentId={data.agentId}
         agentName={agentName}
         capabilityId={data.capabilityId}
+        capabilityName={capabilityName}
         description={(data as { description?: string }).description}
         inputMapping={data.inputMapping}
         selected={selected}
@@ -415,7 +442,9 @@ function BasicNodeComponent({
         isExecutionReadOnly={isExecuting}
         breakpoint={!!(data as any).breakpoint}
         onToggleBreakpoint={isStartStep ? undefined : handleToggleBreakpoint}
-        style={{ width: BASIC_NODE_WIDTH, height: BASIC_NODE_HEIGHT }}
+        detailRows={detailRows}
+        data-parent-node-id={parentId}
+        style={{ width: cardSize.width, height: cardSize.height }}
       >
         {/* Only show source handle for non-Finish steps */}
         {!isFinishStep && (
@@ -483,6 +512,7 @@ function BasicNodeComponent({
               size="icon"
               onClick={handleOpenCreateError}
               title="Add error handler"
+              aria-label={`Add error handler from ${data.name || id || 'step'}`}
             >
               <AlertTriangle className="text-destructive" />
             </Button>
@@ -535,7 +565,10 @@ function arePropsEqual(
       prevData.stepType !== nextData.stepType ||
       prevData.agentId !== nextData.agentId ||
       prevData.capabilityId !== nextData.capabilityId ||
-      (prevData as any).breakpoint !== (nextData as any).breakpoint
+      (prevData as any).breakpoint !== (nextData as any).breakpoint ||
+      (prevData as any).description !== (nextData as any).description ||
+      (prevData as any).childVersion !== (nextData as any).childVersion ||
+      (prevData as any).splitParallelism !== (nextData as any).splitParallelism
     ) {
       return false;
     }

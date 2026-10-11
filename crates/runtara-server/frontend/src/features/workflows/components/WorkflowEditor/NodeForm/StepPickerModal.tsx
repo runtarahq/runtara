@@ -4,7 +4,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Search,
-  X,
   Zap,
   type LucideIcon,
 } from 'lucide-react';
@@ -63,11 +62,8 @@ interface StepPickerModalProps {
 interface StepPickerPanelProps {
   active?: boolean;
   onSelect: (result: StepPickerResult) => void;
-  onCancel?: () => void;
   allowFinish?: boolean;
   mode?: 'all' | 'tool' | 'memory';
-  contentScrollable?: boolean;
-  autoFocus?: boolean;
 }
 
 const TOOL_STEP_TYPES = new Set([
@@ -99,11 +95,8 @@ function normalizeStepType(stepType: StepTypeInfo): string {
 export function StepPickerPanel({
   active = true,
   onSelect,
-  onCancel,
   allowFinish = true,
   mode = 'all',
-  contentScrollable = true,
-  autoFocus = true,
 }: StepPickerPanelProps) {
   const { agents: rawAgents, stepTypes } = useContext(NodeFormContext);
   const entitlements = useEntitlements();
@@ -383,16 +376,6 @@ export function StepPickerPanel({
           <h2 className="text-lg font-semibold">{title}</h2>
           <p className="text-sm text-muted-foreground">{subtitle}</p>
         </div>
-        {onCancel && (
-          <button
-            type="button"
-            onClick={onCancel}
-            className="rounded p-1 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            aria-label="Cancel adding step"
-          >
-            <X className="size-4" />
-          </button>
-        )}
       </div>
 
       <div className="border-b p-4">
@@ -403,17 +386,12 @@ export function StepPickerPanel({
             value={searchQuery}
             onChange={(event) => setSearchQuery(event.target.value)}
             className="pl-9"
-            autoFocus={autoFocus}
+            autoFocus
           />
         </div>
       </div>
 
-      <div
-        className={cn(
-          'p-4',
-          contentScrollable && `${PICKER_LIST_MAX_HEIGHT} overflow-y-auto`
-        )}
-      >
+      <div className={cn('p-4', `${PICKER_LIST_MAX_HEIGHT} overflow-y-auto`)}>
         {viewMode === 'search' ? (
           <SearchResults
             loading={someLoading}

@@ -15,6 +15,8 @@ import {
   STEP_TYPES,
 } from '@/features/workflows/config/workflow.ts';
 import { BASE_WIDTH } from './utils.tsx';
+import { getStepNodeSize } from './node-size';
+import { useCanvasDisplay } from '../CanvasDisplayContext';
 import * as form from '@/features/workflows/components/WorkflowEditor/NodeForm/NodeFormItem.tsx';
 import {
   generateStepId,
@@ -31,10 +33,7 @@ import {
 } from '@/features/workflows/stores/validationStore';
 import { NodeFormProvider } from '../NodeForm/NodeFormProvider';
 import { StepPickerModal, StepPickerResult } from '../NodeForm/StepPickerModal';
-import {
-  renderConditionReadable,
-  Condition,
-} from '@/shared/components/ui/condition-editor';
+import { describeCondition } from '../step-details';
 import { getConditionFromInputMapping } from '@/shared/utils/condition-utils';
 import { CANVAS_Z } from '@/features/workflows/components/WorkflowEditor/canvas-z';
 
@@ -48,6 +47,7 @@ function ConditionalNodeComponent({
   data,
   isConnectable,
   selected,
+  parentId,
 }: NodeProps<ConditionalNodeProps>) {
   const [showStepPicker, setShowStepPicker] = useState<boolean>(false);
   const [activeSource, setActiveSource] = useState<string | null>(null);
@@ -93,38 +93,49 @@ function ConditionalNodeComponent({
   );
   const showValidationError = hasValidationError || hasValidationErrorFromPanel;
 
-  // Extract condition summary for display
+  // The condition as a sentence ("Input · stage is \"intake\""). A loaded
+  // step keeps the DSL condition in `condition`; an edited one carries it as
+  // JSON in capabilityId or as condition.* mapping entries.
+  const { stepNames, stepTypes } = useCanvasDisplay();
+  const parentStepType = parentId ? stepTypes.get(parentId) : undefined;
   const conditionSummary = useMemo(() => {
-    // Try capabilityId first (primary storage for condition JSON)
+    const context = {
+      stepNames,
+      dataScope:
+        parentStepType === 'Split' ? ('item' as const) : ('input' as const),
+    };
+    const loaded = (data as { condition?: unknown }).condition;
+    if (loaded && typeof loaded === 'object') {
+      const text = describeCondition(loaded, context);
+      if (text) return text;
+    }
+
     if (data.capabilityId && typeof data.capabilityId === 'string') {
       try {
-        const condition = JSON.parse(data.capabilityId) as Condition;
-        if (condition && condition.op) {
-          return renderConditionReadable(condition);
-        }
+        const text = describeCondition(JSON.parse(data.capabilityId), context);
+        if (text) return text;
       } catch {
         // Fall through to inputMapping
       }
     }
 
-    // Fallback: reconstruct from inputMapping
     if (data.inputMapping && Array.isArray(data.inputMapping)) {
-      // Filter to only condition-related entries
       const conditionEntries = data.inputMapping.filter(
         (entry: any) =>
           entry.type?.startsWith('condition.expression.') ||
           entry.type?.startsWith('expression.')
       );
       if (conditionEntries.length > 0) {
-        const condition = getConditionFromInputMapping(conditionEntries);
-        if (condition) {
-          return renderConditionReadable(condition as Condition);
-        }
+        const text = describeCondition(
+          getConditionFromInputMapping(conditionEntries),
+          context
+        );
+        if (text) return text;
       }
     }
 
     return null;
-  }, [data.capabilityId, data.inputMapping]);
+  }, [data, parentStepType, stepNames]);
 
   const trueConnections = useNodeConnections({
     handleType: 'source',
@@ -210,6 +221,11 @@ function ConditionalNodeComponent({
     [id, activeSource, setPendingNewNode]
   );
 
+  const { detailLevel } = useCanvasDisplay();
+  const cardSize =
+    getStepNodeSize(NODE_TYPES.ConditionalNode, data, detailLevel) ??
+    NODE_TYPE_SIZES[NODE_TYPES.ConditionalNode];
+
   return (
     <>
       <BaseNode
@@ -227,10 +243,9 @@ function ConditionalNodeComponent({
         breakpoint={!!(data as any).breakpoint}
         onToggleBreakpoint={handleToggleBreakpoint}
         subtitle={conditionSummary}
-        style={{
-          width: NODE_TYPE_SIZES[NODE_TYPES.ConditionalNode].width,
-          height: NODE_TYPE_SIZES[NODE_TYPES.ConditionalNode].height,
-        }}
+        detailRows={[]}
+        data-parent-node-id={parentId}
+        style={{ width: cardSize.width, height: cardSize.height }}
       >
         {/* True handle - pill centered on the right border, positioned at 30% from top */}
         <Handle
@@ -344,7 +359,8 @@ function arePropsEqual(
       prevData.name !== nextData.name ||
       prevData.stepType !== nextData.stepType ||
       prevData.agentId !== nextData.agentId ||
-      prevData.capabilityId !== nextData.capabilityId
+      prevData.capabilityId !== nextData.capabilityId ||
+      prevData.inputMapping !== nextData.inputMapping
     ) {
       return false;
     }

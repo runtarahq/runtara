@@ -24,6 +24,9 @@ function placeOrderedRanks(
   const positions = new Map<string, LayoutPoint>();
   const horizontalGap = snapGapToGrid(rankSep);
   const verticalGap = snapGapToGrid(nodeSep);
+  // Lanes are spaced for a compact card. Taller cards (detailed, AiAgent)
+  // that would collide in a rank are pushed apart by the stacking below;
+  // spacing every lane for the tallest card left huge gaps between branches.
   const laneUnit = snapGapToGrid(BASE_HEIGHT + nodeSep);
   const rankWidths = ranks.map((rankIds) =>
     Math.max(

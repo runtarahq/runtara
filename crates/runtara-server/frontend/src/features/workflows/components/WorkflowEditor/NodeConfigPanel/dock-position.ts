@@ -90,16 +90,3 @@ export function connectorGeometry(node: Rect | null, panel: Rect): Connector {
     visible: withinPanelSpan && gap > 2,
   };
 }
-
-/**
- * Right-hand inset the canvas needs so the panel does not cover it.
- * Zero when undocked — the sheet overlays the bottom instead.
- */
-export function canvasInset(
-  viewport: Viewport,
-  width: number,
-  open: boolean
-): number {
-  if (!open || !isDocked(viewport)) return 0;
-  return width + DOCK_GAP * 2;
-}
