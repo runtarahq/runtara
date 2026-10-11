@@ -8,25 +8,14 @@ import { useNavigate, useParams } from 'react-router';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { Loader } from '@/shared/components/loader.tsx';
-import { formatDate } from '@/lib/utils.ts';
 import { Badge } from '@/shared/components/ui/badge.tsx';
 import { Button } from '@/shared/components/ui/button';
 import {
   ChevronLeft,
   FileText,
-  Clock,
-  Calendar,
-  Timer,
-  MemoryStick,
-  RotateCw,
-  XCircle,
-  Tag,
-  Server,
   Hash,
   Copy,
   Sparkles,
-  Flag,
-  Zap,
   ChevronRight,
   Database,
   Info,
@@ -52,7 +41,6 @@ import {
 } from '@/shared/components/ui/card';
 import { Separator } from '@/shared/components/ui/separator';
 import { toast } from 'sonner';
-import { StructuredErrorDisplay } from '@/shared/components/StructuredErrorDisplay';
 import {
   getTerminationTypeDisplay,
   getStatusDisplay,
@@ -61,10 +49,10 @@ import {
 } from '@/shared/utils/status-display';
 import { getRunOutputEmptyState } from '@/features/workflows/utils/run-empty-state';
 import {
-  ExecutionSummary,
   ExecutionTimeline,
   type ExecutionStats,
 } from '@/features/workflows/components/ExecutionTimeline';
+import { RunOverviewCard } from './RunOverviewCard';
 import { Spinner } from '@/shared/components/ui/spinner';
 import {
   canResume,
@@ -247,18 +235,6 @@ function WorkflowHistoryContent() {
 
   // Empty-state wording depends on whether the run can still produce something.
   const outputEmptyState = getRunOutputEmptyState(data.status);
-  // Metric cards stack two high beside Timeline & Details; a lone card
-  // takes the full height instead of leaving an empty slot under it.
-  const metricCount =
-    [
-      data.executionDurationSeconds,
-      data.queueDurationSeconds,
-      data.maxMemoryMb,
-    ].filter((value) => value !== undefined && value !== null).length +
-    (data.metadata?.retryCount !== undefined &&
-    data.metadata?.maxRetries !== undefined
-      ? 1
-      : 0);
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
@@ -449,257 +425,7 @@ function WorkflowHistoryContent() {
       )}
 
       <div className="space-y-6">
-        {/* Metrics and Timeline & Details share one row: the metric cards
-            stack two high so their column matches the details card. */}
-        <div className="flex flex-col gap-4 lg:flex-row">
-          {metricCount > 0 && (
-            <div
-              className={`grid shrink-0 grid-cols-2 gap-4 lg:auto-cols-[11rem] lg:grid-flow-col lg:grid-cols-none ${
-                metricCount > 1 ? 'lg:grid-rows-2' : 'lg:grid-rows-1'
-              }`}
-            >
-              {/* Execution Duration Card */}
-              {data.executionDurationSeconds !== undefined &&
-                data.executionDurationSeconds !== null && (
-                  <Card>
-                    <CardHeader className="pb-3">
-                      <CardTitle
-                        className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
-                        title="The total time spent actively running your workflow, from start to finish. This doesn't include time waiting in queue."
-                      >
-                        <Timer className="size-4" />
-                        Execution Time
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <div className="text-2xl font-bold">
-                        {data.executionDurationSeconds.toFixed(2)}s
-                      </div>
-                    </CardContent>
-                  </Card>
-                )}
-
-              {/* Queue Duration Card */}
-              {data.queueDurationSeconds !== undefined &&
-                data.queueDurationSeconds !== null && (
-                  <Card>
-                    <CardHeader className="pb-3">
-                      <CardTitle
-                        className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
-                        title="The time your workflow spent waiting before it could start running. During busy periods, workflows may need to wait for available resources."
-                      >
-                        <Clock className="size-4" />
-                        Queue Time
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <div className="text-2xl font-bold">
-                        {data.queueDurationSeconds.toFixed(2)}s
-                      </div>
-                    </CardContent>
-                  </Card>
-                )}
-
-              {/* Memory Usage Card */}
-              {data.maxMemoryMb !== undefined && data.maxMemoryMb !== null && (
-                <Card>
-                  <CardHeader className="pb-3">
-                    <CardTitle
-                      className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
-                      title="The maximum amount of memory (RAM) used while running this workflow. Higher values indicate more data was being processed at once."
-                    >
-                      <MemoryStick className="size-4" />
-                      Max Memory
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">
-                      {data.maxMemoryMb.toFixed(1)} MB
-                    </div>
-                  </CardContent>
-                </Card>
-              )}
-
-              {/* Retries Card */}
-              {data.metadata?.retryCount !== undefined &&
-                data.metadata?.maxRetries !== undefined && (
-                  <Card>
-                    <CardHeader className="pb-3">
-                      <CardTitle
-                        className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
-                        title="Shows how many times this workflow was retried after encountering issues (current / maximum allowed). Automatic retries help ensure your workflows complete successfully."
-                      >
-                        <RotateCw className="size-4" />
-                        Retries
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <div className="text-2xl font-bold">
-                        {data.metadata.retryCount} / {data.metadata.maxRetries}
-                      </div>
-                    </CardContent>
-                  </Card>
-                )}
-            </div>
-          )}
-
-          {/* Instance Details Card */}
-          <Card className="min-w-0 flex-1">
-            <CardHeader className="pb-4">
-              <CardTitle className="flex items-center gap-2">
-                <Calendar className="size-5" />
-                Timeline & Details
-                {data.usedVersion !== undefined && (
-                  <Badge variant="secondary" className="ml-auto">
-                    v{data.usedVersion}
-                  </Badge>
-                )}
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="flex flex-wrap gap-x-8 gap-y-4">
-                <div className="flex items-center gap-3">
-                  <div className="rounded-full bg-muted p-2">
-                    <Calendar className="size-4 text-muted-foreground" />
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground">Created</p>
-                    <p className="text-sm font-medium">
-                      {data.created
-                        ? formatDate(
-                            new Date(data.created),
-                            'yyyy-MM-dd HH:mm:ss'
-                          )
-                        : 'N/A'}
-                    </p>
-                  </div>
-                </div>
-
-                {data.metadata?.startedAt && (
-                  <div className="flex items-center gap-3">
-                    <div className="rounded-full bg-info/10 p-2">
-                      <Zap className="size-4 text-info" />
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Started</p>
-                      <p className="text-sm font-medium">
-                        {formatDate(
-                          new Date(data.metadata.startedAt),
-                          'yyyy-MM-dd HH:mm:ss'
-                        )}
-                      </p>
-                    </div>
-                  </div>
-                )}
-
-                {data.metadata?.completedAt && (
-                  <div className="flex items-center gap-3">
-                    <div className="rounded-full bg-success/10 p-2">
-                      <Flag className="size-4 text-success" />
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground">Completed</p>
-                      <p className="text-sm font-medium">
-                        {formatDate(
-                          new Date(data.metadata.completedAt),
-                          'yyyy-MM-dd HH:mm:ss'
-                        )}
-                      </p>
-                    </div>
-                  </div>
-                )}
-
-                {executionStats && (
-                  <div>
-                    <p className="text-xs text-muted-foreground">Steps</p>
-                    <p className="text-sm font-medium">
-                      {executionStats.stepCount}
-                    </p>
-                  </div>
-                )}
-
-                {data.processingOverheadSeconds !== undefined &&
-                  data.processingOverheadSeconds !== null && (
-                    <div
-                      className="cursor-help"
-                      title="The time spent on setup and coordination tasks before and after running your workflow. This is separate from the actual execution time."
-                    >
-                      <p className="text-xs text-muted-foreground">
-                        Processing Overhead
-                      </p>
-                      <p className="text-sm font-medium">
-                        {data.processingOverheadSeconds.toFixed(2)}s
-                      </p>
-                    </div>
-                  )}
-
-                {data.metadata?.workerId && (
-                  <div
-                    className="min-w-0 cursor-help"
-                    title="A unique identifier for the server that processed this workflow. Useful for troubleshooting and tracking which server handled your request."
-                  >
-                    <p className="flex items-center gap-1 text-xs text-muted-foreground">
-                      <Server className="size-3" />
-                      Worker ID
-                    </p>
-                    <p className="truncate font-mono text-sm">
-                      {data.metadata.workerId}
-                    </p>
-                  </div>
-                )}
-              </div>
-
-              {/* Time per step type, from the Events timeline */}
-              {executionStats &&
-                Object.keys(executionStats.byType).length > 0 && (
-                  <div className="mt-6">
-                    <p className="mb-3 text-sm font-medium">
-                      Execution Summary
-                    </p>
-                    <ExecutionSummary stats={executionStats} />
-                  </div>
-                )}
-
-              {/* Error Message */}
-              {data.metadata?.errorMessage && (
-                <div className="mt-6">
-                  <div className="mb-2 flex items-start gap-2">
-                    <XCircle className="mt-0.5 size-5 text-destructive" />
-                    <p className="font-semibold text-destructive">
-                      Error Message
-                    </p>
-                  </div>
-                  <StructuredErrorDisplay
-                    error={data.metadata.errorMessage}
-                    mode="expanded"
-                    showGuidance
-                  />
-                </div>
-              )}
-
-              {/* Tags */}
-              {data.tags && data.tags.length > 0 && (
-                <div className="mt-6">
-                  <div className="mb-3 flex items-center gap-2">
-                    <Tag className="size-4 text-muted-foreground" />
-                    <span className="text-sm font-medium">Tags</span>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {data.tags.map((tag: string, index: number) => (
-                      <Badge
-                        key={index}
-                        variant="secondary"
-                        className="px-3 py-1"
-                      >
-                        {tag}
-                      </Badge>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
+        <RunOverviewCard run={data} executionStats={executionStats} />
 
         {/* Runs this run started through control:start */}
         {data.id && <ChildRunsCard instanceId={data.id} />}
