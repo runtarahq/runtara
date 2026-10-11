@@ -50,6 +50,8 @@ export type PendingNodeCandidate = {
   sourceNodeId?: string;
   targetNodeId?: string;
   sourceHandle?: string;
+  /** Inserted before the first step, so it replaces the entry point. */
+  becomesEntryPoint?: boolean;
   insertionEdge?: {
     source: string;
     target: string;
@@ -312,12 +314,12 @@ export async function validateNodeEditWithRust({
     candidateEdges = edges;
   }
 
+  const graphOptions = buildGraphOptions(workflow);
+  if (pendingNode?.becomesEntryPoint) {
+    graphOptions.entryPoint = nodeId;
+  }
   const executionGraph =
-    composeExecutionGraph(
-      candidateNodes,
-      candidateEdges,
-      buildGraphOptions(workflow)
-    ) ?? {};
+    composeExecutionGraph(candidateNodes, candidateEdges, graphOptions) ?? {};
 
   const rustValidation = await validateExecutionGraphWithRust(executionGraph);
   const errors =

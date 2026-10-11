@@ -1260,6 +1260,18 @@ export function Workflow() {
     },
   });
 
+  // Workflow-level changes from the settings panel and the canvas (e.g. a new
+  // entry point), kept until the global save like node changes.
+  const handleWorkflowChange = useCallback(
+    (changes: Partial<typeof stagedWorkflowChanges>) => {
+      setStagedWorkflowChanges((prev) => ({
+        ...prev,
+        ...changes,
+      }));
+    },
+    []
+  );
+
   // Handlers for staged node changes
   const handleStagedNodeChange = useCallback(
     (nodeId: string, nodeData: form.SchemaType) => {
@@ -2304,6 +2316,7 @@ export function Workflow() {
             stagedNodeChanges={stagedNodeChanges}
             onStagedNodeChange={handleStagedNodeChange}
             onResetNodeChanges={handleResetNodeChanges}
+            onWorkflowChange={handleWorkflowChange}
           />
           {/* Debug step inspector — floating panel when suspended */}
           {isSuspended && <DebugStepInspector />}
@@ -2314,12 +2327,7 @@ export function Workflow() {
         onNavigateToStep={handleNavigateToStep}
         workflowId={workflowId}
         workflow={workflowForSettings}
-        onWorkflowChange={(changes) => {
-          setStagedWorkflowChanges((prev) => ({
-            ...prev,
-            ...changes,
-          }));
-        }}
+        onWorkflowChange={handleWorkflowChange}
         readOnly={!!executingInstanceId}
         versions={versionsWithDebug}
         selectedVersion={selectedVersion}

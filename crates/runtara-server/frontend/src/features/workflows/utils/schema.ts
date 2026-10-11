@@ -232,10 +232,9 @@ export function buildSchemaFromFields(
       required: field.required !== undefined ? field.required : true,
     };
 
-    // For array types, add a default items definition
-    if (fieldType === 'array') {
-      schemaField.items = field.items ?? { type: 'string' };
-    } else if (field.items !== undefined) {
+    // Keep `items` as declared. An untyped array must stay untyped: defaulting
+    // it to strings on every save silently retypes arrays of objects.
+    if (field.items !== undefined) {
       schemaField.items = field.items;
     }
 

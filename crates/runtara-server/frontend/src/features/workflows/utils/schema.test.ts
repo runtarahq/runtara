@@ -96,6 +96,14 @@ describe('parseSchema/buildSchemaFromFields', () => {
       notEquals: 'closed',
     });
   });
+
+  it('keeps an untyped array untyped instead of retyping it as strings', () => {
+    const rawSchema = {
+      orders: { type: 'array', required: true, description: 'Orders' },
+    };
+
+    expect(buildSchemaFromFields(parseSchema(rawSchema))).toEqual(rawSchema);
+  });
 });
 
 describe('buildStateSchemaFromFields', () => {

@@ -196,6 +196,8 @@ type WorkflowEditorProps = {
   stagedNodeChanges?: StagedNodeChanges;
   onStagedNodeChange?: (nodeId: string, data: form.SchemaType) => void;
   onResetNodeChanges?: (nodeId: string) => void;
+  /** Stages workflow-level changes the canvas makes, such as a new entry point. */
+  onWorkflowChange?: (changes: { entryPoint?: string }) => void;
 };
 
 // Long workflows are several thousand pixels wide; React Flow's default
@@ -265,6 +267,7 @@ function WorkflowEditorContent({
   stagedNodeChanges = {},
   onStagedNodeChange,
   onResetNodeChanges,
+  onWorkflowChange,
 }: WorkflowEditorProps) {
   const isDark = useIsDarkTheme();
   // Context for creating new steps
@@ -1205,6 +1208,7 @@ function WorkflowEditorContent({
               data: data as any,
               position: newPosition,
               targetNodeId: createStepContext.insertionEdge.target,
+              becomesEntryPoint: true,
             });
 
             setCreateStepContext(null);
@@ -1515,6 +1519,11 @@ function WorkflowEditorContent({
                 'source'
               );
             }
+            // A pinned entry point would leave the new first step unreachable
+            // (E002). In auto mode the entry is re-derived from the edges.
+            if (pendingNewNode.becomesEntryPoint && workflow?.entryPoint) {
+              onWorkflowChange?.({ entryPoint: createdNodeId });
+            }
           } else if (pendingNewNode.sourceNodeId) {
             // Connecting from a source node (dragged connection)
             addStoreEdge(
@@ -1542,6 +1551,8 @@ function WorkflowEditorContent({
       setPendingCenterNodeId,
       setSelectedNodeId,
       setPendingNewNode,
+      workflow?.entryPoint,
+      onWorkflowChange,
     ]
   );
 

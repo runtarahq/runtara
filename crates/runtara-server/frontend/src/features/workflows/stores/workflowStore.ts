@@ -238,6 +238,7 @@ interface WorkflowState {
     sourceNodeId?: string; // Node to connect FROM (new node is target)
     targetNodeId?: string; // Node to connect TO (new node is source)
     sourceHandle?: string;
+    becomesEntryPoint?: boolean; // Inserted before the first step, from Start
     insertionEdge?: {
       source: string;
       target: string;

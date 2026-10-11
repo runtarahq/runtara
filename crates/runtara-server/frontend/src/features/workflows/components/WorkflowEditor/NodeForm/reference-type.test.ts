@@ -396,6 +396,23 @@ describe('validateReferencePath', () => {
     ).toBeNull();
   });
 
+  it('flags an unknown root (E126 parity), e.g. a literal carried into reference mode', () => {
+    expect(validateReferencePath('LoanApplication', CONTEXT)).toMatch(
+      /'LoanApplication' is not a reference root/
+    );
+    expect(validateReferencePath('step.fetch.outputs', CONTEXT)).toMatch(
+      /'step' is not a reference root/
+    );
+    for (const ok of [
+      'variables.x',
+      'item.total',
+      'loop.index',
+      'error.message',
+    ]) {
+      expect(validateReferencePath(ok, CONTEXT)).toBeNull();
+    }
+  });
+
   it('flags undeclared workflow input fields', () => {
     expect(validateReferencePath('data.unknown', CONTEXT)).toMatch(
       /'unknown' is not declared in the workflow input schema.*flag, customer/
