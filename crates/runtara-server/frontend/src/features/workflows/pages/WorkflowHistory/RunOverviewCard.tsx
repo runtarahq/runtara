@@ -1,23 +1,9 @@
-import { useState, type ElementType, type ReactNode } from 'react';
-import {
-  Check,
-  Copy,
-  Layers,
-  MemoryStick,
-  RotateCw,
-  Tag,
-  Timer,
-  XCircle,
-} from 'lucide-react';
+import { useState, type ReactNode } from 'react';
+import { Check, Copy, XCircle } from 'lucide-react';
 import { formatDate, formatRelativeTime } from '@/lib/utils.ts';
 import { Badge } from '@/shared/components/ui/badge.tsx';
 import { Button } from '@/shared/components/ui/button';
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from '@/shared/components/ui/card';
+import { Card, CardContent } from '@/shared/components/ui/card';
 import { WithTooltip } from '@/shared/components/ui/tooltip';
 import { StructuredErrorDisplay } from '@/shared/components/StructuredErrorDisplay';
 import {
@@ -35,10 +21,9 @@ interface RunOverviewCardProps {
 }
 
 /**
- * Everything a reader checks first about a run, in one card: what happened
- * and when (headline + error), how long it took and where that time went
- * (key figures, the queued/ran phases, time by step type), then the
- * debugging details (worker, overhead, tags).
+ * A compact summary of a run: what happened and when, why it failed, its
+ * key figures, then two bars showing queued vs. running time and time by
+ * step type.
  */
 export function RunOverviewCard({ run, executionStats }: RunOverviewCardProps) {
   const status = getStatusDisplay(run.status);
@@ -55,6 +40,9 @@ export function RunOverviewCard({ run, executionStats }: RunOverviewCardProps) {
   const retryCount = run.metadata?.retryCount;
   const maxRetries = run.metadata?.maxRetries;
   const errorMessage = run.metadata?.errorMessage;
+  const workerId = run.metadata?.workerId;
+  const overhead = run.processingOverheadSeconds;
+  const tags = run.tags ?? [];
   // A running run reports no duration yet; show how long it has run so far.
   const executionSeconds =
     run.executionDurationSeconds ??
@@ -63,75 +51,34 @@ export function RunOverviewCard({ run, executionStats }: RunOverviewCardProps) {
       ? secondsBetween(startedAt, new Date().toISOString())
       : undefined) ??
     null;
-  const typeCount = executionStats
-    ? Object.keys(executionStats.byType).length
-    : 0;
-
-  const figures: FigureProps[] = [
-    {
-      icon: Timer,
-      label: 'Duration',
-      hint: 'Time spent running the workflow, excluding time waiting in the queue.',
-      value: executionSeconds !== null ? formatSeconds(executionSeconds) : '—',
-      note:
-        active && executionSeconds !== null
-          ? 'so far'
-          : run.queueDurationSeconds && run.queueDurationSeconds >= 0.01
-            ? `+ ${formatSeconds(run.queueDurationSeconds)} in queue`
-            : undefined,
-    },
-    {
-      icon: Layers,
-      label: 'Steps',
-      hint: 'Top-level steps this run executed. Loops and branches count once.',
-      value: executionStats ? String(executionStats.stepCount) : '—',
-      note:
-        executionStats && typeCount < executionStats.stepCount
-          ? pluralize(typeCount, 'step type')
-          : undefined,
-    },
-  ];
-  if (retryCount !== undefined && maxRetries !== undefined) {
-    figures.push({
-      icon: RotateCw,
-      label: 'Retries',
-      hint: 'Automatic retries after a failed attempt, out of the maximum allowed.',
-      value: retryCount === 0 ? 'None' : `${retryCount} of ${maxRetries}`,
-      note:
-        retryCount === 0 ? `up to ${maxRetries} allowed` : 'after a failure',
-      tone: retryCount > 0 ? 'warning' : undefined,
-    });
-  }
-  if (run.maxMemoryMb !== undefined && run.maxMemoryMb !== null) {
-    figures.push({
-      icon: MemoryStick,
-      label: 'Peak memory',
-      hint: 'The most memory the run used at any one time.',
-      value: `${run.maxMemoryMb.toFixed(1)} MB`,
-    });
-  }
+  const hasStepTypes =
+    !!executionStats && Object.keys(executionStats.byType).length > 0;
 
   return (
     <Card>
-      <CardHeader className="flex-row items-start justify-between gap-4 space-y-0 pb-4">
-        <div className="space-y-1">
-          <CardTitle className="text-lg">Run overview</CardTitle>
-          <p className="text-sm text-muted-foreground">{headline}</p>
+      <CardContent className="space-y-4 p-4">
+        {/* Headline */}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <h2 className="text-sm font-semibold">Run overview</h2>
+          <span className="text-sm text-muted-foreground">{headline}</span>
+          <div className="ml-auto flex flex-wrap items-center gap-1.5">
+            {tags.map((tag) => (
+              <Badge key={tag} variant="secondary" className="px-2 py-0">
+                {tag}
+              </Badge>
+            ))}
+            {run.usedVersion !== undefined && (
+              <WithTooltip label="Workflow version this run executed">
+                <Badge variant="secondary">v{run.usedVersion}</Badge>
+              </WithTooltip>
+            )}
+          </div>
         </div>
-        {run.usedVersion !== undefined && (
-          <WithTooltip label="Workflow version this run executed">
-            <Badge variant="secondary" className="shrink-0">
-              v{run.usedVersion}
-            </Badge>
-          </WithTooltip>
-        )}
-      </CardHeader>
 
-      <CardContent className="space-y-6">
         {errorMessage && (
           <div>
-            <div className="mb-2 flex items-center gap-2 text-sm font-medium text-destructive">
-              <XCircle className="size-4" />
+            <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-destructive">
+              <XCircle className="size-3.5" />
               Why it failed
             </div>
             <StructuredErrorDisplay
@@ -142,58 +89,141 @@ export function RunOverviewCard({ run, executionStats }: RunOverviewCardProps) {
           </div>
         )}
 
-        <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border bg-border sm:grid-cols-[repeat(auto-fit,minmax(9rem,1fr))]">
-          {figures.map((figure) => (
-            <Figure key={figure.label} {...figure} />
-          ))}
+        {/* Key figures */}
+        <dl className="flex flex-wrap gap-x-8 gap-y-3">
+          <Figure
+            label="Duration"
+            hint="Time spent running the workflow, excluding time waiting in the queue."
+            value={
+              executionSeconds !== null ? formatSeconds(executionSeconds) : '—'
+            }
+            note={
+              active && executionSeconds !== null
+                ? 'so far'
+                : run.queueDurationSeconds && run.queueDurationSeconds >= 0.01
+                  ? `+ ${formatSeconds(run.queueDurationSeconds)} queued`
+                  : undefined
+            }
+          />
+          <Figure
+            label="Steps"
+            hint="Top-level steps this run executed. Loops and branches count once."
+            value={executionStats ? String(executionStats.stepCount) : '—'}
+          />
+          {retryCount !== undefined && maxRetries !== undefined && (
+            <Figure
+              label="Retries"
+              hint="Automatic retries after a failed attempt, out of the maximum allowed."
+              value={
+                retryCount === 0 ? 'None' : `${retryCount} of ${maxRetries}`
+              }
+              note={retryCount === 0 ? `of ${maxRetries} allowed` : undefined}
+              tone={retryCount > 0 ? 'warning' : undefined}
+            />
+          )}
+          {run.maxMemoryMb !== undefined && run.maxMemoryMb !== null && (
+            <Figure
+              label="Peak memory"
+              hint="The most memory the run used at any one time."
+              value={`${run.maxMemoryMb.toFixed(1)} MB`}
+            />
+          )}
+          {overhead !== undefined && overhead !== null && (
+            <Figure
+              label="Overhead"
+              hint="Setup and coordination before and after the run, outside its duration."
+              value={formatSeconds(overhead)}
+              muted
+            />
+          )}
+          {workerId && (
+            <Figure
+              label="Worker"
+              hint="The server that ran this workflow. Useful when tracing a problem to a host."
+              value={
+                <span className="flex items-center gap-1 font-mono text-sm font-normal">
+                  {workerId}
+                  <CopyButton value={workerId} label="Copy worker ID" />
+                </span>
+              }
+              muted
+            />
+          )}
         </dl>
 
-        <RunPhases
-          status={run.status}
-          active={active}
-          created={run.created}
-          startedAt={startedAt}
-          completedAt={completedAt}
-        />
-
-        {executionStats && Object.keys(executionStats.byType).length > 0 && (
-          <TimeByStepType stats={executionStats} />
-        )}
-
-        <TechnicalDetails run={run} />
+        {/* Where the time went */}
+        <div
+          className={`grid gap-x-8 gap-y-4 ${hasStepTypes ? 'lg:grid-cols-2' : ''}`}
+        >
+          <RunPhases
+            status={run.status}
+            active={active}
+            created={run.created}
+            startedAt={startedAt}
+            completedAt={completedAt}
+          />
+          {executionStats && hasStepTypes && (
+            <TimeByStepType stats={executionStats} />
+          )}
+        </div>
       </CardContent>
     </Card>
   );
 }
 
-interface FigureProps {
-  icon: ElementType;
+function Figure({
+  label,
+  hint,
+  value,
+  note,
+  tone,
+  muted,
+}: {
   label: string;
   hint: string;
-  value: string;
+  value: ReactNode;
   note?: string;
   tone?: 'warning';
-}
-
-function Figure({ icon: Icon, label, hint, value, note, tone }: FigureProps) {
+  /** Secondary, debugging-only figures read quieter. */
+  muted?: boolean;
+}) {
   return (
-    <div className="bg-card px-4 py-3">
-      <dt className="flex items-center gap-1.5 text-xs text-muted-foreground">
-        <Icon className="size-3.5" />
+    <div>
+      <dt className="text-xs text-muted-foreground">
         <WithTooltip label={hint}>
-          <span className="cursor-help underline decoration-muted-foreground/50 decoration-dotted underline-offset-2">
+          <span className="cursor-help underline decoration-muted-foreground/40 decoration-dotted underline-offset-2">
             {label}
           </span>
         </WithTooltip>
       </dt>
       <dd
-        className={`mt-1 text-xl font-semibold tabular-nums ${
-          tone === 'warning' ? 'text-warning' : 'text-foreground'
-        }`}
+        className={`flex items-baseline gap-1.5 tabular-nums ${
+          muted ? 'text-sm' : 'text-base font-semibold'
+        } ${tone === 'warning' ? 'text-warning' : 'text-foreground'}`}
       >
         {value}
+        {note && (
+          <span className="text-xs font-normal text-muted-foreground">
+            {note}
+          </span>
+        )}
       </dd>
-      {note && <p className="mt-0.5 text-xs text-muted-foreground">{note}</p>}
+    </div>
+  );
+}
+
+/** Small section label above each bar. */
+function BarLabel({
+  children,
+  aside,
+}: {
+  children: ReactNode;
+  aside?: string;
+}) {
+  return (
+    <div className="mb-1.5 flex items-baseline justify-between gap-4 text-xs">
+      <span className="font-medium text-muted-foreground">{children}</span>
+      {aside && <span className="text-muted-foreground">{aside}</span>}
     </div>
   );
 }
@@ -241,79 +271,54 @@ function RunPhases({
   const endLabel = completedAt
     ? getStatusDisplay(status).text
     : active
-      ? 'Still running'
+      ? 'Now'
       : 'Ended';
 
   return (
-    <section>
-      <div className="mb-2 flex items-baseline justify-between gap-4">
-        <h3 className="text-sm font-medium">Timeline</h3>
-        <span className="text-xs text-muted-foreground">
-          {formatDate(new Date(created), 'EEE, d MMM yyyy')}
-        </span>
-      </div>
-      <div className="flex h-2.5 gap-0.5 overflow-hidden rounded-full bg-muted">
+    <section className="min-w-0">
+      <BarLabel aside={formatDate(new Date(created), 'd MMM yyyy')}>
+        Queued, then running
+      </BarLabel>
+      <div className="flex h-1.5 gap-0.5 overflow-hidden rounded-full bg-muted">
         {queuedPct > 0 && (
           <div
             className="h-full bg-muted-foreground/30"
             style={{ width: `${queuedPct}%` }}
+            title={`Queued ${formatMs(queuedMs)}`}
           />
         )}
         {ranPct > 0 && (
           <div
             className={`h-full ${runColor}`}
             style={{ width: `${ranPct}%` }}
+            title={`Ran ${formatMs(ranMs)}`}
           />
         )}
       </div>
-      <ol className="mt-2 grid grid-cols-3 gap-2 text-xs">
+      <ol className="mt-1.5 flex flex-wrap justify-between gap-x-3 gap-y-0.5 text-xs">
         <PhasePoint label="Created" at={created} />
-        <PhasePoint
-          label="Started"
-          at={startedAt}
-          note={queuedMs > 0 ? `after ${formatMs(queuedMs)} queued` : undefined}
-          align="center"
-        />
+        <PhasePoint label="Started" at={startedAt} />
         <PhasePoint
           label={endLabel}
           at={
             completedAt ?? (active ? new Date(endMs).toISOString() : undefined)
           }
-          note={startedMs !== null ? `ran ${formatMs(ranMs)}` : undefined}
-          align="right"
         />
       </ol>
     </section>
   );
 }
 
-function PhasePoint({
-  label,
-  at,
-  note,
-  align = 'left',
-}: {
-  label: string;
-  at?: string;
-  note?: string;
-  align?: 'left' | 'center' | 'right';
-}) {
-  const alignClass =
-    align === 'center'
-      ? 'text-center'
-      : align === 'right'
-        ? 'text-right'
-        : 'text-left';
+function PhasePoint({ label, at }: { label: string; at?: string }) {
   return (
-    <li className={alignClass}>
-      <div className="text-muted-foreground">{label}</div>
-      <div
-        className="font-medium tabular-nums text-foreground"
-        title={at ? formatDate(new Date(at), 'yyyy-MM-dd HH:mm:ss.SSS') : ''}
-      >
+    <li
+      className="whitespace-nowrap"
+      title={at ? formatDate(new Date(at), 'yyyy-MM-dd HH:mm:ss.SSS') : ''}
+    >
+      <span className="text-muted-foreground">{label} </span>
+      <span className="font-medium tabular-nums text-foreground">
         {at ? formatDate(new Date(at), 'HH:mm:ss') : '—'}
-      </div>
-      {note && <div className="text-muted-foreground">{note}</div>}
+      </span>
     </li>
   );
 }
@@ -324,9 +329,9 @@ function TimeByStepType({ stats }: { stats: ExecutionStats }) {
   const stepTotal = entries.reduce((sum, [, ms]) => sum + ms, 0);
 
   return (
-    <section>
-      <h3 className="mb-2 text-sm font-medium">Where the time went</h3>
-      <div className="flex h-2.5 gap-0.5 overflow-hidden rounded-full bg-muted">
+    <section className="min-w-0">
+      <BarLabel>Time by step type</BarLabel>
+      <div className="flex h-1.5 gap-0.5 overflow-hidden rounded-full bg-muted">
         {stepTotal > 0 &&
           entries.map(([type, ms]) =>
             ms > 0 ? (
@@ -339,7 +344,7 @@ function TimeByStepType({ stats }: { stats: ExecutionStats }) {
             ) : null
           )}
       </div>
-      <ul className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs">
+      <ul className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs">
         {entries.map(([type, ms]) => (
           <li key={type} className="flex items-center gap-1.5">
             <span
@@ -359,65 +364,6 @@ function TimeByStepType({ stats }: { stats: ExecutionStats }) {
   );
 }
 
-/** Low-priority details people reach for when debugging a specific run. */
-function TechnicalDetails({ run }: { run: WorkflowInstanceWithMetadata }) {
-  const workerId = run.metadata?.workerId;
-  const overhead = run.processingOverheadSeconds;
-  const tags = run.tags ?? [];
-  if (
-    !workerId &&
-    (overhead === undefined || overhead === null) &&
-    !tags.length
-  )
-    return null;
-
-  return (
-    <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t pt-4 text-xs text-muted-foreground">
-      {workerId && (
-        <DetailItem label="Worker">
-          <span className="font-mono text-foreground">{workerId}</span>
-          <CopyButton value={workerId} label="Copy worker ID" />
-        </DetailItem>
-      )}
-      {overhead !== undefined && overhead !== null && (
-        <DetailItem label="Platform overhead">
-          <span
-            className="tabular-nums text-foreground"
-            title="Setup and coordination before and after the run, outside its execution time."
-          >
-            {formatSeconds(overhead)}
-          </span>
-        </DetailItem>
-      )}
-      {tags.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Tag className="size-3.5" />
-          {tags.map((tag) => (
-            <Badge key={tag} variant="secondary" className="px-2 py-0">
-              {tag}
-            </Badge>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function DetailItem({
-  label,
-  children,
-}: {
-  label: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className="flex items-center gap-1.5">
-      <span>{label}</span>
-      {children}
-    </div>
-  );
-}
-
 function CopyButton({ value, label }: { value: string; label: string }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -425,7 +371,7 @@ function CopyButton({ value, label }: { value: string; label: string }) {
       <Button
         variant="secondary"
         size="icon-sm"
-        className="size-6"
+        className="size-5"
         aria-label={label}
         onClick={() => {
           void navigator.clipboard.writeText(value).then(() => {
@@ -457,8 +403,4 @@ function formatMs(ms: number): string {
   const seconds = Math.round((ms % 60_000) / 1000);
   if (minutes < 60) return `${minutes}m ${seconds}s`;
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-}
-
-function pluralize(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? '' : 's'}`;
 }
