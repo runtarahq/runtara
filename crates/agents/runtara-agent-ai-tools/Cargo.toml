@@ -13,32 +13,21 @@ categories = ["wasm", "web-programming::http-client"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-wit-bindgen = "0.58"
+wit-bindgen = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# runtara-http uses ureq natively and typed outbound host calls in WASM.
-# Connection IDs and routing controls are explicit request fields; ordinary
-# credential injection and request signing stay in the native host service.
-# Capability metadata stays beside the code: `#[capability_input]`,
-# `#[capability_output]`, `#[capability]` emit `&'static CapabilityMeta` /
-# `&'static InputTypeMeta` / `&'static OutputTypeMeta` items, and the host-only
-# `agent_info()` fn collects them into a `runtara_dsl::agent_meta::AgentInfo`.
-# A workspace `emit-meta` binary then serializes that to `meta.json` next to
-# the `.wasm` — the JSON is a build artifact, never hand-edited.
-runtara-agent-macro = { path = "../../runtara-agent-macro" }
-runtara-dsl = { path = "../../runtara-dsl", default-features = false }
+runtara-agent-macro = { workspace = true }
+runtara-dsl = { workspace = true }
 # Shared LLM completion logic for the `chat-completion` capability (the Ai Agent
 # loop's LLM call). `default-features = false` drops `tracing` from the .wasm;
 # `completion` brings the provider clients and `run_completion_async`.
 runtara-ai = { path = "../../runtara-ai", default-features = false, features = ["completion"] }
 
-
-
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-runtara-http = { path = "../../runtara-http", default-features = false, features = ["native"] }
+runtara-http = { workspace = true, features = ["native"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-runtara-http = { path = "../../runtara-http", default-features = false, features = ["wasi"] }
+runtara-http = { workspace = true, features = ["wasi"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

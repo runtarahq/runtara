@@ -61,16 +61,19 @@ if [ ! -f "crates/runtara-wit/wit/deps.lock" ] || [ ! -d "crates/runtara-wit/wit
     (cd crates/runtara-wit && wit-deps lock)
 fi
 
-# Discover every workspace member under crates/agents/. Component agents
-# live there as a self-contained subsystem; runtara-wit, runtara-agent-macro,
-# -bundle-emit stay at crates/ root because they're infrastructure shared
-# with the host crates, not components themselves.
-agents=$(grep -E '^\s*"crates/agents/runtara-agent-' Cargo.toml \
-    | sed -E 's@.*"crates/agents/(runtara-agent-[^"]+)".*@\1@' \
-    || true)
+# Discover every crate under crates/agents/, the same set the workspace's
+# `crates/agents/*` member glob includes. Component agents live there as a
+# self-contained subsystem; runtara-wit, runtara-agent-macro, -bundle-emit stay
+# at crates/ root because they're infrastructure shared with the host crates,
+# not components themselves.
+agents=""
+for manifest in crates/agents/*/Cargo.toml; do
+    [ -f "$manifest" ] || continue
+    agents="$agents $(sed -n -E 's/^name = "([^"]+)".*/\1/p' "$manifest" | head -1)"
+done
 
-if [ -z "$agents" ] && [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" != "1" ]; then
-    echo "No runtara-agent-* component crates found in Cargo.toml workspace members." >&2
+if [ -z "${agents// /}" ] && [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" != "1" ]; then
+    echo "No agent component crates found under crates/agents/." >&2
     exit 1
 fi
 

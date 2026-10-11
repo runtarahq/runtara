@@ -13,19 +13,14 @@ categories = ["wasm", "web-programming::http-client"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-wit-bindgen = "0.58"
+wit-bindgen = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# runtara-http uses ureq natively and typed outbound host calls in WASM.
-# Connection IDs and routing controls are explicit request fields; ordinary
-# credential injection and request signing stay in the native host service.
-runtara-agent-macro = { path = "../../runtara-agent-macro" }
-runtara-dsl = { path = "../../runtara-dsl", default-features = false }
-
-
+runtara-agent-macro = { workspace = true }
+runtara-dsl = { workspace = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-runtara-http = { path = "../../runtara-http", default-features = false, features = ["native"] }
+runtara-http = { workspace = true, features = ["native"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-runtara-http = { path = "../../runtara-http", default-features = false, features = ["wasi"] }
+runtara-http = { workspace = true, features = ["wasi"] }

@@ -15,4 +15,4 @@ urlencoding = "2"
 zeroize = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wit-bindgen = "0.58"
+wit-bindgen = { workspace = true }
