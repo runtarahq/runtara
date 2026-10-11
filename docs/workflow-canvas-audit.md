@@ -109,5 +109,5 @@ Ordered by impact.
   there, and keep heights at odd multiples of 12.
 - `step-details.ts` turns node data into label/value rows. It stays pure
   because the layout calls it, before render, to size the cards.
-- `CanvasDisplayContext` defaults to compact cards with no previews, so the
-  replay graph (which reuses `BaseNode`) is unchanged.
+- `CanvasDisplayContext` defaults to compact cards with no previews, so
+  `BaseNode` rendered outside the editor (unit tests) stays compact.

@@ -14,8 +14,8 @@ interface CanvasDisplayContextValue {
   stepTypes: ReadonlyMap<string, string>;
 }
 
-// The default is what any canvas outside the workflow editor gets (the replay
-// graph reuses BaseNode): compact cards, no previews.
+// Outside a provider (BaseNode rendered on its own, as in unit tests) cards
+// are compact with no previews.
 const CanvasDisplayContext = createContext<CanvasDisplayContextValue>({
   detailLevel: 'compact',
   stepPreviews: false,
