@@ -12,11 +12,12 @@
 
 use base64::{Engine as _, engine::general_purpose};
 use runtara_agent_macro::{CapabilityInput, CapabilityOutput, capability};
+use runtara_dsl::agent_meta::EnumVariants;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
-use strum::{Display, EnumString};
+use strum::{Display, EnumString, VariantNames};
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 // ============================================================================
@@ -170,12 +171,29 @@ impl FileData {
 }
 
 /// Supported archive formats. Only ZIP today; placeholder for tar/gzip/etc.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, Display, EnumString, PartialEq)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    Serialize,
+    Deserialize,
+    Display,
+    EnumString,
+    VariantNames,
+    PartialEq,
+)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum ArchiveFormat {
     #[default]
     Zip,
+}
+
+impl EnumVariants for ArchiveFormat {
+    fn variant_names() -> &'static [&'static str] {
+        Self::VARIANTS
+    }
 }
 
 /// Flexible input for archive data — accepts a `FileData` object or a raw
@@ -249,7 +267,8 @@ pub struct CreateArchiveInput {
     #[field(
         display_name = "Format",
         description = "Archive format: 'zip' (default)",
-        default = "zip"
+        default = "zip",
+        enum_type = "ArchiveFormat"
     )]
     #[serde(default)]
     pub format: ArchiveFormat,
@@ -327,7 +346,8 @@ pub struct ExtractArchiveInput {
 
     #[field(
         display_name = "Format",
-        description = "Archive format (auto-detected from content if not specified)"
+        description = "Archive format (auto-detected from content if not specified)",
+        enum_type = "ArchiveFormat"
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<ArchiveFormat>,
@@ -426,7 +446,8 @@ pub struct ExtractFileInput {
 
     #[field(
         display_name = "Format",
-        description = "Archive format (auto-detected from content if not specified)"
+        description = "Archive format (auto-detected from content if not specified)",
+        enum_type = "ArchiveFormat"
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<ArchiveFormat>,
@@ -476,7 +497,8 @@ pub struct ListArchiveInput {
 
     #[field(
         display_name = "Format",
-        description = "Archive format (auto-detected from content if not specified)"
+        description = "Archive format (auto-detected from content if not specified)",
+        enum_type = "ArchiveFormat"
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<ArchiveFormat>,
