@@ -8,7 +8,6 @@ import {
   Play,
   Pause,
   Clock,
-  ArrowRight,
   ChevronRight,
   ChevronDown,
   Hand,
@@ -23,7 +22,7 @@ import {
   timelineBarPosition,
 } from '@/features/workflows/types/timeline';
 import { stepStatusDisplay } from '@/features/workflows/utils/step-status';
-import { PayloadPreBlock } from '@/shared/components/PayloadPreBlock';
+import { PayloadExplorer } from '@/shared/components/PayloadExplorer';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import {
@@ -709,38 +708,30 @@ function ExecutionTimelineContent({
                   </div>
 
                   {/* Inputs/Outputs */}
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div>
-                      <div className="mb-1 flex items-center gap-1 text-xs text-muted-foreground">
-                        <ArrowRight size={12} /> Inputs
-                      </div>
-                      {parsedInputs ? (
-                        <PayloadPreBlock
-                          data={parsedInputs}
-                          className="max-h-32 p-3"
-                        />
-                      ) : (
-                        <pre className="max-h-32 overflow-auto rounded bg-muted p-3 font-mono text-xs text-foreground">
-                          (none)
-                        </pre>
-                      )}
-                    </div>
-                    <div>
-                      <div className="mb-1 flex items-center gap-1 text-xs text-muted-foreground">
-                        <ArrowRight size={12} className="rotate-180" /> Outputs
-                      </div>
-                      {parsedOutputs ? (
-                        <PayloadPreBlock
-                          data={parsedOutputs}
-                          className="max-h-32 p-3"
-                        />
-                      ) : (
-                        <pre className="max-h-32 overflow-auto rounded bg-muted p-3 font-mono text-xs text-foreground">
-                          (none)
-                        </pre>
-                      )}
-                    </div>
-                  </div>
+                  <PayloadExplorer
+                    key={step.stepId}
+                    compact
+                    ariaLabel={`${step.stepName || step.stepId} data`}
+                    defaultSectionId={
+                      parsedOutputs !== null && parsedOutputs !== undefined
+                        ? 'output'
+                        : 'input'
+                    }
+                    sections={[
+                      {
+                        id: 'input',
+                        label: 'Inputs',
+                        value: parsedInputs ?? null,
+                        emptyState: { title: 'No inputs' },
+                      },
+                      {
+                        id: 'output',
+                        label: 'Outputs',
+                        value: parsedOutputs ?? null,
+                        emptyState: { title: 'No outputs' },
+                      },
+                    ]}
+                  />
 
                   {/* Error if present */}
                   {step.error && (

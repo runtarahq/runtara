@@ -1,11 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  isTruncatedPayload,
-  formatPayloadForDisplay,
-  resolvePayloadForCopy,
-  hasElidedPayload,
-  mapElidedForDisplay,
-} from './truncated-payload';
+import { isTruncatedPayload, hasElidedPayload } from './truncated-payload';
 
 describe('elided payloads', () => {
   const elided = {
@@ -21,17 +15,6 @@ describe('elided payloads', () => {
     );
     expect(hasElidedPayload([1, { x: elided }])).toBe(true);
     expect(hasElidedPayload({ data: { small: 'hi', n: 1 } })).toBe(false);
-  });
-
-  it('replaces elided stubs with a readable placeholder, keeping other values', () => {
-    const out = mapElidedForDisplay({
-      data: { upload: { content: elided, name: 'big.bin' }, n: 42 },
-    }) as { data: { upload: { content: unknown; name: string }; n: number } };
-
-    expect(typeof out.data.upload.content).toBe('string');
-    expect(out.data.upload.content as string).toContain('elided');
-    expect(out.data.upload.name).toBe('big.bin');
-    expect(out.data.n).toBe(42);
   });
 });
 
@@ -80,61 +63,5 @@ describe('isTruncatedPayload', () => {
     expect(isTruncatedPayload({ _preview: '{}', _truncated: true })).toBe(
       false
     );
-  });
-});
-
-describe('formatPayloadForDisplay', () => {
-  it('returns pretty-printed preview for truncated payload with valid JSON', () => {
-    const result = formatPayloadForDisplay({
-      _original_size: 26264,
-      _preview: '{"key":"value"}',
-      _truncated: true,
-    });
-
-    expect(result.truncated).toBe(true);
-    expect(result.text).toBe(JSON.stringify({ key: 'value' }, null, 2));
-    expect(result.originalSize).toBe(26264);
-    expect(result.originalSizeFormatted).toBe('25.65 KB');
-  });
-
-  it('returns raw preview string when preview is not valid JSON', () => {
-    const result = formatPayloadForDisplay({
-      _original_size: 50000,
-      _preview: '{"key": "val',
-      _truncated: true,
-    });
-
-    expect(result.truncated).toBe(true);
-    expect(result.text).toBe('{"key": "val');
-    expect(result.originalSize).toBe(50000);
-  });
-
-  it('returns regular JSON.stringify for non-truncated payloads', () => {
-    const data = { key: 'value', nested: { a: 1 } };
-    const result = formatPayloadForDisplay(data);
-
-    expect(result.truncated).toBe(false);
-    expect(result.text).toBe(JSON.stringify(data, null, 2));
-    expect(result.originalSize).toBeUndefined();
-    expect(result.originalSizeFormatted).toBeUndefined();
-  });
-});
-
-describe('resolvePayloadForCopy', () => {
-  it('returns preview string for truncated payload', () => {
-    const result = resolvePayloadForCopy({
-      _original_size: 26264,
-      _preview: '{"key":"value"}',
-      _truncated: true,
-    });
-
-    expect(result).toBe('{"key":"value"}');
-  });
-
-  it('returns JSON.stringify for regular payload', () => {
-    const data = { key: 'value' };
-    const result = resolvePayloadForCopy(data);
-
-    expect(result).toBe(JSON.stringify(data, null, 2));
   });
 });

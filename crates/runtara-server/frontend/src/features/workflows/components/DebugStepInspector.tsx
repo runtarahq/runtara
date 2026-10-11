@@ -1,56 +1,14 @@
-import { useState } from 'react';
-import { X, ChevronDown, ChevronRight } from 'lucide-react';
+import { X } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
+import { PayloadExplorer } from '@/shared/components/PayloadExplorer';
 import { SectionLabel } from '@/shared/components/section-label';
 import { cn } from '@/lib/utils';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { useWorkflowStore } from '@/features/workflows/stores/workflowStore';
 
-function JsonBlock({
-  data,
-  defaultOpen = false,
-}: {
-  data: any;
-  defaultOpen?: boolean;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
-  const lines = text?.split('\n').length ?? 0;
-  const isLong = lines > 3;
-
-  if (data === undefined || data === null) {
-    return <span className="text-xs italic text-muted-foreground">empty</span>;
-  }
-
-  if (!isLong) {
-    return (
-      <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-muted/50 px-2 py-1.5 text-xs text-foreground/80">
-        {text}
-      </pre>
-    );
-  }
-
-  return (
-    <div>
-      <button
-        type="button"
-        className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-        onClick={() => setOpen(!open)}
-      >
-        {open ? (
-          <ChevronDown className="size-3" />
-        ) : (
-          <ChevronRight className="size-3" />
-        )}
-        {open ? 'Collapse' : `Expand (${lines} lines)`}
-      </button>
-      {open && (
-        <pre className="mt-1 max-h-64 overflow-x-auto overflow-y-auto whitespace-pre-wrap break-all rounded bg-muted/50 px-2 py-1.5 text-xs text-foreground/80">
-          {text}
-        </pre>
-      )}
-    </div>
-  );
+/** Debug data counts as present unless it is missing entirely. */
+function hasValue(value: unknown) {
+  return value !== null && value !== undefined;
 }
 
 export function DebugStepInspector() {
@@ -135,18 +93,28 @@ export function DebugStepInspector() {
           </Section>
         )}
 
-        {inputs !== null && inputs !== undefined && (
-          <Section
-            label={isCurrentBreakpoint ? 'Step Inputs (resolved)' : 'Inputs'}
-          >
-            <JsonBlock data={inputs} defaultOpen />
-          </Section>
-        )}
-
-        {outputs !== null && outputs !== undefined && (
-          <Section label="Outputs">
-            <JsonBlock data={outputs} defaultOpen />
-          </Section>
+        {(hasValue(inputs) || hasValue(outputs)) && (
+          <PayloadExplorer
+            key={selectedNodeId ?? undefined}
+            compact
+            ariaLabel={`${stepName} data`}
+            maxHeight={320}
+            defaultSectionId={hasValue(inputs) ? 'input' : 'output'}
+            sections={[
+              {
+                id: 'input',
+                label: isCurrentBreakpoint ? 'Inputs (resolved)' : 'Inputs',
+                value: hasValue(inputs) ? inputs : null,
+                emptyState: { title: 'No inputs' },
+              },
+              {
+                id: 'output',
+                label: 'Outputs',
+                value: hasValue(outputs) ? outputs : null,
+                emptyState: { title: 'No outputs' },
+              },
+            ]}
+          />
         )}
 
         {inputs === null && outputs === null && !nodeStatus?.error && (

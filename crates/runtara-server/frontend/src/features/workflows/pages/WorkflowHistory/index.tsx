@@ -1,5 +1,8 @@
 import { useManagedInputSubmissions } from '@/features/workflows/hooks/useManagedInputSubmissions';
-import { RunStateCard } from '@/features/operations/components/RunStateCard';
+import { useVersionStateSchema } from '@/features/operations/state-schema';
+import { stateLabel } from '@/features/operations/state-label';
+import { PayloadExplorer } from '@/shared/components/PayloadExplorer';
+import { formatRelativeTime } from '@/lib/utils';
 import {
   ManagedInputScope,
   InputRetryPanel,
@@ -8,21 +11,14 @@ import { useNavigate, useParams } from 'react-router';
 import { useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { Loader } from '@/shared/components/loader.tsx';
-import { Badge } from '@/shared/components/ui/badge.tsx';
 import { Button } from '@/shared/components/ui/button';
-import {
-  ChevronLeft,
-  Copy,
-  Sparkles,
-  ChevronRight,
-  Database,
-} from 'lucide-react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import {
   getWorkflowInstance,
   getPendingInput,
   type PendingInput,
 } from '@/features/workflows/queries';
-import { useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { useToken } from '@/shared/hooks';
 import { HumanInputCard } from '@/features/workflows/components/ExecutionPanel/HumanInputCard';
 import { PauseButton } from '@/features/workflows/components/PauseButton';
@@ -36,7 +32,6 @@ import {
   CardHeader,
   CardTitle,
 } from '@/shared/components/ui/card';
-import { toast } from 'sonner';
 import {
   isActiveStatus,
   isFinishedStatus,
@@ -49,10 +44,16 @@ import {
 import { RunOverviewCard } from './RunOverviewCard';
 import { canResume } from '@/features/workflows/utils/suspension';
 import { ChildRunsCard } from '@/features/invocation-history/components/RunLinks';
-import {
-  hasElidedPayload,
-  mapElidedForDisplay,
-} from '@/shared/utils/truncated-payload';
+
+/** Outputs may be stored as a JSON string; show them parsed when they are. */
+function parseRunOutputs(outputs: unknown): unknown {
+  if (typeof outputs !== 'string') return outputs ?? null;
+  try {
+    return JSON.parse(outputs);
+  } catch {
+    return outputs;
+  }
+}
 
 export function WorkflowHistory() {
   return (
@@ -130,48 +131,43 @@ function WorkflowHistoryContent() {
     );
   };
 
-  // Briefly swap the copy button's icon to a checkmark for feedback.
-  const flashCopied = (btnId: string) => {
-    const btn = document.getElementById(btnId);
-    if (!btn) return;
-    btn.innerHTML =
-      '<svg class="size-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>';
-    setTimeout(() => {
-      btn.innerHTML =
-        '<svg class="size-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>';
-    }, 2000);
-  };
-
-  // Copy the input/output payload. When the value was elided by the server,
-  // re-fetch the instance with `?full=true` so the clipboard gets the real,
-  // byte-complete value (e.g. a base64 file) rather than the preview stub.
-  const copyPayload = async (
-    which: 'inputs' | 'outputs',
-    current: unknown,
-    btnId: string
-  ) => {
-    let value = current;
-    if (hasElidedPayload(current) && workflowId && instanceId) {
-      try {
-        const full = await getWorkflowInstance(token, workflowId, instanceId, {
-          full: true,
-        });
-        value = which === 'inputs' ? full.inputs : full.outputs;
-      } catch {
-        toast.error(
-          'Could not load the full value; copied the preview instead'
-        );
-      }
-    }
-    const text =
-      typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-    try {
-      await navigator.clipboard.writeText(text);
-      flashCopied(btnId);
-    } catch {
-      toast.error('Copy failed');
-    }
-  };
+  // Run data for the explorer. Outputs can arrive as a JSON string; parse it
+  // once per fetch so the explorer's per-value caches stay warm.
+  const outputValue = useMemo(
+    () => parseRunOutputs(data?.outputs),
+    [data?.outputs]
+  );
+  const stateValue = useMemo(
+    () =>
+      data?.state && Object.keys(data.state).length > 0 ? data.state : null,
+    [data?.state]
+  );
+  const { schema: stateSchema } = useVersionStateSchema(
+    workflowId ?? '',
+    data?.usedVersion ?? 0
+  );
+  const stateFieldLabels = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.entries(stateSchema).map(([key, field]) => [
+          key,
+          { label: stateLabel(key, field), description: field.description },
+        ])
+      ),
+    [stateSchema]
+  );
+  // Elided placeholders (large uploads) are re-fetched in full on request.
+  const loadFullRunValue = useCallback(
+    async (sectionId: string) => {
+      const full = await getWorkflowInstance(token, workflowId!, instanceId!, {
+        full: true,
+      });
+      if (sectionId === 'input') return full.inputs;
+      if (sectionId === 'output') return parseRunOutputs(full.outputs);
+      return full.state;
+    },
+    [token, workflowId, instanceId]
+  );
 
   // Set page title with workflow name from metadata if available
   usePageTitle(
@@ -335,161 +331,38 @@ function WorkflowHistoryContent() {
         {/* Runs this run started through control:start */}
         {data.id && <ChildRunsCard instanceId={data.id} />}
 
-        {/* Inputs & Outputs */}
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-          <Card className="overflow-hidden">
-            <CardHeader className="border-b bg-gradient-to-r from-info/10 to-info/5">
-              <div className="flex items-center justify-between">
-                <CardTitle className="flex items-center gap-2 text-lg">
-                  <div className="rounded-lg bg-info/10 p-2">
-                    <Database className="size-5 text-info" />
-                  </div>
-                  Input Data
-                </CardTitle>
-                {data.inputs && (
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className="h-8 gap-2"
-                    onClick={() =>
-                      void copyPayload('inputs', data.inputs, 'copy-inputs')
-                    }
-                  >
-                    <span id="copy-inputs">
-                      <Copy className="size-4" />
-                    </span>
-                    Copy
-                  </Button>
-                )}
-              </div>
-            </CardHeader>
-            <CardContent className="bg-muted/30 p-0">
-              {data.inputs ? (
-                <div className="relative">
-                  <pre className="max-h-[500px] overflow-auto p-6 font-mono text-xs">
-                    <code className="text-foreground">
-                      {JSON.stringify(
-                        mapElidedForDisplay(data.inputs),
-                        null,
-                        2
-                      )}
-                    </code>
-                  </pre>
-                  {hasElidedPayload(data.inputs) && (
-                    <div className="px-6 pb-3">
-                      <Badge
-                        variant="secondary"
-                        className="text-3xs text-muted-foreground"
-                      >
-                        Large values elided — use Copy for the full value
-                      </Badge>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="p-12 text-center">
-                  <div className="mb-3 inline-flex size-12 items-center justify-center rounded-full bg-muted">
-                    <Database className="size-6 text-muted-foreground" />
-                  </div>
-                  <p className="mb-1 text-sm text-muted-foreground">
-                    No input data
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    This workflow was executed without input parameters
-                  </p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card className="overflow-hidden">
-            <CardHeader className="border-b bg-gradient-to-r from-success/10 to-success/5">
-              <div className="flex items-center justify-between">
-                <CardTitle className="flex items-center gap-2 text-lg">
-                  <div className="rounded-lg bg-success/10 p-2">
-                    <Sparkles className="size-5 text-success" />
-                  </div>
-                  Output Data
-                </CardTitle>
-                {data.outputs && (
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    className="h-8 gap-2"
-                    onClick={() =>
-                      void copyPayload('outputs', data.outputs, 'copy-outputs')
-                    }
-                  >
-                    <span id="copy-outputs">
-                      <Copy className="size-4" />
-                    </span>
-                    Copy
-                  </Button>
-                )}
-              </div>
-            </CardHeader>
-            <CardContent className="p-0">
-              {data.outputs ? (
-                <div className="relative bg-muted/30">
-                  <pre className="max-h-[500px] overflow-auto p-6 font-mono text-xs">
-                    <code className="text-foreground">
-                      {(() => {
-                        try {
-                          // If outputs is already an object, stringify it
-                          // (eliding any large values for display).
-                          if (typeof data.outputs === 'object') {
-                            return JSON.stringify(
-                              mapElidedForDisplay(data.outputs),
-                              null,
-                              2
-                            );
-                          }
-                          // If outputs is a string, try to parse and re-stringify
-                          return JSON.stringify(
-                            JSON.parse(data.outputs),
-                            null,
-                            2
-                          );
-                        } catch {
-                          // If all else fails, convert to string
-                          return String(data.outputs);
-                        }
-                      })()}
-                    </code>
-                  </pre>
-                  {hasElidedPayload(data.outputs) && (
-                    <div className="px-6 pb-3">
-                      <Badge
-                        variant="secondary"
-                        className="text-3xs text-muted-foreground"
-                      >
-                        Large values elided — use Copy for the full value
-                      </Badge>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="p-12 text-center">
-                  <div className="mb-3 inline-flex size-12 items-center justify-center rounded-full bg-muted">
-                    <Sparkles className="size-6 text-muted-foreground" />
-                  </div>
-                  <p className="mb-1 text-sm text-muted-foreground">
-                    {outputEmptyState.title}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {outputEmptyState.description}
-                  </p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-
-        <RunStateCard
-          workflowId={workflowId!}
-          version={data.usedVersion}
-          state={data.state}
-          updatedAt={data.stateUpdatedAt}
+        <PayloadExplorer
+          ariaLabel="Run data"
+          defaultSectionId="output"
+          loadFullValue={loadFullRunValue}
+          sections={[
+            {
+              id: 'input',
+              label: 'Input',
+              value: data.inputs ?? null,
+              emptyState: {
+                title: 'No input data',
+                description:
+                  'This workflow was executed without input parameters',
+              },
+            },
+            {
+              id: 'output',
+              label: 'Output',
+              value: outputValue,
+              emptyState: outputEmptyState,
+            },
+            {
+              id: 'state',
+              label: 'State',
+              value: stateValue,
+              meta: data.stateUpdatedAt
+                ? `Updated ${formatRelativeTime(data.stateUpdatedAt)}`
+                : undefined,
+              emptyState: { title: 'No state published yet' },
+              fieldLabels: stateFieldLabels,
+            },
+          ]}
         />
 
         {/* Events Section */}
