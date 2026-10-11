@@ -7,7 +7,6 @@ import React, { useState, useEffect, useLayoutEffect } from 'react';
 import {
   Play,
   Pause,
-  RotateCcw,
   Zap,
   Globe,
   Clock,
@@ -381,6 +380,37 @@ function ExecutionTimelineContent({
     return () => clearInterval(interval);
   }, [isPlaying, totalDuration]);
 
+  // Playing from the end starts the replay over.
+  const togglePlay = () => {
+    if (!isPlaying && playhead >= totalDuration) setPlayhead(0);
+    setIsPlaying(!isPlaying);
+  };
+
+  const seekToPointer = (e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    setPlayhead(frac * totalDuration);
+  };
+
+  const onScaleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = totalDuration / 100;
+    const next =
+      e.key === 'ArrowLeft'
+        ? playhead - step
+        : e.key === 'ArrowRight'
+          ? playhead + step
+          : e.key === 'Home'
+            ? 0
+            : e.key === 'End'
+              ? totalDuration
+              : null;
+    if (next === null) return;
+    e.preventDefault();
+    setIsPlaying(false);
+    setPlayhead(Math.min(totalDuration, Math.max(0, next)));
+  };
+
   const getStepPosition = (step: HierarchicalStep) =>
     timelineBarPosition(step, totalDuration);
 
@@ -477,66 +507,73 @@ function ExecutionTimelineContent({
     <div className="space-y-6">
       {inputCards}
 
-      {/* Playback Controls */}
-      <Card>
-        <CardContent className="py-4">
-          <div className="flex items-center gap-4">
-            <Button
-              variant="secondary"
-              bordered
-              size="icon"
-              onClick={() => setIsPlaying(!isPlaying)}
-              className="rounded-full"
-            >
-              {isPlaying ? (
-                <Pause className="size-4" />
-              ) : (
-                <Play className="size-4" />
-              )}
-            </Button>
-            <Button
-              variant="secondary"
-              bordered
-              size="icon"
-              onClick={() => {
-                setPlayhead(0);
-                setIsPlaying(false);
-              }}
-              className="rounded-full"
-            >
-              <RotateCcw className="size-4" />
-            </Button>
-            <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
-              <div
-                className="duration-50 h-full bg-purple-500 transition-all"
-                style={{ width: `${(playhead / totalDuration) * 100}%` }}
-              />
-            </div>
-            <span className="w-20 text-right font-mono text-sm text-muted-foreground">
-              {formatTime(Math.round(playhead))}
-            </span>
-          </div>
-        </CardContent>
-      </Card>
-
       {/* Timeline */}
       <Card className="overflow-hidden">
         <CardContent className="p-0">
-          {/* Time Scale */}
-          <div className="relative flex h-8 items-center border-b bg-muted/50">
-            <div className="w-48 shrink-0 px-4 text-xs text-muted-foreground">
-              Time →
+          {/* Time scale doubles as the playback control: play/pause and the
+              playhead time on the left, click or drag the scale to seek. */}
+          <div className="relative flex h-10 items-center border-b bg-muted/50">
+            <div className="flex w-48 shrink-0 items-center gap-2 px-3">
+              <Button
+                variant="secondary"
+                bordered
+                size="icon-sm"
+                onClick={togglePlay}
+                className="rounded-full"
+                aria-label={isPlaying ? 'Pause replay' : 'Replay run'}
+              >
+                {isPlaying ? (
+                  <Pause className="size-3.5" />
+                ) : (
+                  <Play className="size-3.5" />
+                )}
+              </Button>
+              <span className="font-mono text-xs tabular-nums text-muted-foreground">
+                {formatTime(Math.round(playhead))}
+              </span>
             </div>
-            <div className="relative flex-1" ref={setTrackEl}>
+            <div
+              ref={setTrackEl}
+              role="slider"
+              tabIndex={0}
+              aria-label="Replay position"
+              aria-valuemin={0}
+              aria-valuemax={Math.round(totalDuration)}
+              aria-valuenow={Math.round(playhead)}
+              aria-valuetext={formatTime(Math.round(playhead))}
+              className="relative h-full flex-1 cursor-ew-resize touch-none select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+              onPointerDown={(e) => {
+                e.currentTarget.setPointerCapture(e.pointerId);
+                setIsPlaying(false);
+                seekToPointer(e);
+              }}
+              onPointerMove={(e) => {
+                if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                  seekToPointer(e);
+                }
+              }}
+              onKeyDown={onScaleKeyDown}
+            >
               {[0, 25, 50, 75, 100].map((pct) => (
                 <div
                   key={pct}
-                  className="absolute -translate-x-1/2 transform text-xs text-muted-foreground"
+                  className={`pointer-events-none absolute top-1/2 -translate-y-1/2 px-1 text-xs text-muted-foreground ${
+                    pct === 0
+                      ? ''
+                      : pct === 100
+                        ? '-translate-x-full'
+                        : '-translate-x-1/2'
+                  }`}
                   style={{ left: `${pct}%` }}
                 >
                   {formatTime(Math.round((pct / 100) * totalDuration))}
                 </div>
               ))}
+              {/* Playhead handle; the line continues down through the rows */}
+              <div
+                className="pointer-events-none absolute -bottom-1.5 z-30 size-3 -translate-x-1/2 rounded-full border-2 border-background bg-red-500"
+                style={{ left: `${(playhead / totalDuration) * 100}%` }}
+              />
             </div>
           </div>
 

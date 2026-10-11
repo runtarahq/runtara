@@ -247,6 +247,18 @@ function WorkflowHistoryContent() {
 
   // Empty-state wording depends on whether the run can still produce something.
   const outputEmptyState = getRunOutputEmptyState(data.status);
+  // Metric cards stack two high beside Timeline & Details; a lone card
+  // takes the full height instead of leaving an empty slot under it.
+  const metricCount =
+    [
+      data.executionDurationSeconds,
+      data.queueDurationSeconds,
+      data.maxMemoryMb,
+    ].filter((value) => value !== undefined && value !== null).length +
+    (data.metadata?.retryCount !== undefined &&
+    data.metadata?.maxRetries !== undefined
+      ? 1
+      : 0);
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
@@ -440,90 +452,96 @@ function WorkflowHistoryContent() {
         {/* Metrics and Timeline & Details share one row: the metric cards
             stack two high so their column matches the details card. */}
         <div className="flex flex-col gap-4 lg:flex-row">
-          <div className="grid shrink-0 grid-cols-2 gap-4 lg:auto-cols-[11rem] lg:grid-flow-col lg:grid-cols-none lg:grid-rows-2">
-            {/* Execution Duration Card */}
-            {data.executionDurationSeconds !== undefined &&
-              data.executionDurationSeconds !== null && (
+          {metricCount > 0 && (
+            <div
+              className={`grid shrink-0 grid-cols-2 gap-4 lg:auto-cols-[11rem] lg:grid-flow-col lg:grid-cols-none ${
+                metricCount > 1 ? 'lg:grid-rows-2' : 'lg:grid-rows-1'
+              }`}
+            >
+              {/* Execution Duration Card */}
+              {data.executionDurationSeconds !== undefined &&
+                data.executionDurationSeconds !== null && (
+                  <Card>
+                    <CardHeader className="pb-3">
+                      <CardTitle
+                        className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
+                        title="The total time spent actively running your workflow, from start to finish. This doesn't include time waiting in queue."
+                      >
+                        <Timer className="size-4" />
+                        Execution Time
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold">
+                        {data.executionDurationSeconds.toFixed(2)}s
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+
+              {/* Queue Duration Card */}
+              {data.queueDurationSeconds !== undefined &&
+                data.queueDurationSeconds !== null && (
+                  <Card>
+                    <CardHeader className="pb-3">
+                      <CardTitle
+                        className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
+                        title="The time your workflow spent waiting before it could start running. During busy periods, workflows may need to wait for available resources."
+                      >
+                        <Clock className="size-4" />
+                        Queue Time
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold">
+                        {data.queueDurationSeconds.toFixed(2)}s
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+
+              {/* Memory Usage Card */}
+              {data.maxMemoryMb !== undefined && data.maxMemoryMb !== null && (
                 <Card>
                   <CardHeader className="pb-3">
                     <CardTitle
                       className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
-                      title="The total time spent actively running your workflow, from start to finish. This doesn't include time waiting in queue."
+                      title="The maximum amount of memory (RAM) used while running this workflow. Higher values indicate more data was being processed at once."
                     >
-                      <Timer className="size-4" />
-                      Execution Time
+                      <MemoryStick className="size-4" />
+                      Max Memory
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
                     <div className="text-2xl font-bold">
-                      {data.executionDurationSeconds.toFixed(2)}s
+                      {data.maxMemoryMb.toFixed(1)} MB
                     </div>
                   </CardContent>
                 </Card>
               )}
 
-            {/* Queue Duration Card */}
-            {data.queueDurationSeconds !== undefined &&
-              data.queueDurationSeconds !== null && (
-                <Card>
-                  <CardHeader className="pb-3">
-                    <CardTitle
-                      className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
-                      title="The time your workflow spent waiting before it could start running. During busy periods, workflows may need to wait for available resources."
-                    >
-                      <Clock className="size-4" />
-                      Queue Time
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">
-                      {data.queueDurationSeconds.toFixed(2)}s
-                    </div>
-                  </CardContent>
-                </Card>
-              )}
-
-            {/* Memory Usage Card */}
-            {data.maxMemoryMb !== undefined && data.maxMemoryMb !== null && (
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle
-                    className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
-                    title="The maximum amount of memory (RAM) used while running this workflow. Higher values indicate more data was being processed at once."
-                  >
-                    <MemoryStick className="size-4" />
-                    Max Memory
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">
-                    {data.maxMemoryMb.toFixed(1)} MB
-                  </div>
-                </CardContent>
-              </Card>
-            )}
-
-            {/* Retries Card */}
-            {data.metadata?.retryCount !== undefined &&
-              data.metadata?.maxRetries !== undefined && (
-                <Card>
-                  <CardHeader className="pb-3">
-                    <CardTitle
-                      className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
-                      title="Shows how many times this workflow was retried after encountering issues (current / maximum allowed). Automatic retries help ensure your workflows complete successfully."
-                    >
-                      <RotateCw className="size-4" />
-                      Retries
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">
-                      {data.metadata.retryCount} / {data.metadata.maxRetries}
-                    </div>
-                  </CardContent>
-                </Card>
-              )}
-          </div>
+              {/* Retries Card */}
+              {data.metadata?.retryCount !== undefined &&
+                data.metadata?.maxRetries !== undefined && (
+                  <Card>
+                    <CardHeader className="pb-3">
+                      <CardTitle
+                        className="flex cursor-help items-center gap-2 text-sm font-medium text-muted-foreground"
+                        title="Shows how many times this workflow was retried after encountering issues (current / maximum allowed). Automatic retries help ensure your workflows complete successfully."
+                      >
+                        <RotateCw className="size-4" />
+                        Retries
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold">
+                        {data.metadata.retryCount} / {data.metadata.maxRetries}
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+            </div>
+          )}
 
           {/* Instance Details Card */}
           <Card className="min-w-0 flex-1">
