@@ -13,7 +13,6 @@ import { Badge } from '@/shared/components/ui/badge.tsx';
 import { Button } from '@/shared/components/ui/button';
 import {
   ChevronLeft,
-  ChevronDown,
   FileText,
   Clock,
   Calendar,
@@ -31,19 +30,13 @@ import {
   ChevronRight,
   Database,
   Info,
-  List,
-  BarChart3,
-  ChevronsLeft,
-  ChevronsRight,
-  Network,
 } from 'lucide-react';
 import {
   getWorkflowInstance,
-  getStepSummaries,
   getPendingInput,
   type PendingInput,
 } from '@/features/workflows/queries';
-import { useRef, useState, useMemo, useCallback } from 'react';
+import { useRef } from 'react';
 import { useToken } from '@/shared/hooks';
 import { HumanInputCard } from '@/features/workflows/components/ExecutionPanel/HumanInputCard';
 import { PauseButton } from '@/features/workflows/components/PauseButton';
@@ -66,16 +59,9 @@ import {
   isActiveStatus,
   isFinishedStatus,
 } from '@/shared/utils/status-display';
-import {
-  getRunEventsEmptyState,
-  getRunOutputEmptyState,
-} from '@/features/workflows/utils/run-empty-state';
+import { getRunOutputEmptyState } from '@/features/workflows/utils/run-empty-state';
 import { ExecutionTimeline } from '@/features/workflows/components/ExecutionTimeline';
-import { ReplayView } from '@/features/workflows/components/Replay';
-import { Tabs, TabsList, TabsTrigger } from '@/shared/components/ui/tabs';
 import { Spinner } from '@/shared/components/ui/spinner';
-import { stepStatusDisplay } from '@/features/workflows/utils/step-status';
-import { StepStatusBadge } from '@/features/workflows/components/StepStatusBadge';
 import {
   canResume,
   suspendedStatusLabel,
@@ -89,8 +75,6 @@ import {
   mapElidedForDisplay,
 } from '@/shared/utils/truncated-payload';
 
-const LIST_PAGE_SIZE = 20;
-
 export function WorkflowHistory() {
   return (
     <ManagedInputScope>
@@ -103,12 +87,6 @@ function WorkflowHistoryContent() {
   const { workflowId, instanceId } = useParams();
   const navigate = useNavigate();
   const isInitialLoadRef = useRef(true);
-
-  const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set());
-  const [eventsViewMode, setEventsViewMode] = useState<
-    'list' | 'timeline' | 'graph'
-  >('timeline');
-  const [listPageIndex, setListPageIndex] = useState(0);
 
   const token = useToken();
   const submissions = useManagedInputSubmissions();
@@ -212,60 +190,6 @@ function WorkflowHistoryContent() {
     }
   };
 
-  // Filters for list view with pagination (oldest first)
-  const listFilters = useMemo(
-    () => ({
-      limit: LIST_PAGE_SIZE,
-      offset: listPageIndex * LIST_PAGE_SIZE,
-      sortOrder: 'asc' as const,
-    }),
-    [listPageIndex]
-  );
-
-  // Fetch step summaries for list view (paginated, paired events)
-  const { data: stepSummariesData, isFetching: isListFetching } =
-    useCustomQuery({
-      queryKey: queryKeys.workflows.stepSummaries(
-        workflowId ?? '',
-        instanceId ?? '',
-        listFilters
-      ),
-      queryFn: (token: string) =>
-        getStepSummaries(token, workflowId!, instanceId!, listFilters),
-      enabled: !!workflowId && !!instanceId && eventsViewMode === 'list',
-      refetchInterval: isActiveStatus(data?.status) ? 10000 : false,
-    });
-
-  // Step summaries for list view (paired events from API)
-  const stepSummaries = stepSummariesData?.data?.steps || [];
-
-  // Pagination info for list view
-  const totalCount = stepSummariesData?.data?.totalCount || 0;
-  const totalPages = Math.ceil(totalCount / LIST_PAGE_SIZE);
-
-  // Reset page when switching to list view
-  const handleViewModeChange = useCallback(
-    (mode: 'list' | 'timeline' | 'graph') => {
-      setEventsViewMode(mode);
-      if (mode === 'list') {
-        setListPageIndex(0);
-      }
-    },
-    []
-  );
-
-  const toggleStepExpanded = (index: number) => {
-    setExpandedSteps((prev) => {
-      const next = new Set(prev);
-      if (next.has(index)) {
-        next.delete(index);
-      } else {
-        next.add(index);
-      }
-      return next;
-    });
-  };
-
   // Set page title with workflow name from metadata if available
   usePageTitle(
     data?.metadata?.workflowName
@@ -315,7 +239,6 @@ function WorkflowHistoryContent() {
 
   // Empty-state wording depends on whether the run can still produce something.
   const outputEmptyState = getRunOutputEmptyState(data.status);
-  const eventsEmptyState = getRunEventsEmptyState(data.status, 'Events');
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
@@ -901,275 +824,23 @@ function WorkflowHistoryContent() {
         {/* Events Section */}
         <Card className="overflow-hidden">
           <CardHeader className="border-b bg-gradient-to-r from-purple-500/10 to-purple-500/5">
-            <div className="flex items-center justify-between">
-              <CardTitle className="flex items-center gap-2 text-lg">
-                <div className="rounded-lg bg-purple-500/10 p-2">
-                  <ChevronRight className="size-5 text-purple-600" />
-                </div>
-                Events
-              </CardTitle>
-              <Tabs
-                value={eventsViewMode}
-                onValueChange={(v) =>
-                  handleViewModeChange(v as 'list' | 'timeline' | 'graph')
-                }
-              >
-                <TabsList className="grid w-[300px] grid-cols-3">
-                  <TabsTrigger
-                    value="timeline"
-                    className="flex items-center gap-1"
-                  >
-                    <BarChart3 className="size-4" />
-                    Timeline
-                  </TabsTrigger>
-                  <TabsTrigger
-                    value="graph"
-                    className="flex items-center gap-1"
-                    data-testid="events-view-graph"
-                  >
-                    <Network className="size-4" />
-                    Graph
-                  </TabsTrigger>
-                  <TabsTrigger value="list" className="flex items-center gap-1">
-                    <List className="size-4" />
-                    List
-                  </TabsTrigger>
-                </TabsList>
-              </Tabs>
-            </div>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <div className="rounded-lg bg-purple-500/10 p-2">
+                <ChevronRight className="size-5 text-purple-600" />
+              </div>
+              Events
+            </CardTitle>
             <p className="mt-2 text-sm text-muted-foreground">
               Step execution events showing inputs, outputs, and status for each
               step in your workflow
             </p>
           </CardHeader>
           <CardContent className="p-6">
-            {eventsViewMode === 'graph' ? (
-              <ReplayView workflowId={workflowId!} instanceId={instanceId!} />
-            ) : eventsViewMode === 'timeline' ? (
-              <ExecutionTimeline
-                showInputs={false}
-                workflowId={workflowId!}
-                instanceId={instanceId!}
-              />
-            ) : isListFetching ? (
-              <div className="flex items-center justify-center py-16">
-                <Spinner className="size-8 text-muted-foreground" />
-              </div>
-            ) : stepSummaries.length > 0 ? (
-              <div className="space-y-3">
-                {stepSummaries.map((step: any, index: number) => {
-                  // Calculate global sequence number based on pagination
-                  const globalSequence = listPageIndex * LIST_PAGE_SIZE + index;
-                  const isExpanded = expandedSteps.has(index);
-
-                  // Badge, tint and label for the step summary status
-                  // (including `suspended` for a parked step).
-                  const statusDisplay = stepStatusDisplay(step.status);
-
-                  return (
-                    <div
-                      key={step.stepId || index}
-                      className={`space-y-3 rounded-lg border p-4 transition-colors ${statusDisplay.rowClass}`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <button
-                          onClick={() => toggleStepExpanded(index)}
-                          className="flex items-center gap-2 font-medium transition-colors hover:text-purple-600"
-                        >
-                          {isExpanded ? (
-                            <ChevronDown className="size-4" />
-                          ) : (
-                            <ChevronRight className="size-4" />
-                          )}
-                          <span className="font-semibold">
-                            #{globalSequence + 1} -{' '}
-                            {step.stepName || step.stepId}
-                          </span>
-                        </button>
-                        <StepStatusBadge status={step.status} />
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-                        <Badge
-                          variant="secondary"
-                          className="font-mono text-xs"
-                        >
-                          {step.stepType}
-                        </Badge>
-                        {step.startedAt && (
-                          <>
-                            <span>•</span>
-                            <span className="flex items-center gap-1">
-                              <Calendar className="size-3" />
-                              {formatDate(step.startedAt)}
-                            </span>
-                          </>
-                        )}
-                        {step.durationMs !== undefined &&
-                          step.durationMs !== null && (
-                            <>
-                              <span>•</span>
-                              <span className="flex items-center gap-1">
-                                <Clock className="size-3" />
-                                {step.durationMs}ms
-                              </span>
-                            </>
-                          )}
-                      </div>
-
-                      {step.error && (
-                        <StructuredErrorDisplay
-                          error={step.error}
-                          mode="compact"
-                        />
-                      )}
-
-                      {/* Expandable Inputs/Outputs */}
-                      {isExpanded && (
-                        <div className="mt-3 space-y-4 border-t pt-3">
-                          {/* Inputs */}
-                          {step.inputs && (
-                            <div>
-                              <div className="mb-2 flex items-center justify-between">
-                                <span className="flex items-center gap-1 text-sm font-semibold text-muted-foreground">
-                                  <Database className="size-3" />
-                                  Inputs
-                                </span>
-                                <Button
-                                  variant="secondary"
-                                  size="sm"
-                                  className="h-6 text-xs"
-                                  onClick={() => {
-                                    navigator.clipboard.writeText(
-                                      JSON.stringify(step.inputs, null, 2)
-                                    );
-                                    toast.success('Inputs copied');
-                                  }}
-                                >
-                                  <Copy className="mr-1 size-3" />
-                                  Copy
-                                </Button>
-                              </div>
-                              <pre className="max-h-60 overflow-x-auto overflow-y-auto rounded bg-muted p-3 font-mono text-xs">
-                                {JSON.stringify(step.inputs, null, 2)}
-                              </pre>
-                            </div>
-                          )}
-
-                          {/* Outputs */}
-                          {step.outputs && (
-                            <div>
-                              <div className="mb-2 flex items-center justify-between">
-                                <span className="flex items-center gap-1 text-sm font-semibold text-muted-foreground">
-                                  <Sparkles className="size-3" />
-                                  Outputs
-                                </span>
-                                <Button
-                                  variant="secondary"
-                                  size="sm"
-                                  className="h-6 text-xs"
-                                  onClick={() => {
-                                    navigator.clipboard.writeText(
-                                      JSON.stringify(step.outputs, null, 2)
-                                    );
-                                    toast.success('Outputs copied');
-                                  }}
-                                >
-                                  <Copy className="mr-1 size-3" />
-                                  Copy
-                                </Button>
-                              </div>
-                              <pre className="max-h-60 overflow-x-auto overflow-y-auto rounded bg-muted p-3 font-mono text-xs">
-                                {JSON.stringify(step.outputs, null, 2)}
-                              </pre>
-                            </div>
-                          )}
-
-                          {!step.inputs && !step.outputs && (
-                            <p className="text-sm text-muted-foreground">
-                              No input/output data available for this step.
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-
-                {/* Pagination Controls */}
-                {totalPages > 1 && (
-                  <div className="mt-4 flex items-center justify-between border-t pt-4">
-                    <div className="text-sm text-muted-foreground">
-                      Showing {listPageIndex * LIST_PAGE_SIZE + 1} -{' '}
-                      {Math.min(
-                        (listPageIndex + 1) * LIST_PAGE_SIZE,
-                        totalCount
-                      )}{' '}
-                      of {totalCount} events
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        variant="secondary"
-                        bordered
-                        size="sm"
-                        onClick={() => setListPageIndex(0)}
-                        disabled={listPageIndex === 0}
-                      >
-                        <ChevronsLeft className="size-4" />
-                      </Button>
-                      <Button
-                        variant="secondary"
-                        bordered
-                        size="sm"
-                        onClick={() =>
-                          setListPageIndex((prev) => Math.max(0, prev - 1))
-                        }
-                        disabled={listPageIndex === 0}
-                      >
-                        <ChevronLeft className="size-4" />
-                      </Button>
-                      <span className="px-2 text-sm text-muted-foreground">
-                        Page {listPageIndex + 1} of {totalPages}
-                      </span>
-                      <Button
-                        variant="secondary"
-                        bordered
-                        size="sm"
-                        onClick={() =>
-                          setListPageIndex((prev) =>
-                            Math.min(totalPages - 1, prev + 1)
-                          )
-                        }
-                        disabled={listPageIndex >= totalPages - 1}
-                      >
-                        <ChevronRight className="size-4" />
-                      </Button>
-                      <Button
-                        variant="secondary"
-                        bordered
-                        size="sm"
-                        onClick={() => setListPageIndex(totalPages - 1)}
-                        disabled={listPageIndex >= totalPages - 1}
-                      >
-                        <ChevronsRight className="size-4" />
-                      </Button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="px-6 py-16 text-center">
-                <div className="mb-4 inline-flex size-16 items-center justify-center rounded-full bg-purple-500/10">
-                  <ChevronRight className="size-8 text-purple-600" />
-                </div>
-                <h3 className="mb-2 text-lg font-semibold">
-                  {eventsEmptyState.title}
-                </h3>
-                <p className="mx-auto max-w-md text-sm text-muted-foreground">
-                  {eventsEmptyState.description}
-                </p>
-              </div>
-            )}
+            <ExecutionTimeline
+              showInputs={false}
+              workflowId={workflowId!}
+              instanceId={instanceId!}
+            />
           </CardContent>
         </Card>
       </div>

@@ -55,7 +55,7 @@ test.describe('Run history empty states (mocked)', () => {
       page.getByText('This run completed without returning any output')
     ).toBeVisible();
 
-    // Events → Timeline (the default tab).
+    // Events timeline.
     await expect(
       page.getByRole('heading', { name: 'No Timeline Events', exact: true })
     ).toBeVisible();
@@ -63,15 +63,6 @@ test.describe('Run history empty states (mocked)', () => {
       page.getByText(
         'This run completed without recording any timeline events.'
       )
-    ).toBeVisible();
-
-    // Events → List.
-    await page.getByRole('tab', { name: 'List' }).click();
-    await expect(
-      page.getByRole('heading', { name: 'No Events', exact: true })
-    ).toBeVisible();
-    await expect(
-      page.getByText('This run completed without recording any events.')
     ).toBeVisible();
 
     // Nothing anywhere on the page suggests the run is still going.

@@ -20,29 +20,6 @@ import {
 import { ExecutionStatus } from '@/generated/RuntaraRuntimeApi';
 import { parseStructuredError } from '@/shared/utils/structured-error';
 import { Spinner } from '@/shared/components/ui/spinner';
-import type {
-  ReplayIterationCounts,
-  ReplayNodeState,
-} from '@/features/workflows/components/Replay/types';
-
-/** Border/ring/glow treatment per replay state — mirrors the tutorial palette. */
-function getReplayNodeClass(state: ReplayNodeState): string {
-  switch (state) {
-    case 'running':
-      return 'border-info ring-2 ring-info/40 animate-glow-pulse border-2';
-    case 'done':
-      return 'border-success ring-1 ring-success/30';
-    case 'failed':
-      return 'border-destructive ring-2 ring-destructive/30 border-2';
-    case 'suspended':
-      return 'border-warning ring-2 ring-warning/40 animate-parked-pulse border-2';
-    case 'skipped':
-      return 'border-dashed border-muted-foreground/40 opacity-50';
-    case 'idle':
-    default:
-      return 'border-border opacity-40';
-  }
-}
 
 export const BaseNode = forwardRef<
   HTMLDivElement,
@@ -77,10 +54,6 @@ export const BaseNode = forwardRef<
     rightReservedWidth?: number;
     breakpoint?: boolean;
     onToggleBreakpoint?: () => void;
-    /** Graph Replay: per-frame visual state (drives the ring/glow + corner badge). */
-    replayState?: ReplayNodeState;
-    /** Graph Replay: iteration counts for composite (Split/While) nodes. */
-    replayIteration?: ReplayIterationCounts;
   }
 >(
   (
@@ -107,8 +80,6 @@ export const BaseNode = forwardRef<
       rightReservedWidth,
       breakpoint,
       onToggleBreakpoint,
-      replayState,
-      replayIteration,
       onClick,
       ...props
     },
@@ -237,34 +208,6 @@ export const BaseNode = forwardRef<
     const subtitleContent = getSubtitleContent();
     const showStatusPill = !!executionStatus;
 
-    // Graph Replay corner badge (top-right) for terminal/active replay states.
-    const replayBadge = (() => {
-      switch (replayState) {
-        case 'running':
-          return {
-            icon: <Spinner className="size-2.5" />,
-            cls: 'bg-info/10 text-info',
-          };
-        case 'done':
-          return {
-            icon: <CheckCircle2 className="size-2.5" />,
-            cls: 'bg-success/10 text-success',
-          };
-        case 'failed':
-          return {
-            icon: <XCircle className="size-2.5" />,
-            cls: 'bg-destructive/10 text-destructive',
-          };
-        case 'suspended':
-          return {
-            icon: <Pause className="size-2.5" />,
-            cls: 'bg-warning/10 text-warning',
-          };
-        default:
-          return null;
-      }
-    })();
-
     const handleClick = (e: MouseEvent<HTMLDivElement>) => {
       // Check if Ctrl (Windows) or Command (Mac) key is pressed
       if ((e.ctrlKey || e.metaKey) && stepType === 'EmbedWorkflow') {
@@ -297,22 +240,18 @@ export const BaseNode = forwardRef<
           'group relative h-full w-full',
           'rounded-md bg-card text-muted-foreground',
           'border shadow-sm transition-all duration-200 hover:shadow-md',
-          // Replay mode owns the visual entirely (it is a distinct 'scrub a past
-          // run' surface, never shown alongside live execution). Priority
-          // otherwise: validation error > warning > execution > selected > unsaved.
-          replayState
-            ? getReplayNodeClass(replayState)
-            : hasValidationError
-              ? 'border-2 border-destructive ring-2 ring-destructive/30'
-              : hasValidationWarning
-                ? 'border-2 border-warning ring-2 ring-warning/30'
-                : executionStatus
-                  ? getExecutionBorderClass(executionStatus.status)
-                  : selected
-                    ? 'border-primary shadow-md ring-1 ring-primary/20'
-                    : hasUnsavedChanges
-                      ? 'border-dashed border-warning ring-1 ring-warning/20'
-                      : 'border-border',
+          // Priority: validation error > warning > execution > selected > unsaved.
+          hasValidationError
+            ? 'border-2 border-destructive ring-2 ring-destructive/30'
+            : hasValidationWarning
+              ? 'border-2 border-warning ring-2 ring-warning/30'
+              : executionStatus
+                ? getExecutionBorderClass(executionStatus.status)
+                : selected
+                  ? 'border-primary shadow-md ring-1 ring-primary/20'
+                  : hasUnsavedChanges
+                    ? 'border-dashed border-warning ring-1 ring-warning/20'
+                    : 'border-border',
           // Subtle glow for suspended (breakpoint hit) nodes
           executionStatus?.status === 'suspended' &&
             'animate-glow-pulse border-2',
@@ -329,7 +268,6 @@ export const BaseNode = forwardRef<
         data-testid="workflow-canvas-node"
         data-step-name={name}
         data-step-type={stepType}
-        data-replay-state={replayState}
         {...props}
       >
         {/* Breakpoint indicator - red dot on left edge */}
@@ -360,32 +298,6 @@ export const BaseNode = forwardRef<
           >
             <Circle className="size-1.5 fill-destructive-foreground/80 text-destructive-foreground/80" />
           </button>
-        )}
-
-        {/* Graph Replay state badge + iteration counter (top-right) */}
-        {replayBadge && (
-          <div
-            className="absolute -right-1.5 -top-1.5 z-10 flex items-center gap-0.5"
-            data-testid="replay-node-badge"
-          >
-            {replayIteration && replayIteration.total > 0 && (
-              <span
-                className="rounded-full border bg-background px-1 text-[8px] font-medium leading-none text-muted-foreground shadow-sm"
-                title={`${replayIteration.active} running · ${replayIteration.completed} done · ${replayIteration.total} iterations`}
-              >
-                {replayIteration.completed + replayIteration.active}/
-                {replayIteration.total}
-              </span>
-            )}
-            <span
-              className={cn(
-                'flex size-3.5 items-center justify-center rounded-full shadow-sm',
-                replayBadge.cls
-              )}
-            >
-              {replayBadge.icon}
-            </span>
-          </div>
         )}
 
         {/* Unsaved changes corner dot */}
