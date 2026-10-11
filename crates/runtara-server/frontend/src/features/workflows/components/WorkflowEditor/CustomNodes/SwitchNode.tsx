@@ -347,7 +347,8 @@ function SwitchNodeComponent({
             {cases.map((caseItem: any, index: number) => {
               const handleId = `case-${index}`;
               const label = getCaseLabel(caseItem, index, true);
-              const topPosition = SWITCH_FIRST_HANDLE_TOP + index * SWITCH_HANDLE_SPACING;
+              const topPosition =
+                SWITCH_FIRST_HANDLE_TOP + index * SWITCH_HANDLE_SPACING;
 
               return (
                 <div key={handleId}>

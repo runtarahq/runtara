@@ -1,55 +1,139 @@
 import { describe, expect, it } from 'vitest';
-import { cardDetailLayout, stepDetailRows } from './step-details';
+import {
+  cardDetailLayout,
+  describeCondition,
+  describeReference,
+  humanizeKey,
+  stepDetailRows,
+} from './step-details';
+import { stepDescription } from './step-summary';
+
+const stepNames = new Map([['read', 'Read tenant record']]);
+
+describe('humanizeKey', () => {
+  it('turns field keys into labels', () => {
+    expect(humanizeKey('instance_id')).toBe('Instance ID');
+    expect(humanizeKey('schemaName')).toBe('Schema name');
+    expect(humanizeKey('last_transition')).toBe('Last transition');
+    expect(humanizeKey('callback_url')).toBe('Callback URL');
+    expect(humanizeKey('update-instance')).toBe('Update instance');
+  });
+});
+
+describe('describeReference', () => {
+  it('names where a value comes from', () => {
+    expect(describeReference('data.id')).toEqual({
+      source: 'Input',
+      path: 'id',
+    });
+    expect(describeReference('workflow.inputs.data.customer.email')).toEqual({
+      source: 'Input',
+      path: 'customer.email',
+    });
+    expect(describeReference('data.sku', { dataScope: 'item' })).toEqual({
+      source: 'Item',
+      path: 'sku',
+    });
+    expect(describeReference('steps.read.outputs.rows', { stepNames })).toEqual(
+      { source: 'Read tenant record', path: 'rows' }
+    );
+    expect(describeReference('steps.unknown.outputs')).toEqual({
+      source: 'unknown',
+      path: '',
+    });
+    expect(describeReference('steps.__error.message')).toEqual({
+      source: 'Error',
+      path: 'message',
+    });
+    expect(describeReference('variables.region')).toEqual({
+      source: 'Variable',
+      path: 'region',
+    });
+    expect(describeReference('variables._instance_id')).toEqual({
+      source: 'Run',
+      path: 'Instance ID',
+    });
+  });
+});
 
 describe('stepDetailRows', () => {
-  it('lists configured inputs with their value kind', () => {
-    const rows = stepDetailRows({
-      stepType: 'Finish',
-      inputMapping: [
-        {
-          type: 'decision',
-          value: 'steps.request_decision.outputs',
-          valueType: 'reference',
+  // The step from the Object Model update-instance screenshot.
+  const updateInstance = {
+    stepType: 'Agent',
+    inputMapping: [
+      {
+        type: 'data',
+        valueType: 'composite',
+        value: {
+          stage: { valueType: 'immediate', value: 'published' },
+          last_transition: {
+            valueType: 'reference',
+            value: 'steps.read.outputs.at',
+          },
+          updated_by: { valueType: 'reference', value: 'data.user' },
         },
-        { type: 'status', value: 'Completed', valueType: 'immediate' },
-        {
-          type: 'summary',
-          value: 'Order {{data.orderId}} done',
-          valueType: 'template',
-        },
-        {
-          type: 'payload',
-          value: { id: {}, total: {} },
-          valueType: 'composite',
-        },
+      },
+      { type: 'instance_id', value: 'data.id', valueType: 'reference' },
+      {
+        type: 'schema_name',
+        value: 'ReportStageCase',
+        valueType: 'immediate',
+      },
+    ],
+  };
+
+  it('reads as labelled inputs with named sources', () => {
+    const rows = stepDetailRows(updateInstance, { stepNames });
+    expect(rows.map((row) => [row.label, row.value])).toEqual([
+      ['Data', 'Stage, Last transition, Updated by'],
+      ['Instance ID', 'Input · id'],
+      ['Schema name', 'ReportStageCase'],
+    ]);
+    expect(rows[0].children?.map((row) => [row.label, row.value])).toEqual([
+      ['Stage', 'published'],
+      ['Last transition', 'Read tenant record · at'],
+      ['Updated by', 'Input · user'],
+    ]);
+  });
+
+  it("uses the capability's labels and puts required inputs first", () => {
+    const rows = stepDetailRows(updateInstance, {
+      inputFields: [
+        { name: 'schema_name', displayName: 'Schema', required: true },
+        { name: 'instance_id', displayName: 'Instance', required: true },
+        { name: 'data', displayName: 'Fields to update', required: false },
       ],
     });
-    expect(rows).toEqual([
-      {
-        key: 'decision',
-        label: 'decision',
-        value: 'steps.request_decision.outputs',
-        kind: 'reference',
-      },
-      {
-        key: 'status',
-        label: 'status',
-        value: 'Completed',
-        kind: 'literal',
-      },
-      {
-        key: 'summary',
-        label: 'summary',
-        value: 'Order {{data.orderId}} done',
-        kind: 'template',
-      },
-      {
-        key: 'payload',
-        label: 'payload',
-        value: '{ id, total }',
-        kind: 'composite',
-      },
+    expect(rows.map((row) => row.label)).toEqual([
+      'Schema',
+      'Instance',
+      'Fields to update',
     ]);
+  });
+
+  it('never changes the row count with context', () => {
+    expect(stepDetailRows(updateInstance)).toHaveLength(
+      stepDetailRows(updateInstance, { stepNames, dataScope: 'item' }).length
+    );
+  });
+
+  it('renders template references as sources', () => {
+    const [row] = stepDetailRows(
+      {
+        stepType: 'Log',
+        inputMapping: [
+          {
+            type: 'message',
+            value: 'Order {{ data.orderId }} for {{ steps.read.outputs.name }}',
+            valueType: 'template',
+          },
+        ],
+      },
+      { stepNames }
+    );
+    expect(row.value).toBe(
+      'Order ‹Input · orderId› for ‹Read tenant record · name›'
+    );
   });
 
   it('skips empty inputs and editor plumbing', () => {
@@ -65,16 +149,18 @@ describe('stepDetailRows', () => {
     expect(rows.map((row) => row.key)).toEqual(['value']);
   });
 
-  it('formats durations and names iterated collections', () => {
+  it('formats durations, flags and iterated collections', () => {
     expect(
       stepDetailRows({
         stepType: 'Delay',
         inputMapping: [
           { type: 'durationMs', value: 1200, valueType: 'immediate' },
+          { type: 'retry', value: true, valueType: 'immediate' },
         ],
-      })
+      }).map((row) => [row.label, row.value])
     ).toEqual([
-      { key: 'durationMs', label: 'duration', value: '1.2 s', kind: 'literal' },
+      ['Duration', '1.2 s'],
+      ['Retry', 'Yes'],
     ]);
     expect(
       stepDetailRows({
@@ -85,8 +171,8 @@ describe('stepDetailRows', () => {
         ],
       }).map((row) => [row.label, row.value])
     ).toEqual([
-      ['items', 'data.orders'],
-      ['parallelism', '4'],
+      ['Items', 'Input · orders'],
+      ['Parallelism', '4 at a time'],
     ]);
   });
 
@@ -96,18 +182,13 @@ describe('stepDetailRows', () => {
       inputMapping: [
         {
           type: 'responseSchema',
-          value: [{ name: 'decision' }, { name: 'note' }],
+          value: [{ name: 'decision' }, { name: 'review_note' }],
         },
         { type: 'timeoutMs', value: '', valueType: 'immediate' },
       ],
     });
-    expect(rows).toEqual([
-      {
-        key: 'responseSchema',
-        label: 'asks for',
-        value: 'decision, note',
-        kind: 'list',
-      },
+    expect(rows.map((row) => [row.label, row.value])).toEqual([
+      ['Asks for', 'Decision, Review note'],
     ]);
   });
 
@@ -124,6 +205,20 @@ describe('stepDetailRows', () => {
         inputMapping: [{ type: 'model', value: 'gpt' }],
       })
     ).toEqual([]);
+  });
+});
+
+describe('stepDescription', () => {
+  it('names the agent and capability', () => {
+    const step = {
+      stepType: 'Agent',
+      agentId: 'object-model',
+      capabilityId: 'update-instance',
+    };
+    expect(stepDescription(step, 'Object Model', 'Update Instance')).toBe(
+      'Object Model · Update Instance'
+    );
+    expect(stepDescription(step)).toBe('Object model · Update instance');
   });
 });
 
@@ -148,5 +243,43 @@ describe('cardDetailLayout', () => {
     expect(layout.visible).toHaveLength(2);
     expect(layout.hiddenCount).toBe(4);
     expect(layout.lineCount).toBe(3);
+  });
+});
+
+describe('describeCondition', () => {
+  it('reads a condition as a sentence', () => {
+    expect(
+      describeCondition({
+        type: 'operation',
+        op: 'EQ',
+        arguments: [
+          { value: 'data.stage', valueType: 'reference' },
+          { value: 'intake', valueType: 'immediate' },
+        ],
+      })
+    ).toBe('Input · stage is "intake"');
+    expect(
+      describeCondition(
+        {
+          op: 'AND',
+          arguments: [
+            {
+              op: 'GTE',
+              arguments: [
+                { value: 'steps.read.outputs.total', valueType: 'reference' },
+                { value: 100, valueType: 'immediate' },
+              ],
+            },
+            {
+              op: 'IS_NOT_EMPTY',
+              arguments: [{ value: 'data.email', valueType: 'reference' }],
+            },
+          ],
+        },
+        { stepNames }
+      )
+    ).toBe(
+      '(Read tenant record · total ≥ 100) and (Input · email is not empty)'
+    );
   });
 });

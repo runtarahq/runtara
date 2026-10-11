@@ -6,7 +6,11 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/shared/components/ui/tooltip';
-import { stepBadgeVariant, stepDescription } from './step-summary';
+import {
+  stepBadgeVariant,
+  stepDescription,
+  stepTypeLabel,
+} from './step-summary';
 import { stepIdLabel } from './step-label';
 import { cardDetailLayout, type StepDetailRow } from './step-details';
 import { useCanvasDisplay } from './CanvasDisplayContext';
@@ -41,6 +45,8 @@ export const BaseNode = forwardRef<
     agentName?: string;
     /** Agent capability, shown with the agent as the step summary. */
     capabilityId?: string;
+    /** The capability's display name, used in the step summary. */
+    capabilityName?: string;
     /** The step's own description, shown instead of the type summary. */
     description?: string;
     inputMapping?: Array<{
@@ -81,6 +87,7 @@ export const BaseNode = forwardRef<
       agentId,
       agentName,
       capabilityId,
+      capabilityName,
       description,
       inputMapping,
       executionStatus,
@@ -219,11 +226,13 @@ export const BaseNode = forwardRef<
       // Same summary as the timeline card: description, or what the step does.
       const summary = stepDescription(
         { stepType, agentId, capabilityId, description },
-        agentName
+        agentName,
+        capabilityName
       );
-      return summary
-        ? { text: summary, className: 'text-muted-foreground' }
-        : null;
+      // Without a summary, the readable step type ("Wait for signal") keeps
+      // the card saying what kind of step it is now the type chip is gone.
+      const text = summary || (stepType ? stepTypeLabel(stepType) : undefined);
+      return text ? { text, className: 'text-muted-foreground' } : null;
     };
 
     const subtitleContent = getSubtitleContent();
@@ -373,14 +382,9 @@ export const BaseNode = forwardRef<
                     Unnamed step
                   </span>
                 )}
-                {stepType && (
-                  <Badge
-                    variant={stepBadgeVariant(stepType)}
-                    className="shrink-0 px-1 py-0 text-[9px] font-medium leading-tight"
-                  >
-                    {stepType}
-                  </Badge>
-                )}
+                {/* No step-type chip here: the icon and the subtitle already
+                    say what the step is, and a chip (plus the stale-agent one)
+                    truncated the step name. The hover preview shows the type. */}
                 {/* Stale-agent badge — entitlement allowlist excludes this
                     step's agent. Workflow can't be saved/run until either the
                     entitlement is restored or the step is swapped. */}
@@ -392,7 +396,6 @@ export const BaseNode = forwardRef<
                     className="flex shrink-0 items-center gap-0.5 rounded-full bg-warning/10 px-1 py-0.5 text-[9px] font-medium leading-none text-warning"
                   >
                     <AlertTriangle className="size-2.5" />
-                    <span className="hidden md:inline">Agent disabled</span>
                   </span>
                 )}
                 {/* Inline status pill */}
@@ -429,16 +432,22 @@ export const BaseNode = forwardRef<
         )}
         {showCardDetails && cardDetails && (
           <div
-            className="flex min-h-0 flex-1 flex-col justify-center border-t border-border/60 px-2"
+            // A two-column table: shaded labels, a divider, a rule per row.
+            className="flex min-h-0 flex-1 flex-col divide-y divide-border/70 overflow-hidden rounded-b-md border-t border-border/70 text-[10px]"
             data-testid="step-card-details"
+            role="table"
+            aria-label="Step inputs"
           >
             {cardDetails.visible.map((row) => (
               <StepDetailLine key={row.key} row={row} />
             ))}
             {cardDetails.hiddenCount > 0 && (
-              <span className="h-4 text-[10px] leading-4 text-muted-foreground">
-                +{cardDetails.hiddenCount} more
-              </span>
+              <div
+                role="row"
+                className="flex min-h-0 flex-1 items-center bg-muted/30 px-2 text-muted-foreground"
+              >
+                <span role="cell">+{cardDetails.hiddenCount} more</span>
+              </div>
             )}
           </div>
         )}
@@ -446,7 +455,13 @@ export const BaseNode = forwardRef<
       </div>
     );
 
-    if (!stepPreviews || (stepType === undefined && !name)) {
+    // The hover preview is for compact cards only: a card that already shows
+    // its inputs as a table would just pop the same rows up again.
+    if (
+      !stepPreviews ||
+      detailLevel === 'detailed' ||
+      (stepType === undefined && !name)
+    ) {
       return card;
     }
 
@@ -469,6 +484,7 @@ export const BaseNode = forwardRef<
               summaryIsError={subtitleContent?.className === 'text-destructive'}
               rows={detailRows ?? []}
               editable={editable}
+              hasStaleAgent={hasStaleAgent}
             />
           </TooltipContent>
         </Tooltip>
@@ -477,32 +493,85 @@ export const BaseNode = forwardRef<
   }
 );
 
-function detailValueClass(row: StepDetailRow): string {
-  switch (row.kind) {
-    case 'reference':
-      return 'font-mono text-primary-text';
-    case 'template':
-      return 'font-mono text-foreground';
-    case 'composite':
-      return 'font-mono text-muted-foreground';
-    default:
-      return 'text-foreground';
+/** A row's value: references read "Source › field", the field emphasised. */
+function DetailValue({ row }: { row: StepDetailRow }) {
+  if (row.kind === 'reference' && row.reference) {
+    const { source, path } = row.reference;
+    if (!source || !path) {
+      return (
+        <span className="font-medium text-primary-text">{source || path}</span>
+      );
+    }
+    return (
+      <>
+        <span className="text-muted-foreground">{source}</span>
+        <span className="px-0.5 text-muted-foreground/60" aria-hidden="true">
+          ›
+        </span>
+        <span className="sr-only"> field </span>
+        <span className="font-medium text-primary-text">{path}</span>
+      </>
+    );
   }
+  return <span className="text-foreground">{row.value}</span>;
 }
 
 function StepDetailLine({ row }: { row: StepDetailRow }) {
   return (
     <div
-      className="flex h-4 min-w-0 items-center gap-1.5 text-[10px] leading-4"
-      title={`${row.label}: ${row.value}`}
+      role="row"
+      className="grid min-h-0 flex-1 grid-cols-[minmax(0,40%)_minmax(0,1fr)] items-stretch"
     >
-      <span className="max-w-[45%] shrink-0 truncate text-muted-foreground">
-        {row.label}
+      <span
+        role="rowheader"
+        className="flex min-w-0 items-center border-r border-border/70 bg-muted/40 px-2 text-muted-foreground"
+      >
+        <span className="truncate">{row.label}</span>
       </span>
-      <span className={cn('min-w-0 truncate', detailValueClass(row))}>
-        {row.value}
+      <span role="cell" className="flex min-w-0 items-center px-2">
+        <span className="truncate">
+          <DetailValue row={row} />
+        </span>
       </span>
     </div>
+  );
+}
+
+function PreviewRows({
+  rows,
+  nested = false,
+}: {
+  rows: StepDetailRow[];
+  nested?: boolean;
+}) {
+  return (
+    <>
+      {rows.map((row) => (
+        <div key={row.key} className="contents">
+          <dt
+            className={cn(
+              'truncate text-muted-foreground',
+              nested && 'pl-3 before:mr-1 before:content-["↳"]'
+            )}
+          >
+            {row.label}
+          </dt>
+          <dd className="line-clamp-3 break-words">
+            {row.children && row.children.length > 0 ? (
+              <span className="text-muted-foreground">
+                {row.children.length} field
+                {row.children.length === 1 ? '' : 's'}
+              </span>
+            ) : (
+              <DetailValue row={row} />
+            )}
+          </dd>
+          {row.children && row.children.length > 0 && (
+            <PreviewRows rows={row.children} nested />
+          )}
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -515,6 +584,7 @@ function StepPreview({
   summaryIsError,
   rows,
   editable,
+  hasStaleAgent,
 }: {
   id?: string;
   name?: string;
@@ -523,6 +593,7 @@ function StepPreview({
   summaryIsError?: boolean;
   rows: StepDetailRow[];
   editable: boolean;
+  hasStaleAgent?: boolean;
 }): ReactNode {
   return (
     <div className="space-y-2 text-xs">
@@ -549,18 +620,16 @@ function StepPreview({
           {summary}
         </p>
       )}
+      {hasStaleAgent && (
+        <p className="flex items-center gap-1.5 text-warning">
+          <AlertTriangle className="size-3.5 shrink-0" aria-hidden="true" />
+          Agent disabled — the workflow can&apos;t be saved or run until
+          it&apos;s enabled or this step is replaced.
+        </p>
+      )}
       {rows.length > 0 && (
         <dl className="grid grid-cols-[minmax(0,auto)_minmax(0,1fr)] gap-x-3 gap-y-1 border-t pt-2">
-          {rows.map((row) => (
-            <div key={row.key} className="contents">
-              <dt className="truncate text-muted-foreground">{row.label}</dt>
-              <dd
-                className={cn('line-clamp-3 break-all', detailValueClass(row))}
-              >
-                {row.value}
-              </dd>
-            </div>
-          ))}
+          <PreviewRows rows={rows} />
         </dl>
       )}
       <div className="flex items-center justify-between gap-2 border-t pt-1.5 text-[10px] text-muted-foreground">

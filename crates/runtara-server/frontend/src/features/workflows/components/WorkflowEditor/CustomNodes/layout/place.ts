@@ -19,13 +19,15 @@ function placeOrderedRanks(
   sizes: Map<string, LayoutSize>,
   branchLaneBias: Map<string, number>,
   rankSep: number,
-  nodeSep: number,
-  laneHeight: number
+  nodeSep: number
 ): Map<string, LayoutPoint> {
   const positions = new Map<string, LayoutPoint>();
   const horizontalGap = snapGapToGrid(rankSep);
   const verticalGap = snapGapToGrid(nodeSep);
-  const laneUnit = snapGapToGrid(laneHeight + nodeSep);
+  // Lanes are spaced for a compact card. Taller cards (detailed, AiAgent)
+  // that would collide in a rank are pushed apart by the stacking below;
+  // spacing every lane for the tallest card left huge gaps between branches.
+  const laneUnit = snapGapToGrid(BASE_HEIGHT + nodeSep);
   const rankWidths = ranks.map((rankIds) =>
     Math.max(
       0,
@@ -131,25 +133,8 @@ function layoutConnectedComponent(
     sizes,
     orderedRanks.branchLaneBias,
     rankSep,
-    nodeSep,
-    laneHeight(nodes, sizes)
+    nodeSep
   );
-}
-
-/**
- * Height of one branch lane: the tallest card in the scope. Lanes sized for a
- * compact card would let taller (detailed, AiAgent) cards in neighbouring
- * lanes collide, and the per-rank de-overlap then shifts them out of line
- * with the rest of their lane. Containers are excluded — their height comes
- * from their children and would spread every lane apart.
- */
-function laneHeight(nodes: LayoutNode[], sizes: Map<string, LayoutSize>) {
-  let height = BASE_HEIGHT;
-  for (const node of nodes) {
-    if (node.type === 'container' || node.type === 'note') continue;
-    height = Math.max(height, sizes.get(node.id)?.height ?? BASE_HEIGHT);
-  }
-  return height;
 }
 
 export function layoutScope(

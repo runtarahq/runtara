@@ -26,8 +26,8 @@ export const COMPACT_CARD_HEIGHT = NODE_TYPE_SIZES[NODE_TYPES.BasicNode].height;
 export const COMPACT_CARD_WIDTH = NODE_TYPE_SIZES[NODE_TYPES.BasicNode].width;
 /** Detailed cards are wider so mapped values stay readable. */
 export const DETAILED_CARD_WIDTH = 264;
-export const DETAIL_LINE_HEIGHT = 16;
-const DETAIL_BLOCK_PADDING = 8;
+/** One row of a detailed card's input table; two grid steps of 12. */
+export const DETAIL_LINE_HEIGHT = 24;
 
 export const SWITCH_HANDLE_SPACING = 24;
 export const SWITCH_FIRST_HANDLE_TOP = 28;
@@ -51,14 +51,12 @@ export function oddGridCeil(height: number): number {
   return k * step + SNAP_GRID_SIZE;
 }
 
-/** Height of the detail list under a card header; whole grid steps. */
+/**
+ * Height of the input table under a card header. Rows are 24px (an even
+ * number of grid steps), so a card with a table keeps an odd-multiple height.
+ */
 export function detailBlockHeight(lineCount: number): number {
-  if (lineCount <= 0) return 0;
-  const step = SNAP_GRID_SIZE * 2;
-  return (
-    Math.ceil((lineCount * DETAIL_LINE_HEIGHT + DETAIL_BLOCK_PADDING) / step) *
-    step
-  );
+  return Math.max(0, lineCount) * DETAIL_LINE_HEIGHT;
 }
 
 export function isResizableNodeType(nodeType?: string): boolean {

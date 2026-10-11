@@ -427,14 +427,6 @@ function WorkflowEditorContent({
     setCanvasDetailState(detail);
     writeCanvasDetail(detail);
   }, []);
-  const canvasDisplayValue = useMemo(
-    () => ({
-      detailLevel: canvasDetail,
-      stepPreviews: true,
-      editable: !readOnly && !!workflow,
-    }),
-    [canvasDetail, readOnly, workflow]
-  );
 
   // Pending new node state from store (for deferred creation until user confirms)
   const pendingNewNode = useWorkflowStore((state) => state.pendingNewNode);
@@ -483,6 +475,31 @@ function WorkflowEditorContent({
 
   // Get state from Zustand store
   const nodes = useWorkflowStore((state) => state.nodes);
+  // Rebuilt only when a step is added, removed, renamed or retyped, so cards
+  // do not all re-render on every selection or position change.
+  const stepIndexKey = useMemo(
+    () =>
+      JSON.stringify(
+        nodes.map((node) => [
+          node.id,
+          (node.data as { name?: string })?.name ?? '',
+          (node.data as { stepType?: string })?.stepType ?? '',
+        ])
+      ),
+    [nodes]
+  );
+  const canvasDisplayValue = useMemo(() => {
+    const entries = JSON.parse(stepIndexKey) as Array<[string, string, string]>;
+    return {
+      detailLevel: canvasDetail,
+      stepPreviews: true,
+      editable: !readOnly && !!workflow,
+      stepNames: new Map(
+        entries.filter(([, name]) => name).map(([id, name]) => [id, name])
+      ),
+      stepTypes: new Map(entries.map(([id, , stepType]) => [id, stepType])),
+    };
+  }, [canvasDetail, readOnly, stepIndexKey, workflow]);
   const edges = useWorkflowStore((state) => state.edges);
   const pendingCenterNodeId = useWorkflowStore(
     (state) => state.pendingCenterNodeId

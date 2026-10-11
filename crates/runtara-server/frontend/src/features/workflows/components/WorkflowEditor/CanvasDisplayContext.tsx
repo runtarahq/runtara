@@ -8,6 +8,10 @@ interface CanvasDisplayContextValue {
   stepPreviews: boolean;
   /** Whether the preview may offer "double-click to edit". */
   editable: boolean;
+  /** Step id → name, so references read as the step they come from. */
+  stepNames: ReadonlyMap<string, string>;
+  /** Step id → step type, to tell a Split's item scope from the root. */
+  stepTypes: ReadonlyMap<string, string>;
 }
 
 // The default is what any canvas outside the workflow editor gets (the replay
@@ -16,6 +20,8 @@ const CanvasDisplayContext = createContext<CanvasDisplayContextValue>({
   detailLevel: 'compact',
   stepPreviews: false,
   editable: false,
+  stepNames: new Map(),
+  stepTypes: new Map(),
 });
 
 export const CanvasDisplayProvider = CanvasDisplayContext.Provider;
