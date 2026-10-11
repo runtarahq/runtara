@@ -228,11 +228,14 @@ function WorkflowHistoryContent() {
       {/* Header Section */}
       <div className="mb-8">
         <div className="flex items-center gap-3">
+          {/* -ml-2 cancels the icon button's inner padding so the arrow
+              lines up with the cards' left edge. */}
           <Button
             variant="secondary"
             size="icon"
-            className="rounded-full hover:bg-muted"
+            className="-ml-2 rounded-full hover:bg-muted"
             onClick={handleBack}
+            aria-label="Back"
           >
             <ChevronLeft className="size-5" />
           </Button>
