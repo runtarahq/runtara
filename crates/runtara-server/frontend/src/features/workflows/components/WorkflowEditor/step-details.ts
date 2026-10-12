@@ -258,7 +258,12 @@ function formatLiteral(value: unknown, key: string): string {
     return `${value.length} item${value.length === 1 ? '' : 's'}`;
   }
   if (value && typeof value === 'object') {
-    return truncate(JSON.stringify(value));
+    // A card never shows raw JSON: an object reads as the fields it holds,
+    // like a built (composite) value does.
+    const keys = Object.keys(value as Record<string, unknown>);
+    return truncate(
+      keys.length > 0 ? keys.map(humanizeKey).join(', ') : 'Empty object'
+    );
   }
   return truncate(String(value));
 }
@@ -333,6 +338,15 @@ function buildRow(
       kind: 'composite',
       children,
     };
+  }
+
+  // A condition held as a plain value (object-model query `condition`, a
+  // Filter-style predicate) reads as a sentence, as on Conditional cards.
+  if (isCondition(value)) {
+    const sentence = describeCondition(value, context);
+    if (sentence) {
+      return { key, label, value: truncate(sentence), kind: 'literal' };
+    }
   }
 
   return { key, label, value: formatLiteral(value, key), kind: 'literal' };
