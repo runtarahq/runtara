@@ -109,7 +109,8 @@ export function queryRequests(
   token: string,
   view: OperationViewConfig,
   page: number,
-  search: string
+  search: string,
+  size = 25
 ) {
   return operationsRequest<OperationRequestPage>(
     token,
@@ -121,7 +122,7 @@ export function queryRequests(
       query: {
         ...resolveQuery(view),
         page,
-        size: 25,
+        size,
         search: search || undefined,
       },
     }

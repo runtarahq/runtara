@@ -130,12 +130,12 @@ export const QueueAnswer = forwardRef<
     <div className="min-w-40 space-y-3">
       {!editing && options ? (
         <div className="flex flex-wrap gap-2">
-          {options.values.map((value, index) => (
+          {options.values.map((value) => (
             <Button
               key={JSON.stringify(value)}
               size="sm"
-              variant={index === 0 ? 'primary' : 'secondary'}
-              bordered={index !== 0}
+              variant="secondary"
+              bordered
               disabled={disabled}
               onClick={() => void choose(value)}
             >

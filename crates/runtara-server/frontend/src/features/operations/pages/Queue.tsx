@@ -2,11 +2,13 @@ import { stateLabel } from '../state-label';
 import { inlineOptions } from '../answer-options';
 import { useRef, useState } from 'react';
 import {
-  AlarmClock,
+  ArrowDown,
   ArrowDownWideNarrow,
+  ArrowUp,
   ArrowUpNarrowWide,
   SlidersHorizontal,
 } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import { Link, useNavigate, useParams } from 'react-router';
 import type {
   OperationRequest,
@@ -40,6 +42,7 @@ import {
 import { QueueAnswer, type AnswerController } from '../components/QueueAnswer';
 import { DeleteQueue } from '../components/DeleteQueue';
 import { ViewEditor, StateFilters } from '../components/ViewEditor';
+import { overdueFilters } from '../attention-requests';
 import { OperationHeader, RunRows, RefreshControls } from './shared';
 
 const requestKey = (r: OperationRequest) =>
@@ -114,6 +117,7 @@ function QueueContent({
   const [selection, setSelection] = useState<Set<string>>(() => new Set());
   const [editing, setEditing] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [tab, setTab] = useState<'open' | 'overdue'>('open');
   const refs = useRef(new Map<string, AnswerController>());
   const tenant = useAuthStore((s) => s.orgId);
   const navigate = useNavigate();
@@ -121,12 +125,19 @@ function QueueContent({
   const isQueue = Boolean(view.where?.openRequest);
   const columns = view.columns?.filter((field) => field !== view.roles?.key);
   const bulk = view.answers?.bulk && (!saved || Boolean(view.answers.inline));
+  const due = view.roles?.due;
+  const overdueTab = isQueue && Boolean(due) && tab === 'overdue';
   const query = useCustomQuery({
-    queryKey: ['operations', tenant, 'items', view, page, search],
+    queryKey: ['operations', tenant, 'items', view, page, search, overdueTab],
     queryFn: async (token: string) =>
       isQueue
         ? {
-            requests: await queryRequests(token, view, page, search),
+            requests: await queryRequests(
+              token,
+              overdueTab ? withOverdue(view) : view,
+              page,
+              search
+            ),
             runs: null,
           }
         : {
@@ -138,6 +149,20 @@ function QueueContent({
               size: 25,
             }),
           },
+    refetchInterval: 10_000,
+    placeholderData: undefined,
+  });
+  // Tab counts, the same way the Overview counts overdue requests.
+  const counts = useCustomQuery({
+    queryKey: ['operations', tenant, 'queue-counts', view],
+    queryFn: async (token: string) => {
+      const [open, overdue] = await Promise.all([
+        queryRequests(token, view, 0, '', 1),
+        queryRequests(token, withOverdue(view), 0, '', 1),
+      ]);
+      return { open: open.totalElements, overdue: overdue.totalElements };
+    },
+    enabled: isQueue && Boolean(due),
     refetchInterval: 10_000,
     placeholderData: undefined,
   });
@@ -164,12 +189,6 @@ function QueueContent({
       : [];
   const data = query.data?.requests ?? query.data?.runs;
   const total = data?.totalElements;
-  const due = view.roles?.due;
-  const isOverdueFilter = (filter: StateFilterDto) =>
-    filter.field === due &&
-    filter.op === 'lt' &&
-    (filter.value as { relative?: string } | undefined)?.relative === 'now';
-  const overdueOnly = Boolean(due && view.where?.state?.some(isOverdueFilter));
   // Every row of a queue asks the same question; name it once in the header.
   const question = rows[0]?.label;
   // Context values that a column already shows are noise in the row.
@@ -183,6 +202,31 @@ function QueueContent({
     setPage(next);
     setSelection(new Set());
   };
+  // Header sorting cycles ascending, descending, then back to the default.
+  const sortBy = (field: string) => {
+    setView((v) => ({
+      ...v,
+      sort:
+        v.sort?.field !== field
+          ? { field, descending: false }
+          : v.sort.descending
+            ? null
+            : { field, descending: true },
+    }));
+    goPage(0);
+  };
+  const tabs = [
+    { key: 'open' as const, label: 'Open', count: counts.data?.open ?? total },
+    ...(due
+      ? [
+          {
+            key: 'overdue' as const,
+            label: 'Overdue',
+            count: counts.data?.overdue,
+          },
+        ]
+      : []),
+  ];
   return (
     <ConsoleTableShell
       className="mx-auto h-auto max-h-none min-h-full w-full max-w-[1600px] overflow-visible p-5 lg:px-10 lg:py-7"
@@ -193,24 +237,34 @@ function QueueContent({
             title={view.name}
             section="Queues"
             description={
-              [workflowName, isQueue ? question : undefined]
-                .filter(Boolean)
-                .join(' · ') ||
-              (isQueue
-                ? 'Requests waiting for a decision.'
-                : 'Follow runs and their published state.')
+              workflowName ? (
+                <Link
+                  className="hover:text-foreground hover:underline"
+                  to={`/workflows/${view.workflow}`}
+                >
+                  {workflowName}
+                </Link>
+              ) : isQueue ? (
+                'Requests waiting for a decision.'
+              ) : (
+                'Follow runs and their published state.'
+              )
             }
             actions={
               <>
                 <RefreshControls
+                  compact
                   updatedAt={query.dataUpdatedAt}
                   busy={query.isFetching}
-                  onRefresh={() => void query.refetch()}
+                  onRefresh={() => {
+                    void query.refetch();
+                    void counts.refetch();
+                  }}
                 />
                 <Can permission="workflow:update">
                   {saved ? (
                     <>
-                      <Button asChild variant="secondary" bordered>
+                      <Button asChild variant="secondary">
                         <Link to={`/operations/queues/${saved.id}/edit`}>
                           Edit queue
                         </Link>
@@ -224,7 +278,6 @@ function QueueContent({
                   ) : (
                     <Button
                       variant="secondary"
-                      bordered
                       onClick={() => setEditing((value) => !value)}
                     >
                       Create queue
@@ -235,18 +288,54 @@ function QueueContent({
             }
           />
           <div className="mb-4 flex flex-wrap items-center gap-2">
-            <p className="mr-auto text-sm font-medium tabular-nums">
-              {total?.toLocaleString() ?? '…'}{' '}
-              <span className="font-normal text-muted-foreground">
-                {isQueue
-                  ? total === 1
-                    ? 'open request'
-                    : 'open requests'
-                  : total === 1
-                    ? 'run'
-                    : 'runs'}
-              </span>
-            </p>
+            {isQueue ? (
+              <div
+                role="tablist"
+                aria-label="Requests"
+                className="mr-auto flex items-center gap-1 rounded-lg bg-muted p-1 text-sm"
+              >
+                {tabs.map((t) => {
+                  const active = (overdueTab ? 'overdue' : 'open') === t.key;
+                  return (
+                    <button
+                      key={t.key}
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      className={cn(
+                        'rounded-md px-3 py-1 font-medium transition-colors',
+                        active
+                          ? 'bg-background text-foreground shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground'
+                      )}
+                      onClick={() => {
+                        setTab(t.key);
+                        goPage(0);
+                      }}
+                    >
+                      {t.label}
+                      <span
+                        className={cn(
+                          'ml-1.5 tabular-nums',
+                          t.key === 'overdue' && t.count
+                            ? 'text-warning'
+                            : 'text-muted-foreground'
+                        )}
+                      >
+                        {t.count?.toLocaleString() ?? '…'}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="mr-auto text-sm font-medium tabular-nums">
+                {total?.toLocaleString() ?? '…'}{' '}
+                <span className="font-normal text-muted-foreground">
+                  {total === 1 ? 'run' : 'runs'}
+                </span>
+              </p>
+            )}
             <Input
               aria-label="Search runs"
               placeholder="Search label or run"
@@ -257,40 +346,8 @@ function QueueContent({
                 goPage(0);
               }}
             />
-            {due ? (
-              <Button
-                variant="secondary"
-                bordered
-                aria-pressed={overdueOnly}
-                className={
-                  overdueOnly
-                    ? 'border-warning/50 bg-warning/10 text-warning hover:bg-warning/15 hover:text-warning'
-                    : ''
-                }
-                onClick={() =>
-                  filters(
-                    overdueOnly
-                      ? (view.where?.state ?? []).filter(
-                          (filter) => !isOverdueFilter(filter)
-                        )
-                      : [
-                          ...(view.where?.state ?? []),
-                          {
-                            field: due,
-                            op: 'lt',
-                            value: { relative: 'now', offsetSeconds: 0 },
-                          },
-                        ]
-                  )
-                }
-              >
-                <AlarmClock />
-                Overdue only
-              </Button>
-            ) : null}
             <Button
               variant="secondary"
-              bordered
               aria-expanded={filtersOpen}
               onClick={() => setFiltersOpen((v) => !v)}
             >
@@ -298,80 +355,72 @@ function QueueContent({
               Filters
               {view.where?.state?.length ? ` (${view.where.state.length})` : ''}
             </Button>
-            <div className="flex items-center gap-1">
-              <select
-                aria-label="Sort by"
-                className="h-8 max-w-full rounded-md border bg-background px-2 text-sm"
-                value={view.sort?.field ?? ''}
-                onChange={(e) => {
-                  setView((v) => ({
-                    ...v,
-                    sort: e.target.value
-                      ? { field: e.target.value, descending: false }
-                      : null,
-                  }));
-                  goPage(0);
-                }}
-              >
-                <option value="">
-                  {isQueue ? 'Oldest request first' : 'Recent runs first'}
-                </option>
-                {Object.keys(schema).map((field) => (
-                  <option key={field} value={field}>
-                    Sort by {stateLabel(field, schema[field])}
-                  </option>
-                ))}
-              </select>
-              {view.sort ? (
-                <WithTooltip
-                  label={
-                    view.sort.descending
-                      ? 'Descending — switch to ascending'
-                      : 'Ascending — switch to descending'
-                  }
+            {isQueue ? null : (
+              <div className="flex items-center gap-1">
+                <select
+                  aria-label="Sort by"
+                  className="h-8 max-w-full rounded-md border bg-background px-2 text-sm"
+                  value={view.sort?.field ?? ''}
+                  onChange={(e) => {
+                    setView((v) => ({
+                      ...v,
+                      sort: e.target.value
+                        ? { field: e.target.value, descending: false }
+                        : null,
+                    }));
+                    goPage(0);
+                  }}
                 >
-                  <Button
-                    variant="secondary"
-                    bordered
-                    size="icon"
-                    aria-label={
+                  <option value="">Recent runs first</option>
+                  {Object.keys(schema).map((field) => (
+                    <option key={field} value={field}>
+                      Sort by {stateLabel(field, schema[field])}
+                    </option>
+                  ))}
+                </select>
+                {view.sort ? (
+                  <WithTooltip
+                    label={
                       view.sort.descending
-                        ? 'Sort descending'
-                        : 'Sort ascending'
+                        ? 'Descending — switch to ascending'
+                        : 'Ascending — switch to descending'
                     }
-                    onClick={() => {
-                      setView((v) => ({
-                        ...v,
-                        sort: { ...v.sort!, descending: !v.sort?.descending },
-                      }));
-                      goPage(0);
-                    }}
                   >
-                    {view.sort.descending ? (
-                      <ArrowDownWideNarrow />
-                    ) : (
-                      <ArrowUpNarrowWide />
-                    )}
-                  </Button>
-                </WithTooltip>
-              ) : null}
-            </div>
+                    <Button
+                      variant="secondary"
+                      bordered
+                      size="icon"
+                      aria-label={
+                        view.sort.descending
+                          ? 'Sort descending'
+                          : 'Sort ascending'
+                      }
+                      onClick={() => sortBy(view.sort!.field)}
+                    >
+                      {view.sort.descending ? (
+                        <ArrowDownWideNarrow />
+                      ) : (
+                        <ArrowUpNarrowWide />
+                      )}
+                    </Button>
+                  </WithTooltip>
+                ) : null}
+              </div>
+            )}
           </div>
         </>
       }
       footer={
-        <div className="flex flex-wrap items-center justify-between gap-2 py-3 text-xs text-muted-foreground">
-          <span>
-            {total ?? 0} {isQueue ? 'requests' : 'runs'}
-            {query.isFetching ? ' · Updating…' : ''}
-          </span>
-          <TablePagination
-            pageIndex={page}
-            pageSize={25}
-            pageCount={data?.totalPages ?? 0}
-            onPageChange={goPage}
-          />
-        </div>
+        (data?.totalPages ?? 0) > 1 ? (
+          <div className="flex justify-end py-3">
+            <TablePagination
+              pageIndex={page}
+              pageSize={25}
+              pageCount={data?.totalPages ?? 0}
+              onPageChange={goPage}
+            />
+          </div>
+        ) : undefined
       }
     >
       {editing ? (
@@ -485,21 +534,29 @@ function QueueContent({
                   ) : null}
                 </Can>
               </th>
-              <th className="px-4 py-3">
-                {view.roles?.key
-                  ? stateLabel(view.roles.key, schema[view.roles.key])
-                  : 'Run'}
-              </th>
+              {view.roles?.key ? (
+                <SortHeader
+                  field={view.roles.key}
+                  label={stateLabel(view.roles.key, schema[view.roles.key])}
+                  sort={view.sort}
+                  onSort={sortBy}
+                />
+              ) : (
+                <th className="px-4 py-3">Run</th>
+              )}
               {columns?.map((field) => (
-                <th
+                <SortHeader
                   key={field}
-                  className={`px-4 py-3 ${isNumeric(schema[field]) ? 'text-right' : ''}`}
-                >
-                  {view.labels?.[field] || stateLabel(field, schema[field])}
-                </th>
+                  field={field}
+                  label={
+                    view.labels?.[field] || stateLabel(field, schema[field])
+                  }
+                  numeric={isNumeric(schema[field])}
+                  sort={view.sort}
+                  onSort={sortBy}
+                />
               ))}
-              <th className="px-4 py-3">Requested</th>
-              <th className="px-4 py-3">Decision</th>
+              <th className="px-4 py-3">{question ?? 'Decision'}</th>
             </tr>
           </thead>
           <tbody>
@@ -538,6 +595,22 @@ function QueueContent({
                         row.instanceId.slice(0, 8)
                     )}
                   </Link>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Requested{' '}
+                    <StateValue
+                      value={row.requestedAt}
+                      display={{ kind: 'relative' }}
+                    />
+                    {row.deadline ? (
+                      <>
+                        {' · deadline '}
+                        <StateValue
+                          value={row.deadline}
+                          display={{ kind: 'relative' }}
+                        />
+                      </>
+                    ) : null}
+                  </p>
                   {row.message && row.message !== row.label ? (
                     <p className="mt-1 text-xs">{row.message}</p>
                   ) : null}
@@ -564,21 +637,6 @@ function QueueContent({
                     )}
                   </td>
                 ))}
-                <td className="whitespace-nowrap px-4 py-3">
-                  <StateValue
-                    value={row.requestedAt}
-                    display={{ kind: 'relative' }}
-                  />
-                  {row.deadline ? (
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      Deadline{' '}
-                      <StateValue
-                        value={row.deadline}
-                        display={{ kind: 'relative' }}
-                      />
-                    </p>
-                  ) : null}
-                </td>
                 <td className="px-4 py-3">
                   <Can
                     permission="workflow:execute"
@@ -653,5 +711,56 @@ function RequestContext({
         </div>
       ))}
     </dl>
+  );
+}
+
+/** Overdue is a lens on the queue, applied per query and never saved. */
+function withOverdue(view: OperationViewConfig): OperationViewConfig {
+  return {
+    ...view,
+    where: {
+      ...view.where,
+      state: [
+        ...(view.where?.state ?? []),
+        ...((overdueFilters(view, Date.now()) ?? []) as StateFilterDto[]),
+      ],
+    },
+  };
+}
+
+function SortHeader({
+  field,
+  label,
+  numeric,
+  sort,
+  onSort,
+}: {
+  field: string;
+  label: string;
+  numeric?: boolean;
+  sort?: OperationViewConfig['sort'];
+  onSort: (field: string) => void;
+}) {
+  const active = sort?.field === field;
+  const Arrow = sort?.descending ? ArrowDown : ArrowUp;
+  return (
+    <th
+      aria-sort={
+        active ? (sort?.descending ? 'descending' : 'ascending') : undefined
+      }
+      className={cn('px-4 py-3', numeric && 'text-right')}
+    >
+      <button
+        type="button"
+        className={cn(
+          'inline-flex items-center gap-1 uppercase tracking-wide hover:text-foreground',
+          active && 'text-foreground'
+        )}
+        onClick={() => onSort(field)}
+      >
+        {label}
+        {active ? <Arrow className="size-3" /> : null}
+      </button>
+    </th>
   );
 }
