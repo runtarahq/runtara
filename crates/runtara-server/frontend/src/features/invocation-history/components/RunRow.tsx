@@ -21,7 +21,13 @@ export function RunIdentity({ run }: { run: ExecutionHistoryItem }) {
         <Link
           className="truncate font-medium text-primary-text"
           title={run.runLabel || run.instanceId}
-          to={`/operations/runs/${run.workflowId}/${run.instanceId}`}
+          to={
+            // Only a run waiting on people needs the Operations view; the
+            // execution page covers everything else.
+            run.hasPendingInput
+              ? `/operations/runs/${run.workflowId}/${run.instanceId}`
+              : `/workflows/${run.workflowId}/history/${run.instanceId}`
+          }
         >
           {run.runLabel || run.instanceId.slice(0, 8)}
         </Link>

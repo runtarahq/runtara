@@ -21,7 +21,7 @@ const run: ExecutionHistoryItem = {
 };
 afterEach(() => act(() => useAuthStore.getState().clearMe()));
 describe('operational run rows', () => {
-  it('links the business label to Operations, keeps execution details, and opens Replay with the original row', () => {
+  it('links the business label to the execution, keeps execution details, and opens Replay with the original row', () => {
     const replay = vi.fn();
     render(
       <MemoryRouter>
@@ -31,13 +31,24 @@ describe('operational run rows', () => {
     );
     expect(screen.getByRole('link', { name: 'ORDER-123' })).toHaveAttribute(
       'href',
-      '/operations/runs/workflow/run-12345678'
+      '/workflows/workflow/history/run-12345678'
     );
     expect(
       screen.getByRole('link', { name: 'Open execution' })
     ).toHaveAttribute('href', '/workflows/workflow/history/run-12345678');
     fireEvent.click(screen.getByRole('button', { name: 'Replay' }));
     expect(replay).toHaveBeenCalledWith(run);
+  });
+  it('links a run waiting on requests to Operations', () => {
+    render(
+      <MemoryRouter>
+        <RunIdentity run={{ ...run, hasPendingInput: true }} />
+      </MemoryRouter>
+    );
+    expect(screen.getByRole('link', { name: 'ORDER-123' })).toHaveAttribute(
+      'href',
+      '/operations/runs/workflow/run-12345678'
+    );
   });
   it.each([
     'waiting_signal',
