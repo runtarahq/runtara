@@ -2622,9 +2622,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // mode — local `cargo run` users want Ctrl+C to exit promptly instead
     // of waiting up to RUNTARA_SHUTDOWN_GRACE_MS for each in-flight
     // workflow to checkpoint. Release builds and explicit
-    // RUNTARA_DEV_MODE=false keep the full graceful drain. The embedded core
-    // is still serving throughout this drain, so guests can finish in-flight
-    // agent calls and write their suspend checkpoint.
+    // RUNTARA_DEV_MODE=false keep the full graceful drain. Guests reach core
+    // in-process, so throughout this drain they can finish in-flight agent
+    // calls and write their suspend checkpoint.
     if config::dev_mode() {
         tracing::warn!(
             "Dev mode: skipping graceful drain of executions and instances. \
@@ -2651,12 +2651,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Always tear down the embedded server so ports/pools close cleanly.
-    // `shutdown()` notifies workers and drains core's in-flight instance
-    // requests before stopping, bounded by core's own shutdown grace — so this
-    // adds up to that grace on top of the drain above. It is not free in the
-    // dev-mode branch either: the drain was skipped there, so a guest parked in
-    // a durable delay still holds a request that this waits on.
+    // Always tear down the embedded runtime so pools and listeners close
+    // cleanly. `shutdown()` stops the environment's workers, each finishing its
+    // current task. Only when core's test-only HTTP instance API is served
+    // (RUNTARA_CORE_INSTANCE_API) does it then drain that API's in-flight
+    // requests, bounded by core's own shutdown grace, adding up to that grace
+    // on top of the drain above.
     if let Some(runtara) = embedded_runtara {
         println!("Shutting down embedded Runtara server...");
         if let Err(e) = runtara.shutdown().await {

@@ -234,6 +234,10 @@ impl std::fmt::Debug for CoreRuntimeConfig {
 
 impl CoreRuntimeConfig {
     /// Start the runtime, spawning the HTTP server task.
+    ///
+    /// The listener is bound before this returns, so a port that is taken
+    /// fails here rather than in the background after the runtime reported
+    /// itself started.
     pub async fn start(self) -> Result<CoreRuntime> {
         let CoreRuntimeConfig {
             persistence,
@@ -250,11 +254,16 @@ impl CoreRuntimeConfig {
         let state = Arc::new(state);
         let draining = state.draining_handle();
 
+        // The cause goes in the message itself: hosts print this error with
+        // `{}`, which shows no context chain.
+        let listener = tokio::net::TcpListener::bind(bind_addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("bind runtara-core instance API on {bind_addr}: {e}"))?;
         let server_state = state.clone();
         let shutdown_signal = Arc::new(Notify::new());
         let server_shutdown = Arc::clone(&shutdown_signal);
         let server_handle = tokio::spawn(async move {
-            http_server::run_http_server_with_shutdown(bind_addr, server_state, async move {
+            http_server::serve_with_shutdown(listener, server_state, async move {
                 server_shutdown.notified().await
             })
             .await
@@ -694,9 +703,9 @@ mod tests {
         }
     }
 
-    /// Claim a port by binding and releasing it. `start()` binds asynchronously
-    /// inside the spawned server task, so callers pair this with
-    /// [`wait_until_listening`].
+    /// Claim a port by binding and releasing it. `start()` binds it before
+    /// returning; [`wait_until_listening`] additionally waits for the server
+    /// task to be accepting.
     async fn free_port() -> SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -727,6 +736,31 @@ mod tests {
         let mut buf = Vec::new();
         let _ = stream.read_to_end(&mut buf).await;
         String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    #[tokio::test]
+    async fn start_fails_when_the_port_is_taken() {
+        let taken = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = taken.local_addr().unwrap();
+        let error = CoreRuntime::builder()
+            .persistence(Arc::new(MockPersistence::new()))
+            .bind_addr(addr)
+            .build()
+            .unwrap()
+            .start()
+            .await
+            .err()
+            .expect("a taken port must fail start, not a background task");
+        // Plain `{}`, as the server prints it: address and cause both show.
+        let shown = error.to_string();
+        assert!(
+            shown.contains(&addr.to_string()),
+            "names the address: {shown}"
+        );
+        assert!(
+            shown.len() > format!("bind runtara-core instance API on {addr}").len(),
+            "carries the cause: {shown}"
+        );
     }
 
     #[tokio::test]

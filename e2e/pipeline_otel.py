@@ -113,7 +113,7 @@ def server(disabled=False):
         "OTEL_EXPORTER_OTLP_TIMEOUT": "1000", "OTEL_METRIC_EXPORT_TIMEOUT": "1000",
         "RUNTARA_MAX_CONCURRENT_RUNS": "2", "RUNTARA_TRIGGER_WORKERS": "2",
         "RUNTARA_TRIGGER_CONCURRENCY": "3", "RUNTARA_SHUTDOWN_GRACE_MS": "2000",
-        "RUNTARA_SHUTDOWN_INTAKE_GRACE_MS": "2000", "RUNTARA_CORE_SHUTDOWN_GRACE_MS": "1000",
+        "RUNTARA_SHUTDOWN_INTAKE_GRACE_MS": "2000",
         "RUST_LOG": "warn", "SQLX_OFFLINE": "true",
     })
     process = spawn([ENV.get("RUNTARA_SERVER_BIN", str(ROOT / "target/debug/runtara-server"))],

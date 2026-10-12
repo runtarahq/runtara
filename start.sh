@@ -35,14 +35,8 @@ VALKEY_PORT="${VALKEY_PORT:-6379}"
 # Port configuration
 SERVER_PORT="${SERVER_PORT:-7001}"            # API + UI
 CORE_PORT="${RUNTARA_CORE_HTTP_PORT:-8003}"   # Core: test-only instance API, served only with RUNTARA_CORE_INSTANCE_API=true
+# Passed through unchanged; the server alone parses and validates it.
 CORE_INSTANCE_API="${RUNTARA_CORE_INSTANCE_API:-false}"
-# Mirrors the server's parsing of RUNTARA_CORE_INSTANCE_API.
-core_instance_api_enabled() {
-    case "$(printf %s "${CORE_INSTANCE_API}" | tr "[:upper:]" "[:lower:]")" in
-        true|1|yes|on) return 0 ;;
-        *) return 1 ;;
-    esac
-}
 
 # PID file locations
 PID_DIR="${DATA_DIR}/pids"
@@ -136,9 +130,7 @@ stop_services() {
 start_server() {
     print_status "Starting runtara-server..."
     print_status "  API + UI port:    ${SERVER_PORT}"
-    if core_instance_api_enabled; then
-        print_status "  Core port:        ${CORE_PORT} (test-only instance API)"
-    fi
+    print_status "  Core instance API: RUNTARA_CORE_INSTANCE_API=${CORE_INSTANCE_API} (test-only; port ${CORE_PORT} when enabled)"
 
     TENANT_ID="${TENANT_ID}" \
     AUTH_PROVIDER="${AUTH_PROVIDER:-local}" \
@@ -177,9 +169,7 @@ show_status() {
     echo ""
     echo "  Endpoints:"
     echo "    - API + UI:                     http://127.0.0.1:${SERVER_PORT}"
-    if core_instance_api_enabled; then
-        echo "    - Core (test-only instance API): 127.0.0.1:${CORE_PORT}"
-    fi
+    echo "    - Core instance API (test-only): 127.0.0.1:${CORE_PORT} when enabled (RUNTARA_CORE_INSTANCE_API=${CORE_INSTANCE_API})"
     echo ""
     echo "  Logs:"
     echo "    tail -f ${LOG_FILE}"

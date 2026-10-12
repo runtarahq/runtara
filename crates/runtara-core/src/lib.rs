@@ -35,7 +35,7 @@
 //! ┌─────────────────────────────────────────────────────────────────────────┐
 //! │                      runtara-environment                                 │
 //! │            (Image Registry, Instance Lifecycle, Wake Queue)              │
-//! │                           Port 8002                                      │
+//! │                       (embedded in runtara-server)                       │
 //! └─────────────────────────────────────────────────────────────────────────┘
 //!           │                                              │
 //!           │ Shared Persistence                           │ Spawns
@@ -60,8 +60,9 @@
 //! Instances reach it through the host-implemented
 //! `runtara:workflow/runtime` interface.
 //!
-//! `runtara-server` exposes it over HTTP on the instance port (8001 by
-//! default); environment's in-process runner calls the same handlers directly.
+//! The environment's in-process runner calls the handlers directly for every
+//! workflow. `runtara-server` can also expose them over HTTP on loopback for
+//! tests and debugging, only with `RUNTARA_CORE_INSTANCE_API` (port 8003).
 //!
 //! ## Operations
 //!
