@@ -8,15 +8,19 @@
 //! and [`CoreRuntime`] owns the listener's lifecycle, including the drain
 //! sequence that lets an instance mid-checkpoint finish writing.
 //!
-//! Only guests using the SDK's HTTP backend come through here. The default
-//! composition binds `runtara:workflow/runtime` as a host import, and
-//! those calls reach the same core handlers in-process without a socket.
+//! Workflows do not come through here. They bind `runtara:workflow/runtime`
+//! as a host import, and those calls reach the same core handlers in-process
+//! without a socket. This transport is a test and debugging surface, and the
+//! server serves it only when `RUNTARA_CORE_INSTANCE_API` is enabled, on
+//! loopback. An instance registered through it has no launch or registration
+//! in the Environment, so the heartbeat monitor recovers it as orphaned once it
+//! is older than the heartbeat timeout.
 //!
 //! # Deployment configuration
 //!
 //! The server loads [`RuntimeOverrides`] before constructing the runtime and
-//! passes settings to core's handlers explicitly. Unset values preserve the
-//! builder's defaults:
+//! passes settings to core's handlers explicitly. They govern this transport
+//! only. Unset values preserve the builder's defaults:
 //!
 //! | Variable | Default | Description |
 //! |----------|---------|-------------|
@@ -129,9 +133,9 @@ impl CoreRuntimeBuilder {
 
     /// Observe instance events handled through this runtime's HTTP endpoint.
     ///
-    /// The default workflow composition reaches the same handlers in-process,
-    /// but legacy composed artifacts use the HTTP endpoint. Hosts that observe
-    /// guest events must attach the same observer to both paths.
+    /// Workflows reach the same handlers in-process, through the runner. Hosts
+    /// that observe instance events attach the same observer to both paths, so
+    /// events sent to this endpoint are observed too.
     pub fn event_observer(mut self, observer: Arc<dyn InstanceEventObserver>) -> Self {
         self.event_observer = Some(observer);
         self
@@ -230,6 +234,10 @@ impl std::fmt::Debug for CoreRuntimeConfig {
 
 impl CoreRuntimeConfig {
     /// Start the runtime, spawning the HTTP server task.
+    ///
+    /// The listener is bound before this returns, so a port that is taken
+    /// fails here rather than in the background after the runtime reported
+    /// itself started.
     pub async fn start(self) -> Result<CoreRuntime> {
         let CoreRuntimeConfig {
             persistence,
@@ -246,11 +254,16 @@ impl CoreRuntimeConfig {
         let state = Arc::new(state);
         let draining = state.draining_handle();
 
+        // The cause goes in the message itself: hosts print this error with
+        // `{}`, which shows no context chain.
+        let listener = tokio::net::TcpListener::bind(bind_addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("bind runtara-core instance API on {bind_addr}: {e}"))?;
         let server_state = state.clone();
         let shutdown_signal = Arc::new(Notify::new());
         let server_shutdown = Arc::clone(&shutdown_signal);
         let server_handle = tokio::spawn(async move {
-            http_server::run_http_server_with_shutdown(bind_addr, server_state, async move {
+            http_server::serve_with_shutdown(listener, server_state, async move {
                 server_shutdown.notified().await
             })
             .await
@@ -690,9 +703,9 @@ mod tests {
         }
     }
 
-    /// Claim a port by binding and releasing it. `start()` binds asynchronously
-    /// inside the spawned server task, so callers pair this with
-    /// [`wait_until_listening`].
+    /// Claim a port by binding and releasing it. `start()` binds it before
+    /// returning; [`wait_until_listening`] additionally waits for the server
+    /// task to be accepting.
     async fn free_port() -> SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -723,6 +736,31 @@ mod tests {
         let mut buf = Vec::new();
         let _ = stream.read_to_end(&mut buf).await;
         String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    #[tokio::test]
+    async fn start_fails_when_the_port_is_taken() {
+        let taken = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = taken.local_addr().unwrap();
+        let error = CoreRuntime::builder()
+            .persistence(Arc::new(MockPersistence::new()))
+            .bind_addr(addr)
+            .build()
+            .unwrap()
+            .start()
+            .await
+            .err()
+            .expect("a taken port must fail start, not a background task");
+        // Plain `{}`, as the server prints it: address and cause both show.
+        let shown = error.to_string();
+        assert!(
+            shown.contains(&addr.to_string()),
+            "names the address: {shown}"
+        );
+        assert!(
+            shown.len() > format!("bind runtara-core instance API on {addr}").len(),
+            "carries the cause: {shown}"
+        );
     }
 
     #[tokio::test]

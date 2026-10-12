@@ -2,6 +2,7 @@
 # Verify custom values and explicit host resume against an isolated local server.
 # Requires AUTH_PROVIDER=local, built agent components, and psql on PATH.
 # SERVER_API_URL / CORE_API_URL select the server; TENANT_ID must match it.
+# The server must run with RUNTARA_CORE_INSTANCE_API=true; the instance API is off by default.
 # TEST_RUNTIME_DATABASE is mandatory. PGHOST/PGPORT/PGUSER select its PostgreSQL.
 # Database access is read-only and verifies that cancellation starts no new launch.
 set -euo pipefail

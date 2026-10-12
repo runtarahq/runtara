@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Exercise the instance API of a running local runtara-server.
 # Usage: CORE_API_URL=http://127.0.0.1:8003 ./e2e/test_core_persistence_contract.sh
+# The server must run with RUNTARA_CORE_INSTANCE_API=true; the instance API is off by default.
 # Creates uniquely named instances in the server's configured runtime store.
 set -euo pipefail
 

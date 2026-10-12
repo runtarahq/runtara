@@ -101,7 +101,9 @@ from invalidating every cargo build. Assets from a disk source are served
 
 - Depends on `runtara-workflows`, `runtara-core`, and `runtara-environment` for
   execution, persistence, and the object model. Core is transport-free, so this
-  crate owns the instance protocol's HTTP surface in `core_runtime`.
+  crate owns the instance protocol's HTTP surface in `core_runtime`: a test
+  and debugging transport, served on loopback only when
+  `RUNTARA_CORE_INSTANCE_API` is enabled. Workflows reach Core in-process.
 - Links `runtara-agents` for host connection support and the static metadata
   registry. Workflow capabilities execute in standalone WASM components,
   including [Slack and Mailgun attachment downloads](../../docs/workflow-attachments.md).

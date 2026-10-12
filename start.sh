@@ -34,7 +34,9 @@ VALKEY_PORT="${VALKEY_PORT:-6379}"
 
 # Port configuration
 SERVER_PORT="${SERVER_PORT:-7001}"            # API + UI
-CORE_PORT="${RUNTARA_CORE_HTTP_PORT:-8003}"   # Core: instance API (see RUNTARA_CORE_HTTP_PORT)
+CORE_PORT="${RUNTARA_CORE_HTTP_PORT:-8003}"   # Core: test-only instance API, served only with RUNTARA_CORE_INSTANCE_API=true
+# Passed through unchanged; the server alone parses and validates it.
+CORE_INSTANCE_API="${RUNTARA_CORE_INSTANCE_API:-false}"
 
 # PID file locations
 PID_DIR="${DATA_DIR}/pids"
@@ -128,7 +130,7 @@ stop_services() {
 start_server() {
     print_status "Starting runtara-server..."
     print_status "  API + UI port:    ${SERVER_PORT}"
-    print_status "  Core port:        ${CORE_PORT} (Instance SDK)"
+    print_status "  Core instance API: RUNTARA_CORE_INSTANCE_API=${CORE_INSTANCE_API} (test-only; port ${CORE_PORT} when enabled)"
 
     TENANT_ID="${TENANT_ID}" \
     AUTH_PROVIDER="${AUTH_PROVIDER:-local}" \
@@ -139,6 +141,7 @@ start_server() {
     VALKEY_HOST="${VALKEY_HOST}" \
     VALKEY_PORT="${VALKEY_PORT}" \
     RUNTARA_CORE_HTTP_PORT="${CORE_PORT}" \
+    RUNTARA_CORE_INSTANCE_API="${CORE_INSTANCE_API}" \
     DATA_DIR="${DATA_DIR}" \
     RUST_LOG="${RUST_LOG:-runtara_server=info,runtara_environment=info,runtara_core=info}" \
         cargo run -p runtara-server --release > "${LOG_FILE}" 2>&1 &
@@ -166,7 +169,7 @@ show_status() {
     echo ""
     echo "  Endpoints:"
     echo "    - API + UI:                     http://127.0.0.1:${SERVER_PORT}"
-    echo "    - Core (Instance SDK):          127.0.0.1:${CORE_PORT}"
+    echo "    - Core instance API (test-only): 127.0.0.1:${CORE_PORT} when enabled (RUNTARA_CORE_INSTANCE_API=${CORE_INSTANCE_API})"
     echo ""
     echo "  Logs:"
     echo "    tail -f ${LOG_FILE}"
@@ -203,7 +206,8 @@ usage() {
     echo "  OBJECT_MODEL_DATABASE_URL    Object model database (default: postgres://localhost/runtara_objects)"
     echo "  VALKEY_HOST / VALKEY_PORT    Valkey for checkpoint storage (default: 127.0.0.1:6379)"
     echo "  DATA_DIR                     Data directory (default: .data)"
-    echo "  RUNTARA_CORE_HTTP_PORT       Core instance API port (default: 8003)"
+    echo "  RUNTARA_CORE_INSTANCE_API    Serve Core's test-only HTTP instance API (default: false)"
+    echo "  RUNTARA_CORE_HTTP_PORT       Port for that API, when served (default: 8003)"
     echo "  RUST_LOG                     Log level (default: runtara_*=info)"
     echo ""
 }

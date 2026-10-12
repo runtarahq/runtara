@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! HTTP server for the instance protocol.
 //!
-//! Provides runtara-core's instance protocol operations over HTTP/JSON. This
-//! enables workflows (native or WASM) using the SDK's HTTP backend to reach
-//! core over a socket; workflows composed against the runtime as a host import
-//! reach the same handlers in-process instead, through
-//! `runtara_environment::runtime_host`.
+//! Provides runtara-core's instance protocol operations over HTTP/JSON, for
+//! tests and debugging. Workflows never use it: they reach the same handlers
+//! in-process, through `runtara_environment::runtime_host`. `register` here is
+//! the one way to make an instance `running` without an Environment launch, so
+//! the server serves this router only when `RUNTARA_CORE_INSTANCE_API` is
+//! enabled.
 //!
 //! Every handler here is wire plumbing — decode, delegate to
 //! [`runtara_core::instance_handlers`], map the error to a status. Core owns
@@ -902,8 +903,19 @@ pub async fn run_http_server_with_shutdown(
     state: Arc<InstanceHandlerState>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
-    let app = instance_http_router(state);
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+    serve_with_shutdown(listener, state, shutdown).await
+}
+
+/// [`run_http_server_with_shutdown`] on a listener the caller has already
+/// bound, so a port that is taken fails where the caller can report it.
+pub async fn serve_with_shutdown(
+    listener: tokio::net::TcpListener,
+    state: Arc<InstanceHandlerState>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    let app = instance_http_router(state);
+    let bind_addr = listener.local_addr()?;
 
     info!(addr = %bind_addr, "Instance HTTP server starting");
 

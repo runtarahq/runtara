@@ -431,6 +431,14 @@ impl HeartbeatMonitor {
     /// The result is a snapshot, and the age cutoff only describes an
     /// instance's first start: Core keeps that `started_at` when a wake or
     /// resume relaunches it. Recovery re-checks each candidate before writing.
+    ///
+    /// Calling these orphaned assumes nothing makes an instance `running`
+    /// without registering it first. The launch dispatcher registers a
+    /// generation before `mark_running` promotes Core, and nothing else
+    /// promotes one in production. The exception is `register` in Core's HTTP
+    /// instance protocol, a test surface the server serves only when it is
+    /// explicitly enabled: an instance registered there is recovered once it is
+    /// past the cutoff, however healthy.
     async fn get_orphaned_running_instances(
         &self,
         cutoff: DateTime<Utc>,

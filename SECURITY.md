@@ -50,9 +50,10 @@ When deploying Runtara:
 
 ### Network Security
 
-- Run the instance (8001) and management (8002) APIs behind a firewall
-- Use TLS certificates for connections in production
-- Do not expose management ports (8002, 8003) to the public internet
+- Expose only the public API (7001 by default), behind TLS in production
+- Leave Core's HTTP instance API off in production (`RUNTARA_CORE_INSTANCE_API`
+  is unset by default). It has no authentication and binds loopback only; enable
+  it for tests and debugging alone
 
 ### Configuration
 

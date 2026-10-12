@@ -6,12 +6,34 @@ use std::time::Duration;
 
 use super::ConfigError;
 
+const CORE_INSTANCE_API: &str = "RUNTARA_CORE_INSTANCE_API";
 const MAX_CONCURRENT_INSTANCES: &str = "RUNTARA_MAX_CONCURRENT_INSTANCES";
 const SHUTDOWN_GRACE_MS: &str = "RUNTARA_CORE_SHUTDOWN_GRACE_MS";
 const RUNTIME_MAX_CONNECTIONS: &str = "RUNTARA_RUNTIME_MAX_CONNECTIONS";
 const POOL_ACQUIRE_TIMEOUT_SECS: &str = "RUNTARA_RUNTIME_POOL_ACQUIRE_TIMEOUT_SECS";
 const POOL_IDLE_TIMEOUT_SECS: &str = "RUNTARA_RUNTIME_POOL_IDLE_TIMEOUT_SECS";
 const POOL_MAX_LIFETIME_SECS: &str = "RUNTARA_RUNTIME_POOL_MAX_LIFETIME_SECS";
+
+/// Whether to serve Core's HTTP instance API (`RUNTARA_CORE_INSTANCE_API`).
+///
+/// Off unless set. Workflows reach Core in-process through the runner and
+/// never use it; it exists for tests and manual debugging. An instance
+/// registered through it has no launch or registration in the Environment, so
+/// the heartbeat monitor would recover it as orphaned. A malformed value fails
+/// embedded startup, like the other runtime variables.
+pub fn core_instance_api_enabled() -> Result<bool, ConfigError> {
+    core_instance_api_enabled_from_raw(std::env::var(CORE_INSTANCE_API).ok().as_deref())
+}
+
+fn core_instance_api_enabled_from_raw(raw: Option<&str>) -> Result<bool, ConfigError> {
+    match raw {
+        Some(raw) => super::parse_bool(raw).ok_or(ConfigError::Invalid(
+            CORE_INSTANCE_API,
+            "must be one of true/false/1/0/yes/no/on/off",
+        )),
+        None => Ok(false),
+    }
+}
 
 /// Optional settings applied by the host to its instance runtime.
 ///
@@ -316,6 +338,32 @@ mod tests {
                 "{case}: {}{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn the_core_instance_api_is_off_unless_enabled() {
+        assert!(!core_instance_api_enabled_from_raw(None).unwrap());
+        for raw in ["true", "1", "on", "YES"] {
+            assert!(
+                core_instance_api_enabled_from_raw(Some(raw)).unwrap(),
+                "{raw}"
+            );
+        }
+        for raw in ["false", "0", "off", "no"] {
+            assert!(
+                !core_instance_api_enabled_from_raw(Some(raw)).unwrap(),
+                "{raw}"
+            );
+        }
+        for raw in ["", "enabled", "2"] {
+            assert!(
+                matches!(
+                    core_instance_api_enabled_from_raw(Some(raw)),
+                    Err(ConfigError::Invalid(CORE_INSTANCE_API, _))
+                ),
+                "{raw:?}"
             );
         }
     }

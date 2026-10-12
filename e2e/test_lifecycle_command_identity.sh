@@ -4,6 +4,7 @@
 # commands through the public API. No database access or external credentials.
 # Usage: SERVER_API_URL=http://127.0.0.1:7001 CORE_API_URL=http://127.0.0.1:8003 \
 #        TENANT_ID=local ./e2e/test_lifecycle_command_identity.sh
+# The server must run with RUNTARA_CORE_INSTANCE_API=true; the instance API is off by default.
 set -euo pipefail
 python3 - <<'PY'
 import base64
