@@ -42,15 +42,15 @@ path = "src/bin/compile.rs"
 required-features = ["compiler"]
 
 [dependencies]
-runtara-agent-suspension = { path = "../runtara-agent-suspension", version = "8.9", optional = true }
-runtara-dsl = { path = "../runtara-dsl", version = "8.9" }
+runtara-agent-suspension = { path = "../runtara-agent-suspension", version = "9.0", optional = true }
+runtara-dsl = { path = "../runtara-dsl", version = "9.0" }
 # Reference-path tokenization (`reference_path`), so validation splits a path
 # into exactly the segments the runtime will resolve. `default-features = false`
 # drops the SDK/HTTP runtime, leaving serde + serde_json + minijinja — all of
 # which this crate already depends on, so the dependency graph is unchanged.
-runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", version = "8.9", default-features = false }
-runtara-wit = { path = "../runtara-wit", version = "8.9", features = ["resolve"], optional = true }
-runtara-invocation-contract = { path = "../runtara-invocation-contract", version = "8.9", optional = true }
+runtara-workflow-stdlib = { path = "../runtara-workflow-stdlib", version = "9.0", default-features = false }
+runtara-wit = { path = "../runtara-wit", version = "9.0", features = ["resolve"], optional = true }
+runtara-invocation-contract = { path = "../runtara-invocation-contract", version = "9.0", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"

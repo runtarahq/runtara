@@ -34,12 +34,12 @@ opentelemetry = { version = "0.32", features = ["metrics"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "uuid", "chrono", "macros", "migrate"] }
 
 # Core persistence layer (for shared database access)
-runtara-core = { path = "../runtara-core", version = "8.9" }
+runtara-core = { path = "../runtara-core", version = "9.0" }
 runtara-store-postgres = { path = "../runtara-store-postgres" }
 
 # Embedded wasmtime workflow execution (EmbeddedWasmRunner)
-runtara-component-host = { path = "../runtara-component-host", version = "8.9" }
-runtara-invocation-contract = { path = "../runtara-invocation-contract", version = "8.9" }
+runtara-component-host = { path = "../runtara-component-host", version = "9.0" }
+runtara-invocation-contract = { path = "../runtara-invocation-contract", version = "9.0" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
