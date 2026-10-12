@@ -83,7 +83,8 @@ struct StaleContainer {
 /// Information about an orphaned instance.
 ///
 /// An orphaned instance is one that is marked as "running" in Core's persistence
-/// but is not being tracked in this Environment's container_registry.
+/// but has no row in container_registry, which every Environment sharing the
+/// database writes to.
 #[derive(Debug)]
 struct OrphanedInstance {
     instance_id: String,
@@ -184,7 +185,7 @@ impl HeartbeatMonitor {
         // Check 1: Containers in container_registry with stale heartbeats
         let stale_containers = self.get_stale_containers(cutoff).await?;
 
-        // Check 2: Running instances in Core that are not being tracked locally
+        // Check 2: Running instances in Core that no Environment has registered
         let orphaned_instances = self.get_orphaned_running_instances(cutoff).await?;
 
         let total_stale = stale_containers.len() + orphaned_instances.len();
@@ -210,7 +211,7 @@ impl HeartbeatMonitor {
             }
         }
 
-        // Process orphaned instances (running in Core but not tracked locally).
+        // Process orphaned instances (running in Core but not registered).
         // These were orphaned by an Environment that went away; route them into
         // the restart-recovery path rather than failing them outright.
         for instance in orphaned_instances {
@@ -422,11 +423,14 @@ impl HeartbeatMonitor {
 
     /// Get instances that are running in Core but not tracked in container_registry.
     ///
-    /// These are "orphaned" instances - Core thinks they're running, but we have
-    /// no local record of them. This can happen when:
+    /// These are "orphaned" instances - Core thinks they're running, but no
+    /// Environment has registered them. This can happen when:
     /// - Environment was restarted while instances were running
     /// - Container registry entry was lost or never created
-    /// - Multiple Environment instances share the same Core database
+    ///
+    /// The result is a snapshot, and the age cutoff only describes an
+    /// instance's first start: Core keeps that `started_at` when a wake or
+    /// resume relaunches it. Recovery re-checks each candidate before writing.
     async fn get_orphaned_running_instances(
         &self,
         cutoff: DateTime<Utc>,
@@ -447,7 +451,7 @@ impl HeartbeatMonitor {
             return Ok(vec![]);
         }
 
-        // Get all instance IDs we're tracking locally
+        // Every registered instance, whichever Environment registered it
         let tracked_ids: std::collections::HashSet<String> =
             ContainerRegistry::new(self.pool.clone())
                 .tracked_instance_ids()
@@ -457,12 +461,14 @@ impl HeartbeatMonitor {
 
         // Filter to find orphaned instances:
         // - Running in Core
-        // - Not tracked locally
-        // - Started before the cutoff time (to avoid racing with new launches)
+        // - Not registered by any Environment
+        // - First started before the cutoff time. This only spares a brand-new
+        //   instance; a relaunch keeps the first `started_at`, so it is
+        //   `recover_orphaned`'s re-check that protects a live generation.
         let orphaned: Vec<OrphanedInstance> = running_instances
             .into_iter()
             .filter(|inst| {
-                // Not tracked locally
+                // Not registered
                 if tracked_ids.contains(&inst.instance_id) {
                     return false;
                 }
@@ -489,31 +495,35 @@ impl HeartbeatMonitor {
     /// instead of failing it outright. `RUNTARA_AUTO_RECOVER` turns this off
     /// for the whole Environment; there is no per-workflow opt-out.
     async fn recover_orphaned_instance(&self, instance: &OrphanedInstance) {
-        warn!(
-            instance_id = %instance.instance_id,
-            tenant_id = %instance.tenant_id,
-            started_at = ?instance.started_at,
-            created_at = %instance.created_at,
-            "Found orphaned instance (Core running, untracked) - recovering after Environment restart"
-        );
-
-        let outcome = crate::recovery::recover_or_fail(
+        // The scan's snapshot may be stale by now; this re-checks under locks,
+        // so an orphan is reported only once recovery has acted on it.
+        match crate::recovery::recover_orphaned(
             &self.pool,
             self.core_persistence.as_ref(),
             &instance.instance_id,
         )
-        .await;
-
-        if let Err(error) = &outcome {
-            warn!(instance_id = %instance.instance_id, %error, "Orphan recovery write failed");
-            return;
+        .await
+        {
+            Ok(Some(outcome)) if outcome != crate::recovery::RecoveryOutcome::Unchanged => {
+                warn!(
+                    instance_id = %instance.instance_id,
+                    tenant_id = %instance.tenant_id,
+                    started_at = ?instance.started_at,
+                    created_at = %instance.created_at,
+                    outcome = ?outcome,
+                    "Orphaned instance (Core running, untracked) recovered after Environment restart"
+                );
+            }
+            Ok(_) => {
+                debug!(
+                    instance_id = %instance.instance_id,
+                    "Instance is no longer orphaned; leaving it alone"
+                );
+            }
+            Err(error) => {
+                warn!(instance_id = %instance.instance_id, %error, "Orphan recovery write failed");
+            }
         }
-
-        info!(
-            instance_id = %instance.instance_id,
-            outcome = ?outcome,
-            "Orphaned instance recovery decision"
-        );
     }
 }
 

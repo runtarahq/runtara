@@ -1020,6 +1020,75 @@ async fn test_recent_instance_not_immediately_orphaned() {
     );
 }
 
+/// An instance can look orphaned to the scan and still have a live owner by the
+/// time recovery writes: Core keeps the first `started_at` across generations,
+/// so the age cutoff says nothing about the current one. A live durable launch
+/// lease means a runner owns the instance, and the orphan pass must leave it.
+#[tokio::test]
+async fn test_orphan_with_live_launch_lease_is_left_alone() {
+    skip_if_no_db!();
+    let _monitor = MONITOR_LOCK.lock().await;
+    let pool = get_test_pool().await;
+
+    let tenant_id = format!("test-tenant-leased-orphan-{}", Uuid::new_v4());
+    let image_id = create_test_image(&pool, &tenant_id).await;
+    let instance_id = Uuid::new_v4().to_string();
+
+    let started_at = Utc::now() - ChronoDuration::hours(1);
+    let persistence = Arc::new(MockPersistence::new().with_running_instance(
+        &instance_id,
+        &tenant_id,
+        started_at,
+    ));
+    create_env_instance(&pool, &instance_id, &tenant_id, &image_id, "running").await;
+    // Running and leased, but not in container_registry: the scan selects it.
+    sqlx::query(
+        "INSERT INTO instance_launches (launch_id, instance_id, tenant_id, image_id, kind, \
+         state, deadline_at, lease_owner, lease_expires_at, attempt_count) \
+         VALUES ($1, $2, $3, $4, 'wake', 'running', NOW() + INTERVAL '1 hour', \
+         'live-owner', NOW() + INTERVAL '1 hour', 1)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&instance_id)
+    .bind(&tenant_id)
+    .bind(&image_id)
+    .execute(&pool)
+    .await
+    .expect("insert live launch");
+
+    let config = HeartbeatMonitorConfig {
+        poll_interval: Duration::from_millis(50),
+        heartbeat_timeout: Duration::from_secs(120),
+    };
+    let monitor = HeartbeatMonitor::new(
+        pool.clone(),
+        persistence.clone(),
+        Arc::new(MockRunner),
+        config,
+    );
+    let shutdown = monitor.shutdown_handle();
+    let handle = tokio::spawn(async move {
+        monitor.run().await;
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    shutdown.notify_one();
+    handle.await.ok();
+
+    let (status, reason) = recovery_state(&pool, &instance_id).await;
+    assert_eq!(status, "running", "a leased run must not be recovered");
+    assert_eq!(reason, None);
+    assert!(
+        persistence
+            .get_completed_instances()
+            .iter()
+            .all(|(id, _, _)| id != &instance_id),
+        "a leased run must not be failed"
+    );
+
+    cleanup(&pool, &instance_id).await;
+    cleanup_image(&pool, &image_id).await;
+}
+
 #[tokio::test]
 async fn test_multiple_orphaned_instances() {
     skip_if_no_db!();
