@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { cn } from '@/lib/utils';
 import {
   Background,
   Connection,
@@ -71,6 +72,15 @@ import {
   type ScopeNode,
 } from '@/features/workflows/utils/container-scope';
 import type { CanvasDetailLevel } from './CustomNodes/node-size';
+import { registerScreenToCanvas } from './canvas-bridge';
+import {
+  findAttachTarget,
+  noteAnchorStepId,
+  placementForDrop,
+  resolveNotePositions,
+  stepRects,
+  type Point,
+} from './CustomNodes/note-placement';
 import { readCanvasDetail, writeCanvasDetail } from './editor-preferences';
 import { CANVAS_Z } from '@/features/workflows/components/WorkflowEditor/canvas-z';
 import {
@@ -367,6 +377,7 @@ function WorkflowEditorContent({
     (state) => state.setPendingCenterNodeId
   );
   const removeNode = useWorkflowStore((state) => state.removeNode);
+  const placeNote = useWorkflowStore((state) => state.placeNote);
   const updateNode = useWorkflowStore((state) => state.updateNode);
 
   const {
@@ -379,6 +390,13 @@ function WorkflowEditorContent({
     getZoom,
   } = useReactFlow();
   const reactFlowStore = useStoreApi();
+
+  // Let the toolbar (outside this ReactFlowProvider) map screen points onto
+  // this canvas — it places new notes in the visible middle of it.
+  useEffect(() => {
+    registerScreenToCanvas(screenToFlowPosition);
+    return () => registerScreenToCanvas(null);
+  }, [screenToFlowPosition]);
 
   // Show step picker when createStepContext changes
   useEffect(() => {
@@ -605,14 +623,36 @@ function WorkflowEditorContent({
       detailLevel: canvasDetail,
     });
 
+    const stepNameById = new Map(
+      layout.nodes.map((node) => [
+        node.id,
+        typeof node.data?.name === 'string' && node.data.name
+          ? node.data.name
+          : node.id,
+      ])
+    );
+
     return {
-      nodes: layout.nodes.map((node) => ({
-        ...node,
-        draggable: false,
-      })),
+      // Anchored notes follow their step: resolve them after the layout has
+      // placed the steps. Only notes move by hand, and only by their header.
+      nodes: resolveNotePositions(layout.nodes).map((node) => {
+        if (node.type !== NODE_TYPES.NoteNode) {
+          return { ...node, draggable: false };
+        }
+        const anchor = noteAnchorStepId(node);
+        return {
+          ...node,
+          draggable: !readOnly,
+          dragHandle: '.note-drag-handle',
+          data: {
+            ...node.data,
+            anchorStepName: anchor ? stepNameById.get(anchor) : undefined,
+          },
+        };
+      }),
       edgeRoutes: layout.edgeRoutes ?? {},
     };
-  }, [canvasDetail, visibleCanvasEdges, visibleCanvasNodes]);
+  }, [canvasDetail, readOnly, visibleCanvasEdges, visibleCanvasNodes]);
   const layoutedCanvasNodes = layoutedCanvas.nodes;
   const layoutedCanvasEdgeRoutes = layoutedCanvas.edgeRoutes;
 
@@ -702,10 +742,32 @@ function WorkflowEditorContent({
   // canvas drops React Flow's dimension changes (the measurements must not
   // reach the workflow store), so without `measured` React Flow never
   // considers the nodes initialized and the viewport is never fitted.
+  // A note being dragged: the layout owns every position, so the live drag
+  // position is applied on top of it until the drop is committed.
+  const [noteDrag, setNoteDrag] = useState<{
+    id: string;
+    position: Point;
+    attachTo: string | null;
+  } | null>(null);
+
   const nodesWithStartIndicator = useMemo(() => {
-    const canvasNodes = startIndicatorNode
-      ? [startIndicatorNode, ...layoutedCanvasNodes]
+    const laidOut = noteDrag
+      ? layoutedCanvasNodes.map((node) => {
+          if (node.id === noteDrag.id) {
+            return { ...node, position: noteDrag.position, dragging: true };
+          }
+          if (node.id === noteDrag.attachTo) {
+            return {
+              ...node,
+              className: cn(node.className, 'note-attach-target'),
+            };
+          }
+          return node;
+        })
       : layoutedCanvasNodes;
+    const canvasNodes = startIndicatorNode
+      ? [startIndicatorNode, ...laidOut]
+      : laidOut;
     return canvasNodes.map((node) => {
       const width = node.style?.width;
       const height = node.style?.height;
@@ -713,7 +775,29 @@ function WorkflowEditorContent({
         ? { ...node, measured: { width, height } }
         : node;
     });
-  }, [layoutedCanvasNodes, startIndicatorNode]);
+  }, [layoutedCanvasNodes, noteDrag, startIndicatorNode]);
+
+  // A note whose step was deleted becomes a free note where it last stood,
+  // instead of jumping to its offset read as absolute coordinates.
+  const lastNotePositions = useRef(new Map<string, Point>());
+  useEffect(() => {
+    const stepIds = new Set(nodes.map((node) => node.id));
+    for (const node of nodes) {
+      const anchor = noteAnchorStepId(node);
+      if (node.type === NODE_TYPES.NoteNode && anchor && !stepIds.has(anchor)) {
+        placeNote(
+          node.id,
+          lastNotePositions.current.get(node.id) ?? node.position,
+          null
+        );
+      }
+    }
+    for (const node of layoutedCanvasNodes) {
+      if (node.type === NODE_TYPES.NoteNode) {
+        lastNotePositions.current.set(node.id, node.position);
+      }
+    }
+  }, [layoutedCanvasNodes, nodes, placeNote]);
 
   const edgesWithStartIndicator = useMemo(() => {
     const visibleNodeIds = new Set(layoutedCanvasNodes.map((node) => node.id));
@@ -805,12 +889,15 @@ function WorkflowEditorContent({
 
   // What the viewport is fitted to: which steps and edges exist, and the
   // detail level. Deliberately not sizes or positions — editing a step can
-  // grow its card, and re-fitting on that would yank the view mid-edit.
+  // grow its card, and re-fitting on that would yank the view mid-edit. Not
+  // notes either: adding one would move the camera away from the new note.
   const canvasFitKey = useMemo(
     () =>
       JSON.stringify({
         detail: canvasDetail,
-        nodes: nodesWithStartIndicator.map((node) => node.id),
+        nodes: nodesWithStartIndicator
+          .filter((node) => node.type !== NODE_TYPES.NoteNode)
+          .map((node) => node.id),
         edges: edgesWithStartIndicator.map((edge) => edge.id),
       }),
     [canvasDetail, edgesWithStartIndicator, nodesWithStartIndicator]
@@ -1560,8 +1647,39 @@ function WorkflowEditorContent({
     setPendingNewNode(null);
   }, [setPendingNewNode]);
 
+  const noteIds = useMemo(
+    () =>
+      new Set(
+        layoutedCanvasNodes
+          .filter((node) => node.type === NODE_TYPES.NoteNode)
+          .map((node) => node.id)
+      ),
+    [layoutedCanvasNodes]
+  );
+
   const handleNodesChange = useCallback(
     (changes: import('@xyflow/react').NodeChange[]) => {
+      for (const change of changes) {
+        // Only notes move by hand; steps are always laid out.
+        if (
+          change.type === 'position' &&
+          change.position &&
+          noteIds.has(change.id)
+        ) {
+          const dragged = layoutedCanvasNodes.find((n) => n.id === change.id);
+          const width = dragged?.width ?? 240;
+          const height = dragged?.height ?? 120;
+          const position = change.position;
+          setNoteDrag({
+            id: change.id,
+            position,
+            attachTo: findAttachTarget(
+              { ...position, width, height },
+              stepRects(layoutedCanvasNodes)
+            ),
+          });
+        }
+      }
       const structuralChanges = changes.filter(
         (change) => change.type !== 'position' && change.type !== 'dimensions'
       );
@@ -1569,7 +1687,28 @@ function WorkflowEditorContent({
         onNodesChange(structuralChanges);
       }
     },
-    [onNodesChange]
+    [layoutedCanvasNodes, noteIds, onNodesChange]
+  );
+
+  const handleNodeDragStop = useCallback(
+    (_event: unknown, node: Node) => {
+      if (node.type !== NODE_TYPES.NoteNode) return;
+      setNoteDrag(null);
+      // React Flow hands over the dropped node's final position; recompute
+      // the attach target from it rather than trusting the last drag state.
+      const steps = stepRects(layoutedCanvasNodes);
+      const attachTo = findAttachTarget(
+        {
+          ...node.position,
+          width: node.width ?? node.measured?.width ?? 240,
+          height: node.height ?? node.measured?.height ?? 120,
+        },
+        steps
+      );
+      const placement = placementForDrop(node.position, attachTo, steps);
+      placeNote(node.id, placement.position, placement.anchorStepId);
+    },
+    [layoutedCanvasNodes, placeNote]
   );
 
   return (
@@ -1591,6 +1730,7 @@ function WorkflowEditorContent({
                 edgeTypes={edgeTypes}
                 nodeTypes={nodeTypes}
                 onNodesChange={handleNodesChange}
+                onNodeDragStop={handleNodeDragStop}
                 onEdgesChange={onEdgesChange}
                 onConnect={readOnly ? undefined : onConnect}
                 onConnectEnd={readOnly ? undefined : onConnectEnd}

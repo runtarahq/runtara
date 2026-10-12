@@ -1,5 +1,4 @@
 import { useParams, useSearchParams } from 'react-router';
-import { useReactFlow } from '@xyflow/react';
 import { toast } from 'sonner';
 import {
   useCustomMutation,
@@ -72,7 +71,12 @@ import {
   buildStateSchemaFromFields,
   type SchemaField,
 } from '@/features/workflows/utils/schema';
-import { NODE_TYPES } from '@/features/workflows/config/workflow';
+import {
+  NODE_TYPES,
+  NODE_TYPE_SIZES,
+} from '@/features/workflows/config/workflow';
+import { offsetNextToStep } from '@/features/workflows/components/WorkflowEditor/CustomNodes/note-placement';
+import { screenToCanvas } from '@/features/workflows/components/WorkflowEditor/canvas-bridge';
 
 type WorkflowVariable = {
   name: string;
@@ -289,8 +293,6 @@ export function Workflow() {
       setBlocker(false);
     };
   }, [hasUnsavedChanges, setBlocker]);
-
-  const { getViewport } = useReactFlow();
 
   // Fetch available versions
   const { data: versionsResponse } = useCustomQuery({
@@ -2122,15 +2124,55 @@ export function Workflow() {
   };
 
   const handleAddNote = () => {
-    // Get the viewport center position in flow coordinates
-    const viewport = getViewport();
-    const centerX = (-viewport.x + window.innerWidth / 2) / viewport.zoom;
-    const centerY = (-viewport.y + window.innerHeight / 2) / viewport.zoom;
+    const store = useWorkflowStore.getState();
+    const noteSize = NODE_TYPE_SIZES[NODE_TYPES.NoteNode] ?? {
+      width: 240,
+      height: 120,
+    };
 
-    // Add note at the center of the visible viewport
-    useWorkflowStore.getState().addNote({ x: centerX, y: centerY });
+    // With a step selected, the note is about that step: attach it just
+    // above it, so it follows the step through every re-layout.
+    const selectedStep = store.selectedNodeId
+      ? store.nodes.find(
+          (n) => n.id === store.selectedNodeId && n.type !== NODE_TYPES.NoteNode
+        )
+      : undefined;
+    if (selectedStep) {
+      store.addNote(offsetNextToStep(noteSize.height), '', {
+        anchorStepId: selectedStep.id,
+        autoEdit: true,
+      });
+      return;
+    }
 
-    toast.info('Note added to canvas');
+    // Otherwise drop it in the middle of the canvas the user can see: the
+    // editor's own box, minus the docked step panel when it covers the right
+    // side. The window centre ignored the sidebar and the panel.
+    const root = document.querySelector('[data-workflow-editor-root]');
+    const box = root?.getBoundingClientRect();
+    let left = box?.left ?? 0;
+    let right = box?.right ?? window.innerWidth;
+    const top = box?.top ?? 0;
+    const bottom = box?.bottom ?? window.innerHeight;
+    const panel = document
+      .querySelector('[data-testid="node-config-dialog"]')
+      ?.getBoundingClientRect();
+    if (panel && panel.left > left && panel.left < right) {
+      right = panel.left;
+    }
+    if (right - left < noteSize.width) left = right - noteSize.width;
+    const center = screenToCanvas({
+      x: (left + right) / 2,
+      y: (top + bottom) / 2,
+    }) ?? { x: 0, y: 0 };
+    store.addNote(
+      {
+        x: center.x - noteSize.width / 2,
+        y: center.y - noteSize.height / 2,
+      },
+      '',
+      { autoEdit: true }
+    );
   };
 
   const isLoading =

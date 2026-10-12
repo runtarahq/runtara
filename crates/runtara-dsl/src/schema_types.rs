@@ -307,7 +307,7 @@ pub struct Note {
     pub metadata: Option<NoteMetadata>,
 }
 
-/// Sizing metadata for a note, managed by the workflow editor UI
+/// Sizing and placement metadata for a note, managed by the workflow editor UI
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -319,6 +319,16 @@ pub struct NoteMetadata {
     /// Note height in pixels
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<f64>,
+
+    /// Step the note is attached to. When set, the note's `position` is an
+    /// offset from that step's laid-out position, so the note follows the step
+    /// as the editor re-lays out the graph. Unset means `position` is absolute.
+    #[serde(
+        rename = "anchorStepId",
+        alias = "anchor_step_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub anchor_step_id: Option<String>,
 }
 
 /// Position coordinates for UI elements
@@ -2541,5 +2551,39 @@ mod ai_agent_dynamic_config_tests {
         assert!(config.legacy_provider.is_some());
         let json = serde_json::to_value(config).expect("config serializes");
         assert!(json.get("provider").is_none());
+    }
+}
+
+#[cfg(test)]
+mod note_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn anchor_step_id_round_trips_in_camel_case() {
+        let note: Note = serde_json::from_value(serde_json::json!({
+            "id": "n1",
+            "text": "Why we retry",
+            "position": { "x": 24.0, "y": -96.0 },
+            "metadata": { "width": 240.0, "height": 120.0, "anchorStepId": "fetch" }
+        }))
+        .unwrap();
+        assert_eq!(
+            note.metadata.as_ref().unwrap().anchor_step_id.as_deref(),
+            Some("fetch")
+        );
+        let back = serde_json::to_value(&note).unwrap();
+        assert_eq!(back["metadata"]["anchorStepId"], "fetch");
+    }
+
+    #[test]
+    fn notes_without_an_anchor_still_load_and_omit_it() {
+        let note: Note = serde_json::from_value(serde_json::json!({
+            "id": "n1",
+            "metadata": { "width": 240.0 }
+        }))
+        .unwrap();
+        assert!(note.metadata.as_ref().unwrap().anchor_step_id.is_none());
+        let back = serde_json::to_value(&note).unwrap();
+        assert!(back["metadata"].get("anchorStepId").is_none());
     }
 }
