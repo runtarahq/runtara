@@ -12,8 +12,8 @@ import { appPath } from '../../../utils/app-path';
  *
  * Repro: open a workflow whose steps contain a reference with `default`, a composite
  * value with a nested reference that carries a `type` hint, and a Split step with a
- * numeric immediate variable and a composite-array variable. Click **Auto-layout**,
- * then **Save**. The save payload must carry the same MappingValue metadata as the
+ * numeric immediate variable and a composite-array variable. Make a change (add a
+ * note), then **Save**. The save payload must carry the same MappingValue metadata as the
  * loaded workflow — only `renderingParameters` may differ.
  *
  * Before the fix, the save path dropped `ReferenceValue.default`, the `type` hint on
@@ -27,7 +27,7 @@ import { appPath } from '../../../utils/app-path';
  * correctly strips `type` from immediates/composites — asserting it round-trips
  * would be asserting invalid DSL.
  */
-test.describe('Auto-layout + save preserves step data (mocked)', () => {
+test.describe('Save round-trip preserves step data (mocked)', () => {
   test('does not mutate reference defaults, composite type hints, or Split variables', async ({
     page,
     mockApi,
@@ -228,16 +228,10 @@ test.describe('Auto-layout + save preserves step data (mocked)', () => {
       timeout: 10_000,
     });
 
-    // Click Auto-layout (icon button with title="Auto-layout"). This rewrites
-    // every node position through the store's node<->step round-trip, which is
-    // the code path that used to drop MappingValue metadata.
-    await page.getByTitle('Auto-layout').click();
-
-    // Auto-layout only flips `isDirty` — the Save button is gated on
-    // `isStructurallyDirty` (Workflow/index.tsx passes
-    // `isDirty={hasStructuralUnsavedChanges}`), because position-only edits
-    // must not block execution. Add a note to make the graph structurally
-    // dirty so Save becomes clickable and the layouted graph gets serialized.
+    // The canvas is always auto-laid out (there is no Auto-layout button any
+    // more), so any change pushes every step through the store's
+    // node<->step round-trip on save — the code path that used to drop
+    // MappingValue metadata. Adding a note is the smallest such change.
     await page.getByTitle('Add note').click();
 
     const saveButton = page.getByTitle('Save changes');

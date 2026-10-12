@@ -8,7 +8,6 @@ import * as form from './WorkflowActionsItem';
 import { useRef } from 'react';
 import { Spinner } from '@/shared/components/ui/spinner';
 import {
-  Network,
   Save,
   Play,
   StickyNote,
@@ -27,6 +26,8 @@ import {
 } from 'lucide-react';
 import type { SuspensionReason } from '@/generated/RuntaraRuntimeApi';
 import { waitingStatusText } from '@/features/workflows/utils/suspension';
+import { CanvasDetailToggle } from '@/features/workflows/components/WorkflowEditor/CanvasDetailToggle';
+import type { CanvasDetailLevel } from '@/features/workflows/components/WorkflowEditor/CustomNodes/node-size';
 
 const { schema, initialValues } = form;
 
@@ -61,7 +62,9 @@ type Props = {
   onSubmit: (values: Record<string, any>) => void;
   onExportJSON: () => void;
   onImportJSON: (json: string) => void;
-  onAutoLayout: () => void;
+  /** Step card detail level, switched from the header. */
+  canvasDetail: CanvasDetailLevel;
+  onCanvasDetailChange: (detail: CanvasDetailLevel) => void;
   onAddNote: () => void;
   isExecuting?: boolean;
   isExecutionActive?: boolean;
@@ -99,7 +102,8 @@ export function WorkflowActionsForm(props: Props) {
     onSubmit,
     onExportJSON,
     onImportJSON,
-    onAutoLayout,
+    canvasDetail,
+    onCanvasDetailChange,
     onAddNote,
     isExecuting,
     isExecutionActive,
@@ -151,15 +155,19 @@ export function WorkflowActionsForm(props: Props) {
   };
 
   return (
-    <div className="flex flex-col items-center">
-      {/* Workflow name as separate h1 */}
-      <h1 className="mb-2 mt-3 text-lg font-semibold text-foreground drop-shadow-sm">
+    // A header row above the canvas, not a toolbar floating over it: floating,
+    // the title and the buttons covered step cards and collided with each
+    // other below ~1,100px of canvas width.
+    <header className="flex h-12 shrink-0 items-center gap-4 border-b bg-background px-4">
+      <h1
+        className="min-w-0 max-w-[40%] shrink truncate text-base font-semibold text-foreground"
+        title={workflowName || 'Untitled Workflow'}
+      >
         {workflowName || 'Untitled Workflow'}
       </h1>
 
-      {/* Floating toolbar */}
       <NextForm
-        className="inline-flex items-center gap-1 rounded-lg border border-border/60 bg-white/95 px-2 py-1.5 shadow-lg backdrop-blur supports-[backdrop-filter]:backdrop-blur"
+        className="flex min-w-0 flex-1 items-center gap-1"
         form={form}
         renderContent={() => null}
         renderActions={() => (
@@ -223,7 +231,6 @@ export function WorkflowActionsForm(props: Props) {
                       </span>
                     )}
                 </div>
-                <div className="mx-1 h-4 w-px bg-border" />
               </>
             )}
 
@@ -262,17 +269,19 @@ export function WorkflowActionsForm(props: Props) {
                       </span>
                     )}
                 </div>
-                <div className="mx-1 h-4 w-px bg-border" />
               </>
             )}
+
+            {/* Everything after the status is right-aligned. */}
+            <div className="ml-auto" />
 
             <Can permission="workflow:execute">
               {/* Start button */}
               <Button
                 type="button"
                 variant="secondary"
-                size="icon-sm"
-                className="rounded hover:bg-primary/10"
+                size="sm"
+                className="h-8 gap-1.5 rounded px-2.5 hover:bg-primary/10"
                 disabled={isLoading || isExecuting || isDirty}
                 onClick={onSchedule}
                 title={
@@ -282,6 +291,9 @@ export function WorkflowActionsForm(props: Props) {
                 }
               >
                 <Play className="size-4" />
+                {/* Labels drop below ~1,100px so the header never wraps or
+                    clips; the icon and tooltip remain. */}
+                <span className="hidden min-[1100px]:inline">Run</span>
               </Button>
 
               {/* Debug execute button (server-side with breakpoints) */}
@@ -370,9 +382,9 @@ export function WorkflowActionsForm(props: Props) {
             <Can permission="workflow:update">
               <Button
                 type="button"
-                variant="secondary"
-                size="icon-sm"
-                className="rounded text-foreground/70 hover:bg-muted"
+                variant={hasUnsavedChanges ? 'primary' : 'secondary'}
+                size="sm"
+                className="h-8 gap-1.5 rounded px-2.5"
                 disabled={isLoading || isExecuting || !hasUnsavedChanges}
                 title={
                   hasUnsavedChanges ? 'Save changes' : 'No changes to save'
@@ -380,6 +392,7 @@ export function WorkflowActionsForm(props: Props) {
                 onClick={form.handleSubmit(onSubmit)}
               >
                 <Save className="size-4" />
+                <span className="hidden min-[1100px]:inline">Save</span>
               </Button>
             </Can>
 
@@ -426,22 +439,16 @@ export function WorkflowActionsForm(props: Props) {
               <StickyNote className="size-4" />
             </Button>
 
-            {/* Auto-layout button */}
-            <Button
-              type="button"
-              variant="secondary"
-              size="icon-sm"
-              className="rounded hover:bg-muted"
-              disabled={isLoading || isExecuting}
-              onClick={onAutoLayout}
-              title="Auto-layout"
-            >
-              <Network className="size-4" />
-            </Button>
+            <div className="mx-1 h-4 w-px bg-border" />
+
+            <CanvasDetailToggle
+              value={canvasDetail}
+              onChange={onCanvasDetailChange}
+            />
           </>
         )}
         onSubmit={onSubmit}
       />
-    </div>
+    </header>
   );
 }

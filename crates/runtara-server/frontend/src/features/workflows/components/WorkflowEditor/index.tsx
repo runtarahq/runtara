@@ -11,13 +11,11 @@ import {
   ReactFlow,
   ReactFlowProvider,
   getViewportForBounds,
-  Panel,
   useNodesInitialized,
   useReactFlow,
   useStoreApi,
   OnConnectEnd,
 } from '@xyflow/react';
-import { RectangleHorizontal, Rows3 } from 'lucide-react';
 import {
   generateStepId,
   useWorkflowStore,
@@ -26,7 +24,6 @@ import { useExecutionStore } from '@/features/workflows/stores/executionStore';
 import { useValidationStore } from '@/features/workflows/stores/validationStore';
 import { toast } from 'sonner';
 import { useIsDarkTheme } from '@/shared/stores/themeStore';
-import { Tabs, TabsList, TabsTrigger } from '@/shared/components/ui/tabs';
 import {
   NODE_TYPE_SIZES,
   NODE_TYPES,
@@ -81,7 +78,6 @@ import {
   stepRects,
   type Point,
 } from './CustomNodes/note-placement';
-import { readCanvasDetail, writeCanvasDetail } from './editor-preferences';
 import { CANVAS_Z } from '@/features/workflows/components/WorkflowEditor/canvas-z';
 import {
   validateNodeEditWithRust,
@@ -208,6 +204,8 @@ type WorkflowEditorProps = {
   onResetNodeChanges?: (nodeId: string) => void;
   /** Stages workflow-level changes the canvas makes, such as a new entry point. */
   onWorkflowChange?: (changes: { entryPoint?: string }) => void;
+  /** How much each step card shows; the switch lives in the page header. */
+  canvasDetail?: CanvasDetailLevel;
 };
 
 // Long workflows are several thousand pixels wide; React Flow's default
@@ -220,45 +218,6 @@ const CANVAS_FIT_VIEW_OPTIONS = { padding: 0.15, maxZoom: 1 };
 // opens at this zoom, anchored on its start, and the Fit button shows it all.
 const CANVAS_READABLE_ZOOM = 0.8;
 const CANVAS_VIEW_MARGIN = 48;
-
-function CanvasDetailToggle({
-  value,
-  onChange,
-}: {
-  value: CanvasDetailLevel;
-  onChange: (value: CanvasDetailLevel) => void;
-}) {
-  return (
-    <Tabs
-      value={value}
-      onValueChange={(next) => onChange(next as CanvasDetailLevel)}
-    >
-      <TabsList
-        className="pointer-events-auto shadow-sm"
-        aria-label="Step card detail"
-      >
-        <TabsTrigger
-          value="detailed"
-          className="gap-2"
-          data-testid="canvas-detail-detailed"
-          title="Show each step's configured inputs on its card"
-        >
-          <Rows3 className="size-4" aria-hidden="true" />
-          Details
-        </TabsTrigger>
-        <TabsTrigger
-          value="compact"
-          className="gap-2"
-          data-testid="canvas-detail-compact"
-          title="Show step names only; hover a step for its inputs"
-        >
-          <RectangleHorizontal className="size-4" aria-hidden="true" />
-          Compact
-        </TabsTrigger>
-      </TabsList>
-    </Tabs>
-  );
-}
 
 export function WorkflowEditor(props: WorkflowEditorProps) {
   return (
@@ -278,6 +237,7 @@ function WorkflowEditorContent({
   onStagedNodeChange,
   onResetNodeChanges,
   onWorkflowChange,
+  canvasDetail = 'detailed',
 }: WorkflowEditorProps) {
   const isDark = useIsDarkTheme();
   // Context for creating new steps
@@ -290,14 +250,6 @@ function WorkflowEditorContent({
   // Dialog states
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [showStepPicker, setShowStepPicker] = useState(false);
-  // Detailed cards list each step's configured inputs, so the workflow reads
-  // without opening every step's editor.
-  const [canvasDetail, setCanvasDetailState] =
-    useState<CanvasDetailLevel>(readCanvasDetail);
-  const setCanvasDetail = useCallback((detail: CanvasDetailLevel) => {
-    setCanvasDetailState(detail);
-    writeCanvasDetail(detail);
-  }, []);
 
   // Pending new node state from store (for deferred creation until user confirms)
   const pendingNewNode = useWorkflowStore((state) => state.pendingNewNode);
@@ -1828,12 +1780,6 @@ function WorkflowEditorContent({
                 edgesFocusable={!readOnly}
               >
                 <Controls fitViewOptions={CANVAS_FIT_VIEW_OPTIONS} />
-                <Panel position="bottom-right">
-                  <CanvasDetailToggle
-                    value={canvasDetail}
-                    onChange={setCanvasDetail}
-                  />
-                </Panel>
                 <Background
                   gap={SNAP_GRID_SIZE}
                   size={1}

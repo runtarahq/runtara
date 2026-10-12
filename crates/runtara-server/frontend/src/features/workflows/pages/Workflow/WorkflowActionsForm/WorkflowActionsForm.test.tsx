@@ -9,7 +9,8 @@ const defaultProps = {
   onSubmit: vi.fn(),
   onExportJSON: vi.fn(),
   onImportJSON: vi.fn(),
-  onAutoLayout: vi.fn(),
+  canvasDetail: 'detailed' as const,
+  onCanvasDetailChange: vi.fn(),
   onAddNote: vi.fn(),
 };
 

@@ -77,6 +77,11 @@ import {
 } from '@/features/workflows/config/workflow';
 import { offsetNextToStep } from '@/features/workflows/components/WorkflowEditor/CustomNodes/note-placement';
 import { screenToCanvas } from '@/features/workflows/components/WorkflowEditor/canvas-bridge';
+import {
+  readCanvasDetail,
+  writeCanvasDetail,
+} from '@/features/workflows/components/WorkflowEditor/editor-preferences';
+import type { CanvasDetailLevel } from '@/features/workflows/components/WorkflowEditor/CustomNodes/node-size';
 
 type WorkflowVariable = {
   name: string;
@@ -2119,9 +2124,14 @@ export function Workflow() {
     [confirmIfUnsavedChanges, performImportJSON]
   );
 
-  const handleAutoLayout = () => {
-    useWorkflowStore.getState().applyAutoLayout();
-  };
+  // Step card detail level. Lives here, not in the editor, so the header can
+  // switch it; remembered per browser.
+  const [canvasDetail, setCanvasDetailState] =
+    useState<CanvasDetailLevel>(readCanvasDetail);
+  const setCanvasDetail = useCallback((detail: CanvasDetailLevel) => {
+    setCanvasDetailState(detail);
+    writeCanvasDetail(detail);
+  }, []);
 
   const handleAddNote = () => {
     const store = useWorkflowStore.getState();
@@ -2283,67 +2293,62 @@ export function Workflow() {
 
   return (
     <div className="flex h-full flex-col bg-background">
+      <WorkflowActionsForm
+        isLoading={isLoading}
+        workflowName={stagedWorkflowChanges.name ?? data.name ?? ''}
+        onSchedule={handleSchedule}
+        onSubmit={handleSubmit}
+        onExportJSON={handleExportJSON}
+        onImportJSON={handleImportJSON}
+        canvasDetail={canvasDetail}
+        onCanvasDetailChange={setCanvasDetail}
+        onAddNote={handleAddNote}
+        isExecuting={!!executingInstanceId}
+        isExecutionActive={
+          executionInstanceData?.status &&
+          ['queued', 'compiling', 'running', 'suspended'].includes(
+            executionInstanceData.status
+          )
+        }
+        isDirty={hasStructuralUnsavedChanges}
+        hasUnsavedChanges={hasUnsavedChanges}
+        onStop={handleStop}
+        onClearExecution={handleResetExecution}
+        onViewExecutionDetails={() => {
+          // Switch to history tab (this also expands the panel)
+          useValidationStore.getState().setActiveTab('history');
+          // Select the running instance in history
+          useExecutionStore
+            .getState()
+            .setSelectedInvocationId(executingInstanceId);
+        }}
+        executionStats={
+          executionInstanceData
+            ? {
+                status: executionInstanceData.status,
+                queueDuration:
+                  executionInstanceData.queueDurationSeconds ?? undefined,
+                executionDuration:
+                  executionInstanceData.executionDurationSeconds ?? undefined,
+                maxMemory: executionInstanceData.maxMemoryMb ?? undefined,
+                terminationType:
+                  executionInstanceData.terminationType ?? undefined,
+              }
+            : undefined
+        }
+        onDebugExecute={handleDebugExecuteServer}
+        isSuspended={isSuspended}
+        waitingReason={
+          isWaitingSuspension(executionInstanceData)
+            ? executionInstanceData?.suspensionReason
+            : null
+        }
+        onResume={handleResume}
+        isResuming={resumeMutation.isPending}
+        hasBreakpoints={hasBreakpoints}
+        compilationStatus={compilationToolbarStatus}
+      />
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        {/* Floating toolbar container */}
-        <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center">
-          <div className="pointer-events-auto">
-            <WorkflowActionsForm
-              isLoading={isLoading}
-              workflowName={stagedWorkflowChanges.name ?? data.name ?? ''}
-              onSchedule={handleSchedule}
-              onSubmit={handleSubmit}
-              onExportJSON={handleExportJSON}
-              onImportJSON={handleImportJSON}
-              onAutoLayout={handleAutoLayout}
-              onAddNote={handleAddNote}
-              isExecuting={!!executingInstanceId}
-              isExecutionActive={
-                executionInstanceData?.status &&
-                ['queued', 'compiling', 'running', 'suspended'].includes(
-                  executionInstanceData.status
-                )
-              }
-              isDirty={hasStructuralUnsavedChanges}
-              hasUnsavedChanges={hasUnsavedChanges}
-              onStop={handleStop}
-              onClearExecution={handleResetExecution}
-              onViewExecutionDetails={() => {
-                // Switch to history tab (this also expands the panel)
-                useValidationStore.getState().setActiveTab('history');
-                // Select the running instance in history
-                useExecutionStore
-                  .getState()
-                  .setSelectedInvocationId(executingInstanceId);
-              }}
-              executionStats={
-                executionInstanceData
-                  ? {
-                      status: executionInstanceData.status,
-                      queueDuration:
-                        executionInstanceData.queueDurationSeconds ?? undefined,
-                      executionDuration:
-                        executionInstanceData.executionDurationSeconds ??
-                        undefined,
-                      maxMemory: executionInstanceData.maxMemoryMb ?? undefined,
-                      terminationType:
-                        executionInstanceData.terminationType ?? undefined,
-                    }
-                  : undefined
-              }
-              onDebugExecute={handleDebugExecuteServer}
-              isSuspended={isSuspended}
-              waitingReason={
-                isWaitingSuspension(executionInstanceData)
-                  ? executionInstanceData?.suspensionReason
-                  : null
-              }
-              onResume={handleResume}
-              isResuming={resumeMutation.isPending}
-              hasBreakpoints={hasBreakpoints}
-              compilationStatus={compilationToolbarStatus}
-            />
-          </div>
-        </div>
         <div className="absolute inset-0">
           {isSwitchingVersion && (
             <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/50">
@@ -2360,6 +2365,7 @@ export function Workflow() {
             onStagedNodeChange={handleStagedNodeChange}
             onResetNodeChanges={handleResetNodeChanges}
             onWorkflowChange={handleWorkflowChange}
+            canvasDetail={canvasDetail}
           />
           {/* Debug step inspector — floating panel when suspended */}
           {isSuspended && <DebugStepInspector />}
