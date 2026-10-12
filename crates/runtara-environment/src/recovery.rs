@@ -10,7 +10,8 @@
 //! [`crate::heartbeat_monitor`]) would otherwise mark it terminally `failed`
 //! with "Process terminated during Environment restart" — never relaunching it.
 //!
-//! [`recover_or_fail`] routes those would-be failures into the SAME
+//! [`recover_registered`] and [`recover_orphaned`] route those would-be
+//! failures into the SAME
 //! suspend → wake → relaunch path the drain uses. The engine is
 //! replay-from-start with checkpoints as a result cache, so a relaunched
 //! instance replays from the entry point and completed durable steps are served
@@ -114,8 +115,8 @@ pub enum RecoveryOutcome {
 /// and a new start from replacing the generation midway through recovery.
 /// None means a live claim or a replacement owns the observation now.
 ///
-/// Whether a recovered instance is relaunched or failed follows
-/// [`recover_or_fail`], i.e. the Environment-wide [`RecoveryPolicy`].
+/// Whether a recovered instance is relaunched or failed follows the
+/// Environment-wide [`RecoveryPolicy`].
 pub async fn recover_registered(
     pool: &sqlx::PgPool,
     persistence: &dyn Persistence,
@@ -348,27 +349,6 @@ fn decide(
     Decision::Recover { attempt }
 }
 
-/// Decide whether to auto-recover an instance that was killed by an Environment
-/// restart, or fail it terminally.
-///
-/// The caller has already determined the instance was orphaned by a restart
-/// (its process is gone but Core still shows it `running`). On `Recovered`, the
-/// wake scheduler relaunches the instance on its next poll. On `Failed`, the
-/// instance is left in a terminal state with a clear operator-facing reason.
-///
-/// Recovery is governed by the Environment-wide [`RecoveryPolicy`]; there is
-/// no per-workflow override, so every orphaned instance in this Environment
-/// gets the same answer.
-/// A concurrent lifecycle transition returns `Unchanged`; a failed write
-/// returns an error, so callers do not retire tracking as though it succeeded.
-pub async fn recover_or_fail(
-    pool: &sqlx::PgPool,
-    persistence: &dyn Persistence,
-    instance_id: &str,
-) -> Result<RecoveryOutcome> {
-    recover_or_fail_with(pool, persistence, instance_id, RecoveryPolicy::from_env()).await
-}
-
 /// Why a still-`running` instance is being handed to recovery. It names the
 /// suspension (or failure) recovery records, and nothing else differs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -389,8 +369,12 @@ impl RecoveryCause {
     }
 }
 
-/// [`recover_or_fail`] for a given cause, under the Environment's policy.
-/// The crash-loop cap applies to every cause.
+/// The restart recovery decision for a given cause, under the Environment's
+/// policy. The crash-loop cap applies to every cause.
+///
+/// Like every recovery write, it applies only while Core shows the instance
+/// `running`, which does not identify a generation. The caller must hold the
+/// instance's launch and registration locks, as `observed_exit` does.
 pub async fn recover_or_fail_because(
     pool: &sqlx::PgPool,
     persistence: &dyn Persistence,
@@ -407,8 +391,22 @@ pub async fn recover_or_fail_because(
     .await
 }
 
-/// [`recover_or_fail`] with the policy supplied rather than read from the
-/// process environment.
+/// Decide whether to auto-recover an instance that was killed by an Environment
+/// restart, or fail it terminally, under the supplied policy.
+///
+/// On `Recovered`, the wake scheduler relaunches the instance on its next poll.
+/// On `Failed`, the instance is left in a terminal state with a clear
+/// operator-facing reason. Recovery is governed by the Environment-wide
+/// [`RecoveryPolicy`]; there is no per-workflow override, so every orphaned
+/// instance in this Environment gets the same answer.
+///
+/// The write applies only while Core shows the instance `running`, and that
+/// guard cannot tell the orphaned run from a newer generation. So this is not
+/// an entry point: callers establish that the instance is still orphaned, under
+/// locks held across this call, as [`recover_registered`] and
+/// [`recover_orphaned`] do. A concurrent lifecycle transition returns
+/// `Unchanged`; a failed write returns an error, so callers do not retire
+/// tracking as though it succeeded.
 async fn recover_or_fail_with(
     pool: &sqlx::PgPool,
     persistence: &dyn Persistence,
@@ -931,11 +929,36 @@ mod persistence_tests {
                 recover_orphaned_with(&pool, &persistence, &id, policy(true)).await
             }
         });
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert!(
-            !second.is_finished(),
-            "the second scanner must wait for the first"
-        );
+        // Wait until the second scanner is blocked on the lock, not merely
+        // spawned. Relaunching before it got there would leave the registration
+        // check alone to stop it, and this would pass without the lock. The key
+        // repeats ORPHAN_RECOVERY_LOCK's; if they drift apart, this times out.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks \
+                 WHERE locktype = 'advisory' AND NOT granted AND objsubid = 1 \
+                   AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+                   AND ((classid::bigint << 32) | objid::bigint) \
+                       = hashtextextended('runtara:orphan-recovery' || chr(31) || $1, 0))",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("read lock waits");
+            if waiting {
+                break;
+            }
+            assert!(
+                !second.is_finished(),
+                "the second scanner must wait for the first"
+            );
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the second scanner never reached the lock"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         // Meanwhile the first recovered it and the wake relaunched it.
         register(&pool, &id).await;
         let before = snapshot(&pool, &id).await;

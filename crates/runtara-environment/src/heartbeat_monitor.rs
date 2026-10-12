@@ -185,7 +185,7 @@ impl HeartbeatMonitor {
         // Check 1: Containers in container_registry with stale heartbeats
         let stale_containers = self.get_stale_containers(cutoff).await?;
 
-        // Check 2: Running instances in Core that are not being tracked locally
+        // Check 2: Running instances in Core that no Environment has registered
         let orphaned_instances = self.get_orphaned_running_instances(cutoff).await?;
 
         let total_stale = stale_containers.len() + orphaned_instances.len();
@@ -211,7 +211,7 @@ impl HeartbeatMonitor {
             }
         }
 
-        // Process orphaned instances (running in Core but not tracked locally).
+        // Process orphaned instances (running in Core but not registered).
         // These were orphaned by an Environment that went away; route them into
         // the restart-recovery path rather than failing them outright.
         for instance in orphaned_instances {
@@ -451,7 +451,7 @@ impl HeartbeatMonitor {
             return Ok(vec![]);
         }
 
-        // Get all instance IDs we're tracking locally
+        // Every registered instance, whichever Environment registered it
         let tracked_ids: std::collections::HashSet<String> =
             ContainerRegistry::new(self.pool.clone())
                 .tracked_instance_ids()
@@ -461,12 +461,14 @@ impl HeartbeatMonitor {
 
         // Filter to find orphaned instances:
         // - Running in Core
-        // - Not tracked locally
-        // - Started before the cutoff time (to avoid racing with new launches)
+        // - Not registered by any Environment
+        // - First started before the cutoff time. This only spares a brand-new
+        //   instance; a relaunch keeps the first `started_at`, so it is
+        //   `recover_orphaned`'s re-check that protects a live generation.
         let orphaned: Vec<OrphanedInstance> = running_instances
             .into_iter()
             .filter(|inst| {
-                // Not tracked locally
+                // Not registered
                 if tracked_ids.contains(&inst.instance_id) {
                     return false;
                 }
@@ -493,41 +495,35 @@ impl HeartbeatMonitor {
     /// instead of failing it outright. `RUNTARA_AUTO_RECOVER` turns this off
     /// for the whole Environment; there is no per-workflow opt-out.
     async fn recover_orphaned_instance(&self, instance: &OrphanedInstance) {
-        warn!(
-            instance_id = %instance.instance_id,
-            tenant_id = %instance.tenant_id,
-            started_at = ?instance.started_at,
-            created_at = %instance.created_at,
-            "Found orphaned instance (Core running, untracked) - recovering after Environment restart"
-        );
-
-        // The scan's snapshot may be stale by now; this re-checks under locks.
-        let outcome = match crate::recovery::recover_orphaned(
+        // The scan's snapshot may be stale by now; this re-checks under locks,
+        // so an orphan is reported only once recovery has acted on it.
+        match crate::recovery::recover_orphaned(
             &self.pool,
             self.core_persistence.as_ref(),
             &instance.instance_id,
         )
         .await
         {
-            Ok(Some(outcome)) => outcome,
-            Ok(None) => {
+            Ok(Some(outcome)) if outcome != crate::recovery::RecoveryOutcome::Unchanged => {
+                warn!(
+                    instance_id = %instance.instance_id,
+                    tenant_id = %instance.tenant_id,
+                    started_at = ?instance.started_at,
+                    created_at = %instance.created_at,
+                    outcome = ?outcome,
+                    "Orphaned instance (Core running, untracked) recovered after Environment restart"
+                );
+            }
+            Ok(_) => {
                 debug!(
                     instance_id = %instance.instance_id,
-                    "Instance is no longer orphaned; leaving its current generation alone"
+                    "Instance is no longer orphaned; leaving it alone"
                 );
-                return;
             }
             Err(error) => {
                 warn!(instance_id = %instance.instance_id, %error, "Orphan recovery write failed");
-                return;
             }
-        };
-
-        info!(
-            instance_id = %instance.instance_id,
-            outcome = ?outcome,
-            "Orphaned instance recovery decision"
-        );
+        }
     }
 }
 

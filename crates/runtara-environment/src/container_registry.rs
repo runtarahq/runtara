@@ -130,8 +130,8 @@ impl ContainerRegistry {
         .await?)
     }
 
-    /// Get a specific container's info
-    /// Just the instance ids this process is tracking.
+    /// Just the ids of every registered instance. The table is shared, so this
+    /// includes runs registered by other Environments using the same database.
     ///
     /// The heartbeat monitor wants a membership set, not the rows, and used to
     /// read the table itself for it.
