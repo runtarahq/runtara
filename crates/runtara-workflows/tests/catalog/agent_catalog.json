@@ -35,14 +35,17 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Extract Output",
           "fields": [
             {
               "name": "values",
               "displayName": "Values",
               "description": "Array of extracted property values",
-              "type": "array"
+              "type": "array",
+              "items": {
+                "type": "any"
+              }
             },
             {
               "name": "count",
@@ -54,7 +57,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "get-value-by-path",
@@ -85,7 +89,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "set-value-by-path",
@@ -124,7 +129,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "filter-non-values",
@@ -190,14 +196,17 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Filter Output",
           "fields": [
             {
               "name": "items",
               "displayName": "Items",
               "description": "Array of items that passed the filter",
-              "type": "array"
+              "type": "array",
+              "items": {
+                "type": "any"
+              }
             },
             {
               "name": "count",
@@ -215,7 +224,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "select-first",
@@ -241,7 +251,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "coalesce",
@@ -285,7 +296,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "from-json-string",
@@ -309,6 +321,7 @@
         "hasSideEffects": false,
         "isIdempotent": true,
         "rateLimited": false,
+        "trusted": false,
         "knownErrors": [
           {
             "code": "TRANSFORM_JSON_PARSE_ERROR",
@@ -334,7 +347,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "JSON String Output",
           "fields": [
             {
@@ -354,6 +367,7 @@
         "hasSideEffects": false,
         "isIdempotent": true,
         "rateLimited": false,
+        "trusted": false,
         "knownErrors": [
           {
             "code": "TRANSFORM_JSON_SERIALIZE_ERROR",
@@ -413,14 +427,17 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Filter Output",
           "fields": [
             {
               "name": "items",
               "displayName": "Items",
               "description": "Array of items that passed the filter",
-              "type": "array"
+              "type": "array",
+              "items": {
+                "type": "any"
+              }
             },
             {
               "name": "count",
@@ -438,7 +455,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "sort",
@@ -477,14 +495,17 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Sort Output",
           "fields": [
             {
               "name": "items",
               "displayName": "Items",
               "description": "Array of sorted items",
-              "type": "array"
+              "type": "array",
+              "items": {
+                "type": "any"
+              }
             },
             {
               "name": "count",
@@ -496,7 +517,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "map-fields",
@@ -523,7 +545,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Map Fields Output",
           "fields": [
             {
@@ -542,7 +564,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "group-by",
@@ -578,7 +601,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Group By Output",
           "fields": [
             {
@@ -598,6 +621,7 @@
         "hasSideEffects": false,
         "isIdempotent": true,
         "rateLimited": false,
+        "trusted": false,
         "knownErrors": [
           {
             "code": "TRANSFORM_INVALID_INPUT",
@@ -639,14 +663,17 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Append Output",
           "fields": [
             {
               "name": "array",
               "displayName": "Array",
               "description": "Array with the new item appended",
-              "type": "array"
+              "type": "array",
+              "items": {
+                "type": "any"
+              }
             },
             {
               "name": "length",
@@ -658,7 +685,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "flat-map",
@@ -688,14 +716,17 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Flat Map Output",
           "fields": [
             {
               "name": "items",
               "displayName": "Items",
               "description": "Flattened array of all nested items",
-              "type": "array"
+              "type": "array",
+              "items": {
+                "type": "any"
+              }
             },
             {
               "name": "count",
@@ -707,7 +738,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "array-length",
@@ -726,7 +758,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Array Length Output",
           "fields": [
             {
@@ -745,7 +777,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "ensure-array",
@@ -764,14 +797,17 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Ensure Array Output",
           "fields": [
             {
               "name": "items",
               "displayName": "Items",
               "description": "The input wrapped as an array (or the original array if already an array)",
-              "type": "array"
+              "type": "array",
+              "items": {
+                "type": "any"
+              }
             },
             {
               "name": "count",
@@ -789,7 +825,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       }
     ]
   },
@@ -834,6 +871,14 @@
             "example": "https://api.example.com/v1/users"
           },
           {
+            "name": "connection_endpoint",
+            "displayName": "Connection Endpoint",
+            "description": "Name of an alternate endpoint declared by the connection type, for providers that split one credential across several API hosts (e.g. \"graphql\" on a QuickBooks Online connection). Leave empty to use the connection's default base URL. Ignored without a connection.",
+            "type": "string",
+            "required": false,
+            "example": "graphql"
+          },
+          {
             "name": "headers",
             "displayName": "Headers",
             "description": "Custom HTTP headers",
@@ -855,7 +900,7 @@
             "name": "body",
             "displayName": "Body",
             "description": "Request payload (any JSON value, or string for non-JSON bodies)",
-            "type": "string",
+            "type": "any",
             "required": false,
             "default": null,
             "example": "{\"name\": \"John Doe\", \"email\": \"john@example.com\"}"
@@ -907,7 +952,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "HTTP Response",
           "description": "Response from an HTTP request",
           "fields": [
@@ -915,7 +960,7 @@
               "name": "status_code",
               "displayName": "Status Code",
               "description": "HTTP status code (e.g., 200, 404, 500)",
-              "type": "string",
+              "type": "integer",
               "example": "200"
             },
             {
@@ -928,7 +973,7 @@
               "name": "body",
               "displayName": "Body",
               "description": "Response body (JSON object, text string, or {\"base64\": \"...\"} for binary depending on response_type)",
-              "type": "string"
+              "type": "any"
             },
             {
               "name": "success",
@@ -941,14 +986,15 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       }
     ]
   },
   {
     "id": "object-model",
     "name": "Object Model",
-    "description": "CRUD operations over the runtara object-model API (list schemas, create/query/update/delete instances, bulk operations, aggregates, and conversation memory).",
+    "description": "CRUD operations over the runtara object model (list schemas, create/query/update/delete instances, bulk operations, aggregates, and conversation memory).",
     "hasSideEffects": true,
     "supportsConnections": true,
     "integrationIds": [
@@ -980,7 +1026,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Create Instance Output",
           "description": "Result of creating an instance in the object model",
           "fields": [
@@ -1009,7 +1055,8 @@
         },
         "hasSideEffects": true,
         "isIdempotent": false,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "query-instances",
@@ -1073,7 +1120,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Query Instances Output",
           "description": "Result of querying instances from the object model",
           "fields": [
@@ -1088,7 +1135,10 @@
               "name": "instances",
               "displayName": "Instances",
               "description": "The matching instances",
-              "type": "array"
+              "type": "array",
+              "items": {
+                "type": "any"
+              }
             },
             {
               "name": "total_count",
@@ -1108,7 +1158,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "check-instance-exists",
@@ -1135,7 +1186,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Check Instance Exists Output",
           "description": "Result of checking if an instance exists in the object model",
           "fields": [
@@ -1157,14 +1208,15 @@
               "name": "instance",
               "displayName": "Instance",
               "description": "The full instance data (if exists)",
-              "type": "string",
+              "type": "any",
               "nullable": true
             }
           ]
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "create-if-not-exists",
@@ -1199,7 +1251,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Create If Not Exists Output",
           "description": "Result of create-if-not-exists (upsert) operation",
           "fields": [
@@ -1242,7 +1294,8 @@
         },
         "hasSideEffects": true,
         "isIdempotent": false,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "update-instance",
@@ -1277,7 +1330,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Update Instance Output",
           "description": "Result of updating an instance in the object model",
           "fields": [
@@ -1306,7 +1359,8 @@
         },
         "hasSideEffects": true,
         "isIdempotent": false,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "delete-instance",
@@ -1333,7 +1387,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Delete Instance Output",
           "description": "Result of deleting an instance",
           "fields": [
@@ -1354,7 +1408,8 @@
         },
         "hasSideEffects": true,
         "isIdempotent": false,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "bulk-create-instances",
@@ -1399,7 +1454,7 @@
             "description": "Rows in columnar form — each inner array has the same length as `columns`",
             "type": "array",
             "items": {
-              "type": "any"
+              "type": "array"
             },
             "required": false,
             "example": "[[\"A\", 1], [\"B\", 2]]"
@@ -1449,7 +1504,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Bulk Create Instances Output",
           "description": "Result of a bulk insert",
           "fields": [
@@ -1475,7 +1530,10 @@
               "name": "errors",
               "displayName": "Errors",
               "description": "Per-row errors when on_error='skip'",
-              "type": "array"
+              "type": "array",
+              "items": {
+                "type": "any"
+              }
             },
             {
               "name": "error",
@@ -1488,7 +1546,8 @@
         },
         "hasSideEffects": true,
         "isIdempotent": false,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "bulk-update-instances",
@@ -1533,7 +1592,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Bulk Update Instances Output",
           "description": "Result of a bulk update",
           "fields": [
@@ -1560,7 +1619,8 @@
         },
         "hasSideEffects": true,
         "isIdempotent": false,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "bulk-delete-instances",
@@ -1596,7 +1656,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Bulk Delete Instances Output",
           "description": "Result of a bulk delete",
           "fields": [
@@ -1623,7 +1683,8 @@
         },
         "hasSideEffects": true,
         "isIdempotent": false,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "query-aggregate",
@@ -1683,7 +1744,7 @@
           {
             "name": "limit",
             "displayName": "Limit",
-            "description": "Max result rows. Server caps at 100000.",
+            "description": "Max result rows, subject to the configured database row and byte limits.",
             "type": "integer",
             "required": false,
             "example": "200"
@@ -1698,7 +1759,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Query Aggregate Output",
           "description": "Columnar aggregate result: ordered column names, rows aligned to those columns, and the total number of groups matched.",
           "fields": [
@@ -1712,13 +1773,19 @@
               "name": "columns",
               "displayName": "Columns",
               "description": "Output column names — group_by columns first, then aggregate aliases.",
-              "type": "array"
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
             },
             {
               "name": "rows",
               "displayName": "Rows",
               "description": "Result rows, each aligned to the `columns` list.",
-              "type": "array"
+              "type": "array",
+              "items": {
+                "type": "array"
+              }
             },
             {
               "name": "group_count",
@@ -1737,7 +1804,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "query-sql",
@@ -1778,7 +1846,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Query SQL Output",
           "description": "Result rows decoded to JSON objects (column name → value) plus the row count.",
           "fields": [
@@ -1792,7 +1860,10 @@
               "name": "rows",
               "displayName": "Rows",
               "description": "Result rows as JSON objects keyed by column name",
-              "type": "array"
+              "type": "array",
+              "items": {
+                "type": "any"
+              }
             },
             {
               "name": "row_count",
@@ -1812,6 +1883,7 @@
         "hasSideEffects": false,
         "isIdempotent": true,
         "rateLimited": false,
+        "trusted": false,
         "knownErrors": [
           {
             "code": "OBJECT_MODEL_REQUEST_FAILED",
@@ -1820,17 +1892,17 @@
           },
           {
             "code": "OBJECT_MODEL_UPSTREAM_ERROR",
-            "description": "Object-model API 5xx/429 — retried automatically (reads are safe to retry)",
+            "description": "Retryable native database failure; reads may be retried",
             "kind": "transient"
           },
           {
-            "code": "OBJECT_MODEL_HTTP_ERROR",
-            "description": "Transport failure reaching the object-model API — retried automatically",
+            "code": "OBJECT_MODEL_HOST_ERROR",
+            "description": "Native database deadline exceeded; reads may be retried",
             "kind": "transient"
           },
           {
             "code": "OBJECT_MODEL_PAYLOAD_TOO_LARGE",
-            "description": "Request body exceeds the internal API size limit",
+            "description": "Request exceeds the native database size limit",
             "kind": "permanent"
           }
         ]
@@ -1839,7 +1911,7 @@
         "id": "execute-sql",
         "name": "execute_sql",
         "displayName": "Execute SQL",
-        "description": "Run one SQL write statement against the tenant object-model database with a server-side statement timeout. The workhorse for derived-table rebuilds: computed-expression UPDATEs, TRUNCATE, INSERT...SELECT...GROUP BY write-back. Never auto-retries server errors (statement outcome unknown — retrying a write is the double-apply case). Bypasses per-schema authorization, validation, and soft-delete — use the row-shaped capabilities when their safety net fits.",
+        "description": "Run one SQL write statement against the tenant object-model database with a server-side statement timeout. The workhorse for derived-table rebuilds: computed-expression UPDATEs, TRUNCATE, INSERT...SELECT...GROUP BY write-back. Retries transient errors only when the host confirms the write never committed. Unknown commit outcomes are never retried. Bypasses per-schema authorization, validation, and soft-delete — use the row-shaped capabilities when their safety net fits.",
         "inputType": "ExecuteSqlInput",
         "inputs": [
           {
@@ -1863,7 +1935,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Execute SQL Output",
           "description": "Rows affected by the statement (0 for DDL and TRUNCATE).",
           "fields": [
@@ -1891,6 +1963,7 @@
         "hasSideEffects": true,
         "isIdempotent": false,
         "rateLimited": false,
+        "trusted": false,
         "knownErrors": [
           {
             "code": "OBJECT_MODEL_REQUEST_FAILED",
@@ -1899,17 +1972,17 @@
           },
           {
             "code": "OBJECT_MODEL_UPSTREAM_ERROR",
-            "description": "Object-model API 5xx — never auto-retried for writes; 429 stays retryable (rejected before reaching the database)",
-            "kind": "permanent"
+            "description": "Transient native database failure with a confirmed not-started or rolled-back outcome",
+            "kind": "transient"
           },
           {
-            "code": "OBJECT_MODEL_HTTP_ERROR",
-            "description": "Transport failure — never auto-retried for writes (the statement may have committed)",
+            "code": "OBJECT_MODEL_HOST_ERROR",
+            "description": "Native database deadline exceeded; an unknown commit outcome is never retried",
             "kind": "permanent"
           },
           {
             "code": "OBJECT_MODEL_PAYLOAD_TOO_LARGE",
-            "description": "Request body exceeds the internal API size limit",
+            "description": "Request exceeds the native database size limit",
             "kind": "permanent"
           }
         ]
@@ -1931,7 +2004,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Load Memory Output",
           "description": "Previously stored conversation messages",
           "fields": [
@@ -1945,7 +2018,10 @@
               "name": "messages",
               "displayName": "Messages",
               "description": "Array of conversation messages in rig message format",
-              "type": "array"
+              "type": "array",
+              "items": {
+                "type": "any"
+              }
             },
             {
               "name": "message_count",
@@ -1965,6 +2041,7 @@
         "hasSideEffects": false,
         "isIdempotent": true,
         "rateLimited": false,
+        "trusted": false,
         "tags": [
           "memory:read"
         ]
@@ -1996,7 +2073,7 @@
           }
         ],
         "output": {
-          "type": "string",
+          "type": "object",
           "displayName": "Save Memory Output",
           "description": "Result of saving conversation memory",
           "fields": [
@@ -2024,6 +2101,7 @@
         "hasSideEffects": true,
         "isIdempotent": false,
         "rateLimited": false,
+        "trusted": false,
         "tags": [
           "memory:write"
         ]
@@ -2051,7 +2129,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "random-array",
@@ -2070,11 +2149,15 @@
           }
         ],
         "output": {
-          "type": "array"
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "return-input-string",
@@ -2097,7 +2180,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "return-input",
@@ -2119,7 +2203,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "do-nothing",
@@ -2133,7 +2218,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "delay-in-ms",
@@ -2156,7 +2242,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "calculate",
@@ -2203,7 +2290,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "format-date-from-iso",
@@ -2234,7 +2322,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "iso-to-unix-timestamp",
@@ -2257,7 +2346,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "get-current-unix-timestamp",
@@ -2271,7 +2361,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "get-current-iso-datetime",
@@ -2285,7 +2376,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "get-current-formatted-datetime",
@@ -2308,7 +2400,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       },
       {
         "id": "country-name-to-iso-code",
@@ -2339,7 +2432,8 @@
         },
         "hasSideEffects": false,
         "isIdempotent": true,
-        "rateLimited": false
+        "rateLimited": false,
+        "trusted": false
       }
     ]
   }

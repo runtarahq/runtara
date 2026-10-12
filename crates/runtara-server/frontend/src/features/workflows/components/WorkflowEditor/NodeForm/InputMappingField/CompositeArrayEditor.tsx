@@ -218,7 +218,7 @@ export function CompositeArrayEditor({
       </div>
 
       {/* Items */}
-      <div className="flex-1 space-y-3 overflow-y-auto p-4">
+      <div className="flex-1 space-y-2 overflow-y-auto p-3">
         {value.length === 0 && (
           <div className="py-8 text-center text-muted-foreground">
             <List className="mx-auto mb-2 size-8 opacity-50" />
@@ -231,12 +231,13 @@ export function CompositeArrayEditor({
           <div
             key={index}
             className={cn(
-              'rounded-md border bg-background p-3',
+              'rounded-md border bg-background px-3 py-2',
               getItemErrors(index).length > 0 && 'border-destructive/50'
             )}
           >
             <CompositeValueItem
               label={`[${index}]`}
+              layout="inline"
               value={item}
               onChange={(newValue) => handleItemChange(index, newValue)}
               onRemove={() => handleRemoveItem(index)}

@@ -6,7 +6,7 @@ import {
   getSmoothStepPath,
   Position,
 } from '@xyflow/react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, Split, Wrench, Brain } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { useExecutionStore } from '@/features/workflows/stores/executionStore';
@@ -17,6 +17,7 @@ import {
 } from './RouteSettingsPopover';
 import { useCanvasDisplay } from '../CanvasDisplayContext';
 import { describeCondition } from '../step-details';
+import { findBranchJoin } from '../parallel-branch';
 import { shouldHideDuplicateEdgeLabel } from '../CustomNodes/layout';
 import { useIsDarkTheme } from '@/shared/stores/themeStore';
 import { CANVAS_Z } from '@/features/workflows/components/WorkflowEditor/canvas-z';
@@ -95,6 +96,28 @@ export function ImprovedEdge({
   const { onInsertClick, onParallelClick, routeActions, allEdges, edgeRoutes } =
     useEdgeContext();
   const [isHovered, setIsHovered] = useState(false);
+  // The route's buttons (insert, parallel branch, route settings) show on
+  // hover as well as when the edge is selected: behind a click they were
+  // effectively hidden. Hiding waits a moment so the pointer can travel from
+  // the line onto the buttons, which live in a separate HTML layer.
+  const [controlsHovered, setControlsHovered] = useState(false);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hoverIn = () => {
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+    setIsHovered(true);
+    setControlsHovered(true);
+  };
+  const hoverOut = () => {
+    setIsHovered(false);
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+    hideTimer.current = setTimeout(() => setControlsHovered(false), 250);
+  };
+  useEffect(
+    () => () => {
+      if (hideTimer.current) clearTimeout(hideTimer.current);
+    },
+    []
+  );
 
   // Check if workflow is executing (read-only mode)
   const isExecuting = useExecutionStore((state) => !!state.executingInstanceId);
@@ -361,17 +384,23 @@ export function ImprovedEdge({
   const routeConditionContext = { stepNames };
   const thisEdge = allEdges.find((edge) => edge.id === id);
   const routeCondition = thisEdge ? getRouteCondition(thisEdge) : undefined;
-  // Parallel step: offered on a step's only unconditional route, the shape
-  // the validator accepts for fan-out once it re-converges (E073).
-  const canAddParallel =
+  // Parallel step: offered on any unconditional route whose fan-out
+  // re-converges (E073). The new branch rejoins where the existing ones do —
+  // for a single route its target, for A → (B, B1) → C it is C — so a third
+  // branch can be added from either existing branch.
+  const branchJoin =
     !!onParallelClick &&
     (sourceHandleId || 'source') === 'source' &&
     routeCondition === undefined &&
-    source !== '__start_indicator__' &&
-    allEdges.filter(
-      (edge) =>
-        edge.source === source && (edge.sourceHandle || 'source') === 'source'
-    ).length === 1;
+    source !== '__start_indicator__'
+      ? findBranchJoin(
+          allEdges,
+          source,
+          (edge) =>
+            getRouteCondition(edge as (typeof allEdges)[number]) === undefined
+        )
+      : null;
+  const canAddParallel = branchJoin !== null;
   const canEditRoute =
     !!routeActions && !!thisEdge && source !== '__start_indicator__';
 
@@ -383,8 +412,8 @@ export function ImprovedEdge({
   return (
     <>
       <g
-        onMouseEnter={() => setIsHovered(true)}
-        onMouseLeave={() => setIsHovered(false)}
+        onMouseEnter={hoverIn}
+        onMouseLeave={hoverOut}
         className="cursor-pointer"
         data-edge-source={source}
         data-edge-target={target}
@@ -450,64 +479,69 @@ export function ImprovedEdge({
         {/* Selected-edge toolbar (not for tool/memory edges — those are
             direct connections): insert a step, add one in parallel, edit
             the route's condition and priority. */}
-        {selected && !isExecuting && !isToolEdge && !isMemoryEdge && (
-          <div
-            style={{
-              position: 'absolute',
-              transform: `translate(-50%, -50%) translate(${labelX}px,${labelY + (label ? 20 : 0)}px)`,
-              pointerEvents: 'all',
-              zIndex: CANVAS_Z.edgeControls,
-            }}
-            className="nodrag nopan flex items-center gap-1"
-            onMouseEnter={() => setIsHovered(true)}
-            onMouseLeave={() => setIsHovered(false)}
-          >
-            {onInsertClick && (
-              <Button
-                className="size-4 rounded-full shadow-sm transition-all hover:shadow-md [&_svg]:size-2"
-                variant="secondary"
-                bordered
-                size="icon"
-                onClick={handleInsertClick}
-                aria-label="Insert a step on this route"
-                title="Insert a step"
-              >
-                <Plus />
-              </Button>
-            )}
-            {canAddParallel && (
-              <Button
-                className="size-4 rounded-full shadow-sm transition-all hover:shadow-md [&_svg]:size-2.5"
-                variant="secondary"
-                bordered
-                size="icon"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onParallelClick?.(edgeData());
-                }}
-                aria-label="Add a step in parallel with this route"
-                title="Add a parallel step"
-                data-testid="edge-add-parallel"
-              >
-                <Split />
-              </Button>
-            )}
-            {canEditRoute && thisEdge && routeActions && (
-              <RouteSettingsPopover
-                edge={thisEdge}
-                sourceName={routeActions.stepName(source)}
-                targetName={routeActions.stepName(target)}
-                conditionSuggestions={routeActions.conditionSuggestionsForEdge(
-                  thisEdge
-                )}
-                onUpdate={(updates) =>
-                  routeActions.onUpdateRouteData(id, updates)
-                }
-                onDelete={() => routeActions.onDeleteRoute(id)}
-              />
-            )}
-          </div>
-        )}
+        {(selected || controlsHovered) &&
+          !isExecuting &&
+          !isToolEdge &&
+          !isMemoryEdge && (
+            <div
+              style={{
+                position: 'absolute',
+                transform: `translate(-50%, -50%) translate(${labelX}px,${labelY + (label ? 20 : 0)}px)`,
+                pointerEvents: 'all',
+                zIndex: CANVAS_Z.edgeControls,
+              }}
+              className="nodrag nopan flex items-center gap-1"
+              onMouseEnter={hoverIn}
+              onMouseLeave={hoverOut}
+            >
+              {onInsertClick && (
+                <Button
+                  className="size-5 rounded-full shadow-sm transition-all hover:shadow-md [&_svg]:size-3"
+                  variant="secondary"
+                  bordered
+                  size="icon"
+                  onClick={handleInsertClick}
+                  aria-label="Insert a step on this route"
+                  title="Insert a step"
+                >
+                  <Plus />
+                </Button>
+              )}
+              {canAddParallel && (
+                <Button
+                  className="size-5 rounded-full shadow-sm transition-all hover:shadow-md [&_svg]:size-3"
+                  variant="secondary"
+                  bordered
+                  size="icon"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (branchJoin) {
+                      onParallelClick?.({ ...edgeData(), target: branchJoin });
+                    }
+                  }}
+                  aria-label="Add a parallel branch"
+                  title="Add a parallel branch"
+                  data-testid="edge-add-parallel"
+                >
+                  <Split />
+                </Button>
+              )}
+              {canEditRoute && thisEdge && routeActions && (
+                <RouteSettingsPopover
+                  edge={thisEdge}
+                  sourceName={routeActions.stepName(source)}
+                  targetName={routeActions.stepName(target)}
+                  conditionSuggestions={routeActions.conditionSuggestionsForEdge(
+                    thisEdge
+                  )}
+                  onUpdate={(updates) =>
+                    routeActions.onUpdateRouteData(id, updates)
+                  }
+                  onDelete={() => routeActions.onDeleteRoute(id)}
+                />
+              )}
+            </div>
+          )}
       </EdgeLabelRenderer>
     </>
   );

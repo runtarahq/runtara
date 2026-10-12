@@ -238,6 +238,7 @@ interface WorkflowState {
     sourceNodeId?: string; // Node to connect FROM (new node is target)
     targetNodeId?: string; // Node to connect TO (new node is source)
     sourceHandle?: string;
+    becomesEntryPoint?: boolean; // Inserted before the first step, from Start
     insertionEdge?: {
       source: string;
       target: string;
@@ -314,7 +315,33 @@ interface WorkflowState {
   renameStep: (oldId: string, newId: string) => string | null;
 
   // Actions - Note Operations
-  addNote: (position: { x: number; y: number }, content?: string) => string;
+  /**
+   * Add a note. With `anchorStepId`, `position` is an offset from that step's
+   * laid-out position and the note moves with the step; otherwise it is
+   * absolute. `autoEdit` opens the new note straight into its editor.
+   */
+  addNote: (
+    position: { x: number; y: number },
+    content?: string,
+    options?: { anchorStepId?: string | null; autoEdit?: boolean }
+  ) => string;
+  /**
+   * Edit a note's text or size. Marks the workflow changed — the note card
+   * used syncFromReactFlow, which is for loading and clears the dirty flag,
+   * so a note edit alone left nothing to save.
+   */
+  updateNote: (
+    noteId: string,
+    patch: { content?: string; width?: number; height?: number },
+    /** false while a resize is in progress, so undo gets one entry */
+    recordHistory?: boolean
+  ) => void;
+  /** Record where a dragged note was dropped, and what it is attached to. */
+  placeNote: (
+    noteId: string,
+    position: { x: number; y: number },
+    anchorStepId: string | null
+  ) => void;
 
   // Actions - Edge Operations
   addEdge: (from: string, to: string, label?: string) => void;
@@ -808,6 +835,16 @@ export const useWorkflowStore = create<WorkflowState>()(
             }
           }
 
+          // Notes attached to the renamed step stay attached to it.
+          for (const n of state.nodes) {
+            if (
+              n.type === NODE_TYPES.NoteNode &&
+              (n.data as { anchorStepId?: string }).anchorStepId === oldId
+            ) {
+              n.data = { ...n.data, anchorStepId: newId };
+            }
+          }
+
           state.lastStepRename = { oldId, newId };
           state.isDirty = true;
           state.isStructurallyDirty = true;
@@ -817,7 +854,7 @@ export const useWorkflowStore = create<WorkflowState>()(
       },
 
       // Note Operations
-      addNote: (position, content = 'New note...') => {
+      addNote: (position, content = '', options = {}) => {
         const noteId = uuidv4();
         set((state) => {
           const size = NODE_TYPE_SIZES[NODE_TYPES.NoteNode] || {
@@ -833,6 +870,10 @@ export const useWorkflowStore = create<WorkflowState>()(
             data: {
               id: noteId,
               content,
+              ...(options.anchorStepId
+                ? { anchorStepId: options.anchorStepId }
+                : {}),
+              ...(options.autoEdit ? { autoEdit: true } : {}),
             },
             width: snapToGrid(size.width),
             height: snapToGrid(size.height),
@@ -849,6 +890,54 @@ export const useWorkflowStore = create<WorkflowState>()(
         });
         return noteId;
       },
+
+      updateNote: (noteId, patch, recordHistory = true) =>
+        set((state) => {
+          const note = state.nodes.find(
+            (n) => n.id === noteId && n.type === NODE_TYPES.NoteNode
+          );
+          if (!note) return;
+          const data = { ...(note.data as Record<string, unknown>) };
+          delete data.autoEdit;
+          if (patch.content !== undefined) data.content = patch.content;
+          note.data = data;
+          if (patch.width !== undefined && patch.height !== undefined) {
+            note.width = patch.width;
+            note.height = patch.height;
+            note.style = {
+              ...note.style,
+              width: patch.width,
+              height: patch.height,
+            };
+          }
+          state.isDirty = true;
+          if (recordHistory) state.saveToHistory();
+        }),
+
+      placeNote: (noteId, position, anchorStepId) =>
+        set((state) => {
+          const note = state.nodes.find(
+            (n) => n.id === noteId && n.type === NODE_TYPES.NoteNode
+          );
+          if (!note) return;
+          const snapped = snapPositionToGrid(position);
+          const currentAnchor =
+            (note.data as { anchorStepId?: string }).anchorStepId ?? null;
+          if (
+            note.position.x === snapped.x &&
+            note.position.y === snapped.y &&
+            currentAnchor === anchorStepId
+          ) {
+            return;
+          }
+          note.position = snapped;
+          const data = { ...(note.data as Record<string, unknown>) };
+          if (anchorStepId) data.anchorStepId = anchorStepId;
+          else delete data.anchorStepId;
+          note.data = data;
+          state.isDirty = true;
+          state.saveToHistory();
+        }),
 
       // Edge Operations
       addEdge: (from, to, label) =>

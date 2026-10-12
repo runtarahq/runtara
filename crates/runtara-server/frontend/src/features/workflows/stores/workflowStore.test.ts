@@ -471,3 +471,67 @@ describe('workflowStore step id generation on create', () => {
     expect(useWorkflowStore.getState().nodes[0].id).toBe('receive_order');
   });
 });
+
+describe('workflowStore notes', () => {
+  beforeEach(() => {
+    useWorkflowStore.getState().resetState();
+  });
+
+  const note = (id: string) =>
+    useWorkflowStore.getState().nodes.find((n) => n.id === id)!;
+
+  it('adds an anchored note that opens for editing', () => {
+    const id = useWorkflowStore.getState().addNote({ x: 0, y: -144 }, '', {
+      anchorStepId: 'fetch',
+      autoEdit: true,
+    });
+    expect(note(id).data).toMatchObject({
+      anchorStepId: 'fetch',
+      autoEdit: true,
+      content: '',
+    });
+  });
+
+  it('marks the workflow changed when a note is edited or resized', () => {
+    const id = useWorkflowStore.getState().addNote({ x: 0, y: 0 });
+    useWorkflowStore.setState({ isDirty: false });
+    useWorkflowStore.getState().updateNote(id, { content: 'Why we retry' });
+    expect(useWorkflowStore.getState().isDirty).toBe(true);
+    expect(note(id).data.content).toBe('Why we retry');
+
+    useWorkflowStore.setState({ isDirty: false });
+    useWorkflowStore.getState().updateNote(id, { width: 288, height: 144 });
+    expect(useWorkflowStore.getState().isDirty).toBe(true);
+    expect([note(id).width, note(id).height]).toEqual([288, 144]);
+  });
+
+  it('records where a note was dropped and what it is attached to', () => {
+    const id = useWorkflowStore
+      .getState()
+      .addNote({ x: 0, y: 0 }, 'n', { anchorStepId: 'a' });
+    useWorkflowStore.getState().placeNote(id, { x: 300, y: 400 }, null);
+    expect(note(id).position).toEqual({ x: 300, y: 396 });
+    expect(note(id).data.anchorStepId).toBeUndefined();
+
+    useWorkflowStore.getState().placeNote(id, { x: 0, y: -144 }, 'b');
+    expect(note(id).data.anchorStepId).toBe('b');
+  });
+
+  it('keeps a note attached to a step through a rename', () => {
+    useWorkflowStore.getState().addNode(
+      {
+        id: 'fetch',
+        stepType: 'Agent',
+        name: 'Fetch',
+        agentId: 'utils',
+        capabilityId: 'noop',
+      } as never,
+      { x: 0, y: 0 }
+    );
+    const id = useWorkflowStore
+      .getState()
+      .addNote({ x: 0, y: -144 }, 'n', { anchorStepId: 'fetch' });
+    useWorkflowStore.getState().renameStep('fetch', 'fetch_prices');
+    expect(note(id).data.anchorStepId).toBe('fetch_prices');
+  });
+});

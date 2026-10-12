@@ -12,13 +12,14 @@ import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
 import { FieldError } from '@/shared/components/ui/form';
-import { ChevronRight, Plus, Trash2 } from 'lucide-react';
+import { Plus, Trash2 } from 'lucide-react';
 import {
   MappingValueInput,
   ValueMode,
 } from './InputMappingField/MappingValueInput';
 import { CompositeValueEditor } from './InputMappingField/CompositeValueEditor';
 import { ModeToggleButton } from './InputMappingField/ModeToggleButton';
+import { StructuredValueSummary } from './InputMappingField/StructuredValueSummary';
 import { VariablePickerModal } from './InputMappingField/VariablePickerModal';
 import {
   Select,
@@ -192,14 +193,14 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
   const getArrayDisplayValue = (value: unknown): string => {
     if (!value) return 'Click to configure...';
     const parsedArray = parseCompositeArrayValue(value);
-    return `Composite: ${parsedArray.length} item${parsedArray.length !== 1 ? 's' : ''}`;
+    return `List · ${parsedArray.length} item${parsedArray.length !== 1 ? 's' : ''}`;
   };
 
   const getObjectDisplayValue = (value: unknown): string => {
     if (!value) return 'Click to configure...';
     const parsedObject = parseCompositeObjectValue(value);
     const fieldCount = Object.keys(parsedObject).length;
-    return `Composite: ${fieldCount} field${fieldCount !== 1 ? 's' : ''}`;
+    return `Object · ${fieldCount} field${fieldCount !== 1 ? 's' : ''}`;
   };
 
   // Build array source suggestions from previous steps
@@ -305,6 +306,7 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
           inside the subgraph.
         </p>
         <SchemaFieldsEditor
+          layout="stacked"
           label="Item Schema (Input)"
           fields={(inputSchemaValues || []) as any}
           onChange={(fields) =>
@@ -334,6 +336,7 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
           .
         </p>
         <SchemaFieldsEditor
+          layout="stacked"
           label="Output Schema"
           fields={(outputSchemaValues || []) as any}
           onChange={(fields) =>
@@ -463,9 +466,15 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
                                 hideReferenceToggle
                               />
                             ) : (
-                              <button
-                                type="button"
-                                onClick={() => {
+                              <StructuredValueSummary
+                                kind={isArrayVariable ? 'array' : 'object'}
+                                summary={
+                                  isArrayVariable
+                                    ? getArrayDisplayValue(variable.value)
+                                    : getObjectDisplayValue(variable.value)
+                                }
+                                expanded={editingVariableIndex === index}
+                                onToggle={() => {
                                   const nextValue = isArrayVariable
                                     ? parseCompositeArrayValue(variable.value)
                                     : parseCompositeObjectValue(variable.value);
@@ -483,15 +492,7 @@ export function SplitStepField({ name }: SplitStepFieldProps) {
                                     prev === index ? null : index
                                   );
                                 }}
-                                className="flex w-full items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/50"
-                              >
-                                <span className="truncate text-muted-foreground">
-                                  {isArrayVariable
-                                    ? getArrayDisplayValue(variable.value)
-                                    : getObjectDisplayValue(variable.value)}
-                                </span>
-                                <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
-                              </button>
+                              />
                             )}
                             <ModeToggleButton
                               mode={

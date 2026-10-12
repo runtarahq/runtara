@@ -87,6 +87,23 @@ const BUILTIN_VARIABLE_TYPES: Record<string, string | undefined> = {
 
 /** Both spellings the editor teaches for workflow input data and variables. */
 const DATA_ROOTS = [['workflow', 'inputs', 'data'], ['data']];
+
+/**
+ * Roots the runtime resolves. Mirrors `WORKFLOW_REFERENCE_ROOTS`
+ * (runtara-workflow-stdlib/src/reference_path.rs) plus the `__error`/`error`
+ * aliases `validate_reference_root` accepts; anything else is E126.
+ */
+const REFERENCE_ROOTS: ReadonlySet<string> = new Set([
+  'data',
+  'variables',
+  'workflow',
+  'steps',
+  'iteration',
+  'loop',
+  'item',
+  '__error',
+  'error',
+]);
 const VARIABLE_ROOTS = [['workflow', 'inputs', 'variables'], ['variables']];
 
 function flattenParameters(parameters: StepParameter[]): StepParameter[] {
@@ -363,6 +380,12 @@ export function validateReferencePath(
   }
 
   const segments = referenceSegments(path);
+
+  // A literal carried over from value mode ("LoanApplication") lands here.
+  const root = segments[0];
+  if (root !== undefined && !REFERENCE_ROOTS.has(root)) {
+    return `'${root}' is not a reference root. Start with data, variables, steps, workflow, iteration, loop or item`;
+  }
 
   const dataRest = rootRemainder(segments, DATA_ROOTS);
   if (dataRest !== null && dataRest.length > 0) {

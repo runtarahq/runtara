@@ -54,12 +54,12 @@ import type {
 import { FileInputWithReferences } from './FileInputWithReferences';
 import { ArrayMappingEditor } from './ArrayMappingEditor';
 import { ObjectMappingEditor } from './ObjectMappingEditor';
+import { StructuredValueSummary } from './StructuredValueSummary';
 import { CustomFieldRow } from './CustomFieldRow';
 import { AddCustomFieldDialog } from './AddCustomFieldDialog';
 import { useTabContext } from '../NodeFormItem';
 import { describeArrayValue, describeObjectValue } from './value-display';
 import { TOGGLE_GUTTER_CLASS, VALUE_CELL_CLASS } from './value-cell-layout';
-import { cn } from '@/lib/utils';
 
 /** Check if a field type is an array type */
 function isArrayType(type: string | undefined): boolean {
@@ -206,6 +206,8 @@ function FieldRow({
   onFieldFocus,
   legacyFieldCount = 0,
   validationError,
+  arrayExpanded = false,
+  objectExpanded = false,
 }: {
   nodeId: string;
   field: CapabilityField;
@@ -221,6 +223,9 @@ function FieldRow({
   legacyFieldCount?: number;
   /** Resolver error for this row's value, rendered under the value cell */
   validationError?: string;
+  /** Whether this row's array / object editor is open in the row below */
+  arrayExpanded?: boolean;
+  objectExpanded?: boolean;
 }) {
   const entry = useNodeFormStore((s) => s.getFieldEntry(nodeId, field.name));
   const setFieldValue = useNodeFormStore((s) => s.setFieldValue);
@@ -237,11 +242,14 @@ function FieldRow({
   const isObject = isObjectType(field.type);
   const isUntyped = isUntypedField(field.type);
   const allowsNull = (field as { nullable?: boolean }).nullable === true;
-  // Treat untyped fields as object-like to allow composite mode
-  const showObjectEditor = isObject || isUntyped;
-
   const value = entry ? entry.value : '';
   const valueType = (entry?.valueType ?? 'immediate') as InputMappingValueType;
+  // Untyped fields are object-like so they can be built, and so is any field
+  // holding a built value (e.g. http `body`, declared `string`): every such
+  // value gets the same summary control and the same editor below.
+  const showObjectEditor =
+    isObject || isUntyped || (!isArray && valueType === 'composite');
+  const objectSummaryKind = Array.isArray(value) ? 'array' : 'object';
 
   const handleValueChange = (newValue: string | null) => {
     setFieldValue(nodeId, field.name, newValue);
@@ -301,35 +309,25 @@ function FieldRow({
       {/* Value column */}
       <TableCell className={VALUE_CELL_CLASS}>
         {isArray ? (
-          // Array field - show button to open array editor
-          <button
-            type="button"
-            onClick={() => onEditArray?.(field)}
-            className={cn(
-              TOGGLE_GUTTER_CLASS,
-              'flex items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/50'
-            )}
-          >
-            <span className="truncate text-muted-foreground">
-              {getArrayDisplayValue()}
-            </span>
-            <Icons.chevronRight className="size-4 shrink-0 text-muted-foreground" />
-          </button>
+          <StructuredValueSummary
+            kind="array"
+            summary={getArrayDisplayValue()}
+            expanded={arrayExpanded}
+            onToggle={() => onEditArray?.(field)}
+            className={TOGGLE_GUTTER_CLASS}
+          />
         ) : showObjectEditor ? (
-          // Object/untyped field - show button to open object editor (with composite mode)
-          <button
-            type="button"
-            onClick={() => onEditObject?.(field)}
-            className={cn(
-              TOGGLE_GUTTER_CLASS,
-              'flex items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/50'
-            )}
-          >
-            <span className="truncate text-muted-foreground">
-              {getObjectDisplayValue()}
-            </span>
-            <Icons.chevronRight className="size-4 shrink-0 text-muted-foreground" />
-          </button>
+          <StructuredValueSummary
+            kind={objectSummaryKind}
+            summary={
+              objectSummaryKind === 'array'
+                ? describeArrayValue(value, valueType)
+                : getObjectDisplayValue()
+            }
+            expanded={objectExpanded}
+            onToggle={() => onEditObject?.(field)}
+            className={TOGGLE_GUTTER_CLASS}
+          />
         ) : componentType === 'file' ? (
           <div onFocus={onFieldFocus} className={TOGGLE_GUTTER_CLASS}>
             <FileInputWithReferences
@@ -416,10 +414,15 @@ export function SimpleInputMappingEditor({
     string | null
   >(null);
 
-  // Object editing state - track which object field is expanded inline
-  const [editingObjectFieldName, setEditingObjectFieldName] = useState<
-    string | null
-  >(null);
+  // Object editor open/closed per field. Unset means the default: open for a
+  // built (composite) value, whose editor is the only place it can be seen,
+  // closed otherwise.
+  const [objectExpandedOverrides, setObjectExpandedOverrides] = useState<
+    Record<string, boolean>
+  >({});
+  const isObjectExpanded = (fieldName: string) =>
+    objectExpandedOverrides[fieldName] ??
+    nodeData[fieldName]?.valueType === 'composite';
 
   // Custom field dialog state
   const [isAddCustomFieldOpen, setIsAddCustomFieldOpen] = useState(false);
@@ -432,7 +435,7 @@ export function SimpleInputMappingEditor({
   useEffect(() => {
     if (activeTab !== 'main') {
       setEditingArrayFieldName(null);
-      setEditingObjectFieldName(null);
+      setObjectExpandedOverrides({});
     }
   }, [activeTab]);
 
@@ -748,23 +751,29 @@ export function SimpleInputMappingEditor({
   // Object editing handlers
   const handleEditObject = useCallback(
     (field: CapabilityField) => {
-      // Toggle: if already editing this field, close it; otherwise open it
-      setEditingObjectFieldName((prev) =>
-        prev === field.name ? null : field.name
-      );
+      const expanded =
+        objectExpandedOverrides[field.name] ??
+        nodeData[field.name]?.valueType === 'composite';
+      setObjectExpandedOverrides((prev) => ({
+        ...prev,
+        [field.name]: !expanded,
+      }));
       // Close array editor if open
       if (editingArrayFieldName) {
         setEditingArrayFieldName(null);
       }
     },
-    [editingArrayFieldName]
+    [editingArrayFieldName, objectExpandedOverrides, nodeData]
   );
 
-  const handleObjectClose = useCallback(() => {
-    setEditingObjectFieldName(null);
-    // Sync changes when closing
-    handleFieldChange();
-  }, [handleFieldChange]);
+  const handleObjectClose = useCallback(
+    (fieldName: string) => {
+      setObjectExpandedOverrides((prev) => ({ ...prev, [fieldName]: false }));
+      // Sync changes when closing
+      handleFieldChange();
+    },
+    [handleFieldChange]
+  );
 
   const handleObjectValueChange = useCallback(
     (
@@ -826,9 +835,11 @@ export function SimpleInputMappingEditor({
         <Table className="w-full table-fixed">
           {/* No Type column: at the docked panel's width a dedicated column
               costs more room than it explains, and the value controls were
-              being clipped. The type is in the parameter's info hint. */}
+              being clipped. The type is in the parameter's info hint.
+              32%: labels wrap if they must, values wrap instead of clipping
+              and need the room more. */}
           <colgroup>
-            <col style={{ width: '38%' }} />
+            <col style={{ width: '32%' }} />
             <col />
             <col style={{ width: '40px' }} />
           </colgroup>
@@ -847,8 +858,7 @@ export function SimpleInputMappingEditor({
             {visibleFields.length > 0 ? (
               visibleFields.map((field) => {
                 const isEditingThisArray = editingArrayFieldName === field.name;
-                const isEditingThisObject =
-                  editingObjectFieldName === field.name;
+                const isEditingThisObject = isObjectExpanded(field.name);
                 const fieldEntry = nodeData[field.name];
                 // Collect legacy dot-notation fields for object types
                 const legacyFields = isObjectType(field.type)
@@ -873,6 +883,8 @@ export function SimpleInputMappingEditor({
                       onFieldFocus={handleFieldFocus}
                       legacyFieldCount={legacyFields.length}
                       validationError={fieldErrors?.[field.name]}
+                      arrayExpanded={isEditingThisArray}
+                      objectExpanded={isEditingThisObject}
                     />
                     {/* Inline array editor - appears below the field row */}
                     {isEditingThisArray && isArrayType(field.type) && (
@@ -906,11 +918,11 @@ export function SimpleInputMappingEditor({
                       </TableRow>
                     )}
                     {/* Inline object editor - appears below the field row (also for untyped fields or composite mode) */}
-                    {((isEditingThisObject &&
+                    {isEditingThisObject &&
+                      !isArrayType(field.type) &&
                       (isObjectType(field.type) ||
-                        isUntypedField(field.type))) ||
-                      (fieldEntry?.valueType === 'composite' &&
-                        !isArrayType(field.type))) &&
+                        isUntypedField(field.type) ||
+                        fieldEntry?.valueType === 'composite') &&
                       (() => {
                         // Determine the value and valueType for the editor
                         // If the value is already an object/array, treat it as composite even if valueType says otherwise
@@ -953,8 +965,12 @@ export function SimpleInputMappingEditor({
                                     )
                                   }
                                   schema={field.items as any}
-                                  untyped={isUntypedField(field.type)}
-                                  onClose={handleObjectClose}
+                                  // A non-object field holding a built value
+                                  // (http `body` is declared string) needs the
+                                  // Value option too, to get back to a plain
+                                  // value.
+                                  untyped={!isObjectType(field.type)}
+                                  onClose={() => handleObjectClose(field.name)}
                                 />
                               </div>
                             </TableCell>

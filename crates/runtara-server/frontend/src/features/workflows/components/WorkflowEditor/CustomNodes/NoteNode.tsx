@@ -2,7 +2,7 @@ import { memo, useCallback, useState, useRef, useEffect } from 'react';
 import { NodeProps, NodeResizer } from '@xyflow/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { X } from 'lucide-react';
+import { GripHorizontal, Link2, X } from 'lucide-react';
 import { cn } from '@/lib/utils.ts';
 import {
   snapToGrid,
@@ -21,12 +21,16 @@ const handleStyle = {
 };
 
 const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
-  const [isEditing, setIsEditing] = useState(false);
+  // A note just added from the toolbar opens straight into its editor.
+  const [isEditing, setIsEditing] = useState(data.autoEdit === true);
+  const anchorStepName =
+    typeof data.anchorStepName === 'string' ? data.anchorStepName : null;
   const [content, setContent] = useState<string>(
     typeof data.content === 'string' ? data.content : ''
   );
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const removeNode = useWorkflowStore((state) => state.removeNode);
+  const updateNote = useWorkflowStore((state) => state.updateNote);
 
   // Check if workflow is executing (read-only mode)
   const isExecuting = useExecutionStore((state) => !!state.executingInstanceId);
@@ -54,32 +58,24 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
   }, [dragging, isEditing]);
 
   const handleResize = useCallback(
-    (_event: any, params: { width: number; height: number }) => {
+    (_event: unknown, params: { width: number; height: number }) => {
       // Always snap to grid when resizing for consistency
-      const snappedWidth = snapToGrid(params.width);
-      const snappedHeight = snapToGrid(params.height);
-
-      // Update node dimensions directly in the store
-      const state = useWorkflowStore.getState();
-      const updatedNodes = state.nodes.map((n) =>
-        n.id === id
-          ? {
-              ...n,
-              width: snappedWidth,
-              height: snappedHeight,
-              style: {
-                ...n.style,
-                width: snappedWidth,
-                height: snappedHeight,
-              },
-            }
-          : n
-      );
-      state.syncFromReactFlow(updatedNodes, state.edges);
-
-      return { width: snappedWidth, height: snappedHeight };
+      const width = snapToGrid(params.width);
+      const height = snapToGrid(params.height);
+      updateNote(id, { width, height }, false);
+      return { width, height };
     },
-    [id]
+    [id, updateNote]
+  );
+
+  const handleResizeEnd = useCallback(
+    (_event: unknown, params: { width: number; height: number }) => {
+      updateNote(id, {
+        width: snapToGrid(params.width),
+        height: snapToGrid(params.height),
+      });
+    },
+    [id, updateNote]
   );
 
   const handleDelete = useCallback(
@@ -99,16 +95,13 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
 
   const handleBlur = useCallback(() => {
     setIsEditing(false);
-    // Save content to store by updating the nodes array
+    // Save the text, and drop the one-shot autoEdit flag so the note does
+    // not reopen on the next render.
     const currentContent = typeof data.content === 'string' ? data.content : '';
-    if (content !== currentContent) {
-      const state = useWorkflowStore.getState();
-      const updatedNodes = state.nodes.map((n) =>
-        n.id === id ? { ...n, data: { ...n.data, content } } : n
-      );
-      state.syncFromReactFlow(updatedNodes, state.edges);
+    if (content !== currentContent || data.autoEdit) {
+      updateNote(id, { content });
     }
-  }, [content, data.content, id]);
+  }, [content, data.autoEdit, data.content, id, updateNote]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -142,33 +135,55 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
       <NodeResizer
         handleStyle={handleStyle}
         onResize={handleResize}
+        onResizeEnd={handleResizeEnd}
         minWidth={SNAP_GRID_SIZE * 16} // 192px minimum
         minHeight={SNAP_GRID_SIZE * 8} // 96px minimum
         isVisible={selected && !isExecuting}
       />
 
-      {/* Delete button - hidden during execution */}
+      {/* Header: the drag handle (React Flow `dragHandle`), what the note is
+          attached to, and delete. Shown on hover and while selected so a
+          resting note reads as just its text. */}
       {!isExecuting && (
-        <button
-          onClick={handleDelete}
+        <div
           className={cn(
-            'absolute right-2 top-2 z-10',
-            'rounded-sm p-1',
-            'bg-yellow-100 dark:bg-yellow-900/40',
-            'hover:bg-yellow-200 dark:hover:bg-yellow-800/60',
-            'text-yellow-700 dark:text-yellow-300',
-            'transition-colors duration-200',
-            'opacity-0 group-hover:opacity-100',
-            selected && 'opacity-100'
+            'note-drag-handle absolute inset-x-0 top-0 z-10 flex h-6 items-center gap-1.5 rounded-t-[4px] px-1.5',
+            'cursor-grab active:cursor-grabbing',
+            'bg-yellow-100/90 text-yellow-700 dark:bg-yellow-900/60 dark:text-yellow-300',
+            'opacity-0 transition-opacity duration-150 group-hover:opacity-100',
+            (selected || dragging) && 'opacity-100'
           )}
-          title="Delete note"
+          title="Drag to move. Drop next to a step to attach the note to it."
         >
-          <X className="size-4" />
-        </button>
+          <GripHorizontal className="size-3.5 shrink-0" aria-hidden="true" />
+          <span className="flex min-w-0 flex-1 items-center gap-1 truncate text-2xs">
+            {anchorStepName ? (
+              <>
+                <Link2 className="size-3 shrink-0" aria-hidden="true" />
+                <span className="truncate">{anchorStepName}</span>
+              </>
+            ) : (
+              'Note'
+            )}
+          </span>
+          <button
+            type="button"
+            onClick={handleDelete}
+            className={cn(
+              'nodrag shrink-0 rounded-sm p-0.5',
+              'hover:bg-yellow-200 dark:hover:bg-yellow-800/60',
+              'transition-colors duration-150'
+            )}
+            aria-label="Delete note"
+            title="Delete note"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
       )}
 
       {/* Content area */}
-      <div className="h-full w-full overflow-hidden rounded-md p-3 text-3xs leading-snug">
+      <div className="h-full w-full overflow-hidden rounded-md px-3 pb-3 pt-7 text-xs leading-snug">
         {isEditing ? (
           <Textarea
             ref={textareaRef}
@@ -182,7 +197,7 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
               'text-yellow-900 dark:text-yellow-100',
               'placeholder:text-yellow-500 dark:placeholder:text-yellow-600',
               'focus:outline-none focus-visible:ring-0',
-              'text-3xs leading-snug',
+              'text-xs leading-snug',
               'select-text'
             )}
             placeholder="Type your note... (Markdown supported)"
@@ -193,9 +208,9 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
               'text-yellow-900 dark:text-yellow-100',
               'cursor-text select-text',
               // Custom markdown styling
-              '[&>h1]:mb-1 [&>h1]:text-[12px] [&>h1]:font-bold',
-              '[&>h2]:mb-1 [&>h2]:text-2xs [&>h2]:font-bold',
-              '[&>h3]:mb-1 [&>h3]:text-3xs [&>h3]:font-semibold',
+              '[&>h1]:mb-1 [&>h1]:text-sm [&>h1]:font-bold',
+              '[&>h2]:mb-1 [&>h2]:text-[13px] [&>h2]:font-bold',
+              '[&>h3]:mb-1 [&>h3]:text-xs [&>h3]:font-semibold',
               '[&>p:last-child]:mb-0 [&>p]:mb-1',
               '[&>ul]:mb-1 [&>ul]:ml-3 [&>ul]:list-disc',
               '[&>ol]:mb-1 [&>ol]:ml-3 [&>ol]:list-decimal',
@@ -217,8 +232,8 @@ const NoteNodeComponent = ({ id, data, selected, dragging }: NodeProps) => {
                 {content}
               </ReactMarkdown>
             ) : (
-              <p className="text-3xs italic text-yellow-500 dark:text-yellow-600">
-                Click to add note...
+              <p className="text-xs italic text-yellow-600 dark:text-yellow-500">
+                Double-click to write a note
               </p>
             )}
           </div>

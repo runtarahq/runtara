@@ -415,9 +415,13 @@ function MappingObjectRow({
       : {};
 
   return (
-    <div className="space-y-1 rounded-md border bg-background p-2">
-      <div className="flex items-start gap-2">
-        <div className="w-36 shrink-0">
+    <div className="space-y-1.5 rounded-md border bg-background p-2">
+      {/* Key, type and remove on one line, the value below at full width:
+          on one line the key input, type select, value, mode toggle and
+          remove button left the value too narrow to read in the 520px panel,
+          and a reference pill spilled out of the row. */}
+      <div className="flex min-w-0 items-center gap-2">
+        <div className="min-w-0 flex-1">
           <Input
             type="text"
             value={keyDraft}
@@ -464,28 +468,6 @@ function MappingObjectRow({
           </Select>
         )}
 
-        <div className="min-w-0 flex-1">
-          <MappingValueInput
-            value={
-              isComposite
-                ? ''
-                : typeof entry.value === 'object' && entry.value !== null
-                  ? JSON.stringify(entry.value, null, 2)
-                  : (entry.value as
-                      string | number | boolean | null | undefined)
-            }
-            onChange={handleValueChange}
-            valueType={entry.valueType}
-            onValueTypeChange={handleValueTypeChange}
-            fieldType={effectiveTypeHint ?? 'string'}
-            allowNull
-            placeholder="Enter value..."
-            defaultValue={entry.defaultValue}
-            onDefaultValueChange={handleDefaultValueChange}
-            disabled={disabled}
-          />
-        </div>
-
         <Button
           type="button"
           variant="secondaryDestructive"
@@ -500,6 +482,27 @@ function MappingObjectRow({
       </div>
 
       {keyError && <FieldError>{keyError}</FieldError>}
+
+      <div className="min-w-0">
+        <MappingValueInput
+          value={
+            isComposite
+              ? ''
+              : typeof entry.value === 'object' && entry.value !== null
+                ? JSON.stringify(entry.value, null, 2)
+                : (entry.value as string | number | boolean | null | undefined)
+          }
+          onChange={handleValueChange}
+          valueType={entry.valueType}
+          onValueTypeChange={handleValueTypeChange}
+          fieldType={effectiveTypeHint ?? 'string'}
+          allowNull
+          placeholder="Enter value..."
+          defaultValue={entry.defaultValue}
+          onDefaultValueChange={handleDefaultValueChange}
+          disabled={disabled}
+        />
+      </div>
 
       {isComposite && (
         <div className="rounded-md border bg-muted/20">

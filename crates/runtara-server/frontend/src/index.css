@@ -331,3 +331,10 @@
     padding-bottom: var(--safe-area-inset-bottom);
   }
 }
+
+/* The step a dragged note will attach to (WorkflowEditor note drag). */
+.react-flow__node.note-attach-target {
+  border-radius: 8px;
+  outline: 2px dashed rgb(234 179 8);
+  outline-offset: 4px;
+}

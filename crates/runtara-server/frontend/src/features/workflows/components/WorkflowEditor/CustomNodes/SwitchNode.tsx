@@ -86,8 +86,14 @@ function formatRangeLabel(match: any): string {
     return parts.join(', ');
   }
 
-  // Fallback: stringify the object
-  return JSON.stringify(match);
+  // Fallback: name what the object holds — the card never shows raw JSON.
+  return Object.entries(match)
+    .map(([key, value]) =>
+      value !== null && typeof value === 'object'
+        ? key
+        : `${key} ${String(value)}`
+    )
+    .join(', ');
 }
 
 // Helper function to get a label for a case

@@ -176,6 +176,34 @@ describe('stepDetailRows', () => {
     ]);
   });
 
+  it('never shows raw JSON for a plain object value', () => {
+    // Object-model query `condition` is an immediate condition object.
+    expect(
+      stepDetailRows({
+        stepType: 'Agent',
+        inputMapping: [
+          {
+            type: 'condition',
+            value: {
+              type: 'operation',
+              op: 'IS_NOT_EMPTY',
+              arguments: [{ valueType: 'reference', value: 'segment' }],
+            },
+            valueType: 'immediate',
+          },
+          {
+            type: 'headers',
+            value: { 'X-Tenant': 'acme', accept_language: 'en' },
+            valueType: 'immediate',
+          },
+        ],
+      }).map((row) => [row.label, row.value])
+    ).toEqual([
+      ['Condition', 'segment is not empty'],
+      ['Headers', 'X tenant, Accept language'],
+    ]);
+  });
+
   it('says what a signal wait asks for', () => {
     const rows = stepDetailRows({
       stepType: 'WaitForSignal',

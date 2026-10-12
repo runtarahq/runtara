@@ -203,7 +203,7 @@ export function CustomFieldRow({
           </div>
         ) : valueType === 'composite' ? (
           // Render the structure editor right here. MappingValueInput's
-          // composite state is only a banner reading 'configure below', and
+          // composite state is only a banner reading 'built below', and
           // unlike a schema field row this row has no expansion sibling — so
           // 'below' was nothing at all and the value was unreachable.
           <ObjectMappingEditor

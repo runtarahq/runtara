@@ -272,6 +272,10 @@ export function composeExecutionGraph(
         width: node.width || NODE_TYPE_SIZES[NODE_TYPES.NoteNode]?.width || 240,
         height:
           node.height || NODE_TYPE_SIZES[NODE_TYPES.NoteNode]?.height || 120,
+        // Anchored notes store `position` as an offset from this step.
+        ...(typeof node.data.anchorStepId === 'string' && node.data.anchorStepId
+          ? { anchorStepId: node.data.anchorStepId }
+          : {}),
       },
     }));
   }
@@ -1745,6 +1749,10 @@ export function executionGraphToReactFlow(
       data: {
         id: note.id,
         content,
+        ...(typeof note.metadata?.anchorStepId === 'string' &&
+        note.metadata.anchorStepId
+          ? { anchorStepId: note.metadata.anchorStepId }
+          : {}),
       },
       width,
       height,

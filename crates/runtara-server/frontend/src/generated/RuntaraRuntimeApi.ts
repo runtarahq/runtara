@@ -3204,8 +3204,14 @@ export interface Note {
   y: number;
 }
 
-/** Sizing metadata for a note, managed by the workflow editor UI */
+/** Sizing and placement metadata for a note, managed by the workflow editor UI */
 export interface NoteMetadata {
+  /**
+   * Step the note is attached to. When set, the note's `position` is an
+   * offset from that step's laid-out position, so the note follows the step
+   * as the editor re-lays out the graph. Unset means `position` is absolute.
+   */
+  anchorStepId?: string | null;
   /**
    * Note height in pixels
    * @format double

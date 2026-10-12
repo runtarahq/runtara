@@ -140,7 +140,7 @@ export function CompositeObjectEditor({
       </div>
 
       {/* Fields */}
-      <div className="flex-1 space-y-3 overflow-y-auto p-4">
+      <div className="flex-1 space-y-2 overflow-y-auto p-3">
         {fieldNames.length === 0 && !isAddingField && (
           // One line, not a 156px illustrated panel: the Add Field button is
           // directly below it and says the same thing.
@@ -155,7 +155,7 @@ export function CompositeObjectEditor({
             <div
               key={fieldName}
               className={cn(
-                'rounded-md border bg-background p-3',
+                'rounded-md border bg-background px-3 py-2',
                 getFieldErrors(fieldName).length > 0 && 'border-destructive/50'
               )}
             >

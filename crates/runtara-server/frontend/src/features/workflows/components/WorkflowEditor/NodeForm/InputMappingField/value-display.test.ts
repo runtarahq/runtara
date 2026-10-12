@@ -27,12 +27,8 @@ describe('describeArrayValue', () => {
   });
 
   it('describes composites', () => {
-    expect(describeArrayValue([{}, {}], 'composite')).toBe(
-      'Composite: 2 items'
-    );
-    expect(describeArrayValue('not-an-array', 'composite')).toBe(
-      'Composite Array'
-    );
+    expect(describeArrayValue([{}, {}], 'composite')).toBe('List · 2 items');
+    expect(describeArrayValue('not-an-array', 'composite')).toBe('List');
   });
 
   it('falls back for empty and unparseable values', () => {
@@ -71,10 +67,8 @@ describe('describeObjectValue', () => {
     expect(describeObjectValue('data.payload', 'reference')).toBe(
       'Reference: data.payload'
     );
-    expect(describeObjectValue({ a: 1 }, 'composite')).toBe(
-      'Composite: 1 field'
-    );
-    expect(describeObjectValue([1, 2], 'composite')).toBe('Composite Object');
+    expect(describeObjectValue({ a: 1 }, 'composite')).toBe('Object · 1 field');
+    expect(describeObjectValue([1, 2], 'composite')).toBe('Object');
   });
 
   it('does not mistake an array for an object', () => {

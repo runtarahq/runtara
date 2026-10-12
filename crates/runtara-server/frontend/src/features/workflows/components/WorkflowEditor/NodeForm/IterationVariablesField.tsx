@@ -1,6 +1,6 @@
 import { Fragment, useMemo, useState } from 'react';
 import { useFieldArray, useFormContext, useWatch } from 'react-hook-form';
-import { ChevronRight, Plus, Trash2 } from 'lucide-react';
+import { Plus, Trash2 } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
@@ -18,6 +18,7 @@ import {
 } from './InputMappingField/MappingValueInput';
 import { CompositeValueEditor } from './InputMappingField/CompositeValueEditor';
 import { ModeToggleButton } from './InputMappingField/ModeToggleButton';
+import { StructuredValueSummary } from './InputMappingField/StructuredValueSummary';
 import { VariablePickerModal } from './InputMappingField/VariablePickerModal';
 import type { VariableSuggestion } from './InputMappingValueField/VariableSuggestions';
 import { EditorTh } from '@/features/workflows/components/WorkflowEditor/EditorTable';
@@ -199,9 +200,15 @@ export function IterationVariablesField({
                               hideReferenceToggle
                             />
                           ) : (
-                            <button
-                              type="button"
-                              onClick={() => {
+                            <StructuredValueSummary
+                              kind={isArray ? 'array' : 'object'}
+                              summary={`${isArray ? 'List' : 'Object'} · ${itemCount} ${
+                                isArray
+                                  ? `item${itemCount === 1 ? '' : 's'}`
+                                  : `field${itemCount === 1 ? '' : 's'}`
+                              }`}
+                              expanded={editingIndex === index}
+                              onToggle={() => {
                                 form.setValue(
                                   `${path}.valueType`,
                                   'composite',
@@ -220,16 +227,7 @@ export function IterationVariablesField({
                                   current === index ? null : index
                                 );
                               }}
-                              className="flex w-full items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/50"
-                            >
-                              <span className="truncate text-muted-foreground">
-                                Composite: {itemCount}{' '}
-                                {isArray
-                                  ? `item${itemCount === 1 ? '' : 's'}`
-                                  : `field${itemCount === 1 ? '' : 's'}`}
-                              </span>
-                              <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
-                            </button>
+                            />
                           )}
                           <ModeToggleButton
                             mode={isReference ? 'reference' : 'immediate'}

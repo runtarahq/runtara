@@ -7,6 +7,7 @@ import { SheetBase } from '@/shared/components/next-dialog/sheet-base.tsx';
 import { FormContent } from '@/shared/components/NextForm/form-content.tsx';
 import { Button } from '@/shared/components/ui/button';
 import { NodeFormContext } from './NodeFormContext.tsx';
+import { hasDirtyFields } from './dirty-state';
 import * as form from './NodeFormItem.tsx';
 import { TabProvider, useTabContext } from './NodeFormItem.tsx';
 import { getTestHandler } from './TestAgentButton/TestAgentInline';
@@ -96,9 +97,10 @@ export function NodeForm({
     };
   }, [entireForm, onChange]);
 
-  // Report dirty state upward. `formState.isDirty` is a getter on a Proxy, so
-  // it must be read during render for RHF to subscribe this component to it.
-  const isDirty = entireForm.formState.isDirty;
+  // Report dirty state upward. `formState.dirtyFields` is a getter on a Proxy,
+  // so it must be read during render for RHF to subscribe this component to
+  // it. Not `isDirty`: see hasDirtyFields.
+  const isDirty = hasDirtyFields(entireForm.formState.dirtyFields);
   useEffect(() => {
     onDirtyChange?.(isDirty);
   }, [isDirty, onDirtyChange]);

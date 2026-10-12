@@ -1,5 +1,4 @@
 import { useParams, useSearchParams } from 'react-router';
-import { useReactFlow } from '@xyflow/react';
 import { toast } from 'sonner';
 import {
   useCustomMutation,
@@ -72,7 +71,17 @@ import {
   buildStateSchemaFromFields,
   type SchemaField,
 } from '@/features/workflows/utils/schema';
-import { NODE_TYPES } from '@/features/workflows/config/workflow';
+import {
+  NODE_TYPES,
+  NODE_TYPE_SIZES,
+} from '@/features/workflows/config/workflow';
+import { offsetNextToStep } from '@/features/workflows/components/WorkflowEditor/CustomNodes/note-placement';
+import { screenToCanvas } from '@/features/workflows/components/WorkflowEditor/canvas-bridge';
+import {
+  readCanvasDetail,
+  writeCanvasDetail,
+} from '@/features/workflows/components/WorkflowEditor/editor-preferences';
+import type { CanvasDetailLevel } from '@/features/workflows/components/WorkflowEditor/CustomNodes/node-size';
 
 type WorkflowVariable = {
   name: string;
@@ -289,8 +298,6 @@ export function Workflow() {
       setBlocker(false);
     };
   }, [hasUnsavedChanges, setBlocker]);
-
-  const { getViewport } = useReactFlow();
 
   // Fetch available versions
   const { data: versionsResponse } = useCustomQuery({
@@ -1260,6 +1267,18 @@ export function Workflow() {
     },
   });
 
+  // Workflow-level changes from the settings panel and the canvas (e.g. a new
+  // entry point), kept until the global save like node changes.
+  const handleWorkflowChange = useCallback(
+    (changes: Partial<typeof stagedWorkflowChanges>) => {
+      setStagedWorkflowChanges((prev) => ({
+        ...prev,
+        ...changes,
+      }));
+    },
+    []
+  );
+
   // Handlers for staged node changes
   const handleStagedNodeChange = useCallback(
     (nodeId: string, nodeData: form.SchemaType) => {
@@ -2105,20 +2124,65 @@ export function Workflow() {
     [confirmIfUnsavedChanges, performImportJSON]
   );
 
-  const handleAutoLayout = () => {
-    useWorkflowStore.getState().applyAutoLayout();
-  };
+  // Step card detail level. Lives here, not in the editor, so the header can
+  // switch it; remembered per browser.
+  const [canvasDetail, setCanvasDetailState] =
+    useState<CanvasDetailLevel>(readCanvasDetail);
+  const setCanvasDetail = useCallback((detail: CanvasDetailLevel) => {
+    setCanvasDetailState(detail);
+    writeCanvasDetail(detail);
+  }, []);
 
   const handleAddNote = () => {
-    // Get the viewport center position in flow coordinates
-    const viewport = getViewport();
-    const centerX = (-viewport.x + window.innerWidth / 2) / viewport.zoom;
-    const centerY = (-viewport.y + window.innerHeight / 2) / viewport.zoom;
+    const store = useWorkflowStore.getState();
+    const noteSize = NODE_TYPE_SIZES[NODE_TYPES.NoteNode] ?? {
+      width: 240,
+      height: 120,
+    };
 
-    // Add note at the center of the visible viewport
-    useWorkflowStore.getState().addNote({ x: centerX, y: centerY });
+    // With a step selected, the note is about that step: attach it just
+    // above it, so it follows the step through every re-layout.
+    const selectedStep = store.selectedNodeId
+      ? store.nodes.find(
+          (n) => n.id === store.selectedNodeId && n.type !== NODE_TYPES.NoteNode
+        )
+      : undefined;
+    if (selectedStep) {
+      store.addNote(offsetNextToStep(noteSize.height), '', {
+        anchorStepId: selectedStep.id,
+        autoEdit: true,
+      });
+      return;
+    }
 
-    toast.info('Note added to canvas');
+    // Otherwise drop it in the middle of the canvas the user can see: the
+    // editor's own box, minus the docked step panel when it covers the right
+    // side. The window centre ignored the sidebar and the panel.
+    const root = document.querySelector('[data-workflow-editor-root]');
+    const box = root?.getBoundingClientRect();
+    let left = box?.left ?? 0;
+    let right = box?.right ?? window.innerWidth;
+    const top = box?.top ?? 0;
+    const bottom = box?.bottom ?? window.innerHeight;
+    const panel = document
+      .querySelector('[data-testid="node-config-dialog"]')
+      ?.getBoundingClientRect();
+    if (panel && panel.left > left && panel.left < right) {
+      right = panel.left;
+    }
+    if (right - left < noteSize.width) left = right - noteSize.width;
+    const center = screenToCanvas({
+      x: (left + right) / 2,
+      y: (top + bottom) / 2,
+    }) ?? { x: 0, y: 0 };
+    store.addNote(
+      {
+        x: center.x - noteSize.width / 2,
+        y: center.y - noteSize.height / 2,
+      },
+      '',
+      { autoEdit: true }
+    );
   };
 
   const isLoading =
@@ -2229,66 +2293,62 @@ export function Workflow() {
 
   return (
     <div className="flex h-full flex-col bg-background">
+      <WorkflowActionsForm
+        isLoading={isLoading}
+        workflowName={stagedWorkflowChanges.name ?? data.name ?? ''}
+        onSchedule={handleSchedule}
+        onSubmit={handleSubmit}
+        onExportJSON={handleExportJSON}
+        onImportJSON={handleImportJSON}
+        canvasDetail={canvasDetail}
+        onCanvasDetailChange={setCanvasDetail}
+        onAddNote={handleAddNote}
+        isExecuting={!!executingInstanceId}
+        isExecutionActive={
+          executionInstanceData?.status &&
+          ['queued', 'compiling', 'running', 'suspended'].includes(
+            executionInstanceData.status
+          )
+        }
+        isDirty={hasStructuralUnsavedChanges}
+        hasUnsavedChanges={hasUnsavedChanges}
+        onStop={handleStop}
+        onClearExecution={handleResetExecution}
+        onViewExecutionDetails={() => {
+          // Switch to history tab (this also expands the panel)
+          useValidationStore.getState().setActiveTab('history');
+          // Select the running instance in history
+          useExecutionStore
+            .getState()
+            .setSelectedInvocationId(executingInstanceId);
+        }}
+        executionStats={
+          executionInstanceData
+            ? {
+                status: executionInstanceData.status,
+                queueDuration:
+                  executionInstanceData.queueDurationSeconds ?? undefined,
+                executionDuration:
+                  executionInstanceData.executionDurationSeconds ?? undefined,
+                maxMemory: executionInstanceData.maxMemoryMb ?? undefined,
+                terminationType:
+                  executionInstanceData.terminationType ?? undefined,
+              }
+            : undefined
+        }
+        onDebugExecute={handleDebugExecuteServer}
+        isSuspended={isSuspended}
+        waitingReason={
+          isWaitingSuspension(executionInstanceData)
+            ? executionInstanceData?.suspensionReason
+            : null
+        }
+        onResume={handleResume}
+        isResuming={resumeMutation.isPending}
+        hasBreakpoints={hasBreakpoints}
+        compilationStatus={compilationToolbarStatus}
+      />
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        {/* Floating toolbar container */}
-        <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center">
-          <div className="pointer-events-auto">
-            <WorkflowActionsForm
-              isLoading={isLoading}
-              workflowName={stagedWorkflowChanges.name ?? data.name ?? ''}
-              onSchedule={handleSchedule}
-              onSubmit={handleSubmit}
-              onExportJSON={handleExportJSON}
-              onImportJSON={handleImportJSON}
-              onAutoLayout={handleAutoLayout}
-              onAddNote={handleAddNote}
-              isExecuting={!!executingInstanceId}
-              isExecutionActive={
-                executionInstanceData?.status &&
-                ['queued', 'compiling', 'running', 'suspended'].includes(
-                  executionInstanceData.status
-                )
-              }
-              isDirty={hasStructuralUnsavedChanges}
-              onStop={handleStop}
-              onClearExecution={handleResetExecution}
-              onViewExecutionDetails={() => {
-                // Switch to history tab (this also expands the panel)
-                useValidationStore.getState().setActiveTab('history');
-                // Select the running instance in history
-                useExecutionStore
-                  .getState()
-                  .setSelectedInvocationId(executingInstanceId);
-              }}
-              executionStats={
-                executionInstanceData
-                  ? {
-                      status: executionInstanceData.status,
-                      queueDuration:
-                        executionInstanceData.queueDurationSeconds ?? undefined,
-                      executionDuration:
-                        executionInstanceData.executionDurationSeconds ??
-                        undefined,
-                      maxMemory: executionInstanceData.maxMemoryMb ?? undefined,
-                      terminationType:
-                        executionInstanceData.terminationType ?? undefined,
-                    }
-                  : undefined
-              }
-              onDebugExecute={handleDebugExecuteServer}
-              isSuspended={isSuspended}
-              waitingReason={
-                isWaitingSuspension(executionInstanceData)
-                  ? executionInstanceData?.suspensionReason
-                  : null
-              }
-              onResume={handleResume}
-              isResuming={resumeMutation.isPending}
-              hasBreakpoints={hasBreakpoints}
-              compilationStatus={compilationToolbarStatus}
-            />
-          </div>
-        </div>
         <div className="absolute inset-0">
           {isSwitchingVersion && (
             <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/50">
@@ -2304,6 +2364,8 @@ export function Workflow() {
             stagedNodeChanges={stagedNodeChanges}
             onStagedNodeChange={handleStagedNodeChange}
             onResetNodeChanges={handleResetNodeChanges}
+            onWorkflowChange={handleWorkflowChange}
+            canvasDetail={canvasDetail}
           />
           {/* Debug step inspector — floating panel when suspended */}
           {isSuspended && <DebugStepInspector />}
@@ -2314,12 +2376,7 @@ export function Workflow() {
         onNavigateToStep={handleNavigateToStep}
         workflowId={workflowId}
         workflow={workflowForSettings}
-        onWorkflowChange={(changes) => {
-          setStagedWorkflowChanges((prev) => ({
-            ...prev,
-            ...changes,
-          }));
-        }}
+        onWorkflowChange={handleWorkflowChange}
         readOnly={!!executingInstanceId}
         versions={versionsWithDebug}
         selectedVersion={selectedVersion}

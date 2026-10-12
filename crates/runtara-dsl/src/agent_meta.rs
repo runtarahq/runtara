@@ -1039,6 +1039,13 @@ fn rust_to_json_schema_type_with_schema(rust_type: &str) -> TypeConversionResult
             items_json: None,
             schema: None,
         },
+        // A JSON string of one character (csv delimiter / quote / escape).
+        "char" => TypeConversionResult {
+            json_type: "string".to_string(),
+            format: None,
+            items_json: None,
+            schema: None,
+        },
         "bool" => TypeConversionResult {
             json_type: "boolean".to_string(),
             format: None,
@@ -1058,7 +1065,9 @@ fn rust_to_json_schema_type_with_schema(rust_type: &str) -> TypeConversionResult
             items_json: None,
             schema: None,
         },
-        "Value" => TypeConversionResult {
+        // The macro spells a path type in full, so `serde_json::Value` arrives
+        // as written and used to fall through to the "string" catch-all.
+        "Value" | "serde_json::Value" => TypeConversionResult {
             json_type: "any".to_string(),
             format: None,
             items_json: None,
@@ -1186,7 +1195,22 @@ fn condition_expression_fallback_schema() -> serde_json::Value {
 
 /// Convert InputFieldMeta to CapabilityField
 pub fn input_field_to_api(field: &InputFieldMeta) -> CapabilityField {
-    let type_result = rust_to_json_schema_type_with_schema(field.type_name);
+    let mut type_result = rust_to_json_schema_type_with_schema(field.type_name);
+
+    // A custom type the mapper does not know lands on its "string" catch-all.
+    // With enum variants that is right (a unit enum is a string on the wire);
+    // without, it is a struct, a data enum or a newtype whose wire shape is
+    // not declared — http's `HttpBody` is any JSON, csv's `CsvDataInput` is
+    // bytes, a file object or a string, shopify's `CommerceProduct` is an
+    // object. "string" made E023 reject the objects these inputs accept and
+    // the editor open a text box, so declare the type unknown instead — the
+    // same rule `resolve_output_field` applies to unregistered output types.
+    if type_result.json_type == "string"
+        && field.enum_values_fn.is_none()
+        && is_custom_type_name(field.type_name)
+    {
+        type_result.json_type = "any".to_string();
+    }
 
     let items = type_result.items_json.map(|items_str| {
         // Parse items JSON to extract type and format
@@ -3513,5 +3537,61 @@ mod trusted_metadata_tests {
         let trusted: CapabilityInfo = serde_json::from_value(value).unwrap();
         assert!(trusted.trusted);
         assert_eq!(serde_json::to_value(trusted).unwrap()["trusted"], true);
+    }
+}
+
+#[cfg(test)]
+mod input_field_type_tests {
+    use super::*;
+
+    fn input(type_name: &'static str, enum_values_fn: Option<EnumVariantsFn>) -> InputFieldMeta {
+        InputFieldMeta {
+            name: "field",
+            type_name,
+            is_optional: false,
+            display_name: None,
+            description: None,
+            example: None,
+            default_value: None,
+            enum_values_fn,
+        }
+    }
+
+    fn variants() -> &'static [&'static str] {
+        &["zip"]
+    }
+
+    #[test]
+    fn custom_type_without_variants_is_any() {
+        // http `HttpBody` (transparent Value), shopify `CommerceProduct`
+        // (struct), csv `CsvDataInput` (untagged enum): none is a string on
+        // the wire, and "string" made E023 reject the objects they accept.
+        for type_name in ["HttpBody", "CommerceProduct", "CsvDataInput"] {
+            assert_eq!(input_field_to_api(&input(type_name, None)).type_name, "any");
+        }
+    }
+
+    #[test]
+    fn custom_type_with_variants_stays_a_string_enum() {
+        let field = input_field_to_api(&input("ArchiveFormat", Some(variants)));
+        assert_eq!(field.type_name, "string");
+        assert_eq!(field.enum_values, Some(vec!["zip".to_string()]));
+    }
+
+    #[test]
+    fn mapped_types_keep_their_json_type() {
+        assert_eq!(input_field_to_api(&input("char", None)).type_name, "string");
+        assert_eq!(
+            input_field_to_api(&input("serde_json::Value", None)).type_name,
+            "any"
+        );
+        assert_eq!(
+            input_field_to_api(&input("ConditionExpression", None)).type_name,
+            "object"
+        );
+        assert_eq!(
+            input_field_to_api(&input("String", None)).type_name,
+            "string"
+        );
     }
 }

@@ -98,6 +98,12 @@ interface CompositeValueItemProps {
   pathPrefix?: string;
   /** Whether to hide the type selector */
   hideTypeSelector?: boolean;
+  /**
+   * `stacked` (the default for a labelled item) puts the value on its own
+   * full-width line under the label. `inline` keeps one row for short labels
+   * such as array indices.
+   */
+  layout?: 'stacked' | 'inline';
   /** Disable editing */
   disabled?: boolean;
 }
@@ -162,6 +168,7 @@ export function CompositeValueItem({
   validationErrors = [],
   pathPrefix = '',
   hideTypeSelector = false,
+  layout = 'stacked',
   disabled = false,
 }: CompositeValueItemProps) {
   // The prop is typed non-nullable, but a JSON null inside a stored composite
@@ -422,7 +429,10 @@ export function CompositeValueItem({
           }
           step={typeHint === 'integer' ? '1' : 'any'}
           disabled={disabled}
-          className={cn('h-8 flex-1 text-sm', hasError && 'border-destructive')}
+          className={cn(
+            'h-8 min-w-0 flex-1 text-sm',
+            hasError && 'border-destructive'
+          )}
         />
       );
     }
@@ -442,7 +452,7 @@ export function CompositeValueItem({
         }
         disabled={disabled}
         className={cn(
-          'h-8 flex-1 text-sm',
+          'h-8 min-w-0 flex-1 text-sm',
           typeHint === 'json' && 'font-mono',
           hasError && 'border-destructive'
         )}
@@ -463,7 +473,7 @@ export function CompositeValueItem({
           placeholder="e.g., Bearer {{ steps.my_conn.outputs.parameters.api_key }}"
           disabled={disabled}
           className={cn(
-            'h-8 flex-1 font-mono text-sm',
+            'h-8 min-w-0 flex-1 font-mono text-sm',
             hasError && 'border-destructive'
           )}
         />
@@ -473,7 +483,7 @@ export function CompositeValueItem({
     switch (value.valueType) {
       case 'immediate':
         return (
-          <div className="flex flex-1 items-center gap-2">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
             {/* Type hint selector */}
             <Select
               value={currentTypeHint}
@@ -503,7 +513,7 @@ export function CompositeValueItem({
       case 'reference':
         if (value.value) {
           return (
-            <div className="flex-1">
+            <div className="min-w-0 flex-1">
               <ReferencePill
                 path={value.value as string}
                 type={referenceType}
@@ -532,7 +542,7 @@ export function CompositeValueItem({
             onClick={() => setIsPickerOpen(true)}
             disabled={disabled}
             className={cn(
-              'flex h-8 flex-1 items-center justify-center px-3',
+              'flex h-8 min-w-0 flex-1 items-center justify-center px-3',
               'text-sm text-muted-foreground',
               'rounded-md border border-dashed bg-muted/30',
               'transition-colors hover:border-muted-foreground/50 hover:bg-muted/50',
@@ -553,7 +563,7 @@ export function CompositeValueItem({
           : Object.keys(compositeValue).length;
 
         return (
-          <div className="flex-1">
+          <div className="min-w-0 flex-1">
             <button
               type="button"
               onClick={() => setIsExpanded(!isExpanded)}
@@ -638,77 +648,95 @@ export function CompositeValueItem({
     );
   };
 
+  const typeSelector = !hideTypeSelector ? (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild disabled={disabled}>
+        <button type="button" className="shrink-0">
+          {renderTypeBadge()}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start">
+        {VALUE_TYPE_OPTIONS.map((option) => {
+          const IconComponent = VALUE_TYPE_ICONS[option.icon];
+          return (
+            <DropdownMenuItem
+              key={option.value}
+              onClick={() => handleTypeChange(option.value)}
+            >
+              <IconComponent className="mr-2 size-4" />
+              {option.label}
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  ) : (
+    renderTypeBadge()
+  );
+
+  const errorIndicator = directError && (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <AlertTriangle className="size-4 shrink-0 text-destructive" />
+      </TooltipTrigger>
+      <TooltipContent>
+        <p>{directError.message}</p>
+      </TooltipContent>
+    </Tooltip>
+  );
+
+  const removeButton = removable && onRemove && !disabled && (
+    <Button
+      type="button"
+      variant="secondaryDestructive"
+      size="icon-sm"
+      className="shrink-0"
+      aria-label={label ? `Remove ${label}` : 'Remove item'}
+      onClick={onRemove}
+    >
+      <X className="size-3.5" />
+    </Button>
+  );
+
   return (
-    <div className="space-y-0">
-      <div className="flex items-center gap-2">
-        {/* Label */}
-        {label && (
-          // Fixed width, not min-width: these rows are siblings, so a label
-          // sized to its own text starts every following control at a
-          // different x and the column staircases.
-          <span
-            className="w-32 shrink-0 truncate font-mono text-sm text-muted-foreground"
-            title={label}
-          >
-            {label}
-          </span>
-        )}
-
-        {/* Type badge with dropdown */}
-        {!hideTypeSelector ? (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild disabled={disabled}>
-              <button type="button" className="shrink-0">
-                {renderTypeBadge()}
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start">
-              {VALUE_TYPE_OPTIONS.map((option) => {
-                const IconComponent = VALUE_TYPE_ICONS[option.icon];
-                return (
-                  <DropdownMenuItem
-                    key={option.value}
-                    onClick={() => handleTypeChange(option.value)}
-                  >
-                    <IconComponent className="mr-2 size-4" />
-                    {option.label}
-                  </DropdownMenuItem>
-                );
-              })}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        ) : (
-          renderTypeBadge()
-        )}
-
-        {/* Value editor */}
-        {renderValueEditor()}
-
-        {/* Error indicator */}
-        {directError && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <AlertTriangle className="size-4 shrink-0 text-destructive" />
-            </TooltipTrigger>
-            <TooltipContent>
-              <p>{directError.message}</p>
-            </TooltipContent>
-          </Tooltip>
-        )}
-
-        {/* Remove button */}
-        {removable && onRemove && !disabled && (
-          <Button
-            type="button"
-            variant="secondaryDestructive"
-            size="icon-sm"
-            className="shrink-0"
-            onClick={onRemove}
-          >
-            <X className="size-3.5" />
-          </Button>
-        )}
-      </div>
+    <div className="min-w-0 space-y-0">
+      {label && layout === 'stacked' ? (
+        // A labelled field stacks: its key, mode and remove button on one
+        // line and the value below at full width. On one line the fixed key
+        // column, mode badge, type select and remove button left the value
+        // ~40px in the 520px panel, and a reference pill overflowed the row.
+        <div className="min-w-0 space-y-1.5">
+          <div className="flex min-w-0 items-center gap-2">
+            <span
+              className="min-w-0 flex-1 truncate font-mono text-sm text-muted-foreground"
+              title={label}
+            >
+              {label}
+            </span>
+            {errorIndicator}
+            {typeSelector}
+            {removeButton}
+          </div>
+          <div className="flex min-w-0 items-center gap-2">
+            {renderValueEditor()}
+          </div>
+        </div>
+      ) : (
+        <div className="flex min-w-0 items-center gap-2">
+          {label && (
+            <span
+              className="shrink-0 font-mono text-sm text-muted-foreground"
+              title={label}
+            >
+              {label}
+            </span>
+          )}
+          {typeSelector}
+          {renderValueEditor()}
+          {errorIndicator}
+          {removeButton}
+        </div>
+      )}
 
       {/* Nested composite editor */}
       {renderNestedEditor()}
@@ -849,6 +877,7 @@ function CompositeArrayEditorInline({
         <CompositeValueItem
           key={index}
           label={`[${index}]`}
+          layout="inline"
           value={item}
           onChange={(newValue) => handleItemChange(index, newValue)}
           onRemove={() => handleRemoveItem(index)}
