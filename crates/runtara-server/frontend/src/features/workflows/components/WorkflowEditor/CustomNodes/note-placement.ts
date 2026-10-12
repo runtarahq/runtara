@@ -119,12 +119,21 @@ function rectGap(a: Rect, b: Rect): number {
   return Math.hypot(dx, dy);
 }
 
-/** The step a note dropped at `note` attaches to, or null for a free note. */
+/**
+ * The step a note dropped at `note` attaches to, or null for a free note.
+ * A note keeps its current step while that step is still in range, so a
+ * small nudge does not hop it onto a neighbour that happens to be closer.
+ */
 export function findAttachTarget(
   note: Rect,
   steps: Map<string, Rect>,
-  maxDistance = NOTE_ATTACH_DISTANCE
+  maxDistance = NOTE_ATTACH_DISTANCE,
+  currentAnchorId: string | null = null
 ): string | null {
+  const current = currentAnchorId ? steps.get(currentAnchorId) : undefined;
+  if (current && rectGap(note, current) <= maxDistance) {
+    return currentAnchorId;
+  }
   let best: { id: string; gap: number } | null = null;
   for (const [id, rect] of steps) {
     const gap = rectGap(note, rect);

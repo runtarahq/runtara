@@ -65,7 +65,14 @@ type Props = {
   onAddNote: () => void;
   isExecuting?: boolean;
   isExecutionActive?: boolean;
+  /** Unsaved changes that affect execution: Run and Debug wait for a save. */
   isDirty?: boolean;
+  /**
+   * Anything to save, including changes that do not affect execution (notes,
+   * positions). Defaults to `isDirty`. A note edit alone used to leave Save
+   * disabled because only `isDirty` was consulted.
+   */
+  hasUnsavedChanges?: boolean;
   onStop?: () => void;
   onClearExecution?: () => void;
   onViewExecutionDetails?: () => void;
@@ -97,6 +104,7 @@ export function WorkflowActionsForm(props: Props) {
     isExecuting,
     isExecutionActive,
     isDirty,
+    hasUnsavedChanges = isDirty,
     onStop,
     onClearExecution,
     onViewExecutionDetails,
@@ -365,8 +373,10 @@ export function WorkflowActionsForm(props: Props) {
                 variant="secondary"
                 size="icon-sm"
                 className="rounded text-foreground/70 hover:bg-muted"
-                disabled={isLoading || isExecuting || !isDirty}
-                title={isDirty ? 'Save changes' : 'No changes to save'}
+                disabled={isLoading || isExecuting || !hasUnsavedChanges}
+                title={
+                  hasUnsavedChanges ? 'Save changes' : 'No changes to save'
+                }
                 onClick={form.handleSubmit(onSubmit)}
               >
                 <Save className="size-4" />

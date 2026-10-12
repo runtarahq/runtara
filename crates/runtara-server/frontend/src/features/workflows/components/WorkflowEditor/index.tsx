@@ -1675,7 +1675,9 @@ function WorkflowEditorContent({
             position,
             attachTo: findAttachTarget(
               { ...position, width, height },
-              stepRects(layoutedCanvasNodes)
+              stepRects(layoutedCanvasNodes),
+              undefined,
+              dragged ? noteAnchorStepId(dragged) : null
             ),
           });
         }
@@ -1703,7 +1705,9 @@ function WorkflowEditorContent({
           width: node.width ?? node.measured?.width ?? 240,
           height: node.height ?? node.measured?.height ?? 120,
         },
-        steps
+        steps,
+        undefined,
+        noteAnchorStepId(node)
       );
       const placement = placementForDrop(node.position, attachTo, steps);
       placeNote(node.id, placement.position, placement.anchorStepId);

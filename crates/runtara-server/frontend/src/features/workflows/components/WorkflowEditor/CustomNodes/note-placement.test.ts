@@ -85,6 +85,13 @@ describe('findAttachTarget', () => {
     ).toBe('b');
   });
 
+  it('keeps the current step while it is still in range', () => {
+    // 80px from a and 64px from b: both in range, b closer.
+    const nudged = { x: 296, y: 0, width: 240, height: 120 };
+    expect(findAttachTarget(nudged, steps)).toBe('b');
+    expect(findAttachTarget(nudged, steps, undefined, 'a')).toBe('a');
+  });
+
   it('leaves a note dropped in open space free', () => {
     expect(
       findAttachTarget({ x: 0, y: -600, width: 240, height: 120 }, steps)

@@ -2304,6 +2304,7 @@ export function Workflow() {
                 )
               }
               isDirty={hasStructuralUnsavedChanges}
+              hasUnsavedChanges={hasUnsavedChanges}
               onStop={handleStop}
               onClearExecution={handleResetExecution}
               onViewExecutionDetails={() => {

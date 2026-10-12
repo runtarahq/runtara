@@ -143,4 +143,34 @@ describe('WorkflowActionsForm', () => {
       ).not.toBeInTheDocument();
     });
   });
+
+  describe('save vs run', () => {
+    it('enables Save for changes that do not block running (note edits)', () => {
+      render(
+        <WorkflowActionsForm
+          {...defaultProps}
+          isDirty={false}
+          hasUnsavedChanges={true}
+        />
+      );
+
+      expect(screen.getByTitle('Save changes')).toBeEnabled();
+      expect(screen.getByTitle('Start workflow')).toBeEnabled();
+    });
+
+    it('blocks running until structural changes are saved', () => {
+      render(<WorkflowActionsForm {...defaultProps} isDirty={true} />);
+
+      expect(screen.getByTitle('Save changes')).toBeEnabled();
+      expect(
+        screen.getByTitle('Please save your changes before starting execution')
+      ).toBeDisabled();
+    });
+
+    it('has nothing to save when nothing changed', () => {
+      render(<WorkflowActionsForm {...defaultProps} />);
+
+      expect(screen.getByTitle('No changes to save')).toBeDisabled();
+    });
+  });
 });
