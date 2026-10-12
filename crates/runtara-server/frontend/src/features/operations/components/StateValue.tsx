@@ -17,6 +17,43 @@ export interface DisplayFormat {
   suffix?: string | null;
 }
 
+/** Date and minute, with the year only when it is not the current one. */
+function shortDateTime(date: Date) {
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year:
+      date.getFullYear() === new Date().getFullYear() ? undefined : 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+/** A due date and how far off it is; a past one reads as overdue. */
+export function DueValue({ value }: { value: unknown }) {
+  const date = typeof value === 'string' ? new Date(value) : undefined;
+  if (!date || Number.isNaN(date.getTime()))
+    return <StateValue value={value} />;
+  const distance = formatDistanceToNowStrict(date);
+  const overdue = date.getTime() < Date.now();
+  return (
+    <span className="block">
+      <time
+        dateTime={value as string}
+        title={value as string}
+        className="whitespace-nowrap"
+      >
+        {shortDateTime(date)}
+      </time>
+      <span
+        className={`mt-0.5 block text-xs ${overdue ? 'font-medium text-warning' : 'text-muted-foreground'}`}
+      >
+        {overdue ? `${distance} overdue` : `in ${distance}`}
+      </span>
+    </span>
+  );
+}
+
 export function StateValue({
   value,
   field,
@@ -45,7 +82,7 @@ export function StateValue({
           ? formatDistanceToNowStrict(date, { addSuffix: true })
           : kind === 'date'
             ? date.toLocaleDateString()
-            : date.toLocaleString();
+            : shortDateTime(date);
       return (
         <time dateTime={value} title={value}>
           {label}

@@ -29,9 +29,7 @@ export function OverviewPage() {
       queryRuns(token, {
         status: 'failed,timeout',
         completedFrom: new Date(Date.now() - 86_400_000).toISOString(),
-        size: 3,
-        sortBy: 'completedAt',
-        sortOrder: 'desc',
+        size: 1,
       }),
     refetchInterval: 30_000,
     placeholderData: undefined,
@@ -39,6 +37,15 @@ export function OverviewPage() {
   const running = useCustomQuery({
     queryKey: ['operations', tenant, 'running-count'],
     queryFn: (token: string) => queryRunSummary(token, {}),
+    refetchInterval: 30_000,
+    placeholderData: undefined,
+  });
+  const recent = useCustomQuery({
+    queryKey: ['operations', tenant, 'invocations-24h'],
+    queryFn: (token: string) =>
+      queryRunSummary(token, {
+        createdFrom: new Date(Date.now() - 86_400_000).toISOString(),
+      }),
     refetchInterval: 30_000,
     placeholderData: undefined,
   });
@@ -109,7 +116,7 @@ export function OverviewPage() {
     <div className="mx-auto min-h-full w-full max-w-[1600px] bg-background p-5 lg:px-10 lg:py-7">
       <OperationHeader
         title="Overview"
-        description="Requests to answer and recent failures to review."
+        description="Requests to answer and how runs are going."
         actions={
           <RefreshControls
             updatedAt={queues.dataUpdatedAt}
@@ -127,7 +134,8 @@ export function OverviewPage() {
         views.error ||
         failures.error ||
         attention.error ||
-        running.error ? (
+        running.error ||
+        recent.error ? (
           <p
             role="alert"
             className="rounded-md border p-3 text-sm text-destructive"
@@ -135,7 +143,7 @@ export function OverviewPage() {
             Some Operations data could not be refreshed. Try Refresh.
           </p>
         ) : null}
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
           <Metric
             title="Waiting for a decision"
             value={waiting}
@@ -154,6 +162,13 @@ export function OverviewPage() {
             to="/operations/requests?filter=overdue"
             action="Review"
             warning
+          />
+          <Metric
+            title="Invocations in the last 24 h"
+            value={recent.error ? undefined : recent.data?.total}
+            note="Runs started across all workflows"
+            to="/operations/runs?range=24h"
+            action="View runs"
           />
           <Metric
             title="Failed in the last 24 h"
@@ -182,12 +197,6 @@ export function OverviewPage() {
             requestCount={queues.error ? undefined : waiting}
             requestsPending={attention.isPending}
             requestsError={!!attention.error || !!queues.error || !!views.error}
-            failures={failures.data?.content ?? []}
-            failureCount={
-              failures.error ? undefined : failures.data?.totalElements
-            }
-            failuresPending={failures.isPending}
-            failuresError={!!failures.error}
           />
         </OperationSection>
       </main>
@@ -212,25 +221,23 @@ function Metric({
   danger?: boolean;
 }) {
   return (
-    <div className="min-w-0 rounded-lg border p-4">
+    <div className="flex min-w-0 flex-col rounded-lg border p-4">
       <p className="text-xs font-medium text-muted-foreground">{title}</p>
       <p
         className={`my-2 text-3xl font-semibold tabular-nums ${value && danger ? 'text-destructive' : value && warning ? 'text-warning' : ''}`}
       >
         {value?.toLocaleString() ?? '—'}
       </p>
-      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-        <span className="text-muted-foreground">{note}</span>
-        {to ? (
-          <Link
-            className="flex items-center gap-1 whitespace-nowrap font-medium text-primary-text"
-            to={to}
-          >
-            {action}
-            <ArrowRight className="size-3" />
-          </Link>
-        ) : null}
-      </div>
+      <p className="text-xs text-muted-foreground">{note}</p>
+      {to ? (
+        <Link
+          className="mt-auto flex items-center gap-1 self-start whitespace-nowrap pt-3 text-xs font-medium text-primary-text"
+          to={to}
+        >
+          {action}
+          <ArrowRight className="size-3" />
+        </Link>
+      ) : null}
     </div>
   );
 }

@@ -1,3 +1,5 @@
+import { useState } from 'react';
+import { RefreshCw } from 'lucide-react';
 import { stateLabel } from '../state-label';
 import { Link, useParams } from 'react-router';
 import { useCustomQuery } from '@/shared/hooks/api';
@@ -5,6 +7,13 @@ import { useAuthStore } from '@/shared/stores/authStore';
 import { RuntimeREST } from '@/shared/queries';
 import { createAuthHeaders } from '@/shared/queries/utils';
 import { Can } from '@/shared/components/Can';
+import { Button } from '@/shared/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from '@/shared/components/ui/dialog';
 import { StructuredErrorDisplay } from '@/shared/components/StructuredErrorDisplay';
 import {
   getWorkflowInstance,
@@ -24,11 +33,13 @@ import {
   ReplayButton,
 } from './shared';
 import { useOperations } from '../queries';
+import { isActiveStatus } from '@/shared/utils/status-display';
 
 export function RunPage() {
   const { workflowId = '', instanceId = '' } = useParams();
   const tenant = useAuthStore((s) => s.orgId);
   const submissions = useManagedInputSubmissions();
+  const [replaying, setReplaying] = useState(false);
   const { views, processes } = useOperations();
   const run = useCustomQuery({
     queryKey: ['operations', tenant, 'run', workflowId, instanceId],
@@ -93,7 +104,7 @@ export function RunPage() {
     <div className="mx-auto min-h-full w-full max-w-[1600px] bg-background p-5 lg:px-10 lg:py-7">
       <OperationHeader
         title={data.runLabel ?? data.id.slice(0, 8)}
-        section="Queues"
+        section="Runs"
         description={
           <span className="inline-flex flex-wrap items-center gap-2">
             {processes.data?.find((p) => p.workflowId === workflowId)?.name ??
@@ -126,9 +137,35 @@ export function RunPage() {
             >
               Open execution
             </Link>
+            {/* Same rule as the execution page: any finished run can replay. */}
+            {isActiveStatus(data.status) ? null : (
+              <Can permission="workflow:execute">
+                <Button onClick={() => setReplaying(true)}>
+                  <RefreshCw />
+                  Replay
+                </Button>
+              </Can>
+            )}
           </>
         }
       />
+      <Dialog open={replaying} onOpenChange={setReplaying}>
+        <DialogContent>
+          <DialogTitle>
+            Replay {data.runLabel || data.id.slice(0, 8)}
+          </DialogTitle>
+          <DialogDescription>
+            Start a new run with the original input.
+          </DialogDescription>
+          {replaying && (
+            <ReplayButton
+              run={data}
+              initiallyConfirm
+              onClose={() => setReplaying(false)}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
       <main className="space-y-5">
         {stages?.length ? (
           <ol
@@ -153,9 +190,6 @@ export function RunPage() {
           </ol>
         ) : null}
         <StructuredErrorDisplay error={data.error} mode="expanded" />
-        {data.errorSummary?.category === 'transient' ? (
-          <ReplayButton run={data} />
-        ) : null}
         <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
           <section className="space-y-4">
             {pending.error ? (

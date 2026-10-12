@@ -9,6 +9,7 @@ import type {
   WorkflowInstanceDto,
 } from '@/generated/RuntaraRuntimeApi';
 import { Button } from '@/shared/components/ui/button';
+import { WithTooltip } from '@/shared/components/ui/tooltip';
 import { Can } from '@/shared/components/Can';
 import { useToken } from '@/shared/hooks';
 import { RunStatusPill } from '@/features/invocation-history/components/RunLinks';
@@ -92,11 +93,42 @@ export function RefreshControls({
   updatedAt,
   busy,
   onRefresh,
+  compact = false,
 }: {
   updatedAt?: number;
   busy?: boolean;
   onRefresh: () => void;
+  /** Icon only; the last update moves into the tooltip. */
+  compact?: boolean;
 }) {
+  if (compact)
+    return (
+      <WithTooltip
+        label={
+          updatedAt ? (
+            <>
+              Refresh · updated{' '}
+              <StateValue
+                value={new Date(updatedAt).toISOString()}
+                display={{ kind: 'relative' }}
+              />
+            </>
+          ) : (
+            'Refresh'
+          )
+        }
+      >
+        <Button
+          variant="secondary"
+          size="icon"
+          aria-label="Refresh"
+          disabled={busy}
+          onClick={onRefresh}
+        >
+          <RefreshCw className={busy ? 'animate-spin' : ''} />
+        </Button>
+      </WithTooltip>
+    );
   return (
     <>
       {updatedAt ? (

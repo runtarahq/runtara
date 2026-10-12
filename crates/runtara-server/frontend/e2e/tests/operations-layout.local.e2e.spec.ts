@@ -47,15 +47,18 @@ for (const width of [1440, 1000, 390]) {
         const requests = page.getByRole('list', {
           name: 'Requests requiring input',
         });
-        const failures = page.getByRole('list', { name: 'Recent failures' });
         await expect(requests).toBeVisible();
-        await expect(failures).toBeVisible();
+        // Failures are counted by the metric card; no second list repeats them.
+        await expect(
+          page.getByRole('list', { name: 'Recent failures' })
+        ).toHaveCount(0);
         await expect(
           page.getByRole('link', { name: 'View all requests' })
         ).toHaveAttribute('href', appPath('/operations/requests'));
         await expect(
-          page.getByRole('link', { name: 'View failed runs' })
+          page.locator('a[href*="status=failed,timeout"]')
         ).toHaveAttribute('href', /dateBasis=completed/);
+        await expect(page.locator('a[href$="runs?range=24h"]')).toHaveCount(1);
         let sawNonOverdue = false;
         for (const item of await requests.getByRole('listitem').all()) {
           const overdue =
@@ -69,24 +72,9 @@ for (const width of [1440, 1000, 390]) {
           if (width >= 1024)
             expect((await item.boundingBox())!.height).toBeLessThan(90);
         }
-        for (const item of await failures.getByRole('listitem').all()) {
-          const box = (await item.boundingBox())!;
-          const actionLinks = item.getByRole('link', {
-            name: 'Open execution',
-          });
-          const copy = item.getByRole('button', { name: 'Copy run ID' });
-          const eyeBox = (await actionLinks.boundingBox())!;
-          const copyBox = (await copy.boundingBox())!;
-          expect(eyeBox.y).toBe(copyBox.y);
-          expect(copyBox.x + copyBox.width).toBeLessThanOrEqual(
-            box.x + box.width
-          );
-          if (width >= 1024) expect(box.height).toBeLessThan(90);
-        }
-        await failures
-          .getByRole('button', { name: 'Replay', exact: true })
-          .first()
-          .click();
+      }
+      if (title === 'ORDER-123') {
+        await page.getByRole('button', { name: 'Replay', exact: true }).click();
         await expect(page.getByRole('dialog')).toContainText(
           'repeats all side effects'
         );
