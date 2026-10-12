@@ -1,6 +1,12 @@
 import { stateLabel } from '../state-label';
 import { inlineOptions } from '../answer-options';
 import { useRef, useState } from 'react';
+import {
+  AlarmClock,
+  ArrowDownWideNarrow,
+  ArrowUpNarrowWide,
+  SlidersHorizontal,
+} from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router';
 import type {
   OperationRequest,
@@ -12,6 +18,7 @@ import { useAuthStore } from '@/shared/stores/authStore';
 import { Can } from '@/shared/components/Can';
 import { Button } from '@/shared/components/ui/button';
 import { Input } from '@/shared/components/ui/input';
+import { WithTooltip } from '@/shared/components/ui/tooltip';
 import {
   ConsoleTableShell,
   TablePagination,
@@ -25,7 +32,11 @@ import {
   resolveQuery,
   useOperations,
 } from '../queries';
-import { StateValue, type StateField } from '../components/StateValue';
+import {
+  DueValue,
+  StateValue,
+  type StateField,
+} from '../components/StateValue';
 import { QueueAnswer, type AnswerController } from '../components/QueueAnswer';
 import { DeleteQueue } from '../components/DeleteQueue';
 import { ViewEditor, StateFilters } from '../components/ViewEditor';
@@ -33,6 +44,8 @@ import { OperationHeader, RunRows, RefreshControls } from './shared';
 
 const requestKey = (r: OperationRequest) =>
   JSON.stringify([r.instanceId, r.requestId]);
+const isNumeric = (field?: StateField) =>
+  field?.type === 'number' || field?.type === 'integer';
 export function QueuePage() {
   const { workflowId, actionKey, viewId: legacyViewId, queueId } = useParams();
   const viewId = queueId ?? legacyViewId;
@@ -79,6 +92,7 @@ export function QueuePage() {
       initial={initial}
       schema={process?.stateSchema ?? queue?.stateSchema ?? {}}
       saved={saved}
+      workflowName={process?.name}
     />
   );
 }
@@ -87,10 +101,12 @@ function QueueContent({
   initial,
   schema,
   saved,
+  workflowName,
 }: {
   initial: OperationViewConfig;
   schema: Record<string, StateField>;
   saved?: import('@/generated/RuntaraRuntimeApi').SavedOperationView;
+  workflowName?: string;
 }) {
   const [view, setView] = useState(initial);
   const [page, setPage] = useState(0);
@@ -147,6 +163,17 @@ function QueueContent({
         )
       : [];
   const data = query.data?.requests ?? query.data?.runs;
+  const total = data?.totalElements;
+  const due = view.roles?.due;
+  const isOverdueFilter = (filter: StateFilterDto) =>
+    filter.field === due &&
+    filter.op === 'lt' &&
+    (filter.value as { relative?: string } | undefined)?.relative === 'now';
+  const overdueOnly = Boolean(due && view.where?.state?.some(isOverdueFilter));
+  // Every row of a queue asks the same question; name it once in the header.
+  const question = rows[0]?.label;
+  // Context values that a column already shows are noise in the row.
+  const shown = new Set([...(view.columns ?? []), view.roles?.key]);
   function filters(state: StateFilterDto[]) {
     setView((v) => ({ ...v, where: { ...v.where, state } }));
     setPage(0);
@@ -158,7 +185,7 @@ function QueueContent({
   };
   return (
     <ConsoleTableShell
-      className="mx-auto h-auto max-h-none w-full max-w-[1600px] overflow-visible p-5 lg:px-10 lg:py-7"
+      className="mx-auto h-auto max-h-none min-h-full w-full max-w-[1600px] overflow-visible p-5 lg:px-10 lg:py-7"
       bodyClassName="flex-none rounded-lg border"
       toolbar={
         <>
@@ -166,9 +193,12 @@ function QueueContent({
             title={view.name}
             section="Queues"
             description={
-              isQueue
-                ? 'A decision answers the waiting request; the list follows the run’s state.'
-                : 'Follow runs and their published state.'
+              [workflowName, isQueue ? question : undefined]
+                .filter(Boolean)
+                .join(' · ') ||
+              (isQueue
+                ? 'Requests waiting for a decision.'
+                : 'Follow runs and their published state.')
             }
             actions={
               <>
@@ -187,6 +217,7 @@ function QueueContent({
                       </Button>
                       <DeleteQueue
                         queue={saved}
+                        icon
                         onDeleted={() => navigate('/operations/queues')}
                       />
                     </>
@@ -204,91 +235,134 @@ function QueueContent({
             }
           />
           <div className="mb-4 flex flex-wrap items-center gap-2">
-            <span className="mr-auto border-b-2 border-primary py-2 text-sm font-semibold text-primary-text">
-              {isQueue ? 'Open requests' : 'Runs'}{' '}
-              <span className="ml-1 text-muted-foreground">
-                {data?.totalElements ?? '…'}
+            <p className="mr-auto text-sm font-medium tabular-nums">
+              {total?.toLocaleString() ?? '…'}{' '}
+              <span className="font-normal text-muted-foreground">
+                {isQueue
+                  ? total === 1
+                    ? 'open request'
+                    : 'open requests'
+                  : total === 1
+                    ? 'run'
+                    : 'runs'}
               </span>
-            </span>
+            </p>
             <Input
               aria-label="Search runs"
               placeholder="Search label or run"
-              className="max-w-xs"
+              className="w-full sm:w-64"
               value={search}
               onChange={(e) => {
                 setSearch(e.target.value);
                 goPage(0);
               }}
             />
+            {due ? (
+              <Button
+                variant="secondary"
+                bordered
+                aria-pressed={overdueOnly}
+                className={
+                  overdueOnly
+                    ? 'border-warning/50 bg-warning/10 text-warning hover:bg-warning/15 hover:text-warning'
+                    : ''
+                }
+                onClick={() =>
+                  filters(
+                    overdueOnly
+                      ? (view.where?.state ?? []).filter(
+                          (filter) => !isOverdueFilter(filter)
+                        )
+                      : [
+                          ...(view.where?.state ?? []),
+                          {
+                            field: due,
+                            op: 'lt',
+                            value: { relative: 'now', offsetSeconds: 0 },
+                          },
+                        ]
+                  )
+                }
+              >
+                <AlarmClock />
+                Overdue only
+              </Button>
+            ) : null}
             <Button
               variant="secondary"
               bordered
+              aria-expanded={filtersOpen}
               onClick={() => setFiltersOpen((v) => !v)}
             >
+              <SlidersHorizontal />
               Filters
               {view.where?.state?.length ? ` (${view.where.state.length})` : ''}
             </Button>
-            {view.roles?.due ? (
-              <Button
-                variant="secondary"
-                onClick={() =>
-                  filters([
-                    ...(view.where?.state ?? []),
-                    {
-                      field: view.roles!.due!,
-                      op: 'lt',
-                      value: { relative: 'now', offsetSeconds: 0 },
-                    },
-                  ])
-                }
-              >
-                Overdue
-              </Button>
-            ) : null}
-            <select
-              aria-label="Sort by state"
-              className="h-8 max-w-full rounded border bg-background px-3 text-sm"
-              value={view.sort?.field ?? ''}
-              onChange={(e) => {
-                setView((v) => ({
-                  ...v,
-                  sort: e.target.value
-                    ? { field: e.target.value, descending: false }
-                    : null,
-                }));
-                goPage(0);
-              }}
-            >
-              <option value="">
-                {isQueue ? 'Oldest request first' : 'Recent runs first'}
-              </option>
-              {Object.keys(schema).map((field) => (
-                <option key={field} value={field}>
-                  {stateLabel(field, schema[field])}
-                </option>
-              ))}
-            </select>
-            {view.sort ? (
-              <Button
-                variant="secondary"
-                onClick={() => {
+            <div className="flex items-center gap-1">
+              <select
+                aria-label="Sort by"
+                className="h-8 max-w-full rounded-md border bg-background px-2 text-sm"
+                value={view.sort?.field ?? ''}
+                onChange={(e) => {
                   setView((v) => ({
                     ...v,
-                    sort: { ...v.sort!, descending: !v.sort?.descending },
+                    sort: e.target.value
+                      ? { field: e.target.value, descending: false }
+                      : null,
                   }));
                   goPage(0);
                 }}
               >
-                {view.sort.descending ? 'Descending' : 'Ascending'}
-              </Button>
-            ) : null}
+                <option value="">
+                  {isQueue ? 'Oldest request first' : 'Recent runs first'}
+                </option>
+                {Object.keys(schema).map((field) => (
+                  <option key={field} value={field}>
+                    Sort by {stateLabel(field, schema[field])}
+                  </option>
+                ))}
+              </select>
+              {view.sort ? (
+                <WithTooltip
+                  label={
+                    view.sort.descending
+                      ? 'Descending — switch to ascending'
+                      : 'Ascending — switch to descending'
+                  }
+                >
+                  <Button
+                    variant="secondary"
+                    bordered
+                    size="icon"
+                    aria-label={
+                      view.sort.descending
+                        ? 'Sort descending'
+                        : 'Sort ascending'
+                    }
+                    onClick={() => {
+                      setView((v) => ({
+                        ...v,
+                        sort: { ...v.sort!, descending: !v.sort?.descending },
+                      }));
+                      goPage(0);
+                    }}
+                  >
+                    {view.sort.descending ? (
+                      <ArrowDownWideNarrow />
+                    ) : (
+                      <ArrowUpNarrowWide />
+                    )}
+                  </Button>
+                </WithTooltip>
+              ) : null}
+            </div>
           </div>
         </>
       }
       footer={
         <div className="flex flex-wrap items-center justify-between gap-2 py-3 text-xs text-muted-foreground">
           <span>
-            {data?.totalElements ?? 0} {isQueue ? 'requests' : 'runs'}
+            {total ?? 0} {isQueue ? 'requests' : 'runs'}
             {query.isFetching ? ' · Updating…' : ''}
           </span>
           <TablePagination
@@ -419,13 +493,12 @@ function QueueContent({
               {columns?.map((field) => (
                 <th
                   key={field}
-                  className={`px-4 py-3 ${schema[field]?.type === 'number' || schema[field]?.type === 'integer' ? 'text-right' : ''}`}
+                  className={`px-4 py-3 ${isNumeric(schema[field]) ? 'text-right' : ''}`}
                 >
                   {view.labels?.[field] || stateLabel(field, schema[field])}
                 </th>
               ))}
               <th className="px-4 py-3">Requested</th>
-              <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3">Decision</th>
             </tr>
           </thead>
@@ -456,7 +529,7 @@ function QueueContent({
                 </td>
                 <td className="max-w-64 px-4 py-3">
                   <Link
-                    className="font-medium text-primary hover:underline"
+                    className="whitespace-nowrap font-medium text-primary-text hover:underline"
                     to={`/operations/runs/${row.workflowId}/${row.instanceId}`}
                   >
                     {String(
@@ -465,36 +538,30 @@ function QueueContent({
                         row.instanceId.slice(0, 8)
                     )}
                   </Link>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {row.label}
-                  </p>
-                  {row.message ? <p className="mt-2">{row.message}</p> : null}
-                  {row.context && Object.keys(row.context).length ? (
-                    <details className="mt-2">
-                      <summary>Context</summary>
-                      <pre className="max-w-64 whitespace-pre-wrap text-xs">
-                        {JSON.stringify(row.context, null, 2)}
-                      </pre>
-                    </details>
+                  {row.message && row.message !== row.label ? (
+                    <p className="mt-1 text-xs">{row.message}</p>
                   ) : null}
+                  <RequestContext
+                    context={row.context}
+                    hide={shown}
+                    schema={schema}
+                    formats={view.formats}
+                  />
                 </td>
                 {columns?.map((field) => (
                   <td
                     key={field}
-                    className={`max-w-xs px-4 py-3 ${schema[field]?.type === 'number' || schema[field]?.type === 'integer' ? 'text-right tabular-nums' : ''}`}
+                    className={`max-w-xs px-4 py-3 ${isNumeric(schema[field]) ? 'text-right tabular-nums' : ''}`}
                   >
-                    <StateValue
-                      value={row.state?.[field]}
-                      field={schema[field]}
-                      display={view.formats?.[field]}
-                    />
-                    {field === view.roles?.due &&
-                    typeof row.state?.[field] === 'string' &&
-                    Date.parse(row.state[field]) < Date.now() ? (
-                      <span className="mt-1 block text-xs text-warning">
-                        Overdue
-                      </span>
-                    ) : null}
+                    {field === due ? (
+                      <DueValue value={row.state?.[field]} />
+                    ) : (
+                      <StateValue
+                        value={row.state?.[field]}
+                        field={schema[field]}
+                        display={view.formats?.[field]}
+                      />
+                    )}
                   </td>
                 ))}
                 <td className="whitespace-nowrap px-4 py-3">
@@ -511,18 +578,6 @@ function QueueContent({
                       />
                     </p>
                   ) : null}
-                </td>
-                <td className="whitespace-nowrap px-4 py-3">
-                  <span className="rounded-full bg-warning/10 px-2 py-1 text-xs text-warning">
-                    {submissions.inputs.some(
-                      (input) =>
-                        input.request.instanceId === row.instanceId &&
-                        input.request.requestId === row.requestId &&
-                        input.state === 'accepted'
-                    )
-                      ? 'Decided'
-                      : 'Waiting'}
-                  </span>
                 </td>
                 <td className="px-4 py-3">
                   <Can
@@ -562,5 +617,41 @@ function QueueContent({
         </p>
       ) : null}
     </ConsoleTableShell>
+  );
+}
+
+/** Context the request carries, as label/value pairs, minus what columns show. */
+function RequestContext({
+  context,
+  hide,
+  schema,
+  formats,
+}: {
+  context: unknown;
+  hide: Set<string | null | undefined>;
+  schema: Record<string, StateField>;
+  formats?: OperationViewConfig['formats'];
+}) {
+  if (!context || typeof context !== 'object' || Array.isArray(context))
+    return null;
+  const entries = Object.entries(context).filter(([key]) => !hide.has(key));
+  if (!entries.length) return null;
+  return (
+    <dl className="mt-1 space-y-0.5 text-xs">
+      {entries.map(([key, value]) => (
+        <div key={key} className="flex min-w-0 gap-1">
+          <dt className="shrink-0 text-muted-foreground">
+            {stateLabel(key, schema[key])}:
+          </dt>
+          <dd className="min-w-0 truncate">
+            <StateValue
+              value={value}
+              field={schema[key]}
+              display={formats?.[key] ?? undefined}
+            />
+          </dd>
+        </div>
+      ))}
+    </dl>
   );
 }
