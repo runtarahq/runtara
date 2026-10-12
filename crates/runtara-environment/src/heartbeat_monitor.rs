@@ -83,7 +83,8 @@ struct StaleContainer {
 /// Information about an orphaned instance.
 ///
 /// An orphaned instance is one that is marked as "running" in Core's persistence
-/// but is not being tracked in this Environment's container_registry.
+/// but has no row in container_registry, which every Environment sharing the
+/// database writes to.
 #[derive(Debug)]
 struct OrphanedInstance {
     instance_id: String,
@@ -422,11 +423,14 @@ impl HeartbeatMonitor {
 
     /// Get instances that are running in Core but not tracked in container_registry.
     ///
-    /// These are "orphaned" instances - Core thinks they're running, but we have
-    /// no local record of them. This can happen when:
+    /// These are "orphaned" instances - Core thinks they're running, but no
+    /// Environment has registered them. This can happen when:
     /// - Environment was restarted while instances were running
     /// - Container registry entry was lost or never created
-    /// - Multiple Environment instances share the same Core database
+    ///
+    /// The result is a snapshot, and the age cutoff only describes an
+    /// instance's first start: Core keeps that `started_at` when a wake or
+    /// resume relaunches it. Recovery re-checks each candidate before writing.
     async fn get_orphaned_running_instances(
         &self,
         cutoff: DateTime<Utc>,
@@ -497,17 +501,27 @@ impl HeartbeatMonitor {
             "Found orphaned instance (Core running, untracked) - recovering after Environment restart"
         );
 
-        let outcome = crate::recovery::recover_or_fail(
+        // The scan's snapshot may be stale by now; this re-checks under locks.
+        let outcome = match crate::recovery::recover_orphaned(
             &self.pool,
             self.core_persistence.as_ref(),
             &instance.instance_id,
         )
-        .await;
-
-        if let Err(error) = &outcome {
-            warn!(instance_id = %instance.instance_id, %error, "Orphan recovery write failed");
-            return;
-        }
+        .await
+        {
+            Ok(Some(outcome)) => outcome,
+            Ok(None) => {
+                debug!(
+                    instance_id = %instance.instance_id,
+                    "Instance is no longer orphaned; leaving its current generation alone"
+                );
+                return;
+            }
+            Err(error) => {
+                warn!(instance_id = %instance.instance_id, %error, "Orphan recovery write failed");
+                return;
+            }
+        };
 
         info!(
             instance_id = %instance.instance_id,

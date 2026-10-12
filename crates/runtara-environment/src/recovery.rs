@@ -215,6 +215,93 @@ pub async fn recover_registered_with(
     Ok(Some(outcome))
 }
 
+/// Recover an instance Core shows `running` that no registration tracks, only
+/// after re-checking under locks that it is still orphaned.
+///
+/// The orphan scan's snapshot is not enough to act on. Core keeps an instance's
+/// first `started_at` across generations, so the scan's age cutoff says nothing
+/// about how fresh the current generation is, and the `if_running` guard on the
+/// recovery write cannot tell the orphaned run from a newer one. Between the
+/// scan and the write, the instance can park and be relaunched, or another
+/// scanner sharing the database can recover it and the wake scheduler relaunch
+/// it. Writing then would suspend or fail a generation that a runner owns.
+///
+/// So, inside one transaction held across the Core write:
+/// - a per-instance advisory lock serializes orphan recovery, so a second
+///   scanner re-checks only after the first one's write has committed;
+/// - an active launch with a live lease is left to its owner, as in
+///   [`recover_registered`];
+/// - Core must still be `running`, and only then must no registration exist.
+///   That order matters: a generation registers before it is promoted to
+///   `running`, so one promoted between the two reads is always seen.
+///
+/// None means the instance is no longer an orphan and nothing was written.
+pub async fn recover_orphaned(
+    pool: &sqlx::PgPool,
+    persistence: &dyn Persistence,
+    instance_id: &str,
+) -> Result<Option<RecoveryOutcome>> {
+    recover_orphaned_with(pool, persistence, instance_id, RecoveryPolicy::from_env()).await
+}
+
+/// [`recover_orphaned`] with the policy supplied rather than read from the
+/// process environment.
+pub async fn recover_orphaned_with(
+    pool: &sqlx::PgPool,
+    persistence: &dyn Persistence,
+    instance_id: &str,
+    policy: RecoveryPolicy,
+) -> Result<Option<RecoveryOutcome>> {
+    let mut guard = pool.begin().await?;
+    sqlx::query(ORPHAN_RECOVERY_LOCK)
+        .bind(instance_id)
+        .execute(&mut *guard)
+        .await?;
+    let active_states =
+        crate::launch_queue::LaunchState::sql_list(crate::launch_queue::LaunchState::ACTIVE);
+    let active_launch: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT launch_id FROM instance_launches \
+         WHERE instance_id = $1 AND state IN ({active_states}) FOR UPDATE"
+    ))
+    .bind(instance_id)
+    .fetch_optional(&mut *guard)
+    .await?;
+    if let Some(launch_id) = active_launch {
+        // Evaluate time in a fresh statement after acquiring the row lock.
+        let live: bool = sqlx::query_scalar(
+            "SELECT lease_owner IS NOT NULL AND \
+             COALESCE(lease_expires_at > clock_timestamp(), false) \
+             FROM instance_launches WHERE launch_id = $1",
+        )
+        .bind(&launch_id)
+        .fetch_one(&mut *guard)
+        .await?;
+        if live {
+            return Ok(None);
+        }
+    }
+    match persistence.get_instance_meta(instance_id).await? {
+        Some(instance) if instance.status == runtara_core::domain::InstanceStatus::Running => {}
+        _ => return Ok(None),
+    }
+    let registered: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM container_registry WHERE instance_id = $1)",
+    )
+    .bind(instance_id)
+    .fetch_one(&mut *guard)
+    .await?;
+    if registered {
+        return Ok(None);
+    }
+    let outcome = recover_or_fail_with(pool, persistence, instance_id, policy).await?;
+    guard.commit().await?;
+    Ok(Some(outcome))
+}
+
+/// The per-instance lock [`recover_orphaned_with`] holds for its transaction.
+const ORPHAN_RECOVERY_LOCK: &str =
+    "SELECT pg_advisory_xact_lock(hashtextextended('runtara:orphan-recovery' || chr(31) || $1, 0))";
+
 /// Pure crash-loop decision, separated from any I/O so it can be unit-tested.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Decision {
@@ -536,7 +623,8 @@ mod tests {
 #[cfg(all(test, feature = "db-integration-tests"))]
 mod persistence_tests {
     use super::{
-        RecoveryCause, RecoveryOutcome, RecoveryPolicy, recover_or_fail_for, recover_or_fail_with,
+        ORPHAN_RECOVERY_LOCK, RecoveryCause, RecoveryOutcome, RecoveryPolicy, recover_or_fail_for,
+        recover_or_fail_with, recover_orphaned_with,
     };
     use crate::instance_repository::InstanceRepository;
     use runtara_store_postgres::PostgresPersistence;
@@ -709,6 +797,157 @@ mod persistence_tests {
         let after = snapshot(&pool, &id).await;
         assert_eq!(after["status"], "failed");
         assert_eq!(after["termination_reason"], "park_failed");
+    }
+
+    /// A `running` instance with no registration: what the orphan scan selects.
+    async fn running_orphan(pool: &sqlx::PgPool, prefix: &str) -> String {
+        let id = crate::test_support::unique_id(prefix);
+        sqlx::query(
+            "INSERT INTO instances (instance_id, tenant_id, status) \
+             VALUES ($1, 'recovery-test', 'running')",
+        )
+        .bind(&id)
+        .execute(pool)
+        .await
+        .expect("create running instance");
+        id
+    }
+
+    /// A running launch generation whose owner's lease ends `lease_secs` from
+    /// now (negative: it already has).
+    async fn running_launch(pool: &sqlx::PgPool, id: &str, lease_secs: i64) {
+        let image_id = crate::test_support::unique_id("recovery-image");
+        sqlx::query(
+            "INSERT INTO images (image_id, tenant_id, name, binary_path) \
+             VALUES ($1, 'recovery-test', $1, '/unused')",
+        )
+        .bind(&image_id)
+        .execute(pool)
+        .await
+        .expect("create image");
+        sqlx::query(
+            "INSERT INTO instance_launches (launch_id, instance_id, tenant_id, image_id, kind, \
+             state, deadline_at, lease_owner, lease_expires_at, attempt_count) \
+             VALUES ($1, $2, 'recovery-test', $3, 'wake', 'running', NOW() + INTERVAL '1 hour', \
+             'owner', NOW() + $4 * INTERVAL '1 second', 1)",
+        )
+        .bind(crate::test_support::unique_id("recovery-launch"))
+        .bind(id)
+        .bind(&image_id)
+        .bind(lease_secs)
+        .execute(pool)
+        .await
+        .expect("create running launch");
+    }
+
+    /// The registration a relaunched generation writes before Core promotes it.
+    async fn register(pool: &sqlx::PgPool, id: &str) {
+        sqlx::query(
+            "INSERT INTO container_registry \
+             (container_id, launch_id, instance_id, tenant_id, binary_path, started_at) \
+             VALUES ($1, $1, $2, 'recovery-test', '/unused', NOW())",
+        )
+        .bind(crate::test_support::unique_id("recovery-container"))
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("register relaunched generation");
+    }
+
+    #[tokio::test]
+    async fn orphan_recovery_recovers_a_still_orphaned_instance() {
+        let pool = crate::test_support::pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+        // No launch generation at all, and one whose owner stopped renewing.
+        for expired_launch in [false, true] {
+            let id = running_orphan(&pool, "orphan-recover").await;
+            if expired_launch {
+                running_launch(&pool, &id, -60).await;
+            }
+            assert_eq!(
+                recover_orphaned_with(&pool, &persistence, &id, policy(true))
+                    .await
+                    .expect("recover orphan"),
+                Some(RecoveryOutcome::Recovered),
+                "expired launch: {expired_launch}"
+            );
+            let after = snapshot(&pool, &id).await;
+            assert_eq!(after["status"], "suspended");
+            assert_eq!(after["termination_reason"], "environment_restart");
+            assert_eq!(after["wake_reason"], "recovery");
+        }
+    }
+
+    /// The scan selected the instance, then it moved on before recovery wrote.
+    #[tokio::test]
+    async fn orphan_recovery_leaves_an_instance_that_is_no_longer_orphaned() {
+        let pool = crate::test_support::pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+        for case in ["relaunched", "leased", "parked"] {
+            let id = running_orphan(&pool, "orphan-moved-on").await;
+            match case {
+                "relaunched" => register(&pool, &id).await,
+                "leased" => running_launch(&pool, &id, 3600).await,
+                _ => {
+                    sqlx::query("UPDATE instances SET status = 'suspended' WHERE instance_id = $1")
+                        .bind(&id)
+                        .execute(&pool)
+                        .await
+                        .expect("park");
+                }
+            }
+            let before = snapshot(&pool, &id).await;
+            for auto_recover in [true, false] {
+                assert_eq!(
+                    recover_orphaned_with(&pool, &persistence, &id, policy(auto_recover))
+                        .await
+                        .expect("re-check orphan"),
+                    None,
+                    "{case}"
+                );
+                assert_eq!(snapshot(&pool, &id).await, before, "{case}");
+            }
+        }
+    }
+
+    /// Two scanners can select the same orphan. The second must re-check only
+    /// once the first has written, or it recovers the generation that the
+    /// first one's recovery relaunched.
+    #[tokio::test]
+    async fn concurrent_orphan_recoveries_serialize() {
+        let pool = crate::test_support::pool().await;
+        let id = running_orphan(&pool, "orphan-serialize").await;
+        let mut first = pool.begin().await.expect("begin first scanner");
+        sqlx::query(ORPHAN_RECOVERY_LOCK)
+            .bind(&id)
+            .execute(&mut *first)
+            .await
+            .expect("first scanner takes the lock");
+        let second = tokio::spawn({
+            let pool = pool.clone();
+            let id = id.clone();
+            async move {
+                let persistence = PostgresPersistence::new(pool.clone());
+                recover_orphaned_with(&pool, &persistence, &id, policy(true)).await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !second.is_finished(),
+            "the second scanner must wait for the first"
+        );
+        // Meanwhile the first recovered it and the wake relaunched it.
+        register(&pool, &id).await;
+        let before = snapshot(&pool, &id).await;
+        first.commit().await.expect("first scanner commits");
+        assert_eq!(
+            second
+                .await
+                .expect("second scanner task")
+                .expect("second re-check"),
+            None
+        );
+        assert_eq!(snapshot(&pool, &id).await, before);
     }
 
     #[tokio::test]
