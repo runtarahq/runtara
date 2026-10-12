@@ -4,7 +4,7 @@ Durable execution semantics for Runtara: instances, checkpoints, signals, sleep,
 
 ## Using core
 
-Core is a library. The host supplies storage and transport; `runtara-server` exposes the instance protocol over HTTP, and embedded callers invoke the same handlers directly.
+Core is a library. The host supplies storage and transport. `runtara-environment` invokes the handlers directly for every workflow; `runtara-server` can also expose them over HTTP on loopback for tests and debugging, only when `RUNTARA_CORE_INSTANCE_API` is enabled.
 
 ```rust
 use std::sync::Arc;

@@ -269,6 +269,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Core's HTTP instance API is off by default.** The loopback listener on
+  `RUNTARA_CORE_HTTP_PORT` (8003) starts only with
+  `RUNTARA_CORE_INSTANCE_API=true`. Workflows never used it; they reach Core
+  in-process. An instance registered through its `register` route has no launch
+  or registration in the Environment, so the heartbeat monitor recovered it as
+  orphaned two minutes after it started, however healthy. Enable it for tests
+  and debugging only. `RUNTARA_MAX_CONCURRENT_INSTANCES` and
+  `RUNTARA_CORE_SHUTDOWN_GRACE_MS` only ever applied to this API, so they now
+  have no effect unless it is enabled; the server warns when they are set
+  without it.
 - **Raw SQL read routes are read-only and bounded.** `sql/query`,
   `sql/query-one`, `sql/query-raw` and the MCP `query_sql*` tools run in a
   `READ ONLY` transaction under the raw SQL statement timeout and row/byte caps,

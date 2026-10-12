@@ -8,15 +8,19 @@
 //! and [`CoreRuntime`] owns the listener's lifecycle, including the drain
 //! sequence that lets an instance mid-checkpoint finish writing.
 //!
-//! Only guests using the SDK's HTTP backend come through here. The default
-//! composition binds `runtara:workflow/runtime` as a host import, and
-//! those calls reach the same core handlers in-process without a socket.
+//! Workflows do not come through here. They bind `runtara:workflow/runtime`
+//! as a host import, and those calls reach the same core handlers in-process
+//! without a socket. This transport is a test and debugging surface, and the
+//! server serves it only when `RUNTARA_CORE_INSTANCE_API` is enabled, on
+//! loopback. An instance registered through it has no launch or registration
+//! in the Environment, so the heartbeat monitor recovers it as orphaned once it
+//! is older than the heartbeat timeout.
 //!
 //! # Deployment configuration
 //!
 //! The server loads [`RuntimeOverrides`] before constructing the runtime and
-//! passes settings to core's handlers explicitly. Unset values preserve the
-//! builder's defaults:
+//! passes settings to core's handlers explicitly. They govern this transport
+//! only. Unset values preserve the builder's defaults:
 //!
 //! | Variable | Default | Description |
 //! |----------|---------|-------------|
@@ -129,9 +133,9 @@ impl CoreRuntimeBuilder {
 
     /// Observe instance events handled through this runtime's HTTP endpoint.
     ///
-    /// The default workflow composition reaches the same handlers in-process,
-    /// but legacy composed artifacts use the HTTP endpoint. Hosts that observe
-    /// guest events must attach the same observer to both paths.
+    /// Workflows reach the same handlers in-process, through the runner. Hosts
+    /// that observe instance events attach the same observer to both paths, so
+    /// events sent to this endpoint are observed too.
     pub fn event_observer(mut self, observer: Arc<dyn InstanceEventObserver>) -> Self {
         self.event_observer = Some(observer);
         self

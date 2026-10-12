@@ -13,10 +13,12 @@
 //!
 //! - **In-process**: call the [`instance_handlers`] functions directly. This is
 //!   what `runtara-environment` does for workflows composed against
-//!   `runtara:workflow/runtime` as a host import, which is the default.
+//!   `runtara:workflow/runtime` as a host import, which is how every workflow
+//!   runs.
 //! - **Over HTTP**: `runtara-server` wraps the same functions in an axum router
-//!   (`runtara_server::core_runtime`) and serves them on the instance port for
-//!   guests that reach core through the SDK's HTTP backend.
+//!   (`runtara_server::core_runtime`) for tests and debugging. Workflows never
+//!   use it, and the server serves it on loopback only when
+//!   `RUNTARA_CORE_INSTANCE_API` is enabled.
 //!
 //! Whichever a host picks, the semantics below are the handlers', not the
 //! transport's.
@@ -41,8 +43,8 @@
 //! ┌───────────────────────┐                    ┌─────────────────────────────┐
 //! │    runtara-core       │◄───────────────────│     Workflow Instances      │
 //! │  (This Crate)         │  Instance Protocol │   (via the runtime host)    │
-//! │  Checkpoints/Signals  │  (in-process, or   │                             │
-//! │  (library only)       │   HTTP via server) └─────────────────────────────┘
+//! │  Checkpoints/Signals  │  (in-process)      │                             │
+//! │  (library only)       │                    └─────────────────────────────┘
 //! └───────────────────────┘
 //!           │
 //!           ▼

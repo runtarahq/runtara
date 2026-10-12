@@ -1186,7 +1186,9 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     // =========================================================================
     // Handles durable workflow execution using a dedicated database (RUNTARA_DATABASE_URL):
     // - Management protocol (images, instances) in-process, via runtara-environment's library
-    // - Core functionality (checkpoints, signals) on port 8003 (RUNTARA_CORE_HTTP_PORT)
+    // - Core functionality (checkpoints, signals) in-process, through the runner's host imports
+    // - Core's HTTP instance API (a test surface) on loopback port 8003 only with
+    //   RUNTARA_CORE_INSTANCE_API=true (port: RUNTARA_CORE_HTTP_PORT)
     // Migrations are run automatically via runtara_environment::migrations::run()
 
     let database: Arc<dyn runtara_component_host::DatabaseHost> =
@@ -1267,7 +1269,12 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     .await
     {
         Ok(Some(runtara)) => {
-            println!("✓ Embedded runtara-core started on {}", runtara.core_addr());
+            match runtara.core_addr() {
+                Some(addr) => println!("✓ Embedded runtara-core instance API started on {addr}"),
+                None => println!(
+                    "✓ Embedded runtara-core instance API not served (RUNTARA_CORE_INSTANCE_API)"
+                ),
+            }
             println!("✓ Embedded runtara-environment started (in-process)");
             Some(runtara)
         }

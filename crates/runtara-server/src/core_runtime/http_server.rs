@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! HTTP server for the instance protocol.
 //!
-//! Provides runtara-core's instance protocol operations over HTTP/JSON. This
-//! enables workflows (native or WASM) using the SDK's HTTP backend to reach
-//! core over a socket; workflows composed against the runtime as a host import
-//! reach the same handlers in-process instead, through
-//! `runtara_environment::runtime_host`.
+//! Provides runtara-core's instance protocol operations over HTTP/JSON, for
+//! tests and debugging. Workflows never use it: they reach the same handlers
+//! in-process, through `runtara_environment::runtime_host`. `register` here is
+//! the one way to make an instance `running` without an Environment launch, so
+//! the server serves this router only when `RUNTARA_CORE_INSTANCE_API` is
+//! enabled.
 //!
 //! Every handler here is wire plumbing — decode, delegate to
 //! [`runtara_core::instance_handlers`], map the error to a status. Core owns

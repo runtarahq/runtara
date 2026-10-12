@@ -22,7 +22,7 @@ use runtara_environment::runtime::{DrainReport, EnvironmentRuntime};
 use runtara_store_postgres::PostgresPersistence;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::core_runtime::CoreRuntime;
 
@@ -32,13 +32,14 @@ pub struct EmbeddedRuntaraConfig {
     pub pool: PgPool,
     /// Data directory for images and instance I/O.
     pub data_dir: PathBuf,
-    /// Bind address for runtara-core QUIC server (instance protocol).
-    pub core_bind_addr: SocketAddr,
-    /// Optional bind address for runtara-core's HTTP instance API.
-    /// When set, an HTTP server is started alongside QUIC for the instance protocol.
+    /// Where to serve runtara-core's HTTP instance API, or `None` to not serve
+    /// it. Workflows never use it: the runner reaches Core in-process. It is a
+    /// test and debugging surface, and an instance registered through it is
+    /// unknown to the Environment, which recovers it as orphaned.
     pub core_http_bind_addr: Option<SocketAddr>,
     /// Instance-runtime overrides supplied by the host (concurrency cap and
     /// shutdown grace). Unset fields preserve the runtime builder's defaults.
+    /// They apply only to the HTTP instance API.
     pub core_overrides: RuntimeOverrides,
     /// Bounded active-execution timeout policy shared with the server runtime
     /// client and Environment lifecycle handlers.
@@ -49,7 +50,8 @@ pub struct EmbeddedRuntaraConfig {
 
 /// Handle to the running embedded Runtara servers.
 pub struct EmbeddedRuntara {
-    core: CoreRuntime,
+    /// Core's HTTP instance API, when it was asked for.
+    core: Option<CoreRuntime>,
     environment: EnvironmentRuntime,
     #[allow(dead_code)]
     persistence: Arc<dyn Persistence>,
@@ -98,19 +100,30 @@ impl EmbeddedRuntara {
                 .with_metrics_sink(Arc::new(runtara_environment::metrics::OtlpMetricsSink)),
         );
 
-        // Start Core. Workflow guests never connect to it: every runtime
-        // call is a host import satisfied in-process by the runner.
-        let core_http_addr = config.core_http_bind_addr.unwrap_or(config.core_bind_addr);
-        info!(addr = %core_http_addr, "Starting runtara-core...");
-        let mut core_builder = CoreRuntime::builder()
-            .persistence(persistence.clone())
-            .bind_addr(core_http_addr)
-            .apply_overrides(config.core_overrides);
-        if let Some(observer) = event_observer.as_ref() {
-            core_builder = core_builder.event_observer(Arc::clone(observer));
-        }
-        let core = core_builder.build()?.start().await?;
-        info!("✓ runtara-core started on {}", core_http_addr);
+        // Serve Core's HTTP instance API only when asked. Workflow guests never
+        // connect to it: every runtime call is a host import satisfied
+        // in-process by the runner.
+        let core = match config.core_http_bind_addr {
+            Some(core_http_addr) => {
+                info!(addr = %core_http_addr, "Starting runtara-core instance API...");
+                let mut core_builder = CoreRuntime::builder()
+                    .persistence(persistence.clone())
+                    .bind_addr(core_http_addr)
+                    .apply_overrides(config.core_overrides);
+                if let Some(observer) = event_observer.as_ref() {
+                    core_builder = core_builder.event_observer(Arc::clone(observer));
+                }
+                let core = core_builder.build()?.start().await?;
+                info!("✓ runtara-core instance API started on {}", core_http_addr);
+                Some(core)
+            }
+            None => {
+                info!(
+                    "runtara-core instance API not served (set RUNTARA_CORE_INSTANCE_API=true to serve it)"
+                );
+                None
+            }
+        };
 
         // Create the workflow runner. Workflows are compiled to wasm32-wasip2
         // and executed on the embedded in-process engine; they reach core
@@ -179,14 +192,14 @@ impl EmbeddedRuntara {
         self.environment.launch_lifecycle_observers()
     }
 
-    /// Get the address where runtara-core is listening.
-    pub fn core_addr(&self) -> SocketAddr {
-        self.core.bind_addr()
+    /// Where Core's HTTP instance API is listening, if it is served.
+    pub fn core_addr(&self) -> Option<SocketAddr> {
+        self.core.as_ref().map(CoreRuntime::bind_addr)
     }
 
-    /// Check if both servers are still running.
+    /// Check if the servers that were started are still running.
     pub fn is_running(&self) -> bool {
-        self.core.is_running() && self.environment.is_running()
+        self.core.as_ref().is_none_or(CoreRuntime::is_running) && self.environment.is_running()
     }
 
     /// Checkpoint-aware drain of active runners. Flips the drain flags,
@@ -194,16 +207,19 @@ impl EmbeddedRuntara {
     /// force-stops any that don't reach one within `grace`. Safe to call
     /// before [`Self::shutdown`].
     ///
-    /// Core's flag goes first, and the ordering is the point: it refuses new
-    /// registrations while the instance server is *still serving*, so the
-    /// instances already running can reach a checkpoint and suspend instead of
-    /// being severed. Draining first and refusing afterwards would let a fresh
-    /// instance register into a runtime that is on its way down.
+    /// When Core's instance API is served, its flag goes first, and the
+    /// ordering is the point: it refuses new registrations while the instance
+    /// server is *still serving*, so the instances already running can reach a
+    /// checkpoint and suspend instead of being severed. Draining first and
+    /// refusing afterwards would let a fresh instance register into a runtime
+    /// that is on its way down.
     pub async fn drain(
         &self,
         grace: std::time::Duration,
     ) -> Result<DrainReport, Box<dyn std::error::Error + Send + Sync>> {
-        self.core.set_draining();
+        if let Some(core) = &self.core {
+            core.set_draining();
+        }
         self.environment
             .drain(grace)
             .await
@@ -220,7 +236,9 @@ impl EmbeddedRuntara {
         }
 
         // Then shutdown core
-        if let Err(e) = self.core.shutdown().await {
+        if let Some(core) = self.core
+            && let Err(e) = core.shutdown().await
+        {
             error!("Error shutting down runtara-core: {}", e);
         }
 
@@ -292,13 +310,16 @@ pub async fn create_runtara_pool(
 /// Environment variables:
 /// - `RUNTARA_DATABASE_URL` (required) - PostgreSQL connection string for Runtara database
 /// - `RUNTARA_EMBEDDED` (default: true) - Enable embedded server
-/// - `RUNTARA_CORE_HTTP_PORT` (default: 8003) - Port for core's instance API
+/// - `RUNTARA_CORE_INSTANCE_API` (default: false) - Serve core's HTTP instance
+///   API, a test and debugging surface that workflows never use
+/// - `RUNTARA_CORE_HTTP_PORT` (default: 8003) - Loopback port for that API
 /// - `DATA_DIR` (default: .data) - Directory for images and instance I/O
 ///
 /// The server's instance-runtime variables (`RUNTARA_MAX_CONCURRENT_INSTANCES`,
 /// `RUNTARA_CORE_SHUTDOWN_GRACE_MS`) are read here and applied to the runtime
 /// builder. Unset values preserve the builder's defaults, so the cap stays
-/// disabled unless a deployment asks for one.
+/// disabled unless a deployment asks for one. Both govern only the HTTP
+/// instance API, so they have no effect while it is not served.
 ///
 /// The runtime pool's tuning (`RUNTARA_RUNTIME_MAX_CONNECTIONS`,
 /// `RUNTARA_RUNTIME_POOL_ACQUIRE_TIMEOUT_SECS`,
@@ -333,6 +354,14 @@ pub async fn maybe_start_embedded(
     // "boots fine, executes nothing" is a worse answer to a typo than refusing
     // to start.
     let core_overrides = RuntimeOverrides::from_env()?;
+    let core_instance_api = crate::config::core_instance_api_enabled()?;
+    if !core_instance_api && core_overrides != RuntimeOverrides::default() {
+        warn!(
+            "RUNTARA_MAX_CONCURRENT_INSTANCES / RUNTARA_CORE_SHUTDOWN_GRACE_MS only apply to \
+             runtara-core's HTTP instance API, which is not served (RUNTARA_CORE_INSTANCE_API); \
+             they have no effect"
+        );
+    }
     let pool_config = crate::config::runtime_pool_config();
 
     // Create Runtara database pool
@@ -345,7 +374,7 @@ pub async fn maybe_start_embedded(
     run_migrations(&pool).await?;
 
     // Build configuration
-    // HTTP port for runtara-core's instance API (default: 8003).
+    // HTTP port for runtara-core's instance API, when served (default: 8003).
     let core_http_port: u16 = std::env::var("RUNTARA_CORE_HTTP_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -369,14 +398,14 @@ pub async fn maybe_start_embedded(
         std::env::var("DATA_DIR").unwrap_or_else(|_| ".data".to_string())
     );
 
-    // Core binds loopback only; workflow guests run in-process and reach it
-    // through host imports, never over the network.
-    let core_http_addr = core_http_port;
+    // Core's instance API binds loopback only, and only when asked for;
+    // workflow guests run in-process and reach Core through host imports,
+    // never over the network.
     let config = EmbeddedRuntaraConfig {
         pool,
         data_dir,
-        core_bind_addr: SocketAddr::from(([127, 0, 0, 1], core_http_addr)),
-        core_http_bind_addr: Some(SocketAddr::from(([127, 0, 0, 1], core_http_addr))),
+        core_http_bind_addr: core_instance_api
+            .then(|| SocketAddr::from(([127, 0, 0, 1], core_http_port))),
         core_overrides,
         execution_timeout_policy,
         isolation_policy: crate::config::isolation_policy(),

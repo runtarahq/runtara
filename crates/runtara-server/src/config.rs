@@ -1,7 +1,7 @@
 pub mod isolation;
 mod runtime;
 
-pub use runtime::{RuntimeOverrides, RuntimePoolConfig, ShutdownGrace};
+pub use runtime::{RuntimeOverrides, RuntimePoolConfig, ShutdownGrace, core_instance_api_enabled};
 
 use crate::entitlements::EntitlementSnapshot;
 use runtara_environment::execution_timeout::{
