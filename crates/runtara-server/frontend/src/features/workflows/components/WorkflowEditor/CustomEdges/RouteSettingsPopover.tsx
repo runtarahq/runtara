@@ -184,7 +184,7 @@ export function RouteSettingsPopover({
           bordered
           size="icon"
           className={cn(
-            'size-4 rounded-full shadow-sm transition-all hover:shadow-md [&_svg]:size-2.5',
+            'size-5 rounded-full shadow-sm transition-all hover:shadow-md [&_svg]:size-3',
             hasMetadata && 'text-primary-text'
           )}
           aria-label={`Edit route condition and priority from ${sourceName} to ${targetName}`}
