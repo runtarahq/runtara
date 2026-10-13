@@ -4116,12 +4116,19 @@ mod tests {
         cleanup_step_summary_instance(&pool, &instance_id).await;
     }
 
-    /// A structured checkpoint key, shaped as the workflow stdlib writes it.
+    /// A structured checkpoint key, shaped as the workflow stdlib writes it;
+    /// one the grammar no longer reads fails here rather than passing
+    /// vacuously.
     fn v2_key(kind: &str, loops: serde_json::Value, parts: serde_json::Value) -> String {
-        format!(
+        let key = format!(
             "runtara:v2:{}",
             serde_json::json!([kind, "wf", [], loops, parts])
-        )
+        );
+        assert!(
+            runtara_core::persistence::checkpoint_scope::scope(&key).is_some(),
+            "fixture key has no address: {key}"
+        );
+        key
     }
 
     async fn stored_scopes(
@@ -4228,8 +4235,9 @@ mod tests {
                 backend.save_checkpoint(id, key, b"x").await.unwrap();
             }
         }
+        // The plain upsert never collapses: this exercises the primitive alone.
         backend
-            .record_checkpoint(&run_id, &split, b"all", None)
+            .save_checkpoint(&run_id, &split, b"all")
             .await
             .unwrap();
 
@@ -4303,10 +4311,7 @@ mod tests {
         for key in &inside {
             backend.save_checkpoint(&id, key, b"x").await.unwrap();
         }
-        backend
-            .record_checkpoint(&id, &split, b"all", None)
-            .await
-            .unwrap();
+        backend.save_checkpoint(&id, &split, b"all").await.unwrap();
         let progress = backend.checkpoint_progress(&id).await.unwrap();
 
         let mut tx = pool.begin().await.unwrap();

@@ -230,7 +230,7 @@ impl RuntimeHost for Host {
             });
         }
         if !state.is_empty() {
-            checkpoints.insert(id, state);
+            crate::store_checkpoint(&mut checkpoints, id, state);
         }
         Ok(RuntimeCheckpointResult {
             found: false,

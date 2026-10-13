@@ -1902,8 +1902,10 @@ mod tests {
                 backend.save_checkpoint(instance, id, b"x").await.unwrap();
             }
         }
+        // Stored with the plain upsert, which never collapses: this exercises
+        // the primitive on its own.
         backend
-            .record_checkpoint("run", &split, b"all", None)
+            .save_checkpoint("run", &split, b"all")
             .await
             .unwrap();
         let progress = backend.checkpoint_progress("run").await.unwrap();
@@ -1979,6 +1981,13 @@ mod tests {
             backend,
         )
         .await;
+    }
+
+    /// Scope collapse contract, on the in-memory backend.
+    #[tokio::test]
+    async fn in_memory_backend_satisfies_the_scope_collapse_contract() {
+        let backend = InMemoryPersistence::new();
+        crate::persistence::conformance::scope_collapse::run_all(&backend).await;
     }
 
     /// Agent continuations, on the in-memory backend.

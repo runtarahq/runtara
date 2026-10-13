@@ -816,14 +816,17 @@ fn audit_03_durable_agent_and_split_caches_keep_sibling_results_on_replay() {
             json!({"a":"A","b":"B"})
         );
     }
+    // Each site's Split result replaced its Agent's row when it was
+    // recorded, so the replay above was served by two distinct Split rows.
     let checkpoints = host.checkpoints.lock().unwrap();
-    for kind in ["agent", "split"] {
+    for (kind, rows) in [("agent", 0), ("split", 2)] {
         assert_eq!(
             checkpoints
                 .keys()
                 .filter(|key| key.starts_with(&format!("runtara:v2:[\"{kind}\"")))
                 .count(),
-            2
+            rows,
+            "{kind}"
         );
     }
 }
@@ -1152,9 +1155,27 @@ fn audit_05_completed_loops_do_not_expire_during_later_replay() {
             let host = audit_deadline_host(1_000_000);
             let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
             assert_at(invoke(), 1_060_000);
-            assert!(host.checkpoints.lock().unwrap().iter().any(|(key, value)| {
+            let checkpoints = host.checkpoints.lock().unwrap().clone();
+            let completion = checkpoints.iter().any(|(key, value)| {
                 key.starts_with("runtara:v2:[\"loop-complete\"") && value == &[1]
-            }));
+            });
+            if split && durable {
+                // A durable Split's result replaces its own deadline rows:
+                // replay finds the result before it would read them.
+                assert!(!completion);
+                assert!(
+                    checkpoints
+                        .keys()
+                        .any(|key| key.starts_with("runtara:v2:[\"split\""))
+                );
+                assert!(
+                    !checkpoints
+                        .keys()
+                        .any(|key| key.starts_with("runtara:v2:[\"loop-deadline\""))
+                );
+            } else {
+                assert!(completion);
+            }
             *host.pinned_clock_ms.lock().unwrap() = Some(1_060_001);
             assert_eq!(completed(invoke()), json!({"ok":true}));
         }
