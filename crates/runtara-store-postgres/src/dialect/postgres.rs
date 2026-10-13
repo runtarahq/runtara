@@ -92,10 +92,10 @@ impl Dialect for PostgresDialect {
     }
 
     fn sql_save_checkpoint() -> &'static str {
-        "INSERT INTO checkpoints (instance_id, checkpoint_id, state, created_at) \
-         VALUES ($1, $2, $3, NOW()) \
+        "INSERT INTO checkpoints (instance_id, checkpoint_id, state, scope, created_at) \
+         VALUES ($1, $2, $3, $4, NOW()) \
          ON CONFLICT (instance_id, checkpoint_id) DO UPDATE \
-         SET state = EXCLUDED.state, created_at = NOW()"
+         SET state = EXCLUDED.state, scope = EXCLUDED.scope, created_at = NOW()"
     }
 
     fn sql_list_checkpoints() -> String {

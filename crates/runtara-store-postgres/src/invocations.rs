@@ -2,6 +2,7 @@
 //! transaction, including cancellation; root lifecycle UPDATEs share that lock.
 use crate::PostgresPersistence;
 use crate::dialect::{Dialect, PostgresDialect};
+use runtara_core::persistence::checkpoint_scope;
 use runtara_core::persistence::invocations::*;
 use sqlx::{PgConnection, Postgres, Transaction};
 
@@ -155,8 +156,10 @@ async fn checkpoint(
         return Ok(InvocationCheckpointResult { found: true, state });
     }
     if !write.state.is_empty() {
-        let inserted = sqlx::query("INSERT INTO checkpoints (instance_id,checkpoint_id,state,created_at) VALUES ($1,$2,$3,NOW()) ON CONFLICT (instance_id,checkpoint_id) DO NOTHING")
-            .bind(&token.lease.instance_id).bind(&write.checkpoint_id).bind(&write.state).execute(&mut *db).await.map_err(storage)?.rows_affected();
+        let inserted = sqlx::query("INSERT INTO checkpoints (instance_id,checkpoint_id,state,scope,created_at) VALUES ($1,$2,$3,$4,NOW()) ON CONFLICT (instance_id,checkpoint_id) DO NOTHING")
+            .bind(&token.lease.instance_id).bind(&write.checkpoint_id).bind(&write.state)
+            .bind(checkpoint_scope::scope(&write.checkpoint_id))
+            .execute(&mut *db).await.map_err(storage)?.rows_affected();
         if inserted == 0 {
             let state = sqlx::query_scalar(
                 "SELECT state FROM checkpoints WHERE instance_id=$1 AND checkpoint_id=$2",
@@ -172,6 +175,9 @@ async fn checkpoint(
             .bind(&token.lease.instance_id)
             .bind(&write.checkpoint_id)
             .execute(&mut *db)
+            .await
+            .map_err(storage)?;
+        crate::checkpoints::collapse_recorded(db, &token.lease.instance_id, &write.checkpoint_id)
             .await
             .map_err(storage)?;
     }
@@ -442,6 +448,7 @@ impl InvocationFences for PostgresPersistence {
             .bind(&token.lease.instance_id)
             .bind(&write.checkpoint_id)
             .bind(&write.state)
+            .bind(checkpoint_scope::scope(&write.checkpoint_id))
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
@@ -460,8 +467,10 @@ impl InvocationFences for PostgresPersistence {
     ) -> FenceResult<()> {
         let key = retry.storage_key()?;
         let mut tx = self.invocation_write_transaction(token).await?;
-        sqlx::query("INSERT INTO checkpoints (instance_id,checkpoint_id,state,is_retry_attempt,attempt_number,error_message,created_at) VALUES ($1,$2,'',true,$3,$4,NOW()) ON CONFLICT (instance_id,checkpoint_id) DO UPDATE SET attempt_number=EXCLUDED.attempt_number,error_message=EXCLUDED.error_message,created_at=NOW()")
-            .bind(&token.lease.instance_id).bind(key).bind(retry.attempt_number as i32).bind(&retry.error_message).execute(&mut *tx).await.map_err(storage)?;
+        sqlx::query("INSERT INTO checkpoints (instance_id,checkpoint_id,state,is_retry_attempt,attempt_number,error_message,scope,created_at) VALUES ($1,$2,'',true,$3,$4,$5,NOW()) ON CONFLICT (instance_id,checkpoint_id) DO UPDATE SET attempt_number=EXCLUDED.attempt_number,error_message=EXCLUDED.error_message,scope=EXCLUDED.scope,created_at=NOW()")
+            .bind(&token.lease.instance_id).bind(&key).bind(retry.attempt_number as i32).bind(&retry.error_message)
+            .bind(checkpoint_scope::scope(&key))
+            .execute(&mut *tx).await.map_err(storage)?;
         tx.commit().await.map_err(storage)
     }
     async fn invocation_event(

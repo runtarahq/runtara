@@ -114,7 +114,8 @@ pub(crate) trait Dialect: Send + Sync + 'static {
 
     /// SQL for upserting a checkpoint row.
     ///
-    /// Binds (in order): instance_id, checkpoint_id, state.
+    /// Binds (in order): instance_id, checkpoint_id, state, scope (the row's
+    /// address from `checkpoint_scope::scope`, or NULL).
     ///
     /// An idempotent upsert: `INSERT ... ON CONFLICT (instance_id,
     /// checkpoint_id) DO UPDATE`, refreshing `state` and `created_at` instead

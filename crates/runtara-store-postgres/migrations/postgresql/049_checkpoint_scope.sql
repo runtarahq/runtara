@@ -1,0 +1,16 @@
+-- Where each checkpoint sits in its run: an address derived from a structured
+-- (version 2) checkpoint key when the row is written, NULL for any other key.
+-- Every row inside one composite step (a Split's iterations, an embedded
+-- child's steps) shares a byte prefix of the address, so recording the step's
+-- result can delete the rows inside it as one index range scan. The index is
+-- built by the next migration.
+--
+-- The "C" collation compares bytes, which is what a prefix range needs.
+-- Rows written before this migration keep NULL and are never collapsed.
+--
+-- A nullable column with no default changes only the catalog: nothing is
+-- rewritten. Its ACCESS EXCLUSIVE lock first waits for any transaction
+-- already using the table, and checkpoint reads and writes that arrive
+-- meanwhile queue behind it; once granted, it is released when this
+-- migration commits.
+ALTER TABLE checkpoints ADD COLUMN scope TEXT COLLATE "C";

@@ -441,9 +441,11 @@ impl InstanceRepository {
     ///
     /// Restart policy is Environment's: the counters exist so
     /// [`crate::recovery`] can tell an instance that is making progress from
-    /// one that is stuck, and core reads neither. `marker` is the checkpoint
-    /// count observed at recovery time; comparing it to the current count on
-    /// the next recovery is what distinguishes "made progress" from "stuck".
+    /// one that is stuck, and core reads neither. `marker` is the instance's
+    /// checkpoint progress (`Persistence::checkpoint_progress`) observed at
+    /// recovery time, stored as `id:<n>`; comparing it to the current value
+    /// on the next recovery is what distinguishes "made progress" from
+    /// "stuck".
     pub async fn mark_for_recovery(
         &self,
         instance_id: &str,

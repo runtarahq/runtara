@@ -45,6 +45,9 @@ macro_rules! impl_checkpoint_ops {
                     .bind(instance_id)
                     .bind(checkpoint_id)
                     .bind(state)
+                    .bind(::runtara_core::persistence::checkpoint_scope::scope(
+                        checkpoint_id,
+                    ))
                     .execute(pool)
                     .await
                     .map_err(|e| wrap_checkpoint_save(e, instance_id))?;

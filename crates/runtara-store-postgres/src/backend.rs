@@ -267,11 +267,12 @@ async fn save_retry_attempt(
 
     sqlx::query(
         r#"
-        INSERT INTO checkpoints (instance_id, checkpoint_id, state, is_retry_attempt, attempt_number, error_message, created_at)
-        VALUES ($1, $2, '', true, $3, $4, NOW())
+        INSERT INTO checkpoints (instance_id, checkpoint_id, state, is_retry_attempt, attempt_number, error_message, scope, created_at)
+        VALUES ($1, $2, '', true, $3, $4, $5, NOW())
         ON CONFLICT (instance_id, checkpoint_id) DO UPDATE
         SET attempt_number = EXCLUDED.attempt_number,
             error_message = EXCLUDED.error_message,
+            scope = EXCLUDED.scope,
             created_at = NOW()
         "#,
     )
@@ -279,6 +280,9 @@ async fn save_retry_attempt(
     .bind(&retry_checkpoint_id)
     .bind(attempt_number)
     .bind(error_message)
+    .bind(runtara_core::persistence::checkpoint_scope::scope(
+        &retry_checkpoint_id,
+    ))
     .execute(pool)
     .await
     .map_err(|e| CoreError::CheckpointSaveFailed {
@@ -764,6 +768,9 @@ impl Persistence for PostgresPersistence {
             .bind(instance_id)
             .bind(checkpoint_id)
             .bind(state)
+            .bind(runtara_core::persistence::checkpoint_scope::scope(
+                checkpoint_id,
+            ))
             .execute(&mut *tx)
             .await
             .map_err(|e| crate::ops_common::error::wrap_checkpoint_save(e, instance_id))?;
@@ -821,6 +828,25 @@ impl Persistence for PostgresPersistence {
             created_before,
         )
         .await
+    }
+
+    /// The instance's highest row id: it rises with every new row, since ids
+    /// come from one sequence. A collapse inserts the step's result row in
+    /// the transaction that deletes the rows inside the step, so the maximum
+    /// does not fall.
+    ///
+    /// `MAX(id + 0)`, not `MAX(id)`: a bare `MAX(id)` lets the planner walk
+    /// the primary key backwards from the newest row of every instance until
+    /// it meets one of this instance's; the expression makes it read this
+    /// instance's rows through `idx_checkpoints_instance` instead.
+    async fn checkpoint_progress(&self, instance_id: &str) -> Result<i64, CoreError> {
+        sqlx::query_scalar(
+            "SELECT COALESCE(MAX(id + 0), 0) FROM checkpoints WHERE instance_id = $1",
+        )
+        .bind(instance_id)
+        .fetch_one(&self.pool)
+        .await
+        .db()
     }
 
     async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError> {
@@ -1101,19 +1127,23 @@ impl Persistence for PostgresPersistence {
         let sql = format!(
             "WITH fence AS ({}) \
              INSERT INTO checkpoints (instance_id, checkpoint_id, state, is_retry_attempt, \
-                                      attempt_number, error_message, created_at) \
-             SELECT instance_id, $2, '', true, $3, $4, NOW() FROM fence \
+                                      attempt_number, error_message, scope, created_at) \
+             SELECT instance_id, $2, '', true, $3, $4, $5, NOW() FROM fence \
              ON CONFLICT (instance_id, checkpoint_id) DO UPDATE \
              SET attempt_number = EXCLUDED.attempt_number, \
                  error_message = EXCLUDED.error_message, \
+                 scope = EXCLUDED.scope, \
                  created_at = NOW()",
-            crate::root_owner::fence(owner, 5, false)
+            crate::root_owner::fence(owner, 6, false)
         );
         let query = sqlx::query(&sql)
             .bind(instance_id)
             .bind(&retry_checkpoint_id)
             .bind(attempt)
-            .bind(error_message);
+            .bind(error_message)
+            .bind(runtara_core::persistence::checkpoint_scope::scope(
+                &retry_checkpoint_id,
+            ));
         let written = crate::root_owner::bind_owner(query, owner)
             .execute(&self.pool)
             .await
@@ -4084,5 +4114,218 @@ mod tests {
         assert_eq!(steps[0].correlation_id, "step-nested");
 
         cleanup_step_summary_instance(&pool, &instance_id).await;
+    }
+
+    /// A structured checkpoint key, shaped as the workflow stdlib writes it.
+    fn v2_key(kind: &str, loops: serde_json::Value, parts: serde_json::Value) -> String {
+        format!(
+            "runtara:v2:{}",
+            serde_json::json!([kind, "wf", [], loops, parts])
+        )
+    }
+
+    async fn stored_scopes(
+        pool: &PgPool,
+        instance_id: &str,
+    ) -> std::collections::BTreeMap<String, Option<String>> {
+        sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT checkpoint_id, scope FROM checkpoints WHERE instance_id = $1",
+        )
+        .bind(instance_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect()
+    }
+
+    /// The rows of one Split `s`: its iterations and its own rows, which a
+    /// collapse deletes, and neighbours it must keep.
+    fn split_fixture() -> (String, Vec<String>, Vec<String>) {
+        use serde_json::json;
+        let split = v2_key("split", json!([]), json!(["s"]));
+        let inside = (0..12)
+            .map(|i| v2_key("agent", json!([["Split", "s", i]]), json!(["u", "c", "x"])))
+            .chain([
+                format!("{split}::attempt::1"),
+                v2_key("loop-complete", json!([]), json!(["Split", "root", "s"])),
+            ])
+            .collect();
+        let outside = vec![
+            v2_key("agent", json!([]), json!(["u", "c", "a"])),
+            v2_key("agent", json!([["Split", "s2", 0]]), json!(["u", "c", "x"])),
+            v2_key("agent", json!([["Split", "r", 0]]), json!(["u", "c", "x"])),
+            "wf::agent::u::c::x::[0]".to_string(),
+        ];
+        (split, inside, outside)
+    }
+
+    #[tokio::test]
+    async fn every_checkpoint_write_stores_the_rows_address() {
+        use runtara_core::persistence::checkpoint_scope::scope;
+        use serde_json::json;
+        let pool = test_pool().await;
+        let backend = PostgresPersistence::new(pool.clone());
+        let uuid = Uuid::new_v4();
+        create_test_instance(&pool, uuid, "scope-tenant").await;
+        let id = uuid.to_string();
+
+        let result = v2_key("agent", json!([["Split", "s", 2]]), json!(["u", "c", "x"]));
+        let saved = v2_key("delay", json!([]), json!(["d"]));
+        let sleep = v2_key("delay", json!([]), json!(["nap"]));
+        let legacy = "wf::agent::u::c::x::[2]";
+        backend
+            .record_checkpoint(&id, &result, b"r", None)
+            .await
+            .unwrap();
+        backend.save_checkpoint(&id, &saved, b"s").await.unwrap();
+        backend
+            .save_sleep_checkpoint(&id, &sleep, b"z", None)
+            .await
+            .unwrap();
+        backend
+            .save_retry_attempt(&id, &result, 2, Some("boom"))
+            .await
+            .unwrap();
+        backend
+            .record_retry_attempt(&id, &result, 3, Some("boom"), None)
+            .await
+            .unwrap();
+        backend
+            .record_checkpoint(&id, legacy, b"l", None)
+            .await
+            .unwrap();
+
+        let scopes = stored_scopes(&pool, &id).await;
+        let written = [
+            result.clone(),
+            saved,
+            sleep,
+            format!("{result}::retry::2"),
+            format!("{result}::retry::3"),
+        ];
+        for key in &written {
+            assert!(scopes[key].is_some(), "{key} has an address");
+            assert_eq!(scopes[key], scope(key), "{key}");
+        }
+        assert_eq!(scopes[legacy], None, "a legacy key has no address");
+
+        cleanup_test_instance(&pool, uuid).await;
+    }
+
+    #[tokio::test]
+    async fn a_collapse_deletes_exactly_the_closed_scope() {
+        use runtara_core::persistence::checkpoint_scope::loop_closure;
+        let pool = test_pool().await;
+        let backend = PostgresPersistence::new(pool.clone());
+        let (run, other) = (Uuid::new_v4(), Uuid::new_v4());
+        create_test_instance(&pool, run, "scope-tenant").await;
+        create_test_instance(&pool, other, "scope-tenant").await;
+        let (run_id, other_id) = (run.to_string(), other.to_string());
+        let (split, inside, outside) = split_fixture();
+        for key in inside.iter().chain(&outside) {
+            for id in [&run_id, &other_id] {
+                backend.save_checkpoint(id, key, b"x").await.unwrap();
+            }
+        }
+        backend
+            .record_checkpoint(&run_id, &split, b"all", None)
+            .await
+            .unwrap();
+
+        let closure = loop_closure(&split).unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let deleted = crate::checkpoints::collapse(&mut tx, &run_id, &split, &closure)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(deleted, inside.len() as u64);
+        let left: std::collections::BTreeSet<String> =
+            stored_scopes(&pool, &run_id).await.into_keys().collect();
+        let expected: std::collections::BTreeSet<String> =
+            outside.iter().cloned().chain([split]).collect();
+        assert_eq!(left, expected);
+        assert_eq!(
+            stored_scopes(&pool, &other_id).await.len(),
+            inside.len() + outside.len(),
+            "another instance's rows are untouched"
+        );
+
+        cleanup_test_instance(&pool, run).await;
+        cleanup_test_instance(&pool, other).await;
+    }
+
+    /// A crash before the recording transaction commits leaves the inner rows
+    /// for replay to resume from, and no result row.
+    #[tokio::test]
+    async fn a_collapse_that_never_commits_leaves_the_inner_rows() {
+        use runtara_core::persistence::checkpoint_scope::loop_closure;
+        let pool = test_pool().await;
+        let backend = PostgresPersistence::new(pool.clone());
+        let uuid = Uuid::new_v4();
+        create_test_instance(&pool, uuid, "scope-tenant").await;
+        let id = uuid.to_string();
+        let (split, inside, _) = split_fixture();
+        for key in &inside {
+            backend.save_checkpoint(&id, key, b"x").await.unwrap();
+        }
+
+        let closure = loop_closure(&split).unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        crate::checkpoints::record(&mut tx, &id, &split, b"all")
+            .await
+            .unwrap();
+        crate::checkpoints::collapse(&mut tx, &id, &split, &closure)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+
+        let left: std::collections::BTreeSet<String> =
+            stored_scopes(&pool, &id).await.into_keys().collect();
+        let expected: std::collections::BTreeSet<String> = inside.iter().cloned().collect();
+        assert_eq!(left, expected);
+
+        cleanup_test_instance(&pool, uuid).await;
+    }
+
+    #[tokio::test]
+    async fn checkpoint_progress_does_not_fall_when_a_scope_collapses() {
+        use runtara_core::persistence::checkpoint_scope::loop_closure;
+        let pool = test_pool().await;
+        let backend = PostgresPersistence::new(pool.clone());
+        let uuid = Uuid::new_v4();
+        create_test_instance(&pool, uuid, "scope-tenant").await;
+        let id = uuid.to_string();
+        assert_eq!(backend.checkpoint_progress(&id).await.unwrap(), 0);
+
+        let (split, inside, _) = split_fixture();
+        for key in &inside {
+            backend.save_checkpoint(&id, key, b"x").await.unwrap();
+        }
+        backend
+            .record_checkpoint(&id, &split, b"all", None)
+            .await
+            .unwrap();
+        let progress = backend.checkpoint_progress(&id).await.unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        crate::checkpoints::collapse(&mut tx, &id, &split, &loop_closure(&split).unwrap())
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(
+            backend
+                .count_checkpoints(&id, None, None, None)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(backend.checkpoint_progress(&id).await.unwrap(), progress);
+
+        backend.save_checkpoint(&id, "later", b"x").await.unwrap();
+        assert!(backend.checkpoint_progress(&id).await.unwrap() > progress);
+
+        cleanup_test_instance(&pool, uuid).await;
     }
 }

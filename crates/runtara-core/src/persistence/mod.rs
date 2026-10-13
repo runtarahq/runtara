@@ -31,6 +31,10 @@ pub mod continuations;
 /// A run's queryable state, merged once per writing step.
 pub mod run_state;
 
+/// Where a structured checkpoint sits in its run, and which rows recording a
+/// composite step's result makes obsolete.
+pub mod checkpoint_scope;
+
 pub use self::vocabulary::{EventVocabulary, EventVocabularySpec};
 
 use crate::domain::{EventType, InstanceStatus, SignalType};
@@ -1011,8 +1015,14 @@ pub trait Persistence: Send + Sync {
     /// The write is fenced by `owner` (see [`ExecutionWriter`]): a superseded
     /// execution gets [`CoreError::Superseded`] and writes nothing.
     ///
+    /// When the key is a composite step's result with a
+    /// [`checkpoint_scope::closure`], the transaction that stores it also
+    /// deletes the rows that closure names: replay reads the result first and
+    /// never needs them again. Only the call that stores the row collapses; a
+    /// call that finds the key stored writes nothing at all.
+    ///
     /// The default is a non-atomic, unfenced read-then-write for test
-    /// doubles; durable backends override it.
+    /// doubles, and collapses nothing; durable backends override it.
     async fn record_checkpoint(
         &self,
         instance_id: &str,
@@ -1106,6 +1116,20 @@ pub trait Persistence: Send + Sync {
         created_after: Option<DateTime<Utc>>,
         created_before: Option<DateTime<Utc>>,
     ) -> Result<i64, CoreError>;
+
+    /// A number that rises whenever the instance stores a new checkpoint row,
+    /// and does not fall when recording a composite step's result deletes the
+    /// rows inside it (see [`Self::record_checkpoint`]).
+    ///
+    /// Recovery compares it across restarts to tell an instance that moved
+    /// forward from one stuck in a crash loop. A row count cannot do that once
+    /// rows are collapsed: it falls while the run makes progress.
+    ///
+    /// The default is [`Self::count_checkpoints`], which is right for a
+    /// backend that never collapses rows.
+    async fn checkpoint_progress(&self, instance_id: &str) -> Result<i64, CoreError> {
+        self.count_checkpoints(instance_id, None, None, None).await
+    }
 
     /// Append an event to an instance's timeline.
     ///
