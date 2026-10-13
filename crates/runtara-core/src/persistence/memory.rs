@@ -35,7 +35,7 @@ use crate::persistence::{
     CheckpointRecord, CheckpointWrite, CompleteInstanceGuard, CompleteInstanceParams,
     CustomSignalRecord, EventRecord, EventSortOrder, EventVocabulary, InstanceRecord,
     ListEventsFilter, ListPairedRecordsFilter, PairedRecordStatus, PairedRecordSummary,
-    Persistence, SignalRecord,
+    Persistence, SignalRecord, checkpoint_scope,
 };
 
 #[derive(Default)]
@@ -57,6 +57,9 @@ struct Store {
     instances: HashMap<String, InstanceRecord>,
     /// Ordered by insertion; `(instance_id, checkpoint_id)` is unique.
     checkpoints: Vec<CheckpointRecord>,
+    /// Rows each instance lost to scope collapses, so that
+    /// `checkpoint_progress` does not fall when a collapse deletes them.
+    collapsed_checkpoints: HashMap<String, i64>,
     /// Ordered by insertion, which is also the tiebreak for equal timestamps.
     events: Vec<EventRecord>,
     /// One pending signal per instance.
@@ -134,6 +137,38 @@ impl Store {
             state: state.to_vec(),
             created_at: Utc::now(),
         });
+    }
+
+    /// Delete the rows that recording `checkpoint_id` makes obsolete, if its
+    /// kind has a closure (see [`checkpoint_scope::closure`]).
+    fn collapse_checkpoints(&mut self, instance_id: &str, checkpoint_id: &str) {
+        if let Some(closure) = checkpoint_scope::closure(checkpoint_id) {
+            self.collapse_scope(instance_id, checkpoint_id, &closure);
+        }
+    }
+
+    /// Delete the instance's rows that `closure` covers, keeping
+    /// `checkpoint_id` itself, and count them toward progress. Rows with no
+    /// address are never covered.
+    fn collapse_scope(
+        &mut self,
+        instance_id: &str,
+        checkpoint_id: &str,
+        closure: &checkpoint_scope::ScopeClosure,
+    ) -> usize {
+        let before = self.checkpoints.len();
+        self.checkpoints.retain(|c| {
+            c.instance_id != instance_id
+                || c.checkpoint_id == checkpoint_id
+                || !checkpoint_scope::scope(&c.checkpoint_id)
+                    .is_some_and(|scope| closure.covers(&scope))
+        });
+        let removed = before - self.checkpoints.len();
+        *self
+            .collapsed_checkpoints
+            .entry(instance_id.to_string())
+            .or_default() += removed as i64;
+        removed
     }
 
     /// Apply a completion request to a locked store.
@@ -809,7 +844,9 @@ impl Persistence for InMemoryPersistence {
             .iter()
             .find(|c| c.instance_id == instance_id && c.checkpoint_id == checkpoint_id)
         {
-            return Ok(CheckpointWrite::Existing(existing.state.clone()));
+            let existing = existing.state.clone();
+            store.collapse_checkpoints(instance_id, checkpoint_id);
+            return Ok(CheckpointWrite::Existing(existing));
         }
         store.instance_mut(instance_id)?.checkpoint_id = Some(checkpoint_id.to_string());
         store.checkpoints.push(CheckpointRecord {
@@ -818,6 +855,7 @@ impl Persistence for InMemoryPersistence {
             state: state.to_vec(),
             created_at: Utc::now(),
         });
+        store.collapse_checkpoints(instance_id, checkpoint_id);
         Ok(CheckpointWrite::Recorded)
     }
 
@@ -888,6 +926,21 @@ impl Persistence for InMemoryPersistence {
             .filter(|c| created_after.is_none_or(|t| c.created_at >= t))
             .filter(|c| created_before.is_none_or(|t| c.created_at < t))
             .count() as i64)
+    }
+
+    async fn checkpoint_progress(&self, instance_id: &str) -> Result<i64, CoreError> {
+        let store = self.store.lock().unwrap();
+        let stored = store
+            .checkpoints
+            .iter()
+            .filter(|c| c.instance_id == instance_id)
+            .count() as i64;
+        let collapsed = store
+            .collapsed_checkpoints
+            .get(instance_id)
+            .copied()
+            .unwrap_or(0);
+        Ok(stored + collapsed)
     }
 
     async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError> {
@@ -1474,6 +1527,7 @@ impl Persistence for InMemoryPersistence {
                 deleted += 1;
             }
             store.checkpoints.retain(|c| &c.instance_id != id);
+            store.collapsed_checkpoints.remove(id);
             store.events.retain(|e| &e.instance_id != id);
             store.signals.remove(id);
             store.input_parks.remove(id);
@@ -1817,6 +1871,78 @@ mod tests {
             paged.push(page[0].instance_id.clone());
         }
         assert_eq!(paged, order, "paging must tile the tie-broken order");
+    }
+
+    /// A collapse deletes exactly what its closure covers, keeps the recorded
+    /// row, rows with no address and other instances' rows, and the deleted
+    /// rows still count toward progress.
+    #[tokio::test]
+    async fn a_scope_collapse_deletes_only_covered_rows_and_keeps_progress() {
+        use serde_json::json;
+        let v2 = |kind: &str, loops: serde_json::Value, parts: serde_json::Value| {
+            format!("runtara:v2:{}", json!([kind, "wf", [], loops, parts]))
+        };
+        let backend = InMemoryPersistence::new();
+        for id in ["run", "other"] {
+            backend.register_instance(id, "collapse").await.unwrap();
+        }
+        let split = v2("split", json!([]), json!(["s"]));
+        let inside: Vec<String> = (0..3)
+            .map(|i| v2("agent", json!([["Split", "s", i]]), json!(["u", "c", "x"])))
+            .chain([format!("{split}::attempt::1")])
+            .collect();
+        let outside = [
+            v2("agent", json!([]), json!(["u", "c", "a"])),
+            v2("agent", json!([["Split", "s2", 0]]), json!(["u", "c", "x"])),
+            "wf::agent::u::c::x::[0]".to_string(),
+        ];
+        for id in inside.iter().chain(&outside) {
+            for instance in ["run", "other"] {
+                backend.save_checkpoint(instance, id, b"x").await.unwrap();
+            }
+        }
+        backend
+            .record_checkpoint("run", &split, b"all", None)
+            .await
+            .unwrap();
+        let progress = backend.checkpoint_progress("run").await.unwrap();
+
+        let closure = checkpoint_scope::loop_closure(&split, "Split").unwrap();
+        let removed = backend
+            .store
+            .lock()
+            .unwrap()
+            .collapse_scope("run", &split, &closure);
+
+        assert_eq!(removed, inside.len());
+        let left: std::collections::BTreeSet<String> = backend
+            .list_checkpoints("run", None, 100, 0, None, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.checkpoint_id)
+            .collect();
+        let expected: std::collections::BTreeSet<String> =
+            outside.iter().cloned().chain([split.clone()]).collect();
+        assert_eq!(left, expected);
+        assert_eq!(
+            backend
+                .count_checkpoints("other", None, None, None)
+                .await
+                .unwrap(),
+            (inside.len() + outside.len()) as i64,
+            "another instance's rows are untouched"
+        );
+        assert_eq!(
+            backend.checkpoint_progress("run").await.unwrap(),
+            progress,
+            "a collapse does not lower progress"
+        );
+        backend.save_checkpoint("run", "later", b"x").await.unwrap();
+        assert_eq!(
+            backend.checkpoint_progress("run").await.unwrap(),
+            progress + 1
+        );
     }
 
     /// Run the backend contract against the in-memory implementation.

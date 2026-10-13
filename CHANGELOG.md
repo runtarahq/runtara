@@ -269,6 +269,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Checkpoints record where they sit in their run.** Migration 049 adds an
+  indexed `checkpoints.scope`: an address derived from a structured (version
+  2) checkpoint key when the row is written, NULL for any other key. The rows
+  inside one composite step share a prefix of it, so recording the step's
+  result can delete them in the same transaction. No step collapses its rows
+  yet; that lands per composite step. Crash-loop recovery now measures a run's
+  progress with `Persistence::checkpoint_progress` (the highest checkpoint row
+  id) instead of the row count, which falls once rows are collapsed. Recovery
+  markers stored before this change were counts, so an instance's first
+  recovery after the upgrade counts as progress.
 - **Core's HTTP instance API is off by default.** The loopback listener on
   `RUNTARA_CORE_HTTP_PORT` (8003) starts only with
   `RUNTARA_CORE_INSTANCE_API=true`. Workflows never used it; they reach Core

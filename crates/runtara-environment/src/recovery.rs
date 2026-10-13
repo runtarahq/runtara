@@ -19,9 +19,9 @@
 //!
 //! A crash-loop cap (`RUNTARA_MAX_AUTO_RESTARTS`) bounds instances that crash
 //! before making progress. The cap counts only CONSECUTIVE no-progress
-//! restarts: the counter resets whenever the instance's checkpoint count
-//! advances between recoveries, so a genuinely long-running workflow survives
-//! any number of restarts.
+//! restarts: the counter resets whenever the instance's checkpoint progress
+//! (`Persistence::checkpoint_progress`) advances between recoveries, so a
+//! genuinely long-running workflow survives any number of restarts.
 
 use crate::config::{ProcessEnv, Vars, parse_enabled, positive};
 use runtara_core::persistence::{CompleteInstanceParams, Persistence};
@@ -434,11 +434,12 @@ pub(crate) async fn recover_or_fail_for(
         auto_recover,
         max_auto_restarts: cap,
     } = policy;
-    // Progress fingerprint: total checkpoints written for this instance.
-    // Monotonic, so a higher count than the last recovery means the instance
-    // made forward progress across the restart.
+    // Progress fingerprint: rises with every checkpoint the instance stores,
+    // and does not fall when a composite step's result deletes the rows inside
+    // it, as a row count would. A higher value than at the last recovery means
+    // the instance made forward progress across the restart.
     let progress = persistence
-        .count_checkpoints(instance_id, None, None, None)
+        .checkpoint_progress(instance_id)
         .await
         .unwrap_or(0);
     let marker = progress.to_string();
@@ -698,6 +699,80 @@ mod persistence_tests {
                 assert_eq!(snapshot(&pool, &id).await, before, "state {status}");
             }
         }
+    }
+
+    /// Recording a composite step's result deletes the rows inside it, so a
+    /// run can hold fewer checkpoints after moving forward. A restart after
+    /// that is progress, not a step toward the crash-loop cap.
+    #[tokio::test]
+    async fn rows_collapsed_between_restarts_still_count_as_progress() {
+        use runtara_core::persistence::Persistence;
+        let pool = crate::test_support::pool().await;
+        let persistence = PostgresPersistence::new(pool.clone());
+        let id = crate::test_support::unique_id("recovery-collapse");
+        sqlx::query(
+            "INSERT INTO instances (instance_id, tenant_id, status) \
+             VALUES ($1, 'recovery-test', 'running')",
+        )
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .expect("create running instance");
+        let key = |kind: &str, loops: serde_json::Value, parts: serde_json::Value| {
+            format!(
+                "runtara:v2:{}",
+                serde_json::json!([kind, "wf", [], loops, parts])
+            )
+        };
+        // Killed mid-Split, with every finished iteration checkpointed.
+        for i in 0..20 {
+            let item = key(
+                "agent",
+                serde_json::json!([["Split", "s", i]]),
+                serde_json::json!(["u", "c", "x"]),
+            );
+            persistence.save_checkpoint(&id, &item, b"x").await.unwrap();
+        }
+        assert_eq!(
+            recover_or_fail_with(&pool, &persistence, &id, policy(true))
+                .await
+                .expect("first recovery"),
+            RecoveryOutcome::Recovered
+        );
+
+        // The relaunch finishes the Split: its result is recorded and the
+        // rows inside it are deleted. Then it is killed again.
+        sqlx::query(
+            "UPDATE instances SET status = 'running', sleep_until = NULL, wake_reason = NULL \
+             WHERE instance_id = $1",
+        )
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .expect("relaunch");
+        let split = key("split", serde_json::json!([]), serde_json::json!(["s"]));
+        persistence
+            .save_checkpoint(&id, &split, b"all")
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM checkpoints WHERE instance_id = $1 AND checkpoint_id <> $2")
+            .bind(&id)
+            .bind(&split)
+            .execute(&pool)
+            .await
+            .expect("collapse the Split's iterations");
+
+        assert_eq!(
+            recover_or_fail_with(&pool, &persistence, &id, policy(true))
+                .await
+                .expect("second recovery"),
+            RecoveryOutcome::Recovered
+        );
+        assert_eq!(
+            snapshot(&pool, &id).await["recovery_attempts"],
+            1,
+            "progress across the restart resets the crash-loop counter"
+        );
     }
 
     #[tokio::test]

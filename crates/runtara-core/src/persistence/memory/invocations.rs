@@ -89,6 +89,7 @@ fn checkpoint(
             .get_mut(&token.lease.instance_id)
             .unwrap()
             .checkpoint_id = Some(checkpoint.checkpoint_id.clone());
+        store.collapse_checkpoints(&token.lease.instance_id, &checkpoint.checkpoint_id);
     }
     InvocationCheckpointResult {
         found: false,
