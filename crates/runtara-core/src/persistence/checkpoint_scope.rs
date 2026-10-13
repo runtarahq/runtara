@@ -42,6 +42,10 @@
 //! be matched when steps share an id at one position (an `onWait` branch may
 //! reuse a main-graph id). It is left untagged, and goes when an enclosing
 //! step collapses.
+//!
+//! Stores keep the address in each row, and later closures match rows written
+//! earlier, so the format only grows: a change that renders an existing kind
+//! differently leaves its older rows unmatched, never collapsed.
 
 use serde_json::{Value, json};
 
@@ -76,26 +80,21 @@ pub fn scope(checkpoint_id: &str) -> Option<String> {
 pub struct ScopeClosure {
     /// The exact address of the rows the step keeps for itself.
     pub owned: String,
-    /// A byte prefix of every address inside the step, if it has an inside.
-    pub inner: Option<String>,
+    /// A byte prefix of every address inside the step.
+    pub inner: String,
 }
 
 impl ScopeClosure {
     /// Whether a row at `scope` is obsolete. The recorded row itself is
     /// tagged `base`, never `own`, and no inner prefix reaches its position.
     pub fn covers(&self, scope: &str) -> bool {
-        scope == self.owned
-            || self
-                .inner
-                .as_deref()
-                .is_some_and(|prefix| scope.starts_with(prefix))
+        scope == self.owned || scope.starts_with(&self.inner)
     }
 
     /// `inner` as a half-open byte range `[low, high)`, for an index range
     /// scan under a bytewise ("C") collation.
-    pub fn inner_bounds(&self) -> Option<(&str, String)> {
-        let prefix = self.inner.as_deref()?;
-        Some((prefix, byte_successor(prefix)))
+    pub fn inner_bounds(&self) -> (&str, String) {
+        (&self.inner, byte_successor(&self.inner))
     }
 }
 
@@ -125,7 +124,7 @@ pub fn loop_closure(checkpoint_id: &str) -> Option<ScopeClosure> {
         _ => return None,
     };
     let step = key.result_step()?;
-    key.closure(open_segment(&json!([loop_kind, step])))
+    key.closure(opened(encode(&json!([loop_kind, step]))))
 }
 
 /// The closure of a result that stands for a child invocation (an
@@ -137,7 +136,7 @@ pub fn child_closure(checkpoint_id: &str) -> Option<ScopeClosure> {
         return None;
     }
     let step = key.result_step()?;
-    key.closure(encode_one(&json!(["ns", "child", [step]])))
+    key.closure(encode(&json!(["ns", "child", [step]])))
 }
 
 /// A parsed version 2 key.
@@ -241,11 +240,8 @@ impl Key {
         let mut owned = self.position();
         owned.push(json!(["own", self.kind, self.parts]));
         let owned = bounded(encode(&owned))?;
-        let inner = open(&self.position()) + &inner;
-        Some(ScopeClosure {
-            owned,
-            inner: Some(inner),
-        })
+        let inner = opened(encode(&self.position())) + &inner;
+        Some(ScopeClosure { owned, inner })
     }
 }
 
@@ -265,27 +261,16 @@ fn loop_segment((kind, step, index): &Loop) -> Value {
     json!([kind, step, index])
 }
 
-fn encode(segments: &[Value]) -> String {
-    serde_json::to_string(segments).expect("JSON values always encode")
+fn encode<T: serde::Serialize + ?Sized>(value: &T) -> String {
+    serde_json::to_string(value).expect("JSON values always encode")
 }
 
-fn encode_one(segment: &Value) -> String {
-    serde_json::to_string(segment).expect("JSON values always encode")
-}
-
-/// An address array with its closing bracket replaced by a separator, ready
-/// for one more segment. Positions always hold at least a workflow segment.
-fn open(position: &[Value]) -> String {
-    let mut encoded = encode(position);
-    encoded.pop();
-    encoded.push(',');
-    encoded
-}
-
-/// A segment array with its closing bracket replaced by a separator, so the
-/// prefix matches the segment with any further elements (a loop's index).
-fn open_segment(segment: &Value) -> String {
-    let mut encoded = encode_one(segment);
+/// An encoded non-empty array with its closing bracket replaced by a
+/// separator: a prefix of the same array with more elements. Opening a
+/// position makes room for one more segment; opening a loop segment matches
+/// any of its iterations.
+fn opened(mut encoded: String) -> String {
+    debug_assert!(encoded.ends_with(']') && encoded != "[]");
     encoded.pop();
     encoded.push(',');
     encoded
@@ -756,7 +741,7 @@ mod tests {
     fn inner_bounds_select_exactly_the_prefixed_addresses() {
         let split = key("split", "wf", json!([]), json!([]), json!(["s"]));
         let closure = loop_closure(&split).unwrap();
-        let (low, high) = closure.inner_bounds().unwrap();
+        let (low, high) = closure.inner_bounds();
         let candidates = [
             agent("x", json!([]), json!([["Split", "s", 0]])),
             agent("x", json!([]), json!([["Split", "s", 99]])),

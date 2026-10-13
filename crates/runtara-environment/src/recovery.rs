@@ -312,13 +312,20 @@ enum Decision {
     Fail { error: String },
 }
 
+/// The unit prefix of a stored progress marker: the instance's checkpoint
+/// progress (`Persistence::checkpoint_progress`). Markers once held a row
+/// count, in another unit. A marker without this prefix, whether written
+/// before the change or by an earlier release reading it after a rollback,
+/// cannot be compared and reads as no prior marker.
+const PROGRESS_MARKER: &str = "id:";
+
 /// Decide whether to recover, given the prior counters, the current progress
-/// fingerprint (checkpoint count), the cap, and the Environment-wide
+/// fingerprint (checkpoint progress), the cap, and the Environment-wide
 /// auto-recovery switch.
 ///
 /// The counter resets to 1 when progress advanced since the last recovery (or
-/// there was no prior recovery); otherwise it increments. Once it would exceed
-/// `cap`, or auto-recovery is disabled, the instance fails.
+/// there was no comparable prior marker); otherwise it increments. Once it
+/// would exceed `cap`, or auto-recovery is disabled, the instance fails.
 fn decide(
     prev_attempts: i32,
     prev_marker: Option<&str>,
@@ -327,6 +334,7 @@ fn decide(
     auto_recover: bool,
 ) -> Decision {
     let made_progress = prev_marker
+        .and_then(|m| m.strip_prefix(PROGRESS_MARKER))
         .and_then(|m| m.parse::<i64>().ok())
         .map(|p| progress > p)
         .unwrap_or(true);
@@ -442,7 +450,7 @@ pub(crate) async fn recover_or_fail_for(
         .checkpoint_progress(instance_id)
         .await
         .unwrap_or(0);
-    let marker = progress.to_string();
+    let marker = format!("{PROGRESS_MARKER}{progress}");
 
     // Prior crash-loop counters (best-effort; treat read failure as a fresh
     // instance so we err toward recovering rather than failing).
@@ -518,13 +526,13 @@ mod tests {
 
     #[test]
     fn no_progress_increments_toward_cap() {
-        // Same checkpoint count as last recovery → no progress → increment.
+        // Same checkpoint progress as last recovery → no progress → increment.
         assert_eq!(
-            decide(1, Some("0"), 0, 5, true),
+            decide(1, Some("id:0"), 0, 5, true),
             Decision::Recover { attempt: 2 }
         );
         assert_eq!(
-            decide(4, Some("0"), 0, 5, true),
+            decide(4, Some("id:0"), 0, 5, true),
             Decision::Recover { attempt: 5 }
         );
     }
@@ -532,7 +540,7 @@ mod tests {
     #[test]
     fn exceeding_cap_fails() {
         // attempt would be 6 > cap 5 → fail terminally.
-        match decide(5, Some("0"), 0, 5, true) {
+        match decide(5, Some("id:0"), 0, 5, true) {
             Decision::Fail { error } => assert!(error.contains("restart limit (5)")),
             other => panic!("expected Fail, got {other:?}"),
         }
@@ -540,13 +548,27 @@ mod tests {
 
     #[test]
     fn forward_progress_resets_counter() {
-        // Checkpoint count advanced (3 > 0) since last recovery → reset to 1
-        // even though prev_attempts was at the cap. A long-running workflow
+        // Checkpoint progress advanced (3 > 0) since last recovery → reset to
+        // 1 even though prev_attempts was at the cap. A long-running workflow
         // that keeps making progress recovers unboundedly.
         assert_eq!(
-            decide(5, Some("0"), 3, 5, true),
+            decide(5, Some("id:0"), 3, 5, true),
             Decision::Recover { attempt: 1 }
         );
+    }
+
+    #[test]
+    fn a_marker_in_another_unit_counts_as_progress() {
+        // A bare row count, as stored before markers carried their unit, is
+        // not comparable with checkpoint progress: even at the cap, it never
+        // fails the instance.
+        for marker in ["7", "9999999", "count:3"] {
+            assert_eq!(
+                decide(5, Some(marker), 0, 5, true),
+                Decision::Recover { attempt: 1 },
+                "{marker}"
+            );
+        }
     }
 
     #[test]

@@ -1018,10 +1018,8 @@ pub trait Persistence: Send + Sync {
     /// When the key is a composite step's result with a
     /// [`checkpoint_scope::closure`], the transaction that stores it also
     /// deletes the rows that closure names: replay reads the result first and
-    /// never needs them again. A writer that loses the race for the key
-    /// collapses too, which changes nothing once the winner has. A result the
-    /// caller found by an earlier lookup is not recorded again, so it is not
-    /// collapsed again either.
+    /// never needs them again. Only the call that stores the row collapses; a
+    /// call that finds the key stored writes nothing at all.
     ///
     /// The default is a non-atomic, unfenced read-then-write for test
     /// doubles, and collapses nothing; durable backends override it.

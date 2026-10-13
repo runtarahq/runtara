@@ -164,10 +164,12 @@ impl Store {
                     .is_some_and(|scope| closure.covers(&scope))
         });
         let removed = before - self.checkpoints.len();
-        *self
-            .collapsed_checkpoints
-            .entry(instance_id.to_string())
-            .or_default() += removed as i64;
+        if removed > 0 {
+            *self
+                .collapsed_checkpoints
+                .entry(instance_id.to_string())
+                .or_default() += removed as i64;
+        }
         removed
     }
 
@@ -440,6 +442,7 @@ fn prune_instance(store: &mut Store, id: &str) -> bool {
     let n = store.checkpoints.len();
     store.checkpoints.retain(|c| c.instance_id != id);
     note(n, store.checkpoints.len());
+    store.collapsed_checkpoints.remove(id);
     let n = store.signals.len();
     store.signals.remove(id);
     note(n, store.signals.len());
@@ -844,9 +847,7 @@ impl Persistence for InMemoryPersistence {
             .iter()
             .find(|c| c.instance_id == instance_id && c.checkpoint_id == checkpoint_id)
         {
-            let existing = existing.state.clone();
-            store.collapse_checkpoints(instance_id, checkpoint_id);
-            return Ok(CheckpointWrite::Existing(existing));
+            return Ok(CheckpointWrite::Existing(existing.state.clone()));
         }
         store.instance_mut(instance_id)?.checkpoint_id = Some(checkpoint_id.to_string());
         store.checkpoints.push(CheckpointRecord {

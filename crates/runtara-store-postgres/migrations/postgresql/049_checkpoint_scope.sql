@@ -8,7 +8,9 @@
 -- The "C" collation compares bytes, which is what a prefix range needs.
 -- Rows written before this migration keep NULL and are never collapsed.
 --
--- A nullable column with no default changes only the catalog. Its ACCESS
--- EXCLUSIVE lock is kept to this migration's transaction, which rewrites
--- nothing, so it is held for an instant.
+-- A nullable column with no default changes only the catalog: nothing is
+-- rewritten. Its ACCESS EXCLUSIVE lock first waits for any transaction
+-- already using the table, and checkpoint reads and writes that arrive
+-- meanwhile queue behind it; once granted, it is released when this
+-- migration commits.
 ALTER TABLE checkpoints ADD COLUMN scope TEXT COLLATE "C";

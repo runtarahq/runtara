@@ -47,6 +47,10 @@ migration 049), written by every insert, and indexes it with the instance id
 (migration 050). Keys outside the canonical grammar, legacy keys and addresses
 over 2 KB get NULL and are never collapsed.
 
+Rows keep the address they were written with, and later closures match them,
+so the format only grows. Rendering an existing kind differently would leave
+its older rows unmatched: never collapsed, never collapsed wrongly.
+
 ## Closing a scope
 
 `checkpoint_scope::closure(key)` returns what recording `key` makes obsolete:
@@ -57,9 +61,13 @@ over 2 KB get NULL and are never collapsed.
 
 `loop_closure` builds one for a Split's result (its iterations), and
 `child_closure` for an EmbedWorkflow's or an Agent's (the child namespace of an
-embedded workflow or a workflow-agent call). Only an unsuffixed result key has
-a closure, so a failed attempt never deletes work a retry will reuse. The
-store applies the closure in the transaction that records the result:
+embedded workflow or a workflow-agent call). The inner ranges name the step by
+its id alone. That is exactly as precise as the result keys: two Splits or
+EmbedWorkflows with one id at one position already share a result key, and two
+Agents with one id share their child namespace. Only an unsuffixed result key
+has a closure, so a failed attempt never deletes work a retry will reuse. The
+store applies the closure in the transaction that stores the result (a writer
+that finds the key already stored writes and deletes nothing):
 `checkpoints::record` on the root path, and the fenced `checkpoint` on the
 isolated child path. The in-memory backend does the same.
 

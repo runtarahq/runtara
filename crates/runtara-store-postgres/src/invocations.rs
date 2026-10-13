@@ -169,13 +169,6 @@ async fn checkpoint(
             .fetch_one(&mut *db)
             .await
             .map_err(storage)?;
-            crate::checkpoints::collapse_recorded(
-                db,
-                &token.lease.instance_id,
-                &write.checkpoint_id,
-            )
-            .await
-            .map_err(storage)?;
             return Ok(InvocationCheckpointResult { found: true, state });
         }
         sqlx::query("UPDATE instances SET checkpoint_id=$2 WHERE instance_id=$1")

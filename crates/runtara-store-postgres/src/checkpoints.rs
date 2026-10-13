@@ -11,8 +11,9 @@ use sqlx::PgConnection;
 /// at it, inside the caller's transaction. A losing writer, including one
 /// that raced past its own read, gets the winner's bytes and writes nothing.
 ///
-/// Either way, when the key is a composite step's result, the rows inside
-/// the step are deleted in the same transaction (see [`collapse_recorded`]).
+/// When this call stores a composite step's result, the rows inside the step
+/// are deleted in the same transaction (see [`collapse_recorded`]). A losing
+/// writer leaves that to the winner, whose transaction already did it.
 pub(crate) async fn record(
     db: &mut PgConnection,
     instance_id: &str,
@@ -40,9 +41,6 @@ pub(crate) async fn record(
         .fetch_one(&mut *db)
         .await
         .map_err(|e| wrap_checkpoint_save(e, instance_id))?;
-        collapse_recorded(db, instance_id, checkpoint_id)
-            .await
-            .map_err(|e| wrap_checkpoint_save(e, instance_id))?;
         return Ok(CheckpointWrite::Existing(existing));
     }
     let moved = sqlx::query("UPDATE instances SET checkpoint_id = $2 WHERE instance_id = $1")
@@ -86,9 +84,7 @@ pub(crate) async fn collapse(
     checkpoint_id: &str,
     closure: &ScopeClosure,
 ) -> Result<u64, sqlx::Error> {
-    let (low, high) = closure
-        .inner_bounds()
-        .map_or((None, None), |(low, high)| (Some(low), Some(high)));
+    let (low, high) = closure.inner_bounds();
     let deleted = sqlx::query(
         "DELETE FROM checkpoints \
          WHERE instance_id = $1 AND checkpoint_id <> $2 \
