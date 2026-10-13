@@ -24,6 +24,7 @@ export {
   type TableStatusFooterProps,
 } from './TableStatusFooter';
 export { TablePagination, type TablePaginationProps } from './TablePagination';
+export { PageSizeSelect, type PageSizeSelectProps } from './PageSizeSelect';
 export { PAGE_SIZE_OPTIONS } from './page-size-options';
 export {
   ConsoleTableShell,

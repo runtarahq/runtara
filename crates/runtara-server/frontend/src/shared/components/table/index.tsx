@@ -31,6 +31,7 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import { cn } from '@/lib/utils.ts';
+import { PageSizeSelect } from '@/shared/components/console/PageSizeSelect';
 
 interface DataTableProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[];
@@ -355,19 +356,12 @@ export function DataTable<TData, TValue>({
             </span>
             <div className="flex items-center gap-2">
               <span className="text-sm text-muted-foreground">Page size:</span>
-              <select
-                className="h-8 rounded-md border bg-background px-2.5 text-sm text-foreground"
+              <PageSizeSelect
                 value={pagination.pageSize}
-                onChange={(event) =>
-                  pagination.onPageSizeChange?.(Number(event.target.value))
-                }
-              >
-                {PAGE_SIZE_OPTIONS.map((size) => (
-                  <option key={size} value={size}>
-                    {size} / page
-                  </option>
-                ))}
-              </select>
+                onChange={(size) => pagination.onPageSizeChange?.(size)}
+                options={PAGE_SIZE_OPTIONS}
+                className="text-sm"
+              />
             </div>
           </div>
           <div className="flex items-center gap-3">

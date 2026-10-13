@@ -1,5 +1,4 @@
 import {
-  ChevronDown,
   ChevronFirst,
   ChevronLast,
   ChevronLeft,
@@ -7,6 +6,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { PAGE_SIZE_OPTIONS } from './page-size-options';
+import { PageSizeSelect } from './PageSizeSelect';
 
 export interface TablePaginationProps {
   pageIndex: number;
@@ -40,25 +40,11 @@ export function TablePagination({
   return (
     <div className={cn('flex items-center gap-3.5', className)}>
       {onPageSizeChange && (
-        // The native arrow hugs the right edge; draw our own with room.
-        <span className="relative inline-flex">
-          <select
-            className="h-8 appearance-none rounded-md border bg-background pl-2.5 pr-8 text-[13px] text-foreground"
-            value={pageSize}
-            onChange={(e) => onPageSizeChange(Number(e.target.value))}
-            aria-label="Rows per page"
-          >
-            {pageSizeOptions.map((size) => (
-              <option key={size} value={size}>
-                {size} / page
-              </option>
-            ))}
-          </select>
-          <ChevronDown
-            aria-hidden="true"
-            className="pointer-events-none absolute right-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
-          />
-        </span>
+        <PageSizeSelect
+          value={pageSize}
+          onChange={onPageSizeChange}
+          options={pageSizeOptions}
+        />
       )}
       <span className="tabular-nums">
         Page {pageIndex + 1} of {totalPages.toLocaleString()}
