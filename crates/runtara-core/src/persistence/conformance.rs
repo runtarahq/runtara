@@ -2764,6 +2764,10 @@ pub mod durability;
 /// start to the first end after it (S,S,E; S,E,S,E; E,S,E).
 pub mod paired;
 
+/// Scope collapse: recording a composite step's result deletes the rows its
+/// closure names, on the root and the fenced child path.
+pub mod scope_collapse;
+
 /// External outcomes are fenced against launches: the first publication
 /// wins, a published outcome refuses the child's launch, and an existing
 /// instance row refuses the publication.

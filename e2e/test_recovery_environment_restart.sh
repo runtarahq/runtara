@@ -18,7 +18,9 @@
 # guest *running* (not self-suspended) so it can be killed mid-loop. Because the
 # engine is replay-from-start with checkpoints as a result cache, completed
 # create-instance steps are served from cache on relaunch -> the physical row
-# count must equal N with no duplicates.
+# count must equal N with no duplicates. Once the Split's result is recorded,
+# its per-item checkpoints are deleted with it, so the finished run keeps one
+# checkpoint row.
 #
 # Usage:  MODE=graceful ./e2e/test_recovery_environment_restart.sh
 #         MODE=abrupt   ./e2e/test_recovery_environment_restart.sh
@@ -342,6 +344,7 @@ echo "  final error  : $(instance_error "${INSTANCE_ID}")"
 echo "  row count    : $(row_count) / ${N_ITEMS}"
 echo "  distinct idx : $(distinct_count) / ${N_ITEMS}"
 echo "  recovery_attempts : $(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT recovery_attempts FROM instances WHERE instance_id='${INSTANCE_ID}'" | tr -d '[:space:]')"
+echo "  checkpoint rows   : $(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT COUNT(*) FROM checkpoints WHERE instance_id='${INSTANCE_ID}'" | tr -d '[:space:]')"
 echo "---------------------------------------------------------------"
 
 FINAL_ROWS=$(row_count); FINAL_ROWS=${FINAL_ROWS:-0}
@@ -381,4 +384,14 @@ if [ "${FINAL_DISTINCT}" != "${N_ITEMS}" ]; then
     exit 1
 fi
 
-print_success "Recovered across ${MODE} restart: completed, ${FINAL_ROWS}/${N_ITEMS} rows, no duplicates."
+# The relaunch resumed from the per-item checkpoints (no duplicates above);
+# recording the Split's result then deleted them in the same transaction.
+CHECKPOINTS=$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT COUNT(*) FROM checkpoints WHERE instance_id='${INSTANCE_ID}'" | tr -d '[:space:]')
+SPLIT_ROWS=$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT COUNT(*) FROM checkpoints WHERE instance_id='${INSTANCE_ID}' AND checkpoint_id LIKE 'runtara:v2:[\"split\"%'" | tr -d '[:space:]')
+if [ "${CHECKPOINTS}" != "1" ] || [ "${SPLIT_ROWS}" != "1" ]; then
+    print_error "Expected only the Split's result row after completion, found ${CHECKPOINTS} checkpoint row(s), ${SPLIT_ROWS} of them the Split's"
+    psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT left(checkpoint_id, 160) FROM checkpoints WHERE instance_id='${INSTANCE_ID}' ORDER BY id"
+    exit 1
+fi
+
+print_success "Recovered across ${MODE} restart: completed, ${FINAL_ROWS}/${N_ITEMS} rows, no duplicates, iterations collapsed into the Split's row."

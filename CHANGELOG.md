@@ -269,6 +269,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A finished Split keeps one checkpoint row.** Recording a durable Split's
+  result now deletes, in the same transaction, the checkpoints of its
+  iterations and its own attempt, retry and loop-deadline rows: replay reads
+  the result first and never needs them. `A → Split[10000] → B` keeps 3 rows
+  instead of 10,003. A run killed or parked inside an iteration keeps the
+  Split's rows until the Split finishes. This applies to workflows already
+  compiled with structured checkpoint keys, from runs started on this release
+  (rows written before migration 049 are not collapsed); a `durable: false`
+  Split saves no result and collapses nothing.
 - **Checkpoints record where they sit in their run.** Migrations 049 and 050
   add an indexed `checkpoints.scope`: an address derived from a structured
   (version 2) checkpoint key when the row is written, NULL for any other key.

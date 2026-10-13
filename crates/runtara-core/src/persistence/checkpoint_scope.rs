@@ -114,29 +114,22 @@ type Rule = fn(&Key) -> Option<ScopeClosure>;
 /// Result kinds that close their scope when recorded, and how. A kind is
 /// added here only once replay is known never to read the rows its closure
 /// names after the result exists.
-const RULES: &[(&str, Rule)] = &[];
+///
+/// - `split`: a Split's result is saved once every item has succeeded, and
+///   replay looks it up before entering the loop, its deadline or its
+///   retries, so its iterations and its own rows are never read again.
+const RULES: &[(&str, Rule)] = &[("split", Key::loop_closure)];
 
 /// The closure of a Split's result: its own rows and every iteration it ran.
 pub fn loop_closure(checkpoint_id: &str) -> Option<ScopeClosure> {
-    let key = Key::parse(checkpoint_id)?;
-    let loop_kind = match key.kind.as_str() {
-        "split" => "Split",
-        _ => return None,
-    };
-    let step = key.result_step()?;
-    key.closure(opened(encode(&json!([loop_kind, step]))))
+    Key::parse(checkpoint_id)?.loop_closure()
 }
 
 /// The closure of a result that stands for a child invocation (an
 /// EmbedWorkflow, or an Agent calling a workflow-agent): its own rows and the
 /// child's namespace, which is empty for an Agent that calls no workflow.
 pub fn child_closure(checkpoint_id: &str) -> Option<ScopeClosure> {
-    let key = Key::parse(checkpoint_id)?;
-    if !matches!(key.kind.as_str(), "agent" | "embed_workflow") {
-        return None;
-    }
-    let step = key.result_step()?;
-    key.closure(encode(&json!(["ns", "child", [step]])))
+    Key::parse(checkpoint_id)?.child_closure()
 }
 
 /// A parsed version 2 key.
@@ -229,6 +222,26 @@ impl Key {
         }
         let (kind, parts) = self.deadline_result()?;
         Some(json!(["own", kind, parts]))
+    }
+
+    /// A Split result's closure: its own rows and every iteration it ran.
+    fn loop_closure(&self) -> Option<ScopeClosure> {
+        let loop_kind = match self.kind.as_str() {
+            "split" => "Split",
+            _ => return None,
+        };
+        let step = self.result_step()?;
+        self.closure(opened(encode(&json!([loop_kind, step]))))
+    }
+
+    /// A child-invoking result's closure: its own rows and the child's
+    /// namespace.
+    fn child_closure(&self) -> Option<ScopeClosure> {
+        if !matches!(self.kind.as_str(), "agent" | "embed_workflow") {
+            return None;
+        }
+        let step = self.result_step()?;
+        self.closure(encode(&json!(["ns", "child", [step]])))
     }
 
     /// The closure of this result key: its `own` rows, plus every address
@@ -494,11 +507,27 @@ mod tests {
     }
 
     #[test]
-    fn no_kind_has_a_closure_rule() {
+    fn only_a_split_result_has_a_closure_rule() {
+        let split = key(
+            "split",
+            "wf",
+            json!([]),
+            json!([["Split", "outer", 2]]),
+            json!(["items"]),
+        );
+        assert_eq!(closure(&split), loop_closure(&split));
+        assert!(closure(&split).is_some());
         for id in [
             agent("a", json!([]), json!([])),
-            key("split", "wf", json!([]), json!([]), json!(["items"])),
             key("embed_workflow", "wf", json!([]), json!([]), json!(["e"])),
+            format!("{split}::attempt::1"),
+            key(
+                "loop-complete",
+                "wf",
+                json!([]),
+                json!([]),
+                json!(["Split", "root", "items"]),
+            ),
         ] {
             assert_eq!(closure(&id), None, "{id}");
         }

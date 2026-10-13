@@ -1916,6 +1916,13 @@ async fn durability_conformance() {
     .await;
 }
 
+#[tokio::test]
+async fn scope_collapse_conformance() {
+    let (pool, _container) = postgres_test_pool().await;
+    let backend = PostgresPersistence::new(pool);
+    runtara_core::persistence::conformance::scope_collapse::run_all(&backend).await;
+}
+
 /// The guest checkpoint handler under real concurrency: writers that all
 /// miss the read race to record, and every loser resumes from the winner's
 /// bytes instead of overwriting them.

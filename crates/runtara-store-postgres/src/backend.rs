@@ -4228,8 +4228,9 @@ mod tests {
                 backend.save_checkpoint(id, key, b"x").await.unwrap();
             }
         }
+        // The plain upsert never collapses: this exercises the primitive alone.
         backend
-            .record_checkpoint(&run_id, &split, b"all", None)
+            .save_checkpoint(&run_id, &split, b"all")
             .await
             .unwrap();
 
@@ -4303,10 +4304,7 @@ mod tests {
         for key in &inside {
             backend.save_checkpoint(&id, key, b"x").await.unwrap();
         }
-        backend
-            .record_checkpoint(&id, &split, b"all", None)
-            .await
-            .unwrap();
+        backend.save_checkpoint(&id, &split, b"all").await.unwrap();
         let progress = backend.checkpoint_progress(&id).await.unwrap();
 
         let mut tx = pool.begin().await.unwrap();

@@ -84,8 +84,10 @@ Things an earlier draft assumed that do not exist:
 - **The ordinary checkpoint save is an upsert,** not first-write-wins
   (`dialect/postgres.rs:95-100`).
 - **The 64 KiB continuation cap is a constant,** not configurable.
-- **Nothing compacts checkpoints of a live run.** Retention and pinned-child
-  pruning only touch terminal runs.
+- **Little compacts checkpoints of a live run.** A finished Split's result
+  replaces its iterations' rows (`docs/checkpoint-scope-collapse.md`); every
+  other row, While iterations included, stays until retention or pinned-child
+  pruning, which only touch terminal runs.
 
 ## Concepts
 
@@ -440,9 +442,10 @@ Approved on 2026-09-29:
 
 ## Open questions
 
-- **Long-lived entities.** Nothing compacts a live run's checkpoints. Replay
-  walks every iteration and makes one checkpoint lookup per durable step per
-  iteration, and While defaults to 10 iterations. Continue-as-new or
+- **Long-lived entities.** Nothing compacts a live While loop's checkpoints
+  (only a finished Split's are). Replay walks every iteration and makes one
+  checkpoint lookup per durable step per iteration, and While defaults to 10
+  iterations. Continue-as-new or
   compaction must be decided before messages ship, since entities with edits
   depend on both.
 - **Messages.** The mailbox design above: limits, ordering across senders, and

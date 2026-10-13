@@ -73,8 +73,18 @@ isolated child path. The in-memory backend does the same.
 
 Which kinds close their scope is a rule table in `checkpoint_scope`. A kind is
 added only once replay is known never to read the rows its closure names after
-the result exists. The table starts empty; composite steps join it one at a
-time, each with its own end-to-end tests.
+the result exists. Composite steps join it one at a time, each with its own
+end-to-end tests.
+
+| Result kind | Closes | Why it is safe |
+|---|---|---|
+| `split` | every iteration, and the Split's attempt, retry and loop-deadline/complete rows | The result is saved only after every item succeeded. Replay looks it up before entering the loop, its deadline or its retries. A failed attempt is a suffixed row with no closure, so a retry keeps the items that already succeeded. |
+
+`A → Split[N] → B` therefore keeps three rows, whatever N is. A Split inside
+another Split's iteration collapses first, and the outer Split's range then
+covers its result. A run parked or killed inside an iteration keeps that
+Split's rows until the Split finishes. Not collapsed: a `durable: false` Split,
+which saves no result, and rows written before migration 049.
 
 ## Recovery progress
 

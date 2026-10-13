@@ -1047,3 +1047,241 @@ async fn the_wake_scheduler_claims_a_parked_nested_wait_and_relaunches_it() {
     );
     assert_eq!(runner.occupancy().unwrap().held, 0);
 }
+
+/// `call -> Split[1,2,3]{random-double} -> rest`, where `rest` is the given
+/// steps after the Split and `body_tail` runs after the item's Agent.
+fn split_graph(body_tail: Value, after_split: Value) -> Value {
+    let mut body_steps = json!({
+        "each":{"id":"each","stepType":"Agent","agentId":"utils","capabilityId":"random-double","maxRetries":0,"inputMapping":{}},
+        "item_done":{"id":"item_done","stepType":"Finish","inputMapping":{"value":{"valueType":"reference","value":"steps.each.outputs"}}}
+    });
+    let mut body_plan = vec![json!({"fromStep":"each","toStep":"item_done"})];
+    if let Some((id, step)) = body_tail.as_object().and_then(|o| o.iter().next()) {
+        body_steps[id] = step.clone();
+        body_plan = vec![
+            json!({"fromStep":"each","toStep":id}),
+            json!({"fromStep":id,"toStep":"item_done"}),
+        ];
+    }
+    let mut steps = json!({
+        "call":{"id":"call","stepType":"Agent","agentId":"utils","capabilityId":"random-double","maxRetries":0,"inputMapping":{}},
+        "split":{"id":"split","stepType":"Split",
+            "config":{"value":{"valueType":"immediate","value":[1,2,3]}},
+            "subgraph":{"name":"per item","entryPoint":"each","steps":body_steps,"executionPlan":body_plan}},
+        "finish":{"id":"finish","stepType":"Finish","inputMapping":{
+            "items":{"valueType":"reference","value":"steps.split.outputs"},
+            "value":{"valueType":"reference","value":"steps.call.outputs"}}}
+    });
+    let mut plan = vec![json!({"fromStep":"call","toStep":"split"})];
+    match after_split.as_object().and_then(|o| o.iter().next()) {
+        Some((id, step)) => {
+            steps[id] = step.clone();
+            plan.push(json!({"fromStep":"split","toStep":id}));
+            plan.push(json!({"fromStep":id,"toStep":"finish"}));
+        }
+        None => plan.push(json!({"fromStep":"split","toStep":"finish"})),
+    }
+    json!({"durable":true,"entryPoint":"call","steps":steps,"executionPlan":plan})
+}
+
+fn delay(id: &str, ms: u64) -> Value {
+    json!({ id: {"id":id,"stepType":"Delay","durationMs":{"valueType":"immediate","value":ms}} })
+}
+
+/// Rows written inside one of the Split's iterations.
+fn in_iteration(checkpoint_id: &str) -> bool {
+    checkpoint_id.contains(r#"["Split","split","#)
+}
+
+/// Every number in a JSON value, to find item results inside the Split's
+/// stored aggregate.
+fn numbers(value: &Value, out: &mut Vec<f64>) {
+    match value {
+        Value::Number(n) => out.extend(n.as_f64()),
+        Value::Array(items) => items.iter().for_each(|v| numbers(v, out)),
+        Value::Object(map) => map.values().for_each(|v| numbers(v, out)),
+        _ => {}
+    }
+}
+
+fn item_values(output: &Value) -> Vec<f64> {
+    output["items"]
+        .as_array()
+        .expect("Split outputs")
+        .iter()
+        .map(|item| item["value"].as_f64().expect("item result"))
+        .collect()
+}
+
+fn close(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-12 * a.abs().max(1.0)
+}
+
+async fn run_until_exit(runner: &EmbeddedWasmRunner, options: &LaunchOptions) {
+    let handle = runner.try_launch_detached(options).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        runner.wait_for_exit(&handle, Duration::from_millis(10)),
+    )
+    .await
+    .unwrap();
+}
+
+/// Once a Split's result is recorded, its iterations' rows are gone in the
+/// same transaction, and a replay is served by the result: the parked run
+/// holds three rows, and after relaunch the items keep the values the
+/// result stored (the body did not run again).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_completed_split_keeps_one_row_and_replays_from_it() {
+    let h = Harness::new().await;
+    for backend in ["legacy", "scoped"] {
+        let graph = split_graph(json!({}), delay("sleep", 1000));
+        let artifact = compile(graph, &h.dir.path().join(backend), "utils", backend);
+        let runner = h.runner(Some(bounds("utils")));
+        let mut options = h.options(&artifact.wasm_path).await;
+        run_until_exit(&runner, &options).await;
+        let parked = h
+            .persistence
+            .get_instance(&options.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(parked.status, InstanceStatus::Suspended, "{backend}");
+
+        let rows = h
+            .persistence
+            .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+            .await
+            .unwrap();
+        let ids: Vec<&str> = rows.iter().map(|c| c.checkpoint_id.as_str()).collect();
+        assert_eq!(
+            rows.len(),
+            3,
+            "{backend}: call, the Split's result and the delay: {ids:?}"
+        );
+        assert!(!ids.iter().any(|id| in_iteration(id)), "{backend}: {ids:?}");
+        let aggregate = rows
+            .iter()
+            .find(|c| c.checkpoint_id.starts_with(r#"runtara:v2:["split""#))
+            .expect("the Split's result row");
+        let mut stored = Vec::new();
+        numbers(
+            &serde_json::from_slice(&aggregate.state).unwrap(),
+            &mut stored,
+        );
+
+        let remaining = (parked.sleep_until.unwrap() - chrono::Utc::now())
+            .to_std()
+            .unwrap_or_default();
+        tokio::time::sleep(remaining + Duration::from_millis(20)).await;
+        options.launch_id = format!("resume-{}", options.instance_id);
+        options.prepersisted_input = None;
+        run_until_exit(&runner, &options).await;
+        let completed = h
+            .persistence
+            .get_instance(&options.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.status, InstanceStatus::Completed, "{backend}");
+        let output: Value = serde_json::from_slice(&completed.output.unwrap()).unwrap();
+        let items = item_values(&output);
+        assert_eq!(items.len(), 3, "{backend}");
+        for value in items {
+            assert!(
+                stored.iter().any(|s| close(*s, value)),
+                "{backend}: item {value} must come from the stored result {stored:?}"
+            );
+        }
+        let after = h
+            .persistence
+            .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            after.len(),
+            3,
+            "{backend}: the replay wrote no iteration rows"
+        );
+    }
+}
+
+/// A run parked inside a Split's iteration keeps the finished items' rows,
+/// resumes from them on relaunch, and collapses them once the Split's result
+/// is recorded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_split_parked_mid_iteration_resumes_from_its_item_rows_then_collapses() {
+    let h = Harness::new().await;
+    let graph = split_graph(delay("pause", 300), json!({}));
+    let artifact = compile(graph, h.dir.path(), "utils", "legacy");
+    let runner = h.runner(Some(bounds("utils")));
+    let mut options = h.options(&artifact.wasm_path).await;
+    let mut first_item = None;
+    for launch in 0..8 {
+        if launch > 0 {
+            options.launch_id = format!("resume-{launch}-{}", options.instance_id);
+            options.prepersisted_input = None;
+        }
+        run_until_exit(&runner, &options).await;
+        let instance = h
+            .persistence
+            .get_instance(&options.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        if instance.status == InstanceStatus::Completed {
+            break;
+        }
+        assert_eq!(instance.status, InstanceStatus::Suspended);
+        let rows = h
+            .persistence
+            .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+            .await
+            .unwrap();
+        assert!(
+            !rows
+                .iter()
+                .any(|c| c.checkpoint_id.starts_with(r#"runtara:v2:["split""#)),
+            "no Split result while an iteration is parked"
+        );
+        let item = rows
+            .iter()
+            .find(|c| {
+                c.checkpoint_id.contains(r#"["Split","split",0]"#)
+                    && c.checkpoint_id.contains("random-double")
+            })
+            .expect("the first item's result survives the park");
+        let value: f64 = serde_json::from_slice(&item.state).unwrap();
+        assert!(first_item.is_none_or(|first| close(first, value)));
+        first_item = Some(value);
+        let remaining = (instance.sleep_until.unwrap() - chrono::Utc::now())
+            .to_std()
+            .unwrap_or_default();
+        tokio::time::sleep(remaining + Duration::from_millis(20)).await;
+    }
+    let completed = h
+        .persistence
+        .get_instance(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.status, InstanceStatus::Completed);
+    let output: Value = serde_json::from_slice(&completed.output.unwrap()).unwrap();
+    assert!(
+        close(
+            item_values(&output)[0],
+            first_item.expect("parked at least once")
+        ),
+        "the first item resumed from its row"
+    );
+    let ids: Vec<String> = h
+        .persistence
+        .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| c.checkpoint_id)
+        .collect();
+    assert_eq!(ids.len(), 2, "call and the Split's result: {ids:?}");
+    assert!(!ids.iter().any(|id| in_iteration(id)), "{ids:?}");
+}
