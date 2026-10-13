@@ -115,9 +115,11 @@ type Rule = fn(&Key) -> Option<ScopeClosure>;
 /// added here only once replay is known never to read the rows its closure
 /// names after the result exists.
 ///
-/// - `split`: a Split's result is saved once every item has succeeded, and
-///   replay looks it up before entering the loop, its deadline or its
-///   retries, so its iterations and its own rows are never read again.
+/// - `split`: a Split's result is saved only once its loop has finished
+///   (every item succeeded, or with `dontStopOnFailed` every item ran and
+///   the result records the failures), and replay looks it up before
+///   entering the loop, its deadline or its retries, so its iterations and
+///   its own rows are never read again.
 const RULES: &[(&str, Rule)] = &[("split", Key::loop_closure)];
 
 /// The closure of a Split's result: its own rows and every iteration it ran.

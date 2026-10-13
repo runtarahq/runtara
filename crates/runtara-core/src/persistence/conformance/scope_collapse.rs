@@ -18,9 +18,16 @@ async fn running(p: &dyn Persistence, name: &str) -> String {
     id
 }
 
-/// A structured checkpoint key, shaped as the workflow stdlib writes it.
+/// A structured checkpoint key, shaped as the workflow stdlib writes it. A
+/// fixture the grammar no longer reads would have no address and make every
+/// case pass vacuously, so it fails here instead.
 fn key(kind: &str, frames: Value, loops: Value, parts: Value) -> String {
-    format!("runtara:v2:{}", json!([kind, "wf", frames, loops, parts]))
+    let key = format!("runtara:v2:{}", json!([kind, "wf", frames, loops, parts]));
+    assert!(
+        crate::persistence::checkpoint_scope::scope(&key).is_some(),
+        "fixture key has no address: {key}"
+    );
+    key
 }
 
 /// The result row of Agent `step` in iteration `index` of Split `split`.

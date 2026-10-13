@@ -4116,12 +4116,19 @@ mod tests {
         cleanup_step_summary_instance(&pool, &instance_id).await;
     }
 
-    /// A structured checkpoint key, shaped as the workflow stdlib writes it.
+    /// A structured checkpoint key, shaped as the workflow stdlib writes it;
+    /// one the grammar no longer reads fails here rather than passing
+    /// vacuously.
     fn v2_key(kind: &str, loops: serde_json::Value, parts: serde_json::Value) -> String {
-        format!(
+        let key = format!(
             "runtara:v2:{}",
             serde_json::json!([kind, "wf", [], loops, parts])
-        )
+        );
+        assert!(
+            runtara_core::persistence::checkpoint_scope::scope(&key).is_some(),
+            "fixture key has no address: {key}"
+        );
+        key
     }
 
     async fn stored_scopes(

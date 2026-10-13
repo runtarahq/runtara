@@ -40,6 +40,18 @@ mod sql_fixture;
 mod wait_for_instances;
 mod wasm_performance_baseline;
 
+/// Store a new result checkpoint the way the durable stores do: recording a
+/// composite step's result also deletes the rows its scope closure names
+/// (`runtara_core::persistence::checkpoint_scope`), so every replay test here
+/// runs against collapsed scopes.
+fn store_checkpoint(checkpoints: &mut HashMap<String, Vec<u8>>, id: String, state: Vec<u8>) {
+    use runtara_core::persistence::checkpoint_scope::{closure, scope};
+    if let Some(closure) = closure(&id) {
+        checkpoints.retain(|stored, _| !scope(stored).is_some_and(|s| closure.covers(&s)));
+    }
+    checkpoints.insert(id, state);
+}
+
 // Independent description of the persisted v2 key contract (not a production
 // helper): fixtures that preload checkpoints must name the actual artifact key.
 fn expected_key(
@@ -1369,7 +1381,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for CapturingRuntimeHost 
             );
         }
         if !state.is_empty() {
-            checkpoints.insert(checkpoint_id, state);
+            store_checkpoint(&mut checkpoints, checkpoint_id, state);
         }
         Ok(
             runtara_component_host::runtime_host::RuntimeCheckpointResult {
@@ -1870,7 +1882,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for RecordingRuntimeHost 
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let found = checkpoints.get(&checkpoint_id).cloned();
         if found.is_none() && !state.is_empty() {
-            checkpoints.insert(checkpoint_id, state);
+            store_checkpoint(&mut checkpoints, checkpoint_id, state);
         }
         Ok(
             runtara_component_host::runtime_host::RuntimeCheckpointResult {
@@ -2040,7 +2052,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
             );
         }
         if !state.is_empty() {
-            checkpoints.insert(checkpoint_id, state);
+            store_checkpoint(&mut checkpoints, checkpoint_id, state);
         }
         Ok(
             runtara_component_host::runtime_host::RuntimeCheckpointResult {
@@ -7238,7 +7250,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
             );
         }
         if !state.is_empty() {
-            checkpoints.insert(checkpoint_id, state);
+            store_checkpoint(&mut checkpoints, checkpoint_id, state);
         }
         Ok(
             runtara_component_host::runtime_host::RuntimeCheckpointResult {

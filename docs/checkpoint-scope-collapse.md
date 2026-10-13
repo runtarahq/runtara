@@ -78,7 +78,7 @@ end-to-end tests.
 
 | Result kind | Closes | Why it is safe |
 |---|---|---|
-| `split` | every iteration, and the Split's attempt, retry and loop-deadline/complete rows | The result is saved only after every item succeeded. Replay looks it up before entering the loop, its deadline or its retries. A failed attempt is a suffixed row with no closure, so a retry keeps the items that already succeeded. |
+| `split` | every iteration, and the Split's attempt, retry and loop-deadline/complete rows | The result is saved only once the loop has finished: every item succeeded, or with `dontStopOnFailed` every item ran and the result records the failures. Replay looks it up before entering the loop, its deadline or its retries. A failed attempt is a suffixed row with no closure, so a retry keeps the items that already succeeded. |
 
 `A → Split[N] → B` therefore keeps three rows, whatever N is. A Split inside
 another Split's iteration collapses first, and the outer Split's range then

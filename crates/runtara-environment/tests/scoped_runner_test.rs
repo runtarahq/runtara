@@ -1093,19 +1093,9 @@ fn in_iteration(checkpoint_id: &str) -> bool {
     checkpoint_id.contains(r#"["Split","split","#)
 }
 
-/// Every number in a JSON value, to find item results inside the Split's
-/// stored aggregate.
-fn numbers(value: &Value, out: &mut Vec<f64>) {
-    match value {
-        Value::Number(n) => out.extend(n.as_f64()),
-        Value::Array(items) => items.iter().for_each(|v| numbers(v, out)),
-        Value::Object(map) => map.values().for_each(|v| numbers(v, out)),
-        _ => {}
-    }
-}
-
-fn item_values(output: &Value) -> Vec<f64> {
-    output["items"]
+/// Each item's `value`, in order, from a list of the body's Finish outputs.
+fn item_values(items: &Value) -> Vec<f64> {
+    items
         .as_array()
         .expect("Split outputs")
         .iter()
@@ -1164,11 +1154,8 @@ async fn a_completed_split_keeps_one_row_and_replays_from_it() {
             .iter()
             .find(|c| c.checkpoint_id.starts_with(r#"runtara:v2:["split""#))
             .expect("the Split's result row");
-        let mut stored = Vec::new();
-        numbers(
-            &serde_json::from_slice(&aggregate.state).unwrap(),
-            &mut stored,
-        );
+        let stored: Value = serde_json::from_slice(&aggregate.state).unwrap();
+        let stored = item_values(&stored["outputs"]);
 
         let remaining = (parked.sleep_until.unwrap() - chrono::Utc::now())
             .to_std()
@@ -1185,14 +1172,12 @@ async fn a_completed_split_keeps_one_row_and_replays_from_it() {
             .unwrap();
         assert_eq!(completed.status, InstanceStatus::Completed, "{backend}");
         let output: Value = serde_json::from_slice(&completed.output.unwrap()).unwrap();
-        let items = item_values(&output);
+        let items = item_values(&output["items"]);
         assert_eq!(items.len(), 3, "{backend}");
-        for value in items {
-            assert!(
-                stored.iter().any(|s| close(*s, value)),
-                "{backend}: item {value} must come from the stored result {stored:?}"
-            );
-        }
+        assert!(
+            items.iter().zip(&stored).all(|(a, b)| close(*a, *b)),
+            "{backend}: items {items:?} must be the stored result's {stored:?}"
+        );
         let after = h
             .persistence
             .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
@@ -1212,8 +1197,14 @@ async fn a_completed_split_keeps_one_row_and_replays_from_it() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_split_parked_mid_iteration_resumes_from_its_item_rows_then_collapses() {
     let h = Harness::new().await;
+    for backend in ["legacy", "scoped"] {
+        split_parked_mid_iteration(&h, backend).await;
+    }
+}
+
+async fn split_parked_mid_iteration(h: &Harness, backend: &str) {
     let graph = split_graph(delay("pause", 300), json!({}));
-    let artifact = compile(graph, h.dir.path(), "utils", "legacy");
+    let artifact = compile(graph, &h.dir.path().join(backend), "utils", backend);
     let runner = h.runner(Some(bounds("utils")));
     let mut options = h.options(&artifact.wasm_path).await;
     let mut first_item = None;
@@ -1269,10 +1260,10 @@ async fn a_split_parked_mid_iteration_resumes_from_its_item_rows_then_collapses(
     let output: Value = serde_json::from_slice(&completed.output.unwrap()).unwrap();
     assert!(
         close(
-            item_values(&output)[0],
+            item_values(&output["items"])[0],
             first_item.expect("parked at least once")
         ),
-        "the first item resumed from its row"
+        "{backend}: the first item resumed from its row"
     );
     let ids: Vec<String> = h
         .persistence
@@ -1282,6 +1273,10 @@ async fn a_split_parked_mid_iteration_resumes_from_its_item_rows_then_collapses(
         .into_iter()
         .map(|c| c.checkpoint_id)
         .collect();
-    assert_eq!(ids.len(), 2, "call and the Split's result: {ids:?}");
-    assert!(!ids.iter().any(|id| in_iteration(id)), "{ids:?}");
+    assert_eq!(
+        ids.len(),
+        2,
+        "{backend}: call and the Split's result: {ids:?}"
+    );
+    assert!(!ids.iter().any(|id| in_iteration(id)), "{backend}: {ids:?}");
 }
