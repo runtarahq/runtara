@@ -1907,7 +1907,7 @@ mod tests {
             .unwrap();
         let progress = backend.checkpoint_progress("run").await.unwrap();
 
-        let closure = checkpoint_scope::loop_closure(&split, "Split").unwrap();
+        let closure = checkpoint_scope::loop_closure(&split).unwrap();
         let removed = backend
             .store
             .lock()

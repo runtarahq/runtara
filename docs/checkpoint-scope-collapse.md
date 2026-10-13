@@ -32,13 +32,20 @@ one address, a compact JSON array of segments, outermost first:
 | `["wf", workflow]` | Opens each namespace level |
 | `["Split", step, i]`, `["While", step, i]` | A loop iteration, as in the key |
 | `["ns", kind, parts]` | A namespace frame (`child`, `tool-child`, `agent-aux`) |
-| `["base", family, step]` | A step's result row (Agent, Split, EmbedWorkflow) |
-| `["own", family, step]` | Rows a step keeps for itself: attempts, retry records, retry sleeps, deadlines |
+| `["base", kind, parts]` | A result row (Agent, Split, EmbedWorkflow), with its key's kind and parts |
+| `["own", kind, parts]` | Rows that result keeps for itself: attempts, retry records, retry sleeps, and a Split's or EmbedWorkflow's deadline rows |
 
-Every row inside a step then shares a byte prefix of the address. The store
-keeps it in `checkpoints.scope` (migration 049: `TEXT COLLATE "C"`, indexed
-with the instance id), written by every insert. Keys outside the canonical
-grammar, legacy keys and addresses over 2 KB get NULL and are never collapsed.
+Every row inside a step then shares a byte prefix of the address. The tags
+repeat the result key's kind and parts, so they tell steps apart exactly as
+well as the result keys do; an `onWait` branch may reuse a main-graph step id
+at the same position. An Agent's deadline row cannot be matched to its result
+key (one names the graph scope, the other the agent), so it carries only its
+position and goes when an enclosing step collapses.
+
+The store keeps the address in `checkpoints.scope` (`TEXT COLLATE "C"`,
+migration 049), written by every insert, and indexes it with the instance id
+(migration 050). Keys outside the canonical grammar, legacy keys and addresses
+over 2 KB get NULL and are never collapsed.
 
 ## Closing a scope
 
@@ -48,10 +55,13 @@ grammar, legacy keys and addresses over 2 KB get NULL and are never collapsed.
 - `inner`: a prefix of every address inside the step, deleted as one index
   range scan.
 
-Only an unsuffixed result key has a closure, so a failed attempt never deletes
-work a retry will reuse. The store applies the closure in the transaction that
-records the result: `checkpoints::record` on the root path, and the fenced
-`checkpoint` on the isolated child path. The in-memory backend does the same.
+`loop_closure` builds one for a Split's result (its iterations), and
+`child_closure` for an EmbedWorkflow's or an Agent's (the child namespace of an
+embedded workflow or a workflow-agent call). Only an unsuffixed result key has
+a closure, so a failed attempt never deletes work a retry will reuse. The
+store applies the closure in the transaction that records the result:
+`checkpoints::record` on the root path, and the fenced `checkpoint` on the
+isolated child path. The in-memory backend does the same.
 
 Which kinds close their scope is a rule table in `checkpoint_scope`. A kind is
 added only once replay is known never to read the rows its closure names after

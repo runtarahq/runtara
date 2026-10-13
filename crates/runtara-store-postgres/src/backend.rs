@@ -834,12 +834,19 @@ impl Persistence for PostgresPersistence {
     /// come from one sequence. A collapse inserts the step's result row in
     /// the transaction that deletes the rows inside the step, so the maximum
     /// does not fall.
+    ///
+    /// `MAX(id + 0)`, not `MAX(id)`: a bare `MAX(id)` lets the planner walk
+    /// the primary key backwards from the newest row of every instance until
+    /// it meets one of this instance's; the expression makes it read this
+    /// instance's rows through `idx_checkpoints_instance` instead.
     async fn checkpoint_progress(&self, instance_id: &str) -> Result<i64, CoreError> {
-        sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM checkpoints WHERE instance_id = $1")
-            .bind(instance_id)
-            .fetch_one(&self.pool)
-            .await
-            .db()
+        sqlx::query_scalar(
+            "SELECT COALESCE(MAX(id + 0), 0) FROM checkpoints WHERE instance_id = $1",
+        )
+        .bind(instance_id)
+        .fetch_one(&self.pool)
+        .await
+        .db()
     }
 
     async fn insert_event(&self, event: &EventRecord) -> Result<(), CoreError> {
@@ -4226,7 +4233,7 @@ mod tests {
             .await
             .unwrap();
 
-        let closure = loop_closure(&split, "Split").unwrap();
+        let closure = loop_closure(&split).unwrap();
         let mut tx = pool.begin().await.unwrap();
         let deleted = crate::checkpoints::collapse(&mut tx, &run_id, &split, &closure)
             .await
@@ -4264,7 +4271,7 @@ mod tests {
             backend.save_checkpoint(&id, key, b"x").await.unwrap();
         }
 
-        let closure = loop_closure(&split, "Split").unwrap();
+        let closure = loop_closure(&split).unwrap();
         let mut tx = pool.begin().await.unwrap();
         crate::checkpoints::record(&mut tx, &id, &split, b"all")
             .await
@@ -4303,14 +4310,9 @@ mod tests {
         let progress = backend.checkpoint_progress(&id).await.unwrap();
 
         let mut tx = pool.begin().await.unwrap();
-        crate::checkpoints::collapse(
-            &mut tx,
-            &id,
-            &split,
-            &loop_closure(&split, "Split").unwrap(),
-        )
-        .await
-        .unwrap();
+        crate::checkpoints::collapse(&mut tx, &id, &split, &loop_closure(&split).unwrap())
+            .await
+            .unwrap();
         tx.commit().await.unwrap();
         assert_eq!(
             backend

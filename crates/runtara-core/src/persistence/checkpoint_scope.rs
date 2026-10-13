@@ -29,10 +29,19 @@
 //! - `[kind, step, index]` is a loop iteration, exactly as in the key;
 //! - `["ns", kind, parts]` is a namespace frame's marker (child, tool-child,
 //!   agent-aux);
-//! - `["base", family, step]` tags a step's result row, and
-//!   `["own", family, step]` the rows the step keeps for itself (retry
-//!   attempts, retry records, retry sleeps, deadlines). A closure deletes
-//!   `own` rows, never another step's `base` row.
+//! - `["base", kind, parts]` tags a result row (Agent, Split, EmbedWorkflow),
+//!   and `["own", kind, parts]` the rows that result keeps for itself: its
+//!   retry attempts, retry records and retry sleeps, and a Split's or
+//!   EmbedWorkflow's deadline rows. The tag repeats the result key's kind and
+//!   parts, so it tells steps apart exactly as well as their result keys do.
+//!   A closure deletes `own` rows, never another step's `base` row.
+//!
+//! A Split's or EmbedWorkflow's result key names only its step, so its
+//! deadline rows map onto it without losing anything. An Agent's deadline row
+//! names the graph scope and its result key names the agent, so the two cannot
+//! be matched when steps share an id at one position (an `onWait` branch may
+//! reuse a main-graph id). It is left untagged, and goes when an enclosing
+//! step collapses.
 
 use serde_json::{Value, json};
 
@@ -44,9 +53,6 @@ const ATTEMPT_SUFFIXES: [&str; 3] = ["::attempt::", "::retry_sleep::", "::retry:
 /// Longest address a store keeps. A btree entry holds about 2.7 KB, so a
 /// longer address is not stored and its row is never collapsed.
 pub const MAX_SCOPE_BYTES: usize = 2048;
-
-/// Step families as the key's deadline parts name them.
-const FAMILIES: [&str; 4] = ["Agent", "EmbedWorkflow", "Split", "While"];
 
 type Loop = (String, String, u32);
 /// A loop path is `null` where the source carried none: the same as empty.
@@ -111,21 +117,27 @@ type Rule = fn(&Key) -> Option<ScopeClosure>;
 /// names after the result exists.
 const RULES: &[(&str, Rule)] = &[];
 
-/// The closure of a loop step's result: its own rows and every iteration of
-/// `loop_kind` (`Split` or `While`) it ran.
-pub fn loop_closure(checkpoint_id: &str, loop_kind: &str) -> Option<ScopeClosure> {
+/// The closure of a Split's result: its own rows and every iteration it ran.
+pub fn loop_closure(checkpoint_id: &str) -> Option<ScopeClosure> {
     let key = Key::parse(checkpoint_id)?;
-    let step = key.result_owner()?.1;
-    key.closure(Some(open_segment(&json!([loop_kind, step]))))
+    let loop_kind = match key.kind.as_str() {
+        "split" => "Split",
+        _ => return None,
+    };
+    let step = key.result_step()?;
+    key.closure(open_segment(&json!([loop_kind, step])))
 }
 
-/// The closure of a step whose result stands for a child invocation (an
-/// embedded workflow or a workflow-agent call): its own rows and the child's
-/// namespace.
+/// The closure of a result that stands for a child invocation (an
+/// EmbedWorkflow, or an Agent calling a workflow-agent): its own rows and the
+/// child's namespace, which is empty for an Agent that calls no workflow.
 pub fn child_closure(checkpoint_id: &str) -> Option<ScopeClosure> {
     let key = Key::parse(checkpoint_id)?;
-    let step = key.result_owner()?.1;
-    key.closure(Some(encode_one(&json!(["ns", "child", [step]]))))
+    if !matches!(key.kind.as_str(), "agent" | "embed_workflow") {
+        return None;
+    }
+    let step = key.result_step()?;
+    key.closure(encode_one(&json!(["ns", "child", [step]])))
 }
 
 /// A parsed version 2 key.
@@ -182,67 +194,58 @@ impl Key {
         segments
     }
 
-    /// The step a result row belongs to: `(family, step)`.
-    fn result_owner(&self) -> Option<(&'static str, &str)> {
-        let family = match self.kind.as_str() {
-            "agent" => "Agent",
-            "split" => "Split",
-            "embed_workflow" => "EmbedWorkflow",
-            _ => return None,
-        };
-        let parts = self.parts.as_array()?;
-        let step = match family {
+    /// The step id of a result key (Agent, Split, EmbedWorkflow).
+    fn result_step(&self) -> Option<&str> {
+        match (self.kind.as_str(), self.parts.as_array()?.as_slice()) {
             // agent_id, capability_id, step_id
-            "Agent" if parts.len() == 3 => parts[2].as_str(),
-            "Split" | "EmbedWorkflow" if parts.len() == 1 => parts[0].as_str(),
+            ("agent", [_, _, step]) | ("split" | "embed_workflow", [step]) => step.as_str(),
             _ => None,
-        }?;
-        Some((family, step))
+        }
     }
 
-    /// A deadline or loop-completion row's step: `(family, step)` from its
-    /// `[step_type, graph_scope, step_id]` parts.
-    fn deadline_owner(&self) -> Option<(&str, &str)> {
-        if !matches!(
-            self.kind.as_str(),
-            "agent-deadline" | "embed-deadline" | "loop-deadline" | "loop-complete"
-        ) {
-            return None;
-        }
+    /// The result a Split's or EmbedWorkflow's deadline row belongs to, as
+    /// that result key's kind and parts. Deadline parts are
+    /// `[step_type, graph_scope, step_id]`.
+    fn deadline_result(&self) -> Option<(&'static str, Value)> {
+        let (step_type, result_kind) = match self.kind.as_str() {
+            "loop-deadline" | "loop-complete" => ("Split", "split"),
+            "embed-deadline" => ("EmbedWorkflow", "embed_workflow"),
+            _ => return None,
+        };
         match self.parts.as_array()?.as_slice() {
-            [Value::String(family), _, Value::String(step)]
-                if FAMILIES.contains(&family.as_str()) =>
-            {
-                Some((family, step))
+            [Value::String(owner), _, Value::String(step)] if owner == step_type => {
+                Some((result_kind, json!([step])))
             }
             _ => None,
         }
     }
 
     fn tag(&self) -> Option<Value> {
-        if let Some((family, step)) = self.result_owner() {
+        if self.result_step().is_some() {
             let tag = if self.suffixed { "own" } else { "base" };
-            return Some(json!([tag, family, step]));
+            return Some(json!([tag, self.kind, self.parts]));
         }
         if self.suffixed {
             return None;
         }
-        let (family, step) = self.deadline_owner()?;
-        Some(json!(["own", family, step]))
+        let (kind, parts) = self.deadline_result()?;
+        Some(json!(["own", kind, parts]))
     }
 
-    /// The closure of this result key: its step's `own` rows, plus every
-    /// address starting with the position followed by `inner`.
-    fn closure(&self, inner: Option<String>) -> Option<ScopeClosure> {
-        if self.suffixed {
+    /// The closure of this result key: its `own` rows, plus every address
+    /// starting with the position followed by `inner`.
+    fn closure(&self, inner: String) -> Option<ScopeClosure> {
+        if self.suffixed || self.result_step().is_none() {
             return None;
         }
-        let (family, step) = self.result_owner()?;
         let mut owned = self.position();
-        owned.push(json!(["own", family, step]));
+        owned.push(json!(["own", self.kind, self.parts]));
         let owned = bounded(encode(&owned))?;
-        let inner = inner.map(|segment| open(&self.position()) + &segment);
-        Some(ScopeClosure { owned, inner })
+        let inner = open(&self.position()) + &inner;
+        Some(ScopeClosure {
+            owned,
+            inner: Some(inner),
+        })
     }
 }
 
@@ -331,7 +334,7 @@ mod tests {
     fn a_root_agent_result_is_tagged_with_its_step() {
         assert_eq!(
             scope(&agent("a", json!([]), json!([]))).unwrap(),
-            r#"[["wf","wf"],["base","Agent","a"]]"#
+            r#"[["wf","wf"],["base","agent",["utils","return-input","a"]]]"#
         );
     }
 
@@ -339,15 +342,15 @@ mod tests {
     fn loop_iterations_follow_the_workflow_segment() {
         assert_eq!(
             scope(&agent("each", json!([]), json!([["Split", "items", 3]]))).unwrap(),
-            r#"[["wf","wf"],["Split","items",3],["base","Agent","each"]]"#
+            r#"[["wf","wf"],["Split","items",3],["base","agent",["utils","return-input","each"]]]"#
         );
     }
 
     #[test]
-    fn composite_results_are_tagged_by_their_family() {
+    fn composite_results_are_tagged_with_their_key() {
         assert_eq!(
             scope(&key("split", "wf", json!([]), json!([]), json!(["items"]))).unwrap(),
-            r#"[["wf","wf"],["base","Split","items"]]"#
+            r#"[["wf","wf"],["base","split",["items"]]]"#
         );
         assert_eq!(
             scope(&key(
@@ -358,7 +361,7 @@ mod tests {
                 json!(["e"])
             ))
             .unwrap(),
-            r#"[["wf","wf"],["base","EmbedWorkflow","e"]]"#
+            r#"[["wf","wf"],["base","embed_workflow",["e"]]]"#
         );
     }
 
@@ -367,7 +370,7 @@ mod tests {
         let frames = json!([child("e", json!([["Split", "items", 3]]))]);
         assert_eq!(
             scope(&agent("c1", frames, json!([]))).unwrap(),
-            r#"[["wf","wf"],["Split","items",3],["ns","child",["e"]],["wf","wf"],["base","Agent","c1"]]"#
+            r#"[["wf","wf"],["Split","items",3],["ns","child",["e"]],["wf","wf"],["base","agent",["utils","return-input","c1"]]]"#
         );
     }
 
@@ -399,33 +402,56 @@ mod tests {
         for suffix in ["::attempt::2", "::retry::3", "::retry_sleep::3"] {
             assert_eq!(
                 scope(&format!("{result}{suffix}")).unwrap(),
-                r#"[["wf","wf"],["own","Agent","a"]]"#,
+                r#"[["wf","wf"],["own","agent",["utils","return-input","a"]]]"#,
                 "{suffix}"
             );
         }
     }
 
     #[test]
-    fn deadline_rows_are_owned_by_their_step() {
+    fn split_and_embed_deadline_rows_are_owned_by_their_result() {
         let cases = [
-            ("agent-deadline", "Agent", "a"),
-            ("embed-deadline", "EmbedWorkflow", "e"),
-            ("loop-deadline", "Split", "items"),
-            ("loop-complete", "While", "poll"),
+            ("loop-deadline", "Split", r#"["own","split",["items"]]"#),
+            ("loop-complete", "Split", r#"["own","split",["items"]]"#),
+            (
+                "embed-deadline",
+                "EmbedWorkflow",
+                r#"["own","embed_workflow",["items"]]"#,
+            ),
         ];
-        for (kind, family, step) in cases {
+        for (kind, step_type, tag) in cases {
             let id = key(
                 kind,
                 "wf",
                 json!([]),
                 json!([]),
-                json!([family, "root", step]),
+                json!([step_type, "root", "items"]),
             );
             assert_eq!(
                 scope(&id).unwrap(),
-                format!(r#"[["wf","wf"],["own","{family}","{step}"]]"#),
+                format!(r#"[["wf","wf"],{tag}]"#),
                 "{kind}"
             );
+        }
+    }
+
+    #[test]
+    fn agent_and_while_deadline_rows_carry_their_position_only() {
+        let cases = [
+            ("agent-deadline", "Agent"),
+            ("loop-deadline", "While"),
+            ("loop-complete", "While"),
+            ("embed-deadline", "Split"),
+        ];
+        for (kind, step_type) in cases {
+            let id = key(
+                kind,
+                "wf",
+                json!([]),
+                json!([]),
+                json!([step_type, "root", "s"]),
+            );
+            assert_eq!(scope(&id).unwrap(), r#"[["wf","wf"]]"#, "{kind}");
         }
     }
 
@@ -497,7 +523,7 @@ mod tests {
     fn a_loop_closure_covers_its_iterations_and_owned_rows_only() {
         let outer = json!([["Split", "s", 1]]);
         let split = key("split", "wf", json!([]), outer.clone(), json!(["t"]));
-        let closure = loop_closure(&split, "Split").unwrap();
+        let closure = loop_closure(&split).unwrap();
 
         let inside = [
             agent(
@@ -558,6 +584,13 @@ mod tests {
                 outer.clone(),
                 json!(["Split", "g", "t2"]),
             ),
+            key(
+                "loop-deadline",
+                "wf",
+                json!([]),
+                outer.clone(),
+                json!(["While", "g", "t"]),
+            ),
         ];
         for id in inside {
             assert!(closure.covers(&scope(&id).unwrap()), "should cover {id}");
@@ -585,6 +618,9 @@ mod tests {
                 json!([]),
             ),
             format!("{call}::retry_sleep::2"),
+        ];
+        let outside = [
+            call.clone(),
             key(
                 "agent-deadline",
                 "wf",
@@ -592,9 +628,6 @@ mod tests {
                 site.clone(),
                 json!(["Agent", "g", "e"]),
             ),
-        ];
-        let outside = [
-            call.clone(),
             agent(
                 "c1",
                 json!([child("e", json!([["Split", "s", 3]]))]),
@@ -612,16 +645,56 @@ mod tests {
     }
 
     #[test]
+    fn an_embed_closure_covers_its_child_attempts_and_deadline() {
+        let site = json!([["Split", "s", 2]]);
+        let call = key(
+            "embed_workflow",
+            "wf",
+            json!([]),
+            site.clone(),
+            json!(["e"]),
+        );
+        let closure = child_closure(&call).unwrap();
+        for id in [
+            agent("c1", json!([child("e", site.clone())]), json!([])),
+            format!("{call}::attempt::1"),
+            key(
+                "embed-deadline",
+                "wf",
+                json!([]),
+                site.clone(),
+                json!(["EmbedWorkflow", "g", "e"]),
+            ),
+        ] {
+            assert!(closure.covers(&scope(&id).unwrap()), "should cover {id}");
+        }
+        assert!(!closure.covers(&scope(&call).unwrap()));
+    }
+
+    #[test]
+    fn closures_only_come_from_their_own_result_kinds() {
+        let split = key("split", "wf", json!([]), json!([]), json!(["s"]));
+        let embed = key("embed_workflow", "wf", json!([]), json!([]), json!(["s"]));
+        assert!(loop_closure(&agent("s", json!([]), json!([]))).is_none());
+        assert!(loop_closure(&embed).is_none());
+        assert!(child_closure(&split).is_none());
+        assert!(
+            child_closure(&key("wait", "wf", json!([]), json!([]), json!(["i", "s"]))).is_none()
+        );
+    }
+
+    #[test]
     fn a_suffixed_key_closes_nothing() {
         let split = key("split", "wf", json!([]), json!([]), json!(["s"]));
-        assert_eq!(loop_closure(&format!("{split}::attempt::1"), "Split"), None);
+        assert_eq!(loop_closure(&format!("{split}::attempt::1")), None);
         assert_eq!(child_closure(&format!("{split}::attempt::1")), None);
     }
 
     #[test]
-    fn a_step_reusing_another_steps_id_keeps_its_result() {
-        // An onWait branch may reuse a main-graph step id at the same position;
-        // only the recorded step's own rows are named, never another result.
+    fn a_step_reusing_another_steps_id_keeps_its_rows() {
+        // An onWait branch may reuse a main-graph step id at the same position.
+        // Recording the main step names its own rows only: not the onWait
+        // step's result, attempts or deadline.
         let main = agent("x", json!([]), json!([]));
         let on_wait = key(
             "agent",
@@ -631,7 +704,21 @@ mod tests {
             json!(["slack", "post", "x"]),
         );
         let closure = child_closure(&main).unwrap();
-        assert!(!closure.covers(&scope(&on_wait).unwrap()));
+        for id in [
+            on_wait.clone(),
+            format!("{on_wait}::attempt::1"),
+            format!("{on_wait}::retry::2"),
+            key(
+                "agent-deadline",
+                "wf",
+                json!([]),
+                json!([]),
+                json!(["Agent", "root/onWait/w", "x"]),
+            ),
+        ] {
+            assert!(!closure.covers(&scope(&id).unwrap()), "should keep {id}");
+        }
+        assert!(closure.covers(&scope(&format!("{main}::retry::2")).unwrap()));
     }
 
     #[test]
@@ -649,7 +736,7 @@ mod tests {
         let child_split = key("split", "child", frame.clone(), json!([]), json!(["items"]));
         let child_step = key("agent", "child", frame, json!([]), json!(["u", "c", "x"]));
         let caller = scope(&caller_row).unwrap();
-        assert!(!loop_closure(&child_split, "Split").unwrap().covers(&caller));
+        assert!(!loop_closure(&child_split).unwrap().covers(&caller));
         assert!(!child_closure(&child_step).unwrap().covers(&caller));
     }
 
@@ -657,7 +744,7 @@ mod tests {
     fn escaped_step_ids_keep_their_own_scope() {
         for step in [r#"a"b"#, r"a\b", "ünï", "a,b]"] {
             let split = key("split", "wf", json!([]), json!([]), json!([step]));
-            let closure = loop_closure(&split, "Split").unwrap();
+            let closure = loop_closure(&split).unwrap();
             let item = agent("x", json!([]), json!([["Split", step, 0]]));
             let other = agent("x", json!([]), json!([["Split", format!("{step}x"), 0]]));
             assert!(closure.covers(&scope(&item).unwrap()), "{step}");
@@ -668,7 +755,7 @@ mod tests {
     #[test]
     fn inner_bounds_select_exactly_the_prefixed_addresses() {
         let split = key("split", "wf", json!([]), json!([]), json!(["s"]));
-        let closure = loop_closure(&split, "Split").unwrap();
+        let closure = loop_closure(&split).unwrap();
         let (low, high) = closure.inner_bounds().unwrap();
         let candidates = [
             agent("x", json!([]), json!([["Split", "s", 0]])),

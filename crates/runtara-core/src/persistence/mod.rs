@@ -1016,9 +1016,12 @@ pub trait Persistence: Send + Sync {
     /// execution gets [`CoreError::Superseded`] and writes nothing.
     ///
     /// When the key is a composite step's result with a
-    /// [`checkpoint_scope::closure`], the same transaction also deletes the
-    /// rows that closure names, whether this call stored the row or found it
-    /// stored: replay reads the result first and never needs them again.
+    /// [`checkpoint_scope::closure`], the transaction that stores it also
+    /// deletes the rows that closure names: replay reads the result first and
+    /// never needs them again. A writer that loses the race for the key
+    /// collapses too, which changes nothing once the winner has. A result the
+    /// caller found by an earlier lookup is not recorded again, so it is not
+    /// collapsed again either.
     ///
     /// The default is a non-atomic, unfenced read-then-write for test
     /// doubles, and collapses nothing; durable backends override it.
