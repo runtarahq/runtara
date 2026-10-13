@@ -20,9 +20,10 @@ async function deleteConnectionByTitle(
 ) {
   const card = page.locator('tr').filter({ hasText: title });
   await card
-    .getByRole('button', { name: 'Delete connection', exact: true })
+    .getByRole('button', { name: `More actions for ${title}` })
     .first()
     .click();
+  await page.getByRole('menuitem', { name: 'Delete' }).click();
   // Confirm in the dialog
   await page
     .getByRole('dialog')

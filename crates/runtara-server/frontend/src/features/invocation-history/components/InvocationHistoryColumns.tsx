@@ -80,12 +80,12 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
           {workflowId ? (
             <Link
               to={`/workflows/${workflowId}`}
-              className="group/link inline-flex items-center gap-1.5 text-sm font-medium text-foreground hover:text-primary"
+              className="group/link inline-flex items-center gap-1.5 text-sm font-medium text-foreground hover:text-primary-text"
             >
               <span className="max-w-60 truncate" title={workflowName}>
                 {workflowName}
               </span>
-              <ExternalLink className="size-3 text-muted-foreground transition-colors group-hover/link:text-primary" />
+              <ExternalLink className="size-3 text-muted-foreground transition-colors group-hover/link:text-primary-text" />
             </Link>
           ) : (
             <span className="text-sm font-medium italic text-muted-foreground">
@@ -275,7 +275,7 @@ export const invocationHistoryColumns: ColumnDef<ExecutionHistoryItem>[] = [
               instanceId={instanceId}
               variant="secondary"
               size="icon"
-              className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary"
+              className="h-auto w-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary-text"
             />
           )}
           {shouldShowStop ? (

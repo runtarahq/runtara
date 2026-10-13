@@ -366,7 +366,7 @@ export function TemplateEditorModal({
         <DialogHeader className="shrink-0 border-b border-border bg-muted/30 px-6 py-4">
           <div className="flex items-center gap-3">
             <div className="flex size-9 items-center justify-center rounded-lg bg-primary/10">
-              <Icons.code className="size-4 text-primary" />
+              <Icons.code className="size-4 text-primary-text" />
             </div>
             <div>
               <DialogTitle className="text-base">Template Editor</DialogTitle>
@@ -598,10 +598,10 @@ export function TemplateEditorModal({
                         className="group w-full rounded border border-transparent p-2 text-left transition-colors hover:border-primary/30 hover:bg-primary/5"
                       >
                         <div className="flex items-center gap-1.5">
-                          <span className="text-muted-foreground group-hover:text-primary">
+                          <span className="text-muted-foreground group-hover:text-primary-text">
                             {getIconForType(variable.type, variable.value)}
                           </span>
-                          <code className="truncate text-xs font-semibold text-primary">
+                          <code className="truncate text-xs font-semibold text-primary-text">
                             {variable.label}
                           </code>
                           {variable.type && (

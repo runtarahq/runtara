@@ -63,20 +63,22 @@ export function WorkflowCard({
   return (
     <TableRow className={cn('group', className)}>
       <TableCell className="font-medium text-foreground">
-        <div className="flex items-center gap-2">
-          <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-3xs font-medium text-muted-foreground">
+        <div className="flex items-center gap-2.5">
+          {/* Fixed-width mono chip so names line up down the column; folder
+              rows put their icon in the same slot. "Draft" is wider and grows. */}
+          <span className="min-w-7 shrink-0 rounded-[5px] border bg-muted px-1 py-0.5 text-center font-mono text-2xs font-medium text-muted-foreground">
             {version !== undefined ? `v${version}` : 'Draft'}
           </span>
           <button
             type="button"
             onClick={() => onUpdate(workflow)}
-            className="min-w-0 flex-1 truncate text-left transition-colors hover:text-primary"
+            className="min-w-0 flex-1 truncate text-left transition-colors hover:text-primary-text"
           >
             {title}
           </button>
           {hasInputs && (
-            <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-warning/30 bg-warning/10 px-1.5 py-0.5 text-3xs font-medium text-warning">
-              <AlertCircle className="size-2.5" />
+            <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-warning/30 bg-warning/10 py-0.5 pl-1.5 pr-2 text-2xs font-medium text-warning-text">
+              <AlertCircle className="size-3" />
               Inputs
             </span>
           )}
@@ -88,7 +90,7 @@ export function WorkflowCard({
         </div>
       </TableCell>
       <TableCell
-        className="whitespace-nowrap text-muted-foreground"
+        className="whitespace-nowrap tabular-nums text-muted-foreground"
         title={
           workflow.updated ? formatRelativeTime(workflow.updated) : undefined
         }

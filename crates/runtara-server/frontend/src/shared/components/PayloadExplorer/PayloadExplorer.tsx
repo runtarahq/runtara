@@ -634,7 +634,7 @@ export function PayloadExplorer({
             compact ? 'h-6 px-2 text-[11px]' : 'h-7 px-2.5 text-xs',
             m === 'json' && 'border-l',
             mode === m
-              ? 'bg-primary/10 text-primary'
+              ? 'bg-primary/10 text-primary-text'
               : 'bg-background text-muted-foreground hover:text-foreground'
           )}
         >
@@ -867,7 +867,7 @@ function SectionNotes({
             type="button"
             onClick={onLoadFull}
             disabled={loadingFull}
-            className="ml-1.5 font-medium text-primary hover:underline disabled:opacity-60"
+            className="ml-1.5 font-medium text-primary-text hover:underline disabled:opacity-60"
           >
             {loadingFull ? 'Loading…' : 'Load full value'}
           </button>
@@ -983,8 +983,8 @@ function IconButton({
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        'grid size-6 place-items-center rounded hover:bg-primary/10 hover:text-primary disabled:pointer-events-none disabled:opacity-40',
-        pressed ? 'bg-primary/10 text-primary' : 'text-muted-foreground'
+        'grid size-6 place-items-center rounded hover:bg-primary/10 hover:text-primary-text disabled:pointer-events-none disabled:opacity-40',
+        pressed ? 'bg-primary/10 text-primary-text' : 'text-muted-foreground'
       )}
     >
       {children}

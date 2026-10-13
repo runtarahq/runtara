@@ -94,7 +94,7 @@ function StepIdRow({ stepId }: { stepId: string }) {
             type="button"
             aria-label="Edit step id"
             onClick={startEditing}
-            className="shrink-0 text-muted-foreground hover:text-primary"
+            className="shrink-0 text-muted-foreground hover:text-primary-text"
           >
             <Pencil className="size-3" />
           </button>
@@ -132,7 +132,7 @@ function StepIdRow({ stepId }: { stepId: string }) {
           aria-label="Confirm step id"
           onClick={confirmEditing}
           disabled={Boolean(error)}
-          className="shrink-0 text-muted-foreground hover:text-primary disabled:opacity-40"
+          className="shrink-0 text-muted-foreground hover:text-primary-text disabled:opacity-40"
         >
           <Check className="size-3.5" />
         </button>
@@ -234,7 +234,7 @@ export function NameField({ name }: { name: string }) {
     <button
       type="button"
       onClick={() => setConnectionPickerOpen(true)}
-      className="min-w-0 truncate text-left text-primary hover:text-primary/80 hover:underline"
+      className="min-w-0 truncate text-left text-primary-text hover:text-primary-text/80 hover:underline"
       title={selectedConnection?.title || 'Select connection'}
     >
       {selectedConnection?.title || 'Select connection'}
@@ -272,7 +272,7 @@ export function NameField({ name }: { name: string }) {
           <button
             type="button"
             onClick={() => setCapabilityPickerOpen(true)}
-            className="min-w-0 truncate text-left text-primary hover:text-primary/80 hover:underline"
+            className="min-w-0 truncate text-left text-primary-text hover:text-primary-text/80 hover:underline"
             title={`${agent?.name || agentId} → ${capabilityId}`}
           >
             {agent?.name || agentId} → {capabilityId}

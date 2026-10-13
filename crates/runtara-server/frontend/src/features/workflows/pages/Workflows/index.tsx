@@ -209,8 +209,8 @@ export function Workflows() {
       actions={
         <Can permission="workflow:create">
           <Link to={createWorkflowHref(currentFolderPath)}>
-            <Button disabled={isError}>
-              <PlusIcon className="mr-2 size-4" />
+            <Button size="lg" disabled={isError}>
+              <PlusIcon className="size-4" />
               New workflow
             </Button>
           </Link>

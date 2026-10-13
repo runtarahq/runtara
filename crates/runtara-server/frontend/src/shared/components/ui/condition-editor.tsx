@@ -211,7 +211,7 @@ const ArgumentValueTypeSelector = ({
                     </span>
                     <div className="flex min-w-0 flex-1 flex-col">
                       <span
-                        className={`text-xs font-medium leading-tight ${isSelected ? 'text-primary' : ''}`}
+                        className={`text-xs font-medium leading-tight ${isSelected ? 'text-primary-text' : ''}`}
                       >
                         {option.label}
                         {isSelected && ' ✓'}

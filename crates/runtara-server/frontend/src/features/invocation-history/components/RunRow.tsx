@@ -2,6 +2,7 @@ import { Link } from 'react-router';
 import { toast } from 'sonner';
 import { Bug, CirclePlay, Copy, Eye, MessageSquare } from 'lucide-react';
 import type { ExecutionHistoryItem } from '../types';
+import { cn } from '@/lib/utils';
 import { RunStatusPill } from './RunLinks';
 import { describeFailure } from '@/features/operations/queries';
 import { StateValue } from '@/features/operations/components/StateValue';
@@ -19,7 +20,11 @@ export function RunIdentity({ run }: { run: ExecutionHistoryItem }) {
     <div className="min-w-0 space-y-1">
       <div className="flex min-w-0 items-center gap-1.5">
         <Link
-          className="truncate font-medium text-primary-text"
+          className={cn(
+            'truncate font-medium text-primary-text hover:underline',
+            // A bare ID is set in mono so it reads as an identifier.
+            !run.runLabel && 'font-mono text-[13px]'
+          )}
           title={run.runLabel || run.instanceId}
           to={
             // Only a run waiting on people needs the Operations view; the
@@ -33,7 +38,7 @@ export function RunIdentity({ run }: { run: ExecutionHistoryItem }) {
         </Link>
       </div>
       <p
-        className="truncate text-xs text-muted-foreground"
+        className="truncate text-[12.5px] text-muted-foreground"
         title={run.workflowName || run.workflowId}
       >
         {run.workflowName || run.workflowId}
@@ -124,7 +129,7 @@ export function RunActions({
           asChild
           variant="secondary"
           size="icon"
-          className={`${iconClass} hover:bg-primary/10 hover:text-primary`}
+          className={`${iconClass} hover:bg-primary/10 hover:text-primary-text`}
         >
           <Link
             aria-label="Open execution"
@@ -138,7 +143,7 @@ export function RunActions({
         <Button
           variant="secondary"
           size="icon"
-          className={`${iconClass} hover:bg-primary/10 hover:text-primary`}
+          className={`${iconClass} hover:bg-primary/10 hover:text-primary-text`}
           aria-label="Copy run ID"
           onClick={() =>
             void navigator.clipboard
@@ -156,7 +161,7 @@ export function RunActions({
             instanceId={run.instanceId}
             variant="secondary"
             size="icon"
-            className={`${iconClass} hover:bg-primary/10 hover:text-primary`}
+            className={`${iconClass} hover:bg-primary/10 hover:text-primary-text`}
           />
         )}
         {isActiveStatus(run.status) ? (

@@ -163,7 +163,15 @@ export function InvocationHistoryTable({
     [filters, onFiltersChange]
   );
 
-  const footerLeft = `${query.data ? totalElements : '—'} runs · ${data.length} on this page`;
+  const footerLeft = (
+    <span>
+      <strong className="font-semibold text-foreground">
+        {query.data ? totalElements : '—'}
+      </strong>{' '}
+      runs <span className="mx-0.5 text-muted-foreground/60">·</span>{' '}
+      {data.length} on this page
+    </span>
+  );
 
   const handlePageChange = (page: number) => {
     setPagination((prev) => ({ ...prev, pageIndex: page }));

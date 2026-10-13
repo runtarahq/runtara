@@ -50,12 +50,11 @@ export function Breadcrumb({
             ) : last ? (
               // The final crumb is the page title, so it doubles as the page's
               // h1 — console pages have no other heading, and without one there
-              // is no landmark for screen readers to jump to. Preflight resets
-              // heading font-size/weight/margin, so this renders identically to
-              // the span it replaces.
+              // is no landmark for screen readers to jump to. It is set larger
+              // than the ancestor crumbs so the page reads as titled.
               <h1
                 aria-current="page"
-                className="truncate px-1 py-0.5 text-sm font-medium text-foreground"
+                className="truncate px-1 py-0.5 text-lg font-semibold tracking-tight text-foreground"
               >
                 {item.label}
               </h1>
@@ -192,7 +191,7 @@ export function ConsoleToolbar({
   return (
     <div
       className={cn(
-        'flex h-14 shrink-0 items-center gap-3 border-b px-4 md:px-5',
+        'flex h-16 shrink-0 items-center gap-2 border-b px-4 md:px-7',
         className
       )}
     >

@@ -150,7 +150,7 @@ export function SettingsContent({
                   className={cn(
                     'rounded p-1.5',
                     isSelected
-                      ? 'bg-primary/10 text-primary'
+                      ? 'bg-primary/10 text-primary-text'
                       : 'bg-muted/50 text-muted-foreground'
                   )}
                 >

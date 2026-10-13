@@ -121,7 +121,7 @@ const Settings = lazy(() =>
 // Loading component for Suspense
 const PageLoader = () => (
   <div className="flex h-full items-center justify-center">
-    <Spinner className="size-8 text-primary" />
+    <Spinner className="size-8 text-primary-text" />
   </div>
 );
 

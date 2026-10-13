@@ -90,7 +90,7 @@ export function ObjectModelConnectionSelector() {
                 }}
                 className={cn(
                   'flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted',
-                  selected && 'text-primary'
+                  selected && 'text-primary-text'
                 )}
               >
                 <span className="truncate" title={connection.title}>

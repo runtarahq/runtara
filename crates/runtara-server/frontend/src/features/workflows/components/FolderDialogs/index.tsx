@@ -75,7 +75,7 @@ export function RenameFolderDialog({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Pencil className="size-5 text-primary" />
+            <Pencil className="size-5 text-primary-text" />
             Rename folder
           </DialogTitle>
           <DialogDescription>
@@ -357,7 +357,7 @@ export function MoveToFolderDialog({
               className={cn(
                 'size-5',
                 selectedPath === '/' && !isCreatingNew
-                  ? 'text-primary'
+                  ? 'text-primary-text'
                   : 'text-muted-foreground'
               )}
             />
@@ -366,7 +366,7 @@ export function MoveToFolderDialog({
                 className={cn(
                   'text-sm font-medium',
                   selectedPath === '/' && !isCreatingNew
-                    ? 'text-primary'
+                    ? 'text-primary-text'
                     : 'text-foreground'
                 )}
               >
@@ -403,7 +403,7 @@ export function MoveToFolderDialog({
                 className={cn(
                   'size-5',
                   selectedPath === folder.path && !isCreatingNew
-                    ? 'text-primary'
+                    ? 'text-primary-text'
                     : 'text-amber-500'
                 )}
               />
@@ -412,7 +412,7 @@ export function MoveToFolderDialog({
                   className={cn(
                     'text-sm font-medium',
                     selectedPath === folder.path && !isCreatingNew
-                      ? 'text-primary'
+                      ? 'text-primary-text'
                       : 'text-foreground'
                   )}
                 >

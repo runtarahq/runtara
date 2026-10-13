@@ -52,28 +52,37 @@
     --card-foreground: 214 32% 20%; /* deep blue-gray */
     --popover: 0 0% 100%; /* white */
     --popover-foreground: 214 32% 20%; /* deep blue-gray */
-    --primary: 217 91% 60%; /* vibrant blue */
+    /* #2f6beb: deep enough that its white label clears AA (4.75:1); the old
+       #3b82f6 gave it 3.63:1. */
+    --primary: 221 82% 55%;
     --primary-foreground: 0 0% 100%; /* white */
-    /* Primary as TEXT on a light surface. --primary itself is 3.64:1 on white,
-       under the 4.5:1 WCAG AA bar for body-sized text, so it may tint a
-       background but must not be a label colour here. 45% lightness is 6.00:1
-       — the same value the print block already uses for this reason. */
+    /* Primary as TEXT on a light surface. --primary itself is under the 4.5:1
+       WCAG AA bar on white for body-sized text, so it may tint a background
+       but must not be a label colour here. 45% lightness is 6.00:1 — the same
+       value the print block already uses for this reason. */
     --primary-text: 217 91% 45%;
     --secondary: 142 76% 93%; /* very light green */
     --secondary-foreground: 142 76% 20%; /* dark green */
     --muted: 210 40% 96%; /* very light blue-gray */
     --muted-foreground: 215 20% 40%; /* medium blue-gray */
-    --accent: 199 89% 94%; /* very light cyan */
-    --accent-foreground: 199 89% 25%; /* dark cyan */
+    --accent: 221 86% 94%; /* #e4ecfd - pale blue, same family as primary */
+    --accent-foreground: 222 74% 44%; /* #1d4fc4 */
     --destructive: 0 84% 60%; /* soft red */
     --destructive-foreground: 0 0% 98%; /* off white */
     --border: 214 32% 91%; /* light blue-gray border */
+    /* Console table header and footer bands: a faint wash off the page. */
+    --table-head: 220 50% 98.6%; /* #fafbfd */
     --input: 214 32% 91%; /* light blue-gray input */
     --ring: 217 91% 60%; /* vibrant blue */
     --success: 142 71% 45%; /* green */
     --success-foreground: 0 0% 100%; /* white */
+    /* Success as TEXT; --success is ~2.3:1 on white. This is #166534. */
+    --success-text: 142 61% 24%;
     --warning: 38 92% 50%; /* amber */
     --warning-foreground: 0 0% 100%; /* white */
+    /* Warning as TEXT. --warning is ~2.2:1 on white, so like --primary it may
+       tint a background but must not be a label colour; this is #92400e. */
+    --warning-text: 23 83% 31%;
     --info: 217 91% 60%; /* blue (matches the informational blues in use) */
     --info-foreground: 0 0% 100%; /* white */
     /* Categorical chart palette (reports dataviz set): alternating hue
@@ -91,8 +100,8 @@
     --radius: 0.375rem; /* utilitarian: tight corners (controls ~4px, cards ~6px) */
     --sidebar-background: 210 40% 98%; /* very light blue */
     --sidebar-foreground: 214 32% 20%; /* deep blue-gray */
-    --sidebar-accent: 199 89% 94%; /* very light cyan */
-    --sidebar-accent-foreground: 199 89% 25%; /* dark cyan */
+    --sidebar-accent: 221 86% 94%; /* #e4ecfd - see --accent */
+    --sidebar-accent-foreground: 222 74% 44%; /* #1d4fc4 */
     --sidebar-border: 214 32% 91%; /* light blue-gray border */
     --sidebar-ring: 217 91% 60%; /* vibrant blue */
   }
@@ -110,26 +119,35 @@
     --card-foreground: 0 0% 75%; /* matches --foreground */
     --popover: 0 0% 10%; /* #1a1a1a - Same as card */
     --popover-foreground: 0 0% 75%; /* matches --foreground */
-    --primary: 217 91% 60%; /* #3b82f6 - Bright blue for CTAs */
+    /* Fill: calmer than the old #3b82f6, which glared against the
+       soft-contrast surfaces and gave its white label only 3.63:1. This value
+       gives the label 4.97:1. */
+    --primary: 217 60% 50%; /* #336ecc */
     --primary-foreground: 0 0% 100%; /* white */
-    /* On the dark surfaces --primary already clears AA (5.44:1 on background,
-       4.78:1 on card); darkening it here would make it worse. */
+    /* Text: the fill is too dark to read as text here (3.52:1 on card), so
+       text keeps the brighter blue — 5.45:1 on background, 4.82:1 on card. */
     --primary-text: 217 91% 60%;
     --secondary: 0 0% 7%; /* #111111 - Slightly lighter dark background */
     --secondary-foreground: 0 0% 45%; /* #737373 - Darker gray for secondary text */
     --muted: 0 0% 13%; /* #222222 - Card hover background */
     --muted-foreground: 0 0% 55%; /* #8c8c8c - Muted text that still clears ~4.5:1 on elevated surfaces */
-    --accent: 217 91% 60%; /* #3b82f6 - Same as primary */
-    --accent-foreground: 0 0% 100%; /* white */
+    /* Hover/focus/selected highlight, NOT a second primary. A solid-blue
+       accent made every menu hover and selected row look like a CTA; this is
+       a blue-tinted surface, the dark counterpart of light mode's pale tint. */
+    --accent: 217 40% 18%; /* #1b2940 */
+    --accent-foreground: 213 94% 82%; /* #a8cbfc */
     --destructive: 0 84% 60%; /* #ef4444 - Red for errors */
     --destructive-foreground: 0 0% 98%; /* off white */
     --border: 0 0% 15%; /* #262626 - Subtle dark border */
+    --table-head: 0 0% 8%; /* #151515 */
     --input: 0 0% 15%; /* #262626 - Same as border */
     --ring: 217 91% 60%; /* #3b82f6 - Bright blue focus ring */
     --success: 142 71% 45%; /* #22c55e - Green for success */
     --success-foreground: 0 0% 100%; /* white */
+    --success-text: 142 50% 58%; /* #5ccc85 - softened green */
     --warning: 38 92% 50%; /* amber */
     --warning-foreground: 0 0% 100%; /* white */
+    --warning-text: 40 70% 64%; /* #e6b85c - softened amber, ~9:1 on card */
     --info: 217 91% 60%; /* #3b82f6 */
     --info-foreground: 0 0% 100%; /* white */
     /* Same palette in dark (chosen to read on both surfaces). */
@@ -147,8 +165,8 @@
     --chart-9: 0 74% 42%; /* red-600 */
     --sidebar-background: 0 0% 7%; /* #111111 - Secondary background */
     --sidebar-foreground: 0 0% 64%; /* #a3a3a3 - Medium gray */
-    --sidebar-accent: 217 91% 60%; /* #3b82f6 */
-    --sidebar-accent-foreground: 0 0% 100%; /* white */
+    --sidebar-accent: 217 50% 22%; /* #1c3254 - tint, see --accent */
+    --sidebar-accent-foreground: 213 94% 82%; /* #a8cbfc */
     --sidebar-border: 0 0% 15%; /* #262626 */
     --sidebar-ring: 217 91% 60%; /* #3b82f6 */
   }

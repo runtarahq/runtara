@@ -128,7 +128,7 @@ export function ConnectionPickerModal({
                     onClick={() => handleSelect(option.value)}
                     className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors ${
                       isSelected
-                        ? 'bg-primary/10 text-primary'
+                        ? 'bg-primary/10 text-primary-text'
                         : 'text-foreground hover:bg-accent'
                     }`}
                   >
@@ -158,7 +158,7 @@ export function ConnectionPickerModal({
 
                     {/* Selected indicator */}
                     {isSelected && (
-                      <Check className="size-4 shrink-0 text-primary" />
+                      <Check className="size-4 shrink-0 text-primary-text" />
                     )}
                   </button>
                 );

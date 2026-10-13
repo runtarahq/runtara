@@ -85,7 +85,7 @@ function EventItem({ event }: { event: ChatSSEEvent }) {
     case 'tool_call':
       return (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <Wrench className="size-3 text-primary" />
+          <Wrench className="size-3 text-primary-text" />
           <span>
             Calling{' '}
             <code className="rounded bg-muted px-1 py-0.5 text-3xs">

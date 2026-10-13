@@ -1,12 +1,12 @@
 import { ReactNode, useState } from 'react';
 import { Link } from 'react-router';
 import { toast } from 'sonner';
-import { Activity, Pencil, Trash2, RefreshCw } from 'lucide-react';
+import { RefreshCw } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import { queryClient } from '@/main';
 import { useCustomMutation, useCustomQuery } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys';
 import { Button } from '@/shared/components/ui/button';
-import { WithTooltip } from '@/shared/components/ui/tooltip';
 import { Can } from '@/shared/components/Can';
 import {
   Table,
@@ -20,6 +20,7 @@ import {
   ConsoleEmptyState,
   ConsoleErrorState,
   ConsoleTableShell,
+  RowActionsMenu,
   StatusPill,
   TableSkeletonRows,
   TableStatusFooter,
@@ -58,19 +59,31 @@ function ConnectionUsage({ connection }: { connection: EnrichedConnection }) {
     return <span className="text-muted-foreground/60">—</span>;
   }
 
+  const { totalRequests, rateLimitedCount } = rateLimitStats;
   const statsText =
-    rateLimitStats.rateLimitedCount > 0
-      ? `${formatNumber(rateLimitStats.totalRequests)} req (${formatNumber(rateLimitStats.rateLimitedCount)} limited) 24h`
-      : `${formatNumber(rateLimitStats.totalRequests)} req 24h`;
+    rateLimitedCount > 0
+      ? `${formatNumber(totalRequests)} req (${formatNumber(rateLimitedCount)} limited)`
+      : `${formatNumber(totalRequests)} req`;
 
+  // Idle connections recede so the ones carrying traffic stand out.
   return (
     <Link
       to={`/connections/rate-limits?connection=${encodeURIComponent(connection.id)}`}
-      className="inline-flex items-center gap-1 text-xs underline-offset-2 hover:text-foreground hover:underline"
-      aria-label={`Rate limits for ${connection.title}: ${statsText}`}
+      className={cn(
+        'whitespace-nowrap tabular-nums underline-offset-2 hover:underline',
+        totalRequests > 0
+          ? 'font-medium text-foreground'
+          : 'text-muted-foreground/60 hover:text-foreground'
+      )}
+      aria-label={`Rate limits for ${connection.title}: ${statsText} in the last 24 hours`}
     >
-      <Activity className="size-3" aria-hidden />
-      {statsText}
+      {formatNumber(totalRequests)} req
+      {rateLimitedCount > 0 && (
+        <span className="font-normal text-warning-text">
+          {' '}
+          ({formatNumber(rateLimitedCount)} limited)
+        </span>
+      )}
     </Link>
   );
 }
@@ -136,86 +149,86 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
     );
   } else {
     body = (
-      <Table variant="console">
+      <Table variant="console" className="min-w-[760px] table-fixed">
         <TableHeader>
           <TableRow>
             <TableHead>Connection</TableHead>
-            <TableHead>Integration</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead>Usage</TableHead>
-            <TableHead className="w-0" />
+            <TableHead className="w-[28%]">Integration</TableHead>
+            <TableHead className="w-52">Status</TableHead>
+            <TableHead className="w-32">Usage · 24 h</TableHead>
+            <TableHead className="w-48">
+              <span className="sr-only">Actions</span>
+            </TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {(connections as EnrichedConnection[]).map((connection) => {
             const statusPill = connectionStatusPill(connection.status);
+            // A connection that needs a person is tinted, so it is found
+            // without reading every status.
+            const needsAttention =
+              statusPill.tone === 'warning' || statusPill.tone === 'error';
+            const canReconnect =
+              !!connection.connectionType?.oauthConfig &&
+              connection.status === 'REQUIRES_RECONNECTION';
             return (
-              <TableRow key={connection.id}>
+              <TableRow
+                key={connection.id}
+                className={cn(
+                  needsAttention &&
+                    (statusPill.tone === 'error'
+                      ? 'bg-destructive/[0.04] hover:bg-destructive/[0.07]'
+                      : 'bg-warning/[0.06] hover:bg-warning/10')
+                )}
+              >
                 <TableCell className="font-medium text-foreground">
-                  {connection.title}
+                  <Link
+                    to={`/connections/${connection.id}`}
+                    className="block truncate hover:text-primary-text hover:underline"
+                    title={connection.title}
+                  >
+                    {connection.title}
+                  </Link>
                 </TableCell>
-                <TableCell className="text-muted-foreground">
+                <TableCell className="truncate text-muted-foreground">
                   {connection.connectionType?.displayName || 'Connection'}
                 </TableCell>
                 <TableCell>
                   <StatusPill tone={statusPill.tone} label={statusPill.label} />
                 </TableCell>
-                <TableCell className="text-muted-foreground">
+                <TableCell>
                   <ConnectionUsage connection={connection} />
                 </TableCell>
                 <TableCell className="text-right">
-                  <div className="flex items-center justify-end gap-1">
-                    {connection.connectionType?.oauthConfig &&
-                      connection.status === 'REQUIRES_RECONNECTION' && (
-                        <Can permission="connection:update">
-                          <WithTooltip label="Reconnect (re-authorize with saved credentials)">
-                            <Button
-                              variant="secondary"
-                              size="icon-sm"
-                              className="text-warning hover:text-warning"
-                              aria-label="Reconnect (re-authorize with saved credentials)"
-                              disabled={isAuthorizing(connection.id)}
-                              onClick={() => authorize(connection.id)}
-                            >
-                              {isAuthorizing(connection.id) ? (
-                                <Spinner className="size-4" />
-                              ) : (
-                                <RefreshCw className="size-4" />
-                              )}
-                            </Button>
-                          </WithTooltip>
-                        </Can>
-                      )}
-                    <Can permission="connection:update">
-                      <Link to={`/connections/${connection.id}`}>
-                        <WithTooltip label="Edit connection">
-                          <Button
-                            variant="secondary"
-                            size="icon-sm"
-                            aria-label="Edit connection"
-                          >
-                            <Pencil className="size-4" />
-                          </Button>
-                        </WithTooltip>
-                      </Link>
-                    </Can>
-                    <Can permission="connection:delete">
-                      <WithTooltip label="Delete connection">
+                  <div className="flex items-center justify-end gap-1.5">
+                    {canReconnect && (
+                      <Can permission="connection:update">
                         <Button
-                          variant="secondaryDestructive"
-                          size="icon-sm"
-                          aria-label="Delete connection"
-                          disabled={deletingId === connection.id}
-                          onClick={() => setDeleteTarget(connection)}
+                          variant="secondary"
+                          bordered
+                          size="sm"
+                          className="border-warning/40 text-warning-text hover:bg-warning/10"
+                          title="Re-authorize with the saved credentials"
+                          disabled={isAuthorizing(connection.id)}
+                          onClick={() => authorize(connection.id)}
                         >
-                          {deletingId === connection.id ? (
-                            <Spinner className="size-4" />
+                          {isAuthorizing(connection.id) ? (
+                            <Spinner className="size-3.5" />
                           ) : (
-                            <Trash2 className="size-4" />
+                            <RefreshCw className="size-3.5" />
                           )}
+                          Reconnect
                         </Button>
-                      </WithTooltip>
-                    </Can>
+                      </Can>
+                    )}
+                    <RowActionsMenu
+                      label={connection.title}
+                      editTo={`/connections/${connection.id}`}
+                      editPermission="connection:update"
+                      onDelete={() => setDeleteTarget(connection)}
+                      deletePermission="connection:delete"
+                      deleting={deletingId === connection.id}
+                    />
                   </div>
                 </TableCell>
               </TableRow>
@@ -233,9 +246,14 @@ export function ExistingConnections({ toolbar }: ExistingConnectionsProps) {
         footer={
           hasConnections && !isFetching && !isError ? (
             <TableStatusFooter
-              left={`${connections.length} connection${
-                connections.length === 1 ? '' : 's'
-              }`}
+              left={
+                <span>
+                  <strong className="font-semibold text-foreground">
+                    {connections.length}
+                  </strong>{' '}
+                  connection{connections.length === 1 ? '' : 's'}
+                </span>
+              }
             />
           ) : undefined
         }

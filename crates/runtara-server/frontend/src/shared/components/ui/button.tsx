@@ -25,13 +25,15 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        primary: 'bg-primary text-primary-foreground hover:bg-primary/90',
+        // Filled actions get a little depth: a soft drop shadow and a top
+        // highlight, so they read as pressable against flat secondary buttons.
+        primary:
+          'bg-primary text-primary-foreground shadow-[0_1px_2px_rgba(16,24,40,0.12),inset_0_1px_0_rgba(255,255,255,0.14)] hover:bg-primary/90',
         destructive:
-          'bg-destructive text-destructive-foreground hover:bg-destructive/90',
-        // text-primary-text, not text-primary: the latter is 3.64:1 on white,
-        // under the AA bar for text at these sizes.
-        secondary:
-          'text-primary-text hover:bg-accent hover:text-accent-foreground',
+          'bg-destructive text-destructive-foreground shadow-[0_1px_2px_rgba(16,24,40,0.12),inset_0_1px_0_rgba(255,255,255,0.14)] hover:bg-destructive/90',
+        // Neutral, not blue: blue is kept for the primary action and for
+        // links, so a screen's one primary button is the only blue control.
+        secondary: 'text-foreground hover:bg-muted',
         secondaryDestructive:
           'text-destructive hover:bg-destructive/10 hover:text-destructive',
       },
@@ -49,7 +51,18 @@ const buttonVariants = cva(
       },
     },
     compoundVariants: [
-      { variant: 'secondary', bordered: true, class: 'border-input' },
+      {
+        variant: 'secondary',
+        bordered: true,
+        class: 'border-input shadow-[0_1px_1px_rgba(16,24,40,0.04)]',
+      },
+      // Icon-only secondaries are row and toolbar glyphs: quieter than a
+      // labelled button until hovered.
+      {
+        variant: 'secondary',
+        size: ['icon', 'icon-sm'],
+        class: 'text-muted-foreground hover:text-foreground',
+      },
       {
         variant: 'secondaryDestructive',
         bordered: true,

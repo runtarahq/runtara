@@ -120,7 +120,16 @@ describe('execution search pagination', () => {
     expect(params().pageIndex).toBe(0);
     // No second client-side filter should discard a backend match.
     expect(screen.getByText('server-result')).toBeInTheDocument();
-    expect(screen.getByText('73 runs · 1 on this page')).toBeInTheDocument();
+    // The count is set in <strong>, so match the footer's whole text.
+    expect(
+      screen.getByText(
+        (_, el) =>
+          el?.textContent === '73 runs · 1 on this page' &&
+          Array.from(el.children).every(
+            (child) => child.textContent !== '73 runs · 1 on this page'
+          )
+      )
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByText('Next page'));
     expect(params().pageIndex).toBe(1);
     expect(params().filters.search).toBe('Order/12 [done]');

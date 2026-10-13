@@ -27,6 +27,7 @@ import {
 import { ThemeSwitcher } from '@/shared/components/theme-switcher.tsx';
 import { DollarSign, Settings } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
+import { cn } from '@/lib/utils';
 import { useCustomMutation } from '@/shared/hooks/api';
 import { createBillingPortalSession } from '@/shared/queries';
 import { toast } from 'sonner';
@@ -182,14 +183,24 @@ function FooterMenu() {
     },
   });
 
+  // Utilities, not actions: neutral like the nav, not primary blue.
+  const iconButton = 'size-8 text-muted-foreground hover:text-foreground';
+
   return (
-    <div className="flex min-w-0 flex-col gap-1 px-2 py-2">
-      <div className="flex items-center justify-center gap-2 group-data-[state=collapsed]:flex-col group-data-[state=collapsed]:gap-1">
-        <AuthSidebar />
+    <div className="flex min-w-0 items-center justify-between gap-2 border-t border-sidebar-border px-1.5 pt-3 group-data-[state=collapsed]:flex-col group-data-[state=collapsed]:border-t-0 group-data-[state=collapsed]:px-0 group-data-[state=collapsed]:pt-0">
+      <span
+        className="min-w-0 truncate pl-1 font-mono text-2xs text-muted-foreground group-data-[state=collapsed]:hidden"
+        title={versionTitle}
+        aria-label={`Runtara version ${versionLabel}`}
+      >
+        {versionLabel}
+      </span>
+      <div className="flex shrink-0 items-center gap-0.5 group-data-[state=collapsed]:flex-col group-data-[state=collapsed]:gap-1">
+        <AuthSidebar className={iconButton} />
         <Button
           variant="secondary"
           size="icon"
-          className="relative size-9 shrink-0"
+          className={cn('relative shrink-0', iconButton)}
           aria-label="Manage billing"
           onClick={() => createPortalSession({})}
           disabled={isPending}
@@ -197,15 +208,8 @@ function FooterMenu() {
           <DollarSign className="size-4" />
           <span className="sr-only">Manage billing</span>
         </Button>
-        <ThemeSwitcher />
-        <SidebarTrigger className="mx-0 w-min shrink-0 px-0" />
-      </div>
-      <div
-        className="min-w-0 px-1 text-center text-2xs font-medium text-muted-foreground/80 group-data-[state=collapsed]:hidden"
-        title={versionTitle}
-        aria-label={`Runtara version ${versionLabel}`}
-      >
-        <span className="block truncate">{versionLabel}</span>
+        <ThemeSwitcher className={iconButton} />
+        <SidebarTrigger className={cn('mx-0 shrink-0 px-0', iconButton)} />
       </div>
     </div>
   );
@@ -283,10 +287,20 @@ function SideBarNavLink({
   };
 
   const currentUrl = `${location.pathname}${searchParams.toString() ? `?${searchParams.toString()}` : ''}`;
+  const isChildActive = (child: any) =>
+    !child.external &&
+    (child.to === currentUrl || location.pathname === child.to);
+  // With a sub-item highlighted, the parent only names the section: one
+  // filled item in the nav, not two stacked on each other.
+  const childActive = !!route.children?.some(isChildActive);
 
   const buttonProps = {
-    isActive: active,
-    className: active ? '' : 'text-muted-foreground',
+    isActive: active && !childActive,
+    className: childActive
+      ? 'font-semibold text-foreground [&>svg]:text-primary-text'
+      : active
+        ? ''
+        : 'text-muted-foreground',
     size: 'default' as const,
     tooltip,
     disabled: route.disabled,
@@ -319,11 +333,12 @@ function SideBarNavLink({
             <SidebarMenuSubItem key={child.key}>
               <SidebarMenuSubButton
                 asChild
-                size="sm"
-                isActive={
-                  !child.external &&
-                  (child.to === currentUrl || location.pathname === child.to)
-                }
+                size="md"
+                isActive={isChildActive(child)}
+                className={cn(
+                  'h-8 text-[13px]',
+                  !isChildActive(child) && 'text-muted-foreground'
+                )}
                 onClick={handleNavClick}
               >
                 {child.external ? (

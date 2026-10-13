@@ -336,7 +336,7 @@ function RowAction({
       tabIndex={-1}
       aria-label={label}
       title={label}
-      className="grid size-6 place-items-center rounded text-muted-foreground hover:bg-primary/10 hover:text-primary"
+      className="grid size-6 place-items-center rounded text-muted-foreground hover:bg-primary/10 hover:text-primary-text"
       onClick={(event) => {
         event.stopPropagation();
         onClick();
@@ -485,7 +485,7 @@ function RowValue({
           {canLoadFull && (
             <button
               type="button"
-              className="inline-flex items-center gap-1 rounded-full bg-background px-2 py-0.5 font-medium text-foreground hover:text-primary disabled:opacity-60"
+              className="inline-flex items-center gap-1 rounded-full bg-background px-2 py-0.5 font-medium text-foreground hover:text-primary-text disabled:opacity-60"
               disabled={loadingFull}
               onClick={(event) => {
                 event.stopPropagation();

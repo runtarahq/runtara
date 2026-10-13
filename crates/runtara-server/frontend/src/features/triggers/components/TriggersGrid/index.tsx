@@ -1,7 +1,16 @@
 import { ReactNode, useState } from 'react';
 import { Link } from 'react-router';
 import { toast } from 'sonner';
-import { Pencil, Trash2, Copy } from 'lucide-react';
+import {
+  AppWindow,
+  Clock,
+  Copy,
+  Globe,
+  Mail,
+  MessageSquare,
+  Zap,
+  type LucideIcon,
+} from 'lucide-react';
 import { EnrichedTrigger, TriggerType } from '@/features/triggers/types';
 import { useCustomMutation } from '@/shared/hooks/api';
 import { queryKeys } from '@/shared/queries/query-keys.ts';
@@ -14,9 +23,7 @@ import {
   getChannelWebhookUrl,
 } from '@/features/triggers/utils/endpoints';
 import { formatDate } from '@/lib/utils';
-import { Badge } from '@/shared/components/ui/badge';
 import { Button } from '@/shared/components/ui/button';
-import { Can } from '@/shared/components/Can';
 import {
   Table,
   TableBody,
@@ -29,6 +36,7 @@ import {
   ConsoleEmptyState,
   ConsoleErrorState,
   ConsoleTableShell,
+  RowActionsMenu,
   StatusPill,
   TableSkeletonRows,
   TableStatusFooter,
@@ -41,7 +49,6 @@ import {
   WithTooltip,
 } from '@/shared/components/ui/tooltip';
 import { ModalDialog } from '@/shared/components/next-dialog';
-import { Spinner } from '@/shared/components/ui/spinner';
 import {
   DialogClose,
   DialogDescription,
@@ -57,6 +64,28 @@ interface TriggersGridProps {
   isFetching?: boolean;
   isError?: boolean;
   error?: unknown;
+}
+
+const TRIGGER_TYPES: Partial<
+  Record<TriggerType, { label: string; icon: LucideIcon }>
+> = {
+  HTTP: { label: 'HTTP', icon: Globe },
+  CRON: { label: 'Cron', icon: Clock },
+  EMAIL: { label: 'Email', icon: Mail },
+  APPLICATION: { label: 'Application', icon: AppWindow },
+  CHANNEL: { label: 'Channel', icon: MessageSquare },
+};
+
+/** Neutral chip: the type is a category, so green stays the status's alone. */
+function TriggerTypeChip({ type }: { type?: TriggerType }) {
+  const known = type ? TRIGGER_TYPES[type] : undefined;
+  const Icon = known?.icon ?? Zap;
+  return (
+    <span className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border bg-muted py-0.5 pl-1.5 pr-2 text-xs font-medium text-foreground/80">
+      <Icon className="size-3.5 text-muted-foreground" aria-hidden="true" />
+      {known?.label ?? getTriggerTypeLabel(type)}
+    </span>
+  );
 }
 
 function getTriggerTypeLabel(type?: TriggerType): string {
@@ -172,15 +201,17 @@ export function TriggersGrid({
   } else {
     body = (
       <TooltipProvider delayDuration={150}>
-        <Table variant="console">
+        <Table variant="console" className="min-w-[860px] table-fixed">
           <TableHeader>
             <TableRow>
               <TableHead>Name</TableHead>
-              <TableHead>Type</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Last run</TableHead>
-              <TableHead>Endpoint</TableHead>
-              <TableHead className="w-0" />
+              <TableHead className="w-36">Type</TableHead>
+              <TableHead className="w-32">Status</TableHead>
+              <TableHead className="w-48">Last run</TableHead>
+              <TableHead className="w-[36%]">Endpoint</TableHead>
+              <TableHead className="w-16">
+                <span className="sr-only">Actions</span>
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -192,119 +223,85 @@ export function TriggersGrid({
                   <TableCell className="font-medium text-foreground">
                     <Link
                       to={`/invocation-triggers/${trigger.id}`}
-                      className="hover:text-primary hover:underline"
+                      className="block truncate hover:text-primary-text hover:underline"
+                      title={trigger.workflowName}
                     >
                       {trigger.workflowName}
                     </Link>
                   </TableCell>
-                  <TableCell className="text-muted-foreground">
-                    <Badge variant="secondary">
-                      {getTriggerTypeLabel(trigger.triggerType)}
-                    </Badge>
+                  <TableCell>
+                    <TriggerTypeChip type={trigger.triggerType} />
                   </TableCell>
-                  <TableCell className="text-muted-foreground">
+                  <TableCell>
                     <StatusPill
                       tone={trigger.active ? 'success' : 'neutral'}
                       label={trigger.active ? 'Active' : 'Inactive'}
                     />
                   </TableCell>
-                  <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                  <TableCell
+                    className={
+                      trigger.lastRun
+                        ? 'whitespace-nowrap tabular-nums text-muted-foreground'
+                        : 'text-muted-foreground/60'
+                    }
+                  >
                     {formatLastRun(trigger.lastRun)}
                   </TableCell>
-                  <TableCell className="text-muted-foreground">
+                  <TableCell>
                     {endpoint ? (
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-1">
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span className="block max-w-[16rem] truncate font-mono text-xs text-muted-foreground">
-                                {endpoint}
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent className="max-w-[36rem] break-all font-mono text-xs">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="min-w-0 truncate font-mono text-[12.5px] text-muted-foreground">
                               {endpoint}
-                            </TooltipContent>
-                          </Tooltip>
-                          <WithTooltip label="Copy endpoint">
-                            <Button
-                              variant="secondary"
-                              size="icon"
-                              className="size-6 shrink-0"
-                              aria-label="Copy endpoint"
-                              onClick={() => handleCopyEndpoint(endpoint)}
-                            >
-                              <Copy className="size-3.5" />
-                            </Button>
-                          </WithTooltip>
-                        </div>
-                        {syncEndpoint && (
-                          <div className="flex items-center gap-1">
-                            <span className="shrink-0 text-3xs font-medium uppercase tracking-wide text-muted-foreground/70">
-                              Sync (30s, no history)
                             </span>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <span className="block max-w-[16rem] truncate font-mono text-xs text-muted-foreground">
-                                  {syncEndpoint}
-                                </span>
-                              </TooltipTrigger>
-                              <TooltipContent className="max-w-[36rem] break-all font-mono text-xs">
-                                {syncEndpoint}
-                              </TooltipContent>
-                            </Tooltip>
-                            <WithTooltip label="Copy sync endpoint">
-                              <Button
-                                variant="secondary"
-                                size="icon"
-                                className="size-6 shrink-0"
-                                aria-label="Copy sync endpoint"
-                                onClick={() => handleCopyEndpoint(syncEndpoint)}
-                              >
-                                <Copy className="size-3.5" />
-                              </Button>
-                            </WithTooltip>
-                          </div>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-[36rem] break-all font-mono text-xs">
+                            {endpoint}
+                          </TooltipContent>
+                        </Tooltip>
+                        {/* The sync variant is a different URL; the tag is
+                            how it is copied now that it has no line of its
+                            own. */}
+                        {syncEndpoint && (
+                          <WithTooltip label="Copy sync endpoint — waits up to 30 s for the result and keeps no run history">
+                            <button
+                              type="button"
+                              aria-label="Copy sync endpoint"
+                              onClick={() => handleCopyEndpoint(syncEndpoint)}
+                              className="shrink-0 whitespace-nowrap rounded-[5px] border px-1.5 py-px text-2xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                            >
+                              Sync · 30s · no history
+                            </button>
+                          </WithTooltip>
                         )}
+                        <WithTooltip label="Copy endpoint">
+                          <Button
+                            variant="secondary"
+                            size="icon-sm"
+                            className="shrink-0"
+                            aria-label="Copy endpoint"
+                            onClick={() => handleCopyEndpoint(endpoint)}
+                          >
+                            <Copy className="size-3.5" />
+                          </Button>
+                        </WithTooltip>
                       </div>
                     ) : (
-                      <span className="font-mono text-xs text-muted-foreground/70">
+                      <span className="block truncate font-mono text-[12.5px] text-muted-foreground">
                         {trigger.id}
                       </span>
                     )}
                   </TableCell>
                   <TableCell className="text-right">
-                    <div className="flex items-center justify-end gap-1">
-                      <Can permission="trigger:update">
-                        <Link to={`/invocation-triggers/${trigger.id}`}>
-                          <WithTooltip label="Edit trigger">
-                            <Button
-                              variant="secondary"
-                              size="icon-sm"
-                              aria-label="Edit trigger"
-                            >
-                              <Pencil className="size-4" />
-                            </Button>
-                          </WithTooltip>
-                        </Link>
-                      </Can>
-                      <Can permission="trigger:delete">
-                        <WithTooltip label="Delete trigger">
-                          <Button
-                            variant="secondaryDestructive"
-                            size="icon-sm"
-                            aria-label="Delete trigger"
-                            disabled={deletingId === trigger.id}
-                            onClick={() => setDeleteTarget(trigger)}
-                          >
-                            {deletingId === trigger.id ? (
-                              <Spinner className="size-4" />
-                            ) : (
-                              <Trash2 className="size-4" />
-                            )}
-                          </Button>
-                        </WithTooltip>
-                      </Can>
-                    </div>
+                    <RowActionsMenu
+                      label={trigger.workflowName || 'trigger'}
+                      editTo={`/invocation-triggers/${trigger.id}`}
+                      editPermission="trigger:update"
+                      onDelete={() => setDeleteTarget(trigger)}
+                      deletePermission="trigger:delete"
+                      deleting={deletingId === trigger.id}
+                    />
                   </TableCell>
                 </TableRow>
               );
@@ -322,9 +319,14 @@ export function TriggersGrid({
         footer={
           hasContent && !isFetching && !isError ? (
             <TableStatusFooter
-              left={`${sortedTriggers.length} trigger${
-                sortedTriggers.length === 1 ? '' : 's'
-              }`}
+              left={
+                <span>
+                  <strong className="font-semibold text-foreground">
+                    {sortedTriggers.length}
+                  </strong>{' '}
+                  trigger{sortedTriggers.length === 1 ? '' : 's'}
+                </span>
+              }
             />
           ) : undefined
         }

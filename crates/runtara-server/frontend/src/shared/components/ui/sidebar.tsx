@@ -566,12 +566,11 @@ const SidebarMenuItem = React.forwardRef<
 SidebarMenuItem.displayName = 'SidebarMenuItem';
 
 const sidebarMenuButtonVariants = cva(
-  'peer/menu-button flex w-full items-center gap-2 overflow-hidden rounded-sm p-2 text-left text-sm outline-none ring-sidebar-ring transition-all duration-200 ease-in-out hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground focus-visible:ring-2 active:bg-sidebar-accent/70 active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 group-has-[[data-sidebar=menu-action]]/menu-item:pr-8 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:bg-sidebar-accent/70 data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground data-[state=open]:hover:bg-sidebar-accent/50 data-[state=open]:hover:text-sidebar-accent-foreground group-data-[collapsible=icon]:!size-8 group-data-[collapsible=icon]:!p-2 [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0',
+  'peer/menu-button flex w-full items-center gap-2 overflow-hidden rounded-sm p-2 text-left text-sm outline-none ring-sidebar-ring transition-all duration-200 ease-in-out hover:bg-sidebar-foreground/[0.06] hover:text-foreground focus-visible:ring-2 active:bg-sidebar-foreground/10 disabled:pointer-events-none disabled:opacity-50 group-has-[[data-sidebar=menu-action]]/menu-item:pr-8 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:bg-sidebar-accent data-[active=true]:font-semibold data-[active=true]:text-sidebar-accent-foreground data-[state=open]:hover:bg-sidebar-foreground/[0.06] data-[state=open]:hover:text-foreground group-data-[collapsible=icon]:!size-8 group-data-[collapsible=icon]:!p-2 [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0',
   {
     variants: {
       variant: {
-        default:
-          'hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground',
+        default: 'hover:bg-sidebar-foreground/[0.06] hover:text-foreground',
         outline:
           'border border-sidebar-border/40 bg-background hover:border-sidebar-accent/40 hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground',
       },
@@ -745,7 +744,7 @@ const SidebarMenuSub = React.forwardRef<
     ref={ref}
     data-sidebar="menu-sub"
     className={cn(
-      'mx-3 flex min-w-0 translate-x-px flex-col gap-1 border-l border-sidebar-border/60 px-2 py-0.5',
+      'ml-[15px] mr-0 flex min-w-0 flex-col gap-px border-l border-sidebar-border py-0.5 pl-2.5',
       'group-data-[collapsible=icon]:hidden',
       className
     )}
@@ -777,8 +776,8 @@ const SidebarMenuSubButton = React.forwardRef<
       data-size={size}
       data-active={isActive}
       className={cn(
-        'flex h-7 min-w-0 -translate-x-px items-center gap-2 overflow-hidden rounded-sm px-2 text-sidebar-foreground outline-none ring-sidebar-ring transition-all duration-200 ease-in-out hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground focus-visible:ring-2 active:bg-sidebar-accent/70 active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-accent-foreground',
-        'data-[active=true]:bg-sidebar-accent/70 data-[active=true]:text-sidebar-accent-foreground',
+        'flex h-7 min-w-0 items-center gap-2 overflow-hidden rounded-sm px-2.5 text-sidebar-foreground outline-none ring-sidebar-ring transition-all duration-200 ease-in-out hover:bg-sidebar-foreground/[0.06] hover:text-foreground focus-visible:ring-2 active:bg-sidebar-foreground/10 disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-accent-foreground',
+        'data-[active=true]:bg-sidebar-accent data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground',
         size === 'sm' && 'h-7 text-xs',
         size === 'md' && 'text-sm',
         'group-data-[collapsible=icon]:hidden',

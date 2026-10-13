@@ -481,7 +481,7 @@ export function CapabilityPickerModal({
                           </span>
                           <SuspendsBadge capability={capability} />
                           {isCurrent && (
-                            <span className="rounded bg-primary/10 px-1.5 py-0.5 text-2xs font-medium text-primary">
+                            <span className="rounded bg-primary/10 px-1.5 py-0.5 text-2xs font-medium text-primary-text">
                               Current
                             </span>
                           )}

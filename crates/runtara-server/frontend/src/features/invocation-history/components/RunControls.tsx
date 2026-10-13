@@ -1,5 +1,6 @@
 import type { ComponentProps } from 'react';
 import { CalendarDays, Columns3, ChevronDown } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import { Button } from '@/shared/components/ui/button';
 import {
   Popover,
@@ -60,9 +61,9 @@ export function RunControls({
         : {}),
     });
   return (
-    <div className="space-y-3 border-b px-4 pb-3">
+    <div className="border-b">
       <div
-        className="flex flex-wrap items-center gap-1 border-b"
+        className="flex flex-wrap items-center gap-x-6 gap-y-1 border-b px-4 md:px-7"
         aria-label="Run status filters"
       >
         {runStatusFilters.map((item) => (
@@ -71,10 +72,22 @@ export function RunControls({
             type="button"
             aria-pressed={current === item.label}
             onClick={() => onChange({ ...filters, status: item.status })}
-            className={`border-b-2 px-3 py-2.5 text-sm ${current === item.label ? 'border-primary font-medium text-primary-text' : 'border-transparent text-muted-foreground hover:text-foreground'}`}
+            className={cn(
+              '-mb-px inline-flex h-11 items-center gap-1.5 border-b-2 px-0.5 text-sm font-medium',
+              current === item.label
+                ? 'border-primary font-semibold text-primary-text'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            )}
           >
             {item.label}{' '}
-            <span className="ml-1 tabular-nums text-muted-foreground">
+            <span
+              className={cn(
+                'rounded-full px-[7px] py-px text-[11.5px] font-semibold tabular-nums',
+                current === item.label
+                  ? 'bg-accent text-accent-foreground'
+                  : 'bg-muted text-muted-foreground'
+              )}
+            >
               {!summary || countsUnavailable
                 ? '—'
                 : (item.label === 'All'
@@ -89,7 +102,7 @@ export function RunControls({
         ))}
         {!current && <span className="text-sm">Status: {filters.status}</span>}
       </div>
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3 px-4 py-3 md:px-7">
         <Popover>
           <PopoverTrigger asChild>
             <Button variant="secondary" bordered aria-label="Time range">
