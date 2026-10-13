@@ -8,11 +8,21 @@ import type {
   OperationViewConfig,
   WorkflowInstanceDto,
 } from '@/generated/RuntaraRuntimeApi';
+import { cn } from '@/lib/utils';
 import { Button } from '@/shared/components/ui/button';
 import { WithTooltip } from '@/shared/components/ui/tooltip';
 import { Can } from '@/shared/components/Can';
 import { useToken } from '@/shared/hooks';
 import { RunStatusPill } from '@/features/invocation-history/components/RunLinks';
+import { formatRunDuration } from '@/features/invocation-history/utils/run-duration';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/shared/components/ui/table';
 import { StateValue, type StateField } from '../components/StateValue';
 import { message, operationsRequest } from '../queries';
 import { stateLabel } from '../state-label';
@@ -224,80 +234,105 @@ export function RunRows({
   rows,
   view,
   schema = {},
+  showDuration = false,
 }: {
   rows: WorkflowInstanceDto[];
   view?: OperationViewConfig;
   schema?: Record<string, StateField>;
+  /** Add a Duration column after Started. */
+  showDuration?: boolean;
 }) {
+  // Inside a bordered panel the console table's page-edge inset is too deep.
+  const edge = 'md:first:pl-5 md:last:pr-5';
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-left text-sm">
-        <thead className="bg-muted/50 text-xs text-muted-foreground">
-          <tr>
-            <th className="px-4 py-3">Run</th>
-            <th className="px-4 py-3">Workflow</th>
-            <th className="px-4 py-3">Status</th>
+      <Table variant="console">
+        <TableHeader>
+          <TableRow>
+            <TableHead className={edge}>Run</TableHead>
+            <TableHead className={edge}>Workflow</TableHead>
+            <TableHead className={edge}>Status</TableHead>
             {view?.columns?.map((field) => (
-              <th className="px-4 py-3" key={field}>
+              <TableHead className={edge} key={field}>
                 {view.labels?.[field] || stateLabel(field, schema[field])}
-              </th>
+              </TableHead>
             ))}
-            <th className="px-4 py-3">Started</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y">
-          {rows.map((run) => (
-            <tr key={run.id}>
-              <td className="px-4 py-3">
-                <div className="flex items-center gap-2">
-                  <Link
-                    className="whitespace-nowrap font-medium text-primary-text hover:underline"
-                    to={`/operations/runs/${run.workflowId}/${run.id}`}
-                  >
-                    {String(
-                      (view?.roles?.key && run.state?.[view.roles.key]) ??
-                        run.runLabel ??
-                        run.id.slice(0, 8)
-                    )}
-                  </Link>
-                  <button
-                    className="text-muted-foreground"
-                    aria-label={`Copy run ID ${run.id}`}
-                    title={run.id}
-                    onClick={() => void navigator.clipboard.writeText(run.id)}
-                  >
-                    <Copy className="size-3" />
-                  </button>
-                </div>
-              </td>
-              <td className="min-w-44 px-4 py-3">
-                {run.workflowName ?? run.workflowId}
-              </td>
-              <td className="whitespace-nowrap px-4 py-3">
-                <RunStatusPill
-                  status={run.status}
-                  suspensionReason={run.suspensionReason}
-                />
-              </td>
-              {view?.columns?.map((field) => (
-                <td className="max-w-xs px-4 py-3" key={field}>
-                  <StateValue
-                    value={run.state?.[field]}
-                    field={schema[field]}
-                    display={view.formats?.[field]}
+            <TableHead className={edge}>Started</TableHead>
+            {showDuration ? (
+              <TableHead className={edge}>Duration</TableHead>
+            ) : null}
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((run) => {
+            const label =
+              (view?.roles?.key && run.state?.[view.roles.key]) ?? run.runLabel;
+            return (
+              <TableRow key={run.id}>
+                <TableCell className={edge}>
+                  <div className="flex items-center gap-2">
+                    <Link
+                      className={cn(
+                        'whitespace-nowrap font-medium text-primary-text hover:underline',
+                        label == null && 'font-mono text-[13px]'
+                      )}
+                      to={`/operations/runs/${run.workflowId}/${run.id}`}
+                    >
+                      {String(label ?? run.id.slice(0, 8))}
+                    </Link>
+                    <button
+                      className="text-muted-foreground hover:text-foreground"
+                      aria-label={`Copy run ID ${run.id}`}
+                      title={run.id}
+                      onClick={() => void navigator.clipboard.writeText(run.id)}
+                    >
+                      <Copy className="size-3" />
+                    </button>
+                  </div>
+                </TableCell>
+                <TableCell
+                  className={cn('min-w-44 text-muted-foreground', edge)}
+                >
+                  {run.workflowName ?? run.workflowId}
+                </TableCell>
+                <TableCell className={cn('whitespace-nowrap', edge)}>
+                  <RunStatusPill
+                    status={run.status}
+                    suspensionReason={run.suspensionReason}
                   />
-                </td>
-              ))}
-              <td className="whitespace-nowrap px-4 py-3">
-                <StateValue
-                  value={run.created}
-                  display={{ kind: 'relative' }}
-                />
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+                </TableCell>
+                {view?.columns?.map((field) => (
+                  <TableCell className={cn('max-w-xs', edge)} key={field}>
+                    <StateValue
+                      value={run.state?.[field]}
+                      field={schema[field]}
+                      display={view.formats?.[field]}
+                    />
+                  </TableCell>
+                ))}
+                <TableCell
+                  className={cn(
+                    'whitespace-nowrap tabular-nums text-muted-foreground',
+                    edge
+                  )}
+                >
+                  <StateValue
+                    value={run.created}
+                    display={{ kind: 'relative' }}
+                  />
+                </TableCell>
+                {showDuration ? (
+                  <TableCell
+                    className={cn('whitespace-nowrap tabular-nums', edge)}
+                  >
+                    {formatRunDuration(run.executionDurationSeconds)}
+                  </TableCell>
+                ) : null}
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
     </div>
   );
 }

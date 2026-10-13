@@ -101,7 +101,8 @@ export function RangeControl({
                 aria-pressed={preset === active}
                 className={cn(
                   'w-full rounded px-2 py-1 text-left text-sm hover:bg-muted',
-                  preset === active && 'bg-primary/10 font-medium text-primary'
+                  preset === active &&
+                    'bg-primary/10 font-medium text-primary-text'
                 )}
                 onClick={() => {
                   onChange(presetRange(preset, format));

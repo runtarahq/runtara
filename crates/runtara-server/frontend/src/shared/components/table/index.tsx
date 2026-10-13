@@ -233,6 +233,7 @@ export function DataTable<TData, TValue>({
                       }
                       className={cn(
                         alignRight && 'text-right',
+                        sorted && 'text-foreground',
                         meta?.headerClassName
                       )}
                     >
@@ -270,9 +271,9 @@ export function DataTable<TData, TValue>({
                             )}
                             {canSort &&
                               (sorted === 'asc' ? (
-                                <ArrowUp className="size-3.5 text-primary" />
+                                <ArrowUp className="size-3.5 text-primary-text" />
                               ) : sorted === 'desc' ? (
-                                <ArrowDown className="size-3.5 text-primary" />
+                                <ArrowDown className="size-3.5 text-primary-text" />
                               ) : (
                                 <ArrowUpDown className="size-3.5 text-muted-foreground/40" />
                               ))}

@@ -76,7 +76,7 @@ export function ReferencePill({
         // plus the icon, type badge and remove button is wider than a cell in
         // the 520px panel, and an inline-flex will not shrink on its own.
         'inline-flex max-w-full items-center gap-1.5 rounded-full px-2 py-1 text-xs',
-        'border border-primary/30 bg-primary/10 text-primary',
+        'border border-primary/30 bg-primary/10 text-primary-text',
         disabled && 'opacity-50',
         className
       )}
@@ -99,7 +99,7 @@ export function ReferencePill({
         )}
       </span>
       {type && (
-        <span className="shrink-0 rounded-full bg-primary/20 px-1 py-0.5 font-mono text-3xs leading-none text-primary">
+        <span className="shrink-0 rounded-full bg-primary/20 px-1 py-0.5 font-mono text-3xs leading-none text-primary-text">
           {type}
         </span>
       )}

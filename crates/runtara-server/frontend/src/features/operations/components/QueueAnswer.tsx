@@ -106,7 +106,7 @@ export const QueueAnswer = forwardRef<
   if (!infer && !inline)
     return (
       <Link
-        className="text-primary"
+        className="text-primary-text"
         to={`/operations/runs/${row.workflowId}/${row.instanceId}`}
       >
         Review

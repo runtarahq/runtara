@@ -12,11 +12,11 @@ export type StatusTone = 'success' | 'warning' | 'error' | 'info' | 'neutral';
  */
 export const TONE_CLASSES: Record<StatusTone, { pill: string; dot: string }> = {
   success: {
-    pill: 'text-success bg-success/10 border-success/30',
+    pill: 'text-success-text bg-success/10 border-success/30',
     dot: 'bg-success',
   },
   warning: {
-    pill: 'text-warning bg-warning/10 border-warning/30',
+    pill: 'text-warning-text bg-warning/10 border-warning/30',
     dot: 'bg-warning',
   },
   error: {
@@ -69,7 +69,7 @@ export function StatusPill({
   return (
     <span
       className={cn(
-        'inline-flex items-center justify-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium',
+        'inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-medium',
         t.pill,
         className
       )}
@@ -79,7 +79,7 @@ export function StatusPill({
       ) : dot ? (
         <span
           className={cn(
-            'size-1.5 rounded-full',
+            'size-1.5 shrink-0 rounded-full',
             t.dot,
             pulse && 'animate-pulse'
           )}

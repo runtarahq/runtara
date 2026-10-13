@@ -8,6 +8,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WorkflowDto } from '@/generated/RuntaraRuntimeApi';
 import { WorkflowsGrid } from './index';
 
+/**
+ * The footer's row summary, matched on its whole text: the counts are set in
+ * <strong>, so the sentence spans several text nodes and plain getByText
+ * cannot see it as one string.
+ */
+const rowSummary = (text: string) =>
+  screen.getByText(
+    (_, el) =>
+      el?.textContent === text &&
+      Array.from(el.children).every((child) => child.textContent !== text)
+  );
+
 const FOLDER_COUNT = 12;
 const WORKFLOW_COUNT = 43;
 const PAGE_SIZE = 10;
@@ -162,7 +174,7 @@ describe('WorkflowsGrid pagination', () => {
     ]);
     expect(screen.queryByText('Workflow 01')).not.toBeInTheDocument();
     expect(
-      screen.getByText(`Rows 1–10 of 55 · ${FOLDER_COUNT} folders`)
+      rowSummary(`Rows 1–10 of 55 · ${FOLDER_COUNT} folders`)
     ).toBeInTheDocument();
 
     // Page 2 — the last two folders, then workflows from the very beginning.
@@ -171,9 +183,7 @@ describe('WorkflowsGrid pagination', () => {
     expect(folderRowNames()).toEqual(['folder-11', 'folder-12']);
     expect(screen.getByText('Workflow 08')).toBeInTheDocument();
     expect(screen.queryByText('Workflow 09')).not.toBeInTheDocument();
-    expect(
-      screen.getByText('Rows 11–20 of 55 · 12 folders')
-    ).toBeInTheDocument();
+    expect(rowSummary('Rows 11–20 of 55 · 12 folders')).toBeInTheDocument();
 
     // Page 3 — no folder rows at all: the bug rendered all 12 again right here.
     await goToNextPage();
@@ -182,9 +192,7 @@ describe('WorkflowsGrid pagination', () => {
     expect(screen.getByText('Workflow 18')).toBeInTheDocument();
     expect(screen.queryByText('Workflow 08')).not.toBeInTheDocument();
     expect(screen.queryByText('Workflow 19')).not.toBeInTheDocument();
-    expect(
-      screen.getByText('Rows 21–30 of 55 · 12 folders')
-    ).toBeInTheDocument();
+    expect(rowSummary('Rows 21–30 of 55 · 12 folders')).toBeInTheDocument();
   });
 
   it('stitches the two server pages a folder-shifted window straddles', async () => {
@@ -210,7 +218,7 @@ describe('WorkflowsGrid pagination', () => {
     expect(folderRowNames()).toEqual(['folder-01', 'folder-02', 'folder-03']);
     expect(screen.getByText('Workflow 07')).toBeInTheDocument();
     expect(screen.queryByText('Workflow 08')).not.toBeInTheDocument();
-    expect(screen.getByText('Rows 1–10 of 46 · 3 folders')).toBeInTheDocument();
+    expect(rowSummary('Rows 1–10 of 46 · 3 folders')).toBeInTheDocument();
 
     await goToNextPage();
     await screen.findByText('Workflow 08');
@@ -232,7 +240,7 @@ describe('WorkflowsGrid search', () => {
     await screen.findByText('Workflow 01');
     expect(folderRowNames()).toEqual(['folder-01']);
     expect(screen.queryByText('Workflow 02')).not.toBeInTheDocument();
-    expect(screen.getByText('Rows 1–2 of 2 · 1 folder')).toBeInTheDocument();
+    expect(rowSummary('Rows 1–2 of 2 · 1 folder')).toBeInTheDocument();
   });
 
   it('pages the matching rows, not the unfiltered folder list', async () => {
@@ -252,9 +260,7 @@ describe('WorkflowsGrid search', () => {
       'folder-09',
       'folder-10',
     ]);
-    expect(
-      screen.getByText('Rows 1–10 of 23 · 10 folders')
-    ).toBeInTheDocument();
+    expect(rowSummary('Rows 1–10 of 23 · 10 folders')).toBeInTheDocument();
 
     // Page 2 starts at the first workflow: with all 12 folders counted it would
     // still be showing folder rows here.
@@ -263,9 +269,7 @@ describe('WorkflowsGrid search', () => {
     expect(folderRowNames()).toEqual([]);
     expect(screen.getByText('Workflow 10')).toBeInTheDocument();
     expect(screen.queryByText('Workflow 20')).not.toBeInTheDocument();
-    expect(
-      screen.getByText('Rows 11–20 of 23 · 10 folders')
-    ).toBeInTheDocument();
+    expect(rowSummary('Rows 11–20 of 23 · 10 folders')).toBeInTheDocument();
   });
 
   it('explains a folder-only match instead of claiming the folder is empty', async () => {
@@ -346,9 +350,7 @@ describe('WorkflowsGrid URL state', () => {
     expect(folderRowNames()).toEqual([]);
     expect(screen.getByText('Workflow 28')).toBeInTheDocument();
     expect(screen.queryByText('Workflow 29')).not.toBeInTheDocument();
-    expect(
-      screen.getByText('Rows 21–40 of 55 · 12 folders')
-    ).toBeInTheDocument();
+    expect(rowSummary('Rows 21–40 of 55 · 12 folders')).toBeInTheDocument();
   });
 
   it('puts the page it turns to in the URL', async () => {
@@ -378,9 +380,7 @@ describe('WorkflowsGrid URL state', () => {
 
     await screen.findByText('Workflow 43');
     expect(locationSearch()).toBe('?page=6');
-    expect(
-      screen.getByText('Rows 51–55 of 55 · 12 folders')
-    ).toBeInTheDocument();
+    expect(rowSummary('Rows 51–55 of 55 · 12 folders')).toBeInTheDocument();
   });
 
   it('drops a size it had to ignore instead of leaving the URL claiming it', async () => {

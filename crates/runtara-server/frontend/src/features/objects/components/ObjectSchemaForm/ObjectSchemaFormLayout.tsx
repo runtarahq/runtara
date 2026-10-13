@@ -47,7 +47,7 @@ export function ObjectSchemaFormLayout(props: ObjectSchemaFormLayoutProps) {
                 <ArrowLeft className="size-5" />
               </Link>
               <div>
-                <p className="text-xs font-semibold uppercase tracking-wider text-primary">
+                <p className="text-xs font-semibold uppercase tracking-wider text-primary-text">
                   Objects
                 </p>
                 <h1 className="text-lg font-semibold text-foreground">

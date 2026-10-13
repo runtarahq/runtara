@@ -17,8 +17,10 @@ export interface TablePaginationProps {
   className?: string;
 }
 
+// Disabled is a surface of its own rather than a fade, so a dead button still
+// reads as a button that is off, not as one that failed to render.
 const navBtn =
-  'grid size-6 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground';
+  'grid size-8 place-items-center rounded-md border bg-background text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:bg-muted/40 disabled:text-muted-foreground/40';
 
 /** Compact pagination control sized for the console status footer. */
 export function TablePagination({
@@ -35,10 +37,10 @@ export function TablePagination({
   const canNext = pageIndex < totalPages - 1;
 
   return (
-    <div className={cn('flex items-center gap-3', className)}>
+    <div className={cn('flex items-center gap-3.5', className)}>
       {onPageSizeChange && (
         <select
-          className="h-6 rounded border bg-background px-1.5 text-xs text-foreground"
+          className="h-8 rounded-md border bg-background px-2 text-[13px] text-foreground"
           value={pageSize}
           onChange={(e) => onPageSizeChange(Number(e.target.value))}
           aria-label="Rows per page"
@@ -53,7 +55,7 @@ export function TablePagination({
       <span className="tabular-nums">
         Page {pageIndex + 1} of {totalPages.toLocaleString()}
       </span>
-      <div className="flex items-center gap-0.5">
+      <div className="flex items-center gap-1">
         <button
           type="button"
           className={navBtn}

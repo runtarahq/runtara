@@ -11,21 +11,24 @@ for (const width of [1440, 390]) {
     );
     await page.setViewportSize({ width, height: 1000 });
     await page.goto(appPath('/operations'));
+    // Each metric is one link: label, value, note.
     const waiting = page
-      .getByText('Waiting for a decision', { exact: true })
-      .locator('..');
+      .getByRole('link')
+      .filter({ hasText: 'Waiting for a decision' });
     const overdue = page
-      .getByText('Past their configured due time', { exact: true })
-      .locator('../..');
-    await expect(waiting.locator('p').nth(1)).toHaveText(/^\d+$/);
-    await expect(overdue.locator('p').nth(1)).toHaveText(/^\d+$/);
-    const waitingCount = Number(await waiting.locator('p').nth(1).innerText());
-    const overdueCount = Number(await overdue.locator('p').nth(1).innerText());
+      .getByRole('link')
+      .filter({ hasText: 'Past their configured due time' });
+    await expect(waiting.locator('span').nth(1)).toHaveText(/^\d+$/);
+    await expect(overdue.locator('span').nth(1)).toHaveText(/^\d+$/);
+    const waitingCount = Number(
+      await waiting.locator('span').nth(1).innerText()
+    );
+    const overdueCount = Number(
+      await overdue.locator('span').nth(1).innerText()
+    );
     expect(waitingCount).toBeGreaterThan(overdueCount);
     expect(overdueCount).toBeGreaterThan(0);
-    await waiting
-      .getByRole('link', { name: 'View requests', exact: true })
-      .click();
+    await waiting.click();
     await expect(page).toHaveURL(/\/operations\/requests$/);
     await expect(
       page.getByRole('heading', {

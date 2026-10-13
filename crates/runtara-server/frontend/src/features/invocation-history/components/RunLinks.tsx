@@ -114,7 +114,7 @@ export function ParentRunLink({
     <Link
       to={runDetailPath(parent.workflowId, parentInstanceId)}
       className={cn(
-        'inline-flex min-w-0 flex-col text-sm text-foreground hover:text-primary',
+        'inline-flex min-w-0 flex-col text-sm text-foreground hover:text-primary-text',
         className
       )}
       title={parentInstanceId}
@@ -166,7 +166,7 @@ export function ChildRunsCard({ instanceId }: { instanceId: string }) {
           {total > children.length && (
             <Link
               to={childRunsListPath(instanceId)}
-              className="text-sm font-normal text-primary hover:underline"
+              className="text-sm font-normal text-primary-text hover:underline"
             >
               View all
             </Link>
@@ -181,7 +181,7 @@ export function ChildRunsCard({ instanceId }: { instanceId: string }) {
           >
             <Link
               to={runDetailPath(child.workflowId, child.instanceId)}
-              className="flex min-w-0 flex-col hover:text-primary"
+              className="flex min-w-0 flex-col hover:text-primary-text"
             >
               <span className="truncate text-sm font-medium">
                 {executionDisplayName(child)}

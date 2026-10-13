@@ -103,7 +103,11 @@ function SortableHead({
 }) {
   return (
     <TableHead
-      className={cn('cursor-pointer select-none', className)}
+      className={cn(
+        'cursor-pointer select-none',
+        active && 'text-foreground',
+        className
+      )}
       onClick={onClick}
       aria-sort={active ? (dir === 'asc' ? 'ascending' : 'descending') : 'none'}
     >
@@ -111,9 +115,9 @@ function SortableHead({
         {label}
         {active ? (
           dir === 'asc' ? (
-            <ArrowUp className="size-3.5 text-primary" />
+            <ArrowUp className="size-3.5 text-primary-text" />
           ) : (
-            <ArrowDown className="size-3.5 text-primary" />
+            <ArrowDown className="size-3.5 text-primary-text" />
           )
         ) : (
           <ArrowUpDown className="size-3.5 text-muted-foreground/40" />
@@ -557,7 +561,7 @@ export function WorkflowsGrid({
             <TableHead>Description</TableHead>
             <SortableHead
               label="Updated"
-              className="w-44"
+              className="w-48"
               active={sort.column === 'updated'}
               dir={sort.dir}
               onClick={() => toggleSort('updated')}
@@ -566,24 +570,34 @@ export function WorkflowsGrid({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {visibleFolders.map((folder) => {
+          {visibleFolders.map((folder, index) => {
             const count = folderWorkflowCounts[folder.path];
+            // The last folder row closes the folder block with a full-strength
+            // rule when workflow rows follow it.
+            const closesFolders =
+              index === visibleFolders.length - 1 &&
+              filteredWorkflows.length > 0;
             return (
               <TableRow
                 key={`folder-${folder.path}`}
-                className="group cursor-pointer"
+                className={cn(
+                  'group cursor-pointer',
+                  closesFolders && 'border-border'
+                )}
                 onClick={() => onFolderNavigate?.(folder.path)}
               >
                 <TableCell className="font-medium text-foreground">
-                  <span className="flex items-center gap-2">
-                    <Folder className="size-4 shrink-0 text-amber-500 dark:text-amber-400" />
+                  <span className="flex items-center gap-2.5">
+                    <span className="flex w-7 shrink-0 justify-center">
+                      <Folder className="size-4 fill-amber-500/15 text-amber-500 dark:text-amber-400" />
+                    </span>
                     <span className="truncate">{folder.name}</span>
                   </span>
                 </TableCell>
                 <TableCell className="text-muted-foreground">
                   {folderCountLabel(count)}
                 </TableCell>
-                <TableCell className="text-muted-foreground">—</TableCell>
+                <TableCell className="text-muted-foreground/60">—</TableCell>
                 <TableCell
                   className="text-right"
                   onClick={(e) => e.stopPropagation()}
@@ -655,11 +669,27 @@ export function WorkflowsGrid({
         footer={
           hasContent && !isFetching && !isError ? (
             <TableStatusFooter
-              left={`Rows ${startRow}–${endRow} of ${totalElements.toLocaleString()}${
-                hasFolders
-                  ? ` · ${folderCount} folder${folderCount === 1 ? '' : 's'}`
-                  : ''
-              }`}
+              left={
+                <span>
+                  Rows{' '}
+                  <strong className="font-semibold text-foreground">
+                    {startRow}–{endRow}
+                  </strong>{' '}
+                  of{' '}
+                  <strong className="font-semibold text-foreground">
+                    {totalElements.toLocaleString()}
+                  </strong>
+                  {hasFolders && (
+                    <>
+                      {' '}
+                      <span className="mx-0.5 text-muted-foreground/60">
+                        ·
+                      </span>{' '}
+                      {folderCount} folder{folderCount === 1 ? '' : 's'}
+                    </>
+                  )}
+                </span>
+              }
               right={
                 <TablePagination
                   pageIndex={page}

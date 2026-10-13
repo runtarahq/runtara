@@ -11,7 +11,7 @@ const textClass = 'col-start-1 min-w-0 truncate lg:col-auto';
 const actionsClass =
   'col-start-2 row-span-4 row-start-1 flex shrink-0 items-center justify-end gap-1 lg:col-auto lg:row-span-1 lg:row-auto';
 const iconClass =
-  'h-8 w-8 shrink-0 rounded-lg p-2 text-muted-foreground hover:bg-primary/10 hover:text-primary';
+  'h-8 w-8 shrink-0 rounded-lg p-2 text-muted-foreground hover:bg-primary/10 hover:text-primary-text';
 
 export function RequestRows({ requests }: { requests: AttentionRequest[] }) {
   return (

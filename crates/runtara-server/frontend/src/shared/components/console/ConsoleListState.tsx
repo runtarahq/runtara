@@ -26,7 +26,7 @@ export function TableSkeletonRows({
   return (
     <div className={cn('divide-y divide-border/50', className)}>
       {[...Array(rows)].map((_, i) => (
-        <div key={i} className="flex items-center gap-4 px-5 py-3.5">
+        <div key={i} className="flex items-center gap-4 px-4 py-3.5 md:px-7">
           {widths.map((w, j) => (
             <Skeleton key={j} className={cn('h-4', w)} />
           ))}

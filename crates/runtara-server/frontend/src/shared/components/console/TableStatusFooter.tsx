@@ -18,13 +18,13 @@ export function TableStatusFooter({
   return (
     <div
       className={cn(
-        'flex h-9 shrink-0 items-center gap-4 border-t bg-background px-4 text-xs text-muted-foreground',
+        'flex h-12 shrink-0 items-center gap-4 border-t bg-table-head px-4 text-[13px] tabular-nums text-muted-foreground md:px-7',
         className
       )}
     >
       <div className="flex min-w-0 items-center gap-3 truncate">{left}</div>
       <div className="flex-1" />
-      <div className="flex shrink-0 items-center gap-3">{right}</div>
+      <div className="flex shrink-0 items-center gap-3.5">{right}</div>
     </div>
   );
 }

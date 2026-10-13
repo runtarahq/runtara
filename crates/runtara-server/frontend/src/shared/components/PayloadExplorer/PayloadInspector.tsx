@@ -205,7 +205,7 @@ function CrumbButton({
       className={
         current
           ? 'rounded px-1 font-medium text-foreground hover:bg-primary/10'
-          : 'rounded px-1 text-muted-foreground hover:bg-primary/10 hover:text-primary'
+          : 'rounded px-1 text-muted-foreground hover:bg-primary/10 hover:text-primary-text'
       }
     >
       {children}
@@ -236,7 +236,7 @@ function CopyIcon({
       aria-label={label}
       title={label}
       onClick={onClick}
-      className="grid size-6 place-items-center rounded text-muted-foreground hover:bg-primary/10 hover:text-primary"
+      className="grid size-6 place-items-center rounded text-muted-foreground hover:bg-primary/10 hover:text-primary-text"
     >
       {children}
     </button>

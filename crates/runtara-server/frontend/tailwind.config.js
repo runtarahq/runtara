@@ -86,16 +86,21 @@ export default {
         success: {
           DEFAULT: 'hsl(var(--success))',
           foreground: 'hsl(var(--success-foreground))',
+          /** Success used as text — contrast-safe on each theme's surfaces. */
+          text: 'hsl(var(--success-text))',
         },
         warning: {
           DEFAULT: 'hsl(var(--warning))',
           foreground: 'hsl(var(--warning-foreground))',
+          /** Warning used as text — contrast-safe on each theme's surfaces. */
+          text: 'hsl(var(--warning-text))',
         },
         info: {
           DEFAULT: 'hsl(var(--info))',
           foreground: 'hsl(var(--info-foreground))',
         },
         border: 'hsl(var(--border))',
+        'table-head': 'hsl(var(--table-head))',
         input: 'hsl(var(--input))',
         ring: 'hsl(var(--ring))',
         chart: {

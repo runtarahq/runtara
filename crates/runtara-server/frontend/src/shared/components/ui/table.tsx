@@ -144,8 +144,11 @@ const TableHead = React.forwardRef<
       ref={ref}
       className={cn(
         'text-left align-middle text-xs font-semibold uppercase tracking-wider text-muted-foreground',
+        // Sticky, so the band must be opaque. Cells can meet on a half pixel,
+        // which leaves a seam scrolled rows show through; the 1px shadow in the
+        // band colour covers it.
         isConsole
-          ? 'sticky top-0 z-20 border-b border-border bg-background px-5 py-3'
+          ? 'sticky top-0 z-20 h-10 border-b border-border bg-table-head px-4 py-0 shadow-[1px_0_0_hsl(var(--table-head))] md:first:pl-7 md:last:pr-7'
           : 'h-9 px-3',
         '[&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]',
         className
@@ -166,7 +169,7 @@ const TableCell = React.forwardRef<
       ref={ref}
       className={cn(
         'align-middle [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]',
-        isConsole ? 'px-5 py-3' : 'px-3 py-2',
+        isConsole ? 'px-4 py-3 md:first:pl-7 md:last:pr-7' : 'px-3 py-2',
         className
       )}
       {...props}

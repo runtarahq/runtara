@@ -37,3 +37,4 @@ export {
   type ConsoleErrorStateProps,
   type ConsoleEmptyStateProps,
 } from './ConsoleListState';
+export { RowActionsMenu, type RowActionsMenuProps } from './RowActionsMenu';

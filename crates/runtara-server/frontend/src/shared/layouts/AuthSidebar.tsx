@@ -2,9 +2,10 @@ import { useAuth } from 'react-oidc-context';
 import { LogIn, LogOut } from 'lucide-react';
 import { useAuthStore } from '@/shared/stores/authStore.ts';
 import { isOidcAuth } from '@/shared/config/runtimeConfig';
+import { cn } from '@/lib/utils';
 import { Button } from '@/shared/components/ui/button';
 
-export function AuthSidebar() {
+export function AuthSidebar({ className }: { className?: string }) {
   const { isAuthenticated, signoutRedirect, signinRedirect } = useAuth();
 
   const clearUserGroups = useAuthStore((state) => state.clearUserGroups);
@@ -23,7 +24,7 @@ export function AuthSidebar() {
     <Button
       variant="secondary"
       size="icon"
-      className="relative size-9 shrink-0"
+      className={cn('relative size-9 shrink-0', className)}
       aria-label="Sign out"
       onClick={() => {
         clearUserGroups();
@@ -38,7 +39,7 @@ export function AuthSidebar() {
     <Button
       variant="secondary"
       size="icon"
-      className="relative size-9 shrink-0"
+      className={cn('relative size-9 shrink-0', className)}
       aria-label="Sign in"
       onClick={() => signinRedirect()}
     >

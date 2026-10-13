@@ -54,9 +54,7 @@ async function openConnectionEditor(page: Page, title: string) {
   await page.goto('connections', { waitUntil: 'domcontentloaded' });
   const row = page.locator('tr').filter({ hasText: title });
   await expect(row).toHaveCount(1);
-  await row
-    .getByRole('button', { name: 'Edit connection', exact: true })
-    .click();
+  await row.getByRole('link', { name: title, exact: true }).click();
   await expect(page.getByRole('heading', { name: title })).toBeVisible();
 }
 
@@ -71,8 +69,9 @@ test.describe.serial('Connection schema form local UI', () => {
       const row = page.locator('tr').filter({ hasText: title });
       if ((await row.count()) !== 1) continue;
       await row
-        .getByRole('button', { name: 'Delete connection', exact: true })
+        .getByRole('button', { name: `More actions for ${title}` })
         .click();
+      await page.getByRole('menuitem', { name: 'Delete' }).click();
       await page
         .getByRole('dialog')
         .getByRole('button', { name: 'Delete Connection', exact: true })
@@ -134,7 +133,7 @@ test.describe.serial('Connection schema form local UI', () => {
     const createdRow = page.locator('tr').filter({ hasText: originalTitle });
     await expect(createdRow).toHaveCount(1);
     await createdRow
-      .getByRole('button', { name: 'Edit connection', exact: true })
+      .getByRole('link', { name: originalTitle, exact: true })
       .click();
     await expect(
       page.getByRole('heading', { name: originalTitle })
@@ -167,7 +166,7 @@ test.describe.serial('Connection schema form local UI', () => {
     const updatedRow = page.locator('tr').filter({ hasText: updatedTitle });
     await expect(updatedRow).toHaveCount(1);
     await updatedRow
-      .getByRole('button', { name: 'Edit connection', exact: true })
+      .getByRole('link', { name: updatedTitle, exact: true })
       .click();
     await expect(bearerField).toHaveValue('');
     await expect(
@@ -195,7 +194,7 @@ test.describe.serial('Connection schema form local UI', () => {
     await page
       .locator('tr')
       .filter({ hasText: updatedTitle })
-      .getByRole('button', { name: 'Edit connection', exact: true })
+      .getByRole('link', { name: updatedTitle, exact: true })
       .click();
     await expect(page.getByLabel('Auth Mode')).toContainText('Api Key');
     await page.getByLabel('Auth Mode').click();

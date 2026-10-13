@@ -182,7 +182,7 @@ export function HistoryPanelContent({ workflowId }: HistoryPanelContentProps) {
           <SectionLabel as="span">Recent Executions</SectionLabel>
           <Link
             to={`/invocation-history?workflowId=${workflowId}`}
-            className="flex items-center gap-1 text-xs text-primary hover:underline"
+            className="flex items-center gap-1 text-xs text-primary-text hover:underline"
           >
             View all
             <ExternalLink className="size-3" />

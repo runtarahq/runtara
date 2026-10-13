@@ -1,5 +1,6 @@
 import { Moon, Sun, Monitor } from 'lucide-react';
 import { useThemeStore } from '@/shared/stores/themeStore';
+import { cn } from '@/lib/utils';
 import { Button } from '@/shared/components/ui/button';
 import {
   DropdownMenu,
@@ -8,7 +9,7 @@ import {
   DropdownMenuTrigger,
 } from '@/shared/components/ui/dropdown-menu';
 
-export function ThemeSwitcher() {
+export function ThemeSwitcher({ className }: { className?: string }) {
   const { theme, setTheme } = useThemeStore();
 
   return (
@@ -17,7 +18,7 @@ export function ThemeSwitcher() {
         <Button
           variant="secondary"
           size="icon"
-          className="relative size-9 shrink-0"
+          className={cn('relative size-9 shrink-0', className)}
           aria-label="Toggle theme"
         >
           <Sun className="size-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
