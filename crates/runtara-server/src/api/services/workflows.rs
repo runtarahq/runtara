@@ -74,7 +74,7 @@ fn validate_path(path: &str) -> Result<(), ServiceError> {
 /// Validate that `definition` is a JSON object with a non-empty, ≤255-char `name`.
 /// Returns specific errors so callers see what's actually wrong instead of the
 /// historical catch-all "non-empty 'name' field" message.
-fn validate_execution_graph_name(definition: &Value) -> Result<(), ServiceError> {
+pub(crate) fn validate_execution_graph_name(definition: &Value) -> Result<(), ServiceError> {
     let object = definition.as_object().ok_or_else(|| {
         ServiceError::ValidationError(format!(
             "executionGraph must be a JSON object, got {}. Some MCP clients stringify large arguments — pass the graph as an object, not a JSON-encoded string.",
@@ -154,7 +154,7 @@ fn validate_incremental_patch(
         .collect())
 }
 
-fn validate_execution_timeout(definition: &Value) -> Result<(), ServiceError> {
+pub(crate) fn validate_execution_timeout(definition: &Value) -> Result<(), ServiceError> {
     crate::config::execution_timeout_policy()
         .timeout_from_definition(definition)
         .map(|_| ())

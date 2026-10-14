@@ -2795,10 +2795,24 @@ pub async fn validate_graph_handler(
                 Some((child_id, _)) => format!("in child workflow '{}': {}", child_id, text),
                 None => text,
             };
-            let errors: Vec<String> = report
+            let mut errors: Vec<String> = report
                 .errors()
                 .map(|(origin, e)| attribute(origin, e.to_string()))
                 .collect();
+            // The save gate's definition checks, so validate and save agree.
+            for check in [
+                crate::api::services::workflows::validate_execution_graph_name,
+                crate::api::services::workflows::validate_execution_timeout,
+            ] {
+                if let Err(error) = check(&body) {
+                    errors.push(match error {
+                        crate::api::services::workflows::ServiceError::ValidationError(message) => {
+                            message
+                        }
+                        other => other.to_string(),
+                    });
+                }
+            }
             let mut warnings: Vec<String> = report
                 .warnings()
                 .map(|(origin, w)| attribute(origin, w.to_string()))

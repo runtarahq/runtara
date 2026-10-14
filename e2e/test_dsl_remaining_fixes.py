@@ -164,7 +164,23 @@ def check_child_version_spellings():
           {"status": status, "codes": rejected_codes(body)})
 
 
-CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, check_child_version_spellings]
+# ---------------------------------------------------------------------- B9
+
+
+def check_validate_matches_save_on_name():
+    nameless = graph("f", [fin("f", ok=imm(True))])
+    status, body = call("POST", "/workflows/graph/validate", nameless)
+    errors = (body or {}).get("errors") or []
+    check("B9 graph validate rejects a graph without name, as save does",
+          status == 200 and body.get("valid") is False and any("'name'" in str(e) for e in errors),
+          {"status": status, "valid": (body or {}).get("valid"), "errors": errors[:2]})
+    status, body = call("POST", "/workflows/graph/validate", {"name": "named", **nameless})
+    check("B9 the same graph with a name is valid", status == 200 and body.get("valid") is True,
+          {"status": status, "errors": (body or {}).get("errors")})
+
+
+CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, check_child_version_spellings,
+          check_validate_matches_save_on_name]
 
 
 def main():
