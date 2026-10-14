@@ -10,6 +10,9 @@ never reads credentials.
 import json
 import os
 import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -212,8 +215,84 @@ def check_on_error_inside_handler():
           and r["outputs"].get("failed") == "recover", r)
 
 
+    # The nesting is bounded: five handler levels are rejected at save (E149).
+    steps, plan = [], []
+    for level in range(6):
+        steps += [boom(f"s{level}"), fin(f"ok{level}")]
+        plan.append(edge(f"s{level}", f"ok{level}"))
+        if level < 5:
+            plan.append(edge(f"s{level}", f"s{level + 1}", label="onError"))
+    _, status, body = save_status("rf-deep-on-error", graph("s0", steps, plan))
+    check("D-onError handler nesting past 4 levels is rejected with E149",
+          status == 400 and rejected_codes(body) == ["E149"], {"status": status, "codes": rejected_codes(body)})
+
+
+# ------------------------------------------------------------------ A8, A10
+
+SLOW_STARTS = {}
+
+
+class SlowStub(BaseHTTPRequestHandler):
+    """GET /slow/<run>/<ms>: record the start time per run, then answer after ms."""
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        _, _, run_key, ms = self.path.split("/")
+        SLOW_STARTS.setdefault(run_key, []).append(time.monotonic())
+        time.sleep(int(ms) / 1000)
+        raw = b'{"ok": true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+def start_slow_stub():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowStub)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server.server_address[1]
+
+
+def check_sequential_and_poll_interval():
+    port = start_slow_stub()
+
+    def split(run_key, **config):
+        body = graph("call", [
+            {"stepType": "Agent", "id": "call", "agentId": "http", "capabilityId": "http-request", "maxRetries": 0,
+             "inputMapping": {"method": imm("GET"), "url": imm(f"http://127.0.0.1:{port}/slow/{run_key}/300")}},
+            fin("f", ok=imm(True))], [edge("call", "f")])
+        return graph("s", [{"stepType": "Split", "id": "s", "config": {"value": imm([1, 2, 3, 4]), **config},
+                            "subgraph": body}, fin("done", n=ref("steps.s.outputs"))], [edge("s", "done")])
+
+    spreads = {}
+    for label, config in [("sequential", {"parallelism": 4, "sequential": True}), ("window", {"parallelism": 4})]:
+        key = f"{label}{RUN}"
+        r = run("rf-split-" + label, split(key, **config))
+        starts = sorted(SLOW_STARTS.get(key, []))
+        spreads[label] = {"status": r.get("status"), "calls": len(starts),
+                          "spread_s": round(starts[-1] - starts[0], 2) if starts else None}
+    seq, win = spreads["sequential"], spreads["window"]
+    check("A8 sequential:true runs one at a time although parallelism is 4",
+          seq["status"] == "completed" and seq["calls"] == 4 and seq["spread_s"] >= 0.8
+          and win["calls"] == 4 and win["spread_s"] < 0.3, spreads)
+    status, body = call("POST", "/workflows/graph/validate", {"name": "a8", **split("validate", parallelism=4,
+                                                                                    sequential=True)})
+    warnings = [str(w)[1:5] for w in (body or {}).get("warnings") or []]
+    check("A8 sequential with parallelism warns W087", "W087" in warnings and "W073" not in warnings, warnings)
+
+    g = graph("w", [{"stepType": "WaitForSignal", "id": "w", "pollIntervalMs": 500, "timeoutMs": imm(1000)},
+                    fin("done"), fin("timed_out")], [edge("w", "done"), edge("w", "timed_out", label="onError")])
+    status, body = call("POST", "/workflows/graph/validate", {"name": "a10", **g})
+    warnings = [str(w)[1:5] for w in (body or {}).get("warnings") or []]
+    check("A10 pollIntervalMs is deprecated with W088", "W088" in warnings, warnings)
+
+
 CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, check_child_version_spellings,
-          check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler]
+          check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
+          check_sequential_and_poll_interval]
 
 
 def main():

@@ -2966,12 +2966,20 @@ fn split_config<'a>(
 
 /// The Split's requested `parallelism` window. 0 means "unlimited" per the
 /// DSL contract — normalized here to u32::MAX and clamped at emission time to
-/// the item count; absent/1 = sequential.
+/// the item count; absent/1 = sequential, and `sequential: true` forces it.
 fn split_parallel_window(
     graph: &DirectGraphManifest,
     step_id: &str,
 ) -> Result<Option<u32>, DirectCompileError> {
-    Ok(split_config(graph, step_id)?
+    let config = split_config(graph, step_id)?;
+    if config
+        .get("sequential")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Ok(None);
+    }
+    Ok(config
         .get("parallelism")
         .and_then(serde_json::Value::as_u64)
         .map(|window| {
@@ -4198,6 +4206,31 @@ mod tests {
             body,
             nested_graphs: vec![],
         }
+    }
+
+    /// `sequential: true` forces a window of one whatever `parallelism` asks.
+    #[test]
+    fn sequential_split_overrides_the_parallelism_window() {
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "s",
+            "executionPlan": [{"fromStep": "s", "toStep": "done"}],
+            "steps": {
+                "s": {"stepType": "Split", "id": "s", "config": {
+                    "value": {"valueType": "immediate", "value": [1, 2]},
+                    "parallelism": 4, "sequential": true},
+                    "subgraph": {"entryPoint": "f", "steps": {"f": {"stepType": "Finish", "id": "f"}}}},
+                "done": {"stepType": "Finish", "id": "done"}
+            }
+        }))
+        .expect("graph parses");
+        let mut manifest =
+            super::super::manifest::build_direct_workflow_manifest(&graph).expect("manifest");
+        assert_eq!(split_parallel_window(&manifest.graph, "s").unwrap(), None);
+        manifest.graph.splits[0].value["sequential"] = serde_json::json!(false);
+        assert_eq!(
+            split_parallel_window(&manifest.graph, "s").unwrap(),
+            Some(4)
+        );
     }
 
     /// The rate-limited defaults come from the catalog the compile is given,

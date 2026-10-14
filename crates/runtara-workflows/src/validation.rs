@@ -1872,6 +1872,12 @@ pub enum ValidationWarning {
     /// A key of the definition that no DSL field matches, such as
     /// `inputSchema.name.requird`; deserialization drops it.
     IgnoredField { path: String },
+    /// A Split sets both `sequential: true` and `parallelism`; sequential
+    /// wins and the window is ignored.
+    SplitSequentialOverridesParallelism { step_id: String, parallelism: u32 },
+    /// `WaitForSignal.pollIntervalMs` is deprecated: a waiting run resumes
+    /// when the signal arrives, so the interval is never used.
+    PollIntervalIgnored { step_id: String },
 }
 
 impl ValidationWarning {
@@ -1904,6 +1910,8 @@ impl ValidationWarning {
             Self::NestedGraphSettingIgnored { .. } => "W084",
             Self::UnknownErrorContextField { .. } => "W085",
             Self::IgnoredField { .. } => "W086",
+            Self::SplitSequentialOverridesParallelism { .. } => "W087",
+            Self::PollIntervalIgnored { .. } => "W088",
         }
     }
 }
@@ -2172,6 +2180,21 @@ impl std::fmt::Display for ValidationWarning {
                 f,
                 "[W086] '{}' is not a workflow field and is ignored. Check the spelling.",
                 path
+            ),
+            ValidationWarning::SplitSequentialOverridesParallelism {
+                step_id,
+                parallelism,
+            } => write!(
+                f,
+                "[W087] Split step '{}' sets sequential: true and parallelism {}. Iterations run \
+                 one at a time; remove one of the two.",
+                step_id, parallelism
+            ),
+            ValidationWarning::PollIntervalIgnored { step_id } => write!(
+                f,
+                "[W088] WaitForSignal step '{}' sets pollIntervalMs, which is deprecated and has \
+                 no effect: a waiting run resumes as soon as the signal arrives. Remove it.",
+                step_id
             ),
         }
     }
@@ -3551,7 +3574,14 @@ fn validate_static_step_values(graph: &ExecutionGraph, result: &mut ValidationRe
                 result,
             ),
             Step::WaitForSignal(wait) => {
-                check_millis(step_id, "timeoutMs", wait.timeout_ms.as_ref(), true, result)
+                check_millis(step_id, "timeoutMs", wait.timeout_ms.as_ref(), true, result);
+                if wait.poll_interval_ms.is_some() {
+                    result
+                        .warnings
+                        .push(ValidationWarning::PollIntervalIgnored {
+                            step_id: step_id.clone(),
+                        });
+                }
             }
             _ => {}
         }
@@ -5794,7 +5824,18 @@ fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult)
                     // parallelism=1 matches actual behavior, so only other
                     // values (0 = "unlimited", >1) warn. `sequential` also
                     // matches actual behavior and never warns.
-                    if let Some(parallelism) = config.parallelism
+                    if config.sequential == Some(true)
+                        && let Some(parallelism) = config.parallelism
+                        && parallelism != 1
+                    {
+                        // W087: sequential forces a window of one.
+                        result.warnings.push(
+                            ValidationWarning::SplitSequentialOverridesParallelism {
+                                step_id: step_id.clone(),
+                                parallelism,
+                            },
+                        );
+                    } else if let Some(parallelism) = config.parallelism
                         && parallelism != 1
                     {
                         result
@@ -18332,6 +18373,41 @@ mod edge_shape_tests {
                 "done": fin("done")},
             "executionPlan": [{"fromStep": "d", "toStep": "done"}]});
         assert!(closure_codes(referenced).is_empty());
+    }
+
+    /// `sequential: true` with a parallelism window warns W087 (not W073), and
+    /// `pollIntervalMs` warns W088.
+    #[test]
+    fn sequential_and_poll_interval_warnings() {
+        let warning_codes = |graph: Value| {
+            let graph: ExecutionGraph = serde_json::from_value(graph).unwrap();
+            validate_workflow(&graph, &super::tests::test_catalog())
+                .warnings
+                .iter()
+                .map(|warning| warning.code().to_string())
+                .collect::<Vec<_>>()
+        };
+        let split = |config: Value| {
+            json!({"entryPoint": "s", "steps": {
+                "s": {"stepType": "Split", "id": "s", "config": config,
+                      "subgraph": {"entryPoint": "f", "steps": {"f": fin("f")}}},
+                "done": fin("done")},
+                "executionPlan": [{"fromStep": "s", "toStep": "done"}]})
+        };
+        let items = json!({"valueType": "immediate", "value": [1, 2]});
+        let both = warning_codes(split(
+            json!({"value": items, "sequential": true, "parallelism": 4}),
+        ));
+        assert!(
+            both.contains(&"W087".to_string()) && !both.contains(&"W073".to_string()),
+            "{both:?}"
+        );
+        let window = warning_codes(split(json!({"value": items, "parallelism": 4})));
+        assert!(window.contains(&"W073".to_string()), "{window:?}");
+        let wait = warning_codes(json!({"entryPoint": "w", "steps": {
+            "w": {"stepType": "WaitForSignal", "id": "w", "pollIntervalMs": 500}, "done": fin("done")},
+            "executionPlan": [{"fromStep": "w", "toStep": "done"}]}));
+        assert!(wait.contains(&"W088".to_string()), "{wait:?}");
     }
 
     /// Handlers of handlers nest up to the compiler's limit; deeper nesting

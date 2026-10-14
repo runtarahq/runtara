@@ -1220,8 +1220,9 @@ pub struct WaitForSignalStep {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<MappingValue>,
 
-    /// Polling interval in milliseconds for checking signal (default: 1000).
-    /// Lower values mean faster response but more server load.
+    /// Deprecated and ignored (W088): a waiting run resumes as soon as the
+    /// signal arrives, so there is no polling to tune. Accepted so stored
+    /// definitions keep parsing; to be removed in DSL 4.0.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub poll_interval_ms: Option<u64>,
 
@@ -2395,10 +2396,9 @@ pub struct SplitConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
 
-    /// Execute iterations sequentially instead of in parallel.
-    ///
-    /// **Redundant** — sequential execution is the only mode the WASM runtime
-    /// supports, so this flag changes nothing.
+    /// Run iterations one at a time. `true` overrides `parallelism` (W087
+    /// when both are set); the default already runs sequentially unless
+    /// `parallelism` asks for a window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequential: Option<bool>,
 
