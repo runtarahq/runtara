@@ -1125,6 +1125,7 @@ pub async fn compile_workflow_handler(
     State(pool): State<PgPool>,
     State(runtime_client): State<Option<Arc<crate::runtime_client::RuntimeClient>>>,
     State(_connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     State(events): State<ProductEventSink>,
     Path((workflow_id, version)): Path<(String, String)>,
     Extension(ctx): Extension<AuthContext>,
@@ -1375,8 +1376,11 @@ pub async fn compile_workflow_handler(
     // Fallback: Valkey not configured, compile directly (still protected by semaphore)
     tracing::warn!("Valkey not configured, compiling directly (no queue)");
     let repository = Arc::new(WorkflowRepository::new(pool));
+    // Same catalog as the queued path: rate-limited retry defaults, suspends
+    // and workflow-agent classification all come from it.
     let compilation_service =
         crate::api::services::compilation::CompilationService::new(repository, runtime_client)
+            .with_agent_catalog(agent_catalog)
             .with_direct_compilation(
                 crate::api::services::compilation::direct_compilation_settings_from_config(),
             );

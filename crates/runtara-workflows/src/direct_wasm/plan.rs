@@ -4171,6 +4171,39 @@ mod tests {
         }
     }
 
+    /// The rate-limited defaults come from the catalog the compile is given,
+    /// whatever spelling the step uses for the agent id.
+    #[test]
+    fn catalog_rate_limited_capability_gets_rate_limited_retry_defaults() {
+        use runtara_dsl::agent_meta::{AgentCatalog, workflow_agent_info};
+        let empty = std::collections::HashMap::new();
+        let mut info = workflow_agent_info("rate-flow", "rate-flow", "", &empty, &empty);
+        for capability in &mut info.capabilities {
+            capability.tags.clear();
+            capability.rate_limited = true;
+        }
+        let catalog = AgentCatalog::from_agents(vec![info]);
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "call",
+            "executionPlan": [{"fromStep": "call", "toStep": "finish"}],
+            "steps": {
+                "call": {"id": "call", "stepType": "Agent", "agentId": "rate_flow",
+                         "capabilityId": "run", "inputMapping": {}},
+                "finish": {"id": "finish", "stepType": "Finish"}
+            }
+        }))
+        .expect("graph parses");
+        let manifest = super::super::manifest::build_direct_workflow_manifest_with_agent_catalog(
+            &graph,
+            Some(&catalog),
+        )
+        .expect("manifest");
+        let agent = &manifest.graph.agents[0];
+        assert!(agent.rate_limited);
+        assert_eq!(agent_effective_max_retries(agent), 5);
+        assert_eq!(agent_effective_retry_delay_ms(agent), 2_000);
+    }
+
     #[test]
     fn direct_agent_effective_retry_policy_matches_generated_defaults() {
         assert_eq!(
