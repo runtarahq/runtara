@@ -508,9 +508,9 @@ export interface AiAgentConfig {
    * Maximum retry attempts for the LLM call (default: 0 — no retries).
    *
    * Retries are opt-in for AiAgent (unlike Agent steps' default of 3)
-   * because every retry re-bills the model call. Applies to the
-   * single-shot (chat-completion) path; per-turn retry inside the tool
-   * loop is deliberately deferred until per-turn durability lands.
+   * because every retry re-bills the model call. Applies to every LLM
+   * call: the single-shot call and each turn of a tool loop, where a
+   * failed turn is retried in place before routing to onError.
    * @format int32
    * @min 0
    */
@@ -2326,9 +2326,10 @@ export interface ExecutionGraph {
    * variable names, values contain type and value.
    *
    * On the workflow's own graph these are defaults that a run's input
-   * `variables` can override. On a nested graph (Split/While body, onWait)
-   * they are added to the body's scope, and the step's `config.variables`
-   * win over them.
+   * `variables` can override. A nested graph (Split/While body, onWait)
+   * sees its parent's variables; its own declarations are added to them,
+   * replacing any with the same name, and the step's `config.variables`
+   * win over both.
    */
   variables?: Partial<Record<string, Variable>>;
 }
@@ -3851,7 +3852,10 @@ export interface SchemaColumnInfo {
  * work unchanged.
  */
 export interface SchemaField {
-  /** Default value if not provided */
+  /**
+   * Value used when the field is omitted. Workflow start inputs are filled
+   * from it before the `required` check, so the run sees it.
+   */
   default?: any;
   /** Human-readable description */
   description?: string | null;
@@ -3893,10 +3897,8 @@ export interface SchemaField {
    */
   min?: number | null;
   /**
-   * Whether the field value may be `null`.
-   *
-   * Form-layer hint written by the workflow editor (rendered as a
-   * checkbox); the runtime does not enforce nullability today.
+   * Whether the field value may be `null`: input validation accepts an
+   * explicit `null` in place of the declared type.
    */
   nullable?: boolean | null;
   /**
