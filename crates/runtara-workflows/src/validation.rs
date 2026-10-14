@@ -67,6 +67,7 @@
 //! | E145 | NonDurableDelay | Delay in a non-durable workflow, body or step (a Delay must park) |
 //! | E146 | MissingStepConfig | Split or Switch without the config its value lives in |
 //! | E147 | InvalidMillisecondsValue | Literal Delay.durationMs / WaitForSignal.timeoutMs that is not a non-negative number |
+//! | E148 | InvalidTemplateSyntax | A template value that does not parse |
 //! | E050 | InvalidChildVersion | Invalid child workflow version format |
 //! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
 //! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
@@ -671,6 +672,12 @@ pub enum ValidationError {
         field: String,
         value: String,
     },
+    /// A template value that does not parse.
+    InvalidTemplateSyntax {
+        step_id: String,
+        template: String,
+        reason: String,
+    },
 }
 
 /// Information about a missing required input field.
@@ -760,6 +767,7 @@ impl ValidationError {
             Self::NonDurableDelay { .. } => "E145",
             Self::MissingStepConfig { .. } => "E146",
             Self::InvalidMillisecondsValue { .. } => "E147",
+            Self::InvalidTemplateSyntax { .. } => "E148",
         }
     }
 }
@@ -1616,6 +1624,15 @@ impl std::fmt::Display for ValidationError {
                  milliseconds (for example 5000, not \"5s\").",
                 step_id, field, value
             ),
+            ValidationError::InvalidTemplateSyntax {
+                step_id,
+                template,
+                reason,
+            } => write!(
+                f,
+                "[E148] Step '{}' has a template that does not parse: {}. Template: {}",
+                step_id, reason, template
+            ),
         }
     }
 }
@@ -2008,7 +2025,7 @@ impl std::fmt::Display for ValidationWarning {
             } => {
                 write!(
                     f,
-                    "[W052] Step '{}' template references '{}': {}. This is a warning because Minijinja resolves missing values at runtime.",
+                    "[W052] Step '{}' template references '{}': {}. A missing value renders empty, but reading a field of a missing value fails the run.",
                     step_id, reference, reason
                 )
             }
@@ -3950,9 +3967,9 @@ fn validate_mapping_value_references(
             // Validate template syntax at compile time;
             // reference resolution happens at runtime via minijinja context
             if let Some(err) = validate_template_syntax(&tmpl_value.value) {
-                result.errors.push(ValidationError::InvalidReferencePath {
+                result.errors.push(ValidationError::InvalidTemplateSyntax {
                     step_id: step_id.to_string(),
-                    reference_path: tmpl_value.value.clone(),
+                    template: tmpl_value.value.clone(),
                     reason: err,
                 });
             }
@@ -16982,10 +16999,10 @@ mod template_validation_tests {
         assert!(
             result.errors.iter().any(|e| matches!(
                 e,
-                ValidationError::InvalidReferencePath { reason, .. }
+                ValidationError::InvalidTemplateSyntax { reason, .. }
                     if reason.contains("syntax error")
             )),
-            "Expected template syntax error, got: {:?}",
+            "Expected template syntax error (E148), got: {:?}",
             result.errors
         );
     }

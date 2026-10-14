@@ -728,6 +728,9 @@ impl ValidationErrorDto {
                 Some("executionPlan".into()),
                 None,
             ),
+            ValidationError::InvalidTemplateSyntax { step_id, .. } => {
+                (error.to_string(), Some(step_id.clone()), None, None)
+            }
             ValidationError::MissingStepConfig { step_id, .. } => (
                 error.to_string(),
                 Some(step_id.clone()),

@@ -179,8 +179,24 @@ def check_validate_matches_save_on_name():
           {"status": status, "errors": (body or {}).get("errors")})
 
 
+# ------------------------------------------------------------------ B7, B8
+
+
+def check_template_messages():
+    g = graph("f", [fin("f", t={"valueType": "template", "value": "{{ data.x "})])
+    _, status, body = save_status("rf-template-syntax", g)
+    got = rejected_codes(body)
+    check("B7 a template syntax error is E148, not E011", status == 400 and got == ["E148"],
+          {"status": status, "codes": got})
+    g = graph("f", [fin("f", t={"valueType": "template", "value": "{{ steps.missing.outputs.x }}"})])
+    status, body = call("POST", "/workflows/graph/validate", {"name": "w052", **g})
+    warnings = [w for w in (body or {}).get("warnings") or [] if str(w).startswith("[W052]")]
+    check("B8 W052 says reading a field of a missing value fails the run",
+          warnings and "fails the run" in warnings[0] and "resolves missing values" not in warnings[0], warnings)
+
+
 CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, check_child_version_spellings,
-          check_validate_matches_save_on_name]
+          check_validate_matches_save_on_name, check_template_messages]
 
 
 def main():
