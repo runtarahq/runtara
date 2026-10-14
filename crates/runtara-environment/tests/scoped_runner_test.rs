@@ -1702,3 +1702,130 @@ async fn an_embed_parked_in_its_child_resumes_from_the_child_rows_then_collapses
         );
     }
 }
+
+/// A loopback HTTP endpoint that answers 500 to the first `failures` requests
+/// and 200 after that. Returns its address and the count of requests served.
+async fn flaky_http(
+    failures: usize,
+) -> (
+    std::net::SocketAddr,
+    Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let served = requests.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut bytes = [0; 4096];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let n = stream.read(&mut bytes).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&bytes[..n]);
+            }
+            let response: &[u8] = if served.fetch_add(1, Ordering::SeqCst) < failures {
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 4\r\nConnection: close\r\n\r\nboom"
+            } else {
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}"
+            };
+            let _ = stream.write_all(response).await;
+        }
+    });
+    (address, requests, server)
+}
+
+/// An Agent that fails twice and then succeeds keeps its failed attempts and
+/// retry sleeps while it backs off, resumes from them on each relaunch, and
+/// keeps only its result once it succeeds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_that_retried_keeps_only_its_result_once_it_succeeds() {
+    let h = Harness::new().await;
+    for backend in ["legacy", "scoped"] {
+        let (address, requests, server) = flaky_http(2).await;
+        let call = json!({"id":"call","stepType":"Agent","agentId":"http","capabilityId":"http-request",
+            "maxRetries":3,"retryDelay":200,"inputMapping":{
+                "method":{"valueType":"immediate","value":"GET"},
+                "url":{"valueType":"immediate","value":format!("http://{address}/flaky")}}});
+        let artifact = compile(
+            calling_graph(call, json!({})),
+            &h.dir.path().join(format!("retry-{backend}")),
+            "http",
+            backend,
+        );
+        let runner = h
+            .runner(Some(bounds("http")))
+            .with_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))
+            .unwrap();
+        let mut options = h.options(&artifact.wasm_path).await;
+        let mut parks = 0;
+        for launch in 0..8 {
+            if launch > 0 {
+                options.launch_id = format!("resume-{launch}-{}", options.instance_id);
+                options.prepersisted_input = None;
+            }
+            run_until_exit(&runner, &options).await;
+            let instance = h
+                .persistence
+                .get_instance(&options.instance_id)
+                .await
+                .unwrap()
+                .unwrap();
+            if instance.status == InstanceStatus::Completed {
+                break;
+            }
+            assert_eq!(instance.status, InstanceStatus::Suspended, "{backend}");
+            parks += 1;
+            let ids: Vec<String> = h
+                .persistence
+                .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|c| c.checkpoint_id)
+                .collect();
+            for suffix in ["::attempt::", "::retry_sleep::"] {
+                assert!(
+                    ids.iter().any(|id| id.contains(suffix)),
+                    "{backend}: a {suffix} row while backing off: {ids:?}"
+                );
+            }
+            let remaining = (instance.sleep_until.unwrap() - chrono::Utc::now())
+                .to_std()
+                .unwrap_or_default();
+            tokio::time::sleep(remaining + Duration::from_millis(20)).await;
+        }
+        server.abort();
+        let completed = h
+            .persistence
+            .get_instance(&options.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.status, InstanceStatus::Completed, "{backend}");
+        assert_eq!(parks, 2, "{backend}: one park per failed attempt");
+        assert_eq!(
+            requests.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "{backend}: replays reused the failed attempts instead of calling again"
+        );
+        let ids: Vec<String> = h
+            .persistence
+            .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.checkpoint_id)
+            .collect();
+        assert_eq!(ids.len(), 1, "{backend}: the Agent's result only: {ids:?}");
+        assert!(
+            ids[0].starts_with(r#"runtara:v2:["agent""#) && !ids[0].contains("::"),
+            "{backend}: {ids:?}"
+        );
+    }
+}

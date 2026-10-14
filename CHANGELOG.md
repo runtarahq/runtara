@@ -269,13 +269,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **A finished EmbedWorkflow or workflow-agent call keeps one checkpoint
-  row.** Recording a durable EmbedWorkflow's result, or the result of an
-  Agent step calling a workflow published as an agent, now deletes in the
-  same transaction the checkpoints its child wrote, nested children
-  included, and the step's own attempt, retry and deadline rows: replay reads
-  the result first and never runs the child again. `A → EmbedWorkflow → B`
-  keeps 3 rows whatever the child does. The same goes for an isolated
+- **A finished EmbedWorkflow or workflow-agent call keeps its result, not
+  its child's rows.** Recording a durable EmbedWorkflow's result, or the
+  result of an Agent step calling a workflow published as an agent, now
+  deletes in the same transaction the checkpoints its child wrote, nested
+  children included, and the step's own attempt, retry and retry-sleep rows:
+  replay reads the result first and never runs the child again. An
+  EmbedWorkflow's deadline rows go too; an Agent's deadline row stays, since
+  it cannot be matched to the Agent's result. `A → EmbedWorkflow → B` and
+  `A → workflow-agent → B` keep 3 rows whatever the child does, or 4 when the
+  Agent has a timeout. The same goes for an isolated
   workflow-agent child, and for an EmbedWorkflow called as an AiAgent tool.
   Because a checkpoint key does not say whether an agent is a workflow, every
   durable Agent that retried and then succeeded drops its `::attempt::N`,
@@ -287,8 +290,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from runs started on this release; a `durable: false` step saves no result
   and collapses nothing. A step in an `onWait` graph that reuses the id of an
   Agent or EmbedWorkflow around it shares that step's child namespace, so
-  either one's result also deletes the other's child rows; the workflow
-  editor never reuses ids. Postgres now runs the delete in the statement
+  either one's result also deletes the other's child rows. A call that has
+  no result to replay from then runs its child steps again: one that is
+  `durable: false`, failed with its `onError` handling it, or is still in
+  progress (parked in another branch). The workflow editor never reuses
+  ids. Postgres now runs the delete in the statement
   that points the instance at the new result, as two ranges over the
   `checkpoints.scope` index, so it adds no round trip and never scans the
   run's other rows, even before the table has statistics (a Split's result

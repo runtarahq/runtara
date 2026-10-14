@@ -63,8 +63,9 @@ pub(crate) async fn record(
 ///
 /// Two deletes, not one with an `OR`: each is then an `(instance_id, scope)`
 /// range on the `scope` index whatever the planner knows. Under an `OR`, a
-/// generic plan without column statistics (a young table) scans every row of
-/// the instance instead, on every Agent result.
+/// generic plan can bound the index by `instance_id` alone and filter every
+/// row of the instance, as it did on a table without statistics; that cost
+/// would repeat on every Agent result.
 const COLLAPSE: &str = "owned AS (DELETE FROM checkpoints \
      WHERE instance_id = $1 AND checkpoint_id <> $2 AND scope = $3 RETURNING 1), \
      inside AS (DELETE FROM checkpoints \

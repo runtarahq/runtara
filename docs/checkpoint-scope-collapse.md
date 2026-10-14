@@ -69,10 +69,12 @@ namespace with any other such step that has its id at its position, whatever
 its kind. Step ids are unique within a graph, so this happens only when an
 `onWait` graph reuses an id of the graph around it, which the workflow editor
 never does: recording either step's result also deletes the other's child
-rows. That matters only if the other step has no result to replay from
-(`durable: false`, or a failure its `onError` handled), since an `onWait`
-graph runs again on every replay of its wait; its child steps then run again
-too. Only an unsuffixed result key
+rows. Any durable Agent records a closure, a native one included. That
+matters only if the other step has no result to replay from: it is
+`durable: false`, it failed and its `onError` handled the failure, or it is
+still in progress (its child parked in another branch). An `onWait` graph
+runs again on every replay of its wait, and a parked child resumes by
+replaying, so that step's child steps then run again. Only an unsuffixed result key
 has a closure, so a failed attempt never deletes work a retry will reuse. The
 store applies the closure in the transaction that stores the result (a writer
 that finds the key already stored writes and deletes nothing):
