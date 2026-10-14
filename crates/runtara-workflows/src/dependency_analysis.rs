@@ -59,9 +59,10 @@ pub fn extract_embed_workflow_steps(
                 .get("childVersion")
                 .ok_or_else(|| format!("EmbedWorkflow step '{}' missing childVersion", step_id))?;
 
-            // Convert childVersion to string (might be number or string)
+            // Convert childVersion to string (might be number or string), in
+            // the canonical spelling `runtara_dsl::ChildVersion` reads it as.
             let child_version_str = match child_version_requested {
-                Value::String(s) => s.clone(),
+                Value::String(s) => canonical_child_version(s),
                 Value::Number(n) => n.to_string(),
                 _ => {
                     return Err(format!(
@@ -103,6 +104,21 @@ pub fn extract_embed_workflow_steps_recursive(
     }
 
     Ok(all_steps)
+}
+
+/// The canonical spelling of a child version: keywords lowercase and trimmed,
+/// a numeric string as its number. Matches how `runtara_dsl::ChildVersion`
+/// parses the same value, so a requested version compares equal to the
+/// graph's whatever the author wrote.
+pub fn canonical_child_version(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Ok(version) = trimmed.parse::<i32>() {
+        version.to_string()
+    } else if trimmed.eq_ignore_ascii_case("latest") || trimmed.eq_ignore_ascii_case("current") {
+        trimmed.to_ascii_lowercase()
+    } else {
+        raw.to_string()
+    }
 }
 
 /// Resolves a version string ("latest", "current", or explicit number) to an
@@ -352,6 +368,14 @@ mod tests {
 
         let steps = extract_embed_workflow_steps_recursive(&graph).unwrap();
         assert!(steps.is_empty());
+    }
+
+    #[test]
+    fn canonical_child_versions_match_the_dsl_reading() {
+        assert_eq!(canonical_child_version("LATEST"), "latest");
+        assert_eq!(canonical_child_version(" Current "), "current");
+        assert_eq!(canonical_child_version("03"), "3");
+        assert_eq!(canonical_child_version("newest"), "newest");
     }
 
     #[test]

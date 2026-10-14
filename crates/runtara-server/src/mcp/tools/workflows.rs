@@ -1243,7 +1243,9 @@ fn extract_child_refs_recursive(graph: &serde_json::Value, refs: &mut Vec<ChildW
             let version = step_def
                 .get("childVersion")
                 .map(|v| match v {
-                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::String(s) => {
+                        runtara_workflows::dependency_analysis::canonical_child_version(s)
+                    }
                     serde_json::Value::Number(n) => n.to_string(),
                     _ => "latest".to_string(),
                 })
