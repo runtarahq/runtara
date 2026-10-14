@@ -1368,7 +1368,7 @@ async fn cancel_intents_and_outcomes_follow_launching_races() {
         .await
         .unwrap();
     outbox
-        .terminalize_launch_claim(refused_request, "w", "environment_launch_failed")
+        .terminalize_launch_claim(refused_request, "w", "environment_launch_failed", None)
         .await
         .unwrap();
     let row = outbox

@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use crate::api::dto::workflows::{InstanceInputs, WorkflowInstanceDto};
 use crate::runtime_client::RuntimeClient;
-use crate::types::ExecutionStatus;
+use crate::types::{ExecutionStatus, TerminationType};
 
 /// Extended execution data with metadata from the workflow record.
 ///
@@ -237,6 +237,69 @@ pub fn runtara_info_to_dto(info: InstanceInfo) -> WorkflowInstanceDto {
     }
 }
 
+/// An instance view of a durable execution request that has no runtime
+/// instance: `queued` while it waits to launch, `failed` (with why) when its
+/// launch was refused, for example because the workflow failed to compile.
+/// `None` once the request was accepted, when the runtime owns the record.
+pub fn request_instance_dto(
+    instance_id: &str,
+    request: crate::workers::execution_outbox::InstanceRequest,
+) -> Option<WorkflowInstanceDto> {
+    let (status, termination_type) = match request.state.as_str() {
+        "queued" | "delivered" | "launching" => (ExecutionStatus::Queued, None),
+        "expired" => (ExecutionStatus::Failed, Some(TerminationType::QueueTimeout)),
+        "cancelled" => (
+            ExecutionStatus::Cancelled,
+            Some(TerminationType::UserInitiated),
+        ),
+        "terminal" => (ExecutionStatus::Failed, Some(TerminationType::SystemError)),
+        _ => return None,
+    };
+    let error = (status != ExecutionStatus::Queued).then(|| {
+        let why = request
+            .last_error
+            .or(request.terminal_reason)
+            .unwrap_or_else(|| request.state.clone());
+        format!("The run never started: {why}")
+    });
+    let inputs = request
+        .trigger_event
+        .get("inputs")
+        .cloned()
+        .unwrap_or_default();
+    let (data, variables) = extract_input_fields(Some(&inputs));
+    let created = request.created_at.to_rfc3339();
+    let updated = request.updated_at.to_rfc3339();
+    Some(WorkflowInstanceDto {
+        error_summary: None,
+        state: None,
+        state_updated_at: None,
+        id: instance_id.to_string(),
+        run_label: request.run_label,
+        parent_instance_id: request.parent_instance_id,
+        completed_at: status.is_terminal().then(|| updated.clone()),
+        created,
+        updated,
+        status,
+        suspension_reason: None,
+        execution_phase: None,
+        termination_type,
+        error,
+        workflow_id: request.workflow_id,
+        workflow_name: None,
+        inputs: InstanceInputs { data, variables },
+        outputs: None,
+        tags: vec![],
+        used_version: request.workflow_version.unwrap_or_default(),
+        steps: vec![],
+        execution_duration_seconds: None,
+        max_memory_mb: None,
+        queue_duration_seconds: None,
+        processing_overhead_seconds: None,
+        has_pending_input: false,
+    })
+}
+
 /// Convert Runtara `InstanceInfo` to `ExecutionWithMetadata`.
 ///
 /// Used when enriching a single execution with workflow metadata.
@@ -393,6 +456,53 @@ pub fn parse_image_id(image_id: &str) -> (String, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request(
+        state: &str,
+        last_error: Option<&str>,
+    ) -> crate::workers::execution_outbox::InstanceRequest {
+        crate::workers::execution_outbox::InstanceRequest {
+            state: state.into(),
+            terminal_reason: Some("environment_launch_failed".into()),
+            last_error: last_error.map(Into::into),
+            workflow_id: "wf".into(),
+            workflow_version: Some(3),
+            trigger_event: serde_json::json!({"inputs": {"data": {"x": 1}, "variables": {}}}),
+            run_label: None,
+            parent_instance_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn request_without_runtime_instance_reports_queued_or_why_it_never_started() {
+        let queued = request_instance_dto("i-1", request("queued", None)).expect("queued");
+        assert_eq!(queued.status, ExecutionStatus::Queued);
+        assert!(queued.error.is_none());
+        assert_eq!(queued.inputs.data, serde_json::json!({"x": 1}));
+        assert_eq!(queued.used_version, 3);
+
+        let failed = request_instance_dto(
+            "i-1",
+            request("terminal", Some("Compilation failed: unsupported graph")),
+        )
+        .expect("failed");
+        assert_eq!(failed.status, ExecutionStatus::Failed);
+        assert_eq!(
+            failed.error.as_deref(),
+            Some("The run never started: Compilation failed: unsupported graph")
+        );
+        assert!(failed.completed_at.is_some());
+
+        let reason_only = request_instance_dto("i-1", request("terminal", None)).expect("failed");
+        assert_eq!(
+            reason_only.error.as_deref(),
+            Some("The run never started: environment_launch_failed")
+        );
+
+        assert!(request_instance_dto("i-1", request("accepted", None)).is_none());
+    }
     use serde_json::json;
 
     /// A running run blocked in an in-process wait on this host reports it;

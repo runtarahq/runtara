@@ -807,6 +807,7 @@ async fn process_trigger_event(
                         source_request_id,
                         handoff_owner,
                         "single_instance_active",
+                        None,
                     )
                     .await
                 {
@@ -897,6 +898,7 @@ async fn process_trigger_event(
                 source_request_id,
                 handoff_owner,
                 "workflow_not_runnable",
+                Some(&e.to_string()),
             )
             .await
             {
@@ -918,6 +920,7 @@ async fn process_trigger_event(
                 source_request_id,
                 handoff_owner,
                 "environment_launch_failed",
+                Some(&e.to_string()),
             )
             .await
             {
@@ -981,9 +984,10 @@ async fn terminalize_source_launch_claim(
     request_id: Uuid,
     handoff_owner: &str,
     reason: &str,
+    detail: Option<&str>,
 ) -> bool {
     match outbox
-        .terminalize_launch_claim(request_id, handoff_owner, reason)
+        .terminalize_launch_claim(request_id, handoff_owner, reason, detail)
         .await
     {
         Ok(true) => true,

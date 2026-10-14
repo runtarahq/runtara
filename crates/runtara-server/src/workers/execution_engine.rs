@@ -949,6 +949,30 @@ impl ExecutionEngine {
             .resolve_version(req.tenant_id, req.workflow_id, req.version)
             .await?;
 
+        // 1.5 A compilation that failed for this unchanged definition fails
+        // every launch the same way, so refuse now rather than report a
+        // queued run that never starts. A version not compiled yet is still
+        // admitted: the launch path compiles it.
+        let (_, compilation) = self
+            .workflow_repo
+            .ensure_compilation_ready(req.tenant_id, req.workflow_id, Some(version))
+            .await
+            .map_err(|e| {
+                ExecutionError::DatabaseError(format!("Failed to read compilation status: {e}"))
+            })?;
+        if let CompilationStatus::Failed {
+            error,
+            terminal: true,
+            ..
+        } = compilation
+        {
+            return Err(ExecutionError::WorkflowNotRunnable {
+                workflow_id: req.workflow_id.to_string(),
+                version,
+                error,
+            });
+        }
+
         // 2. Get workflow for input schema
         let workflow = self
             .workflow_repo
@@ -1602,6 +1626,22 @@ impl ExecutionEngine {
                         instance_id = %instance_id,
                         "Runtime detail lookup returned not found; returning execution list summary"
                     );
+                    return Ok(instance);
+                }
+                // A queued run, or one whose launch failed (for example its
+                // compilation), has a durable request but no runtime instance.
+                let request = self
+                    .outbox
+                    .request_for_instance(tenant_id, instance_id)
+                    .await
+                    .map_err(|e| {
+                        ExecutionError::DatabaseError(format!(
+                            "Failed to read execution request: {e}"
+                        ))
+                    })?;
+                if let Some(instance) = request.and_then(|request| {
+                    crate::workers::runtara_dto::request_instance_dto(instance_id, request)
+                }) {
                     return Ok(instance);
                 }
                 return Err(ExecutionError::NotFound(format!(

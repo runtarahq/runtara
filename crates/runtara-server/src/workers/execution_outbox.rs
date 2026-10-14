@@ -332,6 +332,22 @@ fn child_outcome_set(reason: &str) -> String {
     )
 }
 
+/// A durable execution request, as [`ExecutionOutbox::request_for_instance`]
+/// reads it.
+#[derive(Debug, Clone, FromRow)]
+pub struct InstanceRequest {
+    pub state: String,
+    pub terminal_reason: Option<String>,
+    pub last_error: Option<String>,
+    pub workflow_id: String,
+    pub workflow_version: Option<i32>,
+    pub trigger_event: Value,
+    pub run_label: Option<String>,
+    pub parent_instance_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// What [`ExecutionOutbox::cancel_request`] did to a child's admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdmissionCancel {
@@ -396,6 +412,31 @@ impl ExecutionOutbox {
     /// Read an existing request before a caller performs non-durable admission
     /// work. This makes client retries a no-op even when the original request
     /// has already reached the worker stream.
+    /// The durable request behind `instance_id`, for lookups of a run the
+    /// runtime has not (or never) created. `None` when the tenant has no such
+    /// request.
+    pub async fn request_for_instance(
+        &self,
+        tenant_id: &str,
+        instance_id: &str,
+    ) -> Result<Option<InstanceRequest>, ExecutionOutboxError> {
+        Ok(sqlx::query_as::<_, InstanceRequest>(
+            r#"
+            SELECT request.state, request.terminal_reason, outbox.last_error,
+                   request.workflow_id, request.workflow_version, request.trigger_event,
+                   request.run_label, request.parent_instance_id,
+                   request.created_at, request.updated_at
+            FROM execution_requests AS request
+            LEFT JOIN execution_outbox AS outbox ON outbox.request_id = request.request_id
+            WHERE request.tenant_id = $1 AND request.instance_id = $2
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(instance_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     pub async fn find_by_idempotency(
         &self,
         tenant_id: &str,
@@ -1379,11 +1420,15 @@ impl ExecutionOutbox {
     /// Terminalize a request that cannot reach Environment after a worker
     /// owns its handoff (invalid workflow, deliberate single-instance skip,
     /// etc.). This clears the source reservation in the same transaction.
+    /// `detail` is the failure text kept with the request so an instance
+    /// lookup can report why the run never started; `reason` stays the
+    /// machine-readable code.
     pub async fn terminalize_launch_claim(
         &self,
         request_id: Uuid,
         lease_owner: &str,
         reason: &str,
+        detail: Option<&str>,
     ) -> Result<bool, ExecutionOutboxError> {
         let mut tx = self.pool.begin().await?;
         let terminalized = sqlx::query_scalar::<_, Uuid>(&format!(
@@ -1411,7 +1456,7 @@ impl ExecutionOutbox {
                 SET state = 'cancelled',
                     lease_owner = NULL,
                     lease_expires_at = NULL,
-                    last_error = $3,
+                    last_error = COALESCE($4, $3),
                     updated_at = NOW()
                 WHERE request_id = $1 AND state = 'leased' AND lease_owner = $2
                 "#,
@@ -1419,6 +1464,7 @@ impl ExecutionOutbox {
             .bind(request_id)
             .bind(lease_owner)
             .bind(reason)
+            .bind(detail)
             .execute(&mut *tx)
             .await?;
             released_tenant = release_admission_in_tx(&mut tx, request_id, reason).await?;
