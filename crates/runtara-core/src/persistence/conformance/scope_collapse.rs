@@ -22,7 +22,15 @@ async fn running(p: &dyn Persistence, name: &str) -> String {
 /// fixture the grammar no longer reads would have no address and make every
 /// case pass vacuously, so it fails here instead.
 fn key(kind: &str, frames: Value, loops: Value, parts: Value) -> String {
-    let key = format!("runtara:v2:{}", json!([kind, "wf", frames, loops, parts]));
+    key_in("wf", kind, frames, loops, parts)
+}
+
+/// [`key`] in another workflow, as a workflow-agent's child writes it.
+fn key_in(workflow: &str, kind: &str, frames: Value, loops: Value, parts: Value) -> String {
+    let key = format!(
+        "runtara:v2:{}",
+        json!([kind, workflow, frames, loops, parts])
+    );
     assert!(
         crate::persistence::checkpoint_scope::scope(&key).is_some(),
         "fixture key has no address: {key}"
@@ -281,6 +289,304 @@ pub async fn a_fenced_split_result_collapses_its_iterations(p: &dyn Persistence)
     p.delete_instances_batch(&[id]).await.unwrap();
 }
 
+/// The frame a child invoked by step `step` at loop path `loops` (an
+/// EmbedWorkflow's, or a workflow-agent's called from an Agent) writes under.
+fn child(loops: Value, step: &str) -> Value {
+    json!(["child", "wf", loops, [step]])
+}
+
+fn embed(loops: Value, step: &str) -> String {
+    key("embed_workflow", json!([]), loops, json!([step]))
+}
+
+/// The result row of Agent `step` inside `frames`.
+fn agent_in(frames: Value, loops: Value, step: &str) -> String {
+    key(
+        "agent",
+        frames,
+        loops,
+        json!(["utils", "random-double", step]),
+    )
+}
+
+/// Recording an EmbedWorkflow's result deletes its child's rows, a nested
+/// child's included, and the Embed's own attempt, retry and deadline rows.
+/// The result stays, and so do the rows around it, another Embed's child,
+/// the same Embed in an iteration, and another instance's rows.
+pub async fn recording_an_embed_result_collapses_its_child(p: &dyn Persistence) {
+    let id = running(p, "embed").await;
+    let other = running(p, "embed-other").await;
+    let result = embed(json!([]), "embed");
+    let frame = json!([child(json!([]), "embed")]);
+    let inside = vec![
+        agent_in(frame.clone(), json!([]), "c1"),
+        agent_in(frame.clone(), json!([["Split", "items", 2]]), "each"),
+        key("split", frame, json!([]), json!(["items"])),
+        agent_in(
+            json!([child(json!([]), "embed"), child(json!([]), "inner")]),
+            json!([]),
+            "deep",
+        ),
+        format!("{result}::attempt::1"),
+        format!("{result}::retry::1"),
+        format!("{result}::retry_sleep::2"),
+        key(
+            "embed-deadline",
+            json!([]),
+            json!([]),
+            json!(["EmbedWorkflow", "root", "embed"]),
+        ),
+    ];
+    let outside = vec![
+        agent_in(json!([]), json!([]), "before"),
+        agent_in(json!([child(json!([]), "embed2")]), json!([]), "c1"),
+        agent_in(
+            json!([child(json!([["Split", "s", 0]]), "embed")]),
+            json!([]),
+            "c1",
+        ),
+        embed(json!([["Split", "s", 0]]), "embed"),
+        key(
+            "embed-deadline",
+            json!([]),
+            json!([]),
+            json!(["EmbedWorkflow", "root", "embed2"]),
+        ),
+    ];
+    save_all(p, &id, &inside).await;
+    save_all(p, &id, &outside).await;
+    save_all(p, &other, &inside).await;
+
+    assert_eq!(
+        p.record_checkpoint(&id, &result, b"child output", None)
+            .await
+            .unwrap(),
+        CheckpointWrite::Recorded
+    );
+
+    let mut expected = set(&outside);
+    expected.insert(result);
+    assert_eq!(stored(p, &id).await, expected);
+    assert_eq!(
+        stored(p, &other).await,
+        set(&inside),
+        "another instance's rows are untouched"
+    );
+    p.delete_instances_batch(&[id, other]).await.unwrap();
+}
+
+/// Recording an Agent's result deletes its own attempt, retry and retry sleep
+/// rows and, for a workflow-agent, every row its child wrote under the call.
+/// Its deadline row (untagged), another Agent reusing its step id at the same
+/// position, and an AiAgent's tool and memory calls stay.
+pub async fn recording_an_agent_result_collapses_its_child_and_retries(p: &dyn Persistence) {
+    let id = running(p, "agent").await;
+    let result = key(
+        "agent",
+        json!([]),
+        json!([]),
+        json!(["orders-sync", "run", "call"]),
+    );
+    let frame = json!([child(json!([]), "call")]);
+    let inside = vec![
+        key_in(
+            "orders-sync",
+            "agent",
+            frame.clone(),
+            json!([]),
+            json!(["utils", "random-double", "c1"]),
+        ),
+        key_in("orders-sync", "split", frame, json!([]), json!(["items"])),
+        format!("{result}::attempt::1"),
+        format!("{result}::retry::1"),
+        format!("{result}::retry_sleep::2"),
+    ];
+    let reused = key(
+        "agent",
+        json!([]),
+        json!([]),
+        json!(["slack", "post", "call"]),
+    );
+    let outside = vec![
+        key(
+            "agent-deadline",
+            json!([]),
+            json!([]),
+            json!(["Agent", "root", "call"]),
+        ),
+        reused.clone(),
+        format!("{reused}::attempt::1"),
+        agent_in(
+            json!([["tool-child", "wf", [], ["call", "lookup", 0]]]),
+            json!([]),
+            "t1",
+        ),
+        agent_in(
+            json!([["agent-aux", "wf", [], ["call", "memory", "load-memory"]]]),
+            json!([]),
+            "call",
+        ),
+        agent_in(json!([]), json!([]), "next"),
+    ];
+    save_all(p, &id, &inside).await;
+    save_all(p, &id, &outside).await;
+
+    assert_eq!(
+        p.record_checkpoint(&id, &result, b"child output", None)
+            .await
+            .unwrap(),
+        CheckpointWrite::Recorded
+    );
+
+    let mut expected = set(&outside);
+    expected.insert(result);
+    assert_eq!(stored(p, &id).await, expected);
+    p.delete_instances_batch(&[id]).await.unwrap();
+}
+
+/// Child scopes collapse level by level: a Split and an Embed inside an
+/// Embed's child each take their own rows first, and the outer Embed's
+/// result then takes the rest, their results included.
+pub async fn nested_child_scopes_collapse_level_by_level(p: &dyn Persistence) {
+    let id = running(p, "nested-child").await;
+    let frame = json!([child(json!([]), "outer")]);
+    let iterations: Vec<String> = (0..3)
+        .map(|i| agent_in(frame.clone(), json!([["Split", "items", i]]), "each"))
+        .collect();
+    let inner_child: Vec<String> = ["c1", "c2"]
+        .into_iter()
+        .map(|step| {
+            agent_in(
+                json!([child(json!([]), "outer"), child(json!([]), "inner")]),
+                json!([]),
+                step,
+            )
+        })
+        .collect();
+    let split_result = key("split", frame.clone(), json!([]), json!(["items"]));
+    let inner_result = key("embed_workflow", frame, json!([]), json!(["inner"]));
+    let outer_result = embed(json!([]), "outer");
+    let before = agent_in(json!([]), json!([]), "before");
+    save_all(p, &id, &iterations).await;
+    save_all(p, &id, &inner_child).await;
+    save_all(p, &id, std::slice::from_ref(&before)).await;
+
+    p.record_checkpoint(&id, &split_result, b"items", None)
+        .await
+        .unwrap();
+    let mut expected = set(&inner_child);
+    expected.extend([split_result.clone(), before.clone()]);
+    assert_eq!(
+        stored(p, &id).await,
+        expected,
+        "only the child Split's iterations are gone"
+    );
+
+    p.record_checkpoint(&id, &inner_result, b"inner", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored(p, &id).await,
+        set([&split_result, &inner_result, &before]),
+        "the inner Embed took its own child"
+    );
+
+    p.record_checkpoint(&id, &outer_result, b"outer", None)
+        .await
+        .unwrap();
+    assert_eq!(stored(p, &id).await, set([&outer_result, &before]));
+    p.delete_instances_batch(&[id]).await.unwrap();
+}
+
+/// An Embed inside a Split's iteration collapses its child into its result,
+/// and the Split's result then takes that result with the iteration.
+pub async fn an_embed_in_a_split_iteration_collapses_into_the_split(p: &dyn Persistence) {
+    let id = running(p, "embed-in-split").await;
+    let site = json!([["Split", "items", 1]]);
+    let child_rows: Vec<String> = ["c1", "c2"]
+        .into_iter()
+        .map(|step| agent_in(json!([child(site.clone(), "e")]), json!([]), step))
+        .collect();
+    let first_item = item("items", 0, "each");
+    let embed_result = embed(site, "e");
+    let split_result = split(json!([]), "items");
+    save_all(p, &id, &child_rows).await;
+    save_all(p, &id, std::slice::from_ref(&first_item)).await;
+
+    p.record_checkpoint(&id, &embed_result, b"child output", None)
+        .await
+        .unwrap();
+    assert_eq!(stored(p, &id).await, set([&first_item, &embed_result]));
+
+    p.record_checkpoint(&id, &split_result, b"all", None)
+        .await
+        .unwrap();
+    assert_eq!(stored(p, &id).await, set([&split_result]));
+    p.delete_instances_batch(&[id]).await.unwrap();
+}
+
+/// A workflow-agent child running as an isolated invocation writes through
+/// the fenced path; the caller's Agent result, recorded by the root
+/// execution, deletes those rows and keeps the caller's own.
+pub async fn a_fenced_workflow_agent_child_collapses_into_its_callers_result(p: &dyn Persistence) {
+    let id = running(p, "fenced-agent").await;
+    let lease = claim(p, &id).await;
+    let attempt = fences(p)
+        .begin_invocation_attempt(&lease, "call", "start")
+        .await
+        .unwrap()
+        .fence;
+    let frame = json!([child(json!([]), "call")]);
+    let child_rows: Vec<String> = ["c1", "c2", "c3"]
+        .into_iter()
+        .map(|step| {
+            key_in(
+                "orders-sync",
+                "agent",
+                frame.clone(),
+                json!([]),
+                json!(["utils", "random-double", step]),
+            )
+        })
+        .collect();
+    for key in &child_rows {
+        fences(p)
+            .invocation_checkpoint(
+                &attempt,
+                &InvocationCheckpoint {
+                    checkpoint_id: key.clone(),
+                    state: b"x".to_vec(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let before = agent_in(json!([]), json!([]), "before");
+    p.record_checkpoint(&id, &before, b"x", Some(&lease))
+        .await
+        .unwrap();
+    assert_eq!(
+        stored(p, &id).await.len(),
+        child_rows.len() + 1,
+        "the child's rows reached the caller's store"
+    );
+
+    let result = key(
+        "agent",
+        json!([]),
+        json!([]),
+        json!(["orders-sync", "run", "call"]),
+    );
+    assert_eq!(
+        p.record_checkpoint(&id, &result, b"child output", Some(&lease))
+            .await
+            .unwrap(),
+        CheckpointWrite::Recorded
+    );
+    assert_eq!(stored(p, &id).await, set([&before, &result]));
+    p.delete_instances_batch(&[id]).await.unwrap();
+}
+
 /// Every case in this module.
 pub async fn run_all(p: &dyn Persistence) {
     recording_a_split_result_collapses_its_iterations(p).await;
@@ -288,4 +594,9 @@ pub async fn run_all(p: &dyn Persistence) {
     nested_splits_collapse_level_by_level(p).await;
     a_result_found_stored_collapses_nothing(p).await;
     a_fenced_split_result_collapses_its_iterations(p).await;
+    recording_an_embed_result_collapses_its_child(p).await;
+    recording_an_agent_result_collapses_its_child_and_retries(p).await;
+    nested_child_scopes_collapse_level_by_level(p).await;
+    an_embed_in_a_split_iteration_collapses_into_the_split(p).await;
+    a_fenced_workflow_agent_child_collapses_into_its_callers_result(p).await;
 }

@@ -269,6 +269,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A finished EmbedWorkflow or workflow-agent call keeps one checkpoint
+  row.** Recording a durable EmbedWorkflow's result, or the result of an
+  Agent step calling a workflow published as an agent, now deletes in the
+  same transaction the checkpoints its child wrote, nested children
+  included, and the step's own attempt, retry and deadline rows: replay reads
+  the result first and never runs the child again. `A → EmbedWorkflow → B`
+  keeps 3 rows whatever the child does. The same goes for an isolated
+  workflow-agent child, and for an EmbedWorkflow called as an AiAgent tool.
+  Because a checkpoint key does not say whether an agent is a workflow, every
+  durable Agent that retried and then succeeded drops its `::attempt::N`,
+  `::retry_sleep::N` and `::retry::N` rows too, so the checkpoints listing
+  (`GET …/instances/{id}/checkpoints`) no longer shows those retry records or
+  their error messages once the step succeeds. A run killed or parked inside
+  the child keeps the child's rows until the step finishes. As with Split,
+  this applies to workflows already compiled with structured checkpoint keys,
+  from runs started on this release; a `durable: false` step saves no result
+  and collapses nothing. A step in an `onWait` graph that reuses the id of an
+  Agent or EmbedWorkflow around it shares that step's child namespace, so
+  either one's result also deletes the other's child rows; the workflow
+  editor never reuses ids. Postgres now runs the delete in the statement
+  that points the instance at the new result, as two ranges over the
+  `checkpoints.scope` index, so it adds no round trip and never scans the
+  run's other rows, even before the table has statistics (a Split's result
+  could do that before). `A → Split[10000]{Agent} → B` takes as long as it
+  did without the new rules.
 - **A finished Split keeps one checkpoint row.** Recording a durable Split's
   result now deletes, in the same transaction, the checkpoints of its
   iterations and its own attempt, retry and loop-deadline rows: replay reads

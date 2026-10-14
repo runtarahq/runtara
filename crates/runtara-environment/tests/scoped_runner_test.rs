@@ -9,10 +9,12 @@ use runtara_environment::runner::{
 };
 use runtara_invocation_contract::{PackageLimits, artifact_digest};
 use runtara_store_postgres::PostgresPersistence;
+use runtara_workflows::ChildWorkflowInput;
 use runtara_workflows::direct_wasm::{
-    AgentIsolationPolicy, AgentIsolationReview, DirectCompilationInput, DirectCompilationResult,
-    WorkflowRole, compile_direct_workflow, compile_direct_workflow_composed_with_isolation_policy,
-    compose_direct_workflow, compose_direct_workflow_with_isolated_agents,
+    AgentIsolationPolicy, AgentIsolationReason, AgentIsolationReview, DirectCompilationInput,
+    DirectCompilationResult, WorkflowRole, compile_direct_workflow,
+    compile_direct_workflow_composed_with_isolation_policy, compose_direct_workflow,
+    compose_direct_workflow_with_isolated_agents,
 };
 use serde_json::{Value, json};
 use std::{
@@ -53,10 +55,21 @@ fn random_graph() -> Value {
         "executionPlan":[{"fromStep":"call","toStep":"finish"}]})
 }
 fn compile(graph: Value, dir: &Path, agent: &str, backend: &str) -> DirectCompilationResult {
+    compile_with_children(graph, vec![], dir, agent, backend)
+}
+/// [`compile`] with the child workflows its EmbedWorkflow steps run.
+fn compile_with_children(
+    graph: Value,
+    children: Vec<ChildWorkflowInput>,
+    dir: &Path,
+    agent: &str,
+    backend: &str,
+) -> DirectCompilationResult {
     if backend == "inventory-v4" {
         // The guest ABI is unchanged; retain the preceding inventory format
         // to prove pinned packages still execute with unknown durability.
-        let mut compiled = compile(graph, &dir.join("current"), agent, "scoped");
+        let mut compiled =
+            compile_with_children(graph, children, &dir.join("current"), agent, "scoped");
         let bytes = std::fs::read(&compiled.wasm_path).unwrap();
         let package = runtara_invocation_contract::parse(&bytes, limits())
             .unwrap()
@@ -80,7 +93,8 @@ fn compile(graph: Value, dir: &Path, agent: &str, backend: &str) -> DirectCompil
     if backend == "no-runtime" {
         // A valid package envelope around a runtime-less root must not obtain
         // the scoped execution path merely by carrying reviewed child bytes.
-        let mut packaged = compile(graph, &dir.join("packaged"), agent, "scoped");
+        let mut packaged =
+            compile_with_children(graph, children, &dir.join("packaged"), agent, "scoped");
         let pure_input = DirectCompilationInput {
             workflow_id: "scoped-runner-test".into(), version: 1, source_checksum: None,
             execution_graph: serde_json::from_value(json!({"durable":false,"entryPoint":"finish","steps":{"finish":{"id":"finish","stepType":"Finish"}},"executionPlan":[]})).unwrap(),
@@ -115,7 +129,7 @@ fn compile(graph: Value, dir: &Path, agent: &str, backend: &str) -> DirectCompil
         version: 1,
         source_checksum: None,
         execution_graph: serde_json::from_value(graph).unwrap(),
-        child_workflows: vec![],
+        child_workflows: children,
         output_dir: dir.to_owned(),
         track_events: false,
         agent_catalog: None,
@@ -1279,4 +1293,412 @@ async fn split_parked_mid_iteration(h: &Harness, backend: &str) {
         "{backend}: call and the Split's result: {ids:?}"
     );
     assert!(!ids.iter().any(|id| in_iteration(id)), "{backend}: {ids:?}");
+}
+
+/// A child workflow: `r` (random-double), then `tail` if given, then a Finish
+/// returning r's value.
+fn random_child(tail: Value) -> Value {
+    let mut steps = json!({
+        "r":{"id":"r","stepType":"Agent","agentId":"utils","capabilityId":"random-double","maxRetries":0,"inputMapping":{}},
+        "done":{"id":"done","stepType":"Finish","inputMapping":{"value":{"valueType":"reference","value":"steps.r.outputs"}}}
+    });
+    let mut plan = vec![json!({"fromStep":"r","toStep":"done"})];
+    if let Some((id, step)) = tail.as_object().and_then(|o| o.iter().next()) {
+        steps[id] = step.clone();
+        plan = vec![
+            json!({"fromStep":"r","toStep":id}),
+            json!({"fromStep":id,"toStep":"done"}),
+        ];
+    }
+    json!({"durable":true,"entryPoint":"r","steps":steps,"executionPlan":plan})
+}
+
+/// `call -> after -> finish`, where `call` is the given step and `after` an
+/// optional step after it; the Finish returns call's outputs.
+fn calling_graph(call: Value, after: Value) -> Value {
+    let mut steps = json!({
+        "call": call,
+        "finish":{"id":"finish","stepType":"Finish","inputMapping":{
+            "value":{"valueType":"reference","value":"steps.call.outputs"}}}
+    });
+    let plan = match after.as_object().and_then(|o| o.iter().next()) {
+        Some((id, step)) => {
+            steps[id] = step.clone();
+            vec![
+                json!({"fromStep":"call","toStep":id}),
+                json!({"fromStep":id,"toStep":"finish"}),
+            ]
+        }
+        None => vec![json!({"fromStep":"call","toStep":"finish"})],
+    };
+    json!({"durable":true,"entryPoint":"call","steps":steps,"executionPlan":plan})
+}
+
+/// An EmbedWorkflow step `call` running `child`.
+fn embed_call(child: Value) -> (Value, Vec<ChildWorkflowInput>) {
+    let call = json!({"id":"call","stepType":"EmbedWorkflow","childWorkflowId":"random-child",
+        "childVersion":1,"inputMapping":{}});
+    let child = ChildWorkflowInput {
+        step_id: "call".into(),
+        workflow_id: "random-child".into(),
+        version_requested: "1".into(),
+        version_resolved: 1,
+        execution_graph: serde_json::from_value(child).unwrap(),
+    };
+    (call, vec![child])
+}
+
+/// Compile `graph`, whose Agent step `call` runs `child` published as the
+/// workflow-agent `random-child`: composed in-process (`legacy`) or isolated
+/// (`scoped`). Returns the artifact and the runner bounds that admit it.
+fn workflow_agent_parent(
+    graph: Value,
+    child: Value,
+    dir: &Path,
+    backend: &str,
+) -> (DirectCompilationResult, ScopedAgentRunnerConfig) {
+    let components = components();
+    let mut compiled = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "random-child".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(child).unwrap(),
+            child_workflows: vec![],
+            output_dir: dir.join("child"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: Some("random-child".into()),
+        },
+        WorkflowRole::PublishedAgent,
+        false,
+    )
+    .unwrap();
+    compose_direct_workflow(&mut compiled, &components).unwrap();
+    let staging = dir.join("staged");
+    std::fs::create_dir_all(&staging).unwrap();
+    let staged = staging.join("runtara_agent_random_child.wasm");
+    std::fs::copy(&compiled.wasm_path, &staged).unwrap();
+    let info = runtara_dsl::agent_meta::workflow_agent_info(
+        "random-child",
+        "random-child",
+        "fixture",
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    std::fs::write(
+        staging.join("runtara_agent_random_child.meta.json"),
+        serde_json::to_vec(&info).unwrap(),
+    )
+    .unwrap();
+    let mut config = bounds("utils");
+    config.reviewed_agents.insert(
+        "random-child".into(),
+        artifact_digest(&std::fs::read(&staged).unwrap()),
+    );
+
+    let input = DirectCompilationInput {
+        workflow_id: "scoped-runner-test".into(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: serde_json::from_value(graph).unwrap(),
+        child_workflows: vec![],
+        output_dir: dir.join("parent"),
+        track_events: false,
+        agent_catalog: Some(Arc::new(
+            runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![info]),
+        )),
+        agent_slug: None,
+    };
+    let parent = if backend == "scoped" {
+        let reviews = config
+            .reviewed_agents
+            .iter()
+            .map(|(id, sha256)| {
+                (
+                    id.clone(),
+                    AgentIsolationReview {
+                        sha256: sha256.clone(),
+                        reset_safe: true,
+                        compiler_checkpoint_contract: true,
+                    },
+                )
+            })
+            .collect();
+        let parent = compile_direct_workflow_composed_with_isolation_policy(
+            input,
+            WorkflowRole::Root,
+            false,
+            &components,
+            std::slice::from_ref(&staging),
+            AgentIsolationPolicy {
+                enabled: true,
+                runtime_supports_inventory_v5: true,
+                reviews,
+            },
+            limits(),
+        )
+        .unwrap();
+        let decision = parent
+            .artifact_metadata
+            .isolation_selection
+            .as_ref()
+            .expect("an isolation report")
+            .agents
+            .iter()
+            .find(|agent| agent.agent_id == "random-child")
+            .expect("the workflow-agent's decision")
+            .reason;
+        assert_eq!(
+            decision,
+            AgentIsolationReason::Isolated,
+            "the call must run isolated, writing through the fenced path"
+        );
+        parent
+    } else {
+        assert_eq!(backend, "legacy");
+        let mut parent = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+            input,
+            WorkflowRole::Root,
+            false,
+        )
+        .unwrap();
+        runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
+            &mut parent,
+            &components,
+            std::slice::from_ref(&staging),
+        )
+        .unwrap();
+        parent
+    };
+    (parent, config)
+}
+
+/// Rows written by a child workflow under its caller.
+fn in_child(checkpoint_id: &str) -> bool {
+    checkpoint_id.contains(r#"["child","#)
+}
+
+/// The one number in `value`.
+fn only_number(value: &Value) -> f64 {
+    fn collect(value: &Value, out: &mut Vec<f64>) {
+        match value {
+            Value::Number(n) => out.push(n.as_f64().unwrap()),
+            Value::Array(items) => items.iter().for_each(|v| collect(v, out)),
+            Value::Object(map) => map.values().for_each(|v| collect(v, out)),
+            _ => {}
+        }
+    }
+    let mut numbers = Vec::new();
+    collect(value, &mut numbers);
+    assert_eq!(numbers.len(), 1, "exactly one number in {value}");
+    numbers[0]
+}
+
+/// Run `artifact` until it parks on the delay after `call`: only call's
+/// result row (starting with `result_prefix`) and the delay's are left, its
+/// child's rows gone with the transaction that recorded the result. A
+/// relaunch after the delay is then served by that row: the output is the
+/// value it stored, and the replay writes no rows.
+async fn a_finished_call_replays_from_its_row(
+    h: &Harness,
+    runner: &EmbeddedWasmRunner,
+    artifact: &DirectCompilationResult,
+    result_prefix: &str,
+    label: &str,
+) {
+    let mut options = h.options(&artifact.wasm_path).await;
+    run_until_exit(runner, &options).await;
+    let parked = h
+        .persistence
+        .get_instance(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(parked.status, InstanceStatus::Suspended, "{label}");
+    let rows = h
+        .persistence
+        .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+        .await
+        .unwrap();
+    let ids: Vec<&str> = rows.iter().map(|c| c.checkpoint_id.as_str()).collect();
+    assert_eq!(
+        rows.len(),
+        2,
+        "{label}: call's result and the delay: {ids:?}"
+    );
+    assert!(!ids.iter().any(|id| in_child(id)), "{label}: {ids:?}");
+    let result = rows
+        .iter()
+        .find(|c| c.checkpoint_id.starts_with(result_prefix))
+        .expect("call's result row");
+    let stored = only_number(&serde_json::from_slice(&result.state).unwrap());
+
+    let remaining = (parked.sleep_until.unwrap() - chrono::Utc::now())
+        .to_std()
+        .unwrap_or_default();
+    tokio::time::sleep(remaining + Duration::from_millis(20)).await;
+    options.launch_id = format!("resume-{}", options.instance_id);
+    options.prepersisted_input = None;
+    run_until_exit(runner, &options).await;
+    let completed = h
+        .persistence
+        .get_instance(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.status, InstanceStatus::Completed, "{label}");
+    let output: Value = serde_json::from_slice(&completed.output.unwrap()).unwrap();
+    let value = only_number(&output["value"]);
+    assert!(
+        close(value, stored),
+        "{label}: output {value} must be the stored result's {stored}"
+    );
+    let after = h
+        .persistence
+        .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+        .await
+        .unwrap();
+    assert_eq!(after.len(), 2, "{label}: the replay wrote no rows");
+}
+
+/// Once an EmbedWorkflow's result is recorded, its child's rows are gone, and
+/// a replay is served by the result: the child does not run again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_completed_embed_keeps_one_row_and_replays_from_it() {
+    let h = Harness::new().await;
+    for backend in ["legacy", "scoped"] {
+        let (call, children) = embed_call(random_child(json!({})));
+        let artifact = compile_with_children(
+            calling_graph(call, delay("sleep", 1000)),
+            children,
+            &h.dir.path().join(format!("embed-{backend}")),
+            "utils",
+            backend,
+        );
+        let runner = h.runner(Some(bounds("utils")));
+        a_finished_call_replays_from_its_row(
+            &h,
+            &runner,
+            &artifact,
+            r#"runtara:v2:["embed_workflow""#,
+            backend,
+        )
+        .await;
+    }
+}
+
+/// Once an Agent calling a workflow-agent records its result, the rows the
+/// child wrote under the call are gone, composed or isolated, and a replay is
+/// served by the result: the child does not run again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_completed_workflow_agent_call_keeps_one_row_and_replays_from_it() {
+    let h = Harness::new().await;
+    for backend in ["legacy", "scoped"] {
+        let call = json!({"id":"call","stepType":"Agent","agentId":"random-child",
+            "capabilityId":"run","maxRetries":0,"inputMapping":{}});
+        let (artifact, config) = workflow_agent_parent(
+            calling_graph(call, delay("sleep", 1000)),
+            random_child(json!({})),
+            &h.dir.path().join(format!("agent-{backend}")),
+            backend,
+        );
+        let runner = h.runner(Some(config));
+        a_finished_call_replays_from_its_row(
+            &h,
+            &runner,
+            &artifact,
+            r#"runtara:v2:["agent""#,
+            backend,
+        )
+        .await;
+    }
+}
+
+/// A run parked inside an EmbedWorkflow's child keeps the child's rows,
+/// resumes from them on relaunch, and collapses them once the Embed's result
+/// is recorded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_embed_parked_in_its_child_resumes_from_the_child_rows_then_collapses() {
+    let h = Harness::new().await;
+    for backend in ["legacy", "scoped"] {
+        let (call, children) = embed_call(random_child(delay("pause", 300)));
+        let artifact = compile_with_children(
+            calling_graph(call, json!({})),
+            children,
+            &h.dir.path().join(format!("embed-park-{backend}")),
+            "utils",
+            backend,
+        );
+        let runner = h.runner(Some(bounds("utils")));
+        let mut options = h.options(&artifact.wasm_path).await;
+        let mut first = None;
+        for launch in 0..8 {
+            if launch > 0 {
+                options.launch_id = format!("resume-{launch}-{}", options.instance_id);
+                options.prepersisted_input = None;
+            }
+            run_until_exit(&runner, &options).await;
+            let instance = h
+                .persistence
+                .get_instance(&options.instance_id)
+                .await
+                .unwrap()
+                .unwrap();
+            if instance.status == InstanceStatus::Completed {
+                break;
+            }
+            assert_eq!(instance.status, InstanceStatus::Suspended, "{backend}");
+            let rows = h
+                .persistence
+                .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+                .await
+                .unwrap();
+            assert!(
+                !rows.iter().any(|c| c
+                    .checkpoint_id
+                    .starts_with(r#"runtara:v2:["embed_workflow""#)),
+                "{backend}: no Embed result while its child is parked"
+            );
+            let r = rows
+                .iter()
+                .find(|c| in_child(&c.checkpoint_id) && c.checkpoint_id.contains("random-double"))
+                .expect("the child's finished step survives the park");
+            let value: f64 = serde_json::from_slice(&r.state).unwrap();
+            assert!(first.is_none_or(|first| close(first, value)), "{backend}");
+            first = Some(value);
+            let remaining = (instance.sleep_until.unwrap() - chrono::Utc::now())
+                .to_std()
+                .unwrap_or_default();
+            tokio::time::sleep(remaining + Duration::from_millis(20)).await;
+        }
+        let completed = h
+            .persistence
+            .get_instance(&options.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.status, InstanceStatus::Completed, "{backend}");
+        let output: Value = serde_json::from_slice(&completed.output.unwrap()).unwrap();
+        assert!(
+            close(
+                only_number(&output["value"]),
+                first.expect("parked at least once")
+            ),
+            "{backend}: the child's step resumed from its row"
+        );
+        let ids: Vec<String> = h
+            .persistence
+            .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.checkpoint_id)
+            .collect();
+        assert_eq!(ids.len(), 1, "{backend}: the Embed's result only: {ids:?}");
+        assert!(
+            ids[0].starts_with(r#"runtara:v2:["embed_workflow""#),
+            "{backend}: {ids:?}"
+        );
+    }
 }

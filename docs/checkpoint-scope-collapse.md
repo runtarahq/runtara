@@ -62,14 +62,25 @@ its older rows unmatched: never collapsed, never collapsed wrongly.
 `loop_closure` builds one for a Split's result (its iterations), and
 `child_closure` for an EmbedWorkflow's or an Agent's (the child namespace of an
 embedded workflow or a workflow-agent call). The inner ranges name the step by
-its id alone. That is exactly as precise as the result keys: two Splits or
-EmbedWorkflows with one id at one position already share a result key, and two
-Agents with one id share their child namespace. Only an unsuffixed result key
+its id alone. For a Split that is exactly as precise as its result key: two
+Splits with one id at one position already share it. A child namespace is
+looser: every step that can call a child (EmbedWorkflow, Agent) shares one
+namespace with any other such step that has its id at its position, whatever
+its kind. Step ids are unique within a graph, so this happens only when an
+`onWait` graph reuses an id of the graph around it, which the workflow editor
+never does: recording either step's result also deletes the other's child
+rows. That matters only if the other step has no result to replay from
+(`durable: false`, or a failure its `onError` handled), since an `onWait`
+graph runs again on every replay of its wait; its child steps then run again
+too. Only an unsuffixed result key
 has a closure, so a failed attempt never deletes work a retry will reuse. The
 store applies the closure in the transaction that stores the result (a writer
 that finds the key already stored writes and deletes nothing):
 `checkpoints::record` on the root path, and the fenced `checkpoint` on the
-isolated child path. The in-memory backend does the same.
+isolated child path. In Postgres the delete rides in the statement that
+points the instance at its new result (a data-modifying `WITH`), so a closure
+costs no extra round trip; that matters because every durable Agent result
+has one and most delete nothing. The in-memory backend does the same.
 
 Which kinds close their scope is a rule table in `checkpoint_scope`. A kind is
 added only once replay is known never to read the rows its closure names after
@@ -79,12 +90,19 @@ end-to-end tests.
 | Result kind | Closes | Why it is safe |
 |---|---|---|
 | `split` | every iteration, and the Split's attempt, retry and loop-deadline/complete rows | The result is saved only once the loop has finished: every item succeeded, or with `dontStopOnFailed` every item ran and the result records the failures. Replay looks it up before entering the loop, its deadline or its retries. A failed attempt is a suffixed row with no closure, so a retry keeps the items that already succeeded. |
+| `embed_workflow` | the child's rows, nested children included, and the Embed's attempt, retry, retry-sleep and deadline rows | The result is saved only once the child has finished: it succeeded, or, for an Embed called as an AiAgent tool, its failure became the tool result. A child that parks exits the run first, and an enclosing deadline that unwinds skips the save. Replay looks the result up before mapping the child's input, its deadline or its retries. |
+| `agent` | a workflow-agent's child rows, and the Agent's attempt, retry and retry-sleep rows | The result is saved only when the call succeeded; a failure goes to `onError` or fails the run. Replay looks it up before the Agent's deadline, its retries, its continuation and the call. The key does not say whether the agent is a workflow, so every durable Agent that retried also drops its retry rows. An AiAgent's tool and memory calls run under their own frames (`tool-child`, `agent-aux`) and are not touched; neither is the Agent's deadline row, which carries only its position. |
 
-`A → Split[N] → B` therefore keeps three rows, whatever N is. A Split inside
-another Split's iteration collapses first, and the outer Split's range then
-covers its result. A run parked or killed inside an iteration keeps that
-Split's rows until the Split finishes. Not collapsed: a `durable: false` Split,
-which saves no result, and rows written before migration 049.
+`A → Split[N] → B` therefore keeps three rows, whatever N is, and so does
+`A → EmbedWorkflow → B` or `A → workflow-agent → B`, whatever the child does.
+A composite step inside another one collapses first, and the outer step's
+range then covers its result: a Split inside an Embed's child, an Embed inside
+a Split's iteration or inside another Embed. A run parked or killed inside a
+step keeps that step's rows until the step finishes, and a child that runs as
+an isolated invocation writes through the fenced path into the same instance,
+so its caller's result collapses it the same way. Not collapsed: a
+`durable: false` step, which saves no result, and rows written before
+migration 049.
 
 ## Recovery progress
 
