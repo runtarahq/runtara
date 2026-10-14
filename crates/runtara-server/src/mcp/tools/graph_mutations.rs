@@ -190,16 +190,18 @@ async fn fetch_latest_graph_locked(
 ///
 /// For the first mutation, we create a new version by POSTing the EXISTING valid graph,
 /// then immediately patch it with the mutated graph via PUT. This avoids running full
-/// workflow validation (reachability, connections) on an incomplete graph — PUT only
-/// checks DSL structure, with full checks deferred to compile time.
-/// Returns (version, is_new_version).
+/// workflow validation (reachability, connections) on an incomplete graph — PUT
+/// rejects only structural corruption (an edge to a step outside its graph, a
+/// key/id mismatch) and reports everything else as warnings.
+/// Returns (version, is_new_version, warnings) — the warnings the server
+/// reported for the saved graph, so each tool can hand them back to the caller.
 async fn save_graph(
     server: &SmoMcpServer,
     workflow_id: &str,
     graph: serde_json::Value,
     latest_version: i64,
     current_version: i64,
-) -> Result<(String, bool), rmcp::ErrorData> {
+) -> Result<(String, bool, Vec<String>), rmcp::ErrorData> {
     if latest_version == current_version {
         // First mutation — create a new version. Strategy:
         //
@@ -208,7 +210,7 @@ async fn save_graph(
         //
         // 2. If that fails with validation (e.g., adding an unreachable step),
         //    try POST /update with the EXISTING graph (which was valid before the
-        //    mutation), then patch the new version via PUT (which skips reachability).
+        //    mutation), then patch the new version via PUT (which skips reachability checks).
         //
         // 3. If the existing graph is also invalid or empty, return the original error.
         let mutated_body = serde_json::json!({ "executionGraph": graph });
@@ -227,7 +229,7 @@ async fn save_graph(
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown")
                     .to_string();
-                Ok((version, true))
+                Ok((version, true, response_warnings(&res)))
             }
             Err(original_err) => {
                 // Mutated graph failed validation — try existing graph + patch
@@ -263,9 +265,9 @@ async fn save_graph(
                     .unwrap_or("unknown")
                     .to_string();
 
-                // Patch with the mutated graph (PUT skips reachability validation)
+                // Patch with the mutated graph (PUT skips reachability checks)
                 let patch_body = serde_json::json!({ "executionGraph": graph });
-                api_put(
+                let patched = api_put(
                     server,
                     &format!(
                         "/api/runtime/workflows/{}/versions/{}/graph",
@@ -275,13 +277,13 @@ async fn save_graph(
                 )
                 .await?;
 
-                Ok((version, true))
+                Ok((version, true, response_warnings(&patched)))
             }
         }
     } else {
         // Subsequent mutation — patch in-place via PUT /versions/{v}/graph
         let body = serde_json::json!({ "executionGraph": graph });
-        api_put(
+        let patched = api_put(
             server,
             &format!(
                 "/api/runtime/workflows/{}/versions/{}/graph",
@@ -290,8 +292,26 @@ async fn save_graph(
             Some(body),
         )
         .await?;
-        Ok((latest_version.to_string(), false))
+        Ok((
+            latest_version.to_string(),
+            false,
+            response_warnings(&patched),
+        ))
     }
+}
+
+/// The `warnings` array of a workflow save response.
+fn response_warnings(response: &serde_json::Value) -> Vec<String> {
+    response
+        .get("warnings")
+        .and_then(|warnings| warnings.as_array())
+        .map(|warnings| {
+            warnings
+                .iter()
+                .filter_map(|warning| warning.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Navigate into nested subgraphs by following the path.
@@ -1665,13 +1685,14 @@ pub async fn add_step(
         target["entryPoint"] = serde_json::Value::String(params.step_id.clone());
     }
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
         "stepId": params.step_id,
         "setAsEntryPoint": set_entry,
     }))
@@ -1719,13 +1740,14 @@ pub async fn remove_step(
         .and_then(|v| v.as_str())
         .is_some_and(|ep| ep == params.step_id);
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
         "removedStepId": params.step_id,
         "removedEdges": removed_edges,
         "warning": if was_entry_point {
@@ -1767,13 +1789,14 @@ pub async fn update_step(
     step["id"] = serde_json::Value::String(params.step_id.clone());
     target["steps"][&params.step_id] = step;
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
         "stepId": params.step_id,
     }))
 }
@@ -1918,13 +1941,14 @@ pub async fn patch_step(
 
     apply_patches(step, &params.patches)?;
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
         "stepId": params.step_id,
         "patchesApplied": params.patches.len(),
     }))
@@ -2047,13 +2071,14 @@ pub async fn connect_steps(
 
     target["executionPlan"].as_array_mut().unwrap().push(edge);
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
         "fromStep": params.from_step,
         "toStep": params.to_step,
     }))
@@ -2100,13 +2125,14 @@ pub async fn disconnect_steps(
         )));
     }
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
         "removedEdges": removed,
     }))
 }
@@ -2130,13 +2156,14 @@ pub async fn set_entry_point(
 
     target["entryPoint"] = serde_json::Value::String(params.step_id.clone());
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
         "entryPoint": params.step_id,
     }))
 }
@@ -2263,13 +2290,14 @@ pub async fn set_mapping(
 
     step["inputMapping"][&params.input_name] = mapping_value;
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
         "stepId": params.step_id,
         "inputName": params.input_name,
     }))
@@ -2307,13 +2335,14 @@ pub async fn remove_mapping(
         )));
     }
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
         "stepId": params.step_id,
         "removedInput": params.input_name,
     }))
@@ -2355,13 +2384,14 @@ pub async fn set_input_schema(
 
     target["inputSchema"] = normalize_json_arg(params.fields, "fields")?;
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
     }))
 }
 
@@ -2384,13 +2414,14 @@ pub async fn set_input_schema_field(
 
     target["inputSchema"][&params.field_name] = normalize_json_arg(params.field, "field")?;
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
         "field": params.field_name,
     }))
 }
@@ -2416,13 +2447,14 @@ pub async fn remove_input_schema_field(
         )));
     }
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
         "removedField": params.field_name,
     }))
 }
@@ -2463,13 +2495,14 @@ pub async fn set_output_schema(
 
     target["outputSchema"] = normalize_json_arg(params.fields, "fields")?;
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
     }))
 }
 
@@ -2539,13 +2572,14 @@ pub async fn set_state_schema(
     replace_state_schema(&mut graph, &[], fields)?;
     let (_, count) = state_schema_of(&graph);
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
         "count": count,
     }))
 }
@@ -2801,13 +2835,14 @@ pub async fn set_variable(
 
     target["variables"][&params.name] = normalize_json_arg(params.variable, "variable")?;
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
         "variable": params.name,
     }))
 }
@@ -3202,7 +3237,7 @@ pub async fn add_agent_step(
         }));
     }
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
 
     // Extract expected inputs from capability schema
@@ -3217,6 +3252,7 @@ pub async fn add_agent_step(
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
         "stepId": params.step_id,
         "setAsEntryPoint": set_entry,
         "connectedAfter": params.connect_after,
@@ -3246,13 +3282,14 @@ pub async fn remove_variable(
         return Err(err(format!("Variable '{}' not found", params.name)));
     }
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
     json_result(serde_json::json!({
         "success": true,
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
         "removedVariable": params.name,
     }))
 }
@@ -3706,7 +3743,7 @@ pub async fn apply_graph_mutations(
         applied
     };
 
-    let (version, new_version) =
+    let (version, new_version, warnings) =
         save_graph(server, &params.workflow_id, graph, latest, current).await?;
     let operation_count = applied.len();
     json_result(serde_json::json!({
@@ -3714,6 +3751,7 @@ pub async fn apply_graph_mutations(
         "workflowId": params.workflow_id,
         "version": version,
         "newVersion": new_version,
+        "warnings": warnings,
         "path": path,
         "applied": applied,
         "operationCount": operation_count,

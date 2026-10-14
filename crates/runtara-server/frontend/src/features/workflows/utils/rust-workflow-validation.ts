@@ -19,6 +19,13 @@ export interface RustWorkflowValidationResult {
   status: 'valid' | 'invalid' | 'unavailable';
   errors: string[];
   warnings: string[];
+  /**
+   * Per error, the Split/While/WaitForSignal step ids whose bodies hold it
+   * (empty: root graph). Absent when every finding is in the root graph.
+   */
+  errorGraphPaths?: string[][];
+  /** Per warning, as `errorGraphPaths`. */
+  warningGraphPaths?: string[][];
   message: string;
   wasmAvailable: boolean;
   unavailableReason?: string;
@@ -54,6 +61,12 @@ function normalizeValidationResponse(
     status: valid ? 'valid' : 'invalid',
     errors: Array.isArray(response.errors) ? response.errors : [],
     warnings: Array.isArray(response.warnings) ? response.warnings : [],
+    ...(Array.isArray(response.errorGraphPaths)
+      ? { errorGraphPaths: response.errorGraphPaths }
+      : {}),
+    ...(Array.isArray(response.warningGraphPaths)
+      ? { warningGraphPaths: response.warningGraphPaths }
+      : {}),
     message:
       typeof response.message === 'string'
         ? response.message

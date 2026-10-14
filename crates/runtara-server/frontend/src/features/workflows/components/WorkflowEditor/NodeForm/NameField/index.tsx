@@ -18,6 +18,7 @@ import {
   getStepIdValidationError,
   useWorkflowStore,
 } from '@/features/workflows/stores/workflowStore';
+import { canvasNodeStepId } from '../../CustomNodes/utils.tsx';
 import { NodeFormContext } from '../NodeFormContext';
 import { SuspendsBadge } from '@/features/workflows/components/CapabilityBadges';
 import { CapabilityPickerModal } from '../CapabilityPickerModal';
@@ -30,8 +31,12 @@ import { findAgentById, sameAgentId } from '@/shared/utils/agent-id';
  * the store re-points edges/children and rewrites all step references.
  */
 function StepIdRow({ stepId }: { stepId: string }) {
+  // `stepId` is the canvas node id. A step id another container also uses is
+  // qualified on the canvas (`<container>/<step id>`), so show and edit the
+  // DSL step id itself.
+  const ownStepId = canvasNodeStepId(stepId);
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(stepId);
+  const [draft, setDraft] = useState(ownStepId);
   const [error, setError] = useState<string | null>(null);
 
   // Only render for steps that already exist on the canvas (the create
@@ -39,12 +44,17 @@ function StepIdRow({ stepId }: { stepId: string }) {
   const nodeExists = useWorkflowStore((state) =>
     state.nodes.some((node) => node.id === stepId)
   );
+  const isShared = useWorkflowStore(
+    (state) =>
+      state.nodes.filter((node) => canvasNodeStepId(node.id) === ownStepId)
+        .length > 1
+  );
   if (!nodeExists) {
     return null;
   }
 
   const validateDraft = (value: string): string | null => {
-    if (value === stepId) return null; // unchanged: confirming is a no-op
+    if (value === ownStepId) return null; // unchanged: confirming is a no-op
     const ids = useWorkflowStore
       .getState()
       .nodes.map((node) => node.id as string);
@@ -52,20 +62,20 @@ function StepIdRow({ stepId }: { stepId: string }) {
   };
 
   const startEditing = () => {
-    setDraft(stepId);
+    setDraft(ownStepId);
     setError(null);
     setEditing(true);
   };
 
   const cancelEditing = () => {
-    setDraft(stepId);
+    setDraft(ownStepId);
     setError(null);
     setEditing(false);
   };
 
   const confirmEditing = () => {
     const next = draft.trim();
-    if (next === stepId) {
+    if (next === ownStepId) {
       cancelEditing();
       return;
     }
@@ -87,8 +97,8 @@ function StepIdRow({ stepId }: { stepId: string }) {
     return (
       <div className="space-y-0.5">
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <span className="truncate font-mono" title={stepId}>
-            {stepId}
+          <span className="truncate font-mono" title={ownStepId}>
+            {ownStepId}
           </span>
           <button
             type="button"
@@ -99,6 +109,12 @@ function StepIdRow({ stepId }: { stepId: string }) {
             <Pencil className="size-3" />
           </button>
         </div>
+        {isShared && (
+          <p className="text-xs text-muted-foreground">
+            Another container also has a step with this id; each container
+            refers to its own.
+          </p>
+        )}
       </div>
     );
   }

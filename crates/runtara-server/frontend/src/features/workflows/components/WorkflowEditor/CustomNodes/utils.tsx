@@ -140,6 +140,92 @@ export const getNodePositionInsideParent = (
   return position;
 };
 
+/**
+ * Step ids are unique per graph, but React Flow node ids are global: two
+ * Splits may each hold an `iter_finish`, and a subgraph may reuse its
+ * parent's `finish`. On load, the shallowest step keeps its plain id as the
+ * node id; a later step with a taken id gets `<container node id>/<step id>`.
+ * `/` never appears in a step id, so a qualified node id cannot collide with
+ * a plain one, and its last segment is always the real step id.
+ */
+const CANVAS_SCOPE_SEPARATOR = '/';
+
+/** The DSL step id a canvas node id stands for. */
+export function canvasNodeStepId(nodeId: string): string {
+  return nodeId.slice(nodeId.lastIndexOf(CANVAS_SCOPE_SEPARATOR) + 1);
+}
+
+function canvasScopeKey(parentNodeId: string | undefined, stepId: string) {
+  return `${parentNodeId ?? ''}\u0000${stepId}`;
+}
+
+/**
+ * A WaitForSignal's `onWait` graph, when it is non-empty and so renders as a
+ * container. Empty or malformed onWait graphs stay in node data.
+ */
+function canvasOnWaitGraph(
+  step: ExecutionGraphStepDto
+): (ExecutionGraphDto & Record<string, unknown>) | undefined {
+  if ((step.stepType as string) !== 'WaitForSignal') {
+    return undefined;
+  }
+  const rawOnWait = (step as Record<string, unknown>).onWait as
+    (ExecutionGraphDto & Record<string, unknown>) | undefined;
+  if (
+    rawOnWait &&
+    typeof rawOnWait === 'object' &&
+    !Array.isArray(rawOnWait) &&
+    rawOnWait.steps &&
+    typeof rawOnWait.steps === 'object' &&
+    Object.keys(rawOnWait.steps).length > 0
+  ) {
+    return rawOnWait;
+  }
+  return undefined;
+}
+
+/**
+ * Assign a unique canvas node id to every step, keyed by
+ * `canvasScopeKey(container node id, step id)`. Breadth-first, so a root
+ * step always keeps its plain id over a nested step with the same id.
+ */
+function assignCanvasNodeIds(
+  steps: Record<string, ExecutionGraphStepDto>
+): Map<string, string> {
+  const nodeIds = new Map<string, string>();
+  const taken = new Set<string>();
+  let level: Array<{
+    steps: Record<string, ExecutionGraphStepDto>;
+    parentNodeId?: string;
+  }> = [{ steps }];
+
+  while (level.length > 0) {
+    const nextLevel: typeof level = [];
+    for (const { steps: graphSteps, parentNodeId } of level) {
+      for (const [stepId, step] of Object.entries(graphSteps)) {
+        let nodeId = stepId;
+        for (let counter = 1; taken.has(nodeId); counter += 1) {
+          const scope =
+            counter === 1
+              ? (parentNodeId ?? '')
+              : `${parentNodeId ?? ''}${CANVAS_SCOPE_SEPARATOR}${counter}`;
+          nodeId = `${scope}${CANVAS_SCOPE_SEPARATOR}${stepId}`;
+        }
+        taken.add(nodeId);
+        nodeIds.set(canvasScopeKey(parentNodeId, stepId), nodeId);
+
+        const nested = step.subgraph ?? canvasOnWaitGraph(step);
+        if (nested?.steps) {
+          nextLevel.push({ steps: nested.steps, parentNodeId: nodeId });
+        }
+      }
+    }
+    level = nextLevel;
+  }
+
+  return nodeIds;
+}
+
 /*
   Payload schema
 
@@ -286,7 +372,12 @@ export function composeExecutionGraph(
 
   // Create deep copies of nodes to avoid mutating the originals
   nds.forEach((node) => {
-    nodesMap.set(node.id, JSON.parse(JSON.stringify(node)));
+    const copy = JSON.parse(JSON.stringify(node));
+    // A qualified canvas node saves under its real step id.
+    if (copy.data && canvasNodeStepId(node.id) !== node.id) {
+      copy.data.id = canvasNodeStepId(node.id);
+    }
+    nodesMap.set(node.id, copy);
   });
 
   nds.forEach((node) => {
@@ -314,13 +405,15 @@ export function composeExecutionGraph(
           };
           parent.subgraph.steps = {};
         }
-        parent.subgraph.steps[node.id] = nodesMap.get(node.id);
+        parent.subgraph.steps[canvasNodeStepId(node.id)] = nodesMap.get(
+          node.id
+        );
       }
     } else {
       if (!executionGraph.steps) {
         executionGraph.steps = {};
       }
-      executionGraph.steps[node.id] = nodesMap.get(node.id);
+      executionGraph.steps[canvasNodeStepId(node.id)] = nodesMap.get(node.id);
     }
   });
 
@@ -355,8 +448,8 @@ export function composeExecutionGraph(
           parent.subgraph.executionPlan = [];
         }
         const planEdge: Record<string, unknown> = {
-          fromStep: edge.source,
-          toStep: edge.target,
+          fromStep: canvasNodeStepId(edge.source),
+          toStep: canvasNodeStepId(edge.target),
           label: specLabel,
         };
         if ((edge.data as any)?.condition !== undefined) {
@@ -372,8 +465,8 @@ export function composeExecutionGraph(
         executionGraph.executionPlan = [];
       }
       const planEdge: Record<string, unknown> = {
-        fromStep: edge.source,
-        toStep: edge.target,
+        fromStep: canvasNodeStepId(edge.source),
+        toStep: canvasNodeStepId(edge.target),
         label: specLabel,
       };
       if ((edge.data as any)?.condition !== undefined) {
@@ -1716,7 +1809,8 @@ export function executionGraphToReactFlow(
   const { steps = {}, executionPlan = [], notes = [] } = graphToProcess;
   const { nodes: parsedNodes, edges } = normalizeNodesAndEdges(
     steps,
-    executionPlan || []
+    executionPlan || [],
+    assignCanvasNodeIds(steps)
   );
   // Stored visual state may predate a node's containerization (e.g. a
   // WaitForSignal whose onWait was authored as JSON while it was a basic
@@ -1769,10 +1863,13 @@ export function executionGraphToReactFlow(
 function normalizeNodesAndEdges(
   steps: Record<string, ExecutionGraphStepDto>,
   executionPlan: ExecutionGraphTransitionDto[],
+  canvasNodeIds: Map<string, string>,
   parentId?: string
 ) {
   const nodes: Node[] = [];
   const edges: Edge[] = [];
+  const nodeIdOf = (stepId: string) =>
+    canvasNodeIds.get(canvasScopeKey(parentId, stepId)) ?? stepId;
 
   // nodes
   for (const [id, step] of Object.entries(steps)) {
@@ -1797,21 +1894,9 @@ function normalizeNodesAndEdges(
     // The raw key is removed from node.data so the restData spread on save
     // can never resurrect it; the rebuilt container is the source of truth.
     // Empty/malformed onWait graphs stay in node.data (defensive JSON path).
-    let onWaitGraph: ExecutionGraphDto | undefined;
-    if ((step.stepType as string) === 'WaitForSignal') {
-      const rawOnWait = (data as Record<string, unknown>).onWait as
-        (ExecutionGraphDto & Record<string, unknown>) | undefined;
-      if (
-        rawOnWait &&
-        typeof rawOnWait === 'object' &&
-        !Array.isArray(rawOnWait) &&
-        rawOnWait.steps &&
-        typeof rawOnWait.steps === 'object' &&
-        Object.keys(rawOnWait.steps).length > 0
-      ) {
-        onWaitGraph = rawOnWait;
-        delete (data as Record<string, unknown>).onWait;
-      }
+    const onWaitGraph: ExecutionGraphDto | undefined = canvasOnWaitGraph(step);
+    if (onWaitGraph) {
+      delete (data as Record<string, unknown>).onWait;
     }
 
     // Preserve subgraph-level ExecutionGraph fields (variables, schemas,
@@ -1866,8 +1951,9 @@ function normalizeNodesAndEdges(
     const extendedData = data as any;
     const parsedInputSchema = safeParseValue((data as any).inputSchema);
 
+    const nodeId = nodeIdOf(id);
     const node: Node = {
-      id,
+      id: nodeId,
       type: nodeType,
       data: {
         ...data,
@@ -2648,7 +2734,8 @@ function normalizeNodesAndEdges(
       const { nodes: childNodes, edges: childEdges } = normalizeNodesAndEdges(
         subgraph.steps || {},
         subgraph.executionPlan || [],
-        id
+        canvasNodeIds,
+        nodeId
       );
       nodes.push(...childNodes);
       edges.push(...childEdges);
@@ -2656,7 +2743,8 @@ function normalizeNodesAndEdges(
       const { nodes: childNodes, edges: childEdges } = normalizeNodesAndEdges(
         onWaitGraph.steps || {},
         onWaitGraph.executionPlan || [],
-        id
+        canvasNodeIds,
+        nodeId
       );
       nodes.push(...childNodes);
       edges.push(...childEdges);
@@ -2698,10 +2786,12 @@ function normalizeNodesAndEdges(
           : edge.label;
     }
 
+    const source = nodeIdOf(edge.fromStep ?? '');
+    const target = nodeIdOf(edge.toStep ?? '');
     edges.push({
-      id: `${edge.fromStep}-${edge.toStep}-${edge.label || 'default'}-${i}`,
-      source: edge.fromStep ?? '',
-      target: edge.toStep ?? '',
+      id: `${source}-${target}-${edge.label || 'default'}-${i}`,
+      source,
+      target,
       sourceHandle,
       data: {
         ...(edge.condition !== undefined ? { condition: edge.condition } : {}),

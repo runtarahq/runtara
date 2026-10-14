@@ -109,6 +109,51 @@ fn validate_execution_graph_name(definition: &Value) -> Result<(), ServiceError>
 /// persisted. This is deliberately separate from DSL deserialization so all
 /// save/import routes reject legacy string coercions and values that the
 /// runtime would later refuse to launch.
+/// Validate a graph saved by an incremental patch (MCP graph mutations).
+///
+/// A patch may pass through states a finished workflow may not have
+/// (unreachable steps, references to steps not added yet), so only structural
+/// corruption no mutation sequence needs is rejected: an edge whose endpoint is
+/// not a step of its own graph (E014) or a step whose key and id disagree
+/// (E130). Every other finding is returned as a warning, so the caller sees it
+/// now rather than only at compile time.
+fn validate_incremental_patch(
+    graph: &runtara_workflows::ExecutionGraph,
+    catalog: &AgentCatalog,
+) -> Result<Vec<String>, ServiceError> {
+    let validation = validate_workflow(graph, catalog);
+    let (blocking, deferred): (Vec<_>, Vec<_>) = validation
+        .errors
+        .iter()
+        .enumerate()
+        .partition(|(_, error)| matches!(error.code(), "E014" | "E130"));
+    if !blocking.is_empty() {
+        let errors: Vec<ValidationErrorDto> = blocking
+            .into_iter()
+            .map(|(index, error)| {
+                ValidationErrorDto::from_runtara_error(error)
+                    .in_graph(validation.error_graph_path(index))
+            })
+            .collect();
+        let message = errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(ServiceError::WorkflowValidationError { message, errors });
+    }
+    Ok(deferred
+        .into_iter()
+        .map(|(_, error)| error.to_string())
+        .chain(
+            validation
+                .warnings
+                .iter()
+                .map(|warning| warning.to_string()),
+        )
+        .collect())
+}
+
 fn validate_execution_timeout(definition: &Value) -> Result<(), ServiceError> {
     crate::config::execution_timeout_policy()
         .timeout_from_definition(definition)
@@ -635,6 +680,7 @@ impl WorkflowService {
                         field_name: Some("config".to_string()),
                         related_step_ids: None,
                         workflow_id: None,
+                        graph_path: None,
                     });
                 }
             }
@@ -700,6 +746,7 @@ impl WorkflowService {
                     field_name: Some("childWorkflowId".to_string()),
                     related_step_ids: None,
                     workflow_id: Some(info.workflow_ref.workflow_id),
+                    graph_path: None,
                 }),
             }
         }
@@ -730,13 +777,15 @@ impl WorkflowService {
             &closure_children,
         );
 
-        structured_errors.extend(report.errors().map(|(origin, error)| {
-            let dto = ValidationErrorDto::from_runtara_error(error);
-            match origin {
-                Some((child_id, _version)) => dto.in_workflow(child_id),
-                None => dto,
-            }
-        }));
+        structured_errors.extend(report.errors_with_graph_paths().map(
+            |(origin, graph_path, error)| {
+                let dto = ValidationErrorDto::from_runtara_error(error).in_graph(graph_path);
+                match origin {
+                    Some((child_id, _version)) => dto.in_workflow(child_id),
+                    None => dto,
+                }
+            },
+        ));
 
         if !structured_errors.is_empty() {
             let message = structured_errors
@@ -879,17 +928,16 @@ impl WorkflowService {
             }
         }
 
-        let all_warnings: Vec<String> = Vec::new();
-
-        // Only validate DSL structure (deserialization). Skip workflow validation
-        // (reachability, connection checks) — the graph is built incrementally via
-        // atomic mutations, so intermediate states will have unreachable steps.
-        // Full validation happens at compile time.
         let workflow_wrapper = serde_json::json!({ "executionGraph": definition });
         let workflow =
             serde_json::from_value::<runtara_dsl::Workflow>(workflow_wrapper).map_err(|e| {
                 ServiceError::ValidationError(format!("Invalid workflow format: {}", e))
             })?;
+
+        let effective_catalog =
+            crate::workflow_agents::catalog_with_workflow_agents(&self.agent_catalog, tenant_id);
+        let all_warnings =
+            validate_incremental_patch(&workflow.execution_graph, &effective_catalog)?;
 
         // Reject any step whose agent module is disallowed even during
         // incremental graph patches, so a forbidden agent can never be
@@ -1498,6 +1546,135 @@ mod tests {
     use super::*;
 
     // =========================================================================
+    // Incremental patch validation
+    // =========================================================================
+
+    fn graph_from(value: Value) -> runtara_workflows::ExecutionGraph {
+        serde_json::from_value(value).expect("valid DSL")
+    }
+
+    /// Two Splits whose subgraphs each hold an `iter_finish`.
+    fn shared_finish_graph(root_plan: Value, split_a_plan: Value) -> Value {
+        let split = |id: &str, body: &str, plan: Value| {
+            serde_json::json!({
+                "id": id,
+                "stepType": "Split",
+                "config": { "value": { "valueType": "reference", "value": "data.rows" } },
+                "subgraph": {
+                    "name": id,
+                    "entryPoint": body,
+                    "steps": {
+                        body: { "id": body, "stepType": "Log", "message": "x" },
+                        "iter_finish": { "id": "iter_finish", "stepType": "Finish" }
+                    },
+                    "executionPlan": plan
+                }
+            })
+        };
+        serde_json::json!({
+            "name": "patch",
+            "entryPoint": "a",
+            "inputSchema": { "rows": { "type": "array" } },
+            "steps": {
+                "a": split("a", "log_a", split_a_plan),
+                "b": split("b", "log_b", serde_json::json!([
+                    { "fromStep": "log_b", "toStep": "iter_finish", "label": "next" }
+                ])),
+                "finish": { "id": "finish", "stepType": "Finish" }
+            },
+            "executionPlan": root_plan
+        })
+    }
+
+    #[test]
+    fn incremental_patch_rejects_an_edge_into_another_graph() {
+        // The corrupted shape: Split a's inner edge lifted into the root plan.
+        let graph = graph_from(shared_finish_graph(
+            serde_json::json!([
+                { "fromStep": "log_a", "toStep": "iter_finish", "label": "next" },
+                { "fromStep": "a", "toStep": "b", "label": "next" },
+                { "fromStep": "b", "toStep": "finish", "label": "next" }
+            ]),
+            serde_json::json!([]),
+        ));
+
+        let err = validate_incremental_patch(&graph, &AgentCatalog::new())
+            .expect_err("dangling root edge must be rejected");
+        match err {
+            ServiceError::WorkflowValidationError { errors, .. } => {
+                assert!(!errors.is_empty());
+                assert!(errors.iter().all(|e| e.code == "E014"), "{errors:?}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn incremental_patch_rejection_names_the_body_of_the_bad_edge() {
+        let mut value = shared_finish_graph(
+            serde_json::json!([
+                { "fromStep": "a", "toStep": "b", "label": "next" },
+                { "fromStep": "b", "toStep": "finish", "label": "next" }
+            ]),
+            serde_json::json!([
+                { "fromStep": "log_a", "toStep": "iter_finish", "label": "next" }
+            ]),
+        );
+        value["steps"]["b"]["subgraph"]["executionPlan"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({ "fromStep": "log_b", "toStep": "missing", "label": "next" }));
+
+        let err = validate_incremental_patch(&graph_from(value), &AgentCatalog::new())
+            .expect_err("dangling edge in a body must be rejected");
+        match err {
+            ServiceError::WorkflowValidationError { errors, .. } => {
+                assert_eq!(errors.len(), 1, "{errors:?}");
+                assert_eq!(errors[0].code, "E014");
+                assert_eq!(errors[0].graph_path, Some(vec!["b".to_string()]));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn incremental_patch_reports_intermediate_states_as_warnings() {
+        // Split a's Finish is not wired yet: unreachable, but a legitimate
+        // state while a graph is built one mutation at a time.
+        let graph = graph_from(shared_finish_graph(
+            serde_json::json!([
+                { "fromStep": "a", "toStep": "b", "label": "next" },
+                { "fromStep": "b", "toStep": "finish", "label": "next" }
+            ]),
+            serde_json::json!([]),
+        ));
+
+        let warnings = validate_incremental_patch(&graph, &AgentCatalog::new())
+            .expect("intermediate state must be accepted");
+        assert!(
+            warnings.iter().any(|w| w.contains("[E003]")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn incremental_patch_accepts_steps_sharing_an_id_across_subgraphs() {
+        let graph = graph_from(shared_finish_graph(
+            serde_json::json!([
+                { "fromStep": "a", "toStep": "b", "label": "next" },
+                { "fromStep": "b", "toStep": "finish", "label": "next" }
+            ]),
+            serde_json::json!([
+                { "fromStep": "log_a", "toStep": "iter_finish", "label": "next" }
+            ]),
+        ));
+
+        let warnings = validate_incremental_patch(&graph, &AgentCatalog::new())
+            .expect("valid graph must be accepted");
+        assert!(!warnings.iter().any(|w| w.contains("[E0")), "{warnings:?}");
+    }
+
+    // =========================================================================
     // ServiceError Display tests
     // =========================================================================
 
@@ -1518,6 +1695,7 @@ mod tests {
                 field_name: Some("data".to_string()),
                 related_step_ids: None,
                 workflow_id: None,
+                graph_path: None,
             }],
         };
         assert_eq!(
@@ -1593,6 +1771,7 @@ mod tests {
                 field_name: Some("user.name".to_string()),
                 related_step_ids: None,
                 workflow_id: None,
+                graph_path: None,
             },
             ValidationErrorDto {
                 code: "E042".to_string(),
@@ -1601,6 +1780,7 @@ mod tests {
                 field_name: None,
                 related_step_ids: Some(vec!["step2".to_string(), "step3".to_string()]),
                 workflow_id: None,
+                graph_path: None,
             },
         ];
 

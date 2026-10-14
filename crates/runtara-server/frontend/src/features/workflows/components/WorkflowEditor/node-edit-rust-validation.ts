@@ -324,12 +324,13 @@ export async function validateNodeEditWithRust({
   const rustValidation = await validateExecutionGraphWithRust(executionGraph);
   const errors =
     rustValidation.status === 'invalid'
-      ? convertClientErrors(
-          rustValidation.errors.length > 0
-            ? rustValidation.errors
-            : [rustValidation.message],
-          candidateNodes
-        )
+      ? rustValidation.errors.length > 0
+        ? convertClientErrors(
+            rustValidation.errors,
+            candidateNodes,
+            rustValidation.errorGraphPaths
+          )
+        : convertClientErrors([rustValidation.message], candidateNodes)
       : [];
   const warnings = convertClientWarnings(
     [
@@ -338,7 +339,8 @@ export async function validateNodeEditWithRust({
         ? [rustValidation.message]
         : []),
     ],
-    candidateNodes
+    candidateNodes,
+    rustValidation.warningGraphPaths
   );
 
   return {

@@ -83,6 +83,11 @@ export interface ValidationError {
   stepId?: string | null;
   /** Additional step IDs involved (for errors spanning multiple steps) */
   relatedStepIds?: string[] | null;
+  /**
+   * Split/While/WaitForSignal step ids whose bodies hold `stepId`, outermost
+   * first; absent for the root graph.
+   */
+  graphPath?: string[] | null;
 }
 
 /**

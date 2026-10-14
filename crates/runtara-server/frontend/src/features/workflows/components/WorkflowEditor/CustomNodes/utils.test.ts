@@ -3567,3 +3567,155 @@ describe('WaitForInstances round-trip', () => {
     expect(step).not.toHaveProperty('instanceIds');
   });
 });
+
+describe('Step ids shared across subgraphs', () => {
+  // Step ids are unique per graph, not per workflow: two Splits may each hold
+  // an `iter_finish`, and a subgraph may reuse the parent's `finish`. React
+  // Flow node ids are global, so the canvas must not let them collapse.
+  const split = (id: string, body: string, finishName: string) => ({
+    id,
+    name: id,
+    stepType: 'Split',
+    config: { value: { valueType: 'reference', value: 'data.rows' } },
+    subgraph: {
+      name: id,
+      entryPoint: body,
+      steps: {
+        [body]: {
+          id: body,
+          name: body,
+          stepType: 'Agent',
+          agentId: 'utils',
+          capabilityId: 'get-current-iso-datetime',
+        },
+        iter_finish: {
+          id: 'iter_finish',
+          name: finishName,
+          stepType: 'Finish',
+          inputMapping: {},
+        },
+      },
+      executionPlan: [{ fromStep: body, toStep: 'iter_finish', label: 'next' }],
+    },
+  });
+
+  const planOf = (graph: any) =>
+    (graph.executionPlan ?? []).map(
+      (e: any) => `${e.fromStep}->${e.toStep}:${e.label}`
+    );
+
+  it('keeps sibling subgraph steps with the same id separate through load→save', () => {
+    const graph = {
+      name: 'shared-ids',
+      entryPoint: 'a',
+      steps: {
+        a: split('a', 'mark_analyzed', 'Post analyzed'),
+        b: split('b', 'mark_notified', 'Notification complete'),
+        finish: {
+          id: 'finish',
+          name: 'Done',
+          stepType: 'Finish',
+          inputMapping: {},
+        },
+      },
+      executionPlan: [
+        { fromStep: 'a', toStep: 'b', label: 'next' },
+        { fromStep: 'b', toStep: 'finish', label: 'next' },
+      ],
+    };
+
+    const { nodes, edges } = executionGraphToReactFlow(graph as any);
+
+    // Every canvas node id is unique, and each inner edge stays inside its
+    // own container.
+    const ids = nodes.map((n) => n.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    for (const edge of edges) {
+      expect(byId.get(edge.source)?.parentId).toBe(
+        byId.get(edge.target)?.parentId
+      );
+    }
+
+    const round = composeExecutionGraph(nodes, edges, {
+      name: graph.name,
+      entryPoint: 'a',
+    }) as any;
+    expect(planOf(round)).toEqual(['a->b:next', 'b->finish:next']);
+    expect(Object.keys(round.steps).sort()).toEqual(['a', 'b', 'finish']);
+    for (const [splitId, body, finishName] of [
+      ['a', 'mark_analyzed', 'Post analyzed'],
+      ['b', 'mark_notified', 'Notification complete'],
+    ]) {
+      const sub = round.steps[splitId].subgraph;
+      expect(Object.keys(sub.steps).sort()).toEqual(
+        [body, 'iter_finish'].sort()
+      );
+      expect(sub.steps.iter_finish.id).toBe('iter_finish');
+      expect(sub.steps.iter_finish.name).toBe(finishName);
+      expect(planOf(sub)).toEqual([`${body}->iter_finish:next`]);
+    }
+  });
+
+  it('keeps the parent step on its plain id when a subgraph reuses it', () => {
+    const graph = {
+      name: 'nested-finish',
+      entryPoint: 'loop',
+      steps: {
+        // Key order puts the Split before the root Finish on purpose.
+        loop: {
+          id: 'loop',
+          stepType: 'Split',
+          config: { value: { valueType: 'reference', value: 'data.rows' } },
+          subgraph: {
+            entryPoint: 'finish',
+            steps: {
+              finish: {
+                id: 'finish',
+                name: 'Inner',
+                stepType: 'Finish',
+                inputMapping: {},
+              },
+            },
+            executionPlan: [],
+          },
+        },
+        finish: {
+          id: 'finish',
+          name: 'Outer',
+          stepType: 'Finish',
+          inputMapping: {},
+        },
+      },
+      executionPlan: [{ fromStep: 'loop', toStep: 'finish', label: 'next' }],
+    };
+
+    const { nodes, edges } = executionGraphToReactFlow(graph as any);
+    const root = nodes.find((n) => n.id === 'finish');
+    expect(root?.parentId).toBeUndefined();
+    expect(root?.data.name).toBe('Outer');
+    expect(edges.map((e) => `${e.source}->${e.target}`)).toEqual([
+      'loop->finish',
+    ]);
+
+    const round = composeExecutionGraph(nodes, edges, {
+      name: graph.name,
+      entryPoint: 'loop',
+    }) as any;
+    expect(round.steps.finish.name).toBe('Outer');
+    expect(round.steps.loop.subgraph.steps.finish.name).toBe('Inner');
+    expect(round.steps.loop.subgraph.steps.finish.id).toBe('finish');
+    expect(planOf(round)).toEqual(['loop->finish:next']);
+  });
+
+  it('uses the step id as the node id when ids do not collide', () => {
+    const graph = {
+      name: 'unique-ids',
+      entryPoint: 'a',
+      steps: { a: split('a', 'work', 'Done') },
+      executionPlan: [],
+    };
+    const { nodes } = executionGraphToReactFlow(graph as any);
+    expect(nodes.map((n) => n.id).sort()).toEqual(['a', 'iter_finish', 'work']);
+  });
+});

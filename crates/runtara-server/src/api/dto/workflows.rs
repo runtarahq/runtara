@@ -34,6 +34,11 @@ pub struct ValidationErrorDto {
     /// child workflow's id when the error lives in an embedded (grand)child.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workflow_id: Option<String>,
+    /// The Split, While or WaitForSignal steps whose bodies hold `step_id`,
+    /// outermost first; absent for the root graph. Step ids are unique per
+    /// graph only, so this tells same-named steps in different bodies apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_path: Option<Vec<String>>,
 }
 
 /// Response returned when workflow validation fails
@@ -289,15 +294,17 @@ impl ValidationErrorDto {
                 None,
                 None,
             ),
+            // One error per duplicate, naming that step first; the rest
+            // are the steps it clashes with.
             ValidationError::DuplicateStepName { name, step_ids } => (
                 format!(
                     "Multiple steps have the same name '{}': {}",
                     name,
                     step_ids.join(", ")
                 ),
+                step_ids.first().cloned(),
                 None,
-                None,
-                Some(step_ids.clone()),
+                Some(step_ids.iter().skip(1).cloned().collect()),
             ),
             ValidationError::DuplicateEdgePriority {
                 from_step,
@@ -695,7 +702,14 @@ impl ValidationErrorDto {
             field_name,
             related_step_ids,
             workflow_id: None,
+            graph_path: None,
         }
+    }
+
+    /// Attribute this error to the body at `graph_path` (empty: the root).
+    pub fn in_graph(mut self, graph_path: &[String]) -> Self {
+        self.graph_path = (!graph_path.is_empty()).then(|| graph_path.to_vec());
+        self
     }
 
     /// Attribute this error to a child workflow in a validated embed closure.

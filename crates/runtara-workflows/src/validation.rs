@@ -110,9 +110,85 @@ pub struct ValidationResult {
     pub errors: Vec<ValidationError>,
     /// Soft warnings that don't prevent compilation but indicate potential issues.
     pub warnings: Vec<ValidationWarning>,
+    /// Graph (container step ids from the root) findings are pushed for now.
+    graph_path: Vec<String>,
+    /// Every change of `graph_path`, in push order, with the finding counts at
+    /// that moment, so each finding's graph can be looked up by its index.
+    graph_path_marks: Vec<GraphPathMark>,
+}
+
+/// `graph_path` from the moment `errors`/`warnings` had these lengths.
+#[derive(Debug, Clone)]
+struct GraphPathMark {
+    errors: usize,
+    warnings: usize,
+    path: Vec<String>,
 }
 
 impl ValidationResult {
+    /// The graph of `errors[index]`: the ids of the Split, While or
+    /// WaitForSignal steps whose bodies hold it, outermost first. Empty for
+    /// the root graph. Step ids are unique per graph only, so this is what
+    /// tells two same-named steps in different bodies apart.
+    pub fn error_graph_path(&self, index: usize) -> &[String] {
+        self.graph_path_at(index, |mark| mark.errors)
+    }
+
+    /// The graph of `warnings[index]`; see [`Self::error_graph_path`].
+    pub fn warning_graph_path(&self, index: usize) -> &[String] {
+        self.graph_path_at(index, |mark| mark.warnings)
+    }
+
+    fn graph_path_at(&self, index: usize, count: impl Fn(&GraphPathMark) -> usize) -> &[String] {
+        // The latest mark set before the finding was pushed.
+        let marks_before = self
+            .graph_path_marks
+            .partition_point(|mark| count(mark) <= index);
+        match marks_before.checked_sub(1) {
+            Some(mark) => &self.graph_path_marks[mark].path,
+            None => &[],
+        }
+    }
+
+    fn set_graph_path(&mut self, path: Vec<String>) {
+        if self.graph_path != path {
+            self.graph_path = path;
+            self.graph_path_marks.push(GraphPathMark {
+                errors: self.errors.len(),
+                warnings: self.warnings.len(),
+                path: self.graph_path.clone(),
+            });
+        }
+    }
+
+    /// Run `validate` with its findings attributed to the body of
+    /// `container_step_id` (a Split, While or WaitForSignal `onWait`).
+    pub(crate) fn in_subgraph(
+        &mut self,
+        container_step_id: &str,
+        validate: impl FnOnce(&mut Self),
+    ) {
+        let outer = self.graph_path.clone();
+        let mut inner = outer.clone();
+        inner.push(container_step_id.to_string());
+        self.set_graph_path(inner);
+        validate(self);
+        self.set_graph_path(outer);
+    }
+
+    /// Run `validate` with its findings attributed to `relative_path` below
+    /// the current graph, for walkers that visit nested bodies themselves.
+    pub(crate) fn at_relative_path(
+        &mut self,
+        relative_path: &[String],
+        validate: impl FnOnce(&mut Self),
+    ) {
+        let outer = self.graph_path.clone();
+        self.set_graph_path(outer.iter().chain(relative_path).cloned().collect());
+        validate(self);
+        self.set_graph_path(outer);
+    }
+
     /// Returns true if there are no errors (warnings are allowed).
     pub fn is_ok(&self) -> bool {
         self.errors.is_empty()
@@ -130,8 +206,23 @@ impl ValidationResult {
 
     /// Merge another validation result into this one.
     pub fn merge(&mut self, other: ValidationResult) {
+        // `other`'s graphs are relative to the graph current here.
+        let outer = self.graph_path.clone();
+        for mark in other.graph_path_marks {
+            self.graph_path_marks.push(GraphPathMark {
+                errors: self.errors.len() + mark.errors,
+                warnings: self.warnings.len() + mark.warnings,
+                path: outer.iter().chain(&mark.path).cloned().collect(),
+            });
+        }
         self.errors.extend(other.errors);
         self.warnings.extend(other.warnings);
+        // Findings pushed from here on are back in the current graph.
+        self.graph_path_marks.push(GraphPathMark {
+            errors: self.errors.len(),
+            warnings: self.warnings.len(),
+            path: outer,
+        });
     }
 }
 
@@ -2022,6 +2113,28 @@ impl ClosureValidationReport {
             }))
     }
 
+    /// Every error in the closure with its origin and the graph within that
+    /// workflow it was found in (see [`ValidationResult::error_graph_path`]).
+    pub fn errors_with_graph_paths(
+        &self,
+    ) -> impl Iterator<Item = (Option<(&str, i32)>, &[String], &ValidationError)> {
+        let root = self
+            .root
+            .errors
+            .iter()
+            .enumerate()
+            .map(|(index, e)| (None, self.root.error_graph_path(index), e));
+        root.chain(self.children.iter().flat_map(|c| {
+            c.result.errors.iter().enumerate().map(move |(index, e)| {
+                (
+                    Some((c.workflow_id.as_str(), c.version)),
+                    c.result.error_graph_path(index),
+                    e,
+                )
+            })
+        }))
+    }
+
     /// Every warning in the closure with its origin; `None` means the root
     /// graph, `Some((workflow_id, version))` a child.
     pub fn warnings(&self) -> impl Iterator<Item = (Option<(&str, i32)>, &ValidationWarning)> {
@@ -2190,10 +2303,14 @@ fn report_missing_child_references(
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                report_missing_child_references(&split_step.subgraph, children_map, result);
+                result.in_subgraph(&split_step.id, |result| {
+                    report_missing_child_references(&split_step.subgraph, children_map, result)
+                });
             }
             Step::While(while_step) => {
-                report_missing_child_references(&while_step.subgraph, children_map, result);
+                result.in_subgraph(&while_step.id, |result| {
+                    report_missing_child_references(&while_step.subgraph, children_map, result)
+                });
             }
             _ => {}
         }
@@ -2513,10 +2630,14 @@ fn validate_embed_workflow_inputs(
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                validate_embed_workflow_inputs(&split_step.subgraph, child_workflows, result);
+                result.in_subgraph(&split_step.id, |result| {
+                    validate_embed_workflow_inputs(&split_step.subgraph, child_workflows, result)
+                });
             }
             Step::While(while_step) => {
-                validate_embed_workflow_inputs(&while_step.subgraph, child_workflows, result);
+                result.in_subgraph(&while_step.id, |result| {
+                    validate_embed_workflow_inputs(&while_step.subgraph, child_workflows, result)
+                });
             }
             _ => {}
         }
@@ -2595,10 +2716,14 @@ fn validate_graph_structure(graph: &ExecutionGraph, result: &mut ValidationResul
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                validate_graph_structure(&split_step.subgraph, result);
+                result.in_subgraph(&split_step.id, |result| {
+                    validate_graph_structure(&split_step.subgraph, result)
+                });
             }
             Step::While(while_step) => {
-                validate_graph_structure(&while_step.subgraph, result);
+                result.in_subgraph(&while_step.id, |result| {
+                    validate_graph_structure(&while_step.subgraph, result)
+                });
             }
             _ => {}
         }
@@ -2881,7 +3006,9 @@ fn validate_references_with_inherited(
                 if variable_names.contains("_loop") {
                     injected_vars.insert("_loop".to_string());
                 }
-                validate_references_with_inherited(&split_step.subgraph, &injected_vars, result);
+                result.in_subgraph(&split_step.id, |result| {
+                    validate_references_with_inherited(&split_step.subgraph, &injected_vars, result)
+                });
             }
             Step::While(while_step) => {
                 let mut injected_vars: HashSet<String> = while_step
@@ -2897,7 +3024,9 @@ fn validate_references_with_inherited(
                 if variable_names.contains("_item") {
                     injected_vars.insert("_item".to_string());
                 }
-                validate_references_with_inherited(&while_step.subgraph, &injected_vars, result);
+                result.in_subgraph(&while_step.id, |result| {
+                    validate_references_with_inherited(&while_step.subgraph, &injected_vars, result)
+                });
             }
             Step::WaitForSignal(wait_step) => {
                 if let Some(on_wait) = &wait_step.on_wait {
@@ -2907,7 +3036,9 @@ fn validate_references_with_inherited(
                         .iter()
                         .map(|s| s.to_string())
                         .collect();
-                    validate_references_with_inherited(on_wait, &injected_vars, result);
+                    result.in_subgraph(&wait_step.id, |result| {
+                        validate_references_with_inherited(on_wait, &injected_vars, result)
+                    });
                 }
             }
             _ => {}
@@ -3472,14 +3603,20 @@ fn validate_execution_order(graph: &ExecutionGraph, result: &mut ValidationResul
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                validate_execution_order(&split_step.subgraph, result);
+                result.in_subgraph(&split_step.id, |result| {
+                    validate_execution_order(&split_step.subgraph, result)
+                });
             }
             Step::While(while_step) => {
-                validate_execution_order(&while_step.subgraph, result);
+                result.in_subgraph(&while_step.id, |result| {
+                    validate_execution_order(&while_step.subgraph, result)
+                });
             }
             Step::WaitForSignal(wait_step) => {
                 if let Some(on_wait) = &wait_step.on_wait {
-                    validate_execution_order(on_wait, result);
+                    result.in_subgraph(&wait_step.id, |result| {
+                        validate_execution_order(on_wait, result)
+                    });
                 }
             }
             _ => {}
@@ -3613,12 +3750,14 @@ fn validate_template_static_references_with_context(
                 if variable_names.contains("_loop") {
                     injected_vars.insert("_loop".to_string());
                 }
-                validate_template_static_references_with_context(
-                    &split_step.subgraph,
-                    &injected_vars,
-                    DataScope::for_split_body(&split_step.input_schema),
-                    result,
-                );
+                result.in_subgraph(&split_step.id, |result| {
+                    validate_template_static_references_with_context(
+                        &split_step.subgraph,
+                        &injected_vars,
+                        DataScope::for_split_body(&split_step.input_schema),
+                        result,
+                    )
+                });
             }
             Step::While(while_step) => {
                 let mut injected_vars: HashSet<String> = while_step
@@ -3632,12 +3771,14 @@ fn validate_template_static_references_with_context(
                 if variable_names.contains("_item") {
                     injected_vars.insert("_item".to_string());
                 }
-                validate_template_static_references_with_context(
-                    &while_step.subgraph,
-                    &injected_vars,
-                    data_scope.for_while_body(graph),
-                    result,
-                );
+                result.in_subgraph(&while_step.id, |result| {
+                    validate_template_static_references_with_context(
+                        &while_step.subgraph,
+                        &injected_vars,
+                        data_scope.for_while_body(graph),
+                        result,
+                    )
+                });
             }
             Step::WaitForSignal(wait_step) => {
                 if let Some(ref on_wait) = wait_step.on_wait {
@@ -3645,12 +3786,14 @@ fn validate_template_static_references_with_context(
                         .iter()
                         .map(|s| s.to_string())
                         .collect();
-                    validate_template_static_references_with_context(
-                        on_wait,
-                        &injected_vars,
-                        DataScope::RequireSchema,
-                        result,
-                    );
+                    result.in_subgraph(&wait_step.id, |result| {
+                        validate_template_static_references_with_context(
+                            on_wait,
+                            &injected_vars,
+                            DataScope::RequireSchema,
+                            result,
+                        )
+                    });
                 }
             }
             _ => {}
@@ -4150,10 +4293,14 @@ fn validate_agents(
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                validate_agents(&split_step.subgraph, catalog, result);
+                result.in_subgraph(&split_step.id, |result| {
+                    validate_agents(&split_step.subgraph, catalog, result)
+                });
             }
             Step::While(while_step) => {
-                validate_agents(&while_step.subgraph, catalog, result);
+                result.in_subgraph(&while_step.id, |result| {
+                    validate_agents(&while_step.subgraph, catalog, result)
+                });
             }
             _ => {}
         }
@@ -4697,7 +4844,9 @@ fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult)
                 }
 
                 // Recursively validate subgraph
-                validate_configuration(&split_step.subgraph, result);
+                result.in_subgraph(&split_step.id, |result| {
+                    validate_configuration(&split_step.subgraph, result)
+                });
             }
 
             Step::While(while_step) => {
@@ -4726,7 +4875,9 @@ fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult)
                 }
 
                 // Recursively validate subgraph
-                validate_configuration(&while_step.subgraph, result);
+                result.in_subgraph(&while_step.id, |result| {
+                    validate_configuration(&while_step.subgraph, result)
+                });
             }
 
             Step::EmbedWorkflow(start_step) => {
@@ -4755,7 +4906,7 @@ fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult)
 
             Step::WaitForSignal(wait) => {
                 if let Some(on_wait) = &wait.on_wait {
-                    validate_configuration(on_wait, result);
+                    result.in_subgraph(&wait.id, |result| validate_configuration(on_wait, result));
                 }
             }
             _ => {}
@@ -4801,10 +4952,14 @@ fn validate_child_workflows(graph: &ExecutionGraph, result: &mut ValidationResul
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                validate_child_workflows(&split_step.subgraph, result);
+                result.in_subgraph(&split_step.id, |result| {
+                    validate_child_workflows(&split_step.subgraph, result)
+                });
             }
             Step::While(while_step) => {
-                validate_child_workflows(&while_step.subgraph, result);
+                result.in_subgraph(&while_step.id, |result| {
+                    validate_child_workflows(&while_step.subgraph, result)
+                });
             }
             _ => {}
         }
@@ -4817,24 +4972,46 @@ fn validate_child_workflows(graph: &ExecutionGraph, result: &mut ValidationResul
 
 /// Validate that step names are unique across the workflow.
 fn validate_step_names(graph: &ExecutionGraph, result: &mut ValidationResult) {
-    let mut name_to_step_ids: HashMap<String, Vec<String>> = HashMap::new();
+    let mut name_to_steps: HashMap<String, Vec<(String, Vec<String>)>> = HashMap::new();
 
     // Collect all step names recursively
-    collect_step_names(graph, &mut name_to_step_ids);
+    collect_step_names(graph, &mut Vec::new(), &mut name_to_steps);
 
-    // Report duplicates as errors
-    for (name, step_ids) in name_to_step_ids {
-        if step_ids.len() > 1 {
-            result
-                .errors
-                .push(ValidationError::DuplicateStepName { name, step_ids });
+    // One error per step sharing a name, in that step's own body and naming
+    // it first: the steps may sit in different bodies, and a step id may
+    // repeat across bodies, so a single error could not point at each one.
+    let mut duplicates: Vec<_> = name_to_steps
+        .into_iter()
+        .filter(|(_, steps)| steps.len() > 1)
+        .collect();
+    duplicates.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (name, steps) in duplicates {
+        for (index, (step_id, graph_path)) in steps.iter().enumerate() {
+            let mut step_ids = vec![step_id.clone()];
+            step_ids.extend(
+                steps
+                    .iter()
+                    .enumerate()
+                    .filter(|(other, _)| *other != index)
+                    .map(|(_, (other_id, _))| other_id.clone()),
+            );
+            result.at_relative_path(graph_path, |result| {
+                result.errors.push(ValidationError::DuplicateStepName {
+                    name: name.clone(),
+                    step_ids,
+                });
+            });
         }
     }
 }
 
-/// Recursively collect step names into the map.
+/// Recursively collect step names into the map, with each step's body path.
 /// Skips EmbedWorkflow subgraphs as they have their own namespace.
-fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<String, Vec<String>>) {
+fn collect_step_names(
+    graph: &ExecutionGraph,
+    graph_path: &mut Vec<String>,
+    name_to_steps: &mut HashMap<String, Vec<(String, Vec<String>)>>,
+) {
     for (step_id, step) in &graph.steps {
         // Get the step name (if any)
         let name = match step {
@@ -4858,23 +5035,24 @@ fn collect_step_names(graph: &ExecutionGraph, name_to_step_ids: &mut HashMap<Str
         };
 
         if let Some(name) = name {
-            name_to_step_ids
+            name_to_steps
                 .entry(name.clone())
                 .or_default()
-                .push(step_id.clone());
+                .push((step_id.clone(), graph_path.clone()));
         }
 
         // Recursively collect from subgraphs
         // NOTE: EmbedWorkflow steps do NOT have subgraphs in runtara_dsl,
         // they reference child workflows by ID. So we only recurse into Split/While.
-        match step {
-            Step::Split(split_step) => {
-                collect_step_names(&split_step.subgraph, name_to_step_ids);
-            }
-            Step::While(while_step) => {
-                collect_step_names(&while_step.subgraph, name_to_step_ids);
-            }
-            _ => {}
+        let body = match step {
+            Step::Split(split_step) => Some(&split_step.subgraph),
+            Step::While(while_step) => Some(&while_step.subgraph),
+            _ => None,
+        };
+        if let Some(body) = body {
+            graph_path.push(step_id.clone());
+            collect_step_names(body, graph_path, name_to_steps);
+            graph_path.pop();
         }
     }
 }
@@ -4925,12 +5103,18 @@ fn validate_condition_operators(graph: &ExecutionGraph, result: &mut ValidationR
                     &while_step.condition,
                     result,
                 );
-                validate_condition_operators(&while_step.subgraph, result);
+                result.in_subgraph(&while_step.id, |result| {
+                    validate_condition_operators(&while_step.subgraph, result)
+                });
             }
-            Step::Split(split) => validate_condition_operators(&split.subgraph, result),
+            Step::Split(split) => result.in_subgraph(&split.id, |result| {
+                validate_condition_operators(&split.subgraph, result)
+            }),
             Step::WaitForSignal(wait) => {
                 if let Some(on_wait) = &wait.on_wait {
-                    validate_condition_operators(on_wait, result);
+                    result.in_subgraph(&wait.id, |result| {
+                        validate_condition_operators(on_wait, result)
+                    });
                 }
             }
             _ => {}
@@ -5026,12 +5210,12 @@ fn validate_duplicate_target_edges(graph: &ExecutionGraph, result: &mut Validati
 
     for step in graph.steps.values() {
         match step {
-            Step::Split(split_step) => {
+            Step::Split(split_step) => result.in_subgraph(&split_step.id, |result| {
                 validate_duplicate_target_edges(&split_step.subgraph, result)
-            }
-            Step::While(while_step) => {
+            }),
+            Step::While(while_step) => result.in_subgraph(&while_step.id, |result| {
                 validate_duplicate_target_edges(&while_step.subgraph, result)
-            }
+            }),
             _ => {}
         }
     }
@@ -5074,8 +5258,12 @@ fn validate_edge_endpoints(graph: &ExecutionGraph, result: &mut ValidationResult
 
     for step in graph.steps.values() {
         match step {
-            Step::Split(split_step) => validate_edge_endpoints(&split_step.subgraph, result),
-            Step::While(while_step) => validate_edge_endpoints(&while_step.subgraph, result),
+            Step::Split(split_step) => result.in_subgraph(&split_step.id, |result| {
+                validate_edge_endpoints(&split_step.subgraph, result)
+            }),
+            Step::While(while_step) => result.in_subgraph(&while_step.id, |result| {
+                validate_edge_endpoints(&while_step.subgraph, result)
+            }),
             _ => {}
         }
     }
@@ -5186,10 +5374,14 @@ fn validate_edge_conditions_recursive(graph: &ExecutionGraph, result: &mut Valid
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                validate_edge_conditions_recursive(&split_step.subgraph, result);
+                result.in_subgraph(&split_step.id, |result| {
+                    validate_edge_conditions_recursive(&split_step.subgraph, result)
+                });
             }
             Step::While(while_step) => {
-                validate_edge_conditions_recursive(&while_step.subgraph, result);
+                result.in_subgraph(&while_step.id, |result| {
+                    validate_edge_conditions_recursive(&while_step.subgraph, result)
+                });
             }
             _ => {}
         }
@@ -5942,12 +6134,14 @@ fn validate_data_and_variable_references_with_context(
                 if all_variables.contains("_loop") {
                     injected_vars.insert("_loop".to_string());
                 }
-                validate_data_and_variable_references_with_context(
-                    &split_step.subgraph,
-                    &injected_vars,
-                    DataScope::for_split_body(&split_step.input_schema),
-                    result,
-                );
+                result.in_subgraph(&split_step.id, |result| {
+                    validate_data_and_variable_references_with_context(
+                        &split_step.subgraph,
+                        &injected_vars,
+                        DataScope::for_split_body(&split_step.input_schema),
+                        result,
+                    )
+                });
             }
             Step::While(while_step) => {
                 // While subgraphs:
@@ -5967,12 +6161,14 @@ fn validate_data_and_variable_references_with_context(
                 if all_variables.contains("_item") {
                     injected_vars.insert("_item".to_string());
                 }
-                validate_data_and_variable_references_with_context(
-                    &while_step.subgraph,
-                    &injected_vars,
-                    data_scope.for_while_body(graph),
-                    result,
-                );
+                result.in_subgraph(&while_step.id, |result| {
+                    validate_data_and_variable_references_with_context(
+                        &while_step.subgraph,
+                        &injected_vars,
+                        data_scope.for_while_body(graph),
+                        result,
+                    )
+                });
             }
             Step::WaitForSignal(wait_step) => {
                 if let Some(ref on_wait) = wait_step.on_wait {
@@ -5983,12 +6179,14 @@ fn validate_data_and_variable_references_with_context(
                         .iter()
                         .map(|s| s.to_string())
                         .collect();
-                    validate_data_and_variable_references_with_context(
-                        on_wait,
-                        &injected_vars,
-                        DataScope::RequireSchema,
-                        result,
-                    );
+                    result.in_subgraph(&wait_step.id, |result| {
+                        validate_data_and_variable_references_with_context(
+                            on_wait,
+                            &injected_vars,
+                            DataScope::RequireSchema,
+                            result,
+                        )
+                    });
                 }
             }
             _ => {}
@@ -6874,10 +7072,14 @@ fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult
     for step in graph.steps.values() {
         match step {
             Step::Split(split_step) => {
-                validate_ai_agent_steps(&split_step.subgraph, result);
+                result.in_subgraph(&split_step.id, |result| {
+                    validate_ai_agent_steps(&split_step.subgraph, result)
+                });
             }
             Step::While(while_step) => {
-                validate_ai_agent_steps(&while_step.subgraph, result);
+                result.in_subgraph(&while_step.id, |result| {
+                    validate_ai_agent_steps(&while_step.subgraph, result)
+                });
             }
             _ => {}
         }
@@ -16520,5 +16722,203 @@ mod error_code_consistency_tests {
                 &display[..display.len().min(20)]
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod graph_path_tests {
+    use super::*;
+    use runtara_dsl::agent_meta::AgentCatalog;
+    use serde_json::json;
+
+    fn graph(value: serde_json::Value) -> ExecutionGraph {
+        serde_json::from_value(value).expect("valid DSL")
+    }
+
+    /// A Split whose body holds `log` and an `iter_finish`, wired when
+    /// `wired` is set.
+    fn split(id: &str, wired: bool, extra_steps: serde_json::Value) -> serde_json::Value {
+        let mut steps = json!({
+            "log": { "id": "log", "stepType": "Log", "message": "x" },
+            "iter_finish": { "id": "iter_finish", "stepType": "Finish" }
+        });
+        if let (Some(steps), Some(extra)) = (steps.as_object_mut(), extra_steps.as_object()) {
+            steps.extend(extra.clone());
+        }
+        json!({
+            "id": id,
+            "stepType": "Split",
+            "config": { "value": { "valueType": "reference", "value": "data.rows" } },
+            "subgraph": {
+                "entryPoint": "log",
+                "steps": steps,
+                "executionPlan": if wired {
+                    json!([{ "fromStep": "log", "toStep": "iter_finish", "label": "next" }])
+                } else {
+                    json!([])
+                }
+            }
+        })
+    }
+
+    fn root(steps: serde_json::Value, plan: serde_json::Value) -> serde_json::Value {
+        json!({
+            "name": "paths",
+            "entryPoint": "a",
+            "inputSchema": { "rows": { "type": "array" } },
+            "steps": steps,
+            "executionPlan": plan
+        })
+    }
+
+    fn error_paths(result: &ValidationResult, code: &str) -> Vec<Vec<String>> {
+        result
+            .errors
+            .iter()
+            .enumerate()
+            .filter(|(_, error)| error.code() == code)
+            .map(|(index, _)| result.error_graph_path(index).to_vec())
+            .collect()
+    }
+
+    #[test]
+    fn findings_carry_the_body_they_were_found_in() {
+        // Both Splits hold an `iter_finish`; only Split b's is unwired.
+        let workflow = graph(root(
+            json!({
+                "a": split("a", true, json!({})),
+                "b": split("b", false, json!({})),
+                "finish": { "id": "finish", "stepType": "Finish" }
+            }),
+            json!([
+                { "fromStep": "a", "toStep": "b", "label": "next" },
+                { "fromStep": "b", "toStep": "finish", "label": "next" }
+            ]),
+        ));
+
+        let result = validate_workflow(&workflow, &AgentCatalog::new());
+
+        assert_eq!(error_paths(&result, "E003"), vec![vec!["b".to_string()]]);
+    }
+
+    #[test]
+    fn nested_bodies_report_the_full_path_and_root_findings_none() {
+        // Split a holds While w, whose body's `iter_finish` is unwired; the
+        // root's own Finish is unreachable too.
+        let mut a = split(
+            "a",
+            true,
+            json!({
+                "w": {
+                    "id": "w",
+                    "stepType": "While",
+                    "condition": {
+                        "type": "operation",
+                        "op": "LT",
+                        "arguments": [
+                            { "valueType": "immediate", "value": 1 },
+                            { "valueType": "immediate", "value": 2 }
+                        ]
+                    },
+                    "config": { "maxIterations": 2 },
+                    "subgraph": {
+                        "entryPoint": "inner_log",
+                        "steps": {
+                            "inner_log": { "id": "inner_log", "stepType": "Log", "message": "x" },
+                            "iter_finish": { "id": "iter_finish", "stepType": "Finish" }
+                        },
+                        "executionPlan": []
+                    }
+                }
+            }),
+        );
+        a["subgraph"]["executionPlan"] = json!([
+            { "fromStep": "log", "toStep": "w", "label": "next" },
+            { "fromStep": "w", "toStep": "iter_finish", "label": "next" }
+        ]);
+        let workflow = graph(root(
+            json!({
+                "a": a,
+                "finish": { "id": "finish", "stepType": "Finish" }
+            }),
+            json!([]),
+        ));
+
+        let result = validate_workflow(&workflow, &AgentCatalog::new());
+
+        let mut paths = error_paths(&result, "E003");
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![vec![], vec!["a".to_string(), "w".to_string()]],
+            "{:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn walker_phases_report_the_body_too() {
+        // A SetState in Split b's body without a stateSchema (E134).
+        let workflow = graph(root(
+            json!({
+                "a": split("a", true, json!({})),
+                "b": split("b", true, json!({
+                    "save": {
+                        "id": "save",
+                        "stepType": "SetState",
+                        "values": { "x": { "valueType": "immediate", "value": 1 } }
+                    }
+                })),
+            }),
+            json!([{ "fromStep": "a", "toStep": "b", "label": "next" }]),
+        ));
+
+        let result = validate_workflow(&workflow, &AgentCatalog::new());
+
+        assert_eq!(error_paths(&result, "E134"), vec![vec!["b".to_string()]]);
+    }
+
+    #[test]
+    fn duplicate_names_are_reported_on_each_step_in_its_body() {
+        // The v28 shape: both Splits' `iter_finish` are named the same.
+        let mut a = split("a", true, json!({}));
+        let mut b = split("b", true, json!({}));
+        a["subgraph"]["steps"]["iter_finish"]["name"] = json!("Notification complete");
+        b["subgraph"]["steps"]["iter_finish"]["name"] = json!("Notification complete");
+        let workflow = graph(root(
+            json!({ "a": a, "b": b }),
+            json!([{ "fromStep": "a", "toStep": "b", "label": "next" }]),
+        ));
+
+        let result = validate_workflow(&workflow, &AgentCatalog::new());
+
+        let mut paths = error_paths(&result, "E060");
+        paths.sort();
+        assert_eq!(paths, vec![vec!["a".to_string()], vec!["b".to_string()]]);
+        for error in result.errors.iter().filter(|error| error.code() == "E060") {
+            match error {
+                ValidationError::DuplicateStepName { step_ids, .. } => {
+                    assert_eq!(step_ids, &["iter_finish", "iter_finish"]);
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn merge_keeps_paths_relative_to_the_merging_graph() {
+        let mut inner = ValidationResult::default();
+        inner.in_subgraph("w", |result| {
+            result.errors.push(ValidationError::EmptyWorkflow);
+        });
+        inner.errors.push(ValidationError::EmptyWorkflow);
+
+        let mut outer = ValidationResult::default();
+        outer.in_subgraph("a", |result| result.merge(inner));
+        outer.errors.push(ValidationError::EmptyWorkflow);
+
+        assert_eq!(outer.error_graph_path(0), ["a", "w"]);
+        assert_eq!(outer.error_graph_path(1), ["a"]);
+        assert!(outer.error_graph_path(2).is_empty());
     }
 }
