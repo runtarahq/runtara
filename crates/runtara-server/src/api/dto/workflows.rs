@@ -693,6 +693,18 @@ impl ValidationErrorDto {
                 Some(format!("values.{field_name}")),
                 None,
             ),
+            ValidationError::ReservedStepId { step_id } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some("id".into()),
+                None,
+            ),
+            ValidationError::ReservedVariableName { name, .. } => (
+                error.to_string(),
+                None,
+                Some(format!("variables.{name}")),
+                None,
+            ),
         };
 
         Self {

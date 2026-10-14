@@ -517,6 +517,33 @@ impl DirectJsonManifest {
             .eval(&source)
     }
 
+    /// Store a Conditional step's evaluated `result` as `steps.<id>.outputs`
+    /// and return the updated steps context, so later steps can reference it.
+    pub fn conditional_output(
+        &self,
+        condition_id: u32,
+        source: &[u8],
+        result: bool,
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse conditional-output source: {err}"))?;
+        let condition = self
+            .conditions
+            .get(&condition_id)
+            .ok_or_else(|| format!("unknown direct condition id {condition_id}"))?;
+        let step = self.step(&condition.owner_id, &source)?;
+        let steps = insert_step_output(
+            &source,
+            &step.id,
+            step.name.as_deref(),
+            "Conditional",
+            serde_json::json!({ "result": result }),
+            None,
+        );
+        serde_json::to_vec(&Value::Object(steps))
+            .map_err(|err| format!("failed to serialize conditional-output steps context: {err}"))
+    }
+
     /// Execute a manifest routing Switch config and return the selected route.
     pub fn process_switch(&self, switch_id: u32, source: &[u8]) -> Result<String, String> {
         let source: Value = serde_json::from_slice(source)
@@ -4230,6 +4257,14 @@ impl DirectJsonManifest {
     }
 }
 
+/// Root-scope marker the compiler sets in the workflow's variables segment.
+/// Only the root's `data` is the stored instance input envelope
+/// `{"data": ..., "variables": ...}`; a Split iteration's `data` is its item and
+/// an embedded child's `data` is its mapped input, so neither may be unwrapped
+/// even when it happens to contain a `data` key. Pass-through scopes (While,
+/// onWait, handlers) inherit the marker with the root's raw input.
+pub const INPUT_ENVELOPE_VARIABLE: &str = "_input_envelope";
+
 /// Inject the synthetic runtime-identity variables `_instance_id` and
 /// `_tenant_id` that the generated compiler exposes on every `variables`
 /// snapshot (codegen `emit_main`), read from the same env vars generated uses.
@@ -4272,8 +4307,9 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
     // a caller can do by setting it is namespace its own child's durable
     // state, which is exactly the feature. Inputs with no `data` key
     // (low-level / direct runtime invocations) are used as-is.
+    let input_envelope = variables.get(INPUT_ENVELOPE_VARIABLE) == Some(&Value::Bool(true));
     let inner_data = if let Value::Object(envelope) = &mut data {
-        if envelope.contains_key("data") {
+        if input_envelope && envelope.contains_key("data") {
             if let Some(Value::Object(runtime_vars)) = envelope.remove("variables")
                 && let Value::Object(defaults) = &mut variables
             {
@@ -4820,6 +4856,7 @@ fn collect_graph_manifest(
             .insert(
                 condition.id,
                 DirectJsonCondition {
+                    owner_id: condition.owner_id.clone(),
                     value: condition.value.clone(),
                 },
             )
@@ -5182,11 +5219,18 @@ fn split_iteration_variables(
         .cloned()
         .unwrap_or_default();
     let parent_loop = variables.get("_loop").cloned();
+    // The iteration's `data` is the item, never the root input envelope.
+    variables.remove(INPUT_ENVELOPE_VARIABLE);
 
     if let Some(extra_variables_mapping) = split.value.get("variables") {
         let extra_variables = apply_input_mapping(extra_variables_mapping, source)?;
         if let Value::Object(extra_variables) = extra_variables {
-            variables.extend(extra_variables);
+            // Authored values never shadow runtime-owned bindings (E137).
+            variables.extend(
+                extra_variables
+                    .into_iter()
+                    .filter(|(name, _)| !runtara_dsl::is_runtime_variable_name(name)),
+            );
         }
     }
     if let Some(parent_loop) = parent_loop {
@@ -5429,7 +5473,12 @@ fn while_iteration_variables(
     if let Some(extra_variables_mapping) = while_step.value.get("variables") {
         let extra_variables = apply_input_mapping(extra_variables_mapping, source)?;
         if let Value::Object(extra_variables) = extra_variables {
-            variables.extend(extra_variables);
+            // Authored values never shadow runtime-owned bindings (E137).
+            variables.extend(
+                extra_variables
+                    .into_iter()
+                    .filter(|(name, _)| !runtara_dsl::is_runtime_variable_name(name)),
+            );
         }
     }
     if let Some(parent_item) = parent_item {
@@ -6013,7 +6062,7 @@ fn workflow_retry_info(error: &[u8]) -> DirectJsonWorkflowRetryInfo {
 
     let category = parsed.get("category").and_then(Value::as_str);
     let code = parsed.get("code").and_then(Value::as_str).unwrap_or("");
-    let rate_limited = agent_error_code_is_rate_limited(code) || code == "HTTP_RATE_LIMITED";
+    let rate_limited = agent_error_code_is_rate_limited(code);
     let retry_after_ms = parsed.get("retryAfterMs").and_then(Value::as_u64);
     let auto_retry_429 = std::env::var("AUTO_RETRY_ON_429")
         .ok()
@@ -6029,8 +6078,11 @@ fn workflow_retry_info(error: &[u8]) -> DirectJsonWorkflowRetryInfo {
     }
 }
 
+/// Error codes that mean "the provider refused this call for rate reasons, retry
+/// later". `HTTP_429` is what the generic `http` and `openai` agents report for
+/// an HTTP 429, so it must count too or `rateLimitBudgetMs` never applies.
 fn agent_error_code_is_rate_limited(code: &str) -> bool {
-    code.contains("RATE_LIMITED")
+    code.contains("RATE_LIMITED") || code == "HTTP_429"
 }
 
 fn timestamp_ms() -> i64 {
@@ -8174,6 +8226,7 @@ struct DirectJsonMapping {
 
 #[derive(Debug, Clone)]
 struct DirectJsonCondition {
+    owner_id: String,
     value: Value,
 }
 
@@ -11950,7 +12003,7 @@ mod tests {
         // parent-injected site prefix (whitelisted through build_source).
         let scoped = build_source(
             br#"{"data":{},"variables":{"_cache_key_prefix":"parent-wf::call"}}"#,
-            br#"{"_workflow_id":"child-wf"}"#,
+            br#"{"_workflow_id":"child-wf","_input_envelope":true}"#,
             b"{}",
         )
         .expect("scoped source");
@@ -11964,7 +12017,7 @@ mod tests {
         // A second invocation site of the SAME child → a different id.
         let scoped_other = build_source(
             br#"{"data":{},"variables":{"_cache_key_prefix":"parent-wf::call2"}}"#,
-            br#"{"_workflow_id":"child-wf"}"#,
+            br#"{"_workflow_id":"child-wf","_input_envelope":true}"#,
             b"{}",
         )
         .expect("second scoped source");
@@ -13347,7 +13400,7 @@ mod tests {
         // double-wrapped `data.data.tpl` path worked).
         let source = build_source(
             br#"{"data":{"tpl":"hello world"},"variables":{"_workflow_id":"wf1"}}"#,
-            b"{}",
+            br#"{"_input_envelope":true}"#,
             b"{}",
         )
         .expect("source");
@@ -13367,6 +13420,50 @@ mod tests {
     }
 
     #[test]
+    fn build_source_keeps_non_root_data_with_a_data_key_intact() {
+        // A Split item (or an embedded child's mapped input) shaped like the
+        // root envelope must stay whole: only the root scope, marked by the
+        // compiler, carries the instance input envelope.
+        let item = br#"{"data":{"x":1},"id":5,"variables":{"region":"eu"}}"#;
+        let source = build_source(item, br#"{"_index":0}"#, b"{}").expect("source");
+        let source: Value = serde_json::from_slice(&source).expect("source json");
+        assert_eq!(
+            source["data"],
+            json!({"data": {"x": 1}, "id": 5, "variables": {"region": "eu"}})
+        );
+        assert!(source["variables"].get("region").is_none());
+    }
+
+    #[test]
+    fn split_iterations_drop_the_root_envelope_marker() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({}))).expect("manifest");
+        let source = serde_json::to_vec(&json!({
+            "data": {}, "steps": {},
+            "variables": {"_input_envelope": true, "_instance_id": "real"}
+        }))
+        .unwrap();
+        let variables = manifest
+            .split_iteration_variables(0, &source, br#"{"data":{"x":1}}"#, 0)
+            .expect("iteration variables");
+        let variables: Value = serde_json::from_slice(&variables).unwrap();
+        assert!(variables.get(INPUT_ENVELOPE_VARIABLE).is_none());
+        assert_eq!(variables["_instance_id"], "real");
+    }
+
+    #[test]
+    fn http_429_counts_as_rate_limited() {
+        let info = workflow_retry_info(
+            br#"{"code":"HTTP_429","category":"transient","retryable":true,"retryAfterMs":1000}"#,
+        );
+        assert!(info.rate_limited);
+        assert!(info.retryable);
+        assert_eq!(info.retry_after_ms, Some(1000));
+        assert!(agent_error_code_is_rate_limited("HTTP_429"));
+        assert!(agent_error_code_is_rate_limited("STRIPE_RATE_LIMITED"));
+        assert!(!agent_error_code_is_rate_limited("HTTP_5XX"));
+    }
+
+    #[test]
     fn build_source_whitelists_cache_key_prefix_but_not_identity_vars() {
         // A parent invoking this workflow as a composed agent injects the
         // checkpoint-namespace through the input envelope. `_cache_key_prefix`
@@ -13374,7 +13471,7 @@ mod tests {
         // caller can namespace its child's state but never spoof identity.
         let source = build_source(
             br#"{"data":{"x":1},"variables":{"_cache_key_prefix":"wfP::call[2]","_workflow_id":"spoofed","_tenant_id":"spoofed","plain":"ok"}}"#,
-            br#"{"_workflow_id":"wf-real::inst-1"}"#,
+            br#"{"_workflow_id":"wf-real::inst-1","_input_envelope":true}"#,
             b"{}",
         )
         .expect("source");
@@ -13464,7 +13561,8 @@ mod tests {
         // default; `_`-prefixed identity vars are never overridable from input.
         let envelope =
             br#"{"data":{"x":1},"variables":{"greeting":"OVERRIDDEN","_workflow_id":"spoof"}}"#;
-        let defaults = br#"{"greeting":"DEFAULT","mood":"happy","_workflow_id":"real"}"#;
+        let defaults =
+            br#"{"greeting":"DEFAULT","mood":"happy","_workflow_id":"real","_input_envelope":true}"#;
         let source = build_source(envelope, defaults, b"{}").expect("source");
         let source: Value = serde_json::from_slice(&source).expect("source json");
 

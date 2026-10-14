@@ -197,7 +197,7 @@ pub fn step_output_shape(step_type: &str) -> Option<StepOutputShape> {
             siblings: &[],
         },
         "Conditional" => StepOutputShape {
-            summary: "`outputs` is `{result: <bool>}` — the evaluated branch decision (materialized under track-events; used for edge routing otherwise).",
+            summary: "`outputs` is `{result: <bool>}` — the evaluated branch decision, readable by later steps.",
             outputs: OutputsShape::Object(CONDITIONAL_FIELDS),
             siblings: &[],
         },

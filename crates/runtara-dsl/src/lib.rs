@@ -41,6 +41,35 @@ pub mod run_label;
 // Path utilities
 pub mod paths;
 
+/// Variable names the runtime binds itself: identity, iteration and scope
+/// bookkeeping. Authored variables (declared or Split/While
+/// `config.variables`) must not use them, or they would shadow the real
+/// values; validation rejects them (E137) and the compiler and runtime drop
+/// them. Other `_`-prefixed names, such as a legacy `_cache_key_prefix`
+/// namespace, are not reserved.
+pub const RUNTIME_VARIABLE_NAMES: &[&str] = &[
+    "_workflow_id",
+    "_instance_id",
+    "_tenant_id",
+    "_signal_id",
+    "_index",
+    "_item",
+    "_loop",
+    "_loop_indices",
+    "_loop_path",
+    "_scope_id",
+    "_parent_scope_id",
+    "_manifest_graph_path",
+    "_durable_key_version",
+    "_input_envelope",
+];
+
+/// Whether `name` is a runtime-owned variable binding (see
+/// [`RUNTIME_VARIABLE_NAMES`]).
+pub fn is_runtime_variable_name(name: &str) -> bool {
+    RUNTIME_VARIABLE_NAMES.contains(&name)
+}
+
 // Agent capability metadata types for runtime introspection
 pub mod agent_meta;
 

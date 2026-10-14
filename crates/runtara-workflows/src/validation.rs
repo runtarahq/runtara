@@ -55,6 +55,8 @@
 //! | E133 | InvalidWaitForInstancesConfig | WaitForInstances literal instanceIds or timeoutMs out of range |
 //! | E134 | StateStepWithoutStateSchema | SetState/GetState in a workflow without stateSchema |
 //! | E135 | UndeclaredStateField | SetState writes a field not declared in stateSchema |
+//! | E136 | ReservedStepId | A step id collides with the onError error context (`error`, `__error`) |
+//! | E137 | ReservedVariableName | A declared or config variable shadows a runtime-owned binding (`_instance_id`, `_item`, …) |
 //! | E043 | InvalidChildVersion | Invalid child workflow version format |
 //! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
 //! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
@@ -607,6 +609,15 @@ pub enum ValidationError {
         field_name: String,
         declared: Vec<String>,
     },
+    /// A step id that onError handlers reuse for the error context
+    /// (`steps.error` / `steps.__error`), so the step's output would be
+    /// replaced by the error envelope inside handlers.
+    ReservedStepId { step_id: String },
+    /// An authored variable named like a runtime-owned binding
+    /// (`_instance_id`, `_tenant_id`, `_item`, …; see
+    /// `runtara_dsl::RUNTIME_VARIABLE_NAMES`), which it would shadow. `scope`
+    /// names where it was declared.
+    ReservedVariableName { scope: String, name: String },
 }
 
 /// Information about a missing required input field.
@@ -684,6 +695,8 @@ impl ValidationError {
             Self::InvalidWaitForInstancesConfig { .. } => "E133",
             Self::StateStepWithoutStateSchema { .. } => "E134",
             Self::UndeclaredStateField { .. } => "E135",
+            Self::ReservedStepId { .. } => "E136",
+            Self::ReservedVariableName { .. } => "E137",
         }
     }
 }
@@ -1441,6 +1454,18 @@ impl std::fmt::Display for ValidationError {
                 }
                 Ok(())
             }
+            ValidationError::ReservedStepId { step_id } => write!(
+                f,
+                "[E136] Step id '{}' is reserved: inside onError handlers `steps.{}` is the \
+                 error context, so this step's output would be replaced. Rename the step.",
+                step_id, step_id
+            ),
+            ValidationError::ReservedVariableName { scope, name } => write!(
+                f,
+                "[E137] Variable '{}' in {} is a runtime-owned binding and would shadow \
+                 the value the runtime sets. Rename the variable.",
+                name, scope
+            ),
         }
     }
 }
@@ -1944,6 +1969,9 @@ pub fn validate_workflow(
                 step_id: error.step_id,
             }),
     );
+
+    // Phase 0.5: names that collide with runtime-owned identifiers (E136, E137)
+    validate_reserved_names(graph, &mut result);
 
     // Phase 1: Graph structure validation
     validate_graph_structure(graph, &mut result);
@@ -2647,6 +2675,87 @@ fn validate_embed_workflow_inputs(
 // ============================================================================
 // Phase 1: Graph Structure Validation
 // ============================================================================
+
+/// Step ids reused by onError handlers for the error context.
+const RESERVED_STEP_IDS: [&str; 2] = ["error", "__error"];
+
+/// E136/E137 across the root and every nested graph (Split/While subgraphs,
+/// WaitForSignal onWait).
+fn validate_reserved_names(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    fn reserved_variables<'a>(
+        names: impl Iterator<Item = &'a String>,
+        scope: &str,
+        result: &mut ValidationResult,
+    ) {
+        let mut names: Vec<&String> = names
+            .filter(|name| runtara_dsl::is_runtime_variable_name(name))
+            .collect();
+        names.sort();
+        for name in names {
+            result.errors.push(ValidationError::ReservedVariableName {
+                scope: scope.to_string(),
+                name: name.clone(),
+            });
+        }
+    }
+
+    fn walk(graph: &ExecutionGraph, scope: &str, result: &mut ValidationResult) {
+        reserved_variables(graph.variables.keys(), scope, result);
+        let mut step_ids: Vec<&String> = graph.steps.keys().collect();
+        step_ids.sort();
+        for step_id in step_ids {
+            if RESERVED_STEP_IDS.contains(&step_id.as_str()) {
+                result.errors.push(ValidationError::ReservedStepId {
+                    step_id: step_id.clone(),
+                });
+            }
+            match &graph.steps[step_id] {
+                Step::Split(step) => {
+                    if let Some(variables) = step.config.as_ref().and_then(|c| c.variables.as_ref())
+                    {
+                        reserved_variables(
+                            variables.keys(),
+                            &format!("Split '{step_id}' config.variables"),
+                            result,
+                        );
+                    }
+                    walk(
+                        &step.subgraph,
+                        &format!("Split '{step_id}' subgraph variables"),
+                        result,
+                    );
+                }
+                Step::While(step) => {
+                    if let Some(variables) = step.config.as_ref().and_then(|c| c.variables.as_ref())
+                    {
+                        reserved_variables(
+                            variables.keys(),
+                            &format!("While '{step_id}' config.variables"),
+                            result,
+                        );
+                    }
+                    walk(
+                        &step.subgraph,
+                        &format!("While '{step_id}' subgraph variables"),
+                        result,
+                    );
+                }
+                Step::WaitForSignal(step) => {
+                    if let Some(on_wait) = &step.on_wait {
+                        walk(
+                            on_wait,
+                            &format!("WaitForSignal '{step_id}' onWait variables"),
+                            result,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    walk(graph, "workflow variables", result);
+}
 
 fn validate_graph_structure(graph: &ExecutionGraph, result: &mut ValidationResult) {
     // Check for empty workflow
@@ -16920,5 +17029,84 @@ mod graph_path_tests {
         assert_eq!(outer.error_graph_path(0), ["a", "w"]);
         assert_eq!(outer.error_graph_path(1), ["a"]);
         assert!(outer.error_graph_path(2).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod reserved_name_tests {
+    use super::*;
+    use runtara_dsl::agent_meta::AgentCatalog;
+    use serde_json::json;
+
+    fn codes(workflow: serde_json::Value) -> Vec<String> {
+        let graph: ExecutionGraph = serde_json::from_value(workflow).expect("graph parses");
+        validate_workflow(&graph, &AgentCatalog::new())
+            .errors
+            .iter()
+            .map(|error| error.to_string())
+            .filter(|message| message.starts_with("[E136]") || message.starts_with("[E137]"))
+            .collect()
+    }
+
+    #[test]
+    fn step_ids_used_for_the_error_context_are_reserved() {
+        let found = codes(json!({
+            "entryPoint": "error",
+            "steps": {
+                "error": {"id": "error", "stepType": "Finish"},
+                "split": {
+                    "id": "split", "stepType": "Split",
+                    "config": {"value": {"valueType": "immediate", "value": [1]}},
+                    "subgraph": {"entryPoint": "__error", "steps": {
+                        "__error": {"id": "__error", "stepType": "Finish"}
+                    }}
+                }
+            }
+        }));
+        assert!(
+            found
+                .iter()
+                .any(|m| m.starts_with("[E136] Step id 'error'")),
+            "{found:?}"
+        );
+        assert!(
+            found
+                .iter()
+                .any(|m| m.starts_with("[E136] Step id '__error'")),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_owned_variable_names_are_rejected_wherever_authored() {
+        let found = codes(json!({
+            "entryPoint": "split",
+            "variables": {
+                "_instance_id": {"type": "string", "value": "forged"},
+                "_cache_key_prefix": {"type": "string", "value": "legacy"},
+                "color": {"type": "string", "value": "red"}
+            },
+            "steps": {
+                "split": {
+                    "id": "split", "stepType": "Split",
+                    "config": {
+                        "value": {"valueType": "immediate", "value": [1]},
+                        "variables": {"_tenant_id": {"valueType": "immediate", "value": "t"}}
+                    },
+                    "subgraph": {"entryPoint": "f", "steps": {"f": {"id": "f", "stepType": "Finish"}}}
+                }
+            }
+        }));
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("'_instance_id' in workflow variables"))
+        );
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("'_tenant_id' in Split 'split' config.variables"))
+        );
     }
 }

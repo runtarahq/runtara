@@ -71,6 +71,14 @@ interface json {
         source: list<u8>,
     ) -> result<bool, string>;
 
+    /// Record a Conditional step's evaluated `result` as its output and
+    /// return the updated steps context.
+    conditional-output: func(
+        condition-id: u32,
+        source: list<u8>,
+        decision: bool,
+    ) -> result<list<u8>, string>;
+
     process-switch: func(
         switch-id: u32,
         source: list<u8>,

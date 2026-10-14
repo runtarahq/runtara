@@ -500,7 +500,7 @@ fn audit_02_nested_collection_survives_suspend_and_replay() {
 
 #[test]
 fn audit_02_nested_error_handler_preserves_outer_source() {
-    let leaf = json!({"entryPoint":"error","steps":{"error":{"id":"error","stepType":"Error","code":"AUDIT_ERROR","message":"expected"}}});
+    let leaf = json!({"entryPoint":"fail","steps":{"fail":{"id":"fail","stepType":"Error","code":"AUDIT_ERROR","message":"expected"}}});
     let mut graph = preserve_outer_source(nested_gc_body(&["While", "Split"], 0, leaf));
     graph["steps"]["handler"] = json!({"id":"handler","stepType":"Finish","inputMapping":{
         "saved":{"valueType":"reference","value":"steps.saved_filter.outputs.items.0.large"},"handled":immediate(json!(true))
@@ -1457,8 +1457,8 @@ fn audit_05_aggregated_inner_failure_does_not_leak_its_budget() {
         "inner",
         "While",
         1,
-        json!({"entryPoint":"error","steps":{
-            "error":{"id":"error","stepType":"Error","code":"ITEM_ERROR","message":"expected"}
+        json!({"entryPoint":"fail","steps":{
+            "fail":{"id":"fail","stepType":"Error","code":"ITEM_ERROR","message":"expected"}
         }}),
     );
     inner["config"]["timeout"] = json!(1_000);

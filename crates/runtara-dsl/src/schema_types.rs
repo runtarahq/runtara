@@ -493,7 +493,10 @@ pub struct AgentStep {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_mapping: Option<InputMapping>,
 
-    /// Maximum retry attempts (default: 3)
+    /// Maximum retry attempts (default: 3). Rate-limited failures (an HTTP 429
+    /// or a `*_RATE_LIMITED` code) retry within the workflow's
+    /// `rateLimitBudgetMs` and may exceed this count; `0` disables all
+    /// retries, rate-limited ones included.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
 

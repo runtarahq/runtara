@@ -47,6 +47,7 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_build_source: Option<u32>,
     stdlib_apply_mapping: Option<u32>,
     stdlib_eval_condition: Option<u32>,
+    stdlib_conditional_output: Option<u32>,
     stdlib_process_switch: Option<u32>,
     stdlib_filter: Option<u32>,
     stdlib_log_event: Option<u32>,
@@ -300,6 +301,10 @@ impl DirectCoreImportIndices {
             stdlib_eval_condition: require_import(
                 self.stdlib_eval_condition,
                 "stdlib.eval-condition",
+            )?,
+            stdlib_conditional_output: require_import(
+                self.stdlib_conditional_output,
+                "stdlib.conditional-output",
             )?,
             stdlib_process_switch: require_import(
                 self.stdlib_process_switch,
@@ -741,6 +746,7 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_build_source: u32,
     pub(super) stdlib_apply_mapping: u32,
     pub(super) stdlib_eval_condition: u32,
+    pub(super) stdlib_conditional_output: u32,
     pub(super) stdlib_process_switch: u32,
     pub(super) stdlib_filter: u32,
     pub(super) stdlib_log_event: u32,
@@ -1205,6 +1211,8 @@ pub(super) fn import_core_function(
         import_indices.stdlib_apply_mapping = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "eval-condition") {
         import_indices.stdlib_eval_condition = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "conditional-output") {
+        import_indices.stdlib_conditional_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "process-switch") {
         import_indices.stdlib_process_switch = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "filter") {
