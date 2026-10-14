@@ -318,17 +318,10 @@ fn validate_value(value: &Value, schema: &Value, path: &str, errors: &mut Vec<St
             if let Some(condition) = field_schema.get("requiredWhen") {
                 match serde_json::from_value::<crate::VisibleWhen>(condition.clone()) {
                     Ok(condition) => {
-                        let sibling = object.get(&condition.field);
-                        let applies = sibling.is_some()
-                            && (condition.equals.is_some() || condition.not_equals.is_some())
-                            && condition
-                                .equals
-                                .as_ref()
-                                .is_none_or(|expected| sibling == Some(expected))
-                            && condition
-                                .not_equals
-                                .as_ref()
-                                .is_none_or(|excluded| sibling != Some(excluded));
+                        // The same rule the form layer applies to this field.
+                        let applies = (condition.equals.is_some()
+                            || condition.not_equals.is_some())
+                            && condition.matches(object.get(&condition.field));
                         let missing = object.get(field).is_none_or(|value| {
                             value.is_null()
                                 || value.as_str().is_some_and(|text| text.trim().is_empty())
@@ -520,6 +513,39 @@ mod tests {
             (json!({"decision":"reject"}), false),
             (json!({"decision":"reject","reason":"  "}), false),
             (json!({"decision":"reject","reason":"Limit exceeded"}), true),
+        ] {
+            assert_eq!(
+                validate_inputs(&answer, &schema).is_ok(),
+                valid,
+                "server {answer}"
+            );
+            assert_eq!(
+                crate::form::analyze_form(&form, &answer).valid,
+                valid,
+                "form {answer}"
+            );
+        }
+    }
+
+    /// The server and the form layer read `requiredWhen` the same way:
+    /// condition equality (5.0 equals 5) and an absent sibling as null.
+    #[test]
+    fn required_when_matches_the_form_layer_on_numbers_and_absent_siblings() {
+        let schema = json!({
+            "amount":{"type":"number"},
+            "kind":{"type":"string"},
+            "note":{"type":"string","requiredWhen":{"field":"amount","equals":5}},
+            "reason":{"type":"string","requiredWhen":{"field":"kind","notEquals":"standard"}}
+        });
+        let fields = serde_json::from_value(schema.clone()).unwrap();
+        let form = crate::form::schema_fields_form_definition(&fields);
+        for (answer, valid) in [
+            (json!({"amount":5.0,"kind":"standard"}), false),
+            (json!({"amount":5,"kind":"standard"}), false),
+            (json!({"amount":5.0,"kind":"standard","note":"n"}), true),
+            (json!({"amount":6,"kind":"standard"}), true),
+            (json!({"amount":6}), false),
+            (json!({"amount":6,"reason":"r"}), true),
         ] {
             assert_eq!(
                 validate_inputs(&answer, &schema).is_ok(),

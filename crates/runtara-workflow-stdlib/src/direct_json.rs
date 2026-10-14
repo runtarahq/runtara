@@ -19,10 +19,12 @@ use serde_json::{Map, Value};
 use crate::agent_input_validation::{
     AgentInputMissingReason, AgentInputValidationError, MissingAgentInput,
 };
-use crate::conditions::{is_truthy, to_number, values_equal};
 use crate::reference_path::{self, array_index, is_array_index_token};
 use crate::switch_helpers::process_switch_output;
 use crate::template::{CompiledTemplate, render_template};
+use runtara_dsl::condition_eval::{
+    contains, is_empty, is_truthy, length, ordering, value_in, values_equal,
+};
 
 // ===========================================================================
 // Value interning ("scope handles").
@@ -6810,6 +6812,20 @@ fn is_condition_operation(expr: &Value) -> bool {
             .is_some_and(|value| value == "operation")
 }
 
+/// The argument count an operator needs, as validation enforces at save
+/// (`NOT` and `LENGTH` are not checked there and stay lenient). Shared by the
+/// interpreter and the compiled conditions so both reject the same shapes.
+fn condition_arity_error(op: &str, got: usize) -> Option<String> {
+    let expected = match op {
+        "GT" | "GTE" | "LT" | "LTE" | "EQ" | "NE" | "STARTS_WITH" | "ENDS_WITH" | "CONTAINS"
+        | "IN" | "NOT_IN" => 2,
+        "IS_DEFINED" | "IS_EMPTY" | "IS_NOT_EMPTY" => 1,
+        _ => return None,
+    };
+    (got != expected)
+        .then(|| format!("condition operator '{op}' requires {expected} argument(s), got {got}"))
+}
+
 fn eval_condition_operation(expr: &Value, source: &Value) -> Result<bool, String> {
     let op = expr
         .get("op")
@@ -6819,6 +6835,9 @@ fn eval_condition_operation(expr: &Value, source: &Value) -> Result<bool, String
         .get("arguments")
         .and_then(Value::as_array)
         .ok_or_else(|| "condition operation missing arguments".to_string())?;
+    if let Some(error) = condition_arity_error(op, args.len()) {
+        return Err(error);
+    }
 
     match op {
         "AND" => args.iter().try_fold(true, |acc, arg| {
@@ -6856,27 +6875,11 @@ fn eval_condition_operation(expr: &Value, source: &Value) -> Result<bool, String
             .unwrap_or(Ok(false)),
         "IS_EMPTY" => args
             .first()
-            .map(|arg| {
-                eval_condition_argument_as_value(arg, source).map(|value| match value {
-                    Value::Array(value) => value.is_empty(),
-                    Value::String(value) => value.is_empty(),
-                    Value::Object(value) => value.is_empty(),
-                    Value::Null => true,
-                    _ => false,
-                })
-            })
+            .map(|arg| eval_condition_argument_as_value(arg, source).map(|value| is_empty(&value)))
             .unwrap_or(Ok(true)),
         "IS_NOT_EMPTY" => args
             .first()
-            .map(|arg| {
-                eval_condition_argument_as_value(arg, source).map(|value| match value {
-                    Value::Array(value) => !value.is_empty(),
-                    Value::String(value) => !value.is_empty(),
-                    Value::Object(value) => !value.is_empty(),
-                    Value::Null => false,
-                    _ => true,
-                })
-            })
+            .map(|arg| eval_condition_argument_as_value(arg, source).map(|value| !is_empty(&value)))
             .unwrap_or(Ok(false)),
         // Query-only operators: evaluated server-side inside object-model
         // query conditions, never by the workflow runtime. Validation rejects
@@ -6927,30 +6930,24 @@ fn eval_condition_value(value: &Value, source: &Value) -> Result<Value, String> 
 }
 
 fn eval_comparison(op: &str, args: &[Value], source: &Value) -> Result<bool, String> {
-    if args.len() < 2 {
-        return Ok(false);
-    }
     let left = eval_condition_argument_as_value(&args[0], source)?;
     let right = eval_condition_argument_as_value(&args[1], source)?;
-    let Some(left) = to_number(&left) else {
-        return Ok(false);
-    };
-    let Some(right) = to_number(&right) else {
-        return Ok(false);
-    };
-    Ok(match op {
-        "GT" => left > right,
-        "GTE" => left >= right,
-        "LT" => left < right,
-        "LTE" => left <= right,
-        _ => false,
-    })
+    Ok(ordering_matches(op, &left, &right))
+}
+
+/// `GT`/`GTE`/`LT`/`LTE` through the shared [`ordering`].
+fn ordering_matches(op: &str, left: &Value, right: &Value) -> bool {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    matches!(
+        (op, ordering(left, right)),
+        ("GT", Some(Greater))
+            | ("LT", Some(Less))
+            | ("GTE", Some(Greater | Equal))
+            | ("LTE", Some(Less | Equal))
+    )
 }
 
 fn eval_equality(op: &str, args: &[Value], source: &Value) -> Result<bool, String> {
-    if args.len() < 2 {
-        return Ok(false);
-    }
     let left = eval_condition_argument_as_value(&args[0], source)?;
     let right = eval_condition_argument_as_value(&args[1], source)?;
     let equal = values_equal(&left, &right);
@@ -6958,9 +6955,6 @@ fn eval_equality(op: &str, args: &[Value], source: &Value) -> Result<bool, Strin
 }
 
 fn eval_string_match(op: &str, args: &[Value], source: &Value) -> Result<bool, String> {
-    if args.len() < 2 {
-        return Ok(false);
-    }
     let left = eval_condition_argument_as_value(&args[0], source)?;
     let right = eval_condition_argument_as_value(&args[1], source)?;
     let Some(left) = left.as_str() else {
@@ -6977,18 +6971,11 @@ fn eval_string_match(op: &str, args: &[Value], source: &Value) -> Result<bool, S
 }
 
 fn eval_array_match(op: &str, args: &[Value], source: &Value) -> Result<bool, String> {
-    if args.len() < 2 {
-        return Ok(false);
-    }
     let left = eval_condition_argument_as_value(&args[0], source)?;
     let right = eval_condition_argument_as_value(&args[1], source)?;
     let matched = match op {
-        "CONTAINS" => left
-            .as_array()
-            .is_some_and(|items| items.iter().any(|item| values_equal(item, &right))),
-        "IN" | "NOT_IN" => right
-            .as_array()
-            .is_some_and(|items| items.iter().any(|item| values_equal(&left, item))),
+        "CONTAINS" => contains(&left, &right),
+        "IN" | "NOT_IN" => value_in(&left, &right),
         _ => false,
     };
     Ok(if op == "NOT_IN" { !matched } else { matched })
@@ -6999,14 +6986,7 @@ fn eval_length_as_value(args: &[Value], source: &Value) -> Result<Value, String>
         return Ok(Value::Number(0.into()));
     };
     let value = eval_condition_argument_as_value(arg, source)?;
-    let len = match &value {
-        Value::String(value) => value.len() as i64,
-        Value::Array(value) => value.len() as i64,
-        Value::Object(value) => value.len() as i64,
-        Value::Null => 0,
-        _ => 1,
-    };
-    Ok(Value::Number(len.into()))
+    Ok(Value::Number(length(&value).into()))
 }
 
 /// Resolve a Finish step's mapped output to the workflow's return value.
@@ -7715,6 +7695,9 @@ fn compile_op(expr: &Value) -> CompiledOp {
     let Some(args) = expr.get("arguments").and_then(Value::as_array) else {
         return CompiledOp::Error("condition operation missing arguments".to_string());
     };
+    if let Some(error) = condition_arity_error(op, args.len()) {
+        return CompiledOp::Error(error);
+    }
     let vals = || args.iter().map(compile_arg_value).collect::<Vec<_>>();
     match op {
         "AND" => CompiledOp::And(args.iter().map(compile_condition).collect()),
@@ -7882,33 +7865,23 @@ impl CompiledOp {
                 None => Ok(true),
             },
             CompiledOp::Compare { op, args } => {
-                if args.len() < 2 {
-                    return Ok(false);
-                }
-                let (Some(left), Some(right)) = (
-                    to_number(&args[0].eval(source)?),
-                    to_number(&args[1].eval(source)?),
-                ) else {
-                    return Ok(false);
+                let name = match op {
+                    CmpOp::Gt => "GT",
+                    CmpOp::Gte => "GTE",
+                    CmpOp::Lt => "LT",
+                    CmpOp::Lte => "LTE",
                 };
-                Ok(match op {
-                    CmpOp::Gt => left > right,
-                    CmpOp::Gte => left >= right,
-                    CmpOp::Lt => left < right,
-                    CmpOp::Lte => left <= right,
-                })
+                Ok(ordering_matches(
+                    name,
+                    &args[0].eval(source)?,
+                    &args[1].eval(source)?,
+                ))
             }
             CompiledOp::Equality { ne, args } => {
-                if args.len() < 2 {
-                    return Ok(false);
-                }
                 let equal = values_equal(&args[0].eval(source)?, &args[1].eval(source)?);
                 Ok(if *ne { !equal } else { equal })
             }
             CompiledOp::StringMatch { ends, args } => {
-                if args.len() < 2 {
-                    return Ok(false);
-                }
                 let left = args[0].eval(source)?;
                 let right = args[1].eval(source)?;
                 let (Some(left), Some(right)) = (left.as_str(), right.as_str()) else {
@@ -7921,18 +7894,11 @@ impl CompiledOp {
                 })
             }
             CompiledOp::ArrayMatch { kind, args } => {
-                if args.len() < 2 {
-                    return Ok(false);
-                }
                 let left = args[0].eval(source)?;
                 let right = args[1].eval(source)?;
                 let matched = match kind {
-                    ArrKind::Contains => left
-                        .as_array()
-                        .is_some_and(|items| items.iter().any(|i| values_equal(i, &right))),
-                    ArrKind::In | ArrKind::NotIn => right
-                        .as_array()
-                        .is_some_and(|items| items.iter().any(|i| values_equal(&left, i))),
+                    ArrKind::Contains => contains(&left, &right),
+                    ArrKind::In | ArrKind::NotIn => value_in(&left, &right),
                 };
                 Ok(if matches!(kind, ArrKind::NotIn) {
                     !matched
@@ -7953,23 +7919,11 @@ impl CompiledOp {
                 None => Ok(false),
             },
             CompiledOp::IsEmpty(arg) => match arg {
-                Some(a) => a.eval(source).map(|v| match v {
-                    Value::Array(v) => v.is_empty(),
-                    Value::String(v) => v.is_empty(),
-                    Value::Object(v) => v.is_empty(),
-                    Value::Null => true,
-                    _ => false,
-                }),
+                Some(a) => a.eval(source).map(|v| is_empty(&v)),
                 None => Ok(true),
             },
             CompiledOp::IsNotEmpty(arg) => match arg {
-                Some(a) => a.eval(source).map(|v| match v {
-                    Value::Array(v) => !v.is_empty(),
-                    Value::String(v) => !v.is_empty(),
-                    Value::Object(v) => !v.is_empty(),
-                    Value::Null => false,
-                    _ => true,
-                }),
+                Some(a) => a.eval(source).map(|v| !is_empty(&v)),
                 None => Ok(false),
             },
             CompiledOp::Error(message) => Err(message.clone()),
@@ -7994,14 +7948,7 @@ fn compiled_length_value(args: &[CompiledArgValue], source: &Value) -> Result<Va
     let Some(arg) = args.first() else {
         return Ok(Value::Number(0.into()));
     };
-    let len = match &arg.eval(source)? {
-        Value::String(v) => v.len() as i64,
-        Value::Array(v) => v.len() as i64,
-        Value::Object(v) => v.len() as i64,
-        Value::Null => 0,
-        _ => 1,
-    };
-    Ok(Value::Number(len.into()))
+    Ok(Value::Number(length(&arg.eval(source)?).into()))
 }
 
 impl CompiledMapping {
@@ -10143,6 +10090,76 @@ mod tests {
         let output: Value = serde_json::from_slice(&output).expect("output json");
 
         assert_eq!(output, json!({ "result": payload }));
+    }
+
+    /// The workflow runtime (interpreter and compiled form) and the shared
+    /// evaluator behind forms and Operations answers give one answer for every
+    /// condition, including the shapes the DSL audit found disagreeing.
+    #[test]
+    fn runtime_and_shared_conditions_agree() {
+        let imm = |value: Value| json!({"valueType": "immediate", "value": value});
+        let op = |name: &str, arguments: Vec<Value>| json!({"type": "operation", "op": name, "arguments": arguments});
+        let cases = [
+            (op("EQ", vec![imm(json!("5")), imm(json!(5))]), true),
+            (op("EQ", vec![imm(json!(5.0)), imm(json!(5))]), true),
+            (op("GT", vec![imm(json!("10")), imm(json!(9))]), true),
+            (op("GT", vec![imm(json!("10")), imm(json!("9"))]), true),
+            (op("GT", vec![imm(json!("b")), imm(json!("a"))]), true),
+            (
+                op(
+                    "LT",
+                    vec![imm(json!("2026-01-02")), imm(json!("2026-10-14"))],
+                ),
+                true,
+            ),
+            (op("GT", vec![imm(json!(true)), imm(json!(0))]), true),
+            (op("GT", vec![imm(json!("x")), imm(json!(1))]), false),
+            (
+                op(
+                    "EQ",
+                    vec![op("LENGTH", vec![imm(json!("é"))]), imm(json!(1))],
+                ),
+                true,
+            ),
+            (op("NOT", vec![]), true),
+            (
+                op("EQ", vec![imm(json!(0.30000000000000004)), imm(json!(0.3))]),
+                true,
+            ),
+            (
+                op("CONTAINS", vec![imm(json!("abc")), imm(json!("b"))]),
+                true,
+            ),
+            (
+                op("CONTAINS", vec![imm(json!([1, "2"])), imm(json!(2))]),
+                true,
+            ),
+            (op("IN", vec![imm(json!("2")), imm(json!([1, 2]))]), true),
+            (op("IS_EMPTY", vec![imm(json!(0))]), false),
+        ];
+        let source = json!({"data": {}, "variables": {}, "steps": {}});
+        for (condition, expected) in cases {
+            let interpreted = eval_condition_expression(&condition, &source).expect("evaluates");
+            let compiled = compile_condition(&condition)
+                .eval(&source)
+                .expect("evaluates");
+            let parsed: runtara_dsl::ConditionExpression =
+                serde_json::from_value(condition.clone()).expect("condition parses");
+            let shared = runtara_dsl::condition_eval::evaluate_condition(&parsed, &json!({}))
+                .expect("evaluates");
+            assert_eq!(
+                (interpreted, compiled, shared),
+                (expected, expected, expected),
+                "{condition}"
+            );
+        }
+
+        // Shapes validation rejects fail in every evaluator.
+        let bad = op("EQ", vec![imm(json!(1)), imm(json!(1)), imm(json!(1))]);
+        assert!(eval_condition_expression(&bad, &source).is_err());
+        assert!(compile_condition(&bad).eval(&source).is_err());
+        let parsed: runtara_dsl::ConditionExpression = serde_json::from_value(bad).unwrap();
+        assert!(runtara_dsl::condition_eval::evaluate_condition(&parsed, &json!({})).is_err());
     }
 
     #[test]

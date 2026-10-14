@@ -2077,6 +2077,24 @@ pub struct VisibleWhen {
     pub not_equals: Option<serde_json::Value>,
 }
 
+impl VisibleWhen {
+    /// Whether the condition holds for the sibling's value, an absent sibling
+    /// counting as `null`. Both `equals` and `notEquals` must hold when both
+    /// are set; with neither it always holds. Equality is condition equality
+    /// ([`crate::condition_eval::values_equal`]), as in a workflow condition,
+    /// so `5.0` equals `5`.
+    pub fn matches(&self, sibling: Option<&serde_json::Value>) -> bool {
+        let sibling = sibling.unwrap_or(&serde_json::Value::Null);
+        self.equals
+            .as_ref()
+            .is_none_or(|expected| crate::condition_eval::values_equal(sibling, expected))
+            && self
+                .not_equals
+                .as_ref()
+                .is_none_or(|excluded| !crate::condition_eval::values_equal(sibling, excluded))
+    }
+}
+
 // ============================================================================
 // Condition Types (for Conditional steps)
 // ============================================================================

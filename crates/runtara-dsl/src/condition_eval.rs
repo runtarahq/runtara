@@ -3,6 +3,15 @@
 //! The evaluator is intentionally host-independent so the backend can call it
 //! directly and the browser can call the same implementation through WASM.
 //! Operators that require a server-side query engine are rejected explicitly.
+//!
+//! The comparison leaves ([`values_equal`], [`to_number`], [`ordering`],
+//! [`is_truthy`], [`length`], [`is_empty`], [`contains`], [`value_in`]) are the
+//! single definition of condition semantics: the workflow runtime, this
+//! evaluator (forms, Operations answers) and `visibleWhen` / `requiredWhen`
+//! checks all call them, so a condition means the same thing everywhere.
+//! They follow the workflow runtime, which deployed workflows depend on:
+//! numeric strings and booleans coerce to numbers, and numbers compare with
+//! an `f64::EPSILON` tolerance.
 
 use crate::{
     ConditionArgument, ConditionExpression, ConditionOperation, ConditionOperator, MappingValue,
@@ -47,7 +56,7 @@ pub fn evaluate_condition(
     expression: &ConditionExpression,
     context: &Value,
 ) -> Result<bool, ConditionEvaluationError> {
-    Ok(truthy(&evaluate_expression(expression, context)?))
+    Ok(is_truthy(&evaluate_expression(expression, context)?))
 }
 
 /// Whether an operator can be evaluated by this shared in-memory evaluator.
@@ -79,7 +88,7 @@ fn evaluate_operation(
     match &operation.op {
         Op::And => {
             for argument in &operation.arguments {
-                if !truthy(&evaluate_argument(argument, context)?) {
+                if !is_truthy(&evaluate_argument(argument, context)?) {
                     return Ok(Value::Bool(false));
                 }
             }
@@ -87,19 +96,20 @@ fn evaluate_operation(
         }
         Op::Or => {
             for argument in &operation.arguments {
-                if truthy(&evaluate_argument(argument, context)?) {
+                if is_truthy(&evaluate_argument(argument, context)?) {
                     return Ok(Value::Bool(true));
                 }
             }
             Ok(Value::Bool(false))
         }
-        Op::Not => {
-            require_arity(&operation.op, &operation.arguments, "1")?;
-            Ok(Value::Bool(!truthy(&evaluate_argument(
-                &operation.arguments[0],
-                context,
-            )?)))
-        }
+        // NOT and LENGTH are not arity-checked at save, so a missing
+        // argument keeps the runtime's answer instead of an error.
+        Op::Not => match operation.arguments.first() {
+            Some(argument) => Ok(Value::Bool(!is_truthy(&evaluate_argument(
+                argument, context,
+            )?))),
+            None => Ok(Value::Bool(true)),
+        },
         Op::Eq | Op::Ne | Op::Gt | Op::Gte | Op::Lt | Op::Lte => {
             require_arity(&operation.op, &operation.arguments, "2")?;
             let left = evaluate_argument(&operation.arguments[0], context)?;
@@ -126,8 +136,10 @@ fn evaluate_operation(
             }))
         }
         Op::Length => {
-            require_arity(&operation.op, &operation.arguments, "1")?;
-            let value = evaluate_argument(&operation.arguments[0], context)?;
+            let value = match operation.arguments.first() {
+                Some(argument) => evaluate_argument(argument, context)?,
+                None => Value::Null,
+            };
             Ok(Value::Number(serde_json::Number::from(length(&value))))
         }
         Op::IsDefined => {
@@ -244,46 +256,86 @@ fn binary_string<F: Fn(&str, &str) -> bool>(
 }
 
 fn compare(operator: &ConditionOperator, left: &Value, right: &Value) -> bool {
+    use std::cmp::Ordering::{Equal, Greater, Less};
     match operator {
         Op::Eq => values_equal(left, right),
         Op::Ne => !values_equal(left, right),
-        Op::Gt | Op::Gte | Op::Lt | Op::Lte => match (numeric(left), numeric(right)) {
-            (Some(left), Some(right)) => match operator {
-                Op::Gt => left > right,
-                Op::Gte => left >= right,
-                Op::Lt => left < right,
-                Op::Lte => left <= right,
-                _ => unreachable!(),
-            },
-            _ => match (left.as_str(), right.as_str()) {
-                (Some(left), Some(right)) => match operator {
-                    Op::Gt => left > right,
-                    Op::Gte => left >= right,
-                    Op::Lt => left < right,
-                    Op::Lte => left <= right,
-                    _ => unreachable!(),
-                },
-                _ => false,
-            },
-        },
+        Op::Gt => ordering(left, right) == Some(Greater),
+        Op::Gte => matches!(ordering(left, right), Some(Greater | Equal)),
+        Op::Lt => ordering(left, right) == Some(Less),
+        Op::Lte => matches!(ordering(left, right), Some(Less | Equal)),
         _ => false,
     }
 }
 
-fn values_equal(left: &Value, right: &Value) -> bool {
-    if let (Some(left), Some(right)) = (numeric(left), numeric(right)) {
-        return left == right;
+/// Condition equality (`EQ`, `NE`, `CONTAINS`/`IN` membership, and
+/// `visibleWhen` / `requiredWhen`). Numbers compare numerically within
+/// `f64::EPSILON`, a numeric string equals the number it parses to, and
+/// arrays and objects compare element by element with the same rule. Values
+/// of other differing types are unequal.
+pub fn values_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Null, Value::Null) => true,
+        (Value::Bool(left), Value::Bool(right)) => left == right,
+        (Value::Number(left), Value::Number(right)) => match (left.as_f64(), right.as_f64()) {
+            (Some(left), Some(right)) => (left - right).abs() < f64::EPSILON,
+            _ => false,
+        },
+        (Value::String(left), Value::String(right)) => left == right,
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| values_equal(left, right))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, value)| {
+                    right
+                        .get(key)
+                        .is_some_and(|other| values_equal(value, other))
+                })
+        }
+        (Value::String(text), Value::Number(number))
+        | (Value::Number(number), Value::String(text)) => {
+            match (text.parse::<f64>(), number.as_f64()) {
+                (Ok(parsed), Some(number)) => (parsed - number).abs() < f64::EPSILON,
+                _ => false,
+            }
+        }
+        _ => false,
     }
-    left == right
 }
 
-fn numeric(value: &Value) -> Option<f64> {
-    value
-        .as_f64()
-        .or_else(|| value.as_i64().map(|integer| integer as f64))
+/// A value as a number for ordering: numbers, numeric strings, and booleans
+/// (`true` = 1, `false` = 0).
+pub fn to_number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.parse::<f64>().ok(),
+        Value::Bool(flag) => Some(if *flag { 1.0 } else { 0.0 }),
+        _ => None,
+    }
 }
 
-fn truthy(value: &Value) -> bool {
+/// Order two values for `GT`/`GTE`/`LT`/`LTE`: numerically when both are
+/// numbers ([`to_number`]), otherwise by string comparison when both are
+/// strings. Anything else has no order, so every ordering comparison of it
+/// is false.
+pub fn ordering(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+    match (to_number(left), to_number(right)) {
+        (Some(left), Some(right)) => left.partial_cmp(&right),
+        _ => match (left.as_str(), right.as_str()) {
+            (Some(left), Some(right)) => Some(left.cmp(right)),
+            _ => None,
+        },
+    }
+}
+
+/// Condition truthiness: `null`, `false`, zero, and empty strings, arrays
+/// and objects are false; everything else is true.
+pub fn is_truthy(value: &Value) -> bool {
     match value {
         Value::Bool(value) => *value,
         Value::Null => false,
@@ -294,7 +346,9 @@ fn truthy(value: &Value) -> bool {
     }
 }
 
-fn length(value: &Value) -> u64 {
+/// `LENGTH`: characters of a string, items of an array, keys of an object;
+/// 0 for null and 1 for any other scalar.
+pub fn length(value: &Value) -> u64 {
     match value {
         Value::String(value) => value.chars().count() as u64,
         Value::Array(value) => value.len() as u64,
@@ -304,7 +358,9 @@ fn length(value: &Value) -> u64 {
     }
 }
 
-fn is_empty(value: &Value) -> bool {
+/// `IS_EMPTY`: null and empty strings, arrays and objects. Other scalars are
+/// never empty.
+pub fn is_empty(value: &Value) -> bool {
     match value {
         Value::Null => true,
         Value::String(value) => value.is_empty(),
@@ -314,15 +370,18 @@ fn is_empty(value: &Value) -> bool {
     }
 }
 
-fn contains(left: &Value, right: &Value) -> bool {
-    match (left, right) {
-        (Value::String(haystack), Value::String(needle)) => haystack.contains(needle),
+/// `CONTAINS`: a substring of a string, or an element of an array
+/// ([`values_equal`]).
+pub fn contains(haystack: &Value, needle: &Value) -> bool {
+    match (haystack, needle) {
+        (Value::String(haystack), Value::String(needle)) => haystack.contains(needle.as_str()),
         (Value::Array(values), needle) => values.iter().any(|value| values_equal(value, needle)),
         _ => false,
     }
 }
 
-fn value_in(needle: &Value, haystack: &Value) -> bool {
+/// `IN`: an element of an array ([`values_equal`]).
+pub fn value_in(needle: &Value, haystack: &Value) -> bool {
     match haystack {
         Value::Array(values) => values.iter().any(|value| values_equal(value, needle)),
         _ => false,
