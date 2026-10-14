@@ -2799,10 +2799,15 @@ pub async fn validate_graph_handler(
                 .errors()
                 .map(|(origin, e)| attribute(origin, e.to_string()))
                 .collect();
-            let warnings: Vec<String> = report
+            let mut warnings: Vec<String> = report
                 .warnings()
                 .map(|(origin, w)| attribute(origin, w.to_string()))
                 .collect();
+            warnings.extend(
+                runtara_workflows::ignored_fields::ignored_definition_fields(&body)
+                    .iter()
+                    .map(ToString::to_string),
+            );
 
             let is_valid = errors.is_empty();
             let message = if is_valid {

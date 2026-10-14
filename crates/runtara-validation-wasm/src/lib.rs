@@ -453,8 +453,12 @@ fn validate_execution_graph_json_impl(execution_graph_json: &str) -> ValidationR
     };
 
     let catalog = cached_catalog();
-    let validation_result =
+    let mut validation_result =
         runtara_workflows::validation::validate_workflow(&workflow.execution_graph, &catalog);
+    // Dropped keys name their own path, so they sit at the root graph.
+    validation_result
+        .warnings
+        .extend(runtara_workflows::ignored_fields::ignored_definition_fields(&graph));
     let errors = validation_result
         .errors
         .iter()
@@ -1103,6 +1107,27 @@ mod tests {
             response.warnings.iter().any(|warning| {
                 warning.contains("[W052]") && warning.contains("missing_archive")
             }),
+            "{:?}",
+            response.warnings
+        );
+    }
+
+    #[test]
+    fn surfaces_ignored_field_warnings() {
+        let response = validate_execution_graph_json_impl(
+            r#"{
+                "inputSchema": {"name": {"type": "string", "requird": true}},
+                "steps": {"finish": {"stepType": "Finish", "id": "finish"}},
+                "entryPoint": "finish"
+            }"#,
+        );
+
+        assert!(response.valid, "{:?}", response.errors);
+        assert!(
+            response
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("[W086] 'inputSchema.name.requird'")),
             "{:?}",
             response.warnings
         );

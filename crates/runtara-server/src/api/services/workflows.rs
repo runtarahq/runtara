@@ -810,6 +810,11 @@ impl WorkflowService {
                 None => all_warnings.push(warning.to_string()),
             }
         }
+        all_warnings.extend(
+            runtara_workflows::ignored_fields::ignored_definition_fields(&definition)
+                .iter()
+                .map(ToString::to_string),
+        );
 
         // Validate connection existence in database
         let referenced_conn_ids =
@@ -1334,6 +1339,16 @@ impl WorkflowService {
 
         // Convert workflow warnings to ValidationIssue format
         for warning in &validation_result.warnings {
+            all_issues.push(
+                crate::api::utils::reference_validation::ValidationIssue::warning(
+                    crate::api::utils::reference_validation::IssueCategory::UnknownFieldPath,
+                    "workflow",
+                    warning.to_string(),
+                ),
+            );
+        }
+
+        for warning in runtara_workflows::ignored_fields::ignored_definition_fields(&definition) {
             all_issues.push(
                 crate::api::utils::reference_validation::ValidationIssue::warning(
                     crate::api::utils::reference_validation::IssueCategory::UnknownFieldPath,

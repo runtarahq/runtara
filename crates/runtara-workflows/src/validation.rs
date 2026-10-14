@@ -1670,6 +1670,9 @@ pub enum ValidationWarning {
         reference_path: String,
         field: String,
     },
+    /// A key of the definition that no DSL field matches, such as
+    /// `inputSchema.name.requird`; deserialization drops it.
+    IgnoredField { path: String },
 }
 
 impl ValidationWarning {
@@ -1701,6 +1704,7 @@ impl ValidationWarning {
             Self::EmbeddedChildStateIsLocal { .. } => "W083",
             Self::NestedGraphSettingIgnored { .. } => "W084",
             Self::UnknownErrorContextField { .. } => "W085",
+            Self::IgnoredField { .. } => "W086",
         }
     }
 }
@@ -1964,6 +1968,11 @@ impl std::fmt::Display for ValidationWarning {
                 reference_path,
                 field,
                 ERROR_CONTEXT_FIELDS.join(", ")
+            ),
+            ValidationWarning::IgnoredField { path } => write!(
+                f,
+                "[W086] '{}' is not a workflow field and is ignored. Check the spelling.",
+                path
             ),
         }
     }
