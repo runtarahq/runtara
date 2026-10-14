@@ -1,0 +1,18 @@
+-- The steps of a run whose child namespace another step may share: every step
+-- id that occurs inside an `onWait` graph anywhere in the run's workflow, its
+-- embedded children and the workflow-agents it calls. An `onWait` graph keeps
+-- its wait step's position, so a step there that reuses an id of the graph
+-- around it shares that step's child namespace. Recording a result keeps the
+-- child namespace of a step listed here.
+--
+-- Written once, when Environment starts the run, from the manifests compiled
+-- into its artifact. NULL means unknown: the run keeps every child namespace.
+-- That covers runs started before this migration and runs whose artifact
+-- could not be read.
+--
+-- A nullable column with no default changes only the catalog: nothing is
+-- rewritten. Its ACCESS EXCLUSIVE lock first waits for any transaction
+-- already using the table, and instance reads and writes that arrive
+-- meanwhile queue behind it; once granted, it is released when this
+-- migration commits.
+ALTER TABLE instances ADD COLUMN shared_child_steps TEXT[];

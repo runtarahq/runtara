@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::error::Result;
+use runtara_core::persistence::checkpoint_scope::SharedChildSteps;
 
 /// An image that can be launched as an instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,13 +53,23 @@ impl Image {
 }
 
 /// Reject an image that does not export the workflow entry
-/// (`runtara:agent-workflow-agent/capabilities`). This is called before the
-/// launch, so such an artifact cannot take a runner permit or receive a
-/// container registry entry.
-pub async fn require_current_workflow_entrypoint(image: &Image) -> Result<()> {
+/// (`runtara:agent-workflow-agent/capabilities`), and read from the manifests
+/// compiled into it which steps may share a child checkpoint namespace (see
+/// [`SharedChildSteps`]). This is called before the launch, so an artifact
+/// without the entry cannot take a runner permit or receive a container
+/// registry entry.
+pub async fn inspect_current_workflow_image(image: &Image) -> Result<SharedChildSteps> {
     let binary_path = image.binary_path.clone();
     tokio::task::spawn_blocking(move || {
-        runtara_component_host::lifecycle::require_workflow_entry_file(&binary_path)
+        let bytes = std::fs::read(&binary_path)
+            .map_err(|error| anyhow::anyhow!("read workflow component {binary_path}: {error}"))?;
+        runtara_component_host::lifecycle::require_workflow_entry(&bytes)?;
+        Ok::<_, anyhow::Error>(
+            match runtara_component_host::workflow_manifest::shared_child_steps(&bytes) {
+                Some(steps) => SharedChildSteps::known(steps),
+                None => SharedChildSteps::unknown(),
+            },
+        )
     })
     .await
     .map_err(|error| {

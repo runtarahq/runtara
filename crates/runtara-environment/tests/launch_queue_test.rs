@@ -1547,6 +1547,7 @@ async fn initial_claim_never_commits_a_pending_instance_without_its_launch() {
                 .collect(),
         ),
         timeout_seconds: Some(30),
+        shared_child_steps: Default::default(),
     };
 
     let queued = repository
@@ -1635,6 +1636,7 @@ async fn initial_claim_never_commits_a_pending_instance_without_its_launch() {
         input: None,
         env: None,
         timeout_seconds: Some(30),
+        shared_child_steps: Default::default(),
     };
     assert!(matches!(
         repository.claim_initial(invalid).await,

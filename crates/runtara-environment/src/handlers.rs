@@ -21,7 +21,7 @@ use crate::container_registry::ContainerRegistry;
 use crate::db;
 use crate::error::Result;
 use crate::execution_timeout::ExecutionTimeoutPolicy;
-use crate::image_registry::{ImageBuilder, ImageRegistry, require_current_workflow_entrypoint};
+use crate::image_registry::{ImageBuilder, ImageRegistry, inspect_current_workflow_image};
 use crate::instance_repository::InstanceRepository;
 use crate::launch_dispatcher::{DEFAULT_LAUNCH_QUEUE_TIMEOUT, LaunchLifecycleObservers};
 use crate::launch_queue::{
@@ -618,19 +618,30 @@ pub async fn handle_start_instance(
 
     // Every image must export the workflow entry before we create a pending
     // instance. This keeps any other artifact from ever taking a runner permit
-    // or consuming admission while it waits.
-    if let Err(error) = require_current_workflow_entrypoint(&image).await {
+    // or consuming admission while it waits. The same read finds the steps
+    // whose child checkpoint namespace another step may share, which the run
+    // records so that collapsing a result keeps those namespaces.
+    let shared_child_steps = match inspect_current_workflow_image(&image).await {
+        Ok(shared) => shared,
+        Err(error) => {
+            warn!(
+                image_id = %request.image_id,
+                error = %error,
+                "Refusing workflow image without the workflow entry"
+            );
+            return Ok(StartInstanceResponse::rejected(
+                StartRejection::ImageNotRunnable {
+                    image_id: request.image_id.clone(),
+                    detail: error.to_string(),
+                },
+            ));
+        }
+    };
+    if shared_child_steps.steps().is_none() {
         warn!(
             image_id = %request.image_id,
-            error = %error,
-            "Refusing workflow image without the workflow entry"
+            "Could not read the workflow manifests of this image; the run keeps every child checkpoint namespace"
         );
-        return Ok(StartInstanceResponse::rejected(
-            StartRejection::ImageNotRunnable {
-                image_id: request.image_id.clone(),
-                detail: error.to_string(),
-            },
-        ));
     }
 
     // Prepare the durable input envelope before the atomic initial claim. The
@@ -691,6 +702,7 @@ pub async fn handle_start_instance(
             i64::try_from(timeout.as_secs())
                 .expect("bounded execution timeout fits in database integer"),
         ),
+        shared_child_steps,
     };
 
     match repository.claim_initial(initial).await {

@@ -82,6 +82,11 @@ pub struct ScopeClosure {
     pub owned: String,
     /// A byte prefix of every address inside the step.
     pub inner: String,
+    /// The calling step, when `inner` is a child namespace (an EmbedWorkflow
+    /// or an Agent result); `None` for a loop's iterations. A child namespace
+    /// names its step by id alone, so another step with that id at the same
+    /// position may share it (see [`SharedChildSteps`]).
+    pub child_step: Option<String>,
 }
 
 impl ScopeClosure {
@@ -91,10 +96,62 @@ impl ScopeClosure {
         scope == self.owned || scope.starts_with(&self.inner)
     }
 
+    /// [`Self::covers`] in a run that knows `shared`: the step's own rows
+    /// always go, its child namespace only when no other step can share it.
+    pub fn covers_in(&self, scope: &str, shared: &SharedChildSteps) -> bool {
+        scope == self.owned || (self.deletes_inner(shared) && scope.starts_with(&self.inner))
+    }
+
+    /// Whether the rows under `inner` go in a run that knows `shared`.
+    pub fn deletes_inner(&self, shared: &SharedChildSteps) -> bool {
+        self.child_step
+            .as_deref()
+            .is_none_or(|step| !shared.keeps(step))
+    }
+
     /// `inner` as a half-open byte range `[low, high)`, for an index range
     /// scan under a bytewise ("C") collation.
     pub fn inner_bounds(&self) -> (&str, String) {
         (&self.inner, byte_successor(&self.inner))
+    }
+}
+
+/// The steps of a run whose child namespace another step may share: every
+/// step id that occurs inside an `onWait` graph anywhere in the run's
+/// workflow, its embedded children and the workflow-agents it calls.
+///
+/// An `onWait` graph keeps its wait step's position, so a step there that
+/// reuses an id of the graph around it shares that step's child namespace,
+/// and either one's result would delete the other's child rows. When the
+/// other step has no result to replay from (`durable: false`, a failure its
+/// `onError` handled, or still in progress), its child steps would run again.
+/// So a child namespace whose step is listed here is never collapsed.
+///
+/// Unknown (the default) lists every step: a run whose workflow could not be
+/// read, or that started before runs recorded this, keeps every child
+/// namespace.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SharedChildSteps(Option<std::collections::BTreeSet<String>>);
+
+impl SharedChildSteps {
+    /// Nothing is known: every child namespace is kept.
+    pub fn unknown() -> Self {
+        Self(None)
+    }
+
+    /// Exactly `steps` may share their child namespace.
+    pub fn known<S: Into<String>>(steps: impl IntoIterator<Item = S>) -> Self {
+        Self(Some(steps.into_iter().map(Into::into).collect()))
+    }
+
+    /// The listed steps, or `None` when unknown.
+    pub fn steps(&self) -> Option<&std::collections::BTreeSet<String>> {
+        self.0.as_ref()
+    }
+
+    /// Whether `step`'s child namespace must be kept.
+    pub fn keeps(&self, step: &str) -> bool {
+        self.0.as_ref().is_none_or(|steps| steps.contains(step))
     }
 }
 
@@ -120,7 +177,22 @@ type Rule = fn(&Key) -> Option<ScopeClosure>;
 ///   the result records the failures), and replay looks it up before
 ///   entering the loop, its deadline or its retries, so its iterations and
 ///   its own rows are never read again.
-const RULES: &[(&str, Rule)] = &[("split", Key::loop_closure)];
+/// - `embed_workflow`: an EmbedWorkflow's result is saved only once its child
+///   has finished (it succeeded, or, as an AiAgent tool, its failure became
+///   the tool result), never when the child parks or an enclosing deadline
+///   unwinds. Replay looks it up before mapping the child's input, its
+///   deadline or its retries, so the child's rows and its own are never read
+///   again.
+/// - `agent`: an Agent's result is saved only when its call succeeded, and
+///   replay looks it up before its deadline, its retries, its continuation
+///   and the call itself. A workflow-agent's child rows are never read again,
+///   and neither are the attempt, retry and retry-sleep rows of any Agent
+///   that retried: the key does not say whether the agent is a workflow.
+const RULES: &[(&str, Rule)] = &[
+    ("split", Key::loop_closure),
+    ("embed_workflow", Key::child_closure),
+    ("agent", Key::child_closure),
+];
 
 /// The closure of a Split's result: its own rows and every iteration it ran.
 pub fn loop_closure(checkpoint_id: &str) -> Option<ScopeClosure> {
@@ -130,6 +202,10 @@ pub fn loop_closure(checkpoint_id: &str) -> Option<ScopeClosure> {
 /// The closure of a result that stands for a child invocation (an
 /// EmbedWorkflow, or an Agent calling a workflow-agent): its own rows and the
 /// child's namespace, which is empty for an Agent that calls no workflow.
+///
+/// The child namespace names the calling step by its id alone, so the closure
+/// carries that id: a store keeps the namespace when the run lists the step
+/// in its [`SharedChildSteps`].
 pub fn child_closure(checkpoint_id: &str) -> Option<ScopeClosure> {
     Key::parse(checkpoint_id)?.child_closure()
 }
@@ -233,7 +309,7 @@ impl Key {
             _ => return None,
         };
         let step = self.result_step()?;
-        self.closure(opened(encode(&json!([loop_kind, step]))))
+        self.closure(opened(encode(&json!([loop_kind, step]))), None)
     }
 
     /// A child-invoking result's closure: its own rows and the child's
@@ -243,12 +319,13 @@ impl Key {
             return None;
         }
         let step = self.result_step()?;
-        self.closure(encode(&json!(["ns", "child", [step]])))
+        self.closure(encode(&json!(["ns", "child", [step]])), Some(step))
     }
 
     /// The closure of this result key: its `own` rows, plus every address
-    /// starting with the position followed by `inner`.
-    fn closure(&self, inner: String) -> Option<ScopeClosure> {
+    /// starting with the position followed by `inner`, which is the child
+    /// namespace of `child_step` when there is one.
+    fn closure(&self, inner: String, child_step: Option<&str>) -> Option<ScopeClosure> {
         if self.suffixed || self.result_step().is_none() {
             return None;
         }
@@ -256,7 +333,11 @@ impl Key {
         owned.push(json!(["own", self.kind, self.parts]));
         let owned = bounded(encode(&owned))?;
         let inner = opened(encode(&self.position())) + &inner;
-        Some(ScopeClosure { owned, inner })
+        Some(ScopeClosure {
+            owned,
+            inner,
+            child_step: child_step.map(str::to_string),
+        })
     }
 }
 
@@ -509,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_split_result_has_a_closure_rule() {
+    fn only_composite_results_have_a_closure_rule() {
         let split = key(
             "split",
             "wf",
@@ -517,12 +598,18 @@ mod tests {
             json!([["Split", "outer", 2]]),
             json!(["items"]),
         );
+        let embed = key("embed_workflow", "wf", json!([]), json!([]), json!(["e"]));
+        let call = agent("a", json!([]), json!([]));
         assert_eq!(closure(&split), loop_closure(&split));
-        assert!(closure(&split).is_some());
+        assert_eq!(closure(&embed), child_closure(&embed));
+        assert_eq!(closure(&call), child_closure(&call));
+        for id in [&split, &embed, &call] {
+            assert!(closure(id).is_some(), "{id}");
+        }
         for id in [
-            agent("a", json!([]), json!([])),
-            key("embed_workflow", "wf", json!([]), json!([]), json!(["e"])),
             format!("{split}::attempt::1"),
+            format!("{embed}::retry_sleep::2"),
+            format!("{call}::retry::3"),
             key(
                 "loop-complete",
                 "wf",
@@ -530,8 +617,87 @@ mod tests {
                 json!([]),
                 json!(["Split", "root", "items"]),
             ),
+            key(
+                "embed-deadline",
+                "wf",
+                json!([]),
+                json!([]),
+                json!(["EmbedWorkflow", "root", "e"]),
+            ),
+            key(
+                "agent-deadline",
+                "wf",
+                json!([]),
+                json!([]),
+                json!(["Agent", "root", "a"]),
+            ),
+            key("wait", "wf", json!([]), json!([]), json!(["instance", "w"])),
+            key("ai_turn", "wf", json!([]), json!([]), json!(["ai", 0])),
+            key("state", "wf", json!([]), json!([]), json!(["set"])),
         ] {
             assert_eq!(closure(&id), None, "{id}");
+        }
+    }
+
+    #[test]
+    fn a_child_closure_names_its_step_and_a_loop_closure_none() {
+        let split = key("split", "wf", json!([]), json!([]), json!(["items"]));
+        let embed = key("embed_workflow", "wf", json!([]), json!([]), json!(["e"]));
+        assert_eq!(loop_closure(&split).unwrap().child_step, None);
+        assert_eq!(
+            child_closure(&embed).unwrap().child_step.as_deref(),
+            Some("e")
+        );
+        assert_eq!(
+            child_closure(&agent("a", json!([]), json!([])))
+                .unwrap()
+                .child_step
+                .as_deref(),
+            Some("a")
+        );
+    }
+
+    #[test]
+    fn a_shared_child_namespace_is_kept_and_owned_rows_still_go() {
+        let call = agent("x", json!([]), json!([]));
+        let closure = child_closure(&call).unwrap();
+        let child_row = scope(&agent("c1", json!([child("x", json!([]))]), json!([]))).unwrap();
+        let retry = scope(&format!("{call}::retry::1")).unwrap();
+        for (shared, deletes) in [
+            (SharedChildSteps::unknown(), false),
+            (SharedChildSteps::known(["x"]), false),
+            (SharedChildSteps::known(["y"]), true),
+            (SharedChildSteps::known::<&str>([]), true),
+        ] {
+            assert_eq!(closure.deletes_inner(&shared), deletes, "{shared:?}");
+            assert_eq!(
+                closure.covers_in(&child_row, &shared),
+                deletes,
+                "{shared:?}"
+            );
+            assert!(closure.covers_in(&retry, &shared), "{shared:?}");
+        }
+        let split = key("split", "wf", json!([]), json!([]), json!(["items"]));
+        assert!(
+            loop_closure(&split)
+                .unwrap()
+                .deletes_inner(&SharedChildSteps::unknown()),
+            "a loop's iterations go whatever the run knows"
+        );
+    }
+
+    #[test]
+    fn an_agent_closure_keeps_its_tool_and_memory_calls() {
+        // An AiAgent's tool calls and memory calls run under their own frames,
+        // not the child namespace its result closes.
+        let ai = agent("ai", json!([]), json!([]));
+        let closure = child_closure(&ai).unwrap();
+        for frame in [
+            json!(["tool-child", "wf", [], ["ai", "lookup", 0]]),
+            json!(["agent-aux", "wf", [], ["ai", "memory", "load-memory"]]),
+        ] {
+            let call = agent("ai", json!([frame]), json!([]));
+            assert!(!closure.covers(&scope(&call).unwrap()), "{call}");
         }
     }
 
@@ -710,7 +876,8 @@ mod tests {
     fn a_step_reusing_another_steps_id_keeps_its_rows() {
         // An onWait branch may reuse a main-graph step id at the same position.
         // Recording the main step names its own rows only: not the onWait
-        // step's result, attempts or deadline.
+        // step's result, attempts or deadline. Their child namespaces are one,
+        // though: it is keyed by the step id alone.
         let main = agent("x", json!([]), json!([]));
         let on_wait = key(
             "agent",
@@ -735,6 +902,11 @@ mod tests {
             assert!(!closure.covers(&scope(&id).unwrap()), "should keep {id}");
         }
         assert!(closure.covers(&scope(&format!("{main}::retry::2")).unwrap()));
+        let on_wait_child = agent("c1", json!([child("x", json!([]))]), json!([]));
+        assert!(
+            closure.covers(&scope(&on_wait_child).unwrap()),
+            "a child of either step is in the shared namespace"
+        );
     }
 
     #[test]

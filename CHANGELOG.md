@@ -269,6 +269,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A finished EmbedWorkflow or workflow-agent call keeps its result, not
+  its child's rows.** Recording a durable EmbedWorkflow's result, or the
+  result of an Agent step calling a workflow published as an agent, now
+  deletes in the same transaction the checkpoints its child wrote, nested
+  children included, and the step's own attempt, retry and retry-sleep rows:
+  replay reads the result first and never runs the child again. An
+  EmbedWorkflow's deadline rows go too; an Agent's deadline row stays, since
+  it cannot be matched to the Agent's result. `A → EmbedWorkflow → B` and
+  `A → workflow-agent → B` keep 3 rows whatever the child does, or 4 when the
+  Agent has a timeout. The same goes for an isolated
+  workflow-agent child, and for an EmbedWorkflow called as an AiAgent tool.
+  Because a checkpoint key does not say whether an agent is a workflow, every
+  durable Agent that retried and then succeeded drops its `::attempt::N`,
+  `::retry_sleep::N` and `::retry::N` rows too, so the checkpoints listing
+  (`GET …/instances/{id}/checkpoints`) no longer shows those retry records or
+  their error messages once the step succeeds. A run killed or parked inside
+  the child keeps the child's rows until the step finishes. As with Split,
+  this applies to workflows already compiled with structured checkpoint keys,
+  from runs started on this release; a `durable: false` step saves no result
+  and collapses nothing. A step in an `onWait` graph that reuses the id of an
+  Agent or EmbedWorkflow around it shares that step's child namespace, so
+  such namespaces are never collapsed: Environment reads, when it starts a
+  run, the step ids that occur inside `onWait` graphs anywhere in the
+  workflow, its embedded children and the workflow-agents it calls, from the
+  manifests compiled into the artifact, and keeps their child namespaces (the
+  steps' own retry rows still go). This covers workflows compiled before this
+  release. When the artifact's manifests cannot all be read, the run keeps
+  every child namespace. **Upgrade note:** the first boot migrates the
+  runtime database (`051_instance_shared_child_steps`, a nullable
+  `instances.shared_child_steps` column, catalog-only); runs started before
+  it keep every child namespace. Postgres now runs the delete in the statement
+  that points the instance at the new result, as two ranges over the
+  `checkpoints.scope` index, so it adds no round trip and never scans the
+  run's other rows, even before the table has statistics (a Split's result
+  could do that before). `A → Split[10000]{Agent} → B` takes as long as it
+  did without the new rules.
 - **A finished Split keeps one checkpoint row.** Recording a durable Split's
   result now deletes, in the same transaction, the checkpoints of its
   iterations and its own attempt, retry and loop-deadline rows: replay reads

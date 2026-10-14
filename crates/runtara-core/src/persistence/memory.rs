@@ -60,6 +60,9 @@ struct Store {
     /// Rows each instance lost to scope collapses, so that
     /// `checkpoint_progress` does not fall when a collapse deletes them.
     collapsed_checkpoints: HashMap<String, i64>,
+    /// The child namespaces each run's steps may share. A run missing here
+    /// keeps every child namespace.
+    shared_child_steps: HashMap<String, checkpoint_scope::SharedChildSteps>,
     /// Ordered by insertion, which is also the tiebreak for equal timestamps.
     events: Vec<EventRecord>,
     /// One pending signal per instance.
@@ -148,20 +151,26 @@ impl Store {
     }
 
     /// Delete the instance's rows that `closure` covers, keeping
-    /// `checkpoint_id` itself, and count them toward progress. Rows with no
-    /// address are never covered.
+    /// `checkpoint_id` itself and any child namespace the run's steps may
+    /// share, and count them toward progress. Rows with no address are never
+    /// covered.
     fn collapse_scope(
         &mut self,
         instance_id: &str,
         checkpoint_id: &str,
         closure: &checkpoint_scope::ScopeClosure,
     ) -> usize {
+        let shared = self
+            .shared_child_steps
+            .get(instance_id)
+            .cloned()
+            .unwrap_or_default();
         let before = self.checkpoints.len();
         self.checkpoints.retain(|c| {
             c.instance_id != instance_id
                 || c.checkpoint_id == checkpoint_id
                 || !checkpoint_scope::scope(&c.checkpoint_id)
-                    .is_some_and(|scope| closure.covers(&scope))
+                    .is_some_and(|scope| closure.covers_in(&scope, &shared))
         });
         let removed = before - self.checkpoints.len();
         if removed > 0 {
@@ -443,6 +452,7 @@ fn prune_instance(store: &mut Store, id: &str) -> bool {
     store.checkpoints.retain(|c| c.instance_id != id);
     note(n, store.checkpoints.len());
     store.collapsed_checkpoints.remove(id);
+    store.shared_child_steps.remove(id);
     let n = store.signals.len();
     store.signals.remove(id);
     note(n, store.signals.len());
@@ -541,6 +551,19 @@ impl Persistence for InMemoryPersistence {
 
     fn run_state(&self) -> Option<&dyn crate::persistence::run_state::RunState> {
         Some(self)
+    }
+
+    async fn set_shared_child_steps(
+        &self,
+        instance_id: &str,
+        shared: &checkpoint_scope::SharedChildSteps,
+    ) -> Result<(), CoreError> {
+        let mut store = self.store.lock().unwrap();
+        store.instance_mut(instance_id)?;
+        store
+            .shared_child_steps
+            .insert(instance_id.to_string(), shared.clone());
+        Ok(())
     }
 
     async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError> {
@@ -1529,6 +1552,7 @@ impl Persistence for InMemoryPersistence {
             }
             store.checkpoints.retain(|c| &c.instance_id != id);
             store.collapsed_checkpoints.remove(id);
+            store.shared_child_steps.remove(id);
             store.events.retain(|e| &e.instance_id != id);
             store.signals.remove(id);
             store.input_parks.remove(id);

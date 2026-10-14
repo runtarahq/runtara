@@ -185,7 +185,16 @@ pub fn inspect_workflow_entrypoint(wasm: &[u8]) -> anyhow::Result<WorkflowEntryp
 /// Require the workflow entry in the component at `path`, before registration
 /// or launch.
 pub fn require_workflow_entry_file(path: impl AsRef<Path>) -> anyhow::Result<()> {
-    match inspect_workflow_entrypoint_file(path)? {
+    require_entry(inspect_workflow_entrypoint_file(path)?)
+}
+
+/// Byte-slice variant of [`require_workflow_entry_file`].
+pub fn require_workflow_entry(wasm: &[u8]) -> anyhow::Result<()> {
+    require_entry(inspect_workflow_entrypoint(wasm)?)
+}
+
+fn require_entry(entrypoint: WorkflowEntrypoint) -> anyhow::Result<()> {
+    match entrypoint {
         WorkflowEntrypoint::LifecycleInvoke => Ok(()),
         WorkflowEntrypoint::Other => Err(anyhow::anyhow!(
             "compiled workflow does not export the workflow entry `{ENTRY_INTERFACE_NAME}`; \
