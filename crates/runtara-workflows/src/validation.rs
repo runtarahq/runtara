@@ -3157,6 +3157,8 @@ fn validate_references_with_inherited(
                 if variable_names.contains("_loop") {
                     injected_vars.insert("_loop".to_string());
                 }
+                // The body runs on a copy of the parent's variables.
+                injected_vars.extend(variable_names.iter().cloned());
                 result.in_subgraph(&split_step.id, |result| {
                     validate_references_with_inherited(&split_step.subgraph, &injected_vars, result)
                 });
@@ -3175,18 +3177,19 @@ fn validate_references_with_inherited(
                 if variable_names.contains("_item") {
                     injected_vars.insert("_item".to_string());
                 }
+                // The body runs on a copy of the parent's variables.
+                injected_vars.extend(variable_names.iter().cloned());
                 result.in_subgraph(&while_step.id, |result| {
                     validate_references_with_inherited(&while_step.subgraph, &injected_vars, result)
                 });
             }
             Step::WaitForSignal(wait_step) => {
                 if let Some(on_wait) = &wait_step.on_wait {
-                    // An onWait handler inherits no parent variables; the
-                    // runtime injects `_signal_id` and the global built-ins.
-                    let injected_vars: HashSet<String> = WAIT_ON_WAIT_SCOPE_VARIABLES
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect();
+                    // An onWait handler runs on a copy of the parent's
+                    // variables, plus `_signal_id` and the global built-ins.
+                    let mut injected_vars = variable_names.clone();
+                    injected_vars
+                        .extend(WAIT_ON_WAIT_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
                     result.in_subgraph(&wait_step.id, |result| {
                         validate_references_with_inherited(on_wait, &injected_vars, result)
                     });
@@ -3901,6 +3904,8 @@ fn validate_template_static_references_with_context(
                 if variable_names.contains("_loop") {
                     injected_vars.insert("_loop".to_string());
                 }
+                // The body runs on a copy of the parent's variables.
+                injected_vars.extend(variable_names.iter().cloned());
                 result.in_subgraph(&split_step.id, |result| {
                     validate_template_static_references_with_context(
                         &split_step.subgraph,
@@ -3922,6 +3927,8 @@ fn validate_template_static_references_with_context(
                 if variable_names.contains("_item") {
                     injected_vars.insert("_item".to_string());
                 }
+                // The body runs on a copy of the parent's variables.
+                injected_vars.extend(variable_names.iter().cloned());
                 result.in_subgraph(&while_step.id, |result| {
                     validate_template_static_references_with_context(
                         &while_step.subgraph,
@@ -3933,10 +3940,9 @@ fn validate_template_static_references_with_context(
             }
             Step::WaitForSignal(wait_step) => {
                 if let Some(ref on_wait) = wait_step.on_wait {
-                    let injected_vars: HashSet<String> = WAIT_ON_WAIT_SCOPE_VARIABLES
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect();
+                    let mut injected_vars = variable_names.clone();
+                    injected_vars
+                        .extend(WAIT_ON_WAIT_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
                     result.in_subgraph(&wait_step.id, |result| {
                         validate_template_static_references_with_context(
                             on_wait,
@@ -6285,6 +6291,8 @@ fn validate_data_and_variable_references_with_context(
                 if all_variables.contains("_loop") {
                     injected_vars.insert("_loop".to_string());
                 }
+                // The body runs on a copy of the parent's variables.
+                injected_vars.extend(all_variables.iter().cloned());
                 result.in_subgraph(&split_step.id, |result| {
                     validate_data_and_variable_references_with_context(
                         &split_step.subgraph,
@@ -6312,6 +6320,8 @@ fn validate_data_and_variable_references_with_context(
                 if all_variables.contains("_item") {
                     injected_vars.insert("_item".to_string());
                 }
+                // The body runs on a copy of the parent's variables.
+                injected_vars.extend(all_variables.iter().cloned());
                 result.in_subgraph(&while_step.id, |result| {
                     validate_data_and_variable_references_with_context(
                         &while_step.subgraph,
@@ -6323,13 +6333,12 @@ fn validate_data_and_variable_references_with_context(
             }
             Step::WaitForSignal(wait_step) => {
                 if let Some(ref on_wait) = wait_step.on_wait {
-                    // WaitForSignal on_wait handlers don't inherit parent variables
-                    // or implicit data, but the runtime injects `_signal_id`
-                    // (plus the global built-ins) into the scope.
-                    let injected_vars: HashSet<String> = WAIT_ON_WAIT_SCOPE_VARIABLES
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect();
+                    // WaitForSignal on_wait handlers run on a copy of the
+                    // parent's variables (but no implicit data), plus
+                    // `_signal_id` and the global built-ins.
+                    let mut injected_vars = all_variables.clone();
+                    injected_vars
+                        .extend(WAIT_ON_WAIT_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
                     result.in_subgraph(&wait_step.id, |result| {
                         validate_data_and_variable_references_with_context(
                             on_wait,
@@ -17117,6 +17126,57 @@ mod reserved_name_tests {
                 .any(|m| m.starts_with("[E136] Step id '__error'")),
             "{found:?}"
         );
+    }
+
+    #[test]
+    fn nested_bodies_see_the_parent_variables() {
+        let body = |step: &str, value: &str| {
+            json!({"entryPoint": step, "steps": {step: {
+                "id": step, "stepType": "Finish",
+                "inputMapping": {
+                    "v": {"valueType": "reference", "value": value},
+                    "t": {"valueType": "template", "value": format!("{{{{ {value} }}}}")}
+                }
+            }}})
+        };
+        let graph: ExecutionGraph = serde_json::from_value(json!({
+            "entryPoint": "split",
+            "variables": {"color": {"type": "string", "value": "red"}},
+            "executionPlan": [
+                {"fromStep": "split", "toStep": "loop"},
+                {"fromStep": "loop", "toStep": "wait"},
+                {"fromStep": "wait", "toStep": "done"}
+            ],
+            "steps": {
+                "split": {"id": "split", "stepType": "Split",
+                          "config": {"value": {"valueType": "immediate", "value": [1]}},
+                          "subgraph": body("in_split", "variables.color")},
+                "loop": {"id": "loop", "stepType": "While",
+                         "condition": {"type": "value", "valueType": "immediate", "value": false},
+                         "subgraph": body("in_loop", "variables.color")},
+                "wait": {"id": "wait", "stepType": "WaitForSignal",
+                         "onWait": body("in_wait", "variables.color")},
+                "done": {"id": "done", "stepType": "Finish"}
+            }
+        }))
+        .expect("graph parses");
+        let errors: Vec<String> = validate_workflow(&graph, &AgentCatalog::new())
+            .errors
+            .iter()
+            .map(|error| error.to_string())
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // A name the parent doesn't have is still rejected.
+        let mut unknown = graph.clone();
+        unknown.variables.clear();
+        let errors: Vec<String> = validate_workflow(&unknown, &AgentCatalog::new())
+            .errors
+            .iter()
+            .map(|error| error.to_string())
+            .filter(|message| message.contains("'color'"))
+            .collect();
+        assert!(errors.len() >= 3, "{errors:?}");
     }
 
     #[test]

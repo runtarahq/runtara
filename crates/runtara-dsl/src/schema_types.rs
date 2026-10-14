@@ -109,9 +109,10 @@ pub struct ExecutionGraph {
     /// variable names, values contain type and value.
     ///
     /// On the workflow's own graph these are defaults that a run's input
-    /// `variables` can override. On a nested graph (Split/While body, onWait)
-    /// they are added to the body's scope, and the step's `config.variables`
-    /// win over them.
+    /// `variables` can override. A nested graph (Split/While body, onWait)
+    /// sees its parent's variables; its own declarations are added to them,
+    /// replacing any with the same name, and the step's `config.variables`
+    /// win over both.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub variables: HashMap<String, Variable>,
 
