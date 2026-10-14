@@ -699,6 +699,7 @@ pub(super) fn emit_run_plan_mapping(
             breakpoint,
             max_retries,
             retry_delay_ms,
+            rate_limit_budget_ms,
             next_plan,
             error_plan,
         } => {
@@ -706,8 +707,8 @@ pub(super) fn emit_run_plan_mapping(
             // (it is an invoke of `ai_tools`/`chat-completion`); only the output
             // transform differs (`ai-agent-output` builds the
             // `{response, iterations, toolCalls}` envelope). Retries are opt-in
-            // via config.maxRetries (plan default 0 — LLM calls re-bill); no
-            // rate-limit budget (ai-tools is not catalog-rate-limited).
+            // via config.maxRetries (plan default 0 — LLM calls re-bill), and
+            // rate-limited failures retry within the workflow's budget.
             emit_agent_plan(
                 body,
                 indices,
@@ -722,7 +723,7 @@ pub(super) fn emit_run_plan_mapping(
                 *breakpoint,
                 *max_retries,
                 *retry_delay_ms,
-                0,
+                *rate_limit_budget_ms,
                 next_plan,
                 error_plan.as_ref(),
                 data_ptr_local,
@@ -753,6 +754,9 @@ pub(super) fn emit_run_plan_mapping(
             max_iterations,
             tools,
             memory,
+            max_retries,
+            retry_delay_ms,
+            rate_limit_budget_ms,
             next_plan,
             error_plan,
         } => {
@@ -771,6 +775,11 @@ pub(super) fn emit_run_plan_mapping(
                 *max_iterations,
                 tools,
                 memory.as_ref(),
+                super::ai_agent_loop::TurnRetry {
+                    max_retries: *max_retries,
+                    retry_delay_ms: *retry_delay_ms,
+                    rate_limit_budget_ms: *rate_limit_budget_ms,
+                },
                 next_plan,
                 error_plan.as_ref(),
                 data_ptr_local,

@@ -14109,3 +14109,61 @@ fn direct_wasm_execute_rate_limit_budget_ignores_earlier_wait_deadline() {
     assert!(result.status_success, "{:?}", result.error_json);
     assert_eq!(result.llm_requests.len(), 2);
 }
+
+fn ai_agent_tool_loop_with_retries(max_retries: u32, durable: bool) -> String {
+    let graph = ai_agent_tool_loop_on_error_graph_json("return-input").replace(
+        r#""model":{"valueType":"immediate","value":"gpt-4o"}}"#,
+        &format!(
+            r#""model":{{"valueType":"immediate","value":"gpt-4o"}},"maxRetries":{max_retries},"retryDelay":10}}"#
+        ),
+    );
+    let graph = graph.replacen(
+        r#""entryPoint": "ai","#,
+        &format!(r#""durable": {durable}, "entryPoint": "ai","#),
+        1,
+    );
+    assert!(graph.contains(r#""maxRetries""#) && graph.contains(r#""durable""#));
+    graph
+}
+
+/// `maxRetries` applies to every chat-turn call of a tool loop, in durable and
+/// non-durable workflows alike.
+#[test]
+fn direct_wasm_execute_ai_agent_loop_retries_a_failed_turn() {
+    let components_dir = direct_e2e_components_dir();
+    for durable in [true, false] {
+        let result = run_direct_workflow_with_llm_script(
+            &components_dir,
+            &format!("ai-loop-turn-retry-{durable}"),
+            &ai_agent_tool_loop_with_retries(2, durable),
+            br#"{}"#,
+            vec![llm_http_500(), llm_ok("recovered")],
+        );
+        assert!(result.status_success, "{}", result.stderr);
+        assert_eq!(result.llm_requests.len(), 2, "durable={durable}");
+        assert_eq!(
+            result.output_json.as_ref().and_then(|o| o.get("answer")),
+            Some(&Value::String("recovered".to_string())),
+            "durable={durable}: {:?}",
+            result.output_json
+        );
+    }
+}
+
+/// Once the retries are used up, the last failure routes to onError as an
+/// unretried one does.
+#[test]
+fn direct_wasm_execute_ai_agent_loop_exhausted_retries_route_to_on_error() {
+    let components_dir = direct_e2e_components_dir();
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-loop-turn-retry-exhausted",
+        &ai_agent_tool_loop_with_retries(1, false),
+        br#"{}"#,
+        vec![llm_http_500(), llm_http_500(), llm_ok("unused")],
+    );
+    assert!(result.status_success, "{}", result.stderr);
+    assert_eq!(result.llm_requests.len(), 2);
+    let output = result.output_json.expect("handler output");
+    assert_eq!(output.get("handled"), Some(&Value::Bool(true)), "{output}");
+}

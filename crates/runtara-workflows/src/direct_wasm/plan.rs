@@ -196,6 +196,8 @@ pub(super) enum DirectRunPlan {
         /// model call, unlike Agent steps' default of 3).
         max_retries: u32,
         retry_delay_ms: u64,
+        /// The workflow's rate-limit wait budget, as for Agent steps.
+        rate_limit_budget_ms: u64,
         next_plan: Box<DirectRunPlan>,
         error_plan: Option<DirectErrorRoutePlan>,
     },
@@ -219,6 +221,11 @@ pub(super) enum DirectRunPlan {
         tools: Vec<DirectAiToolPlan>,
         /// Conversation memory: load history before the loop, save it after.
         memory: Option<DirectAiMemoryPlan>,
+        /// Per-turn LLM-call retries, with the same opt-in default and
+        /// budget as the single-shot path.
+        max_retries: u32,
+        retry_delay_ms: u64,
+        rate_limit_budget_ms: u64,
         next_plan: Box<DirectRunPlan>,
         /// Loop-level failure routing (GAP-05): chat-turn (provider) and
         /// memory load/save failures dispatch here. Individual TOOL failures
@@ -1061,6 +1068,7 @@ fn step_run_plan_inner(
                     breakpoint: step_breakpoint_enabled(graph, step),
                     max_retries: agent.max_retries.unwrap_or(0),
                     retry_delay_ms: agent.retry_delay.unwrap_or(1_000),
+                    rate_limit_budget_ms: graph.rate_limit_budget_ms,
                     next_plan: Box::new(next_plan),
                     error_plan,
                 });
@@ -1287,6 +1295,9 @@ fn step_run_plan_inner(
                 max_iterations,
                 tools,
                 memory,
+                max_retries: agent.max_retries.unwrap_or(0),
+                retry_delay_ms: agent.retry_delay.unwrap_or(1_000),
+                rate_limit_budget_ms: graph.rate_limit_budget_ms,
                 next_plan: Box::new(next_plan),
                 error_plan: if include_on_error {
                     on_error_plan(graph, child_workflows, step_id, stack, orders)?
@@ -3960,6 +3971,9 @@ mod tests {
             max_iterations: 10,
             tools,
             memory: None,
+            max_retries: 0,
+            retry_delay_ms: 1_000,
+            rate_limit_budget_ms: 60_000,
             next_plan: Box::new(P::Join),
             error_plan: None,
         };

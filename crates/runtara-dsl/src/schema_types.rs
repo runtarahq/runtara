@@ -1513,9 +1513,9 @@ pub struct AiAgentConfig {
     /// Maximum retry attempts for the LLM call (default: 0 — no retries).
     ///
     /// Retries are opt-in for AiAgent (unlike Agent steps' default of 3)
-    /// because every retry re-bills the model call. Applies to the
-    /// single-shot (chat-completion) path; per-turn retry inside the tool
-    /// loop is deliberately deferred until per-turn durability lands.
+    /// because every retry re-bills the model call. Applies to every LLM
+    /// call: the single-shot call and each turn of a tool loop, where a
+    /// failed turn is retried in place before routing to onError.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
 

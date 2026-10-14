@@ -13,13 +13,18 @@
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
 use super::abi::{
-    emit_retptr_error_or_return, load_agent_retptr_list, load_retptr_list, push_retptr_arg,
-    push_retptr_i32_load, push_retptr_u8_load, push_segment_args,
+    emit_retptr_error_or_return, load_agent_retptr_list, load_retptr_list, load_retptr_tag,
+    push_retptr_arg, push_retptr_i32_load, push_retptr_u8_load, push_segment_args,
 };
 use super::agent_error::{
-    emit_agent_invoke_capture_error_or_result, emit_agent_invoke_error_branch,
+    emit_agent_invoke_capture_error_or_result, emit_agent_invoke_error_body_from_info,
+    emit_agent_invoke_error_branch,
 };
 use super::agent_invoke::emit_agent_invoke;
+use super::agent_retry::{
+    emit_agent_advance_retry_attempt, emit_agent_capture_retry_sleep, emit_agent_retry_condition,
+    emit_agent_retry_delay, emit_agent_retry_error_info, emit_agent_retry_sleep,
+};
 use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
 use super::debug::{
     emit_ai_memory_debug_event, emit_ai_tool_debug_event, emit_step_breakpoint,
@@ -31,16 +36,18 @@ use super::mapping::{emit_apply_mapping, emit_build_source};
 use super::split::emit_loop_iteration_heap_reset;
 use super::wait::emit_ai_wait_tool_arm;
 use super::{
-    DIRECT_AI_BASE_LEN_LOCAL, DIRECT_AI_BASE_PTR_LOCAL, DIRECT_AI_CONV_LEN_LOCAL,
-    DIRECT_AI_CONV_PTR_LOCAL, DIRECT_AI_HEAP_BASE_LOCAL, DIRECT_AI_ITER_LOCAL,
-    DIRECT_AI_PENDING_LEN_LOCAL, DIRECT_AI_PENDING_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL,
-    DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_TOOL_ARGS_LEN_LOCAL, DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
-    DIRECT_AI_TOOL_CALL_COUNTER_LOCAL, DIRECT_AI_TOOL_COUNT_LOCAL, DIRECT_AI_TOOL_IDX_LOCAL,
-    DIRECT_AI_TOOL_MATCH_LOCAL, DIRECT_AI_TOOL_RESULT_LEN_LOCAL, DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
-    DIRECT_AI_TURN_INPUT_LEN_LOCAL, DIRECT_AI_TURN_INPUT_PTR_LOCAL, DIRECT_AI_TURN_OUT_LEN_LOCAL,
-    DIRECT_AI_TURN_OUT_PTR_LOCAL, DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U32_OK_OFFSET,
-    DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment, DirectRunPlan,
-    DirectVariables,
+    DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL, DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
+    DIRECT_AGENT_RETRY_ATTEMPT_LOCAL, DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
+    DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL, DIRECT_AI_BASE_LEN_LOCAL, DIRECT_AI_BASE_PTR_LOCAL,
+    DIRECT_AI_CONV_LEN_LOCAL, DIRECT_AI_CONV_PTR_LOCAL, DIRECT_AI_HEAP_BASE_LOCAL,
+    DIRECT_AI_ITER_LOCAL, DIRECT_AI_PENDING_LEN_LOCAL, DIRECT_AI_PENDING_PTR_LOCAL,
+    DIRECT_AI_STATE_LEN_LOCAL, DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+    DIRECT_AI_TOOL_ARGS_PTR_LOCAL, DIRECT_AI_TOOL_CALL_COUNTER_LOCAL, DIRECT_AI_TOOL_COUNT_LOCAL,
+    DIRECT_AI_TOOL_IDX_LOCAL, DIRECT_AI_TOOL_MATCH_LOCAL, DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
+    DIRECT_AI_TOOL_RESULT_PTR_LOCAL, DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+    DIRECT_AI_TURN_INPUT_PTR_LOCAL, DIRECT_AI_TURN_OUT_LEN_LOCAL, DIRECT_AI_TURN_OUT_PTR_LOCAL,
+    DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U32_OK_OFFSET, DirectCoreFunctionIndices,
+    DirectCoreStaticData, DirectDataSegment, DirectRunPlan, DirectVariables,
 };
 use crate::direct_wasm::plan::{
     DirectAiMemoryPlan, DirectAiToolPlan, DirectErrorRoutePlan, DirectFailureTarget,
@@ -99,6 +106,15 @@ pub(super) fn pop_child_frame(body: &mut WasmFunction, result: (u32, u32)) {
     }
 }
 
+/// Retry policy for each chat-turn call: the AiAgent's `maxRetries` /
+/// `retryDelay` and the workflow's rate-limit budget.
+#[derive(Clone, Copy)]
+pub(super) struct TurnRetry {
+    pub(super) max_retries: u32,
+    pub(super) retry_delay_ms: u64,
+    pub(super) rate_limit_budget_ms: u64,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_ai_agent_loop_plan(
     body: &mut WasmFunction,
@@ -115,6 +131,7 @@ pub(super) fn emit_ai_agent_loop_plan(
     max_iterations: u32,
     tools: &[DirectAiToolPlan],
     memory: Option<&DirectAiMemoryPlan>,
+    retry: TurnRetry,
     next_plan: &DirectRunPlan,
     error_plan: Option<&DirectErrorRoutePlan>,
     data_ptr_local: u32,
@@ -533,55 +550,145 @@ pub(super) fn emit_ai_agent_loop_plan(
     );
 
     // turn_out = invoke chat-turn(turn_input)
-    emit_agent_invoke(
-        body,
-        indices,
-        turn_invoke,
-        turn_capability,
-        static_data,
-        agent_id,
-        DIRECT_AI_TURN_INPUT_PTR_LOCAL,
-        DIRECT_AI_TURN_INPUT_LEN_LOCAL,
-        source_ptr_local,
-        source_len_local,
-        super::agent_invoke::AgentInvocationSite::AiTurn,
-    );
-    super::deadline_scope::propagate(
-        body,
-        indices,
-        failure_target.map(|target| target.nested(turn_failure_depth)),
-    );
-    emit_agent_invoke_error_branch(
-        body,
-        indices,
-        static_data,
-        track_events,
-        agent_id,
-        step_id,
-        output_ptr_local,
-        output_len_local,
-        source_ptr_local,
-        source_len_local,
-        steps_ptr_local,
-        steps_len_local,
-        error_plan,
-        route_ptr_local,
-        route_len_local,
-        variables,
-        data_ptr_local,
-        data_len_local,
-        workflow_log_kind,
-        workflow_error_kind,
-        // Inside Block($outer) + Loop($turn): rejoining handlers and Split
-        // failure collectors must also leave a pending-response cache miss.
-        failure_target.map(|target| target.nested(turn_failure_depth)),
-        handled_target.map(|target| target.nested(turn_failure_depth)),
-    );
-    load_agent_retptr_list(
-        body,
-        DIRECT_AI_TURN_OUT_PTR_LOCAL,
-        DIRECT_AI_TURN_OUT_LEN_LOCAL,
-    );
+    let invoke_turn = |body: &mut WasmFunction| {
+        emit_agent_invoke(
+            body,
+            indices,
+            turn_invoke,
+            turn_capability,
+            static_data,
+            agent_id,
+            DIRECT_AI_TURN_INPUT_PTR_LOCAL,
+            DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+            source_ptr_local,
+            source_len_local,
+            super::agent_invoke::AgentInvocationSite::AiTurn,
+        );
+    };
+    if retry.max_retries == 0 {
+        invoke_turn(body);
+        super::deadline_scope::propagate(
+            body,
+            indices,
+            failure_target.map(|target| target.nested(turn_failure_depth)),
+        );
+        emit_agent_invoke_error_branch(
+            body,
+            indices,
+            static_data,
+            track_events,
+            agent_id,
+            step_id,
+            output_ptr_local,
+            output_len_local,
+            source_ptr_local,
+            source_len_local,
+            steps_ptr_local,
+            steps_len_local,
+            error_plan,
+            route_ptr_local,
+            route_len_local,
+            variables,
+            data_ptr_local,
+            data_len_local,
+            workflow_log_kind,
+            workflow_error_kind,
+            // Inside Block($outer) + Loop($turn): rejoining handlers and Split
+            // failure collectors must also leave a pending-response cache miss.
+            failure_target.map(|target| target.nested(turn_failure_depth)),
+            handled_target.map(|target| target.nested(turn_failure_depth)),
+        );
+    } else {
+        // Retry this turn's LLM call in-run, with the Agent step's retry
+        // state machine: a retryable failure sleeps and calls again; the
+        // last failure routes like an unretried one. Each turn starts with
+        // a fresh attempt count and rate-limit wait total.
+        body.instruction(&Instruction::I32Const(1));
+        body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
+        body.instruction(&Instruction::I64Const(0));
+        body.instruction(&Instruction::LocalSet(
+            DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
+        ));
+        body.instruction(&Instruction::Block(BlockType::Empty));
+        body.instruction(&Instruction::Loop(BlockType::Empty));
+        invoke_turn(body);
+        super::deadline_scope::propagate(
+            body,
+            indices,
+            failure_target.map(|target| target.nested(turn_failure_depth + 2)),
+        );
+        load_retptr_tag(body);
+        body.instruction(&Instruction::LocalSet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        emit_agent_capture_retry_sleep(body);
+        emit_agent_retry_error_info(
+            body,
+            indices,
+            DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
+            DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
+        );
+        emit_agent_retry_condition(
+            body,
+            retry.max_retries,
+            retry.retry_delay_ms,
+            retry.rate_limit_budget_ms,
+        );
+        body.instruction(&Instruction::If(BlockType::Empty));
+        emit_agent_advance_retry_attempt(body);
+        emit_agent_retry_delay(
+            body,
+            indices,
+            retry.max_retries,
+            retry.retry_delay_ms,
+            retry.rate_limit_budget_ms,
+        );
+        emit_agent_retry_sleep(body, indices);
+        body.instruction(&Instruction::Br(2)); // Br $retry
+        body.instruction(&Instruction::End);
+        emit_agent_invoke_error_body_from_info(
+            body,
+            indices,
+            static_data,
+            track_events,
+            agent_id,
+            step_id,
+            output_ptr_local,
+            output_len_local,
+            DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
+            DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
+            source_ptr_local,
+            source_len_local,
+            steps_ptr_local,
+            steps_len_local,
+            error_plan,
+            route_ptr_local,
+            route_len_local,
+            variables,
+            data_ptr_local,
+            data_len_local,
+            workflow_log_kind,
+            workflow_error_kind,
+            failure_target.map(|target| target.nested(turn_failure_depth + 3)),
+            handled_target.map(|target| target.nested(turn_failure_depth + 3)),
+        );
+        body.instruction(&Instruction::End); // failed attempt
+        load_agent_retptr_list(
+            body,
+            DIRECT_AI_TURN_OUT_PTR_LOCAL,
+            DIRECT_AI_TURN_OUT_LEN_LOCAL,
+        );
+        body.instruction(&Instruction::Br(1)); // leave the retry block
+        body.instruction(&Instruction::End); // $retry
+        body.instruction(&Instruction::End); // retry block
+    }
+    if retry.max_retries == 0 {
+        load_agent_retptr_list(
+            body,
+            DIRECT_AI_TURN_OUT_PTR_LOCAL,
+            DIRECT_AI_TURN_OUT_LEN_LOCAL,
+        );
+    }
 
     if durable_checkpoint {
         body.instruction(&Instruction::I32Const(1));
