@@ -57,6 +57,13 @@
 //! | E135 | UndeclaredStateField | SetState writes a field not declared in stateSchema |
 //! | E136 | ReservedStepId | A step id collides with the onError error context (`error`, `__error`) |
 //! | E137 | ReservedVariableName | A declared or config variable shadows a runtime-owned binding (`_instance_id`, `_item`, …) |
+//! | E138 | UnsupportedGraphShape | An otherwise valid graph the compiler's support gate rejects (save-time backstop) |
+//! | E139 | ConditionedEdgesWithoutDefault | Conditioned normal edges without a default edge |
+//! | E140 | ConditionalMissingBranch | Conditional without a `true` or `false` edge |
+//! | E141 | RoutingSwitchMissingDefault | Routing Switch without a `default` edge |
+//! | E142 | OnErrorUnsupportedSource | onError edge from a step type that cannot route failures |
+//! | E143 | UnknownEdgeLabel | Edge label the source step type does not route on |
+//! | E144 | FanoutBranchConditionedExit | Parallel fan-out branch with a conditioned exit before the merge |
 //! | E043 | InvalidChildVersion | Invalid child workflow version format |
 //! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
 //! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
@@ -618,6 +625,36 @@ pub enum ValidationError {
     /// `runtara_dsl::RUNTIME_VARIABLE_NAMES`), which it would shadow. `scope`
     /// names where it was declared.
     ReservedVariableName { scope: String, name: String },
+    /// The graph is otherwise valid, but the compiler cannot lower this shape
+    /// yet, so saving it would only fail at compile. Carries the compiler's
+    /// own reason.
+    UnsupportedGraphShape {
+        step_id: Option<String>,
+        feature: String,
+        reason: String,
+    },
+    /// A step has conditioned normal edges but no unconditioned one to take
+    /// when none matches.
+    ConditionedEdgesWithoutDefault { from_step: String },
+    /// A Conditional step is missing its `true` or `false` edge.
+    ConditionalMissingBranch { step_id: String, branch: String },
+    /// A routing Switch (a case has a `route`) has no `default` edge.
+    RoutingSwitchMissingDefault { step_id: String },
+    /// An `onError` edge leaves a step type that cannot route its failures.
+    OnErrorUnsupportedSource { step_id: String, step_type: String },
+    /// An edge label the source step type does not route on.
+    UnknownEdgeLabel {
+        from_step: String,
+        step_type: String,
+        label: String,
+        allowed: Vec<String>,
+    },
+    /// A parallel fan-out branch leaves through a conditioned edge before
+    /// reaching the merge point, so the branches cannot run as one region.
+    FanoutBranchConditionedExit {
+        from_step: String,
+        branch_step: String,
+    },
 }
 
 /// Information about a missing required input field.
@@ -697,6 +734,13 @@ impl ValidationError {
             Self::UndeclaredStateField { .. } => "E135",
             Self::ReservedStepId { .. } => "E136",
             Self::ReservedVariableName { .. } => "E137",
+            Self::UnsupportedGraphShape { .. } => "E138",
+            Self::ConditionedEdgesWithoutDefault { .. } => "E139",
+            Self::ConditionalMissingBranch { .. } => "E140",
+            Self::RoutingSwitchMissingDefault { .. } => "E141",
+            Self::OnErrorUnsupportedSource { .. } => "E142",
+            Self::UnknownEdgeLabel { .. } => "E143",
+            Self::FanoutBranchConditionedExit { .. } => "E144",
         }
     }
 }
@@ -1466,6 +1510,70 @@ impl std::fmt::Display for ValidationError {
                  the value the runtime sets. Rename the variable.",
                 name, scope
             ),
+            ValidationError::UnsupportedGraphShape {
+                step_id,
+                feature,
+                reason,
+            } => match step_id {
+                Some(step_id) => write!(
+                    f,
+                    "[E138] Step '{}' uses a graph shape the compiler cannot build ({}): {}",
+                    step_id, feature, reason
+                ),
+                None => write!(
+                    f,
+                    "[E138] The workflow uses a graph shape the compiler cannot build ({}): {}",
+                    feature, reason
+                ),
+            },
+            ValidationError::ConditionedEdgesWithoutDefault { from_step } => write!(
+                f,
+                "[E139] Step '{}' has conditioned edges but no unconditioned edge to follow \
+                 when none of the conditions match. Add one default edge.",
+                from_step
+            ),
+            ValidationError::ConditionalMissingBranch { step_id, branch } => write!(
+                f,
+                "[E140] Conditional step '{}' has no '{}' edge. A Conditional needs both a \
+                 'true' and a 'false' edge.",
+                step_id, branch
+            ),
+            ValidationError::RoutingSwitchMissingDefault { step_id } => write!(
+                f,
+                "[E141] Routing Switch '{}' has no 'default' edge for values that match no \
+                 case. Add an edge labelled 'default'.",
+                step_id
+            ),
+            ValidationError::OnErrorUnsupportedSource { step_id, step_type } => write!(
+                f,
+                "[E142] {} step '{}' cannot route failures through onError. onError edges \
+                 are supported on Agent, AiAgent, EmbedWorkflow, Split, While, \
+                 WaitForSignal, WaitForInstances, SetState and GetState steps.",
+                step_type, step_id
+            ),
+            ValidationError::UnknownEdgeLabel {
+                from_step,
+                step_type,
+                label,
+                allowed,
+            } => write!(
+                f,
+                "[E143] Edge label '{}' on {} step '{}' is not one it routes on. Use one of: {}.",
+                label,
+                step_type,
+                from_step,
+                allowed.join(", ")
+            ),
+            ValidationError::FanoutBranchConditionedExit {
+                from_step,
+                branch_step,
+            } => write!(
+                f,
+                "[E144] Parallel branch step '{}' (fanned out from '{}') has a conditioned \
+                 exit. Branches of a fan-out must run straight to their merge point; route \
+                 conditionally after the merge.",
+                branch_step, from_step
+            ),
         }
     }
 }
@@ -2218,6 +2326,123 @@ impl ClosureValidationReport {
     }
 }
 
+/// Save-time backstop: run the compiler's own support gate on a graph that
+/// passed every other check, so a shape the emitter cannot lower is rejected
+/// at save with the compiler's reason instead of only at compile (E138).
+/// `children` is the closure keyed by call-site step id, as the compiler sees
+/// it; a child's own unsupported shapes are reported on the child, so the
+/// embed features that only repeat them are skipped here.
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
+fn report_unsupported_graph_shapes(
+    graph: &ExecutionGraph,
+    children: &[crate::compile::ChildWorkflowInput],
+    result: &mut ValidationResult,
+) {
+    if result.has_errors() {
+        return;
+    }
+    let report =
+        crate::direct_wasm::analyze_direct_wasm_support_with_child_workflows(graph, children);
+    let mut seen = HashSet::new();
+    for feature in report.unsupported {
+        if feature.feature.starts_with("embed-workflow")
+            || !seen.insert((feature.step_id.clone(), feature.feature.clone()))
+        {
+            continue;
+        }
+        result.errors.push(ValidationError::UnsupportedGraphShape {
+            step_id: feature.step_id,
+            feature: feature.feature,
+            reason: feature.reason,
+        });
+    }
+}
+
+/// Every EmbedWorkflow call site in `graph` (Split/While bodies included)
+/// paired with the child graph it runs, in the compiler's input shape.
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
+fn collect_closure_call_sites(
+    graph: &ExecutionGraph,
+    children_map: &HashMap<String, ExecutionGraph>,
+    out: &mut Vec<crate::compile::ChildWorkflowInput>,
+) {
+    for (step_id, step) in &graph.steps {
+        match step {
+            Step::EmbedWorkflow(embed) => {
+                if let Some(child) = children_map.get(&embed.child_workflow_id) {
+                    out.push(crate::compile::ChildWorkflowInput {
+                        step_id: step_id.clone(),
+                        workflow_id: embed.child_workflow_id.clone(),
+                        version_requested: "latest".to_string(),
+                        version_resolved: 0,
+                        execution_graph: child.clone(),
+                    });
+                }
+            }
+            Step::Split(split_step) => {
+                collect_closure_call_sites(&split_step.subgraph, children_map, out)
+            }
+            Step::While(while_step) => {
+                collect_closure_call_sites(&while_step.subgraph, children_map, out)
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
+fn report_closure_unsupported_shapes(
+    root: &ExecutionGraph,
+    root_result: &mut ValidationResult,
+    children: &[ClosureChildGraph],
+    child_reports: &mut [ChildValidationReport],
+    children_map: &HashMap<String, ExecutionGraph>,
+) {
+    let mut call_sites = Vec::new();
+    collect_closure_call_sites(root, children_map, &mut call_sites);
+    let mut seen = HashSet::new();
+    for child in children {
+        if seen.insert((child.workflow_id.as_str(), child.version)) {
+            collect_closure_call_sites(&child.execution_graph, children_map, &mut call_sites);
+        }
+    }
+    report_unsupported_graph_shapes(root, &call_sites, root_result);
+    for report in child_reports {
+        if let Some(child) = children
+            .iter()
+            .find(|c| c.workflow_id == report.workflow_id && c.version == report.version)
+        {
+            report_unsupported_graph_shapes(
+                &child.execution_graph,
+                &call_sites,
+                &mut report.result,
+            );
+        }
+    }
+}
+
+#[cfg(not(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+)))]
+fn report_closure_unsupported_shapes(
+    _root: &ExecutionGraph,
+    _root_result: &mut ValidationResult,
+    _children: &[ClosureChildGraph],
+    _child_reports: &mut [ChildValidationReport],
+    _children_map: &HashMap<String, ExecutionGraph>,
+) {
+}
+
 /// Recursively validate a workflow and its full static child closure.
 ///
 /// Every graph in the closure — the root and each unique child at any
@@ -2328,6 +2553,13 @@ pub fn validate_workflow_closure(
             .errors
             .push(ValidationError::DuplicateEmbedStepId { step_id });
     }
+    report_closure_unsupported_shapes(
+        root,
+        &mut root_result,
+        children,
+        &mut child_reports,
+        &children_map,
+    );
 
     ClosureValidationReport {
         root: root_result,
@@ -2931,6 +3163,216 @@ fn parallel_branches_reconverge(graph: &ExecutionGraph, branch_starts: &[String]
     first
         .iter()
         .any(|node| rest.iter().all(|set| set.contains(node)))
+}
+
+/// The edge shapes the compiler can lower, checked with author-facing
+/// messages (E139–E144) instead of the support gate's cascade (E138).
+fn validate_edge_shapes(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    fn normal_label(edge: &runtara_dsl::ExecutionPlanEdge) -> Option<&str> {
+        edge.label.as_deref().filter(|label| *label != "next")
+    }
+    let outgoing = |step_id: &str| {
+        graph
+            .execution_plan
+            .iter()
+            .filter(|edge| edge.from_step == step_id)
+            .collect::<Vec<_>>()
+    };
+    let mut step_ids: Vec<&String> = graph.steps.keys().collect();
+    step_ids.sort();
+    for step_id in step_ids {
+        let step = &graph.steps[step_id];
+        let edges = outgoing(step_id);
+        let step_type = crate::workflow_features::step_type_name(step);
+        let routing_switch = matches!(
+            step,
+            Step::Switch(switch) if switch.config.as_ref().is_some_and(|c| c.is_routing())
+        );
+        match step {
+            Step::Conditional(_) => {
+                for branch in ["true", "false"] {
+                    if !edges.iter().any(|edge| normal_label(edge) == Some(branch)) {
+                        result
+                            .errors
+                            .push(ValidationError::ConditionalMissingBranch {
+                                step_id: step_id.clone(),
+                                branch: branch.to_string(),
+                            });
+                    }
+                }
+            }
+            Step::Switch(switch) if routing_switch => {
+                let routes: Vec<String> = switch
+                    .config
+                    .as_ref()
+                    .map(|config| {
+                        config
+                            .route_labels()
+                            .into_iter()
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !edges
+                    .iter()
+                    .any(|edge| normal_label(edge) == Some("default"))
+                {
+                    result
+                        .errors
+                        .push(ValidationError::RoutingSwitchMissingDefault {
+                            step_id: step_id.clone(),
+                        });
+                }
+                let mut allowed = routes.clone();
+                allowed.push("default".to_string());
+                for edge in &edges {
+                    if let Some(label) = normal_label(edge)
+                        && !allowed.iter().any(|known| known == label)
+                    {
+                        result.errors.push(ValidationError::UnknownEdgeLabel {
+                            from_step: step_id.clone(),
+                            step_type: step_type.to_string(),
+                            label: label.to_string(),
+                            allowed: allowed.clone(),
+                        });
+                    }
+                }
+            }
+            // Tool, memory and MCP labels are checked by the AiAgent rules.
+            Step::AiAgent(_) => {}
+            _ => {
+                for edge in &edges {
+                    if let Some(label) = normal_label(edge)
+                        && label != "onError"
+                    {
+                        result.errors.push(ValidationError::UnknownEdgeLabel {
+                            from_step: step_id.clone(),
+                            step_type: step_type.to_string(),
+                            label: label.to_string(),
+                            allowed: vec!["next".to_string(), "onError".to_string()],
+                        });
+                    }
+                }
+            }
+        }
+
+        if edges
+            .iter()
+            .any(|edge| edge.label.as_deref() == Some("onError"))
+            && !matches!(
+                step,
+                Step::Agent(_)
+                    | Step::AiAgent(_)
+                    | Step::EmbedWorkflow(_)
+                    | Step::Split(_)
+                    | Step::While(_)
+                    | Step::WaitForSignal(_)
+                    | Step::WaitForInstances(_)
+                    | Step::SetState(_)
+                    | Step::GetState(_)
+            )
+        {
+            result
+                .errors
+                .push(ValidationError::OnErrorUnsupportedSource {
+                    step_id: step_id.clone(),
+                    step_type: step_type.to_string(),
+                });
+        }
+
+        if !matches!(step, Step::Conditional(_)) && !routing_switch {
+            let normal: Vec<_> = edges
+                .iter()
+                .filter(|edge| normal_label(edge).is_none())
+                .collect();
+            if normal.iter().any(|edge| edge.condition.is_some())
+                && !normal.iter().any(|edge| edge.condition.is_none())
+            {
+                result
+                    .errors
+                    .push(ValidationError::ConditionedEdgesWithoutDefault {
+                        from_step: step_id.clone(),
+                    });
+            }
+        }
+    }
+    validate_fanout_branch_exits(graph, result);
+
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => result.in_subgraph(&split_step.id, |result| {
+                validate_edge_shapes(&split_step.subgraph, result)
+            }),
+            Step::While(while_step) => result.in_subgraph(&while_step.id, |result| {
+                validate_edge_shapes(&while_step.subgraph, result)
+            }),
+            Step::WaitForSignal(wait_step) => {
+                if let Some(on_wait) = &wait_step.on_wait {
+                    result.in_subgraph(&wait_step.id, |result| {
+                        validate_edge_shapes(on_wait, result)
+                    })
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// E144: in a parallel fan-out (two or more unconditioned normal edges and no
+/// conditioned ones), no step between a branch start and the merge point may
+/// leave the region through a conditioned edge.
+fn validate_fanout_branch_exits(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    let is_normal = |edge: &&runtara_dsl::ExecutionPlanEdge| {
+        matches!(edge.label.as_deref(), None | Some("next"))
+    };
+    let mut sources: Vec<&String> = graph.steps.keys().collect();
+    sources.sort();
+    for from_step in sources {
+        let normal: Vec<_> = graph
+            .execution_plan
+            .iter()
+            .filter(|edge| edge.from_step == *from_step)
+            .filter(is_normal)
+            .collect();
+        if normal.len() < 2 || normal.iter().any(|edge| edge.condition.is_some()) {
+            continue;
+        }
+        let starts: Vec<String> = normal.iter().map(|edge| edge.to_step.clone()).collect();
+        let reachable: Vec<HashSet<String>> = starts
+            .iter()
+            .map(|start| reachable_over_normal_flow(graph, start))
+            .collect();
+        let merge: HashSet<&String> = reachable[0]
+            .iter()
+            .filter(|node| reachable[1..].iter().all(|set| set.contains(*node)))
+            .collect();
+        let mut flagged: Vec<String> = reachable
+            .iter()
+            .flatten()
+            .filter(|node| !merge.contains(node))
+            .filter(|node| {
+                // Only a conditioned edge that leaves the fan-out region; one
+                // into the merge point is harmless.
+                graph.execution_plan.iter().any(|edge| {
+                    edge.from_step == **node
+                        && is_normal(&edge)
+                        && edge.condition.is_some()
+                        && !merge.contains(&edge.to_step)
+                })
+            })
+            .cloned()
+            .collect();
+        flagged.sort();
+        flagged.dedup();
+        for branch_step in flagged {
+            result
+                .errors
+                .push(ValidationError::FanoutBranchConditionedExit {
+                    from_step: from_step.clone(),
+                    branch_step,
+                });
+        }
+    }
 }
 
 /// Steps reachable from `start` following normal-flow edges (everything except
@@ -5321,6 +5763,7 @@ fn collect_step_names(
 /// - Conditional step outgoing edges must be unconditioned `true`/`false` branches
 fn validate_edge_conditions(graph: &ExecutionGraph, result: &mut ValidationResult) {
     validate_edge_conditions_recursive(graph, result);
+    validate_edge_shapes(graph, result);
 }
 
 /// E027: workflow conditions must not use operators that only exist for
@@ -7132,8 +7575,9 @@ fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult
                 if edge.from_step == *step_id
                     && let Some(ref label) = edge.label
                 {
-                    // "next" is reserved for the default/continuation edge, not a tool
-                    if label == "next" {
+                    // "next" and "onError" route the step itself; neither is a
+                    // tool label (two conditioned onError edges are valid).
+                    if label == "next" || label == "onError" {
                         continue;
                     }
 
@@ -15321,10 +15765,17 @@ mod tests {
         ];
 
         let result = validate_workflow(&graph, &test_catalog());
+        // Log keeps the fixture free of capability inputs; it cannot route
+        // onError (E142), which is not what this test is about.
+        let edge_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|error| error.code() != "E142")
+            .collect();
         assert!(
-            !result.has_errors(),
+            edge_errors.is_empty(),
             "Should pass: unique priorities on onError edges. Errors: {:?}",
-            result.errors
+            edge_errors
         );
     }
 
@@ -15462,10 +15913,17 @@ mod tests {
         ];
 
         let result = validate_workflow(&graph, &test_catalog());
+        // Log keeps the fixture free of capability inputs; it cannot route
+        // onError (E142), which is not what this test is about.
+        let edge_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|error| error.code() != "E142")
+            .collect();
         assert!(
-            !result.has_errors(),
+            edge_errors.is_empty(),
             "Should pass: one conditional + one default onError edge. Errors: {:?}",
-            result.errors
+            edge_errors
         );
     }
 
@@ -17410,5 +17868,166 @@ mod reserved_name_tests {
                 .iter()
                 .any(|m| m.contains("'_tenant_id' in Split 'split' config.variables"))
         );
+    }
+}
+
+#[cfg(test)]
+mod edge_shape_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn echo(id: &str) -> Value {
+        json!({"stepType": "Agent", "id": id, "agentId": "utils", "capabilityId": "return-input",
+               "inputMapping": {"value": {"valueType": "immediate", "value": 1}}})
+    }
+
+    fn fin(id: &str) -> Value {
+        json!({"stepType": "Finish", "id": id})
+    }
+
+    fn cond() -> Value {
+        json!({"type": "operation", "op": "EQ", "arguments": [
+            {"valueType": "immediate", "value": 1}, {"valueType": "immediate", "value": 1}]})
+    }
+
+    fn closure_codes(graph: Value) -> Vec<String> {
+        let graph: ExecutionGraph = serde_json::from_value(graph).expect("graph parses");
+        validate_workflow_closure("root", &graph, &super::tests::test_catalog(), &[])
+            .errors()
+            .map(|(_, error)| error.code().to_string())
+            .collect()
+    }
+
+    /// The shapes the DSL audit found saving cleanly and failing only at
+    /// compile (B3, B4, B6) each get one targeted error, not the gate's cascade.
+    #[test]
+    fn shapes_the_compiler_cannot_build_get_targeted_errors() {
+        let cases = [
+            (
+                "E141",
+                json!({"entryPoint": "sw", "steps": {
+                "sw": {"stepType": "Switch", "id": "sw", "config": {
+                    "value": {"valueType": "immediate", "value": "x"},
+                    "cases": [{"matchType": "EQ", "match": "x", "output": "X", "route": "rx"}]}},
+                "frx": fin("frx")},
+                "executionPlan": [{"fromStep": "sw", "toStep": "frx", "label": "rx"}]}),
+            ),
+            (
+                "E140",
+                json!({"entryPoint": "c", "steps": {
+                "c": {"stepType": "Conditional", "id": "c", "condition": cond()}, "t": fin("t")},
+                "executionPlan": [{"fromStep": "c", "toStep": "t", "label": "true"}]}),
+            ),
+            (
+                "E139",
+                json!({"entryPoint": "a", "steps": {"a": echo("a"), "b": fin("b"), "c": fin("c")},
+                "executionPlan": [
+                    {"fromStep": "a", "toStep": "b", "condition": cond(), "priority": 2},
+                    {"fromStep": "a", "toStep": "c", "condition": cond(), "priority": 1}]}),
+            ),
+            (
+                "E142",
+                json!({"entryPoint": "flt", "steps": {
+                "flt": {"stepType": "Filter", "id": "flt", "config": {
+                    "value": {"valueType": "immediate", "value": [1]}, "condition": cond()}},
+                "ok": fin("ok"), "h": fin("h")},
+                "executionPlan": [{"fromStep": "flt", "toStep": "ok"},
+                                  {"fromStep": "flt", "toStep": "h", "label": "onError"}]}),
+            ),
+            (
+                "E143",
+                json!({"entryPoint": "a", "steps": {"a": echo("a"), "b": fin("b"), "c": fin("c")},
+                "executionPlan": [{"fromStep": "a", "toStep": "b"},
+                                  {"fromStep": "a", "toStep": "c", "label": "bogusLabel"}]}),
+            ),
+            (
+                "E144",
+                json!({"entryPoint": "a", "steps": {
+                "a": echo("a"), "b": echo("b"), "c": echo("c"), "j": echo("j"),
+                "fj": fin("fj"), "fc": fin("fc")},
+                "executionPlan": [
+                    {"fromStep": "a", "toStep": "b"}, {"fromStep": "a", "toStep": "c"},
+                    {"fromStep": "b", "toStep": "j"}, {"fromStep": "c", "toStep": "j"},
+                    {"fromStep": "c", "toStep": "fc", "condition": cond(), "priority": 1},
+                    {"fromStep": "j", "toStep": "fj"}]}),
+            ),
+            // B6: "" is read as no label, so this is two default edges.
+            (
+                "E071",
+                json!({"entryPoint": "a", "steps": {
+                "a": echo("a"), "b": fin("b"), "c": fin("c"), "d": fin("d")},
+                "executionPlan": [
+                    {"fromStep": "a", "toStep": "b", "condition": cond(), "priority": 1},
+                    {"fromStep": "a", "toStep": "c"},
+                    {"fromStep": "a", "toStep": "d", "label": ""}]}),
+            ),
+        ];
+        for (expected, graph) in cases {
+            assert_eq!(
+                closure_codes(graph),
+                vec![expected.to_string()],
+                "{expected}"
+            );
+        }
+    }
+
+    /// A conditioned edge from a fan-out branch into the merge point is not a
+    /// conditioned exit.
+    #[test]
+    fn a_conditioned_edge_into_the_merge_point_is_not_a_branch_exit() {
+        let codes = closure_codes(json!({"entryPoint": "a", "steps": {
+            "a": echo("a"), "b": echo("b"), "c": echo("c"), "j": echo("j"), "fj": fin("fj")},
+            "executionPlan": [
+                {"fromStep": "a", "toStep": "b"}, {"fromStep": "a", "toStep": "c"},
+                {"fromStep": "b", "toStep": "j"},
+                {"fromStep": "c", "toStep": "j", "condition": cond(), "priority": 1},
+                {"fromStep": "c", "toStep": "j"},
+                {"fromStep": "j", "toStep": "fj"}]}));
+        assert!(!codes.contains(&"E144".to_string()), "{codes:?}");
+    }
+
+    /// Two conditioned onError edges on an AiAgent are a valid shape, not a
+    /// duplicate tool label (the false E110 in B6).
+    #[test]
+    fn conditioned_on_error_edges_on_an_ai_agent_are_valid() {
+        let codes = closure_codes(json!({"entryPoint": "ai", "steps": {
+            "ai": {"stepType": "AiAgent", "id": "ai", "connectionId": "conn", "config": {
+                "systemPrompt": {"valueType": "immediate", "value": "s"},
+                "userPrompt": {"valueType": "immediate", "value": "u"}}},
+            "ok": fin("ok"), "h1": fin("h1"), "h2": fin("h2")},
+            "executionPlan": [
+                {"fromStep": "ai", "toStep": "ok"},
+                {"fromStep": "ai", "toStep": "h1", "label": "onError", "condition": cond(), "priority": 2},
+                {"fromStep": "ai", "toStep": "h2", "label": "onError", "condition": cond(), "priority": 1}]}));
+        assert!(codes.is_empty(), "{codes:?}");
+    }
+
+    /// The backstop reports the compiler's own reason for a shape no targeted
+    /// rule names, and stays quiet once another error explains the graph.
+    #[test]
+    fn the_support_gate_backstop_reports_only_otherwise_valid_graphs() {
+        let graph: ExecutionGraph = serde_json::from_value(json!({"entryPoint": "c", "steps": {
+            "c": {"stepType": "Conditional", "id": "c", "condition": cond()}, "t": fin("t")},
+            "executionPlan": [{"fromStep": "c", "toStep": "t", "label": "true"}]}))
+        .unwrap();
+        let mut clean = ValidationResult::default();
+        report_unsupported_graph_shapes(&graph, &[], &mut clean);
+        assert!(!clean.errors.is_empty());
+        assert!(clean.errors.iter().all(|error| error.code() == "E138"));
+        assert!(
+            clean.errors[0]
+                .to_string()
+                .contains("compiler cannot build")
+        );
+
+        let mut explained = ValidationResult::default();
+        explained
+            .errors
+            .push(ValidationError::ConditionalMissingBranch {
+                step_id: "c".into(),
+                branch: "false".into(),
+            });
+        report_unsupported_graph_shapes(&graph, &[], &mut explained);
+        assert_eq!(explained.errors.len(), 1);
     }
 }

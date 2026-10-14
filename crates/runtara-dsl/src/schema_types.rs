@@ -181,6 +181,16 @@ pub struct ExecutionGraph {
     pub durable: Option<bool>,
 }
 
+/// Read an empty edge label as no label, so `""` and an absent label are the
+/// same normal edge everywhere (validation, compile, runtime).
+fn deserialize_edge_label<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let label = Option::<String>::deserialize(deserializer)?;
+    Ok(label.filter(|label| !label.is_empty()))
+}
+
 fn default_rate_limit_budget_ms() -> u64 {
     60_000
 }
@@ -249,8 +259,13 @@ pub struct ExecutionPlanEdge {
     /// Edge label for control flow:
     /// - `"true"`/`"false"` for Conditional step branches
     /// - `"onError"` for error handling transition (step failed after retries)
-    /// - `None` or empty for normal sequential flow
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// - `None` or empty for normal sequential flow (an empty label is read
+    ///   as no label)
+    #[serde(
+        default,
+        deserialize_with = "deserialize_edge_label",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub label: Option<String>,
 
     /// Optional condition expression for conditional transitions.
@@ -2614,5 +2629,23 @@ mod note_metadata_tests {
         assert!(note.metadata.as_ref().unwrap().anchor_step_id.is_none());
         let back = serde_json::to_value(&note).unwrap();
         assert!(back["metadata"].get("anchorStepId").is_none());
+    }
+}
+
+#[cfg(test)]
+mod edge_label_tests {
+    use super::ExecutionPlanEdge;
+
+    #[test]
+    fn an_empty_edge_label_is_no_label() {
+        let edge: ExecutionPlanEdge =
+            serde_json::from_value(serde_json::json!({"fromStep": "a", "toStep": "b", "label": ""}))
+                .unwrap();
+        assert_eq!(edge.label, None);
+        let edge: ExecutionPlanEdge = serde_json::from_value(
+            serde_json::json!({"fromStep": "a", "toStep": "b", "label": "onError"}),
+        )
+        .unwrap();
+        assert_eq!(edge.label.as_deref(), Some("onError"));
     }
 }

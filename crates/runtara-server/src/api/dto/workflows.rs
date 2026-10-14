@@ -705,6 +705,38 @@ impl ValidationErrorDto {
                 Some(format!("variables.{name}")),
                 None,
             ),
+            ValidationError::UnsupportedGraphShape { step_id, .. } => {
+                (error.to_string(), step_id.clone(), None, None)
+            }
+            ValidationError::ConditionedEdgesWithoutDefault { from_step }
+            | ValidationError::UnknownEdgeLabel { from_step, .. } => (
+                error.to_string(),
+                Some(from_step.clone()),
+                Some("executionPlan".into()),
+                None,
+            ),
+            ValidationError::ConditionalMissingBranch { step_id, .. }
+            | ValidationError::RoutingSwitchMissingDefault { step_id } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some("executionPlan".into()),
+                None,
+            ),
+            ValidationError::OnErrorUnsupportedSource { step_id, .. } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some("executionPlan".into()),
+                None,
+            ),
+            ValidationError::FanoutBranchConditionedExit {
+                from_step,
+                branch_step,
+            } => (
+                error.to_string(),
+                Some(branch_step.clone()),
+                Some("executionPlan".into()),
+                Some(vec![from_step.clone()]),
+            ),
         };
 
         Self {
