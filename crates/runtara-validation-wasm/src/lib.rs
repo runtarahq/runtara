@@ -45,6 +45,14 @@ struct ValidationResponse {
     valid: bool,
     errors: Vec<String>,
     warnings: Vec<String>,
+    /// Per error, the Split/While/WaitForSignal step ids whose bodies hold
+    /// it (empty: root graph), so same-named steps in different bodies can
+    /// be told apart.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    error_graph_paths: Vec<Vec<String>>,
+    /// Per warning, as `error_graph_paths`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warning_graph_paths: Vec<Vec<String>>,
     message: String,
 }
 
@@ -148,6 +156,8 @@ impl ValidationResponse {
             valid,
             errors,
             warnings,
+            error_graph_paths: Vec::new(),
+            warning_graph_paths: Vec::new(),
             message,
         }
     }
@@ -158,6 +168,8 @@ impl ValidationResponse {
             valid: false,
             errors: vec![message],
             warnings: Vec::new(),
+            error_graph_paths: Vec::new(),
+            warning_graph_paths: Vec::new(),
             message: "Graph validation failed: invalid workflow format".to_string(),
         }
     }
@@ -168,6 +180,8 @@ impl ValidationResponse {
             valid: true,
             errors: Vec::new(),
             warnings: Vec::new(),
+            error_graph_paths: Vec::new(),
+            warning_graph_paths: Vec::new(),
             message: message.into(),
         }
     }
@@ -178,6 +192,8 @@ impl ValidationResponse {
             valid: false,
             errors,
             warnings: Vec::new(),
+            error_graph_paths: Vec::new(),
+            warning_graph_paths: Vec::new(),
             message: message.into(),
         }
     }
@@ -449,8 +465,24 @@ fn validate_execution_graph_json_impl(execution_graph_json: &str) -> ValidationR
         .iter()
         .map(ToString::to_string)
         .collect();
+    let error_graph_paths = (0..validation_result.errors.len())
+        .map(|index| validation_result.error_graph_path(index).to_vec())
+        .collect::<Vec<_>>();
+    let warning_graph_paths = (0..validation_result.warnings.len())
+        .map(|index| validation_result.warning_graph_path(index).to_vec())
+        .collect::<Vec<_>>();
 
-    ValidationResponse::ok(errors, warnings)
+    let mut response = ValidationResponse::ok(errors, warnings);
+    // Only worth sending when some finding sits in a nested body.
+    if error_graph_paths
+        .iter()
+        .chain(&warning_graph_paths)
+        .any(|path| !path.is_empty())
+    {
+        response.error_graph_paths = error_graph_paths;
+        response.warning_graph_paths = warning_graph_paths;
+    }
+    response
 }
 
 fn parse_form_definition(
@@ -707,6 +739,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn reports_the_body_of_each_finding_for_shared_step_ids() {
+        // Splits a and b both hold an `iter_finish`; only b's is unwired.
+        let split = |id: &str, wired: bool| {
+            json!({
+                "id": id,
+                "stepType": "Split",
+                "config": { "value": { "valueType": "reference", "value": "data.rows" } },
+                "subgraph": {
+                    "entryPoint": "log",
+                    "steps": {
+                        "log": { "id": "log", "stepType": "Log", "message": "x" },
+                        "iter_finish": { "id": "iter_finish", "stepType": "Finish" }
+                    },
+                    "executionPlan": if wired {
+                        json!([{ "fromStep": "log", "toStep": "iter_finish", "label": "next" }])
+                    } else {
+                        json!([])
+                    }
+                }
+            })
+        };
+        let graph = json!({
+            "name": "paths",
+            "entryPoint": "a",
+            "inputSchema": { "rows": { "type": "array" } },
+            "steps": {
+                "a": split("a", true),
+                "b": split("b", false),
+                "finish": { "id": "finish", "stepType": "Finish" }
+            },
+            "executionPlan": [
+                { "fromStep": "a", "toStep": "b", "label": "next" },
+                { "fromStep": "b", "toStep": "finish", "label": "next" }
+            ]
+        });
+
+        let result: Value =
+            serde_json::from_str(&validate_execution_graph_json(&graph.to_string())).unwrap();
+
+        let errors = result["errors"].as_array().unwrap();
+        let paths = result["errorGraphPaths"].as_array().unwrap();
+        assert_eq!(errors.len(), paths.len(), "{result}");
+        let unreachable = errors
+            .iter()
+            .position(|error| error.as_str().is_some_and(|m| m.starts_with("[E003]")))
+            .expect("E003 for b's iter_finish");
+        assert_eq!(paths[unreachable], json!(["b"]), "{result}");
     }
 
     #[test]

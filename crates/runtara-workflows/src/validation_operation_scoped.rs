@@ -36,6 +36,8 @@ struct EnclosingScope {
     enclosing_retry: Option<String>,
     on_error: bool,
     on_wait: bool,
+    /// Container step ids from the walked graph to this body.
+    graph_path: Vec<String>,
 }
 
 /// Every context one step is in.
@@ -50,6 +52,8 @@ struct SiteContext {
     on_wait: bool,
     /// Set when an AiAgent edge targets the step.
     ai_role: Option<StepContext>,
+    /// Container step ids from the walked graph to the step's graph.
+    graph_path: Vec<String>,
 }
 
 /// Visit every step of `graph` and its nested graphs with its contexts.
@@ -79,6 +83,12 @@ fn walk_sites(
             on_error: scope.on_error || on_error_region.contains(step_id.as_str()),
             on_wait: scope.on_wait,
             ai_role: ai_roles.get(step_id.as_str()).copied(),
+            graph_path: scope.graph_path.clone(),
+        };
+        let body_path = || {
+            let mut path = scope.graph_path.clone();
+            path.push(step_id.clone());
+            path
         };
         visit(step_id, step, &context);
         let nested = |parallel, enclosing_retry, on_wait| EnclosingScope {
@@ -87,6 +97,7 @@ fn walk_sites(
             enclosing_retry,
             on_error: context.on_error,
             on_wait,
+            graph_path: body_path(),
         };
         match step {
             Step::Split(split) => {
@@ -120,6 +131,7 @@ fn walk_sites(
                         enclosing_retry: context.enclosing_retry.clone(),
                         on_error: context.on_error,
                         on_wait: true,
+                        graph_path: body_path(),
                     };
                     walk_sites(on_wait, graph_durable, &scope, visit);
                 }
@@ -313,30 +325,32 @@ fn apply_shared_contexts(
     enclosing_retry: Option<&str>,
     result: &mut ValidationResult,
 ) {
-    if let Some(role) = context.ai_role {
-        apply_rule(role, kinds, site, None, result);
-    }
-    if context.on_wait {
-        apply_rule(StepContext::OnWait, kinds, site, None, result);
-    }
-    if context.on_error {
-        apply_rule(StepContext::OnErrorRegion, kinds, site, None, result);
-    }
-    if !site_durable {
-        apply_rule(StepContext::NonDurable, kinds, site, None, result);
-    }
-    if let Some((parallel, owner)) = &context.parallel {
-        apply_rule(*parallel, kinds, site, Some(owner), result);
-    }
-    if let Some(owner) = enclosing_retry {
-        apply_rule(
-            StepContext::EnclosingRetry,
-            kinds,
-            site,
-            Some(owner),
-            result,
-        );
-    }
+    result.at_relative_path(&context.graph_path, |result| {
+        if let Some(role) = context.ai_role {
+            apply_rule(role, kinds, site, None, result);
+        }
+        if context.on_wait {
+            apply_rule(StepContext::OnWait, kinds, site, None, result);
+        }
+        if context.on_error {
+            apply_rule(StepContext::OnErrorRegion, kinds, site, None, result);
+        }
+        if !site_durable {
+            apply_rule(StepContext::NonDurable, kinds, site, None, result);
+        }
+        if let Some((parallel, owner)) = &context.parallel {
+            apply_rule(*parallel, kinds, site, Some(owner), result);
+        }
+        if let Some(owner) = enclosing_retry {
+            apply_rule(
+                StepContext::EnclosingRetry,
+                kinds,
+                site,
+                Some(owner),
+                result,
+            );
+        }
+    });
 }
 
 /// The diagnostic label of a WaitForInstances site, in the place of an

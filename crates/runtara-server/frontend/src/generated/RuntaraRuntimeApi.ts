@@ -4749,6 +4749,12 @@ export interface ValidationErrorDto {
   code: string;
   /** Field name with the error (if applicable) */
   fieldName?: string | null;
+  /**
+   * The Split, While or WaitForSignal steps whose bodies hold `step_id`,
+   * outermost first; absent for the root graph. Step ids are unique per
+   * graph only, so this tells same-named steps in different bodies apart.
+   */
+  graphPath?: string[] | null;
   /** Human-readable error message */
   message: string;
   /** Additional step IDs involved (for errors spanning multiple steps) */

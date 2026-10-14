@@ -17,6 +17,7 @@ import {
 } from '@/features/workflows/types/execution-graph';
 import { ValidationError } from '@/shared/hooks/api';
 import {
+  canvasNodeStepId,
   composeExecutionGraph,
   executionGraphToReactFlow,
   getLayoutedElements,
@@ -31,6 +32,7 @@ import {
   STEP_TYPES,
 } from '@/features/workflows/config/workflow.ts';
 import { validateConnection } from '@/features/workflows/utils/graph-validation';
+import { createGraphNodeResolver } from '@/features/workflows/utils/step-node-resolver';
 
 // State holds Sets (stagedNodeIds, stepsWithErrors); renameStep reads them
 // inside an immer draft, which requires the MapSet plugin.
@@ -146,7 +148,11 @@ export function getStepIdValidationError(
     return `'${candidate}' is reserved by the runtime`;
   }
   for (const id of existingIds) {
-    if (id === candidate) {
+    // A qualified canvas node id also claims its real step id.
+    if (
+      id === candidate ||
+      (id !== currentId && canvasNodeStepId(id) === candidate)
+    ) {
       return `A step with id '${candidate}' already exists`;
     }
   }
@@ -187,7 +193,10 @@ export function generateStepId(
     base = 'step';
   }
 
-  const taken = new Set(existingIds);
+  // A qualified canvas node id also claims its real step id.
+  const taken = new Set(
+    [...existingIds].flatMap((id) => [id, canvasNodeStepId(id)])
+  );
   let candidate = base;
   // Matches generateUniqueStepName's display-name convention: the second
   // "Log" is "Log 2", so its id is `log_2`.
@@ -458,6 +467,19 @@ export const useWorkflowStore = create<WorkflowState>()(
       // Validation Errors
       setValidationErrors: (errors: ValidationError[]) =>
         set((state) => {
+          // Errors name DSL step ids; a step id may repeat across Split,
+          // While and onWait bodies, so resolve each to its canvas node by
+          // the body the validator reports.
+          const findStepNode = createGraphNodeResolver(state.nodes);
+          errors = errors.map((error) => ({
+            ...error,
+            stepId: error.stepId
+              ? (findStepNode(error.stepId, error.graphPath) ?? error.stepId)
+              : error.stepId,
+            relatedStepIds: error.relatedStepIds?.map(
+              (id) => findStepNode(id, error.graphPath) ?? id
+            ),
+          }));
           state.validationErrors = errors;
           // Build a Set of step IDs that have errors for quick lookup
           const stepIds = new Set<string>();
@@ -713,6 +735,24 @@ export const useWorkflowStore = create<WorkflowState>()(
           return validationError;
         }
 
+        // A node whose step id is shared with a step in another scope has a
+        // qualified canvas id (see canvasNodeStepId). References to its real
+        // step id are rewritten only among its siblings, where they resolve
+        // to it; elsewhere the same id names the other step.
+        const oldStepId = canvasNodeStepId(oldId);
+        const siblingIds =
+          oldStepId === oldId
+            ? null
+            : new Set(
+                current.nodes
+                  .filter((n) => n.parentId === node.parentId)
+                  .map((n) => n.id)
+              );
+        const rewriteSiblingReferences = <T>(value: T, inScope: boolean): T =>
+          inScope
+            ? (rewriteStepReferencesDeep(value, oldStepId, newId) as T)
+            : value;
+
         set((state) => {
           const remapId = (id: string) => (id === oldId ? newId : id);
 
@@ -721,6 +761,7 @@ export const useWorkflowStore = create<WorkflowState>()(
           // and rewrite step references in every node's data.
           for (const n of state.nodes) {
             const isRenamedNode = n.id === oldId;
+            const inScope = siblingIds?.has(n.id) ?? false;
             if (isRenamedNode) {
               n.id = newId;
             }
@@ -728,12 +769,11 @@ export const useWorkflowStore = create<WorkflowState>()(
               n.parentId = newId;
             }
             if (n.data && typeof n.data === 'object') {
-              const data = rewriteStepReferencesDeep(
-                n.data,
-                oldId,
-                newId
+              const data = rewriteSiblingReferences(
+                rewriteStepReferencesDeep(n.data, oldId, newId),
+                inScope
               ) as Record<string, unknown>;
-              if (isRenamedNode && data.id === oldId) {
+              if (isRenamedNode && data.id === oldStepId) {
                 data.id = newId;
               }
               n.data = data;
@@ -751,13 +791,14 @@ export const useWorkflowStore = create<WorkflowState>()(
           const edgeIdRemap = new Map<string, string>();
           for (const e of state.edges) {
             const endpointsTouched = e.source === oldId || e.target === oldId;
+            const inScope =
+              (siblingIds?.has(e.source) && siblingIds.has(e.target)) ?? false;
             e.source = remapId(e.source);
             e.target = remapId(e.target);
             if (e.data && typeof e.data === 'object') {
-              e.data = rewriteStepReferencesDeep(
-                e.data,
-                oldId,
-                newId
+              e.data = rewriteSiblingReferences(
+                rewriteStepReferencesDeep(e.data, oldId, newId),
+                inScope
               ) as typeof e.data;
             }
             if (endpointsTouched) {

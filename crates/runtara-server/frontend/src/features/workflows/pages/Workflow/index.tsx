@@ -71,6 +71,7 @@ import {
   buildStateSchemaFromFields,
   type SchemaField,
 } from '@/features/workflows/utils/schema';
+import { createStepNodeResolver } from '@/features/workflows/utils/step-node-resolver';
 import {
   NODE_TYPES,
   NODE_TYPE_SIZES,
@@ -934,6 +935,11 @@ export function Workflow() {
     // child runs or a timer is waiting and wakes on its own, so it must not
     // offer breakpoint Continue.
     // NOTE: this block must NOT early-return — the node status mapping below must always run.
+    // Runtime events name a step by its DSL id; a step id shared by two
+    // subgraphs is told apart by the event's iteration scope.
+    const resolveNodeId = createStepNodeResolver(
+      useWorkflowStore.getState().nodes
+    );
     const atBreakpoint = isAtBreakpoint(executionInstanceData);
     const waitingSuspension = isWaitingSuspension(executionInstanceData);
     if (atBreakpoint && !justResumedRef.current) {
@@ -954,7 +960,10 @@ export function Workflow() {
         ) {
           lastProcessedBreakpointRef.current = latestBreakpoint.payload.step_id;
           setSuspended(true, {
-            stepId: latestBreakpoint.payload.step_id,
+            stepId: resolveNodeId(
+              latestBreakpoint.payload.step_id,
+              latestBreakpoint.payload.scope_id
+            ),
             stepName: latestBreakpoint.payload.step_name,
             stepType: latestBreakpoint.payload.step_type,
             inputs: latestBreakpoint.payload.inputs ?? null,
@@ -1005,31 +1014,31 @@ export function Workflow() {
       >();
 
       for (const event of sortedEvents) {
-        if (event.subtype === 'step_debug_start' && event.payload?.step_id) {
+        const nodeId = event.payload?.step_id
+          ? resolveNodeId(event.payload.step_id, event.payload.scope_id)
+          : undefined;
+        if (event.subtype === 'step_debug_start' && nodeId) {
           // Store start event
-          startEvents.set(event.payload.step_id, event);
+          startEvents.set(nodeId, event);
 
           // Mark step as Running
           const timestamp = event.payload.timestamp_ms
             ? new Date(event.payload.timestamp_ms).toISOString()
             : undefined;
-          processedSteps.set(event.payload.step_id, {
+          processedSteps.set(nodeId, {
             status: 'running',
             startedAt: timestamp,
           });
 
           // Store step inputs for debug inspector
           if (event.payload.inputs !== undefined) {
-            setStepDebugData(event.payload.step_id, {
+            setStepDebugData(nodeId, {
               inputs: event.payload.inputs,
             });
           }
-        } else if (
-          event.subtype === 'step_debug_end' &&
-          event.payload?.step_id
-        ) {
+        } else if (event.subtype === 'step_debug_end' && nodeId) {
           // Find matching start event
-          const startEvent = startEvents.get(event.payload.step_id);
+          const startEvent = startEvents.get(nodeId);
           const startTimestamp = startEvent?.payload?.timestamp_ms
             ? new Date(startEvent.payload.timestamp_ms).toISOString()
             : undefined;
@@ -1038,7 +1047,7 @@ export function Workflow() {
           const hasError = !!event.payload.error;
           const status = hasError ? 'failed' : 'completed';
 
-          processedSteps.set(event.payload.step_id, {
+          processedSteps.set(nodeId, {
             status,
             startedAt: startTimestamp,
             executionTime: event.payload.duration_ms || undefined,
@@ -1046,7 +1055,7 @@ export function Workflow() {
           });
 
           // Store step outputs for debug inspector
-          setStepDebugData(event.payload.step_id, {
+          setStepDebugData(nodeId, {
             outputs: event.payload.outputs,
             durationMs: event.payload.duration_ms,
             error: event.payload.error || undefined,
@@ -1563,16 +1572,18 @@ export function Workflow() {
     const rustValidation = await validateExecutionGraphWithRust(executionGraph);
     const rustErrors =
       rustValidation.status === 'invalid'
-        ? convertClientErrors(
-            rustValidation.errors.length > 0
-              ? rustValidation.errors
-              : [rustValidation.message],
-            finalState.nodes
-          )
+        ? rustValidation.errors.length > 0
+          ? convertClientErrors(
+              rustValidation.errors,
+              finalState.nodes,
+              rustValidation.errorGraphPaths
+            )
+          : convertClientErrors([rustValidation.message], finalState.nodes)
         : [];
     const rustWarnings = convertClientWarnings(
       rustValidation.warnings,
-      finalState.nodes
+      finalState.nodes,
+      rustValidation.warningGraphPaths
     );
     // WASM unavailability is unknown validation state, not success. Surface it
     // while still letting the backend validator decide the save request.

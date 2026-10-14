@@ -1326,12 +1326,18 @@ impl DirectJsonManifest {
             _ => Value::Null,
         };
 
+        // Carry the scope keys step-debug events have, so a consumer can tell
+        // which subgraph's step paused when two subgraphs share a step id.
+        let (scope_id, parent_scope_id, loop_indices) = scope_keys(&source);
         serde_json::to_vec(&serde_json::json!({
             "step_id": step.id.clone(),
             "step_name": step.name.clone(),
             "step_type": step.step_type.clone(),
             "inputs": inputs,
             "steps_context": Value::Object(steps_context),
+            "scope_id": scope_id,
+            "parent_scope_id": parent_scope_id,
+            "loop_indices": loop_indices,
         }))
         .map_err(|err| format!("failed to serialize breakpoint event payload: {err}"))
     }
@@ -11521,6 +11527,32 @@ mod tests {
         assert_eq!(event["step_type"], json!("Finish"));
         assert_eq!(event["inputs"], json!({ "outputs": { "value": "mapped" } }));
         assert_eq!(event["steps_context"]["before"]["outputs"], json!(true));
+    }
+
+    #[test]
+    fn breakpoint_event_carries_the_iteration_scope() {
+        let manifest = DirectJsonManifest::parse(&debug_manifest(
+            "Finish",
+            "finish",
+            Some("Done"),
+            json!({ "mappings": [] }),
+        ))
+        .expect("manifest");
+        let source = build_source(
+            br#"{}"#,
+            br#"{"_scope_id":"sc_split_2","_parent_scope_id":null,"_loop_indices":[2]}"#,
+            br#"{}"#,
+        )
+        .expect("source");
+
+        let event = manifest
+            .breakpoint_event("finish", &source)
+            .expect("breakpoint event");
+        let event: Value = serde_json::from_slice(&event).expect("event json");
+
+        assert_eq!(event["scope_id"], json!("sc_split_2"));
+        assert_eq!(event["parent_scope_id"], Value::Null);
+        assert_eq!(event["loop_indices"], json!([2]));
     }
 
     #[test]

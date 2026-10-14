@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { composeExecutionGraph } from '@/features/workflows/components/WorkflowEditor/CustomNodes/utils.tsx';
 import {
   generateStepId,
   getStepIdValidationError,
@@ -533,5 +534,99 @@ describe('workflowStore notes', () => {
       .addNote({ x: 0, y: -144 }, 'n', { anchorStepId: 'fetch' });
     useWorkflowStore.getState().renameStep('fetch', 'fetch_prices');
     expect(note(id).data.anchorStepId).toBe('fetch_prices');
+  });
+});
+
+describe('workflowStore renameStep with step ids shared across subgraphs', () => {
+  beforeEach(() => {
+    useWorkflowStore.getState().resetState();
+  });
+
+  // Both Splits hold a `fetch` step referenced by their own Finish.
+  const split = (id: string) => ({
+    id,
+    stepType: 'Split',
+    config: { value: { valueType: 'reference', value: 'data.rows' } },
+    subgraph: {
+      entryPoint: 'fetch',
+      steps: {
+        fetch: {
+          id: 'fetch',
+          stepType: 'Agent',
+          agentId: 'utils',
+          capabilityId: 'noop',
+        },
+        done: {
+          id: 'done',
+          stepType: 'Finish',
+          inputMapping: {
+            value: { valueType: 'reference', value: 'steps.fetch.outputs' },
+          },
+        },
+      },
+      executionPlan: [{ fromStep: 'fetch', toStep: 'done', label: 'next' }],
+    },
+  });
+
+  it('renames the qualified step and only its own scope references', () => {
+    useWorkflowStore.getState().setExecutionGraph({
+      name: 'shared',
+      entryPoint: 'a',
+      steps: { a: split('a'), b: split('b') },
+      executionPlan: [{ fromStep: 'a', toStep: 'b', label: 'next' }],
+    } as never);
+
+    const qualified = useWorkflowStore
+      .getState()
+      .nodes.find((n) => n.parentId === 'b' && n.data.id === 'fetch');
+    expect(qualified?.id).not.toBe('fetch');
+
+    const error = useWorkflowStore
+      .getState()
+      .renameStep(qualified!.id, 'fetch_b');
+    expect(error).toBeNull();
+
+    const { nodes, edges } = useWorkflowStore.getState();
+    const renamed = nodes.find((n) => n.id === 'fetch_b');
+    expect(renamed?.data.id).toBe('fetch_b');
+
+    const round = composeExecutionGraph(nodes, edges, {
+      name: 'shared',
+      entryPoint: 'a',
+    }) as any;
+    const a = round.steps.a.subgraph;
+    const b = round.steps.b.subgraph;
+    expect(Object.keys(a.steps).sort()).toEqual(['done', 'fetch']);
+    expect(Object.keys(b.steps).sort()).toEqual(['done', 'fetch_b']);
+    expect(b.executionPlan).toEqual([
+      { fromStep: 'fetch_b', toStep: 'done', label: 'next' },
+    ]);
+    expect(JSON.stringify(b.steps.done)).toContain('steps.fetch_b.outputs');
+    expect(JSON.stringify(a.steps.done)).toContain('steps.fetch.outputs');
+    expect(JSON.stringify(a.steps.done)).not.toContain('fetch_b');
+  });
+
+  it('keeps a qualified step id taken after the plain holder is renamed', () => {
+    useWorkflowStore.getState().setExecutionGraph({
+      name: 'shared',
+      entryPoint: 'a',
+      steps: { a: split('a'), b: split('b') },
+      executionPlan: [{ fromStep: 'a', toStep: 'b', label: 'next' }],
+    } as never);
+
+    // Split a holds the plain `fetch` and `done`; Split b's are qualified.
+    expect(
+      useWorkflowStore.getState().renameStep('fetch', 'fetch_a')
+    ).toBeNull();
+    const ids = useWorkflowStore.getState().nodes.map((n) => n.id);
+    expect(ids).not.toContain('fetch');
+
+    const bDone = useWorkflowStore
+      .getState()
+      .nodes.find((n) => n.parentId === 'b' && n.data.id === 'done');
+    expect(useWorkflowStore.getState().renameStep(bDone!.id, 'fetch')).toBe(
+      "A step with id 'fetch' already exists"
+    );
+    expect(generateStepId('Fetch', ids)).toBe('fetch_2');
   });
 });

@@ -3,6 +3,7 @@ import { Node } from '@xyflow/react';
 import { ValidationMessage, ValidationSeverity } from '../types/validation';
 import { ValidationError } from '@/shared/hooks/api';
 import { detectErrorCode, detectWarningCode } from './validation-codes';
+import { createGraphNodeResolver } from './step-node-resolver';
 
 /**
  * Extract step name from an error message.
@@ -38,18 +39,6 @@ function extractStepNamesFromMessage(message: string): string[] {
 }
 
 /**
- * Find step ID from step name by searching nodes.
- */
-function findStepIdByName(stepName: string, nodes: Node[]): string | undefined {
-  const node = nodes.find(
-    (n) =>
-      (n.data?.name as string)?.toLowerCase() === stepName.toLowerCase() ||
-      n.id === stepName
-  );
-  return node?.id;
-}
-
-/**
  * Get step name from node by ID.
  */
 function getStepNameById(stepId: string, nodes: Node[]): string | undefined {
@@ -63,9 +52,11 @@ function getStepNameById(stepId: string, nodes: Node[]): string | undefined {
  */
 export function convertClientErrors(
   errors: string[],
-  nodes: Node[]
+  nodes: Node[],
+  graphPaths?: string[][]
 ): ValidationMessage[] {
-  return errors.map((errorMessage) => {
+  const findStepNode = createGraphNodeResolver(nodes);
+  return errors.map((errorMessage, index) => {
     // Try to extract step info from error message
     const stepNames = extractStepNamesFromMessage(errorMessage);
 
@@ -75,7 +66,7 @@ export function convertClientErrors(
 
     if (stepNames.length > 0) {
       for (const name of stepNames) {
-        stepId = findStepIdByName(name, nodes);
+        stepId = findStepNode(name, graphPaths?.[index]);
         if (stepId) {
           stepName = name;
           break;
@@ -106,9 +97,11 @@ export function convertClientErrors(
  */
 export function convertClientWarnings(
   warnings: string[],
-  nodes: Node[]
+  nodes: Node[],
+  graphPaths?: string[][]
 ): ValidationMessage[] {
-  return warnings.map((warningMessage) => {
+  const findStepNode = createGraphNodeResolver(nodes);
+  return warnings.map((warningMessage, index) => {
     // Try to extract step info from warning message
     const stepNames = extractStepNamesFromMessage(warningMessage);
 
@@ -118,7 +111,7 @@ export function convertClientWarnings(
 
     if (stepNames.length > 0) {
       for (const name of stepNames) {
-        stepId = findStepIdByName(name, nodes);
+        stepId = findStepNode(name, graphPaths?.[index]);
         if (stepId) {
           stepName = name;
           break;
@@ -149,20 +142,27 @@ export function convertServerErrors(
   errors: ValidationError[],
   nodes: Node[]
 ): ValidationMessage[] {
+  const findStepNode = createGraphNodeResolver(nodes);
   return errors.map((error) => {
-    const stepName = error.stepId
-      ? getStepNameById(error.stepId, nodes)
-      : undefined;
+    // Server errors name the DSL step id; resolve it to the canvas node in
+    // the reported body (a step id may repeat across bodies).
+    const stepId = error.stepId
+      ? (findStepNode(error.stepId, error.graphPath) ?? error.stepId)
+      : null;
+    const stepName = stepId ? getStepNameById(stepId, nodes) : undefined;
 
     return {
       id: uuidv4(),
       severity: 'error' as ValidationSeverity,
       code: error.code,
       message: error.message,
-      stepId: error.stepId || null,
+      stepId,
       stepName,
       fieldName: error.fieldName,
-      relatedStepIds: error.relatedStepIds || undefined,
+      relatedStepIds:
+        error.relatedStepIds?.map(
+          (id) => findStepNode(id, error.graphPath) ?? id
+        ) || undefined,
       source: 'server' as const,
       timestamp: Date.now(),
     };

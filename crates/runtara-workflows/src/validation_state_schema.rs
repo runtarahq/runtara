@@ -23,32 +23,34 @@ use super::{ValidationError, ValidationResult, ValidationWarning};
 /// - W082: a state step in a non-durable workflow, whose state is local.
 pub(super) fn validate_state_steps(graph: &ExecutionGraph, result: &mut ValidationResult) {
     let durable = graph.durable.unwrap_or(true);
-    visit_state_steps(graph, &mut |step| {
+    visit_state_steps(graph, &mut Vec::new(), &mut |step, graph_path| {
         let (step_id, step_type) = match step {
             Step::SetState(set) => (&set.id, "SetState"),
             Step::GetState(get) => (&get.id, "GetState"),
             _ => return,
         };
-        if graph.state_schema.is_empty() {
-            result
-                .errors
-                .push(ValidationError::StateStepWithoutStateSchema {
-                    step_id: step_id.clone(),
-                    step_type: step_type.to_string(),
-                });
-            return;
-        }
-        if !durable {
-            result
-                .warnings
-                .push(ValidationWarning::NonDurableStateIsLocal {
-                    step_id: step_id.clone(),
-                    step_type: step_type.to_string(),
-                });
-        }
-        if let Step::SetState(set) = step {
-            check_set_state_values(&set.id, &set.values, &graph.state_schema, result);
-        }
+        result.at_relative_path(graph_path, |result| {
+            if graph.state_schema.is_empty() {
+                result
+                    .errors
+                    .push(ValidationError::StateStepWithoutStateSchema {
+                        step_id: step_id.clone(),
+                        step_type: step_type.to_string(),
+                    });
+                return;
+            }
+            if !durable {
+                result
+                    .warnings
+                    .push(ValidationWarning::NonDurableStateIsLocal {
+                        step_id: step_id.clone(),
+                        step_type: step_type.to_string(),
+                    });
+            }
+            if let Step::SetState(set) = step {
+                check_set_state_values(&set.id, &set.values, &graph.state_schema, result);
+            }
+        });
     });
 }
 
@@ -117,53 +119,64 @@ pub(super) fn validate_embedded_state_steps(
     result: &mut ValidationResult,
 ) {
     let mut embeds = Vec::new();
-    visit_state_steps(graph, &mut |step| {
+    visit_state_steps(graph, &mut Vec::new(), &mut |step, graph_path| {
         if let Step::EmbedWorkflow(embed) = step
             && children
                 .get(&embed.child_workflow_id)
                 .is_some_and(has_state_steps)
         {
-            embeds.push((embed.id.clone(), embed.child_workflow_id.clone()));
+            embeds.push((
+                embed.id.clone(),
+                embed.child_workflow_id.clone(),
+                graph_path.to_vec(),
+            ));
         }
     });
     embeds.sort();
-    for (step_id, child_workflow_id) in embeds {
-        result
-            .warnings
-            .push(ValidationWarning::EmbeddedChildStateIsLocal {
-                step_id,
-                child_workflow_id,
-            });
+    for (step_id, child_workflow_id, graph_path) in embeds {
+        result.at_relative_path(&graph_path, |result| {
+            result
+                .warnings
+                .push(ValidationWarning::EmbeddedChildStateIsLocal {
+                    step_id,
+                    child_workflow_id,
+                });
+        });
     }
 }
 
 /// Whether `graph` or any of its bodies has a SetState or GetState step.
 pub(crate) fn has_state_steps(graph: &ExecutionGraph) -> bool {
     let mut found = false;
-    visit_state_steps(graph, &mut |step| {
+    visit_state_steps(graph, &mut Vec::new(), &mut |step, _| {
         found |= matches!(step, Step::SetState(_) | Step::GetState(_));
     });
     found
 }
 
 /// Visit every step of `graph` and of its Split, While and onWait bodies, in
-/// a stable order. Embedded children are not entered: they are other
-/// workflows.
-fn visit_state_steps<'a>(graph: &'a ExecutionGraph, visit: &mut impl FnMut(&'a Step)) {
+/// a stable order, with the container step ids from `graph` to the step's
+/// body. Embedded children are not entered: they are other workflows.
+fn visit_state_steps<'a>(
+    graph: &'a ExecutionGraph,
+    graph_path: &mut Vec<String>,
+    visit: &mut impl FnMut(&'a Step, &[String]),
+) {
     let mut ids: Vec<&String> = graph.steps.keys().collect();
     ids.sort();
     for id in ids {
         let step = &graph.steps[id];
-        visit(step);
-        match step {
-            Step::Split(split) => visit_state_steps(&split.subgraph, visit),
-            Step::While(while_step) => visit_state_steps(&while_step.subgraph, visit),
-            Step::WaitForSignal(wait) => {
-                if let Some(on_wait) = &wait.on_wait {
-                    visit_state_steps(on_wait, visit);
-                }
-            }
-            _ => {}
+        visit(step, graph_path);
+        let body = match step {
+            Step::Split(split) => Some(&split.subgraph),
+            Step::While(while_step) => Some(&while_step.subgraph),
+            Step::WaitForSignal(wait) => wait.on_wait.as_ref(),
+            _ => None,
+        };
+        if let Some(body) = body {
+            graph_path.push(id.clone());
+            visit_state_steps(body, graph_path, visit);
+            graph_path.pop();
         }
     }
 }
