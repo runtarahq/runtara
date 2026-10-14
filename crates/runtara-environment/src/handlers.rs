@@ -473,6 +473,11 @@ pub fn enrich_input_for_storage(
     if let Some(ref metadata) = image.metadata
         && let Some(default_vars) = metadata.get("variables").and_then(|v| v.as_object())
     {
+        // The guest treats stored input variables as overrides of its compiled
+        // defaults, so only bare values may be merged. Images registered before
+        // the `variablesFormat` marker store `{type, value}` declarations.
+        let declarations =
+            metadata.get("variablesFormat").and_then(Value::as_str) != Some("values");
         let input_obj = input
             .as_object_mut()
             .expect("input should be a JSON object");
@@ -482,7 +487,12 @@ pub fn enrich_input_for_storage(
         if let Some(vars_obj) = vars.as_object_mut() {
             for (key, value) in default_vars {
                 if !key.starts_with('_') {
-                    vars_obj.entry(key.clone()).or_insert_with(|| value.clone());
+                    let value = if declarations {
+                        declared_variable_value(value)
+                    } else {
+                        value.clone()
+                    };
+                    vars_obj.entry(key.clone()).or_insert(value);
                 }
             }
         }
@@ -494,6 +504,17 @@ pub fn enrich_input_for_storage(
     }
 
     input
+}
+
+/// The value of a legacy `{type, value}` variable declaration; anything else
+/// is already a value. Mirrors the compiler's flattening of declared variables.
+fn declared_variable_value(declaration: &Value) -> Value {
+    match declaration {
+        Value::Object(fields) if fields.contains_key("type") && fields.contains_key("value") => {
+            fields.get("value").cloned().unwrap_or(Value::Null)
+        }
+        other => other.clone(),
+    }
 }
 
 /// Handle start instance request.
@@ -2979,6 +3000,38 @@ mod tests {
         assert_eq!(result["variables"]["color"], "red");
         assert_eq!(result["variables"]["size"], 42);
         assert_eq!(result["data"]["key"], "value");
+    }
+
+    #[test]
+    fn enrich_input_flattens_legacy_declaration_metadata() {
+        let input = json!({"data": {}});
+        let image = make_image(Some(json!({
+            "variables": {
+                "color": {"type": "string", "value": "red"},
+                "limits": {"type": "object", "value": {"max": 5}, "description": "d"}
+            }
+        })));
+
+        let result = enrich_input_for_storage(input, &image);
+
+        assert_eq!(result["variables"]["color"], "red");
+        assert_eq!(result["variables"]["limits"], json!({"max": 5}));
+    }
+
+    #[test]
+    fn enrich_input_keeps_values_format_metadata_verbatim() {
+        let input = json!({"data": {}});
+        let image = make_image(Some(json!({
+            "variables": {"shape": {"type": "circle", "value": 3}},
+            "variablesFormat": "values"
+        })));
+
+        let result = enrich_input_for_storage(input, &image);
+
+        assert_eq!(
+            result["variables"]["shape"],
+            json!({"type": "circle", "value": 3})
+        );
     }
 
     #[test]

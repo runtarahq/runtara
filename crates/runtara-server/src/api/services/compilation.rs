@@ -238,6 +238,9 @@ fn workflow_image_metadata(
 
     serde_json::json!({
         "variables": compilation_result.default_variables,
+        // Images registered before this marker store `variables` as
+        // `{type, value}` declarations; the environment flattens those.
+        "variablesFormat": "values",
         "workflow": workflow
     })
 }
@@ -2087,6 +2090,7 @@ mod tests {
             workflow_image_metadata(&result, "workflow-a", 7, "source-sha256", true, None);
 
         assert_eq!(metadata["variables"], serde_json::json!({ "limit": 5 }));
+        assert_eq!(metadata["variablesFormat"], "values");
         assert_eq!(metadata["workflow"]["workflowId"], "workflow-a");
         assert_eq!(metadata["workflow"]["version"], 7);
         assert_eq!(metadata["workflow"]["sourceChecksum"], "source-sha256");
