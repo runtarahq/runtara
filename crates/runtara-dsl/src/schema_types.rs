@@ -38,11 +38,9 @@ pub struct Workflow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub track_events: Option<bool>,
 
-    /// Disable durability for this workflow when `false`. Compiled code contains
-    /// no checkpoint reads/writes, no `sdk.sleep`, and no breakpoint
-    /// checkpoints. When this field is `Some(false)`, the setting propagates
-    /// into `ExecutionGraph.durable` (via `parse_workflow`) and then to every
-    /// nested subgraph and embedded child workflow at codegen time. Default: durable.
+    /// Disable durability for this workflow when `false`. Copied into
+    /// `ExecutionGraph.durable` by `parse_workflow` when that is unset; see
+    /// there for how nested graphs inherit it. Default: durable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub durable: Option<bool>,
 }
@@ -107,9 +105,13 @@ pub struct ExecutionGraph {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub execution_plan: Vec<ExecutionPlanEdge>,
 
-    /// Constant variables available as `variables.<name>` during execution.
-    /// These are static values defined at design time, not overridable at runtime.
-    /// Keys are variable names, values contain type and value.
+    /// Variables available as `variables.<name>` during execution. Keys are
+    /// variable names, values contain type and value.
+    ///
+    /// On the workflow's own graph these are defaults that a run's input
+    /// `variables` can override. On a nested graph (Split/While body, onWait)
+    /// they are added to the body's scope, and the step's `config.variables`
+    /// win over them.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub variables: HashMap<String, Variable>,
 
@@ -150,7 +152,10 @@ pub struct ExecutionGraph {
     pub edges: Option<serde_json::Value>,
 
     /// Maximum cumulative time (in milliseconds) that rate-limited retries may
-    /// durable-sleep before giving up.  Applies to all steps in this workflow.
+    /// durable-sleep before giving up.  Applies to every step of this
+    /// workflow, including those in Split/While bodies and onWait; set it on
+    /// the workflow's own graph, as a nested graph's value is ignored (W084).
+    /// An embedded workflow uses its own setting.
     /// Default: 60 000 (1 minute).  Set higher for workflows that make many
     /// calls through a slow rate limit (e.g. 3 600 000 for 1 hour).
     #[serde(default = "default_rate_limit_budget_ms", skip_serializing_if = "is_default_rate_limit_budget")]
@@ -159,15 +164,18 @@ pub struct ExecutionGraph {
     /// Maximum wall-clock time (in seconds) an execution of this workflow may
     /// run before the server stops it. Written by the workflow editor
     /// (validated 1-3600 in the UI) and enforced server-side when scheduling
-    /// the execution — the compiler does not interpret this field.
+    /// the execution — the compiler does not interpret this field. Only the
+    /// workflow's own graph is read; a nested graph's value is ignored (W084).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_timeout_seconds: Option<u32>,
 
-    /// Disable durability for this workflow when `Some(false)`. Mirrors
-    /// `Workflow.durable`; `parse_workflow` copies the top-level flag here when
-    /// this field is `None`. Codegen reads `ctx.durable` from this value at
-    /// the root, then inherits it unconditionally into all nested subgraphs
-    /// and embedded children. `None` → durable (default).
+    /// Durability of this graph's steps. `None` inherits: the workflow's own
+    /// graph defaults to durable, and a nested graph (Split/While body, onWait)
+    /// takes its parent's setting. An explicit value wins for this graph and
+    /// everything nested in it, so a body can opt out with `false` inside a
+    /// durable workflow (or opt in under a non-durable one). An embedded
+    /// workflow follows its own definition, not the embedding run's.
+    /// `parse_workflow` copies `Workflow.durable` here when this is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable: Option<bool>,
 }

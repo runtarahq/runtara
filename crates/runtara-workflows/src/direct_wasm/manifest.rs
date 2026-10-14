@@ -754,7 +754,7 @@ pub fn build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
     }
     let root_durable = graph.durable.unwrap_or(true);
     let mut state = DirectManifestBuildState::default();
-    let root_graph = graph_manifest(graph, root_durable, &mut state, agent_catalog)?;
+    let root_graph = graph_manifest(graph, root_durable, None, &mut state, agent_catalog)?;
     let mut child_workflows = child_workflows.to_vec();
     child_workflows.sort_by(|left, right| {
         (
@@ -774,9 +774,11 @@ pub fn build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
         .into_iter()
         .map(|child| {
             let child_durable = child.execution_graph.durable.unwrap_or(true);
+            // An embedded child is its own workflow: its own budget applies.
             let graph = graph_manifest(
                 child.execution_graph,
                 child_durable,
+                None,
                 &mut state,
                 agent_catalog,
             )?;
@@ -911,20 +913,36 @@ impl DirectManifestBuildState {
     }
 }
 
+/// `inherited_rate_limit_budget_ms` is `None` for a workflow's own graph and
+/// the enclosing graph's budget for a nested graph (Split/While body, onWait):
+/// `rateLimitBudgetMs` is a workflow-wide setting, so a nested graph's own
+/// value is ignored. Durability instead follows the nearest explicit setting.
 fn graph_manifest(
     graph: &ExecutionGraph,
     inherited_durable: bool,
+    inherited_rate_limit_budget_ms: Option<u64>,
     state: &mut DirectManifestBuildState,
     agent_catalog: Option<&AgentCatalog>,
 ) -> Result<DirectGraphManifest, DirectManifestError> {
     let durable = graph.durable.unwrap_or(inherited_durable);
+    let rate_limit_budget_ms = inherited_rate_limit_budget_ms.unwrap_or(graph.rate_limit_budget_ms);
     let mut step_values = graph.steps.values().collect::<Vec<_>>();
     step_values.sort_by(|left, right| step_id(left).cmp(step_id(right)));
 
     let mut collections = DirectGraphManifestCollections::default();
     let steps = step_values
         .into_iter()
-        .map(|step| step_manifest(step, graph, durable, state, &mut collections, agent_catalog))
+        .map(|step| {
+            step_manifest(
+                step,
+                graph,
+                durable,
+                rate_limit_budget_ms,
+                state,
+                &mut collections,
+                agent_catalog,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     collections.mappings.sort_by_key(|left| left.id);
@@ -951,7 +969,7 @@ fn graph_manifest(
         name: graph.name.clone(),
         entry_point: graph.entry_point.clone(),
         durable,
-        rate_limit_budget_ms: graph.rate_limit_budget_ms,
+        rate_limit_budget_ms,
         variables: canonical_json(&graph.variables)?,
         input_schema: canonical_json(&graph.input_schema)?,
         output_schema: canonical_json(&graph.output_schema)?,
@@ -996,6 +1014,7 @@ fn step_manifest(
     step: &Step,
     graph: &ExecutionGraph,
     inherited_durable: bool,
+    rate_limit_budget_ms: u64,
     state: &mut DirectManifestBuildState,
     collections: &mut DirectGraphManifestCollections,
     agent_catalog: Option<&AgentCatalog>,
@@ -1049,6 +1068,7 @@ fn step_manifest(
                 graph: Box::new(graph_manifest(
                     &step.subgraph,
                     inherited_durable,
+                    Some(rate_limit_budget_ms),
                     state,
                     agent_catalog,
                 )?),
@@ -1106,6 +1126,7 @@ fn step_manifest(
                 graph: Box::new(graph_manifest(
                     &step.subgraph,
                     inherited_durable,
+                    Some(rate_limit_budget_ms),
                     state,
                     agent_catalog,
                 )?),
@@ -1518,6 +1539,7 @@ fn step_manifest(
                     graph: Box::new(graph_manifest(
                         on_wait,
                         inherited_durable,
+                        Some(rate_limit_budget_ms),
                         state,
                         agent_catalog,
                     )?),
@@ -1992,6 +2014,42 @@ mod tests {
         assert_eq!(first.version, DIRECT_WORKFLOW_MANIFEST_VERSION);
         assert_eq!(first.graph.entry_point, "finish");
         assert_eq!(first.graph.rate_limit_budget_ms, graph.rate_limit_budget_ms);
+    }
+
+    #[test]
+    fn nested_graphs_use_the_workflow_rate_limit_budget() {
+        // `rateLimitBudgetMs` is workflow-wide: Split/While bodies and onWait
+        // run with the root's budget, whatever their own graph says (an unset
+        // value deserializes to the 60 000 default).
+        let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "split",
+            "rateLimitBudgetMs": 1500,
+            "steps": {
+                "split": {"id": "split", "stepType": "Split",
+                    "config": {"value": {"valueType": "immediate", "value": [1]}},
+                    "subgraph": {"entryPoint": "loop", "rateLimitBudgetMs": 90000, "steps": {
+                        "loop": {"id": "loop", "stepType": "While",
+                            "condition": {"type": "value", "valueType": "immediate", "value": false},
+                            "subgraph": {"entryPoint": "f", "steps": {"f": {"id": "f", "stepType": "Finish"}}}},
+                        "done": {"id": "done", "stepType": "Finish"}
+                    }, "executionPlan": [{"fromStep": "loop", "toStep": "done"}]}},
+                "finish": {"id": "finish", "stepType": "Finish"}
+            },
+            "executionPlan": [{"fromStep": "split", "toStep": "finish"}]
+        }))
+        .expect("graph parses");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        assert_eq!(manifest.graph.rate_limit_budget_ms, 1500);
+        let split = manifest
+            .graph
+            .steps
+            .iter()
+            .find(|s| s.id == "split")
+            .expect("split");
+        let body = &split.nested_graphs[0].graph;
+        assert_eq!(body.rate_limit_budget_ms, 1500);
+        let while_step = body.steps.iter().find(|s| s.id == "loop").expect("while");
+        assert_eq!(while_step.nested_graphs[0].graph.rate_limit_budget_ms, 1500);
     }
 
     #[test]

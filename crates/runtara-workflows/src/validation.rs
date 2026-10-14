@@ -1659,6 +1659,10 @@ pub enum ValidationWarning {
         step_id: String,
         child_workflow_id: String,
     },
+    /// A nested graph (Split/While body, onWait) sets a workflow-wide
+    /// setting that only the workflow's own graph honours, such as
+    /// `rateLimitBudgetMs`; the nested value has no effect.
+    NestedGraphSettingIgnored { scope: String, setting: String },
 }
 
 impl ValidationWarning {
@@ -1688,6 +1692,7 @@ impl ValidationWarning {
             Self::IneffectiveStateSchemaSetting { .. } => "W081",
             Self::NonDurableStateIsLocal { .. } => "W082",
             Self::EmbeddedChildStateIsLocal { .. } => "W083",
+            Self::NestedGraphSettingIgnored { .. } => "W084",
         }
     }
 }
@@ -1934,6 +1939,11 @@ impl std::fmt::Display for ValidationWarning {
                 f,
                 "[W083] EmbedWorkflow step '{}' embeds '{}', whose SetState and GetState steps keep state local to the embedded run: only the outer run publishes state.",
                 step_id, child_workflow_id
+            ),
+            ValidationWarning::NestedGraphSettingIgnored { scope, setting } => write!(
+                f,
+                "[W084] {} sets {}, which has no effect there: it applies to the whole workflow. Set it on the workflow instead.",
+                scope, setting
             ),
         }
     }
@@ -2676,6 +2686,27 @@ fn validate_embed_workflow_inputs(
 // Phase 1: Graph Structure Validation
 // ============================================================================
 
+/// W084: workflow-wide settings on a nested graph, which only the workflow's
+/// own graph honours. `rateLimitBudgetMs` is compared with its default because
+/// an unset value deserializes to it.
+fn ignored_nested_settings(graph: &ExecutionGraph, scope: &str, result: &mut ValidationResult) {
+    let mut settings = Vec::new();
+    if graph.rate_limit_budget_ms != ExecutionGraph::default().rate_limit_budget_ms {
+        settings.push("rateLimitBudgetMs");
+    }
+    if graph.execution_timeout_seconds.is_some() {
+        settings.push("executionTimeoutSeconds");
+    }
+    for setting in settings {
+        result
+            .warnings
+            .push(ValidationWarning::NestedGraphSettingIgnored {
+                scope: scope.to_string(),
+                setting: setting.to_string(),
+            });
+    }
+}
+
 /// Step ids reused by onError handlers for the error context.
 const RESERVED_STEP_IDS: [&str; 2] = ["error", "__error"];
 
@@ -2699,8 +2730,19 @@ fn validate_reserved_names(graph: &ExecutionGraph, result: &mut ValidationResult
         }
     }
 
-    fn walk(graph: &ExecutionGraph, scope: &str, result: &mut ValidationResult) {
-        reserved_variables(graph.variables.keys(), scope, result);
+    /// `nested` names a nested graph (`None` for the workflow's own graph).
+    fn walk(graph: &ExecutionGraph, nested: Option<&str>, result: &mut ValidationResult) {
+        match nested {
+            Some(nested) => {
+                reserved_variables(
+                    graph.variables.keys(),
+                    &format!("{nested} variables"),
+                    result,
+                );
+                ignored_nested_settings(graph, nested, result);
+            }
+            None => reserved_variables(graph.variables.keys(), "workflow variables", result),
+        }
         let mut step_ids: Vec<&String> = graph.steps.keys().collect();
         step_ids.sort();
         for step_id in step_ids {
@@ -2721,7 +2763,7 @@ fn validate_reserved_names(graph: &ExecutionGraph, result: &mut ValidationResult
                     }
                     walk(
                         &step.subgraph,
-                        &format!("Split '{step_id}' subgraph variables"),
+                        Some(&format!("Split '{step_id}' subgraph")),
                         result,
                     );
                 }
@@ -2736,7 +2778,7 @@ fn validate_reserved_names(graph: &ExecutionGraph, result: &mut ValidationResult
                     }
                     walk(
                         &step.subgraph,
-                        &format!("While '{step_id}' subgraph variables"),
+                        Some(&format!("While '{step_id}' subgraph")),
                         result,
                     );
                 }
@@ -2744,7 +2786,7 @@ fn validate_reserved_names(graph: &ExecutionGraph, result: &mut ValidationResult
                     if let Some(on_wait) = &step.on_wait {
                         walk(
                             on_wait,
-                            &format!("WaitForSignal '{step_id}' onWait variables"),
+                            Some(&format!("WaitForSignal '{step_id}' onWait")),
                             result,
                         );
                     }
@@ -2754,7 +2796,7 @@ fn validate_reserved_names(graph: &ExecutionGraph, result: &mut ValidationResult
         }
     }
 
-    walk(graph, "workflow variables", result);
+    walk(graph, None, result);
 }
 
 fn validate_graph_structure(graph: &ExecutionGraph, result: &mut ValidationResult) {
@@ -17075,6 +17117,34 @@ mod reserved_name_tests {
                 .any(|m| m.starts_with("[E136] Step id '__error'")),
             "{found:?}"
         );
+    }
+
+    #[test]
+    fn workflow_wide_settings_on_nested_graphs_warn() {
+        let graph: ExecutionGraph = serde_json::from_value(json!({
+            "entryPoint": "split",
+            "rateLimitBudgetMs": 5000,
+            "steps": {"split": {
+                "id": "split", "stepType": "Split",
+                "config": {"value": {"valueType": "immediate", "value": [1]}},
+                "subgraph": {
+                    "entryPoint": "f",
+                    "rateLimitBudgetMs": 1500,
+                    "executionTimeoutSeconds": 10,
+                    "steps": {"f": {"id": "f", "stepType": "Finish"}}
+                }
+            }}
+        }))
+        .expect("graph parses");
+        let warnings: Vec<String> = validate_workflow(&graph, &AgentCatalog::new())
+            .warnings
+            .iter()
+            .map(|warning| warning.to_string())
+            .filter(|message| message.starts_with("[W084]"))
+            .collect();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("Split 'split' subgraph sets rateLimitBudgetMs"));
+        assert!(warnings[1].contains("executionTimeoutSeconds"));
     }
 
     #[test]

@@ -77,7 +77,7 @@ fn audit_04_loop_scope_cannot_be_replaced_by_authored_variables() {
         value: config,
         condition: json!(true),
     };
-    let split_vars = split_iteration_variables(&split, &parent, Value::Null, 3).unwrap();
+    let split_vars = split_iteration_variables(&split, &parent, Value::Null, 3, None).unwrap();
     let while_vars = while_iteration_variables(
         &while_step,
         &parent,
@@ -85,6 +85,7 @@ fn audit_04_loop_scope_cannot_be_replaced_by_authored_variables() {
             index: 3,
             outputs: Value::Null,
         },
+        None,
     )
     .unwrap();
     assert_eq!(

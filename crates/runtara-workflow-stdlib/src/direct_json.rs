@@ -357,6 +357,9 @@ pub struct DirectJsonManifest {
     filters: BTreeMap<u32, DirectJsonFilter>,
     switches: BTreeMap<u32, DirectJsonSwitch>,
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
+    /// Variables declared on nested graphs (Split/While bodies, onWait), as
+    /// values, keyed by the graph's `_manifest_graph_path`.
+    nested_variables: BTreeMap<String, Map<String, Value>>,
     delays: BTreeMap<u32, DirectJsonDelay>,
     logs: BTreeMap<u32, DirectJsonLog>,
     errors: BTreeMap<u32, DirectJsonError>,
@@ -445,6 +448,7 @@ impl DirectJsonManifest {
             filters: collections.filters,
             switches: collections.switches,
             group_bys: collections.group_bys,
+            nested_variables: collections.nested_variables,
             delays: collections.delays,
             logs: collections.logs,
             errors: collections.errors,
@@ -610,6 +614,26 @@ impl DirectJsonManifest {
         serde_json::to_vec(item).map_err(|err| format!("failed to serialize Split item: {err}"))
     }
 
+    /// Variables declared on the nested graph `role` owned by step `owner`,
+    /// in the scope `source` is in. A nested graph's declarations extend the
+    /// variables it inherits (shadowing them by name); its step's
+    /// `config.variables` are applied on top.
+    fn nested_declared_variables(
+        &self,
+        source: &Value,
+        role: &str,
+        owner: &str,
+    ) -> Option<&Map<String, Value>> {
+        let mut path = source
+            .get("variables")
+            .and_then(|vars| vars.get("_manifest_graph_path"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        path.push(serde_json::json!([role, owner]));
+        self.nested_variables.get(&Value::Array(path).to_string())
+    }
+
     /// Build generated-code-compatible variables for one Split iteration.
     pub fn split_iteration_variables(
         &self,
@@ -626,7 +650,8 @@ impl DirectJsonManifest {
             .splits
             .get(&split_id)
             .ok_or_else(|| format!("unknown direct Split id {split_id}"))?;
-        let variables = split_iteration_variables(split, &source, item, index)?;
+        let declared = self.nested_declared_variables(&source, "split.subgraph", &split.step_id);
+        let variables = split_iteration_variables(split, &source, item, index, declared)?;
         serde_json::to_vec(&Value::Object(variables))
             .map_err(|err| format!("failed to serialize Split iteration variables: {err}"))
     }
@@ -958,7 +983,9 @@ impl DirectJsonManifest {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse While source: {err}"))?;
         let state = parse_while_state(while_step, state)?;
-        let variables = while_iteration_variables(while_step, &source, &state)?;
+        let declared =
+            self.nested_declared_variables(&source, "while.subgraph", &while_step.step_id);
+        let variables = while_iteration_variables(while_step, &source, &state, declared)?;
         serde_json::to_vec(&Value::Object(variables))
             .map_err(|err| format!("failed to serialize While iteration variables: {err}"))
     }
@@ -1567,6 +1594,11 @@ impl DirectJsonManifest {
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
+        if let Some(declared) =
+            self.nested_declared_variables(&source, "waitForSignal.onWait", step_id)
+        {
+            variables.extend(declared.clone());
+        }
         enter_manifest_graph(&mut variables, &source, "waitForSignal.onWait", step_id);
         variables.insert(
             "_signal_id".to_string(),
@@ -4574,6 +4606,28 @@ fn debug_timer_key(step_id: &str, source: &Value) -> String {
     .to_string()
 }
 
+/// Declared variables (`{name: {type, value}}`) as `{name: value}`, without
+/// runtime-owned names, which authored declarations never shadow (E137).
+fn declared_variable_values(declarations: &Value) -> Map<String, Value> {
+    declarations
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(name, _)| !runtara_dsl::is_runtime_variable_name(name))
+        .map(|(name, declaration)| {
+            let value = match declaration {
+                Value::Object(fields)
+                    if fields.contains_key("type") && fields.contains_key("value") =>
+                {
+                    fields.get("value").cloned().unwrap_or(Value::Null)
+                }
+                other => other.clone(),
+            };
+            (name.clone(), value)
+        })
+        .collect()
+}
+
 fn enter_manifest_graph(
     variables: &mut Map<String, Value>,
     source: &Value,
@@ -4718,6 +4772,9 @@ struct DirectJsonManifestCollections {
     filters: BTreeMap<u32, DirectJsonFilter>,
     switches: BTreeMap<u32, DirectJsonSwitch>,
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
+    /// Variables declared on nested graphs (Split/While bodies, onWait), as
+    /// values, keyed by the graph's `_manifest_graph_path`.
+    nested_variables: BTreeMap<String, Map<String, Value>>,
     delays: BTreeMap<u32, DirectJsonDelay>,
     logs: BTreeMap<u32, DirectJsonLog>,
     errors: BTreeMap<u32, DirectJsonError>,
@@ -5021,6 +5078,12 @@ fn collect_graph_manifest(
         for nested in &step.nested_graphs {
             let mut nested_path = path.as_array().cloned().unwrap_or_default();
             nested_path.push(serde_json::json!([nested.role, step.id]));
+            let declared = declared_variable_values(&nested.graph.variables);
+            if !declared.is_empty() {
+                collections
+                    .nested_variables
+                    .insert(Value::Array(nested_path.clone()).to_string(), declared);
+            }
             collect_graph_manifest(
                 &nested.graph,
                 &Value::Array(nested_path),
@@ -5205,6 +5268,7 @@ fn split_iteration_variables(
     source: &Value,
     item: Value,
     index: u32,
+    declared: Option<&Map<String, Value>>,
 ) -> Result<Map<String, Value>, String> {
     let mut variables = source
         .get("variables")
@@ -5221,6 +5285,9 @@ fn split_iteration_variables(
     let parent_loop = variables.get("_loop").cloned();
     // The iteration's `data` is the item, never the root input envelope.
     variables.remove(INPUT_ENVELOPE_VARIABLE);
+    if let Some(declared) = declared {
+        variables.extend(declared.clone());
+    }
 
     if let Some(extra_variables_mapping) = split.value.get("variables") {
         let extra_variables = apply_input_mapping(extra_variables_mapping, source)?;
@@ -5456,6 +5523,7 @@ fn while_iteration_variables(
     while_step: &DirectJsonWhile,
     source: &Value,
     state: &DirectJsonWhileState,
+    declared: Option<&Map<String, Value>>,
 ) -> Result<Map<String, Value>, String> {
     let mut variables = source
         .get("variables")
@@ -5470,6 +5538,9 @@ fn while_iteration_variables(
         .cloned()
         .unwrap_or_default();
     let parent_item = variables.get("_item").cloned();
+    if let Some(declared) = declared {
+        variables.extend(declared.clone());
+    }
     if let Some(extra_variables_mapping) = while_step.value.get("variables") {
         let extra_variables = apply_input_mapping(extra_variables_mapping, source)?;
         if let Value::Object(extra_variables) = extra_variables {
@@ -13432,6 +13503,74 @@ mod tests {
             json!({"data": {"x": 1}, "id": 5, "variables": {"region": "eu"}})
         );
         assert!(source["variables"].get("region").is_none());
+    }
+
+    #[test]
+    fn nested_graph_declared_variables_extend_the_iteration_scope() {
+        // The Split's subgraph declares `color` and `size`; the parent scope
+        // has `color` too; `config.variables` sets `size`. Precedence:
+        // inherited < subgraph declarations < config.variables. Runtime-owned
+        // names declared on the subgraph are dropped.
+        let mut manifest: Value = serde_json::from_slice(&split_manifest(json!({
+            "value": {"valueType": "immediate", "value": [1]},
+            "variables": {"size": {"valueType": "immediate", "value": "from-config"}}
+        })))
+        .unwrap();
+        manifest["graph"]["steps"][0]["nestedGraphs"] = json!([{
+            "role": "split.subgraph",
+            "graph": {"variables": {
+                "color": {"type": "string", "value": "subgraph-blue"},
+                "size": {"type": "string", "value": "from-subgraph"},
+                "shade": {"type": "string", "value": "dark"},
+                "_instance_id": {"type": "string", "value": "forged"}
+            }, "steps": []}
+        }]);
+        let manifest =
+            DirectJsonManifest::parse(&serde_json::to_vec(&manifest).unwrap()).expect("manifest");
+        let source = serde_json::to_vec(&json!({
+            "data": {}, "steps": {},
+            "variables": {"color": "parent-red", "_instance_id": "real", "_manifest_graph_path": []}
+        }))
+        .unwrap();
+        let variables = manifest
+            .split_iteration_variables(0, &source, b"1", 0)
+            .expect("iteration variables");
+        let variables: Value = serde_json::from_slice(&variables).unwrap();
+        assert_eq!(variables["color"], "subgraph-blue");
+        assert_eq!(variables["shade"], "dark");
+        assert_eq!(variables["size"], "from-config");
+        assert_eq!(variables["_instance_id"], "real");
+    }
+
+    #[test]
+    fn on_wait_declared_variables_extend_the_handler_scope() {
+        let mut manifest: Value = serde_json::from_slice(&wait_manifest(json!({
+            "id": "wait",
+            "stepType": "WaitForSignal",
+            "name": "Review Input"
+        })))
+        .unwrap();
+        manifest["graph"]["steps"][0]["nestedGraphs"] = json!([{
+            "role": "waitForSignal.onWait",
+            "graph": {"variables": {
+                "color": {"type": "string", "value": "on-wait-blue"},
+                "_signal_id": {"type": "string", "value": "forged"}
+            }, "steps": []}
+        }]);
+        let manifest =
+            DirectJsonManifest::parse(&serde_json::to_vec(&manifest).unwrap()).expect("manifest");
+        let source = serde_json::to_vec(&json!({
+            "data": {}, "steps": {},
+            "variables": {"color": "parent-red", "tenant": "t1", "_manifest_graph_path": []}
+        }))
+        .unwrap();
+        let variables = manifest
+            .wait_on_wait_variables("wait", "inst-1", "inst-1/root/wait", &source)
+            .expect("on-wait variables");
+        let variables: Value = serde_json::from_slice(&variables).unwrap();
+        assert_eq!(variables["color"], "on-wait-blue");
+        assert_eq!(variables["tenant"], "t1");
+        assert_eq!(variables["_signal_id"], "inst-1/root/wait");
     }
 
     #[test]

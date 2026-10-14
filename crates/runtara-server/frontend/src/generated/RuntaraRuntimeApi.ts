@@ -385,7 +385,10 @@ export interface AgentStep {
   /** Maps data to agent capability inputs */
   inputMapping?: null | HashMap;
   /**
-   * Maximum retry attempts (default: 3)
+   * Maximum retry attempts (default: 3). Rate-limited failures (an HTTP 429
+   * or a `*_RATE_LIMITED` code) retry within the workflow's
+   * `rateLimitBudgetMs` and may exceed this count; `0` disables all
+   * retries, rate-limited ones included.
    * @format int32
    * @min 0
    */
@@ -2237,11 +2240,13 @@ export interface ExecutionGraph {
   /** Detailed description of what the workflow does */
   description?: string | null;
   /**
-   * Disable durability for this workflow when `Some(false)`. Mirrors
-   * `Workflow.durable`; `parse_workflow` copies the top-level flag here when
-   * this field is `None`. Codegen reads `ctx.durable` from this value at
-   * the root, then inherits it unconditionally into all nested subgraphs
-   * and embedded children. `None` → durable (default).
+   * Durability of this graph's steps. `None` inherits: the workflow's own
+   * graph defaults to durable, and a nested graph (Split/While body, onWait)
+   * takes its parent's setting. An explicit value wins for this graph and
+   * everything nested in it, so a body can opt out with `false` inside a
+   * durable workflow (or opt in under a non-durable one). An embedded
+   * workflow follows its own definition, not the embedding run's.
+   * `parse_workflow` copies `Workflow.durable` here when this is `None`.
    */
   durable?: boolean | null;
   /**
@@ -2267,7 +2272,8 @@ export interface ExecutionGraph {
    * Maximum wall-clock time (in seconds) an execution of this workflow may
    * run before the server stops it. Written by the workflow editor
    * (validated 1-3600 in the UI) and enforced server-side when scheduling
-   * the execution — the compiler does not interpret this field.
+   * the execution — the compiler does not interpret this field. Only the
+   * workflow's own graph is read; a nested graph's value is ignored (W084).
    * @format int32
    * @min 0
    */
@@ -2295,7 +2301,10 @@ export interface ExecutionGraph {
   outputSchema?: Partial<Record<string, SchemaField>>;
   /**
    * Maximum cumulative time (in milliseconds) that rate-limited retries may
-   * durable-sleep before giving up.  Applies to all steps in this workflow.
+   * durable-sleep before giving up.  Applies to every step of this
+   * workflow, including those in Split/While bodies and onWait; set it on
+   * the workflow's own graph, as a nested graph's value is ignored (W084).
+   * An embedded workflow uses its own setting.
    * Default: 60 000 (1 minute).  Set higher for workflows that make many
    * calls through a slow rate limit (e.g. 3 600 000 for 1 hour).
    * @format int64
@@ -2313,9 +2322,13 @@ export interface ExecutionGraph {
   /** Map of step IDs to step definitions */
   steps: Partial<Record<string, Step>>;
   /**
-   * Constant variables available as `variables.<name>` during execution.
-   * These are static values defined at design time, not overridable at runtime.
-   * Keys are variable names, values contain type and value.
+   * Variables available as `variables.<name>` during execution. Keys are
+   * variable names, values contain type and value.
+   *
+   * On the workflow's own graph these are defaults that a run's input
+   * `variables` can override. On a nested graph (Split/While body, onWait)
+   * they are added to the body's scope, and the step's `config.variables`
+   * win over them.
    */
   variables?: Partial<Record<string, Variable>>;
 }
@@ -5061,11 +5074,9 @@ export interface WhileStep {
 /** Complete workflow definition */
 export interface Workflow {
   /**
-   * Disable durability for this workflow when `false`. Compiled code contains
-   * no checkpoint reads/writes, no `sdk.sleep`, and no breakpoint
-   * checkpoints. When this field is `Some(false)`, the setting propagates
-   * into `ExecutionGraph.durable` (via `parse_workflow`) and then to every
-   * nested subgraph and embedded child workflow at codegen time. Default: durable.
+   * Disable durability for this workflow when `false`. Copied into
+   * `ExecutionGraph.durable` by `parse_workflow` when that is unset; see
+   * there for how nested graphs inherit it. Default: durable.
    */
   durable?: boolean | null;
   /** The execution graph containing all steps */

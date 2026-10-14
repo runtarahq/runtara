@@ -40,12 +40,12 @@ use super::{
     DIRECT_AGENT_ATTEMPT_ENV_LEN_LOCAL, DIRECT_AGENT_ATTEMPT_ENV_PTR_LOCAL,
     DIRECT_AGENT_ATTEMPT_ERR_FLAG_LOCAL, DIRECT_AGENT_ATTEMPT_HIT_FLAG_LOCAL,
     DIRECT_AGENT_ATTEMPT_KEY_LEN_LOCAL, DIRECT_AGENT_ATTEMPT_KEY_PTR_LOCAL,
-    DIRECT_AGENT_RATE_LIMITED_LOCAL, DIRECT_AGENT_RETRY_ATTEMPT_LOCAL,
-    DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL, DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL,
-    DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL, DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL,
-    DIRECT_AGENT_RETRYABLE_LOCAL, DirectCoreFunctionIndices, DirectCoreStaticData,
-    DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget, DirectHandledTarget,
-    DirectRunPlan, DirectVariables,
+    DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL, DIRECT_AGENT_RATE_LIMITED_LOCAL,
+    DIRECT_AGENT_RETRY_ATTEMPT_LOCAL, DIRECT_AGENT_RETRY_ERROR_LEN_LOCAL,
+    DIRECT_AGENT_RETRY_ERROR_PTR_LOCAL, DIRECT_AGENT_RETRY_SLEEP_MS_LOCAL,
+    DIRECT_AGENT_RETRY_SLEEP_TAG_LOCAL, DIRECT_AGENT_RETRYABLE_LOCAL, DirectCoreFunctionIndices,
+    DirectCoreStaticData, DirectDataSegment, DirectErrorRoutePlan, DirectFailureTarget,
+    DirectHandledTarget, DirectRunPlan, DirectVariables,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -262,6 +262,13 @@ pub(super) fn emit_agent_plan(
     if max_retries > 0 {
         body.instruction(&Instruction::I32Const(1));
         body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
+        // The rate-limit budget is per step. The local is shared by every
+        // step lowered into this function (and aliased as the Wait deadline),
+        // so an earlier step's waits must not count against this one.
+        body.instruction(&Instruction::I64Const(0));
+        body.instruction(&Instruction::LocalSet(
+            DIRECT_AGENT_RATE_LIMIT_WAIT_TOTAL_LOCAL,
+        ));
         body.instruction(&Instruction::Block(BlockType::Empty));
         body.instruction(&Instruction::Loop(BlockType::Empty));
 

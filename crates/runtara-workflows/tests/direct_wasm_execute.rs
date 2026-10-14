@@ -13986,3 +13986,126 @@ fn a_workflow_agent_failure_reaches_the_root_error_as_child_error() {
         assert_eq!(child_error["message"], "the child failed", "{persisted}");
     }
 }
+
+fn rate_limited_provider_reply() -> Value {
+    serde_json::json!({"status": 429, "headers": {"retry-after-ms": "1000"}, "body": {"error": {"message": "rate limited"}}})
+}
+
+fn ok_provider_reply() -> Value {
+    serde_json::json!({"status": 200, "headers": {}, "body": {"object": "list", "data": [], "has_more": false}})
+}
+
+fn rate_limited_stripe_step(id: &str) -> Value {
+    serde_json::json!({"id": id, "stepType": "Agent", "agentId": "stripe", "capabilityId": "list-customers",
+                       "connectionId": "conn-1", "maxRetries": 1, "retryDelay": 10, "inputMapping": {}})
+}
+
+/// Each 429 asks for a 1000 ms wait against a root budget of 1500 ms: a step
+/// may wait once and gives up on the second. A Split body obeys the root
+/// budget rather than the nested graph's 60 000 ms default.
+#[test]
+fn direct_wasm_execute_split_body_uses_root_rate_limit_budget() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = serde_json::json!({
+        "durable": false,
+        "rateLimitBudgetMs": 1500,
+        "entryPoint": "split",
+        "executionPlan": [{"fromStep": "split", "toStep": "finish"}],
+        "steps": {
+            "split": {"id": "split", "stepType": "Split", "config": {"value": {"valueType": "immediate", "value": [1]}},
+                      "subgraph": {"entryPoint": "call",
+                                   "executionPlan": [{"fromStep": "call", "toStep": "done"}],
+                                   "steps": {"call": rate_limited_stripe_step("call"),
+                                             "done": {"id": "done", "stepType": "Finish", "inputMapping": {}}}}},
+            "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {}}
+        }
+    })
+    .to_string();
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "split-body-root-rate-limit-budget",
+        &graph,
+        br#"{}"#,
+        vec![
+            rate_limited_provider_reply(),
+            rate_limited_provider_reply(),
+            rate_limited_provider_reply(),
+            ok_provider_reply(),
+        ],
+    );
+    assert!(
+        !result.status_success,
+        "the body must give up: {:?}",
+        result.output_json
+    );
+    let error = result.error_json.expect("failure envelope");
+    assert_eq!(error["code"], "STRIPE_RATE_LIMITED", "{error}");
+    assert_eq!(error["stepId"], "call", "{error}");
+    assert_eq!(result.llm_requests.len(), 2, "one wait, then give up");
+}
+
+/// The budget is per step: an earlier step's rate-limit waits do not count
+/// against a later step lowered into the same function.
+#[test]
+fn direct_wasm_execute_rate_limit_budget_restarts_for_each_step() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = serde_json::json!({
+        "durable": false,
+        "rateLimitBudgetMs": 1500,
+        "entryPoint": "first",
+        "executionPlan": [{"fromStep": "first", "toStep": "second"}, {"fromStep": "second", "toStep": "finish"}],
+        "steps": {
+            "first": rate_limited_stripe_step("first"),
+            "second": rate_limited_stripe_step("second"),
+            "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {}}
+        }
+    })
+    .to_string();
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "rate-limit-budget-per-step",
+        &graph,
+        br#"{}"#,
+        vec![
+            rate_limited_provider_reply(),
+            ok_provider_reply(),
+            rate_limited_provider_reply(),
+            ok_provider_reply(),
+        ],
+    );
+    assert!(result.status_success, "{:?}", result.error_json);
+    assert_eq!(result.llm_requests.len(), 4);
+}
+
+/// A timed WaitForSignal leaves its absolute deadline in the local the Agent
+/// retry loop sums rate-limit waits into. A later rate-limited step must still
+/// get its own budget, not start out over it.
+#[test]
+fn direct_wasm_execute_rate_limit_budget_ignores_earlier_wait_deadline() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = serde_json::json!({
+        "rateLimitBudgetMs": 1500,
+        "entryPoint": "wait",
+        "executionPlan": [
+            {"fromStep": "wait", "toStep": "call", "label": "onError"},
+            {"fromStep": "wait", "toStep": "call"},
+            {"fromStep": "call", "toStep": "finish"}
+        ],
+        "steps": {
+            "wait": {"id": "wait", "stepType": "WaitForSignal", "pollIntervalMs": 0,
+                     "timeoutMs": {"valueType": "immediate", "value": 1}},
+            "call": rate_limited_stripe_step("call"),
+            "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {}}
+        }
+    })
+    .to_string();
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "rate-limit-budget-after-wait",
+        &graph,
+        br#"{}"#,
+        vec![rate_limited_provider_reply(), ok_provider_reply()],
+    );
+    assert!(result.status_success, "{:?}", result.error_json);
+    assert_eq!(result.llm_requests.len(), 2);
+}
