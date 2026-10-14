@@ -527,7 +527,10 @@ fn step_run_plan(
     )
 }
 
-fn step_run_plan_without_on_error(
+/// An onError handler's plan. Its own steps keep their onError routing, so a
+/// failure inside a handler reaches that step's handler instead of failing
+/// the run.
+fn handler_run_plan(
     graph: &DirectGraphManifest,
     child_workflows: &[DirectChildWorkflowGraphManifest],
     step_id: &str,
@@ -539,7 +542,7 @@ fn step_run_plan_without_on_error(
         child_workflows,
         step_id,
         stack,
-        false,
+        true,
         None,
         step_id,
         orders,
@@ -2737,13 +2740,7 @@ fn on_error_plan(
                     "missing onError condition id for direct step '{from_step}'"
                 ))
             })?;
-            let plan = step_run_plan_without_on_error(
-                graph,
-                child_workflows,
-                &edge.to_step,
-                stack,
-                orders,
-            )?;
+            let plan = handler_run_plan(graph, child_workflows, &edge.to_step, stack, orders)?;
             Ok(DirectEdgeConditionPlan {
                 condition_id,
                 plan: Box::new(plan),
@@ -2751,9 +2748,7 @@ fn on_error_plan(
         })
         .collect::<Result<Vec<_>, DirectCompileError>>()?;
     let default_plan = default_edge
-        .map(|edge| {
-            step_run_plan_without_on_error(graph, child_workflows, &edge.to_step, stack, orders)
-        })
+        .map(|edge| handler_run_plan(graph, child_workflows, &edge.to_step, stack, orders))
         .transpose()?
         .map(Box::new);
     stack.pop();

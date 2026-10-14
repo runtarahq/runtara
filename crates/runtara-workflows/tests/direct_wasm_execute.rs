@@ -14220,3 +14220,46 @@ fn direct_wasm_execute_ai_agent_provider_429s_use_the_rate_limit_budget() {
         no_retries.output_json
     );
 }
+
+/// A step inside an onError handler keeps its own onError routing: when the
+/// handler's step fails too, its handler runs instead of the run failing.
+#[test]
+fn direct_wasm_execute_on_error_inside_an_on_error_handler_routes() {
+    let components_dir = direct_e2e_components_dir();
+    let boom = |id: &str| {
+        serde_json::json!({"id": id, "stepType": "Agent", "agentId": "transform",
+                           "capabilityId": "from-json-string", "maxRetries": 0,
+                           "inputMapping": {"value": {"valueType": "immediate", "value": "{not json"}}})
+    };
+    let graph = serde_json::json!({
+        "entryPoint": "first",
+        "executionPlan": [
+            {"fromStep": "first", "toStep": "ok"},
+            {"fromStep": "first", "toStep": "recover", "label": "onError"},
+            {"fromStep": "recover", "toStep": "recovered"},
+            {"fromStep": "recover", "toStep": "inner_handler", "label": "onError"}
+        ],
+        "steps": {
+            "first": boom("first"),
+            "recover": boom("recover"),
+            "ok": {"id": "ok", "stepType": "Finish", "inputMapping": {}},
+            "recovered": {"id": "recovered", "stepType": "Finish", "inputMapping": {
+                "stage": {"valueType": "immediate", "value": "recovered"}}},
+            "inner_handler": {"id": "inner_handler", "stepType": "Finish", "inputMapping": {
+                "stage": {"valueType": "immediate", "value": "inner handler"},
+                "failed": {"valueType": "reference", "value": "steps.__error.stepId"}}}
+        }
+    })
+    .to_string();
+    let result = run_direct_workflow_capture(
+        &components_dir,
+        "on-error-inside-handler",
+        &graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(result.status_success, "{}", result.stderr);
+    let output = result.output_json.expect("inner handler output");
+    assert_eq!(output["stage"], "inner handler", "{output}");
+    assert_eq!(output["failed"], "recover", "{output}");
+}

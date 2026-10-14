@@ -195,8 +195,25 @@ def check_template_messages():
           warnings and "fails the run" in warnings[0] and "resolves missing values" not in warnings[0], warnings)
 
 
+# ---------------------------------------------------------------- D-onError
+
+
+def check_on_error_inside_handler():
+    boom = lambda step_id: {"stepType": "Agent", "id": step_id, "agentId": "transform",
+                            "capabilityId": "from-json-string", "maxRetries": 0,
+                            "inputMapping": {"value": imm("{not json")}}
+    g = graph("first", [boom("first"), boom("recover"), fin("ok"), fin("recovered", stage=imm("recovered")),
+                        fin("inner", stage=imm("inner handler"), failed=ref("steps.__error.stepId"))], [
+        edge("first", "ok"), edge("first", "recover", label="onError"),
+        edge("recover", "recovered"), edge("recover", "inner", label="onError")])
+    r = run("rf-nested-on-error", g)
+    check("D-onError a failing step inside a handler reaches its own handler",
+          r.get("status") == "completed" and (r.get("outputs") or {}).get("stage") == "inner handler"
+          and r["outputs"].get("failed") == "recover", r)
+
+
 CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, check_child_version_spellings,
-          check_validate_matches_save_on_name, check_template_messages]
+          check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler]
 
 
 def main():
