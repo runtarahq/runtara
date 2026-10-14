@@ -2686,6 +2686,15 @@ fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
     }
 }
 
+/// Deepest onError handler nesting the planner lowers. Every handler region
+/// is planned inline at each site that can reach it, so unbounded nesting of
+/// handlers that have handlers would grow the plan exponentially; validation
+/// rejects deeper nesting at save (E149).
+pub(crate) const MAX_NESTED_ON_ERROR_DEPTH: usize = 4;
+
+/// Stack frame marking an onError handler level (never a step id).
+const ON_ERROR_FRAME: &str = "\u{1}onError";
+
 fn on_error_plan(
     graph: &DirectGraphManifest,
     child_workflows: &[DirectChildWorkflowGraphManifest],
@@ -2731,7 +2740,17 @@ fn on_error_plan(
             ))
     });
 
+    let depth = stack
+        .iter()
+        .filter(|frame| frame.as_str() == ON_ERROR_FRAME)
+        .count();
+    if depth >= MAX_NESTED_ON_ERROR_DEPTH {
+        return Err(DirectCompileError::Component(format!(
+            "onError handlers nest deeper than {MAX_NESTED_ON_ERROR_DEPTH} levels at step '{from_step}'"
+        )));
+    }
     stack.push(from_step.to_string());
+    stack.push(ON_ERROR_FRAME.to_string());
     let branches = conditional_edges
         .into_iter()
         .map(|edge| {
@@ -2751,6 +2770,7 @@ fn on_error_plan(
         .map(|edge| handler_run_plan(graph, child_workflows, &edge.to_step, stack, orders))
         .transpose()?
         .map(Box::new);
+    stack.pop();
     stack.pop();
 
     Ok(Some(DirectErrorRoutePlan {

@@ -68,6 +68,7 @@
 //! | E146 | MissingStepConfig | Split or Switch without the config its value lives in |
 //! | E147 | InvalidMillisecondsValue | Literal Delay.durationMs / WaitForSignal.timeoutMs that is not a non-negative number |
 //! | E148 | InvalidTemplateSyntax | A template value that does not parse |
+//! | E149 | OnErrorNestingTooDeep | onError handlers nested more than 4 levels, or a handler chain that loops |
 //! | E050 | InvalidChildVersion | Invalid child workflow version format |
 //! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
 //! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
@@ -678,6 +679,14 @@ pub enum ValidationError {
         template: String,
         reason: String,
     },
+    /// onError handlers that themselves have onError handlers nest deeper
+    /// than the compiler lowers, or a handler chain leads back to a step
+    /// already in it.
+    OnErrorNestingTooDeep {
+        step_id: String,
+        max_depth: usize,
+        cyclic: bool,
+    },
 }
 
 /// Information about a missing required input field.
@@ -768,6 +777,7 @@ impl ValidationError {
             Self::MissingStepConfig { .. } => "E146",
             Self::InvalidMillisecondsValue { .. } => "E147",
             Self::InvalidTemplateSyntax { .. } => "E148",
+            Self::OnErrorNestingTooDeep { .. } => "E149",
         }
     }
 }
@@ -1633,6 +1643,28 @@ impl std::fmt::Display for ValidationError {
                 "[E148] Step '{}' has a template that does not parse: {}. Template: {}",
                 step_id, reason, template
             ),
+            ValidationError::OnErrorNestingTooDeep {
+                step_id,
+                max_depth,
+                cyclic,
+            } => {
+                if *cyclic {
+                    write!(
+                        f,
+                        "[E149] The onError handlers of step '{}' lead back to a step already \
+                         in the same handler chain.",
+                        step_id
+                    )
+                } else {
+                    write!(
+                        f,
+                        "[E149] The onError handlers of step '{}' nest more than {} levels deep \
+                         (handlers whose steps have their own onError handlers). Flatten the \
+                         chain.",
+                        step_id, max_depth
+                    )
+                }
+            }
         }
     }
 }
@@ -3372,6 +3404,98 @@ fn validate_edge_shapes(graph: &ExecutionGraph, result: &mut ValidationResult) {
                     })
                 }
             }
+            _ => {}
+        }
+    }
+}
+
+/// Deepest onError handler nesting the compiler lowers (its
+/// `MAX_NESTED_ON_ERROR_DEPTH`).
+const MAX_NESTED_ON_ERROR_DEPTH: usize = 4;
+
+/// E149: a handler region (the steps a handler reaches through normal flow)
+/// may contain steps with their own handlers, down to
+/// [`MAX_NESTED_ON_ERROR_DEPTH`] levels, and a chain may not lead back to a
+/// step already in it.
+fn validate_on_error_nesting(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    fn handler_depth(
+        graph: &ExecutionGraph,
+        step_id: &str,
+        chain: &mut Vec<String>,
+        memo: &mut HashMap<String, Option<usize>>,
+    ) -> Option<usize> {
+        if let Some(known) = memo.get(step_id) {
+            return *known;
+        }
+        if chain.iter().any(|visited| visited == step_id) {
+            return None;
+        }
+        chain.push(step_id.to_string());
+        let mut depth = Some(0);
+        for edge in graph
+            .execution_plan
+            .iter()
+            .filter(|edge| edge.from_step == step_id && edge.label.as_deref() == Some("onError"))
+        {
+            let mut region: Vec<String> = reachable_over_normal_flow(graph, &edge.to_step)
+                .into_iter()
+                .collect();
+            region.sort();
+            for node in region {
+                depth = match (depth, handler_depth(graph, &node, chain, memo)) {
+                    (Some(current), Some(inner)) => Some(current.max(inner + 1)),
+                    _ => None,
+                };
+                if depth.is_none() {
+                    break;
+                }
+            }
+            if depth.is_none() {
+                break;
+            }
+            depth = depth.map(|current| current.max(1));
+        }
+        chain.pop();
+        // A cycle depends on the chain it was reached through; only memoize
+        // finite answers.
+        if depth.is_some() {
+            memo.insert(step_id.to_string(), depth);
+        }
+        depth
+    }
+
+    let mut memo = HashMap::new();
+    let mut step_ids: Vec<&String> = graph.steps.keys().collect();
+    step_ids.sort();
+    for step_id in step_ids {
+        match handler_depth(graph, step_id, &mut Vec::new(), &mut memo) {
+            None => {
+                result.errors.push(ValidationError::OnErrorNestingTooDeep {
+                    step_id: step_id.clone(),
+                    max_depth: MAX_NESTED_ON_ERROR_DEPTH,
+                    cyclic: true,
+                });
+                return;
+            }
+            Some(depth) if depth > MAX_NESTED_ON_ERROR_DEPTH => {
+                result.errors.push(ValidationError::OnErrorNestingTooDeep {
+                    step_id: step_id.clone(),
+                    max_depth: MAX_NESTED_ON_ERROR_DEPTH,
+                    cyclic: false,
+                });
+                return;
+            }
+            Some(_) => {}
+        }
+    }
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => result.in_subgraph(&split_step.id, |result| {
+                validate_on_error_nesting(&split_step.subgraph, result)
+            }),
+            Step::While(while_step) => result.in_subgraph(&while_step.id, |result| {
+                validate_on_error_nesting(&while_step.subgraph, result)
+            }),
             _ => {}
         }
     }
@@ -5934,6 +6058,7 @@ fn validate_edge_conditions(graph: &ExecutionGraph, result: &mut ValidationResul
     validate_edge_shapes(graph, result);
     validate_delay_durability(graph, true, result);
     validate_static_step_values(graph, result);
+    validate_on_error_nesting(graph, result);
 }
 
 /// E027: workflow conditions must not use operators that only exist for
@@ -18207,6 +18332,39 @@ mod edge_shape_tests {
                 "done": fin("done")},
             "executionPlan": [{"fromStep": "d", "toStep": "done"}]});
         assert!(closure_codes(referenced).is_empty());
+    }
+
+    /// Handlers of handlers nest up to the compiler's limit; deeper nesting
+    /// and a chain that loops back are rejected at save.
+    #[test]
+    fn on_error_nesting_is_bounded_and_acyclic() {
+        let chain = |levels: usize| {
+            let mut steps = serde_json::Map::new();
+            let mut plan = Vec::new();
+            for level in 0..=levels {
+                let id = format!("s{level}");
+                steps.insert(id.clone(), echo(&id));
+                steps.insert(format!("ok{level}"), fin(&format!("ok{level}")));
+                plan.push(json!({"fromStep": id, "toStep": format!("ok{level}")}));
+                if level < levels {
+                    plan.push(json!({"fromStep": id, "toStep": format!("s{}", level + 1),
+                                     "label": "onError"}));
+                }
+            }
+            json!({"entryPoint": "s0", "steps": steps, "executionPlan": plan})
+        };
+        assert!(!closure_codes(chain(MAX_NESTED_ON_ERROR_DEPTH)).contains(&"E149".to_string()));
+        assert_eq!(
+            closure_codes(chain(MAX_NESTED_ON_ERROR_DEPTH + 1)),
+            vec!["E149".to_string()]
+        );
+        let looped = json!({"entryPoint": "a", "steps": {"a": echo("a"), "b": echo("b"), "ok": fin("ok")},
+            "executionPlan": [
+                {"fromStep": "a", "toStep": "ok"},
+                {"fromStep": "a", "toStep": "b", "label": "onError"},
+                {"fromStep": "b", "toStep": "ok"},
+                {"fromStep": "b", "toStep": "a", "label": "onError"}]});
+        assert!(closure_codes(looped).contains(&"E149".to_string()));
     }
 
     /// A conditioned edge from a fan-out branch into the merge point is not a
