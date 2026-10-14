@@ -1663,6 +1663,13 @@ pub enum ValidationWarning {
     /// setting that only the workflow's own graph honours, such as
     /// `rateLimitBudgetMs`; the nested value has no effect.
     NestedGraphSettingIgnored { scope: String, setting: String },
+    /// A reference reads a field the onError error context never carries
+    /// (`steps.__error.mesage`); it resolves to null.
+    UnknownErrorContextField {
+        step_id: String,
+        reference_path: String,
+        field: String,
+    },
 }
 
 impl ValidationWarning {
@@ -1693,6 +1700,7 @@ impl ValidationWarning {
             Self::NonDurableStateIsLocal { .. } => "W082",
             Self::EmbeddedChildStateIsLocal { .. } => "W083",
             Self::NestedGraphSettingIgnored { .. } => "W084",
+            Self::UnknownErrorContextField { .. } => "W085",
         }
     }
 }
@@ -1944,6 +1952,18 @@ impl std::fmt::Display for ValidationWarning {
                 f,
                 "[W084] {} sets {}, which has no effect there: it applies to the whole workflow. Set it on the workflow instead.",
                 scope, setting
+            ),
+            ValidationWarning::UnknownErrorContextField {
+                step_id,
+                reference_path,
+                field,
+            } => write!(
+                f,
+                "[W085] Step '{}' references '{}', but the error context has no '{}' field, so it resolves to null. Known fields: {}.",
+                step_id,
+                reference_path,
+                field,
+                ERROR_CONTEXT_FIELDS.join(", ")
             ),
         }
     }
@@ -3040,6 +3060,78 @@ const WHILE_SCOPE_VARIABLES: &[&str] = &["_index", "_previousOutputs", "_loop", 
 /// `_instance_id` is also injected there but is already a global built-in.
 const WAIT_ON_WAIT_SCOPE_VARIABLES: &[&str] = &["_signal_id"];
 
+/// Top-level fields the onError error context can carry: the agent error
+/// envelope (`error-info` in the agent WIT plus `stepId`/`agentId`/
+/// `capabilityId`), the Error step's `context`, the EmbedWorkflow child
+/// failure, and the missing-input failure (see `parse_error_envelope`,
+/// `DirectJsonManifest::error` and `child_failure_envelope` in the stdlib).
+const ERROR_CONTEXT_FIELDS: &[&str] = &[
+    "code",
+    "message",
+    "category",
+    "severity",
+    "retryable",
+    "retryAfterMs",
+    "attributes",
+    "details",
+    "context",
+    "stepId",
+    "stepName",
+    "stepType",
+    "agentId",
+    "capabilityId",
+    "childWorkflowId",
+    "childError",
+    "missingInputs",
+];
+
+/// Steer the bare `__error`/`error` roots to `steps.__error.*` (W053), and
+/// flag a field the error context never has (W085). Roots are read as the
+/// runtime reads them, so `["__error"].message` and `__error["message"]`
+/// are treated like the dotted spelling.
+fn check_error_context_reference(step_id: &str, ref_path: &str, result: &mut ValidationResult) {
+    let segments = reference_segments(ref_path);
+    let (bare, field) = match segments.first().map(String::as_str) {
+        Some("steps")
+            if matches!(
+                segments.get(1).map(String::as_str),
+                Some("__error" | "error")
+            ) =>
+        {
+            (false, segments.get(2))
+        }
+        Some("__error" | "error") => (true, segments.get(1)),
+        _ => return,
+    };
+    if bare {
+        let suggested_path = if let Some(rest) = ref_path.strip_prefix("__error") {
+            format!("steps.__error{rest}")
+        } else if let Some(rest) = ref_path.strip_prefix("error") {
+            format!("steps.__error{rest}")
+        } else {
+            // Bracketed root: `["error"].message` -> `steps["__error"].message`.
+            let rest = ref_path.find(']').map_or("", |end| &ref_path[end + 1..]);
+            format!("steps[\"__error\"]{rest}")
+        };
+        result.warnings.push(ValidationWarning::BareErrorReference {
+            step_id: step_id.to_string(),
+            reference_path: ref_path.to_string(),
+            suggested_path,
+        });
+    }
+    if let Some(field) = field
+        && !ERROR_CONTEXT_FIELDS.contains(&field.as_str())
+    {
+        result
+            .warnings
+            .push(ValidationWarning::UnknownErrorContextField {
+                step_id: step_id.to_string(),
+                reference_path: ref_path.to_string(),
+                field: field.clone(),
+            });
+    }
+}
+
 /// Step ids the runtime injects implicitly rather than as authored steps —
 /// `steps.__error` is the error context populated inside onError handlers.
 /// Referencing one outside its scope resolves to null at runtime, matching the
@@ -3300,17 +3392,7 @@ fn validate_step_reference(
         return false;
     }
 
-    // Read the root as the runtime does, so `["__error"].message` and
-    // `__error["message"]` are steered to the canonical path like the dotted
-    // spelling.
-    if reference_root(ref_path).as_deref() == Some("__error") {
-        let separator = if ref_path.starts_with('[') { "" } else { "." };
-        result.warnings.push(ValidationWarning::BareErrorReference {
-            step_id: step_id.to_string(),
-            reference_path: ref_path.to_string(),
-            suggested_path: format!("steps{separator}{ref_path}"),
-        });
-    }
+    check_error_context_reference(step_id, ref_path, result);
 
     let Some(referenced_step_id) = extract_step_id_from_reference(ref_path) else {
         return true;
@@ -4016,7 +4098,10 @@ fn validate_template_static_reference(
         return;
     }
 
-    if let Some(referenced_step_id) = extract_step_id_from_reference(reference) {
+    check_error_context_reference(step_id, reference, result);
+    if let Some(referenced_step_id) = extract_step_id_from_reference(reference)
+        && !RESERVED_IMPLICIT_STEP_IDS.contains(&referenced_step_id.as_str())
+    {
         if warn_on_self_reference && referenced_step_id == step_id {
             result.warnings.push(ValidationWarning::SelfReference {
                 step_id: step_id.to_string(),
@@ -9124,6 +9209,84 @@ mod tests {
         );
         assert!(!canonical.has_errors());
         assert!(!canonical.has_warnings());
+    }
+
+    /// The `error` alias of the bare root warns like `__error`, and a field
+    /// the error context never has is flagged on every spelling.
+    #[test]
+    fn error_context_alias_and_unknown_fields_warn() {
+        let codes = |reference: &str| {
+            let mut result = ValidationResult::default();
+            validate_reference(
+                "handler",
+                reference,
+                &HashSet::new(),
+                &HashMap::new(),
+                &HashSet::new(),
+                &mut result,
+            );
+            assert!(!result.has_errors(), "{reference}: {:?}", result.errors);
+            result
+                .warnings
+                .iter()
+                .map(|warning| warning.to_string())
+                .collect::<Vec<_>>()
+        };
+        let bare = codes("error.message");
+        assert_eq!(bare.len(), 1, "{bare:?}");
+        assert!(bare[0].contains("[W053]") && bare[0].contains("'steps.__error.message'"));
+        assert!(codes(r#"error["code"]"#)[0].contains(r#"'steps.__error["code"]'"#));
+
+        for typo in [
+            "steps.__error.mesage",
+            "steps.error.mesage",
+            "__error.mesage",
+        ] {
+            let warnings = codes(typo);
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.starts_with("[W085]") && w.contains("no 'mesage' field")),
+                "{typo}: {warnings:?}"
+            );
+        }
+        for known in [
+            "steps.__error.code",
+            "steps.__error.attributes.status_code",
+            "steps.__error.childError.code",
+            "steps.__error",
+        ] {
+            assert!(codes(known).is_empty(), "{known}");
+        }
+    }
+
+    /// Templates read the error context like mappings: no false "step does
+    /// not exist", and the same field check.
+    #[test]
+    fn template_error_context_references_are_checked_not_rejected() {
+        let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "done",
+            "steps": {"done": {"id": "done", "stepType": "Finish", "inputMapping": {
+                "ok": {"valueType": "template", "value": "{{ steps.__error.message }}"},
+                "typo": {"valueType": "template", "value": "{{ steps.__error.mesage }}"}
+            }}}
+        }))
+        .expect("graph parses");
+        let warnings: Vec<String> =
+            validate_workflow(&graph, &runtara_dsl::agent_meta::AgentCatalog::new())
+                .warnings
+                .iter()
+                .map(|warning| warning.to_string())
+                .collect();
+        assert!(
+            !warnings.iter().any(|w| w.contains("does not exist")),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            warnings.iter().filter(|w| w.starts_with("[W085]")).count(),
+            1,
+            "{warnings:?}"
+        );
     }
 
     /// The bare root is read with the runtime's tokenizer, so every spelling of
