@@ -572,6 +572,17 @@ pub(super) fn emit_embed_workflow_tool_arm(
     }
 }
 
+/// Restore the data context an Embed step was entered with. The child's input
+/// mapping (and any nested embed) clobbered the shared child-data local, but
+/// the onError handler and the next plan resolve `data.*` against this step's
+/// data context.
+fn restore_entry_data(body: &mut WasmFunction, data_ptr_local: u32, data_len_local: u32) {
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_SAVED_DATA_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(data_ptr_local));
+    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_SAVED_DATA_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(data_len_local));
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_embed_workflow_child_with_retry(
     body: &mut WasmFunction,
@@ -896,6 +907,9 @@ pub(super) fn emit_embed_workflow_plan(
             output_ptr_local,
             output_len_local,
         );
+        // A recorded result skips the child, but the input mapping above
+        // already overwrote the shared child-data local.
+        restore_entry_data(body, data_ptr_local, data_len_local);
         body.instruction(&Instruction::Else);
     }
 
@@ -1018,13 +1032,8 @@ pub(super) fn emit_embed_workflow_plan(
         DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL,
     ));
 
-    // Restore the entry data context: the child's input mapping (and any nested
-    // embed) clobbered the shared child-data local, but the onError handler and
-    // the next plan resolve `data.*` against THIS step's data context.
-    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_SAVED_DATA_PTR_LOCAL));
-    body.instruction(&Instruction::LocalSet(data_ptr_local));
-    body.instruction(&Instruction::LocalGet(DIRECT_EMBED_SAVED_DATA_LEN_LOCAL));
-    body.instruction(&Instruction::LocalSet(data_len_local));
+    // Restore the entry data context before the onError handler runs.
+    restore_entry_data(body, data_ptr_local, data_len_local);
 
     if timeout_ms.is_some() {
         capture_deadline_error(body, deadline_owner, output_ptr_local, output_len_local);

@@ -1981,6 +1981,9 @@ impl runtara_component_host::runtime_host::RuntimeHost for RecordingRuntimeHost 
     }
 }
 
+/// The command id of the pause [`PersistingRuntimeHost::pause_after`] raises.
+const PERSISTING_HOST_PAUSE: &str = "pause-after-checkpoint";
+
 /// A checkpoint-PERSISTING runtime host: records every id-carrying durable
 /// call and keeps checkpoints across `execute_invoke` calls, so a second run
 /// against the same host behaves exactly like a drain/resume replay (every
@@ -1999,6 +2002,8 @@ struct PersistingRuntimeHost {
     /// guest early-returns suspended from its wait poll loop — through the
     /// composed-agent sentinel when the wait lives inside a child.
     suspend_requested: std::sync::atomic::AtomicBool,
+    /// A checkpoint id whose first write is answered with a pause, once.
+    pause_after: Mutex<Option<String>>,
 }
 
 impl PersistingRuntimeHost {
@@ -2010,6 +2015,7 @@ impl PersistingRuntimeHost {
             managed_inputs: Default::default(),
             polled_input_ids: Mutex::new(Vec::new()),
             suspend_requested: std::sync::atomic::AtomicBool::new(false),
+            pause_after: Mutex::new(None),
         }
     }
 
@@ -2110,6 +2116,16 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
                 },
             );
         }
+        let mut pause_after = self.pause_after.lock().unwrap();
+        let pending_signal = (pause_after.as_deref() == Some(checkpoint_id.as_str())).then(|| {
+            pause_after.take();
+            runtara_component_host::runtime_host::RuntimeSignalInfo {
+                signal_type: "pause".into(),
+                command_id: PERSISTING_HOST_PAUSE.into(),
+                payload: Vec::new(),
+                checkpoint_id: None,
+            }
+        });
         if !state.is_empty() {
             store_checkpoint(&mut checkpoints, checkpoint_id, state);
         }
@@ -2117,7 +2133,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
             runtara_component_host::runtime_host::RuntimeCheckpointResult {
                 found: false,
                 state: Vec::new(),
-                pending_signal: None,
+                pending_signal,
                 custom_signal: None,
             },
         )
@@ -2125,9 +2141,9 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
     async fn handle_checkpoint_signal(
         &self,
         _signal_type: String,
-        _command_id: String,
+        command_id: String,
     ) -> Result<bool, String> {
-        Ok(false)
+        Ok(command_id == PERSISTING_HOST_PAUSE)
     }
     async fn record_retry_attempt(
         &self,
@@ -7200,37 +7216,41 @@ fn embed_in_embed_graphs() -> (
     )
 }
 
+/// Compile and compose [`embed_in_embed_graphs`] under `dir`.
+fn compile_embed_in_embed(components_dir: &Path, dir: &Path, track_events: bool) -> PathBuf {
+    let (parent, children) = embed_in_embed_graphs();
+    let mut compiled = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "embed-nest".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: parent,
+            child_workflows: children,
+            output_dir: dir.join("build"),
+            track_events,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
+        false,
+    )
+    .expect("embed-in-embed parent compiles");
+    runtara_workflows::direct_wasm::compose_direct_workflow(&mut compiled, components_dir)
+        .expect("embed-in-embed parent composes");
+    compiled.wasm_path
+}
+
+const EMBED_IN_EMBED_INPUT: &[u8] = br#"{"data":{"x":"from-parent"},"variables":{}}"#;
+
 #[test]
 fn direct_wasm_execute_embed_in_embed_keeps_the_middle_childs_context() {
     let components_dir = direct_e2e_components_dir();
     for track_events in [false, true] {
-        let (parent, children) = embed_in_embed_graphs();
         let temp = tempfile::tempdir().expect("tempdir");
-        let mut compiled = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
-            DirectCompilationInput {
-                workflow_id: "embed-nest".to_string(),
-                version: 1,
-                source_checksum: None,
-                execution_graph: parent,
-                child_workflows: children,
-                output_dir: temp.path().join("build"),
-                track_events,
-                agent_catalog: None,
-                agent_slug: None,
-            },
-            runtara_workflows::direct_wasm::WorkflowRole::Root,
-            false,
-        )
-        .expect("embed-in-embed parent compiles");
-        runtara_workflows::direct_wasm::compose_direct_workflow(&mut compiled, &components_dir)
-            .expect("embed-in-embed parent composes");
+        let wasm_path = compile_embed_in_embed(&components_dir, temp.path(), track_events);
 
         let host = Arc::new(PersistingRuntimeHost::new());
-        let exit = run_invoke_once(
-            &compiled.wasm_path,
-            host.clone(),
-            br#"{"data":{"x":"from-parent"},"variables":{}}"#.to_vec(),
-        );
+        let exit = run_invoke_once(&wasm_path, host.clone(), EMBED_IN_EMBED_INPUT.to_vec());
         let output = match exit {
             runtara_component_host::InvokeExit::Completed(output) => output,
             other => {
@@ -7255,6 +7275,54 @@ fn direct_wasm_execute_embed_in_embed_keeps_the_middle_childs_context() {
         assert!(
             writes.contains(&after),
             "track_events={track_events}: `after` checkpoints in the middle child's namespace; written: {writes:?}"
+        );
+    }
+}
+
+/// A run paused right after the inner Embed records its result resumes with
+/// that Embed answered from its row, and the middle child's steps after it
+/// still read the middle child's own data.
+#[test]
+fn direct_wasm_execute_embed_in_embed_replayed_from_its_row_keeps_the_middle_childs_data() {
+    use runtara_component_host::lifecycle::WorkflowWake;
+    let components_dir = direct_e2e_components_dir();
+    for track_events in [false, true] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let wasm_path = compile_embed_in_embed(&components_dir, temp.path(), track_events);
+
+        let host = Arc::new(PersistingRuntimeHost::new());
+        *host.pause_after.lock().unwrap() = Some(expected_key(
+            "embed_workflow",
+            "embed-nest",
+            serde_json::json!(["mid"]),
+            serde_json::json!([]),
+            serde_json::json!([["child", "embed-nest", [], ["call"]]]),
+        ));
+        match run_invoke_once(&wasm_path, host.clone(), EMBED_IN_EMBED_INPUT.to_vec()) {
+            runtara_component_host::InvokeExit::Suspended(wakes) => assert!(
+                matches!(wakes.as_slice(), [WorkflowWake::OnResume]),
+                "track_events={track_events}: a pause re-raises as an on-resume wake, got {wakes:?}"
+            ),
+            other => panic!(
+                "track_events={track_events}: the pause after `mid`'s result must suspend, got {other:?}"
+            ),
+        }
+        assert!(
+            host.pause_after.lock().unwrap().is_none(),
+            "track_events={track_events}: `mid` recorded its result before the pause"
+        );
+
+        let output = match run_invoke_once(&wasm_path, host.clone(), EMBED_IN_EMBED_INPUT.to_vec())
+        {
+            runtara_component_host::InvokeExit::Completed(output) => output,
+            other => {
+                panic!("track_events={track_events}: the resumed run must complete, got {other:?}")
+            }
+        };
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output).expect("output json"),
+            serde_json::json!({"value": {"mid": {"leaf": "inner"}, "who": "middle", "x": "from-parent"}}),
+            "track_events={track_events}: the middle child reads its own data after `mid` replays from its row"
         );
     }
 }
