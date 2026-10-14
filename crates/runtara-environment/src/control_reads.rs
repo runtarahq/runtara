@@ -786,6 +786,7 @@ mod parent_tests {
             input: None,
             env: None,
             timeout_seconds: None,
+            shared_child_steps: Default::default(),
         }
     }
 

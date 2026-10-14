@@ -549,6 +549,29 @@ impl Persistence for PostgresPersistence {
         Some(self)
     }
 
+    async fn set_shared_child_steps(
+        &self,
+        instance_id: &str,
+        shared: &runtara_core::persistence::checkpoint_scope::SharedChildSteps,
+    ) -> Result<(), CoreError> {
+        let steps: Option<Vec<String>> =
+            shared.steps().map(|steps| steps.iter().cloned().collect());
+        let updated =
+            sqlx::query("UPDATE instances SET shared_child_steps = $2 WHERE instance_id = $1")
+                .bind(instance_id)
+                .bind(steps)
+                .execute(&self.pool)
+                .await
+                .db()?
+                .rows_affected();
+        if updated == 0 {
+            return Err(CoreError::InstanceNotFound {
+                instance_id: instance_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     async fn register_instance(&self, instance_id: &str, tenant_id: &str) -> Result<(), CoreError> {
         Self::op_register_instance(&self.pool, instance_id, tenant_id).await
     }

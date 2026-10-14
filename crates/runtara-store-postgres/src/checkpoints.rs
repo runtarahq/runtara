@@ -61,6 +61,11 @@ pub(crate) async fn record(
 /// recorded result `$2`: the owned rows by exact address (`$3`), the inner
 /// rows as a byte range (`$4` to `$5`). Rows with no address never match.
 ///
+/// When the inner rows are the child namespace of step `$6`, they go only if
+/// the run knows its shared child steps and `$6` is not one of them (see
+/// [`checkpoint_scope::SharedChildSteps`]). That test reads one instance row
+/// and no checkpoint column, so it is checked once, not per row.
+///
 /// Two deletes, not one with an `OR`: each is then an `(instance_id, scope)`
 /// range on the `scope` index whatever the planner knows. Under an `OR`, a
 /// generic plan can bound the index by `instance_id` alone and filter every
@@ -69,7 +74,11 @@ pub(crate) async fn record(
 const COLLAPSE: &str = "owned AS (DELETE FROM checkpoints \
      WHERE instance_id = $1 AND checkpoint_id <> $2 AND scope = $3 RETURNING 1), \
      inside AS (DELETE FROM checkpoints \
-     WHERE instance_id = $1 AND checkpoint_id <> $2 AND scope >= $4 AND scope < $5 RETURNING 1)";
+     WHERE instance_id = $1 AND checkpoint_id <> $2 AND scope >= $4 AND scope < $5 \
+       AND ($6::text IS NULL OR EXISTS (SELECT 1 FROM instances \
+         WHERE instance_id = $1 AND shared_child_steps IS NOT NULL \
+           AND NOT ($6 = ANY (shared_child_steps)))) \
+     RETURNING 1)";
 
 /// Point the instance at the result just stored, inside the caller's
 /// transaction. When the result's kind has a closure (see
@@ -104,6 +113,7 @@ pub(crate) async fn point_and_collapse(
         .bind(&closure.owned)
         .bind(low)
         .bind(&high)
+        .bind(&closure.child_step)
         .execute(&mut *db)
         .await?
         .rows_affected();
@@ -111,8 +121,8 @@ pub(crate) async fn point_and_collapse(
 }
 
 /// Delete the instance's rows that `closure` covers, keeping `checkpoint_id`
-/// itself: the collapse [`point_and_collapse`] runs, on its own. Returns how
-/// many rows it deleted.
+/// itself and any child namespace the run may share: the collapse
+/// [`point_and_collapse`] runs, on its own. Returns how many rows it deleted.
 #[cfg(all(test, feature = "db-integration-tests"))]
 pub(crate) async fn collapse(
     db: &mut PgConnection,
@@ -129,6 +139,7 @@ pub(crate) async fn collapse(
     .bind(&closure.owned)
     .bind(low)
     .bind(&high)
+    .bind(&closure.child_step)
     .fetch_one(&mut *db)
     .await?;
     Ok(deleted as u64)

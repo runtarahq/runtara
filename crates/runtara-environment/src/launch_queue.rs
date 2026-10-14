@@ -319,6 +319,10 @@ pub struct InitialLaunchRequest {
     pub env: Option<HashMap<String, String>>,
     /// Bounded active-execution timeout persisted with the image binding.
     pub timeout_seconds: Option<i64>,
+    /// The steps whose child checkpoint namespace another step of the run may
+    /// share, read from the artifact's manifests; persisted on the instance so
+    /// that collapsing a result keeps those namespaces. Unknown keeps them all.
+    pub shared_child_steps: runtara_core::persistence::checkpoint_scope::SharedChildSteps,
 }
 
 /// Result of atomically claiming an initial instance and launch.
@@ -682,8 +686,8 @@ impl LaunchRepository {
             r#"
             INSERT INTO instances
                 (instance_id, tenant_id, definition_version, status, created_at, input, run_label,
-                 parent_instance_id, parent_close_policy, admitted_at)
-            SELECT $1, $2, 1, 'pending', NOW(), $3, $4, $5, $6, $7
+                 parent_instance_id, parent_close_policy, admitted_at, shared_child_steps)
+            SELECT $1, $2, 1, 'pending', NOW(), $3, $4, $5, $6, $7, $8
             WHERE $5::TEXT IS NULL OR EXISTS (
                 SELECT 1 FROM instances AS parent
                 WHERE parent.instance_id = $5 AND parent.tenant_id = $2
@@ -699,6 +703,12 @@ impl LaunchRepository {
         .bind(request.parent.as_ref().map(|p| &p.parent_instance_id))
         .bind(request.parent.as_ref().map(|p| &p.parent_close_policy))
         .bind(request.parent.as_ref().map(|p| p.admitted_at))
+        .bind(
+            request
+                .shared_child_steps
+                .steps()
+                .map(|steps| steps.iter().cloned().collect::<Vec<_>>()),
+        )
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -2386,6 +2396,60 @@ fn duration_to_micros(duration: Duration, field: &'static str) -> Result<i64, La
 
 #[cfg(test)]
 mod tests {
+    /// A run records which of its steps may share a child checkpoint
+    /// namespace when it is claimed. Unknown stays NULL, which keeps every
+    /// child namespace.
+    #[cfg(feature = "db-integration-tests")]
+    #[tokio::test]
+    async fn the_initial_claim_records_shared_child_steps() {
+        use runtara_core::persistence::checkpoint_scope::SharedChildSteps;
+        let pool = crate::test_support::pool().await;
+        let repo = LaunchRepository {
+            pool: pool.clone(),
+            metrics: None,
+        };
+        for (shared, expected) in [
+            (
+                SharedChildSteps::known(["y", "x"]),
+                Some(vec!["x".to_string(), "y".to_string()]),
+            ),
+            (SharedChildSteps::known::<&str>([]), Some(vec![])),
+            (SharedChildSteps::unknown(), None),
+        ] {
+            let id = uuid::Uuid::new_v4().to_string();
+            sqlx::query("INSERT INTO images (image_id, tenant_id, name, binary_path) VALUES ($1, $1, 'shared', '/unused')")
+                .bind(&id).execute(&pool).await.unwrap();
+            let request = InitialLaunchRequest {
+                run_label: None,
+                parent: None,
+                launch: EnqueueRequest::immediate(
+                    &id,
+                    &id,
+                    &id,
+                    &id,
+                    LaunchKind::Start,
+                    Duration::from_secs(600),
+                ),
+                input: None,
+                env: None,
+                timeout_seconds: None,
+                shared_child_steps: shared,
+            };
+            assert!(matches!(
+                repo.claim_initial(request).await.unwrap(),
+                InitialLaunchOutcome::Enqueued(_)
+            ));
+            let stored: Option<Vec<String>> = sqlx::query_scalar(
+                "SELECT shared_child_steps FROM instances WHERE instance_id = $1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(stored, expected);
+        }
+    }
+
     #[cfg(feature = "db-integration-tests")]
     #[tokio::test]
     async fn telemetry_counts_only_committed_changes_and_finishes_queue_once() {
@@ -2420,6 +2484,7 @@ mod tests {
             input: None,
             env: None,
             timeout_seconds: None,
+            shared_child_steps: Default::default(),
         };
         assert!(matches!(
             repo.claim_initial(request.clone()).await.unwrap(),
@@ -2502,6 +2567,7 @@ mod tests {
                 input: None,
                 env: None,
                 timeout_seconds: None,
+                shared_child_steps: Default::default(),
             })
             .await
             .unwrap();

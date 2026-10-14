@@ -35,6 +35,7 @@ pub mod registry;
 pub mod runtime_host;
 pub mod trusted;
 pub mod workflow;
+pub mod workflow_manifest;
 
 pub use bindings::exports::runtara::agent::capabilities::ErrorInfo;
 pub use connection_resolver_host::{CONNECTION_RESOLVER_INTERFACE_NAME, ConnectionResolverHost};

@@ -290,11 +290,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from runs started on this release; a `durable: false` step saves no result
   and collapses nothing. A step in an `onWait` graph that reuses the id of an
   Agent or EmbedWorkflow around it shares that step's child namespace, so
-  either one's result also deletes the other's child rows. A call that has
-  no result to replay from then runs its child steps again: one that is
-  `durable: false`, failed with its `onError` handling it, or is still in
-  progress (parked in another branch). The workflow editor never reuses
-  ids. Postgres now runs the delete in the statement
+  such namespaces are never collapsed: Environment reads, when it starts a
+  run, the step ids that occur inside `onWait` graphs anywhere in the
+  workflow, its embedded children and the workflow-agents it calls, from the
+  manifests compiled into the artifact, and keeps their child namespaces (the
+  steps' own retry rows still go). This covers workflows compiled before this
+  release. When the artifact's manifests cannot all be read, the run keeps
+  every child namespace. **Upgrade note:** the first boot migrates the
+  runtime database (`051_instance_shared_child_steps`, a nullable
+  `instances.shared_child_steps` column, catalog-only); runs started before
+  it keep every child namespace. Postgres now runs the delete in the statement
   that points the instance at the new result, as two ranges over the
   `checkpoints.scope` index, so it adds no round trip and never scans the
   run's other rows, even before the table has statistics (a Split's result

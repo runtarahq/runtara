@@ -67,14 +67,30 @@ Splits with one id at one position already share it. A child namespace is
 looser: every step that can call a child (EmbedWorkflow, Agent) shares one
 namespace with any other such step that has its id at its position, whatever
 its kind. Step ids are unique within a graph, so this happens only when an
-`onWait` graph reuses an id of the graph around it, which the workflow editor
-never does: recording either step's result also deletes the other's child
-rows. Any durable Agent records a closure, a native one included. That
-matters only if the other step has no result to replay from: it is
+`onWait` graph, which keeps its wait step's position, reuses an id of the
+graph around it (the workflow editor never does). Deleting a shared namespace
+would hurt when the other step has no result to replay from: it is
 `durable: false`, it failed and its `onError` handled the failure, or it is
-still in progress (its child parked in another branch). An `onWait` graph
-runs again on every replay of its wait, and a parked child resumes by
-replaying, so that step's child steps then run again. Only an unsuffixed result key
+still in progress. An `onWait` graph runs again on every replay of its wait,
+so its child steps would run again.
+
+So a child closure carries its step (`ScopeClosure::child_step`), and a run
+records which of its steps may share a namespace (`SharedChildSteps`): every
+step id that occurs inside an `onWait` graph anywhere in its workflow, its
+embedded children and the workflow-agents it calls. A child namespace whose
+step is listed is kept; the step's own attempt and retry rows still go, since
+their tag carries the whole result key. Environment reads the list when it
+starts the run, from the manifests the compiler writes into every
+workflow-logic component (a composed artifact keeps each workflow-agent's,
+an isolated package holds them as artifacts), and stores it in
+`instances.shared_child_steps` (migration 051). When the list is unknown (no
+manifest, one that does not parse, a called workflow-agent whose manifest is
+missing, or a run started before migration 051) the column is NULL and the
+run keeps every child namespace. A loop's iterations are not affected: once a
+Split's result exists, replay never enters the loop again, an `onWait` graph
+inside an iteration included.
+
+Only an unsuffixed result key
 has a closure, so a failed attempt never deletes work a retry will reuse. The
 store applies the closure in the transaction that stores the result (a writer
 that finds the key already stored writes and deletes nothing):

@@ -88,6 +88,10 @@ pub mod workflow {
     /// It is how the host tells compiled workflow logic, which may bind this
     /// package, from an agent: both export a `capabilities` interface.
     pub const LOGIC_SECTION: &str = "runtara.direct_workflow.abi";
+    /// Custom section holding the compiled workflow's manifest (its graph,
+    /// its embedded children's graphs), next to [`LOGIC_SECTION`] in every
+    /// workflow-logic component.
+    pub const MANIFEST_SECTION: &str = "runtara.direct_workflow.manifest";
     pub const RUNTIME: &str = concat!("runtara:workflow/runtime@", v!());
     pub const TASKS: &str = concat!("runtara:workflow/tasks@", v!());
     pub const OPERATION: &str = concat!("runtara:workflow/operation@", v!());

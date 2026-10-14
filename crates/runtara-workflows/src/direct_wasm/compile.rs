@@ -137,7 +137,7 @@ use super::support::{
 /// Bumped whenever the export shape changes, so cached artifacts recompile.
 pub const DIRECT_WORKFLOW_INVOKE_ABI_VERSION: u32 = 5;
 /// Custom section containing [`DirectWorkflowManifest`] JSON.
-pub const DIRECT_WORKFLOW_MANIFEST_SECTION: &str = "runtara.direct_workflow.manifest";
+pub const DIRECT_WORKFLOW_MANIFEST_SECTION: &str = runtara_wit::workflow::MANIFEST_SECTION;
 /// Custom section containing [`DirectWorkflowSupportReport`] JSON.
 pub const DIRECT_WORKFLOW_SUPPORT_SECTION: &str = "runtara.direct_workflow.support";
 /// Custom section containing direct artifact ABI metadata JSON.

@@ -3,6 +3,8 @@
 #[path = "../../runtara-component-host/tests/common/outbound.rs"]
 mod outbound_fixture;
 
+use runtara_component_host::workflow_manifest::shared_child_steps;
+use runtara_core::persistence::checkpoint_scope::SharedChildSteps;
 use runtara_core::{domain::InstanceStatus, persistence::Persistence};
 use runtara_environment::runner::{
     EmbeddedWasmRunner, LaunchOptions, Runner, ScopedAgentRunnerConfig, WorkflowRunnerConfig,
@@ -221,6 +223,16 @@ impl Harness {
                 .await
                 .unwrap()
         );
+        // As Environment does when it starts a run: read from the artifact's
+        // manifests which steps may share a child checkpoint namespace.
+        let shared = match shared_child_steps(&std::fs::read(wasm).unwrap()) {
+            Some(steps) => SharedChildSteps::known(steps),
+            None => SharedChildSteps::unknown(),
+        };
+        self.persistence
+            .set_shared_child_steps(&id, &shared)
+            .await
+            .unwrap();
         LaunchOptions {
             launch_id: format!("launch-{id}"),
             instance_id: id,
@@ -1603,6 +1615,11 @@ async fn a_completed_workflow_agent_call_keeps_one_row_and_replays_from_it() {
             &h.dir.path().join(format!("agent-{backend}")),
             backend,
         );
+        assert_eq!(
+            shared_child_steps(&std::fs::read(&artifact.wasm_path).unwrap()),
+            Some(Default::default()),
+            "{backend}: the scan reads the workflow-agent's manifest and finds no onWait step"
+        );
         let runner = h.runner(Some(config));
         a_finished_call_replays_from_its_row(
             &h,
@@ -1826,6 +1843,159 @@ async fn an_agent_that_retried_keeps_only_its_result_once_it_succeeds() {
         assert!(
             ids[0].starts_with(r#"runtara:v2:["agent""#) && !ids[0].contains("::"),
             "{backend}: {ids:?}"
+        );
+    }
+}
+
+/// An onWait graph keeps its wait step's position, so its EmbedWorkflow `x`
+/// shares a child namespace with a main-graph Agent `x`. The run lists `x`,
+/// so the Agent's result keeps the onWait call's child rows: the non-durable
+/// onWait Embed, which has no result of its own, replays its child from them
+/// instead of running it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_result_keeps_the_child_rows_of_an_on_wait_step_with_its_id() {
+    let h = Harness::new().await;
+    for backend in ["legacy", "scoped"] {
+        let (on_wait_embed, children) = embed_call(random_child(json!({})));
+        let mut on_wait_embed = on_wait_embed;
+        on_wait_embed["id"] = json!("x");
+        let children: Vec<ChildWorkflowInput> = children
+            .into_iter()
+            .map(|child| ChildWorkflowInput {
+                step_id: "x".into(),
+                ..child
+            })
+            .collect();
+        let graph = json!({"durable":true,"entryPoint":"wait","steps":{
+            "wait":{"id":"wait","stepType":"WaitForSignal","name":"go","pollIntervalMs":10,
+                "onWait":{"durable":false,"entryPoint":"x","steps":{
+                    "x":on_wait_embed,
+                    "notified":{"id":"notified","stepType":"Finish"}},
+                    "executionPlan":[{"fromStep":"x","toStep":"notified"}]}},
+            "x":{"id":"x","stepType":"Agent","agentId":"utils","capabilityId":"random-double",
+                "maxRetries":0,"inputMapping":{}},
+            "sleep":{"id":"sleep","stepType":"Delay","durationMs":{"valueType":"immediate","value":300}},
+            "finish":{"id":"finish","stepType":"Finish","inputMapping":{
+                "value":{"valueType":"reference","value":"steps.x.outputs"}}}},
+            "executionPlan":[{"fromStep":"wait","toStep":"x"},{"fromStep":"x","toStep":"sleep"},
+                {"fromStep":"sleep","toStep":"finish"}]});
+        let artifact = compile_with_children(
+            graph,
+            children,
+            &h.dir.path().join(format!("on-wait-{backend}")),
+            "utils",
+            backend,
+        );
+        let shared = shared_child_steps(&std::fs::read(&artifact.wasm_path).unwrap());
+        assert!(
+            shared.as_ref().is_some_and(|steps| steps.contains("x")),
+            "{backend}: the onWait step is listed: {shared:?}"
+        );
+        let runner = h.runner(Some(bounds("utils")));
+        let mut options = h.options(&artifact.wasm_path).await;
+        let child_row = |rows: &[runtara_core::persistence::CheckpointRecord]| {
+            rows.iter()
+                .find(|c| in_child(&c.checkpoint_id) && c.checkpoint_id.contains("random-double"))
+                .map(|c| serde_json::from_slice::<f64>(&c.state).unwrap())
+        };
+
+        // The wait parks; its onWait graph ran the embedded child once.
+        run_until_exit(&runner, &options).await;
+        let parked = h
+            .persistence
+            .get_instance(&options.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(parked.status, InstanceStatus::Suspended, "{backend}");
+        let rows = h
+            .persistence
+            .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+            .await
+            .unwrap();
+        let first = child_row(&rows).expect("the onWait child's row");
+
+        // The signal arrives: the wait resolves, the main-graph Agent `x`
+        // records its result, and the Delay parks.
+        let inputs = h.persistence.input_requests().unwrap();
+        let pending = inputs
+            .list_inputs(
+                &options.tenant_id,
+                std::slice::from_ref(&options.instance_id),
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(pending.total_count, 1, "{backend}");
+        runtara_core::persistence::inputs::submit_input(
+            inputs,
+            &options.tenant_id,
+            &options.instance_id,
+            &pending.requests[0].request_id,
+            "go",
+            &json!({"go": true}),
+        )
+        .await
+        .unwrap();
+        assert!(
+            h.persistence
+                .claim_sleeping_instance(&options.instance_id)
+                .await
+                .unwrap()
+        );
+        options.launch_id = format!("signal-{}", options.instance_id);
+        options.prepersisted_input = None;
+        run_until_exit(&runner, &options).await;
+        let parked = h
+            .persistence
+            .get_instance(&options.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(parked.status, InstanceStatus::Suspended, "{backend}");
+        let rows = h
+            .persistence
+            .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+            .await
+            .unwrap();
+        assert!(
+            rows.iter()
+                .any(|c| c.checkpoint_id.starts_with(r#"runtara:v2:["agent""#)
+                    && c.checkpoint_id.contains(r#""x"]]"#)
+                    && !in_child(&c.checkpoint_id)),
+            "{backend}: the Agent `x` recorded its result"
+        );
+        assert_eq!(
+            child_row(&rows),
+            Some(first),
+            "{backend}: the Agent's result kept the onWait child's row"
+        );
+
+        // After the Delay the run replays the wait and its onWait graph; the
+        // child is served by its row and the run completes.
+        let remaining = (parked.sleep_until.unwrap() - chrono::Utc::now())
+            .to_std()
+            .unwrap_or_default();
+        tokio::time::sleep(remaining + Duration::from_millis(20)).await;
+        options.launch_id = format!("wake-{}", options.instance_id);
+        run_until_exit(&runner, &options).await;
+        let completed = h
+            .persistence
+            .get_instance(&options.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.status, InstanceStatus::Completed, "{backend}");
+        let rows = h
+            .persistence
+            .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            child_row(&rows),
+            Some(first),
+            "{backend}: the onWait child never ran again"
         );
     }
 }

@@ -66,6 +66,7 @@ fn launch(family: &Family, child: &str) -> InitialLaunchRequest {
         input: None,
         env: None,
         timeout_seconds: None,
+        shared_child_steps: Default::default(),
     }
 }
 

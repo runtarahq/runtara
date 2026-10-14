@@ -82,6 +82,11 @@ pub struct ScopeClosure {
     pub owned: String,
     /// A byte prefix of every address inside the step.
     pub inner: String,
+    /// The calling step, when `inner` is a child namespace (an EmbedWorkflow
+    /// or an Agent result); `None` for a loop's iterations. A child namespace
+    /// names its step by id alone, so another step with that id at the same
+    /// position may share it (see [`SharedChildSteps`]).
+    pub child_step: Option<String>,
 }
 
 impl ScopeClosure {
@@ -91,10 +96,62 @@ impl ScopeClosure {
         scope == self.owned || scope.starts_with(&self.inner)
     }
 
+    /// [`Self::covers`] in a run that knows `shared`: the step's own rows
+    /// always go, its child namespace only when no other step can share it.
+    pub fn covers_in(&self, scope: &str, shared: &SharedChildSteps) -> bool {
+        scope == self.owned || (self.deletes_inner(shared) && scope.starts_with(&self.inner))
+    }
+
+    /// Whether the rows under `inner` go in a run that knows `shared`.
+    pub fn deletes_inner(&self, shared: &SharedChildSteps) -> bool {
+        self.child_step
+            .as_deref()
+            .is_none_or(|step| !shared.keeps(step))
+    }
+
     /// `inner` as a half-open byte range `[low, high)`, for an index range
     /// scan under a bytewise ("C") collation.
     pub fn inner_bounds(&self) -> (&str, String) {
         (&self.inner, byte_successor(&self.inner))
+    }
+}
+
+/// The steps of a run whose child namespace another step may share: every
+/// step id that occurs inside an `onWait` graph anywhere in the run's
+/// workflow, its embedded children and the workflow-agents it calls.
+///
+/// An `onWait` graph keeps its wait step's position, so a step there that
+/// reuses an id of the graph around it shares that step's child namespace,
+/// and either one's result would delete the other's child rows. When the
+/// other step has no result to replay from (`durable: false`, a failure its
+/// `onError` handled, or still in progress), its child steps would run again.
+/// So a child namespace whose step is listed here is never collapsed.
+///
+/// Unknown (the default) lists every step: a run whose workflow could not be
+/// read, or that started before runs recorded this, keeps every child
+/// namespace.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SharedChildSteps(Option<std::collections::BTreeSet<String>>);
+
+impl SharedChildSteps {
+    /// Nothing is known: every child namespace is kept.
+    pub fn unknown() -> Self {
+        Self(None)
+    }
+
+    /// Exactly `steps` may share their child namespace.
+    pub fn known<S: Into<String>>(steps: impl IntoIterator<Item = S>) -> Self {
+        Self(Some(steps.into_iter().map(Into::into).collect()))
+    }
+
+    /// The listed steps, or `None` when unknown.
+    pub fn steps(&self) -> Option<&std::collections::BTreeSet<String>> {
+        self.0.as_ref()
+    }
+
+    /// Whether `step`'s child namespace must be kept.
+    pub fn keeps(&self, step: &str) -> bool {
+        self.0.as_ref().is_none_or(|steps| steps.contains(step))
     }
 }
 
@@ -146,10 +203,9 @@ pub fn loop_closure(checkpoint_id: &str) -> Option<ScopeClosure> {
 /// EmbedWorkflow, or an Agent calling a workflow-agent): its own rows and the
 /// child's namespace, which is empty for an Agent that calls no workflow.
 ///
-/// The child namespace names the calling step by its id alone. A step in an
-/// `onWait` graph that reuses a main-graph step's id at the same position
-/// shares that namespace, so either one's result also deletes the other's
-/// child rows.
+/// The child namespace names the calling step by its id alone, so the closure
+/// carries that id: a store keeps the namespace when the run lists the step
+/// in its [`SharedChildSteps`].
 pub fn child_closure(checkpoint_id: &str) -> Option<ScopeClosure> {
     Key::parse(checkpoint_id)?.child_closure()
 }
@@ -253,7 +309,7 @@ impl Key {
             _ => return None,
         };
         let step = self.result_step()?;
-        self.closure(opened(encode(&json!([loop_kind, step]))))
+        self.closure(opened(encode(&json!([loop_kind, step]))), None)
     }
 
     /// A child-invoking result's closure: its own rows and the child's
@@ -263,12 +319,13 @@ impl Key {
             return None;
         }
         let step = self.result_step()?;
-        self.closure(encode(&json!(["ns", "child", [step]])))
+        self.closure(encode(&json!(["ns", "child", [step]])), Some(step))
     }
 
     /// The closure of this result key: its `own` rows, plus every address
-    /// starting with the position followed by `inner`.
-    fn closure(&self, inner: String) -> Option<ScopeClosure> {
+    /// starting with the position followed by `inner`, which is the child
+    /// namespace of `child_step` when there is one.
+    fn closure(&self, inner: String, child_step: Option<&str>) -> Option<ScopeClosure> {
         if self.suffixed || self.result_step().is_none() {
             return None;
         }
@@ -276,7 +333,11 @@ impl Key {
         owned.push(json!(["own", self.kind, self.parts]));
         let owned = bounded(encode(&owned))?;
         let inner = opened(encode(&self.position())) + &inner;
-        Some(ScopeClosure { owned, inner })
+        Some(ScopeClosure {
+            owned,
+            inner,
+            child_step: child_step.map(str::to_string),
+        })
     }
 }
 
@@ -576,6 +637,53 @@ mod tests {
         ] {
             assert_eq!(closure(&id), None, "{id}");
         }
+    }
+
+    #[test]
+    fn a_child_closure_names_its_step_and_a_loop_closure_none() {
+        let split = key("split", "wf", json!([]), json!([]), json!(["items"]));
+        let embed = key("embed_workflow", "wf", json!([]), json!([]), json!(["e"]));
+        assert_eq!(loop_closure(&split).unwrap().child_step, None);
+        assert_eq!(
+            child_closure(&embed).unwrap().child_step.as_deref(),
+            Some("e")
+        );
+        assert_eq!(
+            child_closure(&agent("a", json!([]), json!([])))
+                .unwrap()
+                .child_step
+                .as_deref(),
+            Some("a")
+        );
+    }
+
+    #[test]
+    fn a_shared_child_namespace_is_kept_and_owned_rows_still_go() {
+        let call = agent("x", json!([]), json!([]));
+        let closure = child_closure(&call).unwrap();
+        let child_row = scope(&agent("c1", json!([child("x", json!([]))]), json!([]))).unwrap();
+        let retry = scope(&format!("{call}::retry::1")).unwrap();
+        for (shared, deletes) in [
+            (SharedChildSteps::unknown(), false),
+            (SharedChildSteps::known(["x"]), false),
+            (SharedChildSteps::known(["y"]), true),
+            (SharedChildSteps::known::<&str>([]), true),
+        ] {
+            assert_eq!(closure.deletes_inner(&shared), deletes, "{shared:?}");
+            assert_eq!(
+                closure.covers_in(&child_row, &shared),
+                deletes,
+                "{shared:?}"
+            );
+            assert!(closure.covers_in(&retry, &shared), "{shared:?}");
+        }
+        let split = key("split", "wf", json!([]), json!([]), json!(["items"]));
+        assert!(
+            loop_closure(&split)
+                .unwrap()
+                .deletes_inner(&SharedChildSteps::unknown()),
+            "a loop's iterations go whatever the run knows"
+        );
     }
 
     #[test]

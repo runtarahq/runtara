@@ -2,6 +2,7 @@
 //! composite step's result deletes the rows its closure names, in the same
 //! transaction (see `docs/checkpoint-scope-collapse.md`).
 use crate::domain::InstanceStatus;
+use crate::persistence::checkpoint_scope::SharedChildSteps;
 use crate::persistence::invocations::{InvocationCheckpoint, InvocationFences, InvocationLease};
 use crate::persistence::{CheckpointWrite, Persistence};
 use serde_json::{Value, json};
@@ -9,12 +10,22 @@ use std::collections::BTreeSet;
 
 const TENANT: &str = "scope-collapse";
 
+/// A running instance whose steps share no child namespace, as Environment
+/// records for a workflow without `onWait` graphs.
 async fn running(p: &dyn Persistence, name: &str) -> String {
+    running_with(p, name, Some(SharedChildSteps::known::<&str>([]))).await
+}
+
+/// A running instance that records `shared`, or nothing (unknown) for `None`.
+async fn running_with(p: &dyn Persistence, name: &str, shared: Option<SharedChildSteps>) -> String {
     let id = format!("scope-collapse-{name}-{}", uuid::Uuid::new_v4());
     p.register_instance(&id, TENANT).await.unwrap();
     p.update_instance_status(&id, InstanceStatus::Running, None)
         .await
         .unwrap();
+    if let Some(shared) = shared {
+        p.set_shared_child_steps(&id, &shared).await.unwrap();
+    }
     id
 }
 
@@ -587,6 +598,137 @@ pub async fn a_fenced_workflow_agent_child_collapses_into_its_callers_result(p: 
     p.delete_instances_batch(&[id]).await.unwrap();
 }
 
+/// A run that does not know which steps share a child namespace keeps every
+/// child namespace: an Embed's and an Agent's results delete only their own
+/// retry rows.
+pub async fn an_unknown_run_keeps_every_child_namespace(p: &dyn Persistence) {
+    let id = running_with(p, "unknown", None).await;
+    let embed_result = embed(json!([]), "e");
+    let agent_result = key(
+        "agent",
+        json!([]),
+        json!([]),
+        json!(["orders-sync", "run", "call"]),
+    );
+    let children = vec![
+        agent_in(json!([child(json!([]), "e")]), json!([]), "c1"),
+        agent_in(json!([child(json!([]), "call")]), json!([]), "c1"),
+    ];
+    let retries = vec![
+        format!("{embed_result}::attempt::1"),
+        format!("{agent_result}::retry::1"),
+    ];
+    save_all(p, &id, &children).await;
+    save_all(p, &id, &retries).await;
+
+    for result in [&embed_result, &agent_result] {
+        p.record_checkpoint(&id, result, b"done", None)
+            .await
+            .unwrap();
+    }
+
+    let mut expected = set(&children);
+    expected.extend([embed_result, agent_result]);
+    assert_eq!(stored(p, &id).await, expected);
+    p.delete_instances_batch(&[id]).await.unwrap();
+}
+
+/// A step the run lists keeps its child namespace, whichever step records
+/// the result; another step's namespace still collapses.
+pub async fn a_listed_step_keeps_its_child_namespace(p: &dyn Persistence) {
+    let id = running_with(p, "listed", Some(SharedChildSteps::known(["x"]))).await;
+    // A main-graph Agent `x` and an onWait EmbedWorkflow `x` share one
+    // namespace; `y` is called once.
+    let shared_child = agent_in(json!([child(json!([]), "x")]), json!([]), "c1");
+    let other_child = agent_in(json!([child(json!([]), "y")]), json!([]), "c1");
+    let x = key(
+        "agent",
+        json!([]),
+        json!([]),
+        json!(["utils", "random-double", "x"]),
+    );
+    let x_retry = format!("{x}::attempt::1");
+    let y = embed(json!([]), "y");
+    save_all(p, &id, &[shared_child.clone(), other_child, x_retry]).await;
+
+    p.record_checkpoint(&id, &x, b"x", None).await.unwrap();
+    p.record_checkpoint(&id, &y, b"y", None).await.unwrap();
+
+    assert_eq!(stored(p, &id).await, set([&shared_child, &x, &y]));
+    p.delete_instances_batch(&[id]).await.unwrap();
+}
+
+/// A Split's result deletes its iterations whatever the run knows: once it
+/// exists, replay never enters the loop, an onWait graph inside an iteration
+/// included.
+pub async fn a_split_collapse_ignores_shared_steps(p: &dyn Persistence) {
+    let id = running_with(p, "split-unknown", None).await;
+    let site = json!([["Split", "items", 0]]);
+    let inside = vec![
+        item("items", 0, "each"),
+        agent_in(json!([child(site.clone(), "e")]), json!([]), "c1"),
+    ];
+    let result = split(json!([]), "items");
+    save_all(p, &id, &inside).await;
+
+    p.record_checkpoint(&id, &result, b"all", None)
+        .await
+        .unwrap();
+
+    assert_eq!(stored(p, &id).await, set([&result]));
+    p.delete_instances_batch(&[id]).await.unwrap();
+}
+
+/// The fenced path keeps a listed step's child namespace too.
+pub async fn a_fenced_child_keeps_a_listed_namespace(p: &dyn Persistence) {
+    let id = running_with(p, "fenced-listed", Some(SharedChildSteps::known(["call"]))).await;
+    let lease = claim(p, &id).await;
+    let attempt = fences(p)
+        .begin_invocation_attempt(&lease, "call", "start")
+        .await
+        .unwrap()
+        .fence;
+    let call = key(
+        "agent",
+        json!([]),
+        json!([]),
+        json!(["orders-sync", "run", "call"]),
+    );
+    let frame = json!([child(json!([]), "call")]);
+    let nested_result = key("embed_workflow", frame.clone(), json!([]), json!(["call"]));
+    let nested_child = agent_in(
+        json!([child(json!([]), "call"), child(json!([]), "call")]),
+        json!([]),
+        "c1",
+    );
+    // The child writes a nested Embed `call` through the fenced path; its own
+    // child namespace is listed too, so the nested result keeps it.
+    for (key, state) in [
+        (&nested_child, b"x".to_vec()),
+        (&nested_result, b"r".to_vec()),
+    ] {
+        fences(p)
+            .invocation_checkpoint(
+                &attempt,
+                &InvocationCheckpoint {
+                    checkpoint_id: key.clone(),
+                    state,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    p.record_checkpoint(&id, &call, b"done", Some(&lease))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        stored(p, &id).await,
+        set([&nested_child, &nested_result, &call])
+    );
+    p.delete_instances_batch(&[id]).await.unwrap();
+}
+
 /// Every case in this module.
 pub async fn run_all(p: &dyn Persistence) {
     recording_a_split_result_collapses_its_iterations(p).await;
@@ -599,4 +741,8 @@ pub async fn run_all(p: &dyn Persistence) {
     nested_child_scopes_collapse_level_by_level(p).await;
     an_embed_in_a_split_iteration_collapses_into_the_split(p).await;
     a_fenced_workflow_agent_child_collapses_into_its_callers_result(p).await;
+    an_unknown_run_keeps_every_child_namespace(p).await;
+    a_listed_step_keeps_its_child_namespace(p).await;
+    a_split_collapse_ignores_shared_steps(p).await;
+    a_fenced_child_keeps_a_listed_namespace(p).await;
 }

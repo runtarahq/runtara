@@ -743,6 +743,21 @@ pub trait Persistence: Send + Sync {
         None
     }
 
+    /// Record which of the run's steps may share a child namespace (see
+    /// [`checkpoint_scope::SharedChildSteps`]), so that recording a result
+    /// keeps those namespaces. A run starts with this unknown, which keeps
+    /// every child namespace; Environment records it when it starts the run.
+    ///
+    /// The default records nothing, so the run stays unknown.
+    async fn set_shared_child_steps(
+        &self,
+        instance_id: &str,
+        shared: &checkpoint_scope::SharedChildSteps,
+    ) -> Result<(), CoreError> {
+        let _ = (instance_id, shared);
+        Ok(())
+    }
+
     /// Insert a new instance row for `instance_id`, owned by `tenant_id`, in
     /// its initial pending state.
     ///
