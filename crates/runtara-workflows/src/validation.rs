@@ -67,7 +67,7 @@
 //! | E145 | NonDurableDelay | Delay in a non-durable workflow, body or step (a Delay must park) |
 //! | E146 | MissingStepConfig | Split or Switch without the config its value lives in |
 //! | E147 | InvalidMillisecondsValue | Literal Delay.durationMs / WaitForSignal.timeoutMs that is not a non-negative number |
-//! | E043 | InvalidChildVersion | Invalid child workflow version format |
+//! | E050 | InvalidChildVersion | Invalid child workflow version format |
 //! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
 //! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
 //! | E053 | UndefinedVariableReference | `variables.*` field not in variables |

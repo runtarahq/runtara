@@ -1341,7 +1341,8 @@ async fn validate_child_workflow_refs(
 
 /// Resolve a version string ("latest", "current", or numeric) against a workflow's metadata.
 fn resolve_child_version(version_str: &str, workflow_data: &serde_json::Value) -> Option<i32> {
-    match version_str {
+    let version_str = version_str.trim();
+    match version_str.to_ascii_lowercase().as_str() {
         "latest" => workflow_data
             .pointer("/data/latestVersion")
             .or_else(|| workflow_data.pointer("/data/latest_version"))

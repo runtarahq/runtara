@@ -708,9 +708,11 @@ pub struct EmbedWorkflowStep {
     pub durable: Option<bool>,
 }
 
-/// Child workflow version specification
+/// Child workflow version specification: `"latest"`, `"current"`, or a
+/// version number. The keywords are case-insensitive and a numeric string
+/// (`"3"`) is the version number, so every spelling resolves the same way.
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(untagged)]
 pub enum ChildVersion {
@@ -718,6 +720,36 @@ pub enum ChildVersion {
     Latest(String),
     /// Use specific version number
     Specific(i32),
+}
+
+impl<'de> Deserialize<'de> for ChildVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Number(i32),
+            Text(String),
+        }
+        Ok(match Raw::deserialize(deserializer)? {
+            Raw::Number(version) => ChildVersion::Specific(version),
+            Raw::Text(text) => {
+                let trimmed = text.trim();
+                if let Ok(version) = trimmed.parse::<i32>() {
+                    ChildVersion::Specific(version)
+                } else if trimmed.eq_ignore_ascii_case("latest")
+                    || trimmed.eq_ignore_ascii_case("current")
+                {
+                    ChildVersion::Latest(trimmed.to_ascii_lowercase())
+                } else {
+                    // Kept as written; validation reports it (E050).
+                    ChildVersion::Latest(text)
+                }
+            }
+        })
+    }
 }
 
 /// Conditional loop - repeat subgraph until condition is false
@@ -2647,5 +2679,23 @@ mod edge_label_tests {
         )
         .unwrap();
         assert_eq!(edge.label.as_deref(), Some("onError"));
+    }
+}
+
+#[cfg(test)]
+mod child_version_tests {
+    use super::ChildVersion;
+
+    fn parse(value: serde_json::Value) -> ChildVersion {
+        serde_json::from_value(value).expect("child version parses")
+    }
+
+    #[test]
+    fn every_spelling_of_a_child_version_resolves_the_same_way() {
+        assert!(matches!(parse(serde_json::json!(3)), ChildVersion::Specific(3)));
+        assert!(matches!(parse(serde_json::json!("3")), ChildVersion::Specific(3)));
+        assert!(matches!(parse(serde_json::json!("LATEST")), ChildVersion::Latest(v) if v == "latest"));
+        assert!(matches!(parse(serde_json::json!(" Current ")), ChildVersion::Latest(v) if v == "current"));
+        assert!(matches!(parse(serde_json::json!("newest")), ChildVersion::Latest(v) if v == "newest"));
     }
 }

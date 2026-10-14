@@ -136,7 +136,35 @@ def check_static_values():
         check(f"{label}: save rejects with {code}", status == 400 and got == [code], {"status": status, "codes": got})
 
 
-CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values]
+# ---------------------------------------------------------------------- B2
+
+
+def check_child_version_spellings():
+    child, status, body = save_status("rf-child", graph("f", [fin("f", ok=imm(True))]))
+    assert status < 300, (status, body)
+    compile_latest(child)
+    _, versions = call("GET", f"/workflows/{child}/versions")
+    latest = max(v.get("version", v.get("versionNumber", 1)) for v in (versions.get("data") or versions))
+
+    def parent(version):
+        return graph("call", [
+            {"stepType": "EmbedWorkflow", "id": "call", "childWorkflowId": child, "childVersion": version,
+             "inputMapping": {}},
+            fin("done", out=ref("steps.call.outputs"))], [edge("call", "done")])
+
+    workflow, status, body = save_status("rf-latest", parent("LATEST"))
+    result = None
+    if status < 300:
+        compile_latest(workflow)
+        result = execute(workflow)
+    check('B2 childVersion "LATEST" saves and runs', status < 300 and (result or {}).get("status") == "completed",
+          {"status": status, "codes": rejected_codes(body), "run": result})
+    _, status, body = save_status("rf-pinned", parent(str(latest)))
+    check(f'B2 childVersion "{latest}" (a numeric string) saves', status < 300,
+          {"status": status, "codes": rejected_codes(body)})
+
+
+CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, check_child_version_spellings]
 
 
 def main():
