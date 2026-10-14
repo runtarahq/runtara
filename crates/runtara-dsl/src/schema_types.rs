@@ -1966,7 +1966,8 @@ pub struct SchemaField {
     #[serde(default)]
     pub required: bool,
 
-    /// Default value if not provided
+    /// Value used when the field is omitted. Workflow start inputs are filled
+    /// from it before the `required` check, so the run sees it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
 
@@ -2043,10 +2044,8 @@ pub struct SchemaField {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_when: Option<VisibleWhen>,
 
-    /// Whether the field value may be `null`.
-    ///
-    /// Form-layer hint written by the workflow editor (rendered as a
-    /// checkbox); the runtime does not enforce nullability today.
+    /// Whether the field value may be `null`: input validation accepts an
+    /// explicit `null` in place of the declared type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nullable: Option<bool>,
 }
