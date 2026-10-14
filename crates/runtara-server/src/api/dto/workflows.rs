@@ -728,6 +728,12 @@ impl ValidationErrorDto {
                 Some("executionPlan".into()),
                 None,
             ),
+            ValidationError::NonDurableDelay { step_id } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some("durable".into()),
+                None,
+            ),
             ValidationError::FanoutBranchConditionedExit {
                 from_step,
                 branch_step,

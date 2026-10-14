@@ -1108,9 +1108,9 @@ pub struct DelayStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakpoint: Option<bool>,
 
-    /// Disable durability for this step when `Some(false)`. Uses
-    /// `std::thread::sleep` instead of `sdk.sleep` — the delay is
-    /// not suspendable or resumable across crashes.
+    /// A Delay parks the run (a durable sleep) instead of holding a runner,
+    /// so it requires durability: `Some(false)` here, or a non-durable
+    /// workflow or enclosing body, is rejected at save (E145).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable: Option<bool>,
 }

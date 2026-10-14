@@ -64,6 +64,7 @@
 //! | E142 | OnErrorUnsupportedSource | onError edge from a step type that cannot route failures |
 //! | E143 | UnknownEdgeLabel | Edge label the source step type does not route on |
 //! | E144 | FanoutBranchConditionedExit | Parallel fan-out branch with a conditioned exit before the merge |
+//! | E145 | NonDurableDelay | Delay in a non-durable workflow, body or step (a Delay must park) |
 //! | E043 | InvalidChildVersion | Invalid child workflow version format |
 //! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
 //! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
@@ -655,6 +656,10 @@ pub enum ValidationError {
         from_step: String,
         branch_step: String,
     },
+    /// A Delay that is not durable (its own `durable: false`, or a
+    /// non-durable workflow or body): a Delay parks the run, which needs
+    /// durability, so it cannot be built.
+    NonDurableDelay { step_id: String },
 }
 
 /// Information about a missing required input field.
@@ -741,6 +746,7 @@ impl ValidationError {
             Self::OnErrorUnsupportedSource { .. } => "E142",
             Self::UnknownEdgeLabel { .. } => "E143",
             Self::FanoutBranchConditionedExit { .. } => "E144",
+            Self::NonDurableDelay { .. } => "E145",
         }
     }
 }
@@ -1573,6 +1579,13 @@ impl std::fmt::Display for ValidationError {
                  exit. Branches of a fan-out must run straight to their merge point; route \
                  conditionally after the merge.",
                 branch_step, from_step
+            ),
+            ValidationError::NonDurableDelay { step_id } => write!(
+                f,
+                "[E145] Delay step '{}' is not durable. A Delay parks the run instead of \
+                 holding a runner, which needs durability: enable durability for the \
+                 workflow or step, or remove the delay.",
+                step_id
             ),
         }
     }
@@ -3310,6 +3323,42 @@ fn validate_edge_shapes(graph: &ExecutionGraph, result: &mut ValidationResult) {
                 if let Some(on_wait) = &wait_step.on_wait {
                     result.in_subgraph(&wait_step.id, |result| {
                         validate_edge_shapes(on_wait, result)
+                    })
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// E145: a Delay parks the run, so it needs effective durability. The rule
+/// matches the compiler's: nearest explicit `durable` wins and nested bodies
+/// inherit it, and a Delay's own `durable: false` opts it out.
+fn validate_delay_durability(
+    graph: &ExecutionGraph,
+    inherited_durable: bool,
+    result: &mut ValidationResult,
+) {
+    let durable = graph.durable.unwrap_or(inherited_durable);
+    let mut step_ids: Vec<&String> = graph.steps.keys().collect();
+    step_ids.sort();
+    for step_id in step_ids {
+        match &graph.steps[step_id] {
+            Step::Delay(delay) if !durable || delay.durable == Some(false) => {
+                result.errors.push(ValidationError::NonDurableDelay {
+                    step_id: step_id.clone(),
+                });
+            }
+            Step::Split(split_step) => result.in_subgraph(&split_step.id, |result| {
+                validate_delay_durability(&split_step.subgraph, durable, result)
+            }),
+            Step::While(while_step) => result.in_subgraph(&while_step.id, |result| {
+                validate_delay_durability(&while_step.subgraph, durable, result)
+            }),
+            Step::WaitForSignal(wait_step) => {
+                if let Some(on_wait) = &wait_step.on_wait {
+                    result.in_subgraph(&wait_step.id, |result| {
+                        validate_delay_durability(on_wait, durable, result)
                     })
                 }
             }
@@ -5764,6 +5813,7 @@ fn collect_step_names(
 fn validate_edge_conditions(graph: &ExecutionGraph, result: &mut ValidationResult) {
     validate_edge_conditions_recursive(graph, result);
     validate_edge_shapes(graph, result);
+    validate_delay_durability(graph, true, result);
 }
 
 /// E027: workflow conditions must not use operators that only exist for
@@ -17968,6 +18018,43 @@ mod edge_shape_tests {
                 vec![expected.to_string()],
                 "{expected}"
             );
+        }
+    }
+
+    /// A Delay needs durability, as the compiler requires; the deliberate
+    /// rejection fixtures fail at save with E145, not the backstop.
+    #[test]
+    fn non_durable_delays_are_rejected_at_save() {
+        let delay = |durable: Option<bool>| {
+            let mut step = json!({"stepType": "Delay", "id": "d",
+                                  "durationMs": {"valueType": "immediate", "value": 10}});
+            if let Some(durable) = durable {
+                step["durable"] = json!(durable);
+            }
+            step
+        };
+        let flow = |delay: Value, durable: Option<bool>| {
+            let mut graph = json!({"entryPoint": "d", "steps": {"d": delay, "done": fin("done")},
+                                   "executionPlan": [{"fromStep": "d", "toStep": "done"}]});
+            if let Some(durable) = durable {
+                graph["durable"] = json!(durable);
+            }
+            graph
+        };
+        assert_eq!(closure_codes(flow(delay(Some(false)), None)), vec!["E145"]);
+        assert_eq!(closure_codes(flow(delay(None), Some(false))), vec!["E145"]);
+        assert!(closure_codes(flow(delay(None), None)).is_empty());
+        // A durable step in a non-durable workflow is still non-durable.
+        assert_eq!(
+            closure_codes(flow(delay(Some(true)), Some(false))),
+            vec!["E145"]
+        );
+        for fixture in [
+            include_str!("../tests/fixtures/split_timeout.json"),
+            include_str!("../tests/fixtures/while_timeout.json"),
+        ] {
+            let graph: Value = serde_json::from_str(fixture).unwrap();
+            assert_eq!(closure_codes(graph), vec!["E145"]);
         }
     }
 

@@ -103,7 +103,24 @@ def check_graph_shapes():
           status < 300 and compiled, {"status": status, "codes": rejected_codes(body)})
 
 
-CHECKS = [check_graph_shapes]
+# ------------------------------------------------------------------ D-Delay
+
+
+def check_non_durable_delay():
+    delay = {"stepType": "Delay", "id": "d", "durationMs": imm(10)}
+    for label, g in [
+        ("Delay with durable:false", graph("d", [{**delay, "durable": False}, fin("done")], [edge("d", "done")])),
+        ("Delay in a non-durable workflow", graph("d", [delay, fin("done")], [edge("d", "done")], durable=False)),
+    ]:
+        _, status, body = save_status("rf-delay", g)
+        got = rejected_codes(body)
+        check(f"D-Delay {label}: save rejects with E145", status == 400 and got == ["E145"],
+              {"status": status, "codes": got})
+    r = run("rf-delay-durable", graph("d", [delay, fin("done", ok=imm(True))], [edge("d", "done")]))
+    check("D-Delay a durable Delay still runs", r.get("status") == "completed", r)
+
+
+CHECKS = [check_graph_shapes, check_non_durable_delay]
 
 
 def main():
