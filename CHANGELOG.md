@@ -532,6 +532,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An EmbedWorkflow inside an embedded child no longer breaks the child
+  around it.** Running the inner child overwrote the enclosing child's
+  variables, and nothing put them back. With step events on, the run failed
+  with `unknown direct step '<id>'`. With them off, the enclosing child's
+  later steps and its `onError` handler read the inner child's `variables.*`,
+  and its durable steps checkpointed under the inner child's namespace. An
+  AiAgent inside an embedded child that called an EmbedWorkflow tool also
+  lost the child's variables and data to the tool's. The enclosing context is
+  now restored after each inner run. This applies to workflows compiled on
+  this release; recompile a workflow to pick it up.
 - **Step summaries list each step once.** A resumed run replays its
   completed steps and re-enters a parked one, which emitted their start and
   end events again, so `GET .../instances/{iid}/steps` repeated those steps

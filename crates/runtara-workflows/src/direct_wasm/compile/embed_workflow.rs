@@ -113,6 +113,15 @@ const ATTEMPT_CONTEXT: [u32; 8] = [
     super::DIRECT_EMBED_RETRY_SLEEP_KEY_LEN_LOCAL,
 ];
 
+// The context of an AiAgent that runs inside an embedded child, which an
+// EmbedWorkflow tool overwrites while it runs.
+const TOOL_CALLER_CONTEXT: [u32; 4] = [
+    DIRECT_EMBED_CHILD_DATA_PTR_LOCAL,
+    DIRECT_EMBED_CHILD_DATA_LEN_LOCAL,
+    DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL,
+    DIRECT_EMBED_CHILD_VARIABLES_LEN_LOCAL,
+];
+
 fn push_embed_workflow_attempt_frame(
     body: &mut WasmFunction,
     steps_ptr_local: u32,
@@ -391,6 +400,14 @@ pub(super) fn emit_embed_workflow_tool_arm(
         .step_id(embed_step_id)
         .expect("embed tool step ids are present in static data");
 
+    // When the AiAgent runs inside an embedded child, its data and variables
+    // are the shared child-data and child-variables locals, which this arm
+    // overwrites with the tool child's. Keep the entry values on the stack and
+    // restore them after the tool, so the AiAgent and the steps after it keep
+    // their own context.
+    for local in TOOL_CALLER_CONTEXT {
+        body.instruction(&Instruction::LocalGet(local));
+    }
     push_embed_workflow_frame(
         body,
         steps_ptr_local,
@@ -550,6 +567,9 @@ pub(super) fn emit_embed_workflow_tool_arm(
         route_ptr_local,
         route_len_local,
     );
+    for local in TOOL_CALLER_CONTEXT.into_iter().rev() {
+        body.instruction(&Instruction::LocalSet(local));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -897,6 +917,18 @@ pub(super) fn emit_embed_workflow_plan(
         handled_target
     };
 
+    // When this step runs inside an embedded child, its own variables are the
+    // shared child-variables local, which the call below overwrites with this
+    // step's child's variables. Keep the entry value on the stack across the
+    // child and restore it after, like the data context, so the next plan and
+    // the onError handler resolve `variables.*`, and derive durable keys,
+    // against this step's variables.
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalGet(
+        DIRECT_EMBED_CHILD_VARIABLES_LEN_LOCAL,
+    ));
     push_segment_args(body, step_id_segment);
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_EMBED_PARENT_SOURCE_LEN_LOCAL));
@@ -977,6 +1009,14 @@ pub(super) fn emit_embed_workflow_plan(
         route_ptr_local,
         route_len_local,
     );
+    // Restore the entry variables context kept before the child's variables
+    // were computed.
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_EMBED_CHILD_VARIABLES_LEN_LOCAL,
+    ));
+    body.instruction(&Instruction::LocalSet(
+        DIRECT_EMBED_CHILD_VARIABLES_PTR_LOCAL,
+    ));
 
     // Restore the entry data context: the child's input mapping (and any nested
     // embed) clobbered the shared child-data local, but the onError handler and
