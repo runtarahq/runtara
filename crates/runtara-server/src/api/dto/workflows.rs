@@ -728,6 +728,18 @@ impl ValidationErrorDto {
                 Some("executionPlan".into()),
                 None,
             ),
+            ValidationError::MissingStepConfig { step_id, .. } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some("config".into()),
+                None,
+            ),
+            ValidationError::InvalidMillisecondsValue { step_id, field, .. } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some(field.clone()),
+                None,
+            ),
             ValidationError::NonDurableDelay { step_id } => (
                 error.to_string(),
                 Some(step_id.clone()),

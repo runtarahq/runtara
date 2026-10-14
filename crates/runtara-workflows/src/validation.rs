@@ -65,6 +65,8 @@
 //! | E143 | UnknownEdgeLabel | Edge label the source step type does not route on |
 //! | E144 | FanoutBranchConditionedExit | Parallel fan-out branch with a conditioned exit before the merge |
 //! | E145 | NonDurableDelay | Delay in a non-durable workflow, body or step (a Delay must park) |
+//! | E146 | MissingStepConfig | Split or Switch without the config its value lives in |
+//! | E147 | InvalidMillisecondsValue | Literal Delay.durationMs / WaitForSignal.timeoutMs that is not a non-negative number |
 //! | E043 | InvalidChildVersion | Invalid child workflow version format |
 //! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
 //! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
@@ -660,6 +662,15 @@ pub enum ValidationError {
     /// non-durable workflow or body): a Delay parks the run, which needs
     /// durability, so it cannot be built.
     NonDurableDelay { step_id: String },
+    /// A Split or Switch without `config`, whose `value` it requires.
+    MissingStepConfig { step_id: String, step_type: String },
+    /// A literal duration or timeout that is not a non-negative number of
+    /// milliseconds, which the runtime would reject on every run.
+    InvalidMillisecondsValue {
+        step_id: String,
+        field: String,
+        value: String,
+    },
 }
 
 /// Information about a missing required input field.
@@ -747,6 +758,8 @@ impl ValidationError {
             Self::UnknownEdgeLabel { .. } => "E143",
             Self::FanoutBranchConditionedExit { .. } => "E144",
             Self::NonDurableDelay { .. } => "E145",
+            Self::MissingStepConfig { .. } => "E146",
+            Self::InvalidMillisecondsValue { .. } => "E147",
         }
     }
 }
@@ -1586,6 +1599,22 @@ impl std::fmt::Display for ValidationError {
                  holding a runner, which needs durability: enable durability for the \
                  workflow or step, or remove the delay.",
                 step_id
+            ),
+            ValidationError::MissingStepConfig { step_id, step_type } => write!(
+                f,
+                "[E146] {} step '{}' has no config. It needs config.value (and, for a \
+                 Switch, config.cases).",
+                step_type, step_id
+            ),
+            ValidationError::InvalidMillisecondsValue {
+                step_id,
+                field,
+                value,
+            } => write!(
+                f,
+                "[E147] Step '{}' sets {} to {}, but it must be a non-negative number of \
+                 milliseconds (for example 5000, not \"5s\").",
+                step_id, field, value
             ),
         }
     }
@@ -3323,6 +3352,79 @@ fn validate_edge_shapes(graph: &ExecutionGraph, result: &mut ValidationResult) {
                 if let Some(on_wait) = &wait_step.on_wait {
                     result.in_subgraph(&wait_step.id, |result| {
                         validate_edge_shapes(on_wait, result)
+                    })
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// E146/E147: values the runtime would reject on every run, caught at save.
+/// Only literals are checked; references and templates resolve at runtime.
+fn validate_static_step_values(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    fn check_millis(
+        step_id: &str,
+        field: &str,
+        value: Option<&MappingValue>,
+        allow_null: bool,
+        result: &mut ValidationResult,
+    ) {
+        let Some(MappingValue::Immediate(immediate)) = value else {
+            return;
+        };
+        let literal = &immediate.value;
+        let valid =
+            literal.as_f64().is_some_and(|ms| ms >= 0.0) || (allow_null && literal.is_null());
+        if !valid {
+            result
+                .errors
+                .push(ValidationError::InvalidMillisecondsValue {
+                    step_id: step_id.to_string(),
+                    field: field.to_string(),
+                    value: literal.to_string(),
+                });
+        }
+    }
+    let mut step_ids: Vec<&String> = graph.steps.keys().collect();
+    step_ids.sort();
+    for step_id in step_ids {
+        let step = &graph.steps[step_id];
+        let missing_config = match step {
+            Step::Split(split) => split.config.is_none(),
+            Step::Switch(switch) => switch.config.is_none(),
+            _ => false,
+        };
+        if missing_config {
+            result.errors.push(ValidationError::MissingStepConfig {
+                step_id: step_id.clone(),
+                step_type: crate::workflow_features::step_type_name(step).to_string(),
+            });
+        }
+        match step {
+            Step::Delay(delay) => check_millis(
+                step_id,
+                "durationMs",
+                Some(&delay.duration_ms),
+                false,
+                result,
+            ),
+            Step::WaitForSignal(wait) => {
+                check_millis(step_id, "timeoutMs", wait.timeout_ms.as_ref(), true, result)
+            }
+            _ => {}
+        }
+        match step {
+            Step::Split(split_step) => result.in_subgraph(&split_step.id, |result| {
+                validate_static_step_values(&split_step.subgraph, result)
+            }),
+            Step::While(while_step) => result.in_subgraph(&while_step.id, |result| {
+                validate_static_step_values(&while_step.subgraph, result)
+            }),
+            Step::WaitForSignal(wait_step) => {
+                if let Some(on_wait) = &wait_step.on_wait {
+                    result.in_subgraph(&wait_step.id, |result| {
+                        validate_static_step_values(on_wait, result)
                     })
                 }
             }
@@ -5814,6 +5916,7 @@ fn validate_edge_conditions(graph: &ExecutionGraph, result: &mut ValidationResul
     validate_edge_conditions_recursive(graph, result);
     validate_edge_shapes(graph, result);
     validate_delay_durability(graph, true, result);
+    validate_static_step_values(graph, result);
 }
 
 /// E027: workflow conditions must not use operators that only exist for
@@ -18056,6 +18159,37 @@ mod edge_shape_tests {
             let graph: Value = serde_json::from_str(fixture).unwrap();
             assert_eq!(closure_codes(graph), vec!["E145"]);
         }
+    }
+
+    /// Values the runtime always rejects fail at save: a Split or Switch
+    /// without config, and a literal duration or timeout that is not a number.
+    #[test]
+    fn missing_configs_and_bad_literal_durations_are_rejected_at_save() {
+        assert_eq!(
+            closure_codes(json!({"entryPoint": "s", "steps": {
+                "s": {"stepType": "Split", "id": "s",
+                      "subgraph": {"entryPoint": "f", "steps": {"f": fin("f")}}},
+                "done": fin("done")},
+                "executionPlan": [{"fromStep": "s", "toStep": "done"}]})),
+            vec!["E146"]
+        );
+        let delay = |value: Value| {
+            json!({"entryPoint": "d", "steps": {
+                "d": {"stepType": "Delay", "id": "d",
+                      "durationMs": {"valueType": "immediate", "value": value}},
+                "done": fin("done")},
+                "executionPlan": [{"fromStep": "d", "toStep": "done"}]})
+        };
+        assert_eq!(closure_codes(delay(json!("5s"))), vec!["E147"]);
+        assert_eq!(closure_codes(delay(json!(-1))), vec!["E147"]);
+        assert!(closure_codes(delay(json!(5000))).is_empty());
+        let referenced = json!({"entryPoint": "d", "variables": {"ms": {"type": "number", "value": 10}},
+            "steps": {
+                "d": {"stepType": "Delay", "id": "d",
+                      "durationMs": {"valueType": "reference", "value": "variables.ms"}},
+                "done": fin("done")},
+            "executionPlan": [{"fromStep": "d", "toStep": "done"}]});
+        assert!(closure_codes(referenced).is_empty());
     }
 
     /// A conditioned edge from a fan-out branch into the merge point is not a

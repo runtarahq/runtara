@@ -120,7 +120,23 @@ def check_non_durable_delay():
     check("D-Delay a durable Delay still runs", r.get("status") == "completed", r)
 
 
-CHECKS = [check_graph_shapes, check_non_durable_delay]
+# ------------------------------------------------------ D-config, D-dynamic
+
+
+def check_static_values():
+    for label, code, g in [
+        ("D-config Split without config", "E146", graph("s", [
+            {"stepType": "Split", "id": "s", "subgraph": graph("f", [fin("f")])}, fin("done")],
+            [edge("s", "done")])),
+        ('D-dynamic Delay.durationMs "5s"', "E147", graph("d", [
+            {"stepType": "Delay", "id": "d", "durationMs": imm("5s")}, fin("done")], [edge("d", "done")])),
+    ]:
+        _, status, body = save_status("rf-static", g)
+        got = rejected_codes(body)
+        check(f"{label}: save rejects with {code}", status == 400 and got == [code], {"status": status, "codes": got})
+
+
+CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values]
 
 
 def main():
