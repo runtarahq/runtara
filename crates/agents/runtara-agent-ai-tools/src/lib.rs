@@ -836,7 +836,7 @@ pub async fn chat_completion(
 
     let response = runtara_ai::run_completion_async(req)
         .await
-        .map_err(|e| AgentError::transient("AI_CHAT_COMPLETION_FAILED", e))?;
+        .map_err(|e| completion_error("AI_CHAT_COMPLETION_FAILED", e))?;
 
     let choice = serde_json::to_value(&response.choice).map_err(|e| {
         AgentError::permanent(
@@ -1085,7 +1085,7 @@ pub async fn chat_turn(input: ChatTurnInput) -> Result<ChatTurnOutput, AgentErro
     };
     let response = runtara_ai::run_completion_async(req)
         .await
-        .map_err(|e| AgentError::transient("AI_TURN_COMPLETION_FAILED", e))?;
+        .map_err(|e| completion_error("AI_TURN_COMPLETION_FAILED", e))?;
 
     // Record the user message (first turn only) then the assistant message.
     if is_first {
@@ -2467,6 +2467,21 @@ fn structured_response(text: &str, schema: &Value) -> Result<Value, AgentError> 
     Ok(value)
 }
 
+/// A failed LLM call as an agent error. A provider throttle becomes
+/// `AI_RATE_LIMITED`, which the workflow runtime retries within the
+/// workflow's rate-limit budget; any other failure keeps `code`.
+fn completion_error(code: &str, failure: runtara_ai::CompletionFailure) -> AgentError {
+    let Some(status) = failure.rate_limited_status else {
+        return AgentError::transient(code, failure.message);
+    };
+    let error = AgentError::transient("AI_RATE_LIMITED", failure.message)
+        .with_attr("status_code", status.to_string());
+    match failure.retry_after_ms {
+        Some(ms) => error.with_retry_after_ms(ms),
+        None => error,
+    }
+}
+
 fn classify_http_status(status: u16) -> (&'static str, &'static str) {
     if status == 429 {
         ("transient", "HTTP_429")
@@ -2613,6 +2628,29 @@ runtara_agent_macro::agent_component!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_throttles_become_rate_limited_agent_errors() {
+        let throttled = completion_error(
+            "AI_TURN_COMPLETION_FAILED",
+            runtara_ai::CompletionFailure {
+                message: "LLM call failed: RateLimited: slow down".into(),
+                rate_limited_status: Some(429),
+                retry_after_ms: Some(1500),
+            },
+        );
+        assert_eq!(throttled.code, "AI_RATE_LIMITED");
+        assert_eq!(throttled.category, "transient");
+        assert_eq!(throttled.retry_after_ms, Some(1500));
+        assert_eq!(throttled.attributes["status_code"], "429");
+
+        let failed = completion_error(
+            "AI_TURN_COMPLETION_FAILED",
+            runtara_ai::CompletionFailure::from("LLM call failed: boom".to_string()),
+        );
+        assert_eq!(failed.code, "AI_TURN_COMPLETION_FAILED");
+        assert_eq!(failed.retry_after_ms, None);
+    }
 
     fn fake_connection(integration_id: &str) -> RawConnection {
         RawConnection {

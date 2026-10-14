@@ -3,8 +3,9 @@
 
 Covers B5/N3 (parent variables in bodies), N2 (rate-limited retry default),
 A12 (error-context warnings), D-typos (W086), A9 (input defaults and
-nullable), A11 (AiAgent tool-loop retries) and B1 (one condition semantics),
-as recorded in docs/dsl-audit-2026-10-14.md.
+nullable), A11 (AiAgent tool-loop retries), N4 (provider 429s are
+rate-limited) and B1 (one condition semantics), as recorded in
+docs/dsl-audit-2026-10-14.md.
 
 RUNTARA_API_URL defaults to http://127.0.0.1:7041/api/runtime. The server must
 be a test instance started with RUNTARA_PROXY_ALLOWED_HOSTS=127.0.0.1 and
@@ -144,7 +145,8 @@ def bump(key):
 
 class ConverseStub(BaseHTTPRequestHandler):
     """Bedrock Converse. Model `flakyN-x`: 500 for the first N calls, then an
-    answer; `fail-x`: always 500."""
+    answer; `throttleN-x`: 429 (retry-after-ms 1) for the first N calls, then
+    an answer; `fail-x`: always 500."""
 
     def log_message(self, *args):
         pass
@@ -157,18 +159,24 @@ class ConverseStub(BaseHTTPRequestHandler):
         model = parts[1]
         mode = model.partition("-")[0]
         n = bump("converse/" + model)
-        failures = 10**9 if mode == "fail" else int(mode[len("flaky"):] or 0)
-        if n <= failures:
-            return self.reply(500, {"message": "stub provider outage", "n": n})
+        if mode.startswith("throttle"):
+            if n <= int(mode[len("throttle"):] or 0):
+                return self.reply(429, {"message": "Too many requests", "n": n}, {"retry-after-ms": "1"})
+        else:
+            failures = 10**9 if mode == "fail" else int(mode[len("flaky"):] or 0)
+            if n <= failures:
+                return self.reply(500, {"message": "stub provider outage", "n": n})
         return self.reply(200, {
             "output": {"message": {"role": "assistant", "content": [{"text": f"recovered after {n - 1}"}]}},
             "stopReason": "end_turn", "usage": {"inputTokens": 1, "outputTokens": 1, "totalTokens": 2}})
 
-    def reply(self, status, body):
+    def reply(self, status, body, headers=None):
         raw = json.dumps(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(raw)
 
@@ -392,12 +400,16 @@ def check_tool_loop_retries(converse_port):
             ("non-durable, maxRetries 2, one failure: recovers", "flaky1-b", 2, False, True, 2),
             ("maxRetries unset, one failure: onError", "flaky1-c", None, False, False, 1),
             ("maxRetries 1, always failing: onError", "fail-d", 1, False, False, 2),
+            # N4: a provider 429 is rate-limited, so it retries within the
+            # rate-limit budget past maxRetries.
+            ("N4 maxRetries 1, two provider 429s: recovers", "throttle2-e", 1, False, True, 3),
         ]:
             model = f"{model}{RUN}"
             out = run("p1-a11-tool-loop", tool_loop(model, retries, durable)).get("outputs") or {}
             made = COUNTS.get("converse/" + model, 0)
             ok = made == calls and (bool(out.get("answer")) if recovers else out.get("handled") is True)
-            check("A11 " + label, ok, {"provider_calls": made, "outputs": out})
+            check(label if label.startswith("N4") else "A11 " + label, ok,
+                  {"provider_calls": made, "outputs": out})
     finally:
         call("DELETE", f"/connections/{connection}")
 

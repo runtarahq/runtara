@@ -14167,3 +14167,56 @@ fn direct_wasm_execute_ai_agent_loop_exhausted_retries_route_to_on_error() {
     let output = result.output_json.expect("handler output");
     assert_eq!(output.get("handled"), Some(&Value::Bool(true)), "{output}");
 }
+
+fn llm_rate_limited() -> Value {
+    serde_json::json!({"status": 429, "headers": {"retry-after-ms": "1"},
+                       "body": {"error": {"message": "slow down"}}})
+}
+
+/// A provider 429 is rate-limited for both AiAgent paths, so it retries within
+/// the workflow's rate-limit budget, past `maxRetries`.
+#[test]
+fn direct_wasm_execute_ai_agent_provider_429s_use_the_rate_limit_budget() {
+    let components_dir = direct_e2e_components_dir();
+    let tool_loop = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-loop-provider-429",
+        &ai_agent_tool_loop_with_retries(1, false),
+        br#"{}"#,
+        vec![llm_rate_limited(), llm_rate_limited(), llm_ok("recovered")],
+    );
+    assert!(tool_loop.status_success, "{}", tool_loop.stderr);
+    assert_eq!(tool_loop.llm_requests.len(), 3);
+    assert_eq!(
+        tool_loop.output_json.as_ref().and_then(|o| o.get("answer")),
+        Some(&Value::String("recovered".to_string())),
+        "{:?}",
+        tool_loop.output_json
+    );
+
+    let single = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-single-provider-429",
+        &single_shot_ai_agent_graph_json(r#","maxRetries":1,"retryDelay":10"#),
+        br#"{}"#,
+        vec![llm_rate_limited(), llm_rate_limited(), llm_ok("recovered")],
+    );
+    assert!(single.status_success, "{}", single.stderr);
+    assert_eq!(single.llm_requests.len(), 3, "{:?}", single.output_json);
+
+    // maxRetries 0 still disables every retry, rate-limited ones included.
+    let no_retries = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-loop-provider-429-no-retries",
+        &ai_agent_tool_loop_on_error_graph_json("return-input"),
+        br#"{}"#,
+        vec![llm_rate_limited(), llm_ok("unused")],
+    );
+    assert_eq!(no_retries.llm_requests.len(), 1);
+    assert_eq!(
+        no_retries.output_json.as_ref().and_then(|o| o.get("code")),
+        Some(&Value::String("AI_RATE_LIMITED".to_string())),
+        "{:?}",
+        no_retries.output_json
+    );
+}

@@ -195,10 +195,12 @@ impl OpenAICompletionModel {
                 body = %error_body,
                 "OpenAI API error"
             );
-            return Err(CompletionError::ProviderError(format!(
-                "OpenAI API returned {}: {}",
-                response.status, error_body
-            )));
+            return Err(CompletionError::from_http_status(
+                "OpenAI API",
+                response.status,
+                &response.headers,
+                &error_body,
+            ));
         }
 
         let response_text = response.into_string().map_err(|e| {

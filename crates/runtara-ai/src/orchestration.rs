@@ -60,17 +60,60 @@ pub struct CompletionInvokeRequest {
     pub timeout_ms: Option<u64>,
 }
 
-/// Issue one LLM chat completion. Returns the model's response (choice + usage)
-/// or a human-readable error string.
-///
-/// This is intentionally identical in behavior to the generated
-/// `__ai_llm_durable` body; keep the two in sync.
+/// A failed completion: a human-readable message, and whether the provider
+/// throttled the call so the caller can report it as rate-limited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionFailure {
+    pub message: String,
+    /// The provider's throttling status (429, or Bedrock's throttling
+    /// exception status) when it rate-limited the call.
+    pub rate_limited_status: Option<u16>,
+    pub retry_after_ms: Option<u64>,
+}
+
+impl std::fmt::Display for CompletionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl From<String> for CompletionFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            rate_limited_status: None,
+            retry_after_ms: None,
+        }
+    }
+}
+
 #[cfg(feature = "completion")]
-pub fn run_completion(req: CompletionInvokeRequest) -> Result<CompletionResponse, String> {
+impl From<crate::CompletionError> for CompletionFailure {
+    fn from(error: crate::CompletionError) -> Self {
+        let (rate_limited_status, retry_after_ms) = match &error {
+            crate::CompletionError::RateLimited {
+                status,
+                retry_after_ms,
+                ..
+            } => (Some(*status), *retry_after_ms),
+            _ => (None, None),
+        };
+        Self {
+            message: format!("LLM call failed: {error}"),
+            rate_limited_status,
+            retry_after_ms,
+        }
+    }
+}
+
+/// Issue one LLM chat completion. Returns the model's response (choice + usage)
+/// or a [`CompletionFailure`].
+#[cfg(feature = "completion")]
+pub fn run_completion(
+    req: CompletionInvokeRequest,
+) -> Result<CompletionResponse, CompletionFailure> {
     let (model, request) = prepare_completion(req)?;
-    model
-        .completion(request)
-        .map_err(|e| format!("LLM call failed: {e}"))
+    Ok(model.completion(request)?)
 }
 
 /// Issue a completion through awaitable component I/O in WASM. Provider
@@ -78,12 +121,9 @@ pub fn run_completion(req: CompletionInvokeRequest) -> Result<CompletionResponse
 #[cfg(feature = "completion")]
 pub async fn run_completion_async(
     req: CompletionInvokeRequest,
-) -> Result<CompletionResponse, String> {
+) -> Result<CompletionResponse, CompletionFailure> {
     let (model, request) = prepare_completion(req)?;
-    model
-        .completion_async(request)
-        .await
-        .map_err(|e| format!("LLM call failed: {e}"))
+    Ok(model.completion_async(request).await?)
 }
 
 #[cfg(feature = "completion")]
