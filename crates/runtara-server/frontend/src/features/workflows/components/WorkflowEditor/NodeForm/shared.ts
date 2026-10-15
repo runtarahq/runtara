@@ -292,10 +292,7 @@ function buildStepInfoList(
           children: undefined,
         });
       }
-    } else if (
-      step.stepType === 'Wait' ||
-      (step.stepType as string) === 'WaitForSignal'
-    ) {
+    } else if (step.stepType === 'WaitForSignal') {
       // WaitForSignal steps output the signal response defined by responseSchema
       const waitStep = step as any;
       if (

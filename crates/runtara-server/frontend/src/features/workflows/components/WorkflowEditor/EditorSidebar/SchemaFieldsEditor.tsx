@@ -40,6 +40,7 @@ const SUPPORTED_TYPES: { label: string; value: string }[] = [
   { label: 'Object', value: 'object' },
   { label: 'Array', value: 'array' },
   { label: 'File', value: 'file' },
+  { label: 'Connection', value: 'connection' },
 ];
 
 export type SchemaField = {

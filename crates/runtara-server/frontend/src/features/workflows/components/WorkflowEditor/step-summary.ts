@@ -58,7 +58,6 @@ export function stepBadgeVariant(stepType: string) {
       return 'warning' as const;
     case 'Split':
     case 'While':
-    case 'RepeatUntil':
       return 'default' as const;
     case 'EmbedWorkflow':
       return 'secondary' as const;

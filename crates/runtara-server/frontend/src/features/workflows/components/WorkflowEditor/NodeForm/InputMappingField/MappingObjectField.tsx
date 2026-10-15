@@ -62,6 +62,7 @@ const TYPE_HINT_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'number', label: 'Number' },
   { value: 'boolean', label: 'Boolean' },
   { value: 'json', label: 'JSON' },
+  { value: 'file', label: 'File' },
 ];
 
 interface MappingObjectFieldProps {

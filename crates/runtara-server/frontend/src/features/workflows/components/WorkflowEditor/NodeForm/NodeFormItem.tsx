@@ -310,8 +310,8 @@ function StepAdvancedFields() {
               </div>
             </div>
             <p className="text-xs text-muted-foreground">
-              Timeout is accepted by the DSL for these steps; runtime validation
-              currently reports it as warning-only.
+              Timeout is the step&apos;s deadline. A timeout of 0 fails the step
+              before it runs; leave it empty for no deadline.
             </p>
           </>
         )}
@@ -713,10 +713,8 @@ export const schema = () =>
             }
           })
       ),
-      executionTimeout: z.coerce.number().int().nonnegative(),
       maxRetries: z.coerce.number().int().nonnegative(),
       retryDelay: z.coerce.number().int().nonnegative(),
-      retryStrategy: z.enum(['Linear', 'Exponential']).optional(),
       inputSchema: z.any().optional(),
       inputSchemaFields: z
         .array(
@@ -976,10 +974,8 @@ export const initialValues: Partial<SchemaType> = {
     return initValues;
   }, {}),
   // Add advanced options default values
-  executionTimeout: 120,
   maxRetries: 1,
   retryDelay: 1000,
-  retryStrategy: 'Linear',
   breakpoint: undefined,
   durable: undefined,
   timeout: undefined,

@@ -27,12 +27,6 @@ export function StepTypeIcon(props: Props) {
       return <Icons.asterisk className={iconClassName} />;
     case 'Switch':
       return <Icons.squareMenu className={iconClassName} />;
-    case 'Combine':
-      return <Icons.merge className={iconClassName} />;
-    case 'Wait':
-      return <Icons.wait className={iconClassName} />;
-    case 'Event':
-      return <Icons.event className={iconClassName} />;
     case 'GroupBy':
       return <Icons.groupby className={iconClassName} />;
     case 'Start': // Backend format (with space)

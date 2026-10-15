@@ -89,6 +89,22 @@ describe('SchemaFieldsEditor', () => {
       expect(input).toHaveAttribute('aria-invalid', 'true');
     }
   });
+
+  it('shows the type of a connection field', async () => {
+    vi.mocked(validateSchemaFieldsWithRust).mockResolvedValue(
+      validValidationResult
+    );
+
+    render(
+      <SchemaFieldsEditor
+        label="Input Schema Fields"
+        fields={[baseField({ name: 'crm', type: 'connection' })]}
+        onChange={vi.fn()}
+      />
+    );
+
+    expect(await screen.findByText('Connection')).toBeInTheDocument();
+  });
 });
 
 describe('advanced schema draft (dialog apply path)', () => {
