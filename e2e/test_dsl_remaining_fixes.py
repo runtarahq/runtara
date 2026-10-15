@@ -603,7 +603,8 @@ def mcp_call(method, params, session=None, request_id=1):
         session = response.headers.get("Mcp-Session-Id") or session
     payload = None
     for line in raw.splitlines():
-        if line.startswith("data:"):
+        # SSE frames: skip the empty priming data line.
+        if line.startswith("data:") and line[5:].strip():
             payload = json.loads(line[5:].strip())
     if payload is None and raw.strip():
         payload = json.loads(raw)
