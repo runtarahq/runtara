@@ -1777,7 +1777,13 @@ pub struct ReferenceValue {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImmediateValue {
-    /// The literal value (string, number, boolean, object, or array)
+    /// The literal value (string, number, boolean, object, or array).
+    ///
+    /// In an Agent or AiAgent `inputMapping`, `{valueType: "reference", ...}`
+    /// envelopes nested inside the value are resolved before the call: that
+    /// is how a condition held in an immediate (an Object Model query) reads
+    /// workflow data. Every other mapping passes the value on literally
+    /// (W090 flags a nested reference there).
     pub value: serde_json::Value,
 }
 

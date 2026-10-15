@@ -326,9 +326,30 @@ def check_variable_types_and_conditions():
           status == 400 and rejected_codes(body) == ["E151"], {"status": status, "codes": rejected_codes(body)})
 
 
+# ---------------------------------------------------------------------- C4
+
+
+def check_nested_immediate_references():
+    nested = imm({"inner": ref("variables.color")})
+    color = {"color": {"type": "string", "value": "red"}}
+    finish_only = graph("done", [fin("done", out=nested)], variables=color)
+    status, body = call("POST", "/workflows/graph/validate", {"name": "c4", **finish_only})
+    warnings = [str(w)[1:5] for w in (body or {}).get("warnings") or []]
+    agent = graph("a", [
+        {"stepType": "Agent", "id": "a", "agentId": "utils", "capabilityId": "return-input",
+         "inputMapping": {"value": nested}},
+        fin("done", resolved=ref("steps.a.outputs"), literal=nested)], [edge("a", "done")], variables=color)
+    out = run("rf-nested-immediate", agent).get("outputs") or {}
+    check("C4 nested references resolve in Agent inputs only, and W090 flags the literal case",
+          "W090" in warnings and json.dumps(out.get("resolved")).count("red") == 1
+          and out.get("literal", {}).get("inner", {}).get("valueType") == "reference",
+          {"warnings": warnings, "outputs": out})
+
+
 CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, check_child_version_spellings,
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
-          check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions]
+          check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions,
+          check_nested_immediate_references]
 
 
 def main():

@@ -1920,6 +1920,11 @@ pub enum ValidationWarning {
         field: String,
         condition: String,
     },
+    /// An immediate value outside an Agent mapping holds a reference
+    /// envelope. Only Agent inputs resolve references nested in immediates
+    /// (that is how a condition inside one reads workflow data); here it is
+    /// passed on literally.
+    ImmediateReferenceNotResolved { step_id: String, field: String },
 }
 
 impl ValidationWarning {
@@ -1955,6 +1960,7 @@ impl ValidationWarning {
             Self::SplitSequentialOverridesParallelism { .. } => "W087",
             Self::PollIntervalIgnored { .. } => "W088",
             Self::FieldConditionNeverMatches { .. } => "W089",
+            Self::ImmediateReferenceNotResolved { .. } => "W090",
         }
     }
 }
@@ -2250,6 +2256,14 @@ impl std::fmt::Display for ValidationWarning {
                 "[W089] Field '{}' in {} has a {} whose equals and notEquals are the same \
                  value, so it can never hold.",
                 field, location, condition
+            ),
+            ValidationWarning::ImmediateReferenceNotResolved { step_id, field } => write!(
+                f,
+                "[W090] Step '{}' field '{}' is an immediate value containing a reference \
+                 envelope. Only Agent inputs resolve references nested in immediates; here \
+                 it is passed on as literal JSON. Use a reference or composite mapping to \
+                 read workflow data.",
+                step_id, field
             ),
             ValidationWarning::PollIntervalIgnored { step_id } => write!(
                 f,
@@ -3488,6 +3502,56 @@ fn validate_edge_shapes(graph: &ExecutionGraph, result: &mut ValidationResult) {
                     })
                 }
             }
+            _ => {}
+        }
+    }
+}
+
+/// W090: immediates holding a reference envelope in mappings that keep
+/// immediates literal (everything but Agent / AiAgent inputs).
+fn validate_unresolved_immediate_references(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    fn holds_reference(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(map) => {
+                map.get("valueType").and_then(serde_json::Value::as_str) == Some("reference")
+                    || map.values().any(holds_reference)
+            }
+            serde_json::Value::Array(items) => items.iter().any(holds_reference),
+            _ => false,
+        }
+    }
+    let mut step_ids: Vec<&String> = graph.steps.keys().collect();
+    step_ids.sort();
+    for step_id in step_ids {
+        let step = &graph.steps[step_id];
+        if matches!(step, Step::Agent(_) | Step::AiAgent(_)) {
+            continue;
+        }
+        for mapping in collect_step_mappings(step) {
+            let mut fields: Vec<&String> = mapping.keys().collect();
+            fields.sort();
+            for field in fields {
+                if let MappingValue::Immediate(immediate) = &mapping[field]
+                    && holds_reference(&immediate.value)
+                {
+                    result
+                        .warnings
+                        .push(ValidationWarning::ImmediateReferenceNotResolved {
+                            step_id: step_id.clone(),
+                            field: field.clone(),
+                        });
+                }
+            }
+        }
+    }
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => result.in_subgraph(&split_step.id, |result| {
+                validate_unresolved_immediate_references(&split_step.subgraph, result)
+            }),
+            Step::While(while_step) => result.in_subgraph(&while_step.id, |result| {
+                validate_unresolved_immediate_references(&while_step.subgraph, result)
+            }),
             _ => {}
         }
     }
@@ -6317,6 +6381,7 @@ fn validate_edge_conditions(graph: &ExecutionGraph, result: &mut ValidationResul
     validate_on_error_nesting(graph, result);
     validate_variable_types(graph, result);
     validate_field_conditions(graph, result);
+    validate_unresolved_immediate_references(graph, result);
 }
 
 /// E027: workflow conditions must not use operators that only exist for
@@ -18625,6 +18690,31 @@ mod edge_shape_tests {
             "w": {"stepType": "WaitForSignal", "id": "w", "pollIntervalMs": 500}, "done": fin("done")},
             "executionPlan": [{"fromStep": "w", "toStep": "done"}]}));
         assert!(wait.contains(&"W088".to_string()), "{wait:?}");
+    }
+
+    /// A reference inside an immediate resolves in Agent inputs and is literal
+    /// elsewhere; the literal case warns.
+    #[test]
+    fn immediate_references_outside_agent_inputs_warn() {
+        let warning_codes = |graph: Value| {
+            let graph: ExecutionGraph = serde_json::from_value(graph).unwrap();
+            validate_workflow(&graph, &super::tests::test_catalog())
+                .warnings
+                .iter()
+                .map(|warning| warning.code().to_string())
+                .collect::<Vec<_>>()
+        };
+        let nested = json!({"valueType": "immediate",
+                            "value": {"inner": {"valueType": "reference", "value": "data.x"}}});
+        let finish = json!({"entryPoint": "done", "steps": {"done": {"stepType": "Finish", "id": "done",
+            "inputMapping": {"out": nested}}}});
+        assert!(warning_codes(finish).contains(&"W090".to_string()));
+        let agent = json!({"entryPoint": "a", "steps": {
+            "a": {"stepType": "Agent", "id": "a", "agentId": "utils", "capabilityId": "return-input",
+                  "inputMapping": {"value": nested}},
+            "done": fin("done")},
+            "executionPlan": [{"fromStep": "a", "toStep": "done"}]});
+        assert!(!warning_codes(agent).contains(&"W090".to_string()));
     }
 
     /// A variable's value must match its declared type, and a field condition
