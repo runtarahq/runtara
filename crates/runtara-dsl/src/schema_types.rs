@@ -117,6 +117,11 @@ pub struct ExecutionGraph {
     /// sees its parent's variables; its own declarations are added to them,
     /// replacing any with the same name, and the step's `config.variables`
     /// win over both.
+    ///
+    /// The runtime also binds `_`-prefixed variables of its own, such as
+    /// `_instance_id` and, in a Split body, `_index` and `_item`
+    /// ([`crate::PUBLIC_RUNTIME_VARIABLES`] lists the ones to read). Those
+    /// names are reserved: declaring or overriding one is rejected (E137).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub variables: HashMap<String, Variable>,
 

@@ -482,6 +482,31 @@ def check_error_context_spellings():
           {"status": status, "codes": rejected_codes(body)})
 
 
+# --------------------------------------------------------------------- C10
+
+
+def check_runtime_variables():
+    body = graph("f", [fin("f", i=ref("variables._index"), item=ref("variables._item"),
+                           indices=ref("variables._loop_indices"), color=ref("variables.color"))])
+    g = graph("s", [
+        {"stepType": "Split", "id": "s", "config": {"value": imm([10, 20]), "variables": {"color": imm("blue")}},
+         "subgraph": body},
+        fin("done", out=ref("steps.s.outputs"), color=ref("variables.color"), wid=ref("variables._workflow_id"))],
+        [edge("s", "done")], variables={"color": {"type": "string", "value": "red"}})
+    workflow, status, _ = save_status("rf-runtime-variables", g)
+    compile_latest(workflow)
+    r = execute(workflow)
+    out = r.get("outputs") or {}
+    check("C10 the documented runtime variables and override order hold in a Split body",
+          out.get("out") == [{"i": 0, "item": 10, "indices": [0], "color": "blue"},
+                             {"i": 1, "item": 20, "indices": [1], "color": "blue"}]
+          and out.get("color") == "red" and out.get("wid") == workflow, {"status": r.get("status"), "outputs": out})
+    _, status, body = save_status("rf-reserved-variable", graph("f", [fin("f")],
+                                  variables={"_index": {"type": "integer", "value": 1}}))
+    check("C10 declaring a runtime variable is rejected (E137)", status == 400 and "E137" in rejected_codes(body),
+          {"status": status, "codes": rejected_codes(body)})
+
+
 # ---------------------------------------------------------------- E2-E5
 
 
@@ -550,13 +575,18 @@ def check_mcp_prose():
           mentioned and mentioned <= names and "execute_workflow_and_wait" not in instructions
           and schema.get("dslVersion") and "file" in state_types and "connection" in state_types,
           {"mentioned": sorted(mentioned), "dslVersion": schema.get("dslVersion"), "stateTypes": state_types})
+    runtime_variables = sorted((schema.get("mappingValue") or {}).get("runtimeVariables") or {})
+    check("C10 the authoring schema lists the public runtime variables",
+          runtime_variables == sorted(f"variables.{name}" for name in (
+              "_workflow_id", "_instance_id", "_tenant_id", "_signal_id", "_index", "_item", "_loop",
+              "_loop_indices")), runtime_variables)
 
 
 CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, check_child_version_spellings,
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
           check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions,
           check_nested_immediate_references, check_workflow_inputs_in_bodies, check_group_by_keys,
-          check_null_collections, check_zero_timeouts, check_condition_spellings, check_route_less_switch_cases, check_error_context_spellings, check_doc_drift, check_mcp_prose]
+          check_null_collections, check_zero_timeouts, check_condition_spellings, check_route_less_switch_cases, check_error_context_spellings, check_runtime_variables, check_doc_drift, check_mcp_prose]
 
 
 def main():

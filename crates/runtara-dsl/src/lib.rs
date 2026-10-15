@@ -66,6 +66,36 @@ pub const RUNTIME_VARIABLE_NAMES: &[&str] = &[
     "_workflow_inputs",
 ];
 
+/// The runtime-owned variables a workflow may read, with what each holds.
+/// The other [`RUNTIME_VARIABLE_NAMES`] are scope and durability bookkeeping
+/// and carry no stable meaning for authors. A While body also binds the
+/// legacy `_previousOutputs`, the same value as `loop.outputs`.
+pub const PUBLIC_RUNTIME_VARIABLES: &[(&str, &str)] = &[
+    ("_workflow_id", "ID of the running workflow"),
+    ("_instance_id", "ID of this run"),
+    ("_tenant_id", "Tenant the run belongs to"),
+    (
+        "_signal_id",
+        "Inside a WaitForSignal onWait graph: the signal being waited for",
+    ),
+    (
+        "_index",
+        "Inside a Split or While body: the innermost iteration's index, from 0",
+    ),
+    (
+        "_item",
+        "Inside a Split body: the current item (the body's `data`); inside a While in a Split, that Split's item",
+    ),
+    (
+        "_loop",
+        "Inside a While body: `{index, outputs}` of the current iteration, as `loop.*`; inside a Split in a While, that While's",
+    ),
+    (
+        "_loop_indices",
+        "Inside any Split or While body: the index of every enclosing iteration, outermost first",
+    ),
+];
+
 /// Whether `name` is a runtime-owned variable binding (see
 /// [`RUNTIME_VARIABLE_NAMES`]).
 pub fn is_runtime_variable_name(name: &str) -> bool {
@@ -913,6 +943,13 @@ mod tests {
         assert_eq!(json.get("id").unwrap(), "split1");
         assert!(json.get("config").is_some());
         assert!(json.get("subgraph").is_some());
+    }
+
+    #[test]
+    fn public_runtime_variables_are_reserved() {
+        for (name, _) in PUBLIC_RUNTIME_VARIABLES {
+            assert!(is_runtime_variable_name(name), "{name} is not reserved");
+        }
     }
 
     #[test]

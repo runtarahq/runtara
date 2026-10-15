@@ -643,6 +643,11 @@ fn run_state_step_shapes() -> serde_json::Value {
 /// condition-operator enum can be drift-tested against `ConditionOperator`
 /// (SYN-451).
 pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> serde_json::Value {
+    let runtime_variables: serde_json::Map<String, serde_json::Value> =
+        runtara_dsl::PUBLIC_RUNTIME_VARIABLES
+            .iter()
+            .map(|(name, meaning)| (format!("variables.{name}"), (*meaning).into()))
+            .collect();
     serde_json::json!({
         "schema": "workflow-authoring",
         // Version of this authoring document's own format; the DSL it
@@ -739,6 +744,7 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
             "compositeObject": {"valueType": "composite", "value": {"field": {"valueType": "reference", "value": "data.foo"}}},
             "compositeArray": {"valueType": "composite", "value": [{"valueType": "reference", "value": "data.foo"}]},
             "referencePrefixes": ["data.<workflowInput>", "variables.<name>", "steps.<stepId>.outputs.<field>", "steps.__error.<field> on onError paths"],
+            "runtimeVariables": runtime_variables,
             "conditionalOutput": {
                 "reference": "steps.<conditionalStepId>.outputs.result",
                 "type": "boolean",
@@ -1969,6 +1975,39 @@ mod tests {
         }
         let text = schema.to_string();
         assert!(!text.contains("execute_workflow_and_wait"), "{text}");
+        let runtime_variables = schema["mappingValue"]["runtimeVariables"]
+            .as_object()
+            .unwrap();
+        assert_eq!(
+            runtime_variables.len(),
+            runtara_dsl::PUBLIC_RUNTIME_VARIABLES.len()
+        );
+        assert!(runtime_variables.contains_key("variables._index"));
+    }
+
+    /// The editor's built-in variable types cover exactly the public runtime
+    /// variables the DSL documents.
+    #[test]
+    fn editor_builtin_variables_match_the_dsl() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/frontend/src/features/workflows/components/WorkflowEditor/NodeForm/reference-type.ts"
+        ))
+        .unwrap();
+        let start = source.find("BUILTIN_VARIABLE_TYPES").unwrap();
+        let body = &source[start..start + source[start..].find("};").unwrap()];
+        let mut editor: Vec<&str> = body
+            .lines()
+            .filter_map(|line| line.trim().split_once(':').map(|(name, _)| name))
+            .filter(|name| name.starts_with('_'))
+            .collect();
+        editor.sort_unstable();
+        let mut dsl: Vec<&str> = runtara_dsl::PUBLIC_RUNTIME_VARIABLES
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        dsl.sort_unstable();
+        assert_eq!(editor, dsl);
     }
 
     #[test]
