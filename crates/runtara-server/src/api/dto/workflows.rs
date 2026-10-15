@@ -728,6 +728,15 @@ impl ValidationErrorDto {
                 Some("executionPlan".into()),
                 None,
             ),
+            ValidationError::VariableTypeMismatch { name, .. } => (
+                error.to_string(),
+                None,
+                Some(format!("variables.{name}")),
+                None,
+            ),
+            ValidationError::FieldConditionWithoutTest { field, .. } => {
+                (error.to_string(), None, Some(field.clone()), None)
+            }
             ValidationError::OnErrorNestingTooDeep { step_id, .. } => (
                 error.to_string(),
                 Some(step_id.clone()),

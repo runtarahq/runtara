@@ -311,9 +311,24 @@ def check_workflow_level_settings():
     check("D-meta trackEvents/memoryTier inside executionGraph say where they belong", len(hints) == 2, hints)
 
 
+# ------------------------------------------------------ D-vartype, D-visibleWhen
+
+
+def check_variable_types_and_conditions():
+    g = graph("done", [fin("done")], variables={"v": {"type": "integer", "value": "hello"}})
+    _, status, body = save_status("rf-vartype", g)
+    check("D-vartype a variable whose value mismatches its type is rejected (E150)",
+          status == 400 and rejected_codes(body) == ["E150"], {"status": status, "codes": rejected_codes(body)})
+    g = graph("done", [fin("done")], inputSchema={"kind": {"type": "string"},
+                                                    "note": {"type": "string", "visibleWhen": {"field": "kind"}}})
+    _, status, body = save_status("rf-visible-when", g)
+    check("D-visibleWhen a condition with no test is rejected (E151)",
+          status == 400 and rejected_codes(body) == ["E151"], {"status": status, "codes": rejected_codes(body)})
+
+
 CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, check_child_version_spellings,
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
-          check_sequential_and_poll_interval, check_workflow_level_settings]
+          check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions]
 
 
 def main():

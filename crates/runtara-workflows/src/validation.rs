@@ -69,6 +69,8 @@
 //! | E147 | InvalidMillisecondsValue | Literal Delay.durationMs / WaitForSignal.timeoutMs that is not a non-negative number |
 //! | E148 | InvalidTemplateSyntax | A template value that does not parse |
 //! | E149 | OnErrorNestingTooDeep | onError handlers nested more than 4 levels, or a handler chain that loops |
+//! | E150 | VariableTypeMismatch | A declared variable's value does not match its `type` |
+//! | E151 | FieldConditionWithoutTest | `visibleWhen`/`requiredWhen` with neither `equals` nor `notEquals` |
 //! | E050 | InvalidChildVersion | Invalid child workflow version format |
 //! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
 //! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
@@ -687,6 +689,18 @@ pub enum ValidationError {
         max_depth: usize,
         cyclic: bool,
     },
+    /// A declared variable whose value does not match its `type`.
+    VariableTypeMismatch {
+        name: String,
+        declared: String,
+        actual: String,
+    },
+    /// A `visibleWhen` / `requiredWhen` with neither `equals` nor `notEquals`.
+    FieldConditionWithoutTest {
+        location: String,
+        field: String,
+        condition: String,
+    },
 }
 
 /// Information about a missing required input field.
@@ -778,6 +792,8 @@ impl ValidationError {
             Self::InvalidMillisecondsValue { .. } => "E147",
             Self::InvalidTemplateSyntax { .. } => "E148",
             Self::OnErrorNestingTooDeep { .. } => "E149",
+            Self::VariableTypeMismatch { .. } => "E150",
+            Self::FieldConditionWithoutTest { .. } => "E151",
         }
     }
 }
@@ -1665,6 +1681,25 @@ impl std::fmt::Display for ValidationError {
                     )
                 }
             }
+            ValidationError::VariableTypeMismatch {
+                name,
+                declared,
+                actual,
+            } => write!(
+                f,
+                "[E150] Variable '{}' is declared as {} but its value is {}.",
+                name, declared, actual
+            ),
+            ValidationError::FieldConditionWithoutTest {
+                location,
+                field,
+                condition,
+            } => write!(
+                f,
+                "[E151] Field '{}' in {} has a {} with neither 'equals' nor 'notEquals'. \
+                 Add one, or remove the condition.",
+                field, location, condition
+            ),
         }
     }
 }
@@ -1878,6 +1913,13 @@ pub enum ValidationWarning {
     /// `WaitForSignal.pollIntervalMs` is deprecated: a waiting run resumes
     /// when the signal arrives, so the interval is never used.
     PollIntervalIgnored { step_id: String },
+    /// A `visibleWhen` / `requiredWhen` whose `equals` and `notEquals` are
+    /// the same value, so it can never hold.
+    FieldConditionNeverMatches {
+        location: String,
+        field: String,
+        condition: String,
+    },
 }
 
 impl ValidationWarning {
@@ -1912,6 +1954,7 @@ impl ValidationWarning {
             Self::IgnoredField { .. } => "W086",
             Self::SplitSequentialOverridesParallelism { .. } => "W087",
             Self::PollIntervalIgnored { .. } => "W088",
+            Self::FieldConditionNeverMatches { .. } => "W089",
         }
     }
 }
@@ -2197,6 +2240,16 @@ impl std::fmt::Display for ValidationWarning {
                 "[W087] Split step '{}' sets sequential: true and parallelism {}. Iterations run \
                  one at a time; remove one of the two.",
                 step_id, parallelism
+            ),
+            ValidationWarning::FieldConditionNeverMatches {
+                location,
+                field,
+                condition,
+            } => write!(
+                f,
+                "[W089] Field '{}' in {} has a {} whose equals and notEquals are the same \
+                 value, so it can never hold.",
+                field, location, condition
             ),
             ValidationWarning::PollIntervalIgnored { step_id } => write!(
                 f,
@@ -3432,6 +3485,160 @@ fn validate_edge_shapes(graph: &ExecutionGraph, result: &mut ValidationResult) {
                 if let Some(on_wait) = &wait_step.on_wait {
                     result.in_subgraph(&wait_step.id, |result| {
                         validate_edge_shapes(on_wait, result)
+                    })
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// E150: a declared variable's value must match its `type` (`null` is
+/// allowed as "no value yet"). Runtime-owned names are reported by E137.
+fn validate_variable_types(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    use runtara_dsl::VariableType;
+    let mut names: Vec<&String> = graph.variables.keys().collect();
+    names.sort();
+    for name in names {
+        let variable = &graph.variables[name];
+        let value = &variable.value;
+        let matches = value.is_null()
+            || match variable.var_type {
+                VariableType::String => value.is_string(),
+                VariableType::Number => value.is_number(),
+                VariableType::Integer => {
+                    value.is_i64()
+                        || value.is_u64()
+                        || value.as_f64().is_some_and(|n| n.fract() == 0.0)
+                }
+                VariableType::Boolean => value.is_boolean(),
+                VariableType::Array => value.is_array(),
+                VariableType::Object | VariableType::File => value.is_object(),
+            };
+        if !matches {
+            let actual = match value {
+                serde_json::Value::String(_) => "a string",
+                serde_json::Value::Number(_) => "a number",
+                serde_json::Value::Bool(_) => "a boolean",
+                serde_json::Value::Array(_) => "an array",
+                serde_json::Value::Object(_) => "an object",
+                serde_json::Value::Null => "null",
+            };
+            result.errors.push(ValidationError::VariableTypeMismatch {
+                name: name.clone(),
+                declared: serde_json::to_value(&variable.var_type)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_else(|| format!("{:?}", variable.var_type)),
+                actual: actual.to_string(),
+            });
+        }
+    }
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => result.in_subgraph(&split_step.id, |result| {
+                validate_variable_types(&split_step.subgraph, result)
+            }),
+            Step::While(while_step) => result.in_subgraph(&while_step.id, |result| {
+                validate_variable_types(&while_step.subgraph, result)
+            }),
+            Step::WaitForSignal(wait_step) => {
+                if let Some(on_wait) = &wait_step.on_wait {
+                    result.in_subgraph(&wait_step.id, |result| {
+                        validate_variable_types(on_wait, result)
+                    })
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// E151 / W089: `visibleWhen` and `requiredWhen` on every schema the graph
+/// declares — its own, its steps' and nested properties and items.
+fn validate_field_conditions(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    fn check_fields(
+        location: &str,
+        fields: &HashMap<String, SchemaField>,
+        result: &mut ValidationResult,
+    ) {
+        let mut names: Vec<&String> = fields.keys().collect();
+        names.sort();
+        for name in names {
+            let field = &fields[name];
+            for (kind, condition) in [
+                ("visibleWhen", field.visible_when.as_ref()),
+                ("requiredWhen", field.required_when.as_ref()),
+            ] {
+                let Some(condition) = condition else {
+                    continue;
+                };
+                match (&condition.equals, &condition.not_equals) {
+                    (None, None) => {
+                        result
+                            .errors
+                            .push(ValidationError::FieldConditionWithoutTest {
+                                location: location.to_string(),
+                                field: name.clone(),
+                                condition: kind.to_string(),
+                            })
+                    }
+                    (Some(equals), Some(not_equals))
+                        if runtara_dsl::condition_eval::values_equal(equals, not_equals) =>
+                    {
+                        result
+                            .warnings
+                            .push(ValidationWarning::FieldConditionNeverMatches {
+                                location: location.to_string(),
+                                field: name.clone(),
+                                condition: kind.to_string(),
+                            })
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(properties) = &field.properties {
+                check_fields(&format!("{location}.{name}"), properties, result);
+            }
+            if let Some(items) = &field.items
+                && let Some(properties) = &items.properties
+            {
+                check_fields(&format!("{location}.{name}[]"), properties, result);
+            }
+        }
+    }
+    check_fields("inputSchema", &graph.input_schema, result);
+    check_fields("outputSchema", &graph.output_schema, result);
+    check_fields("stateSchema", &graph.state_schema, result);
+    let mut step_ids: Vec<&String> = graph.steps.keys().collect();
+    step_ids.sort();
+    for step_id in step_ids {
+        match &graph.steps[step_id] {
+            Step::Split(split_step) => {
+                check_fields(
+                    &format!("step '{step_id}' inputSchema"),
+                    &split_step.input_schema,
+                    result,
+                );
+                check_fields(
+                    &format!("step '{step_id}' outputSchema"),
+                    &split_step.output_schema,
+                    result,
+                );
+                result.in_subgraph(&split_step.id, |result| {
+                    validate_field_conditions(&split_step.subgraph, result)
+                });
+            }
+            Step::While(while_step) => result.in_subgraph(&while_step.id, |result| {
+                validate_field_conditions(&while_step.subgraph, result)
+            }),
+            Step::WaitForSignal(wait_step) => {
+                if let Some(schema) = &wait_step.response_schema {
+                    check_fields(&format!("step '{step_id}' responseSchema"), schema, result);
+                }
+                if let Some(on_wait) = &wait_step.on_wait {
+                    result.in_subgraph(&wait_step.id, |result| {
+                        validate_field_conditions(on_wait, result)
                     })
                 }
             }
@@ -6108,6 +6315,8 @@ fn validate_edge_conditions(graph: &ExecutionGraph, result: &mut ValidationResul
     validate_delay_durability(graph, true, result);
     validate_static_step_values(graph, result);
     validate_on_error_nesting(graph, result);
+    validate_variable_types(graph, result);
+    validate_field_conditions(graph, result);
 }
 
 /// E027: workflow conditions must not use operators that only exist for
@@ -18416,6 +18625,57 @@ mod edge_shape_tests {
             "w": {"stepType": "WaitForSignal", "id": "w", "pollIntervalMs": 500}, "done": fin("done")},
             "executionPlan": [{"fromStep": "w", "toStep": "done"}]}));
         assert!(wait.contains(&"W088".to_string()), "{wait:?}");
+    }
+
+    /// A variable's value must match its declared type, and a field condition
+    /// needs a test.
+    #[test]
+    fn variable_types_and_field_conditions_are_checked() {
+        let with_variable = |var_type: &str, value: Value| {
+            json!({"entryPoint": "done", "steps": {"done": fin("done")},
+                   "variables": {"v": {"type": var_type, "value": value}}})
+        };
+        assert_eq!(
+            closure_codes(with_variable("integer", json!("hello"))),
+            vec!["E150"]
+        );
+        assert_eq!(
+            closure_codes(with_variable("boolean", json!(1))),
+            vec!["E150"]
+        );
+        for (var_type, value) in [
+            ("integer", json!(3)),
+            ("number", json!(2.5)),
+            ("string", json!("x")),
+            ("object", json!({})),
+            ("array", json!([])),
+            ("string", json!(null)),
+        ] {
+            assert!(
+                closure_codes(with_variable(var_type, value)).is_empty(),
+                "{var_type}"
+            );
+        }
+        let with_condition = |condition: Value| {
+            json!({"entryPoint": "done", "steps": {"done": fin("done")}, "inputSchema": {
+                "kind": {"type": "string"},
+                "note": {"type": "string", "visibleWhen": condition}}})
+        };
+        assert_eq!(
+            closure_codes(with_condition(json!({"field": "kind"}))),
+            vec!["E151"]
+        );
+        assert!(closure_codes(with_condition(json!({"field": "kind", "equals": "a"}))).is_empty());
+        let graph: ExecutionGraph = serde_json::from_value(with_condition(
+            json!({"field": "kind", "equals": "a", "notEquals": "a"}),
+        ))
+        .unwrap();
+        let warnings: Vec<String> = validate_workflow(&graph, &super::tests::test_catalog())
+            .warnings
+            .iter()
+            .map(|warning| warning.code().to_string())
+            .collect();
+        assert!(warnings.contains(&"W089".to_string()), "{warnings:?}");
     }
 
     /// Handlers of handlers nest up to the compiler's limit; deeper nesting
