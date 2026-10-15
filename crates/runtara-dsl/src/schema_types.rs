@@ -2460,7 +2460,8 @@ pub struct SwitchConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cases: Vec<SwitchCase>,
 
-    /// Default output if no case matches
+    /// Default output if no case matches. A routing switch then takes the
+    /// `default` edge.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
 }
@@ -2506,6 +2507,10 @@ pub struct SwitchCase {
     /// Route label for routing switches. When present, the switch acts as a
     /// branching control flow step. The label corresponds to edge labels in
     /// the execution plan.
+    ///
+    /// In a routing switch, a matching case without a route outputs its own
+    /// `output` and takes the `default` edge (W092 warns). Write
+    /// `"route": "default"` to say so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<String>,
 }

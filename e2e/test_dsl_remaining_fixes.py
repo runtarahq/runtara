@@ -436,6 +436,30 @@ def check_condition_spellings():
           {"save": status, "branches": branches, "stored": stored_condition})
 
 
+# ---------------------------------------------------------------------- C6
+
+
+def check_route_less_switch_cases():
+    g = graph("sw", [
+        {"stepType": "Switch", "id": "sw", "config": {"value": ref("data.v"), "default": "D", "cases": [
+            {"matchType": "EQ", "match": "x", "output": "X", "route": "rx"},
+            {"matchType": "EQ", "match": "y", "output": "Y"}]}},
+        fin("fx", path=imm("rx"), out=ref("steps.sw.outputs")),
+        fin("fd", path=imm("default"), out=ref("steps.sw.outputs"))], [
+        edge("sw", "fx", label="rx"), edge("sw", "fd", label="default")],
+        inputSchema={"v": {"type": "string"}})
+    _, body = call("POST", "/workflows/graph/validate", {"name": "rf-switch-route", **g})
+    warned = [w for w in (body or {}).get("warnings") or [] if str(w).startswith("[W092]")]
+    workflow, status, _ = save_status("rf-switch-route", g)
+    compile_latest(workflow)
+    outputs = {v: execute(workflow, {"v": v}).get("outputs") for v in ("y", "z")}
+    check("C6 a route-less case in a routing Switch warns and takes the default edge with its own output",
+          warned and "case(s) 1 without a route" in warned[0]
+          and (outputs["y"] or {}).get("path") == "default"
+          and (outputs["z"] or {}).get("path") == "default",
+          {"warnings": warned, "outputs": outputs})
+
+
 # ---------------------------------------------------------------- E2-E5
 
 
@@ -510,7 +534,7 @@ CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, chec
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
           check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions,
           check_nested_immediate_references, check_workflow_inputs_in_bodies, check_group_by_keys,
-          check_null_collections, check_zero_timeouts, check_condition_spellings, check_doc_drift, check_mcp_prose]
+          check_null_collections, check_zero_timeouts, check_condition_spellings, check_route_less_switch_cases, check_doc_drift, check_mcp_prose]
 
 
 def main():

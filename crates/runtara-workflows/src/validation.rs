@@ -1933,6 +1933,12 @@ pub enum ValidationWarning {
         step_type: String,
         fails: bool,
     },
+    /// A routing Switch case without a `route`: when it matches, the switch
+    /// outputs that case's `output` and takes the `default` edge.
+    SwitchCaseWithoutRoute {
+        step_id: String,
+        case_indices: Vec<usize>,
+    },
 }
 
 impl ValidationWarning {
@@ -1970,6 +1976,7 @@ impl ValidationWarning {
             Self::FieldConditionNeverMatches { .. } => "W089",
             Self::ImmediateReferenceNotResolved { .. } => "W090",
             Self::ZeroTimeout { .. } => "W091",
+            Self::SwitchCaseWithoutRoute { .. } => "W092",
         }
     }
 }
@@ -2295,6 +2302,21 @@ impl std::fmt::Display for ValidationWarning {
                     )
                 }
             }
+            ValidationWarning::SwitchCaseWithoutRoute {
+                step_id,
+                case_indices,
+            } => write!(
+                f,
+                "[W092] Routing Switch step '{}' has case(s) {} without a route. A matching \
+                 case without a route outputs its own output and takes the default edge. \
+                 Give it a route, or set route \"default\" to say so.",
+                step_id,
+                case_indices
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             ValidationWarning::PollIntervalIgnored { step_id } => write!(
                 f,
                 "[W088] WaitForSignal step '{}' sets pollIntervalMs, which is deprecated and has \
@@ -3895,6 +3917,26 @@ fn validate_static_step_values(graph: &ExecutionGraph, result: &mut ValidationRe
                 step_type: crate::workflow_features::step_type_name(step).to_string(),
                 fails,
             });
+        }
+        if let Step::Switch(switch) = step
+            && let Some(config) = switch.config.as_ref()
+            && config.is_routing()
+        {
+            let case_indices: Vec<usize> = config
+                .cases
+                .iter()
+                .enumerate()
+                .filter(|(_, case)| case.route.is_none())
+                .map(|(index, _)| index)
+                .collect();
+            if !case_indices.is_empty() {
+                result
+                    .warnings
+                    .push(ValidationWarning::SwitchCaseWithoutRoute {
+                        step_id: step_id.clone(),
+                        case_indices,
+                    });
+            }
         }
         match step {
             Step::Delay(delay) => check_millis(
@@ -18599,6 +18641,46 @@ mod edge_shape_tests {
             .errors()
             .map(|(_, error)| error.code().to_string())
             .collect()
+    }
+
+    /// A routing Switch case without a route takes the default edge (C6).
+    #[test]
+    fn routing_switch_cases_without_a_route_warn() {
+        let switch = |cases: Value| {
+            json!({"entryPoint": "sw", "steps": {
+                "sw": {"stepType": "Switch", "id": "sw", "config": {
+                    "value": {"valueType": "immediate", "value": "y"}, "cases": cases, "default": "D"}},
+                "fx": fin("fx"), "fd": fin("fd")},
+                "executionPlan": [{"fromStep": "sw", "toStep": "fx", "label": "rx"},
+                                  {"fromStep": "sw", "toStep": "fd", "label": "default"}]})
+        };
+        let warnings = |graph: Value| -> Vec<String> {
+            let graph: ExecutionGraph = serde_json::from_value(graph).unwrap();
+            let result = validate_workflow(&graph, &super::tests::test_catalog());
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            result
+                .warnings
+                .iter()
+                .filter(|warning| warning.code() == "W092")
+                .map(ToString::to_string)
+                .collect()
+        };
+        let routed = json!({"matchType": "EQ", "match": "x", "output": "X", "route": "rx"});
+        let found = warnings(switch(json!([routed,
+            {"matchType": "EQ", "match": "y", "output": "Y"},
+            {"matchType": "EQ", "match": "z", "output": "Z"}])));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains("case(s) 1, 2 without a route"),
+            "{}",
+            found[0]
+        );
+        // An explicit default route, or a value switch, is fine.
+        assert!(
+            warnings(switch(json!([routed,
+            {"matchType": "EQ", "match": "y", "output": "Y", "route": "default"}])))
+            .is_empty()
+        );
     }
 
     /// A value condition can carry a reference's type hint (C1), and a nested
