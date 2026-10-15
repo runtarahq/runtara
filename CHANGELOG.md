@@ -21,8 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   settings and references that are ignored or do something unexpected. `workflow.inputs` is the run's input in every scope, onError
   handlers route their own failures, a value condition can carry a type hint,
   and AiAgent turns retry and report provider throttling as `AI_RATE_LIMITED`.
-  The changelog at `/api/runtime/specs/dsl/changelog` lists the deprecated
-  spellings that DSL 4.0 is to remove.
+  Millisecond fields are now `timeoutMs`, `retryDelayMs` and `turnTimeoutMs`;
+  the old `timeout`, `retryDelay` and `turnTimeout` still read and warn
+  (W093), and the editor rewrites them to the new names the next time a
+  workflow is saved. Type hints gain `object` and `array` (`json` is
+  deprecated), variables gain `connection`, and GroupBy outputs `totalGroups`
+  beside the deprecated `total_groups`. The changelog at
+  `/api/runtime/specs/dsl/changelog` lists the deprecated spellings that DSL
+  4.0 is to remove.
 
 - **Workflows can declare `stateSchema`**, the typed state a run exposes,
   next to `inputSchema` and `outputSchema`: a map of schema fields with
