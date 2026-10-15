@@ -1200,7 +1200,12 @@ async fn agent_deadline_success_and_saturating_budget_preserve_output() -> anyho
     Ok(())
 }
 
-#[tokio::test]
+// Multi-threaded so the expiry is timed when it happens. The run drops the
+// pending call on time, but the invoking thread then stays busy until the
+// invocation returns, seconds later under a loaded suite. On a current-thread
+// runtime the HTTP connection task and the fixture share that thread, so the
+// socket close, and the expiry this test measures, waited for the return.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_deadline_covers_later_attempt_without_resetting_budget() -> anyhow::Result<()> {
     // A long retry delay inside the budget keeps a restarted budget far from
     // a correct one, so a loaded machine's late timer cannot pass for either.
