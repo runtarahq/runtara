@@ -74,7 +74,12 @@ export type TerminationType =
 
 /**
  * Match type for switch cases.
- * Supports all ConditionOperator values plus compound match types.
+ *
+ * The comparison (`GT`, `GTE`, `LT`, `LTE`, `EQ`, `NE`), string, array and
+ * emptiness operators of [`ConditionOperator`], plus the Switch-only `BETWEEN`
+ * and `RANGE`. The logical operators (`AND`, `OR`, `NOT`), `LENGTH` and the
+ * search operators (`MATCH`, `SIMILARITY_GTE`, the distance operators) are not
+ * match types: a case compares the switch value with its `match`.
  */
 export type SwitchMatchType =
   | "GT"
@@ -1355,7 +1360,11 @@ export interface CheckpointMetadataDto {
   stepId?: string | null;
 }
 
-/** Child workflow version specification */
+/**
+ * Child workflow version specification: `"latest"`, `"current"`, or a
+ * version number. The keywords are case-insensitive and a numeric string
+ * (`"3"`) is the version number, so every spelling resolves the same way.
+ */
 export type ChildVersion = string | number;
 
 export interface CloneWorkflowRequest {
@@ -1532,15 +1541,24 @@ export interface Condition {
  * Uses untagged serialization to avoid duplicate "type" fields when nesting
  * expressions (since both ConditionExpression and MappingValue use internally-tagged enums).
  * The deserializer distinguishes variants by structure:
- * - Expression: has "op" and "arguments" fields (from ConditionExpression::Operation)
- *   or has "valueType" field (from ConditionExpression::Value -> MappingValue)
- * - Value: has "valueType" field (from MappingValue)
+ * - Expression: has `op` (the `"operation"` tag is optional), or carries the
+ *   `"value"` tag
+ * - Value: any other object, read as a mapping value (its `type` is a hint)
  */
 export type ConditionArgument = ConditionExpression | MappingValue;
 
 /**
  * A condition expression for conditional branching.
  * Can be either an operation (with operator and arguments) or a simple value check.
+ *
+ * The `type` tag is optional: an object with `op` is an operation, and any
+ * other object is a value. A value condition may therefore use `type` for a
+ * reference's type hint instead of the tag, which a tagged value can't carry
+ * (both are the `type` key). A value with a hint is written without the tag:
+ *
+ * ```json
+ * {"condition": {"valueType": "reference", "value": "data.count", "type": "integer"}}
+ * ```
  */
 export type ConditionExpression =
   | (ConditionOperation & {
@@ -1980,12 +1998,10 @@ export interface CsvValidationError {
 /**
  * Delay step - pause workflow execution for a specified duration.
  *
- * This is a **durable** delay: if the workflow crashes during the delay,
- * it will resume from where it left off rather than restarting the delay.
- *
- * For native platforms, this uses `sdk.sleep()` (which forwards to
- * `backend.durable_sleep()`) and stores the wake time in the database.
- * For WASI/embedded, it uses blocking sleep.
+ * This is a **durable** delay: the run parks with its wake time stored, so
+ * it holds no runner while it waits and a crash or restart resumes it at the
+ * same deadline rather than restarting the delay. It therefore requires a
+ * durable workflow and step (E145).
  *
  * Example:
  * ```json
@@ -1993,7 +2009,7 @@ export interface CsvValidationError {
  *   "stepType": "Delay",
  *   "id": "wait-for-cooldown",
  *   "name": "Wait 5 seconds",
- *   "duration_ms": { "valueType": "immediate", "value": 5000 }
+ *   "durationMs": { "valueType": "immediate", "value": 5000 }
  * }
  * ```
  *
@@ -2002,7 +2018,7 @@ export interface CsvValidationError {
  * {
  *   "stepType": "Delay",
  *   "id": "dynamic-wait",
- *   "duration_ms": { "valueType": "reference", "value": "data.waitTimeMs" }
+ *   "durationMs": { "valueType": "reference", "value": "data.waitTimeMs" }
  * }
  * ```
  */
@@ -2010,9 +2026,9 @@ export interface DelayStep {
   /** When true, execution pauses before this step in debug mode */
   breakpoint?: boolean | null;
   /**
-   * Disable durability for this step when `Some(false)`. Uses
-   * `std::thread::sleep` instead of `sdk.sleep` — the delay is
-   * not suspendable or resumable across crashes.
+   * A Delay parks the run (a durable sleep) instead of holding a runner,
+   * so it requires durability: `Some(false)` here, or a non-durable
+   * workflow or enclosing body, is rejected at save (E145).
    */
   durable?: boolean | null;
   /**
@@ -2330,6 +2346,11 @@ export interface ExecutionGraph {
    * sees its parent's variables; its own declarations are added to them,
    * replacing any with the same name, and the step's `config.variables`
    * win over both.
+   *
+   * The runtime also binds `_`-prefixed variables of its own, such as
+   * `_instance_id` and, in a Split body, `_index` and `_item`
+   * ([`crate::PUBLIC_RUNTIME_VARIABLES`] lists the ones to read). Those
+   * names are reserved: declaring or overriding one is rejected (E137).
    */
   variables?: Partial<Record<string, Variable>>;
 }
@@ -2399,7 +2420,8 @@ export interface ExecutionPlanEdge {
    * Edge label for control flow:
    * - `"true"`/`"false"` for Conditional step branches
    * - `"onError"` for error handling transition (step failed after retries)
-   * - `None` or empty for normal sequential flow
+   * - `None` or empty for normal sequential flow (an empty label is read
+   *   as no label)
    */
   label?: string | null;
   /**
@@ -2490,7 +2512,8 @@ export interface FilterConfig {
   condition: ConditionExpression;
   /**
    * Array to filter (MappingValue resolving to array).
-   * If null or non-array, treated as empty array.
+   * If null or non-array, treated as empty array. (A Split is stricter: it
+   * fails on `null` unless `allowNull` is set.)
    */
   value: MappingValue;
 }
@@ -2544,12 +2567,12 @@ export interface FilterRequest {
  *   "stepType": "Filter",
  *   "id": "filter-active",
  *   "config": {
- *     "value": { "valueType": "reference", "path": "steps.get-users.outputs.items" },
+ *     "value": { "valueType": "reference", "value": "steps.get-users.outputs.items" },
  *     "condition": {
  *       "type": "operation",
- *       "op": "eq",
+ *       "op": "EQ",
  *       "arguments": [
- *         { "valueType": "reference", "path": "item.status" },
+ *         { "valueType": "reference", "value": "item.status" },
  *         { "valueType": "immediate", "value": "active" }
  *       ]
  *     }
@@ -2577,6 +2600,12 @@ export interface FilterStep {
  * standard mapping system (`data.*`, `steps.<id>.outputs.*`, `variables.*`).
  *
  * There is no `outputMapping` field — Finish only takes `inputMapping`.
+ *
+ * A mapping whose only key is `outputs` returns that value itself, not an
+ * object holding it, so `{"outputs": <array>}` returns the array. This is the
+ * one way to return a value that is not an object. An `outputSchema` that
+ * declares just `outputs` therefore describes the mapping, not the caller's
+ * fields, and references into the result are not checked against it.
  */
 export interface FinishStep {
   /** When true, execution pauses before this step in debug mode */
@@ -2729,13 +2758,20 @@ export interface GroupByConfig {
    */
   expectedKeys?: string[] | null;
   /**
-   * Property path to group by (e.g., "status", "user.role", "data.category").
-   * Supports nested paths with dot notation.
+   * Path, inside each item, of the value to group by (e.g. `"status"`,
+   * `"user.role"`). It is not a workflow reference: `"data.category"`
+   * reads `item.data.category`, not the workflow's `data.category`.
+   *
+   * The group name is the value as text: strings as-is, numbers and
+   * booleans in their JSON spelling, and other values as their JSON. An
+   * item without the key (or with `null` there) goes into the `"_null"`
+   * group.
    */
   key: string;
   /**
    * Array to group (MappingValue resolving to array).
-   * If null or non-array, treated as empty array.
+   * If null or non-array, treated as empty array. (A Split is stricter: it
+   * fails on `null` unless `allowNull` is set.)
    */
   value: MappingValue;
 }
@@ -2796,7 +2832,15 @@ export type HashMap = Partial<
  * Example: `{ "valueType": "immediate", "value": "Hello World" }`
  */
 export interface ImmediateValue {
-  /** The literal value (string, number, boolean, object, or array) */
+  /**
+   * The literal value (string, number, boolean, object, or array).
+   *
+   * In an Agent or AiAgent `inputMapping`, `{valueType: "reference", ...}`
+   * envelopes nested inside the value are resolved before the call: that
+   * is how a condition held in an immediate (an Object Model query) reads
+   * workflow data. Every other mapping passes the value on literally
+   * (W090 flags a nested reference there).
+   */
   value: any;
 }
 
@@ -3044,10 +3088,13 @@ export interface LogStep {
  * - `reference`: Value is a path to data (e.g., "data.name", "steps.step1.outputs.result")
  * - `immediate`: Value is a literal (string, number, boolean, object, array)
  * - `composite`: Value is a structured object or array with nested MappingValues
+ * - `template`: Value is a minijinja template rendered against the execution
+ *   context (`data`, `variables`, `steps`, ...) into a string
  *
  * Example reference: `{ "valueType": "reference", "value": "data.user.name" }`
  * Example immediate: `{ "valueType": "immediate", "value": "Hello World" }`
  * Example composite: `{ "valueType": "composite", "value": { "name": {...}, "id": {...} } }`
+ * Example template: `{ "valueType": "template", "value": "Order {{ data.orderId }}" }`
  */
 export type MappingValue =
   | (ReferenceValue & {
@@ -3732,8 +3779,8 @@ export interface RateLimitTimelineResponse {
  * - `workflow.inputs` - Original workflow inputs
  *
  * Built-in variables (available in all steps, including subgraphs):
- * - `variables._workflow_id` - Unique per execution: "{workflow_id}::{instance_id}"
- * - `variables._instance_id` - Execution instance UUID
+ * - `variables._workflow_id` - The workflow's id (the same for every execution)
+ * - `variables._instance_id` - Execution instance UUID (unique per execution)
  * - `variables._tenant_id` - Tenant identifier
  *
  * Example: `{ "valueType": "reference", "value": "data.user.name" }`
@@ -4014,6 +4061,8 @@ export interface SplitConfig {
    * Convert single values to a single-element array (default: false).
    * When true, non-array values are wrapped in an array.
    * When false, non-array values raise an error.
+   * `null` is not a single value here: it still fails unless `allowNull`
+   * is set (unlike Filter and GroupBy, which read `null` as an empty array).
    * Use `transform/ensure-array` agent for explicit conversion.
    */
   convertSingleValue?: boolean | null;
@@ -4048,14 +4097,15 @@ export interface SplitConfig {
    */
   retryDelay?: number | null;
   /**
-   * Execute iterations sequentially instead of in parallel.
-   *
-   * **Redundant** — sequential execution is the only mode the WASM runtime
-   * supports, so this flag changes nothing.
+   * Run iterations one at a time. `true` overrides `parallelism` (W087
+   * when both are set); the default already runs sequentially unless
+   * `parallelism` asks for a window.
    */
   sequential?: boolean | null;
   /**
-   * Step timeout in milliseconds. If exceeded, step fails.
+   * Step timeout in milliseconds. If exceeded, step fails. `0` means no
+   * timeout here (unlike an Agent's `timeout`, where 0 fails the step;
+   * W091 flags both).
    * @format int64
    * @min 0
    */
@@ -4504,6 +4554,10 @@ export interface SwitchCase {
    * Route label for routing switches. When present, the switch acts as a
    * branching control flow step. The label corresponds to edge labels in
    * the execution plan.
+   *
+   * In a routing switch, a matching case without a route outputs its own
+   * `output` and takes the `default` edge (W092 warns). Write
+   * `"route": "default"` to say so.
    */
   route?: string | null;
 }
@@ -4515,7 +4569,10 @@ export interface SwitchCase {
 export interface SwitchConfig {
   /** Array of cases to match against the value */
   cases?: SwitchCase[];
-  /** Default output if no case matches */
+  /**
+   * Default output if no case matches. A routing switch then takes the
+   * `default` edge.
+   */
   default?: any;
   /** The value to switch on (evaluated at runtime) */
   value: MappingValue;
@@ -4562,7 +4619,7 @@ export interface SystemAnalyticsResponse {
  * - `steps.<id>.outputs.*` — previous step outputs
  * - `workflow.inputs.*` — original workflow inputs
  *
- * Example: `{ "valueType": "template", "value": "Bearer {{ steps.my_conn.outputs.parameters.api_key }}" }`
+ * Example: `{ "valueType": "template", "value": "Hello {{ data.user.name }}, order {{ steps.fetch.outputs.id }}" }`
  * With filter: `{ "valueType": "template", "value": "{{ data.name | upper }}" }`
  */
 export interface TemplateValue {
@@ -4730,6 +4787,11 @@ export interface UpdateTrackEventsRequest {
 }
 
 export interface UpdateWorkflowRequest {
+  /**
+   * Workflow-level durability, as in the DSL's `Workflow.durable`: copied
+   * into `executionGraph.durable` when the graph does not set it.
+   */
+  durable?: boolean | null;
   /**
    * The execution graph containing workflow definition.
    * Must include 'name' and optionally 'description' fields.
@@ -4975,7 +5037,7 @@ export interface WaitForSignalActionConfig {
  *     },
  *     "executionPlan": [{ "fromStep": "send_notification", "toStep": "finish" }]
  *   },
- *   "timeoutMs": 86400000
+ *   "timeoutMs": { "valueType": "immediate", "value": 86400000 }
  * }
  * ```
  */
@@ -5004,8 +5066,9 @@ export interface WaitForSignalStep {
    */
   onWait?: null | ExecutionGraph;
   /**
-   * Polling interval in milliseconds for checking signal (default: 1000).
-   * Lower values mean faster response but more server load.
+   * Deprecated and ignored (W088): a waiting run resumes as soon as the
+   * signal arrives, so there is no polling to tune. Accepted so stored
+   * definitions keep parsing; to be removed in DSL 4.0.
    * @format int64
    * @min 0
    */
@@ -5041,7 +5104,9 @@ export interface WhileConfig {
    */
   maxIterations?: number | null;
   /**
-   * Step timeout in milliseconds. If exceeded, step fails.
+   * Step timeout in milliseconds. If exceeded, step fails. `0` means no
+   * timeout here (unlike an Agent's `timeout`, where 0 fails the step;
+   * W091 flags both).
    * @format int64
    * @min 0
    */
@@ -5083,9 +5148,17 @@ export interface Workflow {
   durable?: boolean | null;
   /** The execution graph containing all steps */
   executionGraph: ExecutionGraph;
-  /** Memory allocation tier for workflow execution */
+  /**
+   * Memory allocation tier for workflow execution. Not read from this
+   * type: the server takes it from the update request's `memoryTier`
+   * and stores it on the workflow. To be removed in DSL 4.0.
+   */
   memoryTier?: null | MemoryTier;
-  /** Enable step-level debug instrumentation */
+  /**
+   * Enable step-level debug instrumentation. Not read from this type: the
+   * server takes it from the update request's `trackEvents` (stored per
+   * workflow) and `runtara-compile` from `--debug`. To be removed in DSL 4.0.
+   */
   trackEvents?: boolean | null;
 }
 
