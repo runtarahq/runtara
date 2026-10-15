@@ -15,8 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **DSL 3.6.0: fixes from the DSL audit** (`docs/dsl-audit-2026-10-14.md`).
   Graphs the compiler cannot build, non-durable Delays, missing Split or
-  Switch config and mistyped variables are rejected at save (E136–E151)
-  instead of failing at compile or run time, and W084–W092 flag keys,
+  Switch config and mistyped variables are rejected at save (E138–E151)
+  instead of failing at compile or run time, step ids and variables that
+  shadow runtime bindings are rejected (E136, E137), and W084–W092 flag keys,
   settings and references that are ignored or do something unexpected. `workflow.inputs` is the run's input in every scope, onError
   handlers route their own failures, a value condition can carry a type hint,
   and AiAgent turns retry and report provider throttling as `AI_RATE_LIMITED`.
