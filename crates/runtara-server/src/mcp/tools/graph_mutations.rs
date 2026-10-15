@@ -951,7 +951,7 @@ pub struct AddAgentStepParams {
     )]
     pub connection_id: Option<String>,
     #[schemars(
-        description = "Step timeout in milliseconds: the step's hard deadline, retries and parked time included. Required (> 0) when the capability suspends (E029)."
+        description = "Step timeout in milliseconds, written as the step's timeoutMs: its hard deadline, retries and parked time included. Required (> 0) when the capability suspends (E029)."
     )]
     pub timeout: Option<u64>,
     #[schemars(
@@ -984,7 +984,7 @@ fn agent_step_and_hint(
         step["connectionId"] = serde_json::Value::String(conn_id.clone());
     }
     if let Some(timeout) = params.timeout {
-        step["timeout"] = serde_json::json!(timeout);
+        step["timeoutMs"] = serde_json::json!(timeout);
     }
     if let Some(durable) = params.durable {
         step["durable"] = serde_json::json!(durable);
@@ -4001,7 +4001,7 @@ mod add_agent_step_tests {
     fn timeout_and_durable_land_on_the_step_and_parse_as_an_agent_step() {
         let (step, _) =
             agent_step_and_hint(&params(Some(600_000), Some(true)), &serde_json::json!({}));
-        assert_eq!(step["timeout"], 600_000);
+        assert_eq!(step["timeoutMs"], 600_000);
         assert_eq!(step["durable"], true);
         let parsed: runtara_dsl::Step = serde_json::from_value(step).unwrap();
         let runtara_dsl::Step::Agent(agent) = parsed else {
@@ -4011,7 +4011,7 @@ mod add_agent_step_tests {
         assert_eq!(agent.durable, Some(true));
 
         let (step, _) = agent_step_and_hint(&params(None, None), &serde_json::json!({}));
-        assert!(step.get("timeout").is_none() && step.get("durable").is_none());
+        assert!(step.get("timeoutMs").is_none() && step.get("durable").is_none());
     }
 
     #[test]

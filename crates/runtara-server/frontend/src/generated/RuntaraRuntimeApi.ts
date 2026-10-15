@@ -405,7 +405,7 @@ export interface AgentStep {
    * @format int64
    * @min 0
    */
-  retryDelay?: number | null;
+  retryDelayMs?: number | null;
   /**
    * Cooperative guest deadline in milliseconds, including preparation,
    * retries and durable suspension. Zero prevents invocation; absence leaves
@@ -417,7 +417,7 @@ export interface AgentStep {
    * @format int64
    * @min 0
    */
-  timeout?: number | null;
+  timeoutMs?: number | null;
 }
 
 /**
@@ -555,7 +555,7 @@ export interface AiAgentConfig {
    * @format int64
    * @min 0
    */
-  retryDelay?: number | null;
+  retryDelayMs?: number | null;
   /** System prompt / instructions for the LLM */
   systemPrompt: MappingValue;
   /** Temperature for LLM sampling, resolved when the step starts (default: 0.7). */
@@ -570,12 +570,12 @@ export interface AiAgentConfig {
    * outbound-HTTP layer: the emitter injects it into the LLM invoke and the
    * server proxy honors it, so it bounds the model call rather than
    * preempting in-guest compute. Agent tools use their own cooperative
-   * per-step `timeout` budget. A capability's documented transport timeout
+   * per-step `timeoutMs` budget. A capability's documented transport timeout
    * input remains separate from that guest deadline.
    * @format int64
    * @min 0
    */
-  turnTimeout?: number | null;
+  turnTimeoutMs?: number | null;
   /** User message / request to process */
   userPrompt: MappingValue;
 }
@@ -2119,7 +2119,7 @@ export interface EmbedWorkflowStep {
    * @format int64
    * @min 0
    */
-  retryDelay?: number | null;
+  retryDelayMs?: number | null;
   /**
    * Cooperative guest deadline for the inline child, in milliseconds,
    * including retries and durable suspension. Zero prevents child execution;
@@ -2128,7 +2128,7 @@ export interface EmbedWorkflowStep {
    * @format int64
    * @min 0
    */
-  timeout?: number | null;
+  timeoutMs?: number | null;
 }
 
 export interface EntitlementLimits {
@@ -4095,7 +4095,7 @@ export interface SplitConfig {
    * @format int64
    * @min 0
    */
-  retryDelay?: number | null;
+  retryDelayMs?: number | null;
   /**
    * Run iterations one at a time. `true` overrides `parallelism` (W087
    * when both are set); the default already runs sequentially unless
@@ -4104,12 +4104,12 @@ export interface SplitConfig {
   sequential?: boolean | null;
   /**
    * Step timeout in milliseconds. If exceeded, step fails. `0` means no
-   * timeout here (unlike an Agent's `timeout`, where 0 fails the step;
+   * timeout here (unlike an Agent's `timeoutMs`, where 0 fails the step;
    * W091 flags both).
    * @format int64
    * @min 0
    */
-  timeout?: number | null;
+  timeoutMs?: number | null;
   /** The array to iterate over */
   value: MappingValue;
   /** Additional variables to pass to each iteration's subgraph */
@@ -5105,12 +5105,12 @@ export interface WhileConfig {
   maxIterations?: number | null;
   /**
    * Step timeout in milliseconds. If exceeded, step fails. `0` means no
-   * timeout here (unlike an Agent's `timeout`, where 0 fails the step;
+   * timeout here (unlike an Agent's `timeoutMs`, where 0 fails the step;
    * W091 flags both).
    * @format int64
    * @min 0
    */
-  timeout?: number | null;
+  timeoutMs?: number | null;
   /**
    * Additional variables to pass to every iteration's subgraph.
    * Mappings are evaluated against the parent execution scope when the

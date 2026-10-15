@@ -564,7 +564,7 @@ pub(crate) fn wait_for_instances_step_shape() -> serde_json::Value {
         "purpose": "Park the run, without holding a runner or a concurrency slot, until direct child runs it started with control start have finished.",
         "required": ["id", "stepType", "instanceIds"],
         "optionalFields": ["name", "mode", "timeoutMs", "breakpoint"],
-        "doesNotAccept": ["inputMapping", "durable", "maxRetries", "retryDelay", "timeout"],
+        "doesNotAccept": ["inputMapping", "durable", "maxRetries", "retryDelayMs", "timeout"],
         "fields": {
             "instanceIds": format!("MappingValue resolving to an array of 1 to {} distinct, non-empty instance ids, each a direct child of this run: a composite array of control start outputs (steps.<start>.outputs.instanceId) or a reference to an array of ids. An empty array settles at once with resolution empty.", waits::MAX_WAIT_TARGETS),
             "mode": "all (default): settle when every run has finished. any: settle when the first has; wait again on remaining to handle the rest.",

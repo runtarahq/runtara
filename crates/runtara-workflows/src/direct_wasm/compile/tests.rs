@@ -3736,7 +3736,7 @@ fn direct_compile_supports_split_timeout_graph() {
         serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
             .expect("manifest json");
     assert_eq!(manifest.graph.splits.len(), 1);
-    assert_eq!(manifest.graph.splits[0].value["timeout"], 10);
+    assert_eq!(manifest.graph.splits[0].value["timeoutMs"], 10);
 }
 
 #[test]
@@ -3774,7 +3774,7 @@ fn direct_compile_supports_while_timeout_graph() {
         serde_json::from_slice(&fs::read(&result.manifest_path).expect("manifest"))
             .expect("manifest json");
     assert_eq!(manifest.graph.whiles.len(), 1);
-    assert_eq!(manifest.graph.whiles[0].value["timeout"], 10);
+    assert_eq!(manifest.graph.whiles[0].value["timeoutMs"], 10);
 }
 
 #[test]

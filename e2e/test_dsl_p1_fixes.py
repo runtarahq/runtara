@@ -360,7 +360,7 @@ def check_rate_limited_default(refusing_port):
         # Spaced past the connection's own proxy limiter (burst 4).
         for label, extra in [("default", {}), ("maxRetries 3", {"maxRetries": 3})]:
             step = {"stepType": "Agent", "id": "call", "agentId": "shopify", "capabilityId": "list-products",
-                    "connectionId": connection, "retryDelay": 700, "inputMapping": {}, **extra}
+                    "connectionId": connection, "retryDelayMs": 700, "inputMapping": {}, **extra}
             g = graph("call", [step, fin("fin", ok=imm(True)), fin("handler", code=ref("steps.__error.code"))],
                       [edge("call", "fin"), edge("call", "handler", label="onError")], durable=False)
             before = COUNTS.get("refused", 0)
@@ -384,7 +384,7 @@ def check_tool_loop_retries(converse_port):
         config = {"systemPrompt": imm("You call tools"), "userPrompt": imm("Use the echo tool if needed"),
                   "provider": imm("bedrock"), "model": imm(model)}
         if retries is not None:
-            config.update({"maxRetries": retries, "retryDelay": 10})
+            config.update({"maxRetries": retries, "retryDelayMs": 10})
         return graph("ai", [
             {"stepType": "AiAgent", "id": "ai", "connectionId": connection, "config": config},
             {"stepType": "Agent", "id": "echo_tool", "name": "echo", "agentId": "utils",

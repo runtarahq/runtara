@@ -399,8 +399,8 @@ def check_null_collections():
 
 
 def check_zero_timeouts():
-    agent = graph("a", [{**echo("a"), "timeout": 0}, fin("done")], [edge("a", "done")])
-    split = graph("s", [{"stepType": "Split", "id": "s", "config": {"value": imm([1]), "timeout": 0},
+    agent = graph("a", [{**echo("a"), "timeoutMs": 0}, fin("done")], [edge("a", "done")])
+    split = graph("s", [{"stepType": "Split", "id": "s", "config": {"value": imm([1]), "timeoutMs": 0},
                          "subgraph": graph("f", [fin("f")])}, fin("done")], [edge("s", "done")])
     seen = {}
     for label, g in [("agent", agent), ("split", split)]:
@@ -547,6 +547,28 @@ def check_switch_match_types():
           {"AND": and_status, "EQ": eq_status, "body": text[:300]})
 
 
+# ------------------------------------------------------- D-naming (durations)
+
+
+def check_duration_names():
+    _, body = call("POST", "/workflows/graph/validate", {"name": "rf-old-durations", **graph("a", [
+        {**echo("a"), "timeout": 5000, "retryDelay": 10},
+        {"stepType": "Split", "id": "s", "config": {"value": imm([1]), "timeout": 5000},
+         "subgraph": graph("f", [fin("f")])}, fin("done")], [edge("a", "s"), edge("s", "done")])})
+    warned = sorted(w for w in (body or {}).get("warnings") or [] if str(w).startswith("[W093]"))
+    old_ok = (len(warned) == 3 and any("'steps.a.timeout'" in w and "'timeoutMs'" in w for w in warned)
+              and any("'steps.s.config.timeout'" in w for w in warned))
+    # The canonical names run: an Agent deadline of 0 fails the step before it runs.
+    r = run("rf-timeout-ms", graph("a", [{**echo("a"), "timeoutMs": 0, "maxRetries": 0}, fin("done")],
+                                   [edge("a", "done")]))
+    _, both_status, both_body = save_status("rf-both-durations", graph("a", [
+        {**echo("a"), "timeout": 1, "timeoutMs": 2}, fin("done")], [edge("a", "done")]))
+    check("D-naming millisecond fields are timeoutMs/retryDelayMs; the old names warn W093",
+          old_ok and r.get("status") == "failed" and both_status == 400
+          and "duplicate field" in json.dumps(both_body),
+          {"warnings": warned, "timeoutMs0": r.get("status"), "both": both_status})
+
+
 # ------------------------------------------------------------------- 3.6.0
 
 
@@ -639,7 +661,7 @@ CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, chec
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
           check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions,
           check_nested_immediate_references, check_workflow_inputs_in_bodies, check_group_by_keys,
-          check_null_collections, check_zero_timeouts, check_condition_spellings, check_route_less_switch_cases, check_error_context_spellings, check_runtime_variables, check_lone_outputs_unwrap, check_switch_match_types, check_dsl_version, check_doc_drift, check_mcp_prose]
+          check_null_collections, check_zero_timeouts, check_condition_spellings, check_route_less_switch_cases, check_error_context_spellings, check_runtime_variables, check_lone_outputs_unwrap, check_switch_match_types, check_duration_names, check_dsl_version, check_doc_drift, check_mcp_prose]
 
 
 def main():

@@ -2838,7 +2838,7 @@ pub async fn validate_graph_handler(
                 .map(|(origin, w)| attribute(origin, w.to_string()))
                 .collect();
             warnings.extend(
-                runtara_workflows::ignored_fields::ignored_definition_fields(&body)
+                runtara_workflows::ignored_fields::raw_definition_warnings(&body)
                     .iter()
                     .map(ToString::to_string),
             );

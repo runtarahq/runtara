@@ -14,7 +14,10 @@
 // have `use` statements or `//!` doc comments. Imports are provided by the
 // including module.
 //
-// Spelling conventions: field names are camelCase; operators (condition `op`,
+// Spelling conventions: field names are camelCase, and a millisecond field
+// ends in `Ms` (`timeoutMs`, `retryDelayMs`, `durationMs`); the old `timeout`,
+// `retryDelay` and `turnTimeout` still read as deprecated aliases (W093).
+// Operators (condition `op`,
 // Switch `matchType`) are SCREAMING_SNAKE_CASE; kinds and type names
 // (`valueType`, type hints, schema field types, `compaction.strategy`) are
 // lowercase or camelCase; `stepType` is PascalCase. Inputs must use these
@@ -547,7 +550,7 @@ pub struct AgentStep {
     pub max_retries: Option<u32>,
 
     /// Base delay between retries in milliseconds (default: 1000)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "retryDelayMs", alias = "retryDelay", default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
     /// Cooperative guest deadline in milliseconds, including preparation,
@@ -557,7 +560,7 @@ pub struct AgentStep {
     /// emergency whole-workflow abort. External effects are not rolled back.
     /// A step whose capability suspends must set it above zero (E029): it is
     /// the step's hard deadline, parked time included.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "timeoutMs", alias = "timeout", default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
     /// When true, execution pauses before this step in debug mode
@@ -708,14 +711,14 @@ pub struct EmbedWorkflowStep {
     pub max_retries: Option<u32>,
 
     /// Base delay between retries in milliseconds (default: 1000)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "retryDelayMs", alias = "retryDelay", default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
     /// Cooperative guest deadline for the inline child, in milliseconds,
     /// including retries and durable suspension. Zero prevents child execution;
     /// absence leaves only enclosing deadlines. Cleanup can extend beyond the
     /// budget, and uncooperative code may require whole-workflow abort.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "timeoutMs", alias = "timeout", default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
     /// When true, execution pauses before this step in debug mode
@@ -824,9 +827,9 @@ pub struct WhileConfig {
     pub variables: Option<InputMapping>,
 
     /// Step timeout in milliseconds. If exceeded, step fails. `0` means no
-    /// timeout here (unlike an Agent's `timeout`, where 0 fails the step;
+    /// timeout here (unlike an Agent's `timeoutMs`, where 0 fails the step;
     /// W091 flags both).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "timeoutMs", alias = "timeout", default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 }
 
@@ -1598,7 +1601,7 @@ pub struct AiAgentConfig {
     pub max_retries: Option<u32>,
 
     /// Base delay between retries in milliseconds (default: 1000).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "retryDelayMs", alias = "retryDelay", skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
     /// Maximum duration of a single LLM "brain" turn, per attempt, in
@@ -1610,9 +1613,9 @@ pub struct AiAgentConfig {
     /// outbound-HTTP layer: the emitter injects it into the LLM invoke and the
     /// server proxy honors it, so it bounds the model call rather than
     /// preempting in-guest compute. Agent tools use their own cooperative
-    /// per-step `timeout` budget. A capability's documented transport timeout
+    /// per-step `timeoutMs` budget. A capability's documented transport timeout
     /// input remains separate from that guest deadline.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "turnTimeoutMs", alias = "turnTimeout", skip_serializing_if = "Option::is_none")]
     pub turn_timeout: Option<u64>,
 
     /// Conversation memory configuration.
@@ -2586,13 +2589,13 @@ pub struct SplitConfig {
     pub max_retries: Option<u32>,
 
     /// Base delay between retries in milliseconds (default: 1000)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "retryDelayMs", alias = "retryDelay", default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
     /// Step timeout in milliseconds. If exceeded, step fails. `0` means no
-    /// timeout here (unlike an Agent's `timeout`, where 0 fails the step;
+    /// timeout here (unlike an Agent's `timeoutMs`, where 0 fails the step;
     /// W091 flags both).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "timeoutMs", alias = "timeout", default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
     /// Allow null values as input (default: false).

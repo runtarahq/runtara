@@ -1871,6 +1871,20 @@ fn step_type_name(step: &Step) -> &'static str {
     }
 }
 
+/// A millisecond field of a raw step body or config: its canonical `...Ms`
+/// key, or the deprecated name an older definition or manifest carries.
+pub(super) fn duration_ms(value: &serde_json::Value, canonical: &str) -> Option<u64> {
+    let legacy = match canonical {
+        "timeoutMs" => "timeout",
+        "retryDelayMs" => "retryDelay",
+        _ => canonical,
+    };
+    value
+        .get(canonical)
+        .or_else(|| value.get(legacy))
+        .and_then(serde_json::Value::as_u64)
+}
+
 /// Live deadlines need the standard clock, including inline and supplied graphs.
 pub(super) fn needs_monotonic_clock(
     root: &DirectGraphManifest,
@@ -1881,26 +1895,13 @@ pub(super) fn needs_monotonic_clock(
     while let Some(graph) = graphs.pop() {
         if graph.agents.iter().any(|agent| agent.timeout.is_some())
             || graph.steps.iter().any(|step| {
-                step.step_type == "EmbedWorkflow"
-                    && step
-                        .body
-                        .get("timeout")
-                        .and_then(serde_json::Value::as_u64)
-                        .is_some()
+                step.step_type == "EmbedWorkflow" && duration_ms(&step.body, "timeoutMs").is_some()
             })
             || graph.whiles.iter().any(|value| {
-                value
-                    .value
-                    .get("timeout")
-                    .and_then(|v| v.as_u64())
-                    .is_some_and(|timeout| timeout > 0)
+                duration_ms(&value.value, "timeoutMs").is_some_and(|timeout| timeout > 0)
             })
             || graph.splits.iter().any(|value| {
-                value
-                    .value
-                    .get("timeout")
-                    .and_then(|v| v.as_u64())
-                    .is_some_and(|timeout| timeout > 0)
+                duration_ms(&value.value, "timeoutMs").is_some_and(|timeout| timeout > 0)
             })
         {
             return true;
@@ -1925,13 +1926,7 @@ pub(super) fn has_embed_timeout(
     graphs.extend(children.iter().map(|child| &child.graph));
     while let Some(graph) = graphs.pop() {
         for step in &graph.steps {
-            if step.step_type == "EmbedWorkflow"
-                && step
-                    .body
-                    .get("timeout")
-                    .and_then(serde_json::Value::as_u64)
-                    .is_some()
-            {
+            if step.step_type == "EmbedWorkflow" && duration_ms(&step.body, "timeoutMs").is_some() {
                 return true;
             }
             graphs.extend(
@@ -1975,6 +1970,33 @@ pub(super) fn agent_timeouts(
 mod tests {
     use std::fs;
     use std::path::PathBuf;
+
+    /// A manifest body or config written before DSL 3.6 carries the old
+    /// duration names; the canonical name wins when both are present.
+    #[test]
+    fn duration_ms_reads_the_canonical_or_the_deprecated_name() {
+        let read = |value: serde_json::Value, key| duration_ms(&value, key);
+        assert_eq!(
+            read(serde_json::json!({"timeoutMs": 5}), "timeoutMs"),
+            Some(5)
+        );
+        assert_eq!(
+            read(serde_json::json!({"timeout": 5}), "timeoutMs"),
+            Some(5)
+        );
+        assert_eq!(
+            read(serde_json::json!({"retryDelay": 7}), "retryDelayMs"),
+            Some(7)
+        );
+        assert_eq!(
+            read(
+                serde_json::json!({"timeoutMs": 1, "timeout": 2}),
+                "timeoutMs"
+            ),
+            Some(1)
+        );
+        assert_eq!(read(serde_json::json!({}), "timeoutMs"), None);
+    }
 
     use super::*;
 

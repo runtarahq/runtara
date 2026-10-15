@@ -811,7 +811,7 @@ impl WorkflowService {
             }
         }
         all_warnings.extend(
-            runtara_workflows::ignored_fields::ignored_definition_fields(&definition)
+            runtara_workflows::ignored_fields::raw_definition_warnings(&definition)
                 .iter()
                 .map(ToString::to_string),
         );
@@ -1348,7 +1348,7 @@ impl WorkflowService {
             );
         }
 
-        for warning in runtara_workflows::ignored_fields::ignored_definition_fields(&definition) {
+        for warning in runtara_workflows::ignored_fields::raw_definition_warnings(&definition) {
             all_issues.push(
                 crate::api::utils::reference_validation::ValidationIssue::warning(
                     crate::api::utils::reference_validation::IssueCategory::UnknownFieldPath,

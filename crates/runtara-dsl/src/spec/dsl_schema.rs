@@ -150,17 +150,22 @@ pub fn get_dsl_changelog() -> Value {
                     {
                         "type": "added",
                         "component": "validation",
-                        "description": "W084 workflow setting on a nested graph, W085 unknown error-context field, W086 ignored definition key, W087 sequential overrides parallelism, W088 pollIntervalMs ignored, W089 field condition that never matches, W090 reference inside an immediate that does not resolve, W091 timeout 0, W092 routing Switch case without a route. W053 also covers the bare error root and the steps.error alias."
+                        "description": "W084 workflow setting on a nested graph, W085 unknown error-context field, W086 ignored definition key, W087 sequential overrides parallelism, W088 pollIntervalMs ignored, W089 field condition that never matches, W090 reference inside an immediate that does not resolve, W091 timeout 0, W092 routing Switch case without a route, W093 deprecated spelling. W053 also covers the bare error root and the steps.error alias."
+                    },
+                    {
+                        "type": "changed",
+                        "component": "step-field",
+                        "description": "Millisecond fields end in Ms: timeoutMs and retryDelayMs on Agent and EmbedWorkflow, timeoutMs and retryDelayMs in Split config, timeoutMs in While config, retryDelayMs and turnTimeoutMs in AiAgent config, as durationMs and the Wait steps' timeoutMs already did. The old names still parse; giving both is an error."
                     },
                     {
                         "type": "deprecated",
                         "component": "execution-graph",
-                        "description": "To be removed in DSL 4.0: the steps.error, __error and error spellings of the error context (use steps.__error), WaitForSignal pollIntervalMs, memoryTier and trackEvents on Workflow (set them on the update request), and the While alias variables._previousOutputs (use loop.outputs)."
+                        "description": "To be removed in DSL 4.0: the steps.error, __error and error spellings of the error context (use steps.__error), the duration names timeout, retryDelay and turnTimeout (use timeoutMs, retryDelayMs, turnTimeoutMs; W093), WaitForSignal pollIntervalMs, memoryTier and trackEvents on Workflow (set them on the update request), and the While alias variables._previousOutputs (use loop.outputs)."
                     },
                     {
                         "type": "planned",
                         "component": "dsl-4.0",
-                        "description": "DSL 4.0 is to give timeout one meaning and one unit on every step, including AiAgent, which has none at step level; one type vocabulary for type hints, variable types and schema field types; one enum casing convention; an explicit single-value Finish output in place of unwrapping a lone outputs key; template support in Log and Error messages; and reserved _previousOutputs."
+                        "description": "DSL 4.0 is to give timeoutMs one meaning and one placement on every step, including AiAgent, which has none at step level; one type vocabulary for type hints, variable types and schema field types; one enum casing convention; an explicit single-value Finish output in place of unwrapping a lone outputs key; template support in Log and Error messages; and reserved _previousOutputs."
                     }
                 ]
             },

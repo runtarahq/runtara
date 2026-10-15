@@ -847,7 +847,7 @@ fn step_run_plan_inner(
                 breakpoint: step_breakpoint_enabled(graph, step),
                 max_retries: embed_workflow_effective_max_retries(step),
                 retry_delay_ms: embed_workflow_effective_retry_delay_ms(step),
-                timeout_ms: step.body.get("timeout").and_then(serde_json::Value::as_u64),
+                timeout_ms: super::manifest::duration_ms(&step.body, "timeoutMs"),
                 child_plan: Box::new(child_plan),
                 next_plan: Box::new(next_plan),
                 error_plan,
@@ -1134,10 +1134,7 @@ fn step_run_plan_inner(
                                     .get("durable")
                                     .and_then(serde_json::Value::as_bool)
                                     .unwrap_or(true),
-                            timeout_ms: step
-                                .body
-                                .get("timeout")
-                                .and_then(serde_json::Value::as_u64),
+                            timeout_ms: super::manifest::duration_ms(&step.body, "timeoutMs"),
                             child_plan: Box::new(child_plan),
                         });
                         continue;
@@ -3009,10 +3006,10 @@ fn split_timeout_ms(
     graph: &DirectGraphManifest,
     step_id: &str,
 ) -> Result<Option<u64>, DirectCompileError> {
-    Ok(split_config(graph, step_id)?
-        .get("timeout")
-        .and_then(serde_json::Value::as_u64)
-        .filter(|ms| *ms > 0))
+    Ok(
+        super::manifest::duration_ms(split_config(graph, step_id)?, "timeoutMs")
+            .filter(|ms| *ms > 0),
+    )
 }
 
 fn split_subgraph<'a>(
@@ -3065,8 +3062,7 @@ fn while_timeout_ms(graph: &DirectGraphManifest, step_id: &str) -> Option<u64> {
         .whiles
         .iter()
         .find(|while_step| while_step.step_id == step_id && while_step.purpose == "while.config")
-        .and_then(|while_step| while_step.value.get("timeout"))
-        .and_then(serde_json::Value::as_u64)
+        .and_then(|while_step| super::manifest::duration_ms(&while_step.value, "timeoutMs"))
         .filter(|ms| *ms > 0)
 }
 
@@ -3281,10 +3277,7 @@ fn embed_workflow_effective_max_retries(step: &DirectStepManifest) -> u32 {
 }
 
 fn embed_workflow_effective_retry_delay_ms(step: &DirectStepManifest) -> u64 {
-    step.body
-        .get("retryDelay")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(1_000)
+    super::manifest::duration_ms(&step.body, "retryDelayMs").unwrap_or(1_000)
 }
 
 fn split_effective_max_retries(split: &DirectSplitManifest) -> u32 {
@@ -3297,11 +3290,7 @@ fn split_effective_max_retries(split: &DirectSplitManifest) -> u32 {
 }
 
 fn split_effective_retry_delay_ms(split: &DirectSplitManifest) -> u64 {
-    split
-        .value
-        .get("retryDelay")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(1_000)
+    super::manifest::duration_ms(&split.value, "retryDelayMs").unwrap_or(1_000)
 }
 
 fn finish_mapping_id(

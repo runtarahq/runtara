@@ -923,12 +923,54 @@ describe('Backend DSL serialization', () => {
       renderingParameters: { x: 0, y: 0 },
     });
 
+    // The deprecated names load and save as the canonical `...Ms` names.
     const step = roundTripStep(graph);
     expect(step).toMatchObject({
       maxRetries: 2,
-      retryDelay: 500,
-      timeout: 30_000,
+      retryDelayMs: 500,
+      timeoutMs: 30_000,
     });
+    expect(step).not.toHaveProperty('retryDelay');
+    expect(step).not.toHaveProperty('timeout');
+  });
+
+  it('round-trips a While timeout in either spelling as timeoutMs', () => {
+    for (const timeout of [{ timeout: 4_000 }, { timeoutMs: 4_000 }]) {
+      const step = roundTripStep(
+        makeGraph({
+          id: 'loop',
+          stepType: 'While',
+          condition: {
+            type: 'operation',
+            op: 'LT',
+            arguments: [
+              { valueType: 'reference', value: 'loop.index' },
+              { valueType: 'immediate', value: 3 },
+            ],
+          },
+          config: { maxIterations: 3, ...timeout },
+          renderingParameters: { x: 0, y: 0 },
+        })
+      );
+      expect(step.config).toMatchObject({ timeoutMs: 4_000 });
+      expect(step.config).not.toHaveProperty('timeout');
+    }
+  });
+
+  it('round-trips the canonical Agent duration names', () => {
+    const step = roundTripStep(
+      makeGraph({
+        id: 'agent',
+        stepType: 'Agent',
+        agentId: 'payments',
+        capabilityId: 'charge-card',
+        retryDelayMs: 500,
+        timeoutMs: 30_000,
+        renderingParameters: { x: 0, y: 0 },
+      })
+    );
+    expect(step).toMatchObject({ retryDelayMs: 500, timeoutMs: 30_000 });
+    expect(step).not.toHaveProperty('timeout');
   });
 
   it('does not preserve stale direct Error fields after form values are cleared', () => {
@@ -1513,9 +1555,30 @@ describe('Backend DSL serialization', () => {
     expect(step.config).toMatchObject({
       model: { valueType: 'immediate', value: 'gpt-4.1-mini' },
       maxRetries: 3,
-      retryDelay: 250,
+      retryDelayMs: 250,
     });
+    expect(step.config).not.toHaveProperty('retryDelay');
     expect(step.config).not.toHaveProperty('provider');
+  });
+
+  it('round-trips the AiAgent turn timeout, in either spelling', () => {
+    for (const turn of [{ turnTimeout: 9_000 }, { turnTimeoutMs: 9_000 }]) {
+      const step = roundTripStep(
+        makeGraph({
+          id: 'ai',
+          stepType: 'AiAgent',
+          config: {
+            systemPrompt: { valueType: 'immediate', value: 'You help.' },
+            userPrompt: { valueType: 'immediate', value: 'Hi' },
+            model: { valueType: 'immediate', value: 'gpt-4.1-mini' },
+            ...turn,
+          },
+          renderingParameters: { x: 0, y: 0 },
+        })
+      );
+      expect(step.config).toMatchObject({ turnTimeoutMs: 9_000 });
+      expect(step.config).not.toHaveProperty('turnTimeout');
+    }
   });
 
   it('round-trips dynamic AiAgent model parameters as mapping values', () => {
@@ -2071,13 +2134,15 @@ describe('Split variable round-trip', () => {
     });
 
     const step = roundTripStep(graph);
+    expect(step.config).not.toHaveProperty('retryDelay');
+    expect(step.config).not.toHaveProperty('timeout');
     expect(step.config).toMatchObject({
       parallelism: 4,
       sequential: true,
       dontStopOnFailed: true,
       maxRetries: 2,
-      retryDelay: 500,
-      timeout: 10_000,
+      retryDelayMs: 500,
+      timeoutMs: 10_000,
       allowNull: true,
       convertSingleValue: true,
       batchSize: 25,

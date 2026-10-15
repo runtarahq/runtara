@@ -1489,7 +1489,7 @@ impl std::fmt::Display for ValidationError {
             } => write!(
                 f,
                 "[E029] Step '{}' calls suspending capability '{}' without a timeout. \
-                 Set timeout (milliseconds, > 0): it is the hard deadline of the step, \
+                 Set timeoutMs (> 0): it is the hard deadline of the step, \
                  parked time included.",
                 step_id, capability
             ),
@@ -1925,7 +1925,7 @@ pub enum ValidationWarning {
     /// (that is how a condition inside one reads workflow data); here it is
     /// passed on literally.
     ImmediateReferenceNotResolved { step_id: String, field: String },
-    /// `timeout: 0` means different things by step type: no deadline for a
+    /// `timeoutMs: 0` means different things by step type: no deadline for a
     /// Split or While, a deadline already passed for an Agent or
     /// EmbedWorkflow (the step fails before it runs).
     ZeroTimeout {
@@ -1938,6 +1938,14 @@ pub enum ValidationWarning {
     SwitchCaseWithoutRoute {
         step_id: String,
         case_indices: Vec<usize>,
+    },
+    /// A deprecated spelling that still reads as its canonical form until
+    /// DSL 4.0: a millisecond field without its `Ms` suffix, the `json` type
+    /// hint, GroupBy's `total_groups`.
+    DeprecatedSpelling {
+        path: String,
+        found: String,
+        canonical: String,
     },
 }
 
@@ -1977,6 +1985,7 @@ impl ValidationWarning {
             Self::ImmediateReferenceNotResolved { .. } => "W090",
             Self::ZeroTimeout { .. } => "W091",
             Self::SwitchCaseWithoutRoute { .. } => "W092",
+            Self::DeprecatedSpelling { .. } => "W093",
         }
     }
 }
@@ -2063,7 +2072,7 @@ impl std::fmt::Display for ValidationWarning {
             } => {
                 write!(
                     f,
-                    "[W034] Step '{}' has timeout={}ms ({}). Consider {} or less, or breaking into smaller steps.",
+                    "[W034] Step '{}' has timeoutMs={} ({}). Consider {} or less, or breaking into smaller steps.",
                     step_id,
                     timeout_ms,
                     format_duration(*timeout_ms),
@@ -2199,7 +2208,7 @@ impl std::fmt::Display for ValidationWarning {
                 margin_ms,
             } => write!(
                 f,
-                "[W078] Step '{}' calls a suspending capability with timeout={}ms, at most the {}ms deadline margin: it times out instead of parking. Raise the timeout.",
+                "[W078] Step '{}' calls a suspending capability with timeoutMs={}, at most the {}ms deadline margin: it times out instead of parking. Raise timeoutMs.",
                 step_id, timeout_ms, margin_ms
             ),
             ValidationWarning::IneffectiveStateSchemaSetting {
@@ -2289,14 +2298,14 @@ impl std::fmt::Display for ValidationWarning {
                 if *fails {
                     write!(
                         f,
-                        "[W091] {} step '{}' sets timeout 0, which is a deadline already \
-                         passed: the step fails before it runs. Omit timeout for no deadline.",
+                        "[W091] {} step '{}' sets timeoutMs 0, which is a deadline already \
+                         passed: the step fails before it runs. Omit timeoutMs for no deadline.",
                         step_type, step_id
                     )
                 } else {
                     write!(
                         f,
-                        "[W091] {} step '{}' sets timeout 0, which means no timeout here \
+                        "[W091] {} step '{}' sets timeoutMs 0, which means no timeout here \
                          (unlike an Agent, where 0 fails the step). Omit it instead.",
                         step_type, step_id
                     )
@@ -2316,6 +2325,16 @@ impl std::fmt::Display for ValidationWarning {
                     .map(usize::to_string)
                     .collect::<Vec<_>>()
                     .join(", ")
+            ),
+            ValidationWarning::DeprecatedSpelling {
+                path,
+                found,
+                canonical,
+            } => write!(
+                f,
+                "[W093] '{}' uses the deprecated spelling '{}'. Use '{}' instead; both are \
+                 read until DSL 4.0, which removes '{}'.",
+                path, found, canonical, found
             ),
             ValidationWarning::PollIntervalIgnored { step_id } => write!(
                 f,

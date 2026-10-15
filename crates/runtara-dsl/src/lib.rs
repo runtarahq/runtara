@@ -1955,8 +1955,54 @@ mod tests {
             config["variables"]["tenant"]["value"],
             serde_json::json!("data.tenant")
         );
-        // WhileConfig uses "timeout" not "timeoutMs"
-        assert_eq!(config.get("timeout").unwrap(), 5000);
+        // Durations serialize with the `Ms` suffix; the old key still reads.
+        assert_eq!(config.get("timeoutMs").unwrap(), 5000);
+        assert!(config.get("timeout").is_none());
+    }
+
+    /// Millisecond fields are spelled `...Ms`; the old names are deprecated
+    /// aliases (W093), and giving both is an error.
+    #[test]
+    fn duration_fields_accept_the_deprecated_names() {
+        let agent = |extra: serde_json::Value| {
+            let mut step = serde_json::json!({"stepType": "Agent", "id": "a",
+                "agentId": "utils", "capabilityId": "return-input"});
+            step.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<Step>(step)
+        };
+        for extra in [
+            serde_json::json!({"timeoutMs": 50, "retryDelayMs": 5}),
+            serde_json::json!({"timeout": 50, "retryDelay": 5}),
+        ] {
+            let Step::Agent(step) = agent(extra.clone()).unwrap() else {
+                panic!("expected an agent");
+            };
+            assert_eq!(
+                (step.timeout, step.retry_delay),
+                (Some(50), Some(5)),
+                "{extra}"
+            );
+        }
+        let error = agent(serde_json::json!({"timeout": 1, "timeoutMs": 2}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("duplicate field"), "{error}");
+        let split = serde_json::from_value::<SplitConfig>(serde_json::json!({
+            "value": {"valueType": "immediate", "value": []},
+            "timeout": 7, "retryDelay": 3
+        }))
+        .unwrap();
+        assert_eq!((split.timeout, split.retry_delay), (Some(7), Some(3)));
+        let written = serde_json::to_value(&split).unwrap();
+        assert_eq!(
+            (
+                written["timeoutMs"].clone(),
+                written["retryDelayMs"].clone()
+            ),
+            (serde_json::json!(7), serde_json::json!(3))
+        );
     }
 
     #[test]

@@ -458,7 +458,9 @@ fn validate_execution_graph_json_impl(execution_graph_json: &str) -> ValidationR
     // Dropped keys name their own path, so they sit at the root graph.
     validation_result
         .warnings
-        .extend(runtara_workflows::ignored_fields::ignored_definition_fields(&graph));
+        .extend(runtara_workflows::ignored_fields::raw_definition_warnings(
+            &graph,
+        ));
     let errors = validation_result
         .errors
         .iter()

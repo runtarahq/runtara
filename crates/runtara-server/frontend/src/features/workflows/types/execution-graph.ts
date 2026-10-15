@@ -54,8 +54,12 @@ export interface SplitStepConfig {
   /** Maximum retry attempts for the split operation */
   maxRetries?: number;
   /** Base delay between retries in milliseconds */
+  retryDelayMs?: number;
+  /** Deprecated spelling of retryDelayMs (DSL 3.6, W093) */
   retryDelay?: number;
   /** Step timeout in milliseconds */
+  timeoutMs?: number;
+  /** Deprecated spelling of timeoutMs (DSL 3.6, W093) */
   timeout?: number;
   /** Treat null input as an empty array */
   allowNull?: boolean;
@@ -100,8 +104,12 @@ export interface ExecutionGraphStepDto {
   /** @format int32 */
   maxRetries?: number;
   /** @format int64 */
+  retryDelayMs?: number;
+  /** Deprecated spelling of retryDelayMs (DSL 3.6, W093) */
   retryDelay?: number;
   /** @format int64 */
+  timeoutMs?: number;
+  /** Deprecated spelling of timeoutMs (DSL 3.6, W093) */
   timeout?: number;
   durable?: boolean | null;
   renderingParameters?: ExecutionGraphStepRenderingParametersDto;

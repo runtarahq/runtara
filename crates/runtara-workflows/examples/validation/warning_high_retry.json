@@ -9,7 +9,7 @@
             "agentId": "http",
             "capabilityId": "http-request",
             "maxRetries": 100,
-            "retryDelay": 1000,
+            "retryDelayMs": 1000,
             "inputMapping": {
                 "url": {
                     "valueType": "immediate",
