@@ -1920,7 +1920,12 @@ pub enum ValueType {
     Number,
     /// Boolean value
     Boolean,
-    /// JSON object or array (pass through as-is)
+    /// JSON object; a JSON string holding an object is parsed
+    Object,
+    /// JSON array; a JSON string holding an array is parsed
+    Array,
+    /// Deprecated: passes the value through unchanged, the same as no hint.
+    /// Use `object` or `array` (W093); DSL 4.0 removes it.
     Json,
     /// Base64-encoded file data (FileData structure with content, filename, mimeType)
     File,
@@ -1971,6 +1976,8 @@ pub enum VariableType {
     Object,
     /// Base64-encoded file data (FileData structure)
     File,
+    /// A connection id (a string), as a `connection` schema field holds
+    Connection,
 }
 
 /// Data types for schema fields.

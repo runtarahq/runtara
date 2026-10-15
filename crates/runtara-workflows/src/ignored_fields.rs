@@ -81,8 +81,39 @@ pub fn deprecated_definition_spellings(definition: &Value) -> Vec<ValidationWarn
             }
         }
     }
+    /// A reference anywhere in the definition with the deprecated `json` hint.
+    fn json_hints(value: &Value, path: &str, out: &mut Vec<ValidationWarning>) {
+        match value {
+            Value::Object(map) => {
+                if map.get("valueType").and_then(Value::as_str) == Some("reference")
+                    && map.get("type").and_then(Value::as_str) == Some("json")
+                {
+                    out.push(ValidationWarning::DeprecatedSpelling {
+                        path: format!("{path}.type"),
+                        found: "json".to_string(),
+                        canonical: "object or array, or no type hint".to_string(),
+                    });
+                }
+                for (key, child) in map {
+                    let child_path = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    json_hints(child, &child_path, out);
+                }
+            }
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    json_hints(item, &format!("{path}.{index}"), out);
+                }
+            }
+            _ => {}
+        }
+    }
     let mut warnings = Vec::new();
     walk(definition, "", &mut warnings);
+    json_hints(definition, "", &mut warnings);
     warnings
 }
 
@@ -230,6 +261,34 @@ mod tests {
                 "steps.s.config.timeout->timeoutMs",
                 "steps.s.subgraph.steps.w.config.timeout->timeoutMs",
             ]
+        );
+    }
+
+    #[test]
+    fn the_json_type_hint_is_reported_wherever_it_sits() {
+        let found: Vec<String> = deprecated_definition_spellings(&json!({
+            "entryPoint": "f",
+            "steps": {
+                "f": {"id": "f", "stepType": "Finish", "inputMapping": {
+                    "a": {"valueType": "reference", "value": "data.a", "type": "json"},
+                    "b": {"valueType": "reference", "value": "data.b", "type": "array"}}},
+                "c": {"id": "c", "stepType": "Conditional", "condition": {"op": "IS_EMPTY",
+                    "arguments": [{"valueType": "reference", "value": "data.c", "type": "json"}]}}
+            }
+        }))
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(
+            found
+                .iter()
+                .any(|w| w.contains("'steps.f.inputMapping.a.type'"))
+        );
+        assert!(
+            found
+                .iter()
+                .any(|w| w.contains("'steps.c.condition.arguments.0.type'"))
         );
     }
 

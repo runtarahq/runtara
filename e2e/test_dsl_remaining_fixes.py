@@ -569,6 +569,28 @@ def check_duration_names():
           {"warnings": warned, "timeoutMs0": r.get("status"), "both": both_status})
 
 
+# ------------------------------------------------------ D-naming (vocabulary)
+
+
+def check_type_vocabulary():
+    hinted = lambda hint: {"valueType": "reference", "value": "data.raw", "type": hint}
+    g = graph("done", [fin("done", parsed=hinted("array"), kept=hinted("json"))],
+              inputSchema={"raw": {"type": "string"}})
+    _, body = call("POST", "/workflows/graph/validate", {"name": "rf-hint-vocabulary", **g})
+    warned = [w for w in (body or {}).get("warnings") or [] if str(w).startswith("[W093]")]
+    r = run("rf-hint-vocabulary", g, {"raw": "[1, 2]"})
+    out = r.get("outputs") or {}
+    _, ok_status, _ = save_status("rf-connection-variable", graph(
+        "f", [fin("f")], variables={"crm": {"type": "connection", "value": "conn-123"}}))
+    _, bad_status, bad_body = save_status("rf-connection-variable-bad", graph(
+        "f", [fin("f")], variables={"crm": {"type": "connection", "value": 7}}))
+    check("D-naming hints use the schema vocabulary: array parses, json warns W093, variables take connection",
+          out.get("parsed") == [1, 2] and out.get("kept") == "[1, 2]"
+          and len(warned) == 1 and "object or array" in warned[0]
+          and ok_status < 300 and bad_status == 400 and "E150" in rejected_codes(bad_body),
+          {"outputs": out, "warnings": warned, "connection": [ok_status, bad_status]})
+
+
 # ------------------------------------------------------------------- 3.6.0
 
 
@@ -661,7 +683,7 @@ CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, chec
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
           check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions,
           check_nested_immediate_references, check_workflow_inputs_in_bodies, check_group_by_keys,
-          check_null_collections, check_zero_timeouts, check_condition_spellings, check_route_less_switch_cases, check_error_context_spellings, check_runtime_variables, check_lone_outputs_unwrap, check_switch_match_types, check_duration_names, check_dsl_version, check_doc_drift, check_mcp_prose]
+          check_null_collections, check_zero_timeouts, check_condition_spellings, check_route_less_switch_cases, check_error_context_spellings, check_runtime_variables, check_lone_outputs_unwrap, check_switch_match_types, check_duration_names, check_type_vocabulary, check_dsl_version, check_doc_drift, check_mcp_prose]
 
 
 def main():

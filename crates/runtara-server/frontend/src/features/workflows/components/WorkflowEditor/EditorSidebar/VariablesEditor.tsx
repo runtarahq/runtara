@@ -218,6 +218,7 @@ export function VariablesEditor({
                       <SelectItem value={'object'}>Object</SelectItem>
                       <SelectItem value={'array'}>Array</SelectItem>
                       <SelectItem value={'file'}>File</SelectItem>
+                      <SelectItem value={'connection'}>Connection</SelectItem>
                     </SelectContent>
                   </Select>
                 </td>

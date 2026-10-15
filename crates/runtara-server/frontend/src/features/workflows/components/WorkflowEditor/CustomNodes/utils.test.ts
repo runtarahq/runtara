@@ -1353,11 +1353,11 @@ describe('Backend DSL serialization', () => {
       renderingParameters: { x: 0, y: 0 },
     });
 
+    // The deprecated `json` hint is the same as none, so a save drops it.
     const step = roundTripStep(graph);
     expect(step.config.value).toEqual({
       valueType: 'reference',
       value: 'data.items',
-      type: 'json',
       default: [],
     });
   });
@@ -1424,13 +1424,11 @@ describe('Backend DSL serialization', () => {
         {
           valueType: 'reference',
           value: 'data.primary',
-          type: 'json',
           default: [],
         },
         {
           valueType: 'reference',
           value: 'data.secondary',
-          type: 'json',
         },
       ],
     });
@@ -2097,7 +2095,7 @@ describe('Split variable round-trip', () => {
         value: {
           valueType: 'reference',
           value: 'data.items',
-          type: 'json',
+          type: 'string',
         },
       },
       renderingParameters: { x: 0, y: 0 },
@@ -2107,7 +2105,7 @@ describe('Split variable round-trip', () => {
     expect(step.config.value).toMatchObject({
       valueType: 'reference',
       value: 'data.items',
-      type: 'json',
+      type: 'string',
     });
   });
 

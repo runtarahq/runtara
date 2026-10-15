@@ -7321,6 +7321,19 @@ fn apply_type_hint(value: Value, type_hint: Option<&str>) -> Result<Value, Strin
             Value::Array(value) => Value::Bool(!value.is_empty()),
             Value::Object(value) => Value::Bool(!value.is_empty()),
         },
+        // `object`/`array` take the value as it is, or parse a JSON string
+        // holding one.
+        Some(shape @ ("object" | "array")) => {
+            let parsed = match value {
+                Value::String(ref text) => serde_json::from_str::<Value>(text).ok(),
+                ref other => Some(other.clone()),
+            };
+            match parsed {
+                Some(Value::Object(_)) if shape == "object" => parsed.unwrap(),
+                Some(Value::Array(_)) if shape == "array" => parsed.unwrap(),
+                _ => return coercion_result(value, shape),
+            }
+        }
         // `json`/`file`, no hint, and any unrecognized hint pass through
         // untouched — see the overload note above.
         _ => value,
@@ -9640,6 +9653,34 @@ mod tests {
         assert_eq!(
             coerce_count("value", None, br#"{"count":5}"#).expect("unknown hint passes through"),
             json!({ "result": 5 })
+        );
+    }
+
+    #[test]
+    fn apply_type_hint_object_and_array_parse_json_strings() {
+        assert_eq!(
+            apply_type_hint(json!("[1,2]"), Some("array")).unwrap(),
+            json!([1, 2])
+        );
+        assert_eq!(
+            apply_type_hint(json!([3]), Some("array")).unwrap(),
+            json!([3])
+        );
+        assert_eq!(
+            apply_type_hint(json!("{\"a\":1}"), Some("object")).unwrap(),
+            json!({"a": 1})
+        );
+        assert_eq!(
+            apply_type_hint(Value::Null, Some("array")).unwrap(),
+            Value::Null
+        );
+        assert!(apply_type_hint(json!("{\"a\":1}"), Some("array")).is_err());
+        assert!(apply_type_hint(json!("not json"), Some("object")).is_err());
+        assert!(apply_type_hint(json!(5), Some("object")).is_err());
+        // The deprecated `json` hint still passes values through.
+        assert_eq!(
+            apply_type_hint(json!("[1]"), Some("json")).unwrap(),
+            json!("[1]")
         );
     }
 

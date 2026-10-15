@@ -3653,6 +3653,7 @@ fn validate_variable_types(graph: &ExecutionGraph, result: &mut ValidationResult
                 VariableType::Boolean => value.is_boolean(),
                 VariableType::Array => value.is_array(),
                 VariableType::Object | VariableType::File => value.is_object(),
+                VariableType::Connection => value.is_string(),
             };
         if !matches {
             let actual = match value {
@@ -19033,7 +19034,13 @@ mod edge_shape_tests {
             closure_codes(with_variable("boolean", json!(1))),
             vec!["E150"]
         );
+        // `connection` joins the variable types, as in schema fields: an id.
+        assert_eq!(
+            closure_codes(with_variable("connection", json!(7))),
+            vec!["E150"]
+        );
         for (var_type, value) in [
+            ("connection", json!("4f6c0d0e-conn")),
             ("integer", json!(3)),
             ("number", json!(2.5)),
             ("string", json!("x")),

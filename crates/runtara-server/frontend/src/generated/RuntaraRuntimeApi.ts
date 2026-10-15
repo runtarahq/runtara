@@ -24,7 +24,8 @@ export type VariableType =
   | "boolean"
   | "array"
   | "object"
-  | "file";
+  | "file"
+  | "connection";
 
 /**
  * Type hints for reference values.
@@ -48,6 +49,8 @@ export type ValueType =
   | "integer"
   | "number"
   | "boolean"
+  | "object"
+  | "array"
   | "json"
   | "file";
 
