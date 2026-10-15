@@ -549,6 +549,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A workflow-agent whose slug has a word starting with a digit can be
+  called.** A workflow named like `SYN-686 child` gets the slug
+  `syn-686-child` and publishes as an agent, but every parent that called it
+  failed to compile with `failed to parse direct workflow wac document:
+  unexpected token was encountered`: the document that composes the parent
+  requires every word of a name to start with a letter. It now writes such a
+  word in a form it accepts, and the agent keeps its slug. Recompile a parent
+  that failed this way; already-published workflow-agents need no change.
 - **Graph validation sees the tenant's published workflow-agents.**
   `POST /api/runtime/workflows/graph/validate` checked a graph against the
   built-in agents only, so a parent whose Agent step calls a published

@@ -8854,6 +8854,18 @@ fn direct_wasm_execute_invoke_wait_parks_on_signal_then_resumes() {
 /// agent-output shaping.
 #[test]
 fn parent_workflow_composes_and_invokes_published_workflow_agent() {
+    parent_composes_and_invokes_published_workflow_agent("shout-echo");
+}
+
+/// The same loop for a slug with a word that starts with a digit, as a name
+/// like "SYN-686 echo" derives. WIT accepts it, but the WAC document that
+/// composes the parent spells it in its own form.
+#[test]
+fn parent_workflow_composes_a_published_workflow_agent_with_a_digit_led_slug() {
+    parent_composes_and_invokes_published_workflow_agent("syn-686-echo");
+}
+
+fn parent_composes_and_invokes_published_workflow_agent(slug: &str) {
     let components_dir = direct_e2e_components_dir();
 
     // 1. The child: a pure workflow with a typed input, published as an agent.
@@ -8888,7 +8900,7 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
             output_dir: temp.path().join("child-build"),
             track_events: false,
             agent_catalog: None,
-            agent_slug: Some("shout-echo".to_string()),
+            agent_slug: Some(slug.to_string()),
         },
         &components_dir,
         runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
@@ -8899,7 +8911,7 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
         child
             .component_artifacts
             .world_wit
-            .contains("export runtara:agent-shout-echo/capabilities@1.0.0;"),
+            .contains(&format!("export runtara:agent-{slug}/capabilities@1.0.0;")),
         "child must export under its slug:\n{}",
         child.component_artifacts.world_wit
     );
@@ -8910,18 +8922,21 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
     fs::create_dir_all(&staging).expect("staging dir");
     fs::copy(
         &child.wasm_path,
-        staging.join("runtara_agent_shout_echo.wasm"),
+        staging.join(format!("runtara_agent_{}.wasm", slug.replace('-', "_"))),
     )
     .expect("stage child wasm");
     let info = certified_workflow_agent_info(
-        "shout-echo",
+        slug,
         "Shout Echo",
         "",
         &child_graph.input_schema,
         &child_graph.output_schema,
     );
     fs::write(
-        staging.join("runtara_agent_shout_echo.meta.json"),
+        staging.join(format!(
+            "runtara_agent_{}.meta.json",
+            slug.replace('-', "_")
+        )),
         serde_json::to_vec_pretty(&info).expect("meta serializes"),
     )
     .expect("stage child meta");
@@ -8952,9 +8967,11 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
       "inputSchema": { "msg": { "type": "string", "required": true } },
       "outputSchema": {}
     }"#;
-    let parent_graph: ExecutionGraph = serde_json::from_str(PARENT).expect("parent parses");
+    let parent_graph: ExecutionGraph =
+        serde_json::from_str(&PARENT.replace("\"shout-echo\"", &format!("\"{slug}\"")))
+            .expect("parent parses");
     // The catalog overlay (synthesized meta) is what lets the manifest builder
-    // resolve `shout-echo` / capability `run` / its required inputs.
+    // resolve the slug / capability `run` / its required inputs.
     let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
         info,
     ]));

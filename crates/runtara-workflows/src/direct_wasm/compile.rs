@@ -107,7 +107,7 @@ pub use isolation_selection::{
 };
 
 use super::component::{
-    DIRECT_AGENT_WIT_VERSION, DIRECT_WORKFLOW_LOGIC_PACKAGE, DirectComponentArtifacts,
+    DIRECT_AGENT_WIT_VERSION, DIRECT_WORKFLOW_LOGIC_PACKAGE, DirectComponentArtifacts, wac_name,
 };
 use super::error::DirectCompileError;
 use super::manifest::{
@@ -720,16 +720,17 @@ fn compose_direct_workflow_selected(
         "compose: resolved + read component dependencies from disk",
     );
 
+    // Keyed by each package's name as the WAC document spells it.
     let mut overrides: HashMap<String, PathBuf> = HashMap::new();
     overrides.insert(
         "runtara:workflow-logic".to_string(),
         result.workflow_logic_wasm_path.clone(),
     );
     for component in &shared_components {
-        overrides.insert(component.package.clone(), component.wasm_path.clone());
+        overrides.insert(wac_name(&component.package), component.wasm_path.clone());
     }
     for component in &agent_components {
-        overrides.insert(component.package.clone(), component.wasm_path.clone());
+        overrides.insert(wac_name(&component.package), component.wasm_path.clone());
     }
 
     let mut children = Vec::new();
@@ -767,7 +768,7 @@ fn compose_direct_workflow_selected(
                 .build_dir
                 .join(format!("isolated-agent-{}.wasm", bindings.len()));
             fs::write(&adapter_path, adapter)?;
-            overrides.insert(component.package.clone(), adapter_path);
+            overrides.insert(wac_name(&component.package), adapter_path);
             children.push(child);
             bindings.push(binding);
         }

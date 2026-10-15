@@ -366,6 +366,30 @@ fn emit_world_wit(
     out
 }
 
+/// How a package name (`runtara:agent-<id>`) or a variable name
+/// (`agent-<id>`) is spelled inside the WAC composition document.
+///
+/// WAC requires every word of a name to start with a letter, but an agent id
+/// may have a word that starts with a digit: the slug derived from a
+/// workflow named "SYN-686 child" is `syn-686-child`, which WIT and the
+/// component model accept. Such a word is written as an uppercase WAC word
+/// behind an `N` (`686` becomes `N686`, `2fa` becomes `N2FA`); every other
+/// word is kept, so most names read the same. Agent ids and package names
+/// are lowercase, so the spelling never collides with another name. Only the
+/// document uses it: composition maps each spelled package name to its
+/// component, and the components keep their real import and export names.
+pub(crate) fn wac_name(name: &str) -> String {
+    name.split_inclusive(['-', ':'])
+        .map(|word| {
+            if word.starts_with(|c: char| c.is_ascii_digit()) {
+                format!("N{}", word.to_ascii_uppercase())
+            } else {
+                word.to_string()
+            }
+        })
+        .collect()
+}
+
 fn emit_wac(
     agents: &[String],
     parallel_pools: &std::collections::BTreeMap<String, u32>,
@@ -379,9 +403,10 @@ fn emit_wac(
     );
 
     for agent in agents {
+        let package = wac_name(&format!("runtara:agent-{agent}"));
         out.push_str(&format!(
-            "let agent-{id} = new runtara:agent-{id} {{ ... }};\n",
-            id = agent
+            "let {} = new {package} {{ ... }};\n",
+            wac_name(&format!("agent-{agent}"))
         ));
         // Extra instantiations of the SAME package for the parallel pool —
         // sync-lifted instances serialize concurrent entries, so K-way
@@ -391,8 +416,8 @@ fn emit_wac(
                 let phantom =
                     crate::direct_wasm::split_parallel_pool_member_component_id(agent, member);
                 out.push_str(&format!(
-                    "let agent-{phantom} = new runtara:agent-{id} {{ ... }};\n",
-                    id = agent
+                    "let {} = new {package} {{ ... }};\n",
+                    wac_name(&format!("agent-{phantom}"))
                 ));
             }
         }
@@ -406,14 +431,16 @@ fn emit_wac(
         } else {
             "capabilities"
         };
-        out.push_str(&format!(" ...agent-{id},", id = agent));
+        out.push_str(&format!(" ...{},", wac_name(&format!("agent-{agent}"))));
         if let Some(pool) = parallel_pools.get(agent) {
             for member in 1..*pool {
                 let phantom =
                     crate::direct_wasm::split_parallel_pool_member_component_id(agent, member);
+                // The quoted import and export names are the real ones.
                 out.push_str(&format!(
                     " \"runtara:agent-{phantom}/{interface}@{DIRECT_AGENT_WIT_VERSION}\": \
-                     agent-{phantom}[\"runtara:agent-{id}/{interface}@{DIRECT_AGENT_WIT_VERSION}\"],",
+                     {instance}[\"runtara:agent-{id}/{interface}@{DIRECT_AGENT_WIT_VERSION}\"],",
+                    instance = wac_name(&format!("agent-{phantom}")),
                     id = agent
                 ));
             }
@@ -614,6 +641,67 @@ world workflow {
                 .world_wit
                 .contains("import runtara:workflow/runtime@1.0.0;")
         );
+    }
+
+    #[test]
+    fn a_digit_led_agent_id_composes_under_its_wac_spelling() {
+        let agents = ["syn-686-echo".to_string(), "utils".to_string()];
+        let pools = std::collections::BTreeMap::from([("syn-686-echo".to_string(), 3)]);
+        let artifacts = emit_direct_component_artifacts_with_pools(
+            &agents,
+            WorkflowRole::default(),
+            false,
+            None,
+            &pools,
+        );
+        let document = wac_parser::Document::parse(&artifacts.wac_source).unwrap_or_else(|err| {
+            panic!(
+                "the composition document must parse: {err}\n{}",
+                artifacts.wac_source
+            )
+        });
+        let packages: std::collections::BTreeSet<String> = wac_resolver::packages(&document)
+            .expect("packages")
+            .into_keys()
+            .map(|key| key.name.to_string())
+            .collect();
+        assert_eq!(
+            packages,
+            [
+                "runtara:agent-syn-N686-echo",
+                "runtara:agent-utils",
+                "runtara:workflow-logic",
+                "runtara:workflow-stdlib",
+            ]
+            .map(String::from)
+            .into(),
+        );
+        // The pool members are wired by the real import name.
+        assert!(
+            artifacts
+                .wac_source
+                .contains("\"runtara:agent-syn-686-echo-par2/capabilities@1.0.0\""),
+            "{}",
+            artifacts.wac_source
+        );
+    }
+
+    #[test]
+    fn wac_name_respells_only_digit_led_words() {
+        for name in [
+            "runtara:agent-utils",
+            "runtara:agent-object-model",
+            "runtara:workflow-stdlib",
+            "agent-ai-tools-par2",
+        ] {
+            assert_eq!(wac_name(name), name);
+        }
+        assert_eq!(
+            wac_name("runtara:agent-syn-686-child"),
+            "runtara:agent-syn-N686-child"
+        );
+        assert_eq!(wac_name("agent-2fa-sync"), "agent-N2FA-sync");
+        assert_ne!(wac_name("a-686-1"), wac_name("a-686-n1"));
     }
 
     #[test]

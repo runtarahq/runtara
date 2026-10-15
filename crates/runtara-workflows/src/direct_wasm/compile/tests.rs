@@ -10902,6 +10902,14 @@ fn generated_workflow_slugs_are_wit_valid_packages() {
         resolve
             .push_str(format!("runtara-agent-{slug}.wit"), &wit)
             .unwrap_or_else(|e| panic!("slug {slug:?} (from name {name:?}) is not WIT-valid: {e}"));
+        // A parent calling it composes it through a WAC document, whose
+        // grammar is stricter than WIT's: every word must start with a letter.
+        let wac =
+            super::super::component::emit_direct_component_artifacts(std::slice::from_ref(&slug))
+                .wac_source;
+        wac_parser::Document::parse(&wac).unwrap_or_else(|e| {
+            panic!("slug {slug:?} (from name {name:?}) does not compose: {e}\n{wac}")
+        });
     }
 }
 
