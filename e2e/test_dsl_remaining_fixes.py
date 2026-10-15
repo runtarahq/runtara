@@ -361,10 +361,25 @@ def check_workflow_inputs_in_bodies():
           r.get("status") == "completed" and out == [{"item": {"k": 1}, "order": 7}], r)
 
 
+# ---------------------------------------------------------------------- C9
+
+
+def check_group_by_keys():
+    g = graph("g", [
+        {"stepType": "GroupBy", "id": "g", "config": {"value": imm(
+            [{"data": {"category": "a"}}, {"data": {"category": "b"}}, {"other": 1}]), "key": "data.category"}},
+        fin("done", out=ref("steps.g.outputs"))], [edge("g", "done")],
+        inputSchema={"category": {"type": "string"}})
+    r = run("rf-group-by", g, {"category": "ignored"})
+    groups = ((r.get("outputs") or {}).get("out") or {}).get("groups") or {}
+    check("C9 GroupBy key is a path inside each item, and items without it go to _null (as documented)",
+          sorted(groups) == ["_null", "a", "b"], {"groups": sorted(groups), "status": r.get("status")})
+
+
 CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, check_child_version_spellings,
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
           check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions,
-          check_nested_immediate_references, check_workflow_inputs_in_bodies]
+          check_nested_immediate_references, check_workflow_inputs_in_bodies, check_group_by_keys]
 
 
 def main():

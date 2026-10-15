@@ -1085,8 +1085,14 @@ pub struct GroupByConfig {
     /// If null or non-array, treated as empty array.
     pub value: MappingValue,
 
-    /// Property path to group by (e.g., "status", "user.role", "data.category").
-    /// Supports nested paths with dot notation.
+    /// Path, inside each item, of the value to group by (e.g. `"status"`,
+    /// `"user.role"`). It is not a workflow reference: `"data.category"`
+    /// reads `item.data.category`, not the workflow's `data.category`.
+    ///
+    /// The group name is the value as text: strings as-is, numbers and
+    /// booleans in their JSON spelling, and other values as their JSON. An
+    /// item without the key (or with `null` there) goes into the `"_null"`
+    /// group.
     pub key: String,
 
     /// Optional list of expected key values.
@@ -1098,12 +1104,10 @@ pub struct GroupByConfig {
 
 /// Delay step - pause workflow execution for a specified duration.
 ///
-/// This is a **durable** delay: if the workflow crashes during the delay,
-/// it will resume from where it left off rather than restarting the delay.
-///
-/// For native platforms, this uses `sdk.sleep()` (which forwards to
-/// `backend.durable_sleep()`) and stores the wake time in the database.
-/// For WASI/embedded, it uses blocking sleep.
+/// This is a **durable** delay: the run parks with its wake time stored, so
+/// it holds no runner while it waits and a crash or restart resumes it at the
+/// same deadline rather than restarting the delay. It therefore requires a
+/// durable workflow and step (E145).
 ///
 /// Example:
 /// ```json
