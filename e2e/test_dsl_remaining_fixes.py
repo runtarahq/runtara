@@ -376,10 +376,30 @@ def check_group_by_keys():
           sorted(groups) == ["_null", "a", "b"], {"groups": sorted(groups), "status": r.get("status")})
 
 
+# ------------------------------------------------------------------ D-null
+
+
+def check_null_collections():
+    body = graph("f", [fin("f", ok=imm(True))])
+    split = lambda **config: graph("s", [
+        {"stepType": "Split", "id": "s", "config": {"value": imm(None), **config}, "subgraph": body},
+        fin("done", out=ref("steps.s.outputs"))], [edge("s", "done")])
+    strict = run("rf-split-null", split(convertSingleValue=True))
+    allowed = run("rf-split-null-allowed", split(allowNull=True))
+    filtered = run("rf-filter-null", graph("flt", [
+        {"stepType": "Filter", "id": "flt", "config": {"value": imm(None), "condition": op("EQ", imm(1), imm(1))}},
+        fin("done", out=ref("steps.flt.outputs"))], [edge("flt", "done")]))
+    check("D-null Split needs allowNull for null (as documented), Filter reads null as empty",
+          strict.get("status") == "failed" and allowed.get("status") == "completed"
+          and (filtered.get("outputs") or {}).get("out", {}).get("count") == 0,
+          {"split": strict.get("status"), "allowNull": allowed.get("status"), "filter": filtered.get("outputs")})
+
+
 CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, check_child_version_spellings,
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
           check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions,
-          check_nested_immediate_references, check_workflow_inputs_in_bodies, check_group_by_keys]
+          check_nested_immediate_references, check_workflow_inputs_in_bodies, check_group_by_keys,
+          check_null_collections]
 
 
 def main():

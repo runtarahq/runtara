@@ -1028,7 +1028,8 @@ pub struct FilterStep {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FilterConfig {
     /// Array to filter (MappingValue resolving to array).
-    /// If null or non-array, treated as empty array.
+    /// If null or non-array, treated as empty array. (A Split is stricter: it
+    /// fails on `null` unless `allowNull` is set.)
     pub value: MappingValue,
 
     /// Condition expression evaluated for each item.
@@ -1082,7 +1083,8 @@ pub struct GroupByStep {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GroupByConfig {
     /// Array to group (MappingValue resolving to array).
-    /// If null or non-array, treated as empty array.
+    /// If null or non-array, treated as empty array. (A Split is stricter: it
+    /// fails on `null` unless `allowNull` is set.)
     pub value: MappingValue,
 
     /// Path, inside each item, of the value to group by (e.g. `"status"`,
@@ -2445,6 +2447,8 @@ pub struct SplitConfig {
     /// Convert single values to a single-element array (default: false).
     /// When true, non-array values are wrapped in an array.
     /// When false, non-array values raise an error.
+    /// `null` is not a single value here: it still fails unless `allowNull`
+    /// is set (unlike Filter and GroupBy, which read `null` as an empty array).
     /// Use `transform/ensure-array` agent for explicit conversion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub convert_single_value: Option<bool>,
