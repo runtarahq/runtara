@@ -30,11 +30,15 @@ pub struct Workflow {
     /// The execution graph containing all steps
     pub execution_graph: ExecutionGraph,
 
-    /// Memory allocation tier for workflow execution
+    /// Memory allocation tier for workflow execution. Not read from this
+    /// type: the server takes it from the update request's `memoryTier`
+    /// and stores it on the workflow. To be removed in DSL 4.0.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_tier: Option<MemoryTier>,
 
-    /// Enable step-level debug instrumentation
+    /// Enable step-level debug instrumentation. Not read from this type: the
+    /// server takes it from the update request's `trackEvents` (stored per
+    /// workflow) and `runtara-compile` from `--debug`. To be removed in DSL 4.0.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub track_events: Option<bool>,
 

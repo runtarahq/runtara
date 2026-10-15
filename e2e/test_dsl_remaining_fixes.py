@@ -290,9 +290,30 @@ def check_sequential_and_poll_interval():
     check("A10 pollIntervalMs is deprecated with W088", "W088" in warnings, warnings)
 
 
+# ---------------------------------------------------------------- C8, D-meta
+
+
+def check_workflow_level_settings():
+    g = graph("d", [{"stepType": "Delay", "id": "d", "durationMs": imm(10)}, fin("done")], [edge("d", "done")])
+    status, body = call("POST", "/workflows/create", {"name": f"rf-durable-{RUN}", "description": "C8"})
+    workflow = (body.get("data") or body)["id"]
+    status, body = call("POST", f"/workflows/{workflow}/update",
+                        {"executionGraph": {"name": f"rf-durable-{RUN}", **g}, "durable": False})
+    check("C8 a top-level durable:false applies to the graph (its Delay is rejected, E145)",
+          status == 400 and rejected_codes(body) == ["E145"], {"status": status, "codes": rejected_codes(body)})
+    status, body = call("POST", f"/workflows/{workflow}/update",
+                        {"executionGraph": {"name": f"rf-durable-{RUN}", **g}})
+    check("C8 the same graph without it saves", status < 300, {"status": status})
+
+    status, body = call("POST", "/workflows/graph/validate",
+                        {"name": "meta", "trackEvents": False, "memoryTier": "S", **graph("f", [fin("f")])})
+    hints = [w for w in (body or {}).get("warnings") or [] if "beside executionGraph" in str(w)]
+    check("D-meta trackEvents/memoryTier inside executionGraph say where they belong", len(hints) == 2, hints)
+
+
 CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, check_child_version_spellings,
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
-          check_sequential_and_poll_interval]
+          check_sequential_and_poll_interval, check_workflow_level_settings]
 
 
 def main():

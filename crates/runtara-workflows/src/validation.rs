@@ -2176,11 +2176,19 @@ impl std::fmt::Display for ValidationWarning {
                 field,
                 ERROR_CONTEXT_FIELDS.join(", ")
             ),
-            ValidationWarning::IgnoredField { path } => write!(
-                f,
-                "[W086] '{}' is not a workflow field and is ignored. Check the spelling.",
-                path
-            ),
+            ValidationWarning::IgnoredField { path } => match path.as_str() {
+                "trackEvents" | "memoryTier" => write!(
+                    f,
+                    "[W086] '{}' is not an executionGraph field and is ignored here. Set it on \
+                     the workflow, beside executionGraph.",
+                    path
+                ),
+                _ => write!(
+                    f,
+                    "[W086] '{}' is not a workflow field and is ignored. Check the spelling.",
+                    path
+                ),
+            },
             ValidationWarning::SplitSequentialOverridesParallelism {
                 step_id,
                 parallelism,
