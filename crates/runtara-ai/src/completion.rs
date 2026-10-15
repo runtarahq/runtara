@@ -51,6 +51,7 @@ pub enum CompletionError {
 impl CompletionError {
     /// Classify a provider's HTTP error response. `provider` names it in the
     /// message (`"OpenAI API"`, `"Bedrock Converse API"`).
+    #[cfg(feature = "completion")]
     pub(crate) fn from_http_status(
         provider: &str,
         status: u16,
@@ -264,7 +265,7 @@ fn merge_json(a: serde_json::Value, b: serde_json::Value) -> serde_json::Value {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "completion"))]
 mod tests {
     use super::CompletionError;
     use std::collections::HashMap;
