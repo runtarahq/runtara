@@ -645,7 +645,10 @@ fn run_state_step_shapes() -> serde_json::Value {
 pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> serde_json::Value {
     serde_json::json!({
         "schema": "workflow-authoring",
+        // Version of this authoring document's own format; the DSL it
+        // describes is `dslVersion`.
         "version": 1,
+        "dslVersion": runtara_dsl::DSL_VERSION,
         "purpose": "Canonical workflow JSON shapes for MCP clients and LLM authors.",
         "graphShape": {
             "required": ["name", "entryPoint", "steps", "executionPlan"],
@@ -665,7 +668,7 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                 "inputSchema": "optional; map of field name to SchemaField",
                 "outputSchema": "optional; map of field name to SchemaField",
                 "stateSchema": {
-                    "fieldName": {"type": "string | number | integer | boolean | array | object", "label": "Display label", "format": "optional display hint", "enum": ["optional allowed values"]}
+                    "fieldName": {"type": "string | number | integer | boolean | array | object | file | connection", "label": "Display label", "format": "optional display hint", "enum": ["optional allowed values"]}
                 },
                 "conditionalBranches": [
                     {"fromStep": "conditionalStepId", "toStep": "whenTrueStepId", "label": "true"},
@@ -691,7 +694,7 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
             },
             "Finish": {
                 "optionalFields": ["inputMapping"],
-                "executionLabels": "Pass run_label to execute_workflow or execute_workflow_and_wait. Finish cannot assign execution labels.",
+                "executionLabels": "Pass run_label to execute_workflow, execute_workflow_sync or execute_workflow_wait. Finish cannot assign execution labels.",
                 "example": {
                     "id": "finish",
                     "stepType": "Finish",
@@ -1939,6 +1942,34 @@ fn diff_step(a: &serde_json::Value, b: &serde_json::Value) -> Vec<String> {
 mod tests {
     use super::*;
     use schemars::JsonSchema;
+
+    /// The authoring document names its DSL version, every state field type,
+    /// and only tools that exist.
+    #[test]
+    fn authoring_schema_matches_the_dsl_and_the_registered_tools() {
+        let schema = workflow_authoring_schema("object_model", "bulk-update-instances");
+        assert_eq!(schema["dslVersion"], runtara_dsl::DSL_VERSION);
+        let state_types = schema["graphShape"]["shape"]["stateSchema"]["fieldName"]["type"]
+            .as_str()
+            .unwrap();
+        for field_type in [
+            "string",
+            "number",
+            "integer",
+            "boolean",
+            "array",
+            "object",
+            "file",
+            "connection",
+        ] {
+            assert!(
+                state_types.contains(field_type),
+                "{field_type}: {state_types}"
+            );
+        }
+        let text = schema.to_string();
+        assert!(!text.contains("execute_workflow_and_wait"), "{text}");
+    }
 
     #[test]
     fn authoring_schema_describes_error_step_without_input_mapping() {

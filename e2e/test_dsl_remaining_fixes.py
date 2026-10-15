@@ -433,11 +433,59 @@ def check_doc_drift():
     check("E4 the served changelog says GroupBy was reinstated", "reinstated" in text, {"status": status})
 
 
+# ---------------------------------------------------------------------- E8
+
+
+def mcp_endpoint():
+    base = os.environ.get("RUNTARA_API_URL", "http://127.0.0.1:7041/api/runtime").rstrip("/")
+    return base.rsplit("/api/runtime", 1)[0] + "/mcp"
+
+
+def mcp_call(method, params, session=None, request_id=1):
+    import urllib.request
+    body = {"jsonrpc": "2.0", "method": method, "params": params}
+    if request_id is not None:
+        body["id"] = request_id
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    if session:
+        headers["Mcp-Session-Id"] = session
+    req = urllib.request.Request(mcp_endpoint(), data=json.dumps(body).encode(), headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=60) as response:
+        raw = response.read().decode()
+        session = response.headers.get("Mcp-Session-Id") or session
+    payload = None
+    for line in raw.splitlines():
+        if line.startswith("data:"):
+            payload = json.loads(line[5:].strip())
+    if payload is None and raw.strip():
+        payload = json.loads(raw)
+    return payload, session
+
+
+def check_mcp_prose():
+    init, session = mcp_call("initialize", {"protocolVersion": "2025-03-26", "capabilities": {},
+                                            "clientInfo": {"name": "rf-e2e", "version": "1"}})
+    mcp_call("notifications/initialized", {}, session, request_id=None)
+    tools, _ = mcp_call("tools/list", {}, session, request_id=2)
+    names = {tool["name"] for tool in tools["result"]["tools"]}
+    instructions = json.dumps(init["result"].get("instructions", ""))
+    mentioned = {name for name in ("execute_workflow", "execute_workflow_sync", "execute_workflow_wait",
+                                   "execute_workflow_and_wait") if f"`{name}`" in instructions}
+    schema_result, _ = mcp_call("tools/call", {"name": "get_workflow_authoring_schema", "arguments": {}},
+                                session, request_id=3)
+    schema = json.loads(schema_result["result"]["content"][0]["text"])
+    state_types = schema["graphShape"]["shape"]["stateSchema"]["fieldName"]["type"]
+    check("E8 MCP prose names only registered tools, and the authoring schema matches the DSL",
+          mentioned and mentioned <= names and "execute_workflow_and_wait" not in instructions
+          and schema.get("dslVersion") and "file" in state_types and "connection" in state_types,
+          {"mentioned": sorted(mentioned), "dslVersion": schema.get("dslVersion"), "stateTypes": state_types})
+
+
 CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, check_child_version_spellings,
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
           check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions,
           check_nested_immediate_references, check_workflow_inputs_in_bodies, check_group_by_keys,
-          check_null_collections, check_zero_timeouts, check_doc_drift]
+          check_null_collections, check_zero_timeouts, check_doc_drift, check_mcp_prose]
 
 
 def main():
