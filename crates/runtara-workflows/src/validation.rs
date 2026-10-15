@@ -2986,7 +2986,10 @@ fn build_dependency_graph(
 /// Validate EmbedWorkflow input mappings against child workflow inputSchemas.
 /// Checks `steps.<embed>.outputs.<field>` references against the embedded
 /// child's declared output schema (E058). Children without an output schema
-/// are not checked: their outputs are whatever their Finish returns.
+/// are not checked: their outputs are whatever their Finish returns. Nor is a
+/// schema whose only field is `outputs`: it describes a Finish that maps only
+/// `outputs`, which returns that value unwrapped, so the caller's fields are
+/// the inner value's.
 fn validate_embed_workflow_outputs(
     graph: &ExecutionGraph,
     child_workflows: &HashMap<String, ExecutionGraph>,
@@ -3000,10 +3003,11 @@ fn validate_embed_workflow_outputs(
         for (id, step) in &graph.steps {
             match step {
                 Step::EmbedWorkflow(embed) => {
-                    if let Some(child) = children
-                        .get(&embed.child_workflow_id)
-                        .filter(|c| !c.output_schema.is_empty())
-                    {
+                    if let Some(child) = children.get(&embed.child_workflow_id).filter(|c| {
+                        !c.output_schema.is_empty()
+                            && !(c.output_schema.len() == 1
+                                && c.output_schema.contains_key("outputs"))
+                    }) {
                         out.insert(id.clone(), child);
                     }
                 }
@@ -18663,6 +18667,42 @@ mod edge_shape_tests {
             .errors()
             .map(|(_, error)| error.code().to_string())
             .collect()
+    }
+
+    /// A child's Finish that maps only `outputs` returns that value unwrapped
+    /// (C3), so a schema declaring the lone `outputs` field does not describe
+    /// the caller's fields and is not checked against them.
+    #[test]
+    fn a_lone_outputs_schema_field_is_not_checked_against_callers() {
+        let codes = |child_schema: Value, reference: &str| -> Vec<String> {
+            let child: ExecutionGraph = serde_json::from_value(json!({"entryPoint": "f",
+                "outputSchema": child_schema,
+                "steps": {"f": {"stepType": "Finish", "id": "f", "inputMapping": {"outputs": {
+                    "valueType": "composite", "value": {"a": {"valueType": "immediate", "value": 1}}}}}}}))
+            .unwrap();
+            let parent: ExecutionGraph = serde_json::from_value(json!({"entryPoint": "e", "steps": {
+                "e": {"stepType": "EmbedWorkflow", "id": "e", "childWorkflowId": "kid", "childVersion": 1},
+                "f": {"stepType": "Finish", "id": "f", "inputMapping": {
+                    "x": {"valueType": "reference", "value": reference}}}},
+                "executionPlan": [{"fromStep": "e", "toStep": "f"}]}))
+            .unwrap();
+            let child = ClosureChildGraph {
+                workflow_id: "kid".into(),
+                version: 1,
+                execution_graph: child,
+            };
+            validate_workflow_closure("root", &parent, &super::tests::test_catalog(), &[child])
+                .errors()
+                .map(|(_, error)| error.code().to_string())
+                .collect()
+        };
+        assert!(codes(json!({"outputs": {"type": "object"}}), "steps.e.outputs.a").is_empty());
+        // A schema of the real fields is still checked.
+        assert_eq!(
+            codes(json!({"a": {"type": "integer"}}), "steps.e.outputs.b"),
+            ["E058"]
+        );
+        assert!(codes(json!({"a": {"type": "integer"}}), "steps.e.outputs.a").is_empty());
     }
 
     /// A routing Switch case without a route takes the default edge (C6).

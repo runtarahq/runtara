@@ -457,6 +457,12 @@ pub struct StepCommon {
 /// standard mapping system (`data.*`, `steps.<id>.outputs.*`, `variables.*`).
 ///
 /// There is no `outputMapping` field — Finish only takes `inputMapping`.
+///
+/// A mapping whose only key is `outputs` returns that value itself, not an
+/// object holding it, so `{"outputs": <array>}` returns the array. This is the
+/// one way to return a value that is not an object. An `outputSchema` that
+/// declares just `outputs` therefore describes the mapping, not the caller's
+/// fields, and references into the result are not checked against it.
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]

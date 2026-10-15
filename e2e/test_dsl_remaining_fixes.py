@@ -507,6 +507,29 @@ def check_runtime_variables():
           {"status": status, "codes": rejected_codes(body)})
 
 
+# ---------------------------------------------------------------------- C3
+
+
+def check_lone_outputs_unwrap():
+    composite = {"valueType": "composite", "value": {"a": imm(1)}}
+    child, status, body = save_status("rf-unwrap-child", graph(
+        "f", [fin("f", outputs=composite)], outputSchema={"outputs": {"type": "object"}}))
+    assert status < 300, (status, body)
+    compile_latest(child)
+    g = graph("call", [
+        {"stepType": "EmbedWorkflow", "id": "call", "childWorkflowId": child, "childVersion": "latest",
+         "inputMapping": {}},
+        fin("done", a=ref("steps.call.outputs.a"))], [edge("call", "done")])
+    workflow, status, body = save_status("rf-unwrap-parent", g)
+    result = None
+    if status < 300:
+        compile_latest(workflow)
+        result = execute(workflow)
+    check("C3 a caller reads the unwrapped fields of a child whose Finish maps only outputs",
+          status < 300 and ((result or {}).get("outputs") or {}).get("a") == 1,
+          {"status": status, "codes": rejected_codes(body), "run": result})
+
+
 # ---------------------------------------------------------------- E2-E5
 
 
@@ -586,7 +609,7 @@ CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, chec
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
           check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions,
           check_nested_immediate_references, check_workflow_inputs_in_bodies, check_group_by_keys,
-          check_null_collections, check_zero_timeouts, check_condition_spellings, check_route_less_switch_cases, check_error_context_spellings, check_runtime_variables, check_doc_drift, check_mcp_prose]
+          check_null_collections, check_zero_timeouts, check_condition_spellings, check_route_less_switch_cases, check_error_context_spellings, check_runtime_variables, check_lone_outputs_unwrap, check_doc_drift, check_mcp_prose]
 
 
 def main():
