@@ -13,6 +13,13 @@
 // NOTE: This file is included by build.rs via include!() macro, so it cannot
 // have `use` statements or `//!` doc comments. Imports are provided by the
 // including module.
+//
+// Spelling conventions: field names are camelCase; operators (condition `op`,
+// Switch `matchType`) are SCREAMING_SNAKE_CASE; kinds and type names
+// (`valueType`, type hints, schema field types, `compaction.strategy`) are
+// lowercase or camelCase; `stepType` is PascalCase. Inputs must use these
+// spellings exactly. Unifying the exceptions is planned for DSL 4.0 (see the
+// 3.6.0 changelog entry).
 
 /// DSL version - bump when making breaking changes
 pub const DSL_VERSION: &str = "3.5.0";
@@ -2406,7 +2413,12 @@ impl<'de> Deserialize<'de> for ConditionArgument {
 // ============================================================================
 
 /// Match type for switch cases.
-/// Supports all ConditionOperator values plus compound match types.
+///
+/// The comparison (`GT`, `GTE`, `LT`, `LTE`, `EQ`, `NE`), string, array and
+/// emptiness operators of [`ConditionOperator`], plus the Switch-only `BETWEEN`
+/// and `RANGE`. The logical operators (`AND`, `OR`, `NOT`), `LENGTH` and the
+/// search operators (`MATCH`, `SIMILARITY_GTE`, the distance operators) are not
+/// match types: a case compares the switch value with its `match`.
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -2955,5 +2967,25 @@ mod condition_tag_tests {
         assert!(error.contains("NOPE"), "{error}");
         let error = parse(json!(true)).unwrap_err();
         assert!(error.contains("must be an object"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod switch_match_type_tests {
+    use super::*;
+
+    /// The match types are the comparison operators plus BETWEEN and RANGE,
+    /// not every ConditionOperator (D).
+    #[test]
+    fn logical_and_length_operators_are_not_match_types() {
+        for op in ["AND", "LENGTH", "MATCH"] {
+            let error = serde_json::from_value::<SwitchMatchType>(serde_json::json!(op))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("BETWEEN"), "{op}: {error}");
+        }
+        for op in ["EQ", "STARTS_WITH", "IS_NOT_EMPTY", "BETWEEN", "RANGE"] {
+            serde_json::from_value::<SwitchMatchType>(serde_json::json!(op)).unwrap();
+        }
     }
 }

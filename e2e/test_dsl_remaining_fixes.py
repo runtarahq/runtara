@@ -530,6 +530,23 @@ def check_lone_outputs_unwrap():
           {"status": status, "codes": rejected_codes(body), "run": result})
 
 
+# ---------------------------------------------------------------- D (match)
+
+
+def check_switch_match_types():
+    def switch(match_type):
+        return graph("sw", [
+            {"stepType": "Switch", "id": "sw", "config": {"value": imm("x"), "default": "D", "cases": [
+                {"matchType": match_type, "match": "x", "output": "X"}]}},
+            fin("done", out=ref("steps.sw.outputs"))], [edge("sw", "done")])
+    _, and_status, and_body = save_status("rf-match-and", switch("AND"))
+    _, eq_status, _ = save_status("rf-match-eq", switch("EQ"))
+    text = json.dumps(and_body)
+    check("D SwitchMatchType rejects AND and names the match types it takes",
+          and_status == 400 and "BETWEEN" in text and eq_status < 300,
+          {"AND": and_status, "EQ": eq_status, "body": text[:300]})
+
+
 # ---------------------------------------------------------------- E2-E5
 
 
@@ -609,7 +626,7 @@ CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, chec
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
           check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions,
           check_nested_immediate_references, check_workflow_inputs_in_bodies, check_group_by_keys,
-          check_null_collections, check_zero_timeouts, check_condition_spellings, check_route_less_switch_cases, check_error_context_spellings, check_runtime_variables, check_lone_outputs_unwrap, check_doc_drift, check_mcp_prose]
+          check_null_collections, check_zero_timeouts, check_condition_spellings, check_route_less_switch_cases, check_error_context_spellings, check_runtime_variables, check_lone_outputs_unwrap, check_switch_match_types, check_doc_drift, check_mcp_prose]
 
 
 def main():
