@@ -2757,7 +2757,6 @@ fn direct_wasm_execute_group_by_finish_reports_completion() {
                 "active": 2,
                 "inactive": 1
             },
-            "totalGroups": 2,
             "total_groups": 2
         })
     );
