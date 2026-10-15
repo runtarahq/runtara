@@ -591,6 +591,27 @@ def check_type_vocabulary():
           {"outputs": out, "warnings": warned, "connection": [ok_status, bad_status]})
 
 
+# ---------------------------------------------------------- D-naming (casing)
+
+
+def check_casing():
+    g = graph("g", [
+        {"stepType": "GroupBy", "id": "g", "config": {"value": imm([{"k": "a"}, {"k": "b"}]), "key": "k"}},
+        fin("done", total=ref("steps.g.outputs.totalGroups"), old=ref("steps.g.outputs.total_groups"))],
+        [edge("g", "done")])
+    _, body = call("POST", "/workflows/graph/validate", {"name": "rf-total-groups", **g})
+    warned = [w for w in (body or {}).get("warnings") or [] if str(w).startswith("[W093]")]
+    r = run("rf-total-groups", g)
+    out = r.get("outputs") or {}
+    workflow, _, _ = save_status("rf-memory-tier", graph("f", [fin("f")]))
+    status, tier_body = call("POST", f"/workflows/{workflow}/update",
+                             {"executionGraph": {"name": f"rf-memory-tier-{RUN}", **graph("f", [fin("f")])},
+                              "memoryTier": "xl"})
+    check("D-naming GroupBy outputs totalGroups (total_groups warns W093) and memoryTier reads lowercase",
+          out.get("total") == 2 and out.get("old") == 2 and len(warned) == 1 and "'totalGroups'" in warned[0]
+          and status < 300, {"outputs": out, "warnings": warned, "memoryTier": status})
+
+
 # ------------------------------------------------------------------- 3.6.0
 
 
@@ -683,7 +704,7 @@ CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, chec
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
           check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions,
           check_nested_immediate_references, check_workflow_inputs_in_bodies, check_group_by_keys,
-          check_null_collections, check_zero_timeouts, check_condition_spellings, check_route_less_switch_cases, check_error_context_spellings, check_runtime_variables, check_lone_outputs_unwrap, check_switch_match_types, check_duration_names, check_type_vocabulary, check_dsl_version, check_doc_drift, check_mcp_prose]
+          check_null_collections, check_zero_timeouts, check_condition_spellings, check_route_less_switch_cases, check_error_context_spellings, check_runtime_variables, check_lone_outputs_unwrap, check_switch_match_types, check_duration_names, check_type_vocabulary, check_casing, check_dsl_version, check_doc_drift, check_mcp_prose]
 
 
 def main():

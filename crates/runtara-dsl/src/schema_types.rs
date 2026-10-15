@@ -14,15 +14,16 @@
 // have `use` statements or `//!` doc comments. Imports are provided by the
 // including module.
 //
-// Spelling conventions: field names are camelCase, and a millisecond field
-// ends in `Ms` (`timeoutMs`, `retryDelayMs`, `durationMs`); the old `timeout`,
-// `retryDelay` and `turnTimeout` still read as deprecated aliases (W093).
-// Operators (condition `op`,
-// Switch `matchType`) are SCREAMING_SNAKE_CASE; kinds and type names
-// (`valueType`, type hints, schema field types, `compaction.strategy`) are
-// lowercase or camelCase; `stepType` is PascalCase. Inputs must use these
-// spellings exactly. Unifying the exceptions is planned for DSL 4.0 (see the
-// 3.6.0 changelog entry).
+// Spelling conventions (DSL 3.6):
+// - Field names and output keys are camelCase, and a millisecond field ends
+//   in `Ms` (`timeoutMs`, `retryDelayMs`, `durationMs`).
+// - Enum values are lowercase, camelCase when they are more than one word
+//   (`valueType`, type hints, schema field types, `slidingWindow`).
+// - Operators (condition `op`, Switch `matchType`) are SCREAMING_SNAKE_CASE,
+//   as in SQL; `stepType` is PascalCase, as type names are.
+// Deprecated spellings still read and warn (W093): `timeout`, `retryDelay`,
+// `turnTimeout`, the `json` hint and GroupBy's `total_groups`. `memoryTier`
+// (S, M, L, XL) also reads lowercase. DSL 4.0 removes the deprecated ones.
 
 /// DSL version - bump when making breaking changes
 pub const DSL_VERSION: &str = "3.6.0";
@@ -64,10 +65,15 @@ pub struct Workflow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum MemoryTier {
+    // Written uppercase; lowercase input is accepted too.
+    #[serde(alias = "s")]
     S,
+    #[serde(alias = "m")]
     M,
+    #[serde(alias = "l")]
     L,
     #[default]
+    #[serde(alias = "xl")]
     XL,
 }
 

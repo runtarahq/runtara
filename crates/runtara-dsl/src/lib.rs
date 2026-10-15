@@ -946,6 +946,15 @@ mod tests {
     }
 
     #[test]
+    fn memory_tier_reads_lowercase_and_writes_uppercase() {
+        let tier: MemoryTier = serde_json::from_value(serde_json::json!("xl")).unwrap();
+        assert_eq!(tier, MemoryTier::XL);
+        assert_eq!(serde_json::to_value(tier).unwrap(), serde_json::json!("XL"));
+        let tier: MemoryTier = serde_json::from_value(serde_json::json!("M")).unwrap();
+        assert_eq!(tier, MemoryTier::M);
+    }
+
+    #[test]
     fn public_runtime_variables_are_reserved() {
         for (name, _) in PUBLIC_RUNTIME_VARIABLES {
             assert!(is_runtime_variable_name(name), "{name} is not reserved");

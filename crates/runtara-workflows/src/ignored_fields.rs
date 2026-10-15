@@ -111,9 +111,77 @@ pub fn deprecated_definition_spellings(definition: &Value) -> Vec<ValidationWarn
             _ => {}
         }
     }
+    /// Every GroupBy step id, in every nested graph.
+    fn group_by_ids(graph: &Value, out: &mut Vec<String>) {
+        let Some(steps) = graph.get("steps").and_then(Value::as_object) else {
+            return;
+        };
+        for (step_id, step) in steps {
+            if step.get("stepType").and_then(Value::as_str) == Some("GroupBy") {
+                out.push(step_id.clone());
+            }
+            for key in ["subgraph", "onWait"] {
+                if let Some(nested) = step.get(key) {
+                    group_by_ids(nested, out);
+                }
+            }
+        }
+    }
+    /// References and templates reading a GroupBy's `total_groups`.
+    fn total_groups_reads(
+        value: &Value,
+        path: &str,
+        groups: &[String],
+        out: &mut Vec<ValidationWarning>,
+    ) {
+        match value {
+            Value::Object(map) => {
+                let text = match map.get("valueType").and_then(Value::as_str) {
+                    Some("reference" | "template") => map.get("value").and_then(Value::as_str),
+                    _ => None,
+                };
+                if let Some(text) = text
+                    && groups.iter().any(|id| {
+                        [
+                            format!("steps.{id}.outputs.total_groups"),
+                            format!("steps['{id}'].outputs.total_groups"),
+                            format!("steps[\"{id}\"].outputs.total_groups"),
+                        ]
+                        .iter()
+                        .any(|read| text.contains(read.as_str()))
+                    })
+                {
+                    out.push(ValidationWarning::DeprecatedSpelling {
+                        path: format!("{path}.value"),
+                        found: "total_groups".to_string(),
+                        canonical: "totalGroups".to_string(),
+                    });
+                }
+                for (key, child) in map {
+                    let child_path = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    total_groups_reads(child, &child_path, groups, out);
+                }
+            }
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    total_groups_reads(item, &format!("{path}.{index}"), groups, out);
+                }
+            }
+            _ => {}
+        }
+    }
     let mut warnings = Vec::new();
     walk(definition, "", &mut warnings);
     json_hints(definition, "", &mut warnings);
+    let mut groups = Vec::new();
+    group_by_ids(definition, &mut groups);
+    if !groups.is_empty() {
+        total_groups_reads(definition, "", &groups, &mut warnings);
+    }
     warnings
 }
 
@@ -289,6 +357,28 @@ mod tests {
             found
                 .iter()
                 .any(|w| w.contains("'steps.c.condition.arguments.0.type'"))
+        );
+    }
+
+    #[test]
+    fn group_by_total_groups_reads_are_reported() {
+        let found: Vec<String> = deprecated_definition_spellings(&json!({
+            "entryPoint": "g",
+            "steps": {
+                "g": {"id": "g", "stepType": "GroupBy"},
+                "f": {"id": "f", "stepType": "Finish", "inputMapping": {
+                    "old": {"valueType": "reference", "value": "steps.g.outputs.total_groups"},
+                    "text": {"valueType": "template", "value": "{{ steps.g.outputs.total_groups }}"},
+                    "new": {"valueType": "reference", "value": "steps.g.outputs.totalGroups"}}}
+            }
+        }))
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(
+            found.iter().all(|w| w.contains("'totalGroups'")),
+            "{found:?}"
         );
     }
 

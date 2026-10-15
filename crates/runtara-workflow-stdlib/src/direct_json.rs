@@ -5952,6 +5952,8 @@ fn apply_group_by(config: &Value, source: &Value) -> Result<Value, String> {
     Ok(serde_json::json!({
         "groups": groups,
         "counts": counts,
+        "totalGroups": groups.len(),
+        // Deprecated spelling, kept until DSL 4.0 (W093).
         "total_groups": groups.len(),
     }))
 }
@@ -11539,6 +11541,7 @@ mod tests {
 
         assert_eq!(output["counts"], json!({ "active": 2, "inactive": 1 }));
         assert_eq!(output["total_groups"], json!(2));
+        assert_eq!(output["totalGroups"], json!(2));
         assert_eq!(output["groups"]["active"][0]["id"], json!(1));
         assert_eq!(output["groups"]["active"][1]["id"], json!(3));
         assert_eq!(steps["group"]["stepName"], json!("Group by Status"));
