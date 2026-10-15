@@ -1791,12 +1791,12 @@ mod tests {
 
     #[test]
     fn test_template_value_from_json() {
-        let json = r#"{"valueType": "template", "value": "Bearer {{ steps.my_conn.outputs.parameters.api_key }}"}"#;
+        let json = r#"{"valueType": "template", "value": "Hello {{ data.user.name }}"}"#;
         let parsed: MappingValue = serde_json::from_str(json).unwrap();
         assert!(parsed.is_template());
         assert_eq!(
             parsed.as_template_str().unwrap(),
-            "Bearer {{ steps.my_conn.outputs.parameters.api_key }}"
+            "Hello {{ data.user.name }}"
         );
     }
 

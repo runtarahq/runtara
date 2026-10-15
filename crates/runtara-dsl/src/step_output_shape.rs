@@ -119,6 +119,11 @@ const SPLIT_SIBLINGS: &[ShapeField] = &[
     ),
 ];
 
+const LOG_FIELDS: &[ShapeField] = &[
+    field("level", "string", "The log level"),
+    field("message", "string", "The logged message"),
+];
+
 const FILTER_FIELDS: &[ShapeField] = &[
     field("items", "array", "Input items that matched the condition"),
     field("count", "integer", "Number of items kept"),
@@ -252,8 +257,8 @@ pub fn step_output_shape(step_type: &str) -> Option<StepOutputShape> {
             siblings: &[],
         },
         "Log" => StepOutputShape {
-            summary: "Diagnostic only: emits a log/debug event and writes no referenceable `outputs`.",
-            outputs: OutputsShape::Dynamic,
+            summary: "Emits a log/debug event; `outputs` is `{level, message}`, the level and the message as logged.",
+            outputs: OutputsShape::Object(LOG_FIELDS),
             siblings: &[],
         },
         "Delay" => StepOutputShape {

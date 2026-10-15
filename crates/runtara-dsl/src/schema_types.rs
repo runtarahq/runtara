@@ -1741,8 +1741,8 @@ pub enum MappingValue {
 /// - `workflow.inputs` - Original workflow inputs
 ///
 /// Built-in variables (available in all steps, including subgraphs):
-/// - `variables._workflow_id` - Unique per execution: "{workflow_id}::{instance_id}"
-/// - `variables._instance_id` - Execution instance UUID
+/// - `variables._workflow_id` - The workflow's id (the same for every execution)
+/// - `variables._instance_id` - Execution instance UUID (unique per execution)
 /// - `variables._tenant_id` - Tenant identifier
 ///
 /// Example: `{ "valueType": "reference", "value": "data.user.name" }`
@@ -1859,7 +1859,7 @@ pub enum CompositeInner {
 /// - `steps.<id>.outputs.*` — previous step outputs
 /// - `workflow.inputs.*` — original workflow inputs
 ///
-/// Example: `{ "valueType": "template", "value": "Bearer {{ steps.my_conn.outputs.parameters.api_key }}" }`
+/// Example: `{ "valueType": "template", "value": "Hello {{ data.user.name }}, order {{ steps.fetch.outputs.id }}" }`
 /// With filter: `{ "valueType": "template", "value": "{{ data.name | upper }}" }`
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]

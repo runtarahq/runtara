@@ -227,8 +227,8 @@ pub fn get_dsl_changelog() -> Value {
                     {
                         "type": "removed",
                         "component": "step-type",
-                        "description": "Removed GroupBy step type",
-                        "migration": "Use Agent step with transform.group-by operator"
+                        "description": "Removed GroupBy step type (it was later reinstated and is a step type again)",
+                        "migration": "None needed now: use the GroupBy step"
                     }
                 ]
             },

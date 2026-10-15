@@ -411,11 +411,33 @@ def check_zero_timeouts():
           and seen["split"] and "no timeout here" in seen["split"][0], seen)
 
 
+# ---------------------------------------------------------------- E2-E5
+
+
+def check_doc_drift():
+    g = graph("log", [{"stepType": "Log", "id": "log", "message": "hello"},
+                      fin("done", level=ref("steps.log.outputs.level"), wid=ref("variables._workflow_id"))],
+              [edge("log", "done")])
+    workflow, status, _ = save_status("rf-log-outputs", g)
+    compile_latest(workflow)
+    out = execute(workflow).get("outputs") or {}
+    check("E5 Log outputs {level, message} are referenceable; E3 _workflow_id is the workflow id",
+          out.get("level") == "info" and out.get("wid") == workflow, {"outputs": out, "workflow": workflow})
+    typo = graph("log", [{"stepType": "Log", "id": "log", "message": "hello"},
+                         fin("done", x=ref("steps.log.outputs.lvl"))], [edge("log", "done")])
+    status, body = call("POST", "/workflows/graph/validate", {"name": "e5", **typo})
+    check("E5 a mistyped Log output field is now caught", body.get("valid") is False,
+          {"errors": (body or {}).get("errors")})
+    status, body = call("GET", "/specs/dsl/changelog")
+    text = json.dumps(body)
+    check("E4 the served changelog says GroupBy was reinstated", "reinstated" in text, {"status": status})
+
+
 CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, check_child_version_spellings,
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
           check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions,
           check_nested_immediate_references, check_workflow_inputs_in_bodies, check_group_by_keys,
-          check_null_collections, check_zero_timeouts]
+          check_null_collections, check_zero_timeouts, check_doc_drift]
 
 
 def main():
