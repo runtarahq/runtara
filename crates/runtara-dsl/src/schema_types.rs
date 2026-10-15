@@ -22,7 +22,7 @@
 // 3.6.0 changelog entry).
 
 /// DSL version - bump when making breaking changes
-pub const DSL_VERSION: &str = "3.5.0";
+pub const DSL_VERSION: &str = "3.6.0";
 
 // ============================================================================
 // Root Types

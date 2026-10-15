@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **DSL 3.6.0: fixes from the DSL audit** (`docs/dsl-audit-2026-10-14.md`).
+  Graphs the compiler cannot build, non-durable Delays, missing Split or
+  Switch config and mistyped variables are rejected at save (E136–E151)
+  instead of failing at compile or run time, and W084–W092 flag keys,
+  settings and references that are ignored or do something unexpected. `workflow.inputs` is the run's input in every scope, onError
+  handlers route their own failures, a value condition can carry a type hint,
+  and AiAgent turns retry and report provider throttling as `AI_RATE_LIMITED`.
+  The changelog at `/api/runtime/specs/dsl/changelog` lists the deprecated
+  spellings that DSL 4.0 is to remove.
+
 - **Workflows can declare `stateSchema`**, the typed state a run exposes,
   next to `inputSchema` and `outputSchema`: a map of schema fields with
   labels, formats and enums (DSL 3.4.0). It is stored with each version,

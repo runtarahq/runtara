@@ -113,6 +113,58 @@ pub fn get_dsl_changelog() -> Value {
         "version": DSL_VERSION,
         "changes": [
             {
+                "version": "3.6.0",
+                "date": "2026-10-15",
+                "breaking": false,
+                "changes": [
+                    {
+                        "type": "changed",
+                        "component": "execution-graph",
+                        "description": "workflow.inputs is the run's input in every scope; inside a Split, While or onWait body it used to be the item. Nested graphs inherit the workflow's rate-limit budget, their parent's variables and their own declared variables."
+                    },
+                    {
+                        "type": "changed",
+                        "component": "condition",
+                        "description": "The condition type tag is optional: an object with op is an operation and any other object is a value. A value condition may use type for a reference's type hint, written untagged, and a nested operation needs no tag. Workflow conditions, form conditions and requiredWhen share one comparison implementation; visibleWhen with both equals and notEquals requires both."
+                    },
+                    {
+                        "type": "changed",
+                        "component": "step-field",
+                        "description": "childVersion reads latest and current case-insensitively and a numeric string as the version number. An empty edge label is no label. Split sequential:true now runs one iteration at a time over parallelism."
+                    },
+                    {
+                        "type": "changed",
+                        "component": "schema-field",
+                        "description": "Workflow start inputs get SchemaField defaults before the required check, including nested properties and array items, and an explicit null passes a nullable field."
+                    },
+                    {
+                        "type": "changed",
+                        "component": "step-type",
+                        "description": "A failing step inside an onError handler runs that step's own onError edges, nested up to 4 handler levels. An AiAgent tool loop retries a failed chat turn up to maxRetries, and an LLM provider 429 or throttling exception fails with AI_RATE_LIMITED and the provider's retry-after."
+                    },
+                    {
+                        "type": "added",
+                        "component": "validation",
+                        "description": "E136 reserved step id, E137 reserved variable name, E138 unsupported graph shape, E139 conditioned edges without a default, E140 Conditional missing a branch, E141 routing Switch without a default edge, E142 onError edge from a step type that cannot route failures, E143 unknown edge label, E144 conditioned exit from a fan-out branch, E145 non-durable Delay, E146 Split or Switch without config, E147 a literal duration or timeout that is not a number, E148 template syntax error, E149 onError nesting too deep or looping, E150 variable value not of its declared type, E151 field condition without a test."
+                    },
+                    {
+                        "type": "added",
+                        "component": "validation",
+                        "description": "W084 workflow setting on a nested graph, W085 unknown error-context field, W086 ignored definition key, W087 sequential overrides parallelism, W088 pollIntervalMs ignored, W089 field condition that never matches, W090 reference inside an immediate that does not resolve, W091 timeout 0, W092 routing Switch case without a route. W053 also covers the bare error root and the steps.error alias."
+                    },
+                    {
+                        "type": "deprecated",
+                        "component": "execution-graph",
+                        "description": "To be removed in DSL 4.0: the steps.error, __error and error spellings of the error context (use steps.__error), WaitForSignal pollIntervalMs, memoryTier and trackEvents on Workflow (set them on the update request), and the While alias variables._previousOutputs (use loop.outputs)."
+                    },
+                    {
+                        "type": "planned",
+                        "component": "dsl-4.0",
+                        "description": "DSL 4.0 is to give timeout one meaning and one unit on every step, including AiAgent, which has none at step level; one type vocabulary for type hints, variable types and schema field types; one enum casing convention; an explicit single-value Finish output in place of unwrapping a lone outputs key; template support in Log and Error messages; and reserved _previousOutputs."
+                    }
+                ]
+            },
+            {
                 "version": "3.5.0",
                 "date": "2026-09-29",
                 "breaking": false,
