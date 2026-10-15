@@ -8739,14 +8739,30 @@ fn direct_wasm_execute_invoke_wait_observes_persistence_expiry_with_guest_clock_
         matches!(early, runtara_component_host::InvokeExit::Suspended(_)),
         "guest tolerance cannot expire the managed request early, got {early:?}"
     );
-    thread::sleep(Duration::from_millis(deadline.saturating_sub(now_ms()) + 1));
+    // Wait out the deadline persistence holds, not the guest's. Registration
+    // rebases the guest deadline onto the persistence clock sampled after the
+    // guest's, so the stored one is later by that gap, which a loaded run can
+    // stretch past a millisecond.
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let persisted = runtime
+        .block_on(host.managed_inputs.request(&signal))
+        .spec
+        .deadline
+        .expect("timed wait persists a deadline")
+        .timestamp_millis() as u64;
+    assert!(
+        persisted >= deadline,
+        "persistence deadline precedes the guest's"
+    );
+    thread::sleep(Duration::from_millis(
+        persisted.saturating_sub(now_ms()) + 1,
+    ));
     let expired = run_invoke_once(&artifact.wasm_path, host.clone(), input);
     assert!(
         matches!(expired, runtara_component_host::InvokeExit::Failed(ref error)
         if error.message.contains("timed out")),
         "persistence expiry must surface as WAIT_TIMEOUT, got {expired:?}"
     );
-    let runtime = tokio::runtime::Runtime::new().unwrap();
     assert!(matches!(
         runtime.block_on(host.managed_inputs.request(&signal)).state,
         runtara_core::persistence::inputs::InputState::Closed {
