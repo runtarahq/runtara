@@ -7318,6 +7318,7 @@ fn validate_data_and_variable_references(graph: &ExecutionGraph, result: &mut Va
         graph,
         &HashSet::new(),          // No inherited variables at top level
         DataScope::RequireSchema, // Top level requires inputSchema for data references
+        &graph.input_schema,      // What `workflow.inputs.data` is, in every scope
         result,
     );
 }
@@ -7328,11 +7329,14 @@ fn validate_data_and_variable_references(graph: &ExecutionGraph, result: &mut Va
 /// * `graph` - The execution graph to validate
 /// * `inherited_variables` - Variable names inherited from parent scope (e.g., Split config.variables)
 /// * `data_scope` - What `data.*` references resolve against in this scope (see [`DataScope`])
+/// * `run_input` - The workflow's own `inputSchema`, which `workflow.inputs.data`
+///   resolves against in every scope (a body's `data` may be its item instead)
 /// * `result` - Accumulator for validation errors
 fn validate_data_and_variable_references_with_context(
     graph: &ExecutionGraph,
     inherited_variables: &HashSet<String>,
     data_scope: DataScope<'_>,
+    run_input: &HashMap<String, SchemaField>,
     result: &mut ValidationResult,
 ) {
     // Merge inherited variables with graph's own variables + built-in runtime variables.
@@ -7364,6 +7368,7 @@ fn validate_data_and_variable_references_with_context(
                 reference,
                 graph,
                 data_scope,
+                run_input,
                 &all_variables,
                 &available_variables,
                 has_loop_context,
@@ -7383,6 +7388,7 @@ fn validate_data_and_variable_references_with_context(
                 reference,
                 graph,
                 data_scope,
+                run_input,
                 &all_variables,
                 &available_variables,
                 has_loop_context,
@@ -7397,6 +7403,7 @@ fn validate_data_and_variable_references_with_context(
                 reference,
                 graph,
                 data_scope,
+                run_input,
                 &all_variables,
                 &available_variables,
                 true,
@@ -7415,6 +7422,7 @@ fn validate_data_and_variable_references_with_context(
                 reference,
                 graph,
                 data_scope,
+                run_input,
                 &all_variables,
                 &available_variables,
                 has_loop_context,
@@ -7453,6 +7461,7 @@ fn validate_data_and_variable_references_with_context(
                         &split_step.subgraph,
                         &injected_vars,
                         DataScope::for_split_body(&split_step.input_schema),
+                        run_input,
                         result,
                     )
                 });
@@ -7482,6 +7491,7 @@ fn validate_data_and_variable_references_with_context(
                         &while_step.subgraph,
                         &injected_vars,
                         data_scope.for_while_body(graph),
+                        run_input,
                         result,
                     )
                 });
@@ -7499,6 +7509,7 @@ fn validate_data_and_variable_references_with_context(
                             on_wait,
                             &injected_vars,
                             DataScope::RequireSchema,
+                            run_input,
                             result,
                         )
                     });
@@ -7523,6 +7534,7 @@ fn validate_reference_root(
     reference: &str,
     graph: &ExecutionGraph,
     data_scope: DataScope<'_>,
+    run_input: &HashMap<String, SchemaField>,
     all_variables: &HashSet<String>,
     available_variables: &[String],
     loop_allowed: bool,
@@ -7587,7 +7599,7 @@ fn validate_reference_root(
                 step_id,
                 reference,
                 graph,
-                data_scope,
+                run_input,
                 all_variables,
                 available_variables,
                 result,
@@ -7715,7 +7727,7 @@ fn validate_workflow_reference(
     step_id: &str,
     reference: &str,
     graph: &ExecutionGraph,
-    data_scope: DataScope<'_>,
+    run_input: &HashMap<String, SchemaField>,
     all_variables: &HashSet<String>,
     available_variables: &[String],
     result: &mut ValidationResult,
@@ -7740,12 +7752,17 @@ fn validate_workflow_reference(
         // `workflow.inputs` and either bare scope address a whole object;
         // there is nothing below them to check.
         [] | ["data"] | ["variables"] => {}
+        // The run's input, in every scope (a body's `data` may be its item).
         ["data", ..] => validate_data_reference_in_scope(
             step_id,
             reference,
             &["workflow", "inputs", "data"],
             graph,
-            data_scope,
+            if run_input.is_empty() {
+                DataScope::RequireSchema
+            } else {
+                DataScope::Declared(run_input)
+            },
             result,
         ),
         ["variables", field_name, ..] => {
@@ -15871,28 +15888,44 @@ mod tests {
         );
     }
 
+    /// `workflow.inputs.data` is the run's input in a Split body too (not the
+    /// item), so it is checked against the workflow's own inputSchema.
     #[test]
-    fn test_split_subgraph_workflow_inputs_data_typo_errors() {
-        let mut mapping = InputMapping::new();
-        mapping.insert(
-            "item_name".to_string(),
-            ref_value("workflow.inputs.data.nmae"),
-        );
-
-        let graph = wrap_in_main_graph(
-            "split",
-            split_step_with_schema("split", subgraph_with_agent_mapping(mapping), item_schema()),
-        );
-        let result = validate_workflow(&graph, &test_catalog());
-
+    fn test_split_subgraph_workflow_inputs_data_is_the_run_input() {
+        let run_input = |path: &str| {
+            let mut mapping = InputMapping::new();
+            mapping.insert("value".to_string(), ref_value(path));
+            let mut graph = wrap_in_main_graph(
+                "split",
+                split_step_with_schema(
+                    "split",
+                    subgraph_with_agent_mapping(mapping),
+                    item_schema(),
+                ),
+            );
+            graph
+                .input_schema
+                .insert("order".to_string(), schema_field(SchemaFieldType::Integer));
+            validate_workflow(&graph, &test_catalog()).errors
+        };
+        let typo = run_input("workflow.inputs.data.ordr");
         assert!(
-            result.errors.iter().any(|e| matches!(
+            typo.iter().any(|e| matches!(
                 e,
                 ValidationError::UndefinedDataReference { step_id, field_name, .. }
-                    if step_id == "sub_agent" && field_name == "nmae"
+                    if step_id == "sub_agent" && field_name == "ordr"
             )),
-            "workflow.inputs.data mirrors the iteration data, so typos should error; got: {:?}",
-            result.errors
+            "{typo:?}"
+        );
+        // A run-input field the item does not have is valid in the body.
+        let valid = run_input("workflow.inputs.data.order");
+        assert!(
+            !valid.iter().any(|e| matches!(
+                e,
+                ValidationError::UndefinedDataReference { .. }
+                    | ValidationError::MissingInputSchema { .. }
+            )),
+            "{valid:?}"
         );
     }
 

@@ -1304,7 +1304,7 @@ impl DirectJsonManifest {
             .cloned()
             .unwrap_or_default();
         let inputs = match step.step_type.as_str() {
-            "Conditional" => source.clone(),
+            "Conditional" => debug_source_view(&source),
             "Finish" => self
                 .finish_mapping(step)
                 .map(|mapping| apply_input_mapping(&mapping.value, &source))
@@ -4299,6 +4299,20 @@ impl DirectJsonManifest {
 /// onWait, handlers) inherit the marker with the root's raw input.
 pub const INPUT_ENVELOPE_VARIABLE: &str = "_input_envelope";
 
+/// Runtime-owned variable carrying the run's `{data, variables}` into nested
+/// scopes, so `workflow.inputs` means the same thing in every body.
+pub const WORKFLOW_INPUTS_VARIABLE: &str = "_workflow_inputs";
+
+/// A source as debug events and breakpoints show it: without the internal
+/// copy of the run input (it is already visible under `workflow.inputs`).
+fn debug_source_view(source: &Value) -> Value {
+    let mut view = source.clone();
+    if let Some(variables) = view.get_mut("variables").and_then(Value::as_object_mut) {
+        variables.remove(WORKFLOW_INPUTS_VARIABLE);
+    }
+    view
+}
+
 /// Inject the synthetic runtime-identity variables `_instance_id` and
 /// `_tenant_id` that the generated compiler exposes on every `variables`
 /// snapshot (codegen `emit_main`), read from the same env vars generated uses.
@@ -4384,6 +4398,22 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
         intern_scope_entries(map);
     }
 
+    // `workflow.inputs` is the run's own input in every scope. The outermost
+    // scope (a run, or an embedded child's run) records it, built from the
+    // interned data and variables so it stays small; Split/While/onWait bodies
+    // inherit it through the variable copy, so a body sees the input the
+    // workflow was started with rather than its item.
+    let workflow_inputs = match variables.get(WORKFLOW_INPUTS_VARIABLE) {
+        Some(inputs) => inputs.clone(),
+        None => {
+            let inputs = serde_json::json!({"data": data.clone(), "variables": variables.clone()});
+            if let Value::Object(map) = &mut variables {
+                map.insert(WORKFLOW_INPUTS_VARIABLE.to_string(), inputs.clone());
+            }
+            inputs
+        }
+    };
+
     // onError handlers inject the captured error envelope at `steps.__error`
     // (alias `steps.error`, see `error_steps`). Mirror it to the source root so
     // references using the historically-documented bare `__error.*` / `error.*`
@@ -4404,12 +4434,9 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
         source.insert("error".to_string(), error);
     }
 
-    let mut workflow_inputs = Map::new();
-    workflow_inputs.insert("data".to_string(), data);
-    workflow_inputs.insert("variables".to_string(), variables.clone());
     source.insert(
         "workflow".to_string(),
-        serde_json::json!({ "inputs": Value::Object(workflow_inputs) }),
+        serde_json::json!({ "inputs": workflow_inputs }),
     );
 
     if let Some(iteration) = iteration_context(&variables) {
@@ -13588,6 +13615,27 @@ mod tests {
         assert_eq!(variables["color"], "on-wait-blue");
         assert_eq!(variables["tenant"], "t1");
         assert_eq!(variables["_signal_id"], "inst-1/root/wait");
+    }
+
+    /// `workflow.inputs` is the run's input in a Split body too, not the item.
+    #[test]
+    fn workflow_inputs_are_the_run_input_inside_a_split_body() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({}))).expect("manifest");
+        let root = build_source(
+            br#"{"data":{"items":[1],"order":7},"variables":{}}"#,
+            br#"{"_input_envelope":true,"_workflow_id":"wf"}"#,
+            b"{}",
+        )
+        .expect("root source");
+        let root_value: Value = serde_json::from_slice(&root).unwrap();
+        assert_eq!(root_value["workflow"]["inputs"]["data"]["order"], 7);
+        let iteration = manifest
+            .split_iteration_variables(0, &root, br#"{"item":true}"#, 0)
+            .expect("iteration variables");
+        let body = build_source(br#"{"item":true}"#, &iteration, b"{}").expect("body source");
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["data"]["item"], true);
+        assert_eq!(body["workflow"]["inputs"]["data"]["order"], 7, "{body}");
     }
 
     #[test]

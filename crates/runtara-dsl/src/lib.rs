@@ -62,6 +62,7 @@ pub const RUNTIME_VARIABLE_NAMES: &[&str] = &[
     "_manifest_graph_path",
     "_durable_key_version",
     "_input_envelope",
+    "_workflow_inputs",
 ];
 
 /// Whether `name` is a runtime-owned variable binding (see

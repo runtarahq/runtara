@@ -346,10 +346,25 @@ def check_nested_immediate_references():
           {"warnings": warnings, "outputs": out})
 
 
+# ---------------------------------------------------------------------- C5
+
+
+def check_workflow_inputs_in_bodies():
+    g = graph("s", [
+        {"stepType": "Split", "id": "s", "config": {"value": ref("data.items")},
+         "subgraph": graph("f", [fin("f", item=ref("data"), order=ref("workflow.inputs.data.order"))])},
+        fin("done", out=ref("steps.s.outputs"))], [edge("s", "done")],
+        inputSchema={"items": {"type": "array"}, "order": {"type": "integer"}})
+    r = run("rf-workflow-inputs", g, {"items": [{"k": 1}], "order": 7})
+    out = (r.get("outputs") or {}).get("out") or []
+    check("C5 workflow.inputs in a Split body is the run input, not the item",
+          r.get("status") == "completed" and out == [{"item": {"k": 1}, "order": 7}], r)
+
+
 CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, check_child_version_spellings,
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
           check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions,
-          check_nested_immediate_references]
+          check_nested_immediate_references, check_workflow_inputs_in_bodies]
 
 
 def main():
