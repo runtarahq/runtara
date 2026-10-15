@@ -18601,6 +18601,30 @@ mod edge_shape_tests {
             .collect()
     }
 
+    /// A value condition can carry a reference's type hint (C1), and a nested
+    /// operation needs no `"type": "operation"` tag (C2).
+    #[test]
+    fn hinted_value_conditions_and_untagged_operations_validate() {
+        let hinted = json!({"valueType": "reference", "value": "data.count", "type": "integer"});
+        let graph = json!({"entryPoint": "c",
+            "inputSchema": {"count": {"type": "string"}},
+            "steps": {
+                "c": {"stepType": "Conditional", "id": "c", "condition": hinted},
+                "w": {"stepType": "While", "id": "w", "condition": {"op": "AND", "arguments": [
+                    {"op": "LT", "arguments": [
+                        {"valueType": "reference", "value": "data.count", "type": "integer"},
+                        {"valueType": "immediate", "value": 3}]},
+                    hinted]},
+                    "config": {"maxIterations": 3},
+                    "subgraph": {"entryPoint": "inner", "steps": {"inner": fin("inner")}}},
+                "f": fin("f")},
+            "executionPlan": [
+                {"fromStep": "c", "toStep": "w", "label": "true"},
+                {"fromStep": "c", "toStep": "f", "label": "false"},
+                {"fromStep": "w", "toStep": "f"}]});
+        assert_eq!(closure_codes(graph), Vec::<String>::new());
+    }
+
     /// The shapes the DSL audit found saving cleanly and failing only at
     /// compile (B3, B4, B6) each get one targeted error, not the gate's cascade.
     #[test]

@@ -2220,16 +2220,117 @@ pub enum ConditionOperator {
 
 /// A condition expression for conditional branching.
 /// Can be either an operation (with operator and arguments) or a simple value check.
+///
+/// The `type` tag is optional: an object with `op` is an operation, and any
+/// other object is a value. A value condition may therefore use `type` for a
+/// reference's type hint instead of the tag, which a tagged value can't carry
+/// (both are the `type` key). A value with a hint is written without the tag:
+///
+/// ```json
+/// {"condition": {"valueType": "reference", "value": "data.count", "type": "integer"}}
+/// ```
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[cfg_attr(
+    any(feature = "json-schema", feature = "utoipa"),
+    serde(tag = "type", rename_all = "lowercase")
+)]
 pub enum ConditionExpression {
     /// A comparison or logical operation
     Operation(ConditionOperation),
 
     /// A direct value (reference or immediate) - evaluated as truthy/falsy
     Value(MappingValue),
+}
+
+/// Whether a condition object is an operation: it has `op`, or the
+/// `"operation"` tag.
+fn is_operation_object(object: &serde_json::Map<String, serde_json::Value>) -> bool {
+    object.contains_key("op")
+        || object.get("type").and_then(serde_json::Value::as_str) == Some("operation")
+}
+
+/// Parse a condition object, tagged or not (see [`ConditionExpression`]).
+fn condition_from_object(
+    mut object: serde_json::Map<String, serde_json::Value>,
+) -> Result<ConditionExpression, String> {
+    if is_operation_object(&object) {
+        match object.remove("type") {
+            None => {}
+            Some(serde_json::Value::String(tag)) if tag == "operation" => {}
+            Some(other) => {
+                return Err(format!(
+                    "a condition with `op` is an operation, so its `type` must be \"operation\", got {other}"
+                ));
+            }
+        }
+        return serde_json::from_value(serde_json::Value::Object(object))
+            .map(ConditionExpression::Operation)
+            .map_err(|e| e.to_string());
+    }
+    if object.get("type").and_then(serde_json::Value::as_str) == Some("value") {
+        object.remove("type");
+    }
+    if !object.contains_key("valueType") {
+        return Err(
+            "a condition needs `op` (an operation) or `valueType` (a value)".to_string(),
+        );
+    }
+    serde_json::from_value(serde_json::Value::Object(object))
+        .map(ConditionExpression::Value)
+        .map_err(|e| e.to_string())
+}
+
+impl Serialize for ConditionExpression {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::Error;
+        let (tag, body) = match self {
+            ConditionExpression::Operation(operation) => (
+                Some("operation"),
+                serde_json::to_value(operation).map_err(S::Error::custom)?,
+            ),
+            // A hinted reference keeps its hint in `type`, so it goes untagged.
+            ConditionExpression::Value(
+                value @ MappingValue::Reference(ReferenceValue {
+                    type_hint: Some(_),
+                    ..
+                }),
+            ) => (None, serde_json::to_value(value).map_err(S::Error::custom)?),
+            ConditionExpression::Value(value) => (
+                Some("value"),
+                serde_json::to_value(value).map_err(S::Error::custom)?,
+            ),
+        };
+        let mut object = match body {
+            serde_json::Value::Object(object) => object,
+            _ => return Err(S::Error::custom("condition must serialize to an object")),
+        };
+        if let Some(tag) = tag {
+            object.insert("type".to_string(), serde_json::Value::String(tag.to_string()));
+        }
+        object.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ConditionExpression {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::Object(object) => {
+                condition_from_object(object).map_err(D::Error::custom)
+            }
+            other => Err(D::Error::custom(format!(
+                "a condition must be an object, got {other}"
+            ))),
+        }
+    }
 }
 
 /// An operation in a condition expression
@@ -2252,11 +2353,11 @@ pub struct ConditionOperation {
 /// Uses untagged serialization to avoid duplicate "type" fields when nesting
 /// expressions (since both ConditionExpression and MappingValue use internally-tagged enums).
 /// The deserializer distinguishes variants by structure:
-/// - Expression: has "op" and "arguments" fields (from ConditionExpression::Operation)
-///   or has "valueType" field (from ConditionExpression::Value -> MappingValue)
-/// - Value: has "valueType" field (from MappingValue)
+/// - Expression: has `op` (the `"operation"` tag is optional), or carries the
+///   `"value"` tag
+/// - Value: any other object, read as a mapping value (its `type` is a hint)
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(untagged)]
 pub enum ConditionArgument {
@@ -2266,6 +2367,27 @@ pub enum ConditionArgument {
 
     /// A mapping value - either reference (data path) or immediate (literal)
     Value(MappingValue),
+}
+
+impl<'de> Deserialize<'de> for ConditionArgument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        let tagged_value = raw.get("type").and_then(serde_json::Value::as_str) == Some("value");
+        match raw {
+            serde_json::Value::Object(object) if is_operation_object(&object) || tagged_value => {
+                condition_from_object(object)
+                    .map(|expression| ConditionArgument::Expression(Box::new(expression)))
+                    .map_err(D::Error::custom)
+            }
+            other => serde_json::from_value(other)
+                .map(ConditionArgument::Value)
+                .map_err(D::Error::custom),
+        }
+    }
 }
 
 // ============================================================================
@@ -2722,5 +2844,100 @@ mod child_version_tests {
         assert!(matches!(parse(serde_json::json!("LATEST")), ChildVersion::Latest(v) if v == "latest"));
         assert!(matches!(parse(serde_json::json!(" Current ")), ChildVersion::Latest(v) if v == "current"));
         assert!(matches!(parse(serde_json::json!("newest")), ChildVersion::Latest(v) if v == "newest"));
+    }
+}
+
+#[cfg(test)]
+mod condition_tag_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn parse(value: serde_json::Value) -> Result<ConditionExpression, String> {
+        serde_json::from_value(value).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn a_value_condition_can_carry_a_type_hint() {
+        let condition = parse(json!({
+            "valueType": "reference", "value": "data.count", "type": "integer"
+        }))
+        .unwrap();
+        let ConditionExpression::Value(MappingValue::Reference(reference)) = &condition else {
+            panic!("expected a reference value, got {condition:?}");
+        };
+        assert_eq!(reference.type_hint, Some(ValueType::Integer));
+        // The hint survives a round trip, untagged.
+        let written = serde_json::to_value(&condition).unwrap();
+        assert_eq!(
+            written,
+            json!({"valueType": "reference", "value": "data.count", "type": "integer"})
+        );
+        assert!(matches!(
+            parse(written).unwrap(),
+            ConditionExpression::Value(MappingValue::Reference(ReferenceValue {
+                type_hint: Some(ValueType::Integer),
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn the_tag_is_optional_and_still_written() {
+        for (input, tag) in [
+            (json!({"op": "IS_DEFINED", "arguments": [{"valueType": "reference", "value": "data.x"}]}), "operation"),
+            (json!({"type": "operation", "op": "IS_DEFINED", "arguments": [{"valueType": "reference", "value": "data.x"}]}), "operation"),
+            (json!({"valueType": "immediate", "value": true}), "value"),
+            (json!({"type": "value", "valueType": "immediate", "value": true}), "value"),
+        ] {
+            let condition = parse(input.clone()).unwrap_or_else(|e| panic!("{input}: {e}"));
+            assert_eq!(serde_json::to_value(&condition).unwrap()["type"], tag, "{input}");
+        }
+    }
+
+    #[test]
+    fn a_nested_operation_needs_no_tag() {
+        let condition = parse(json!({
+            "op": "AND",
+            "arguments": [
+                {"op": "GT", "arguments": [
+                    {"valueType": "reference", "value": "data.n", "type": "integer"},
+                    {"valueType": "immediate", "value": 1}
+                ]},
+                {"type": "value", "valueType": "immediate", "value": true}
+            ]
+        }))
+        .unwrap();
+        let ConditionExpression::Operation(and) = condition else {
+            panic!("expected an operation");
+        };
+        let ConditionArgument::Expression(inner) = &and.arguments[0] else {
+            panic!("expected a nested expression");
+        };
+        let ConditionExpression::Operation(gt) = inner.as_ref() else {
+            panic!("expected a nested operation");
+        };
+        assert!(matches!(
+            &gt.arguments[0],
+            ConditionArgument::Value(MappingValue::Reference(ReferenceValue {
+                type_hint: Some(ValueType::Integer),
+                ..
+            }))
+        ));
+        assert!(matches!(
+            &and.arguments[1],
+            ConditionArgument::Expression(value) if matches!(value.as_ref(), ConditionExpression::Value(_))
+        ));
+    }
+
+    #[test]
+    fn malformed_conditions_say_what_is_missing() {
+        let error = parse(json!({"value": "data.x"})).unwrap_err();
+        assert!(error.contains("`op` (an operation) or `valueType`"), "{error}");
+        let error = parse(json!({"op": "EQ", "type": "value", "arguments": []})).unwrap_err();
+        assert!(error.contains("its `type` must be \"operation\""), "{error}");
+        let error = parse(json!({"op": "NOPE", "arguments": []})).unwrap_err();
+        assert!(error.contains("NOPE"), "{error}");
+        let error = parse(json!(true)).unwrap_err();
+        assert!(error.contains("must be an object"), "{error}");
     }
 }

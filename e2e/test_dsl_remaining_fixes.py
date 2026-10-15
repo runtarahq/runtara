@@ -411,6 +411,31 @@ def check_zero_timeouts():
           and seen["split"] and "no timeout here" in seen["split"][0], seen)
 
 
+# ------------------------------------------------------------------ C1 / C2
+
+
+def check_condition_spellings():
+    hinted = {"valueType": "reference", "value": "data.count", "type": "integer"}
+    nested = {"op": "AND", "arguments": [hinted, {"op": "GT", "arguments": [hinted, imm(1)]}]}
+    g = graph("c", [
+        {"stepType": "Conditional", "id": "c", "condition": hinted},
+        {"stepType": "Conditional", "id": "n", "condition": nested},
+        fin("zero", branch=imm("zero")), fin("one", branch=imm("one")), fin("many", branch=imm("many"))], [
+        edge("c", "n", label="true"), edge("c", "zero", label="false"),
+        edge("n", "many", label="true"), edge("n", "one", label="false")],
+        inputSchema={"count": {"type": "string"}})
+    workflow, status, body = save_status("rf-condition-spellings", g)
+    compile_latest(workflow)
+    branches = {count: ((execute(workflow, {"count": count}).get("outputs") or {}).get("branch"))
+                for count in ("0", "1", "5")}
+    _, stored = call("GET", f"/workflows/{workflow}")
+    stored_graph = ((stored or {}).get("data") or stored or {}).get("executionGraph") or {}
+    stored_condition = (stored_graph.get("steps") or {}).get("c", {}).get("condition")
+    check("C1/C2 a value condition carries a type hint and nested operations need no tag",
+          status < 300 and branches == {"0": "zero", "1": "one", "5": "many"} and stored_condition == hinted,
+          {"save": status, "branches": branches, "stored": stored_condition})
+
+
 # ---------------------------------------------------------------- E2-E5
 
 
@@ -485,7 +510,7 @@ CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, chec
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
           check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions,
           check_nested_immediate_references, check_workflow_inputs_in_bodies, check_group_by_keys,
-          check_null_collections, check_zero_timeouts, check_doc_drift, check_mcp_prose]
+          check_null_collections, check_zero_timeouts, check_condition_spellings, check_doc_drift, check_mcp_prose]
 
 
 def main():
