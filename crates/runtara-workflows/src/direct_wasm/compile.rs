@@ -107,7 +107,7 @@ pub use isolation_selection::{
 };
 
 use super::component::{
-    DIRECT_AGENT_WIT_VERSION, DIRECT_WORKFLOW_LOGIC_PACKAGE, DirectComponentArtifacts,
+    DIRECT_AGENT_WIT_VERSION, DIRECT_WORKFLOW_LOGIC_PACKAGE, DirectComponentArtifacts, wac_name,
 };
 use super::error::DirectCompileError;
 use super::manifest::{
@@ -868,11 +868,13 @@ fn compose_direct_workflow_selected(
 /// This is the in-process equivalent of `wac compose <wac> -d pkg=path ...`,
 /// reusing the exact `workflow.wac` document the direct compiler already emits.
 /// `wac_source` is the WAC script, `deps_dir` is the search root for any package
-/// not in `overrides` (none are, in practice), and `overrides` maps each WAC
+/// not in `overrides` (none are, in practice), and `overrides` maps each
 /// package name (e.g. `runtara:workflow-logic`, `runtara:agent-http`) to its
-/// prebuilt `.wasm` path. Composition runs through `wac-parser`/`wac-resolver`/
-/// `wac-graph` — the same crates the `wac` CLI uses — so the output is identical
-/// to the former subprocess, with no external `wac` binary required.
+/// prebuilt `.wasm` path. The names are the real ones; they are looked up as
+/// the script spells them ([`wac_name`]). Composition runs through
+/// `wac-parser`/`wac-resolver`/`wac-graph` — the same crates the `wac` CLI
+/// uses — so the output is identical to the former subprocess, with no
+/// external `wac` binary required.
 fn compose_workflow_component_in_process(
     wac_source: &str,
     deps_dir: &Path,
@@ -901,6 +903,10 @@ fn compose_workflow_component_in_process(
     );
 
     let resolve_pkgs_start = Instant::now();
+    let overrides = overrides
+        .into_iter()
+        .map(|(package, path)| (wac_name(&package), path))
+        .collect();
     let resolver = FileSystemPackageResolver::new(deps_dir, overrides, false);
     let resolved = resolver.resolve(&keys).map_err(|err| {
         DirectCompileError::Component(format!(

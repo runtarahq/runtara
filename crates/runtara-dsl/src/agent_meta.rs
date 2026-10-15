@@ -1890,9 +1890,10 @@ impl std::error::Error for SlugError {}
 ///
 /// Leading digits are allowed (`2fa-sync` is a valid slug): wit-parser
 /// accepts digit-led words in package names — asserted by a test in
-/// `runtara-workflows` against the real parser. The output is always
-/// idempotent under [`canonical_agent_id`] and passes
-/// [`validate_workflow_slug`].
+/// `runtara-workflows` against the real parser. WAC does not, so the document
+/// that composes a parent spells such a word in its own form; the slug itself
+/// is unchanged. The output is always idempotent under [`canonical_agent_id`]
+/// and passes [`validate_workflow_slug`].
 pub fn generate_workflow_slug(name: &str, workflow_id: &str) -> String {
     let mut slug = String::with_capacity(name.len());
     let mut pending_hyphen = false;

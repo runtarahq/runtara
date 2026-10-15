@@ -366,6 +366,38 @@ fn emit_world_wit(
     out
 }
 
+/// How a package name (`runtara:agent-<id>`) or a variable name
+/// (`agent-<id>`) is spelled inside the WAC composition document.
+///
+/// WAC requires every word of a name to start with a letter, but an agent id
+/// may have a word that starts with a digit: the slug derived from a
+/// workflow named "Q3 2024 sync" is `q3-2024-sync`, which WIT and the
+/// component model accept. Such a word is written as an uppercase WAC word
+/// behind an `N` (`2024` becomes `N2024`, `2fa` becomes `N2FA`); every other
+/// word is kept, so most names read the same. Agent ids and package names
+/// are lowercase, so the spelling never collides with another name. Only the
+/// document uses it: composition maps each spelled package name to its
+/// component, and the components keep their real import and export names.
+pub(crate) fn wac_name(name: &str) -> String {
+    name.split_inclusive(['-', ':'])
+        .map(|word| {
+            if word.starts_with(|c: char| c.is_ascii_digit()) {
+                format!("N{}", word.to_ascii_uppercase())
+            } else {
+                word.to_string()
+            }
+        })
+        .collect()
+}
+
+/// An agent's instance in the composition document, and the instances of its
+/// parallel-pool members as (component id, name) pairs.
+struct WacAgentInstance<'a> {
+    agent: &'a str,
+    name: String,
+    pool: Vec<(String, String)>,
+}
+
 fn emit_wac(
     agents: &[String],
     parallel_pools: &std::collections::BTreeMap<String, u32>,
@@ -378,45 +410,53 @@ fn emit_wac(
          let workflow-stdlib = new runtara:workflow-stdlib {{ ... }};\n",
     );
 
-    for agent in agents {
+    // Named once for both the instantiations and the arguments below.
+    let instances: Vec<WacAgentInstance> = agents
+        .iter()
+        .map(|agent| WacAgentInstance {
+            agent,
+            name: wac_name(&format!("agent-{agent}")),
+            pool: (1..parallel_pools.get(agent).copied().unwrap_or(1))
+                .map(|member| {
+                    let id =
+                        crate::direct_wasm::split_parallel_pool_member_component_id(agent, member);
+                    let name = wac_name(&format!("agent-{id}"));
+                    (id, name)
+                })
+                .collect(),
+        })
+        .collect();
+
+    for instance in &instances {
+        let package = wac_name(&format!("runtara:agent-{}", instance.agent));
         out.push_str(&format!(
-            "let agent-{id} = new runtara:agent-{id} {{ ... }};\n",
-            id = agent
+            "let {} = new {package} {{ ... }};\n",
+            instance.name
         ));
         // Extra instantiations of the SAME package for the parallel pool —
         // sync-lifted instances serialize concurrent entries, so K-way
         // overlap needs K instances.
-        if let Some(pool) = parallel_pools.get(agent) {
-            for member in 1..*pool {
-                let phantom =
-                    crate::direct_wasm::split_parallel_pool_member_component_id(agent, member);
-                out.push_str(&format!(
-                    "let agent-{phantom} = new runtara:agent-{id} {{ ... }};\n",
-                    id = agent
-                ));
-            }
+        for (_, member) in &instance.pool {
+            out.push_str(&format!("let {member} = new {package} {{ ... }};\n"));
         }
     }
 
     out.push_str("\nlet wf = new runtara:workflow-logic {");
     out.push_str(" ...workflow-stdlib,");
-    for agent in agents {
+    for instance in &instances {
+        let agent = instance.agent;
         let interface = if scoped_agents.contains(agent) {
             "scoped-capabilities-v3"
         } else {
             "capabilities"
         };
-        out.push_str(&format!(" ...agent-{id},", id = agent));
-        if let Some(pool) = parallel_pools.get(agent) {
-            for member in 1..*pool {
-                let phantom =
-                    crate::direct_wasm::split_parallel_pool_member_component_id(agent, member);
-                out.push_str(&format!(
-                    " \"runtara:agent-{phantom}/{interface}@{DIRECT_AGENT_WIT_VERSION}\": \
-                     agent-{phantom}[\"runtara:agent-{id}/{interface}@{DIRECT_AGENT_WIT_VERSION}\"],",
-                    id = agent
-                ));
-            }
+        out.push_str(&format!(" ...{},", instance.name));
+        // The quoted import and export names are the real ones.
+        for (id, member) in &instance.pool {
+            out.push_str(&format!(
+                " \"runtara:agent-{id}/{interface}@{DIRECT_AGENT_WIT_VERSION}\": \
+                 {member}[\"runtara:agent-{agent}/{interface}@{DIRECT_AGENT_WIT_VERSION}\"],"
+            ));
         }
     }
     // The trailing bare `...` leaves every remaining workflow-logic import
@@ -614,6 +654,67 @@ world workflow {
                 .world_wit
                 .contains("import runtara:workflow/runtime@1.0.0;")
         );
+    }
+
+    #[test]
+    fn a_digit_led_agent_id_composes_under_its_wac_spelling() {
+        let agents = ["q3-2024-echo".to_string(), "utils".to_string()];
+        let pools = std::collections::BTreeMap::from([("q3-2024-echo".to_string(), 3)]);
+        let artifacts = emit_direct_component_artifacts_with_pools(
+            &agents,
+            WorkflowRole::default(),
+            false,
+            None,
+            &pools,
+        );
+        let document = wac_parser::Document::parse(&artifacts.wac_source).unwrap_or_else(|err| {
+            panic!(
+                "the composition document must parse: {err}\n{}",
+                artifacts.wac_source
+            )
+        });
+        let packages: std::collections::BTreeSet<String> = wac_resolver::packages(&document)
+            .expect("packages")
+            .into_keys()
+            .map(|key| key.name.to_string())
+            .collect();
+        assert_eq!(
+            packages,
+            [
+                "runtara:agent-q3-N2024-echo",
+                "runtara:agent-utils",
+                "runtara:workflow-logic",
+                "runtara:workflow-stdlib",
+            ]
+            .map(String::from)
+            .into(),
+        );
+        // The pool members are wired by the real import name.
+        assert!(
+            artifacts
+                .wac_source
+                .contains("\"runtara:agent-q3-2024-echo-par2/capabilities@1.0.0\""),
+            "{}",
+            artifacts.wac_source
+        );
+    }
+
+    #[test]
+    fn wac_name_respells_only_digit_led_words() {
+        for name in [
+            "runtara:agent-utils",
+            "runtara:agent-object-model",
+            "runtara:workflow-stdlib",
+            "agent-ai-tools-par2",
+        ] {
+            assert_eq!(wac_name(name), name);
+        }
+        assert_eq!(
+            wac_name("runtara:agent-q3-2024-sync"),
+            "runtara:agent-q3-N2024-sync"
+        );
+        assert_eq!(wac_name("agent-2fa-sync"), "agent-N2FA-sync");
+        assert_ne!(wac_name("a-686-1"), wac_name("a-686-n1"));
     }
 
     #[test]
