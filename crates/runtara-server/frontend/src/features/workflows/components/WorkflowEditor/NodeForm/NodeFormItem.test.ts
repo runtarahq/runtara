@@ -5,10 +5,8 @@ const baseFormData = {
   name: 'Test Step',
   stepType: 'Error',
   inputMapping: [],
-  executionTimeout: 120,
   maxRetries: 1,
   retryDelay: 1000,
-  retryStrategy: 'Linear' as const,
 };
 
 const testSchema = schema();

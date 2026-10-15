@@ -19,10 +19,12 @@ use serde_json::{Map, Value};
 use crate::agent_input_validation::{
     AgentInputMissingReason, AgentInputValidationError, MissingAgentInput,
 };
-use crate::conditions::{is_truthy, to_number, values_equal};
 use crate::reference_path::{self, array_index, is_array_index_token};
 use crate::switch_helpers::process_switch_output;
 use crate::template::{CompiledTemplate, render_template};
+use runtara_dsl::condition_eval::{
+    contains, is_empty, is_truthy, length, ordering, value_in, values_equal,
+};
 
 // ===========================================================================
 // Value interning ("scope handles").
@@ -357,6 +359,9 @@ pub struct DirectJsonManifest {
     filters: BTreeMap<u32, DirectJsonFilter>,
     switches: BTreeMap<u32, DirectJsonSwitch>,
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
+    /// Variables declared on nested graphs (Split/While bodies, onWait), as
+    /// values, keyed by the graph's `_manifest_graph_path`.
+    nested_variables: BTreeMap<String, Map<String, Value>>,
     delays: BTreeMap<u32, DirectJsonDelay>,
     logs: BTreeMap<u32, DirectJsonLog>,
     errors: BTreeMap<u32, DirectJsonError>,
@@ -445,6 +450,7 @@ impl DirectJsonManifest {
             filters: collections.filters,
             switches: collections.switches,
             group_bys: collections.group_bys,
+            nested_variables: collections.nested_variables,
             delays: collections.delays,
             logs: collections.logs,
             errors: collections.errors,
@@ -517,6 +523,33 @@ impl DirectJsonManifest {
             .eval(&source)
     }
 
+    /// Store a Conditional step's evaluated `result` as `steps.<id>.outputs`
+    /// and return the updated steps context, so later steps can reference it.
+    pub fn conditional_output(
+        &self,
+        condition_id: u32,
+        source: &[u8],
+        result: bool,
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse conditional-output source: {err}"))?;
+        let condition = self
+            .conditions
+            .get(&condition_id)
+            .ok_or_else(|| format!("unknown direct condition id {condition_id}"))?;
+        let step = self.step(&condition.owner_id, &source)?;
+        let steps = insert_step_output(
+            &source,
+            &step.id,
+            step.name.as_deref(),
+            "Conditional",
+            serde_json::json!({ "result": result }),
+            None,
+        );
+        serde_json::to_vec(&Value::Object(steps))
+            .map_err(|err| format!("failed to serialize conditional-output steps context: {err}"))
+    }
+
     /// Execute a manifest routing Switch config and return the selected route.
     pub fn process_switch(&self, switch_id: u32, source: &[u8]) -> Result<String, String> {
         let source: Value = serde_json::from_slice(source)
@@ -583,6 +616,26 @@ impl DirectJsonManifest {
         serde_json::to_vec(item).map_err(|err| format!("failed to serialize Split item: {err}"))
     }
 
+    /// Variables declared on the nested graph `role` owned by step `owner`,
+    /// in the scope `source` is in. A nested graph's declarations extend the
+    /// variables it inherits (shadowing them by name); its step's
+    /// `config.variables` are applied on top.
+    fn nested_declared_variables(
+        &self,
+        source: &Value,
+        role: &str,
+        owner: &str,
+    ) -> Option<&Map<String, Value>> {
+        let mut path = source
+            .get("variables")
+            .and_then(|vars| vars.get("_manifest_graph_path"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        path.push(serde_json::json!([role, owner]));
+        self.nested_variables.get(&Value::Array(path).to_string())
+    }
+
     /// Build generated-code-compatible variables for one Split iteration.
     pub fn split_iteration_variables(
         &self,
@@ -599,7 +652,8 @@ impl DirectJsonManifest {
             .splits
             .get(&split_id)
             .ok_or_else(|| format!("unknown direct Split id {split_id}"))?;
-        let variables = split_iteration_variables(split, &source, item, index)?;
+        let declared = self.nested_declared_variables(&source, "split.subgraph", &split.step_id);
+        let variables = split_iteration_variables(split, &source, item, index, declared)?;
         serde_json::to_vec(&Value::Object(variables))
             .map_err(|err| format!("failed to serialize Split iteration variables: {err}"))
     }
@@ -931,7 +985,9 @@ impl DirectJsonManifest {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse While source: {err}"))?;
         let state = parse_while_state(while_step, state)?;
-        let variables = while_iteration_variables(while_step, &source, &state)?;
+        let declared =
+            self.nested_declared_variables(&source, "while.subgraph", &while_step.step_id);
+        let variables = while_iteration_variables(while_step, &source, &state, declared)?;
         serde_json::to_vec(&Value::Object(variables))
             .map_err(|err| format!("failed to serialize While iteration variables: {err}"))
     }
@@ -1248,7 +1304,7 @@ impl DirectJsonManifest {
             .cloned()
             .unwrap_or_default();
         let inputs = match step.step_type.as_str() {
-            "Conditional" => source.clone(),
+            "Conditional" => debug_source_view(&source),
             "Finish" => self
                 .finish_mapping(step)
                 .map(|mapping| apply_input_mapping(&mapping.value, &source))
@@ -1540,6 +1596,11 @@ impl DirectJsonManifest {
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
+        if let Some(declared) =
+            self.nested_declared_variables(&source, "waitForSignal.onWait", step_id)
+        {
+            variables.extend(declared.clone());
+        }
         enter_manifest_graph(&mut variables, &source, "waitForSignal.onWait", step_id);
         variables.insert(
             "_signal_id".to_string(),
@@ -4230,6 +4291,28 @@ impl DirectJsonManifest {
     }
 }
 
+/// Root-scope marker the compiler sets in the workflow's variables segment.
+/// Only the root's `data` is the stored instance input envelope
+/// `{"data": ..., "variables": ...}`; a Split iteration's `data` is its item and
+/// an embedded child's `data` is its mapped input, so neither may be unwrapped
+/// even when it happens to contain a `data` key. Pass-through scopes (While,
+/// onWait, handlers) inherit the marker with the root's raw input.
+pub const INPUT_ENVELOPE_VARIABLE: &str = "_input_envelope";
+
+/// Runtime-owned variable carrying the run's `{data, variables}` into nested
+/// scopes, so `workflow.inputs` means the same thing in every body.
+pub const WORKFLOW_INPUTS_VARIABLE: &str = "_workflow_inputs";
+
+/// A source as debug events and breakpoints show it: without the internal
+/// copy of the run input (it is already visible under `workflow.inputs`).
+fn debug_source_view(source: &Value) -> Value {
+    let mut view = source.clone();
+    if let Some(variables) = view.get_mut("variables").and_then(Value::as_object_mut) {
+        variables.remove(WORKFLOW_INPUTS_VARIABLE);
+    }
+    view
+}
+
 /// Inject the synthetic runtime-identity variables `_instance_id` and
 /// `_tenant_id` that the generated compiler exposes on every `variables`
 /// snapshot (codegen `emit_main`), read from the same env vars generated uses.
@@ -4272,8 +4355,9 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
     // a caller can do by setting it is namespace its own child's durable
     // state, which is exactly the feature. Inputs with no `data` key
     // (low-level / direct runtime invocations) are used as-is.
+    let input_envelope = variables.get(INPUT_ENVELOPE_VARIABLE) == Some(&Value::Bool(true));
     let inner_data = if let Value::Object(envelope) = &mut data {
-        if envelope.contains_key("data") {
+        if input_envelope && envelope.contains_key("data") {
             if let Some(Value::Object(runtime_vars)) = envelope.remove("variables")
                 && let Value::Object(defaults) = &mut variables
             {
@@ -4314,6 +4398,22 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
         intern_scope_entries(map);
     }
 
+    // `workflow.inputs` is the run's own input in every scope. The outermost
+    // scope (a run, or an embedded child's run) records it, built from the
+    // interned data and variables so it stays small; Split/While/onWait bodies
+    // inherit it through the variable copy, so a body sees the input the
+    // workflow was started with rather than its item.
+    let workflow_inputs = match variables.get(WORKFLOW_INPUTS_VARIABLE) {
+        Some(inputs) => inputs.clone(),
+        None => {
+            let inputs = serde_json::json!({"data": data.clone(), "variables": variables.clone()});
+            if let Value::Object(map) = &mut variables {
+                map.insert(WORKFLOW_INPUTS_VARIABLE.to_string(), inputs.clone());
+            }
+            inputs
+        }
+    };
+
     // onError handlers inject the captured error envelope at `steps.__error`
     // (alias `steps.error`, see `error_steps`). Mirror it to the source root so
     // references using the historically-documented bare `__error.*` / `error.*`
@@ -4334,12 +4434,9 @@ pub fn build_source(data: &[u8], variables: &[u8], steps: &[u8]) -> Result<Vec<u
         source.insert("error".to_string(), error);
     }
 
-    let mut workflow_inputs = Map::new();
-    workflow_inputs.insert("data".to_string(), data);
-    workflow_inputs.insert("variables".to_string(), variables.clone());
     source.insert(
         "workflow".to_string(),
-        serde_json::json!({ "inputs": Value::Object(workflow_inputs) }),
+        serde_json::json!({ "inputs": workflow_inputs }),
     );
 
     if let Some(iteration) = iteration_context(&variables) {
@@ -4538,6 +4635,28 @@ fn debug_timer_key(step_id: &str, source: &Value) -> String {
     .to_string()
 }
 
+/// Declared variables (`{name: {type, value}}`) as `{name: value}`, without
+/// runtime-owned names, which authored declarations never shadow (E137).
+fn declared_variable_values(declarations: &Value) -> Map<String, Value> {
+    declarations
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(name, _)| !runtara_dsl::is_runtime_variable_name(name))
+        .map(|(name, declaration)| {
+            let value = match declaration {
+                Value::Object(fields)
+                    if fields.contains_key("type") && fields.contains_key("value") =>
+                {
+                    fields.get("value").cloned().unwrap_or(Value::Null)
+                }
+                other => other.clone(),
+            };
+            (name.clone(), value)
+        })
+        .collect()
+}
+
 fn enter_manifest_graph(
     variables: &mut Map<String, Value>,
     source: &Value,
@@ -4682,6 +4801,9 @@ struct DirectJsonManifestCollections {
     filters: BTreeMap<u32, DirectJsonFilter>,
     switches: BTreeMap<u32, DirectJsonSwitch>,
     group_bys: BTreeMap<u32, DirectJsonGroupBy>,
+    /// Variables declared on nested graphs (Split/While bodies, onWait), as
+    /// values, keyed by the graph's `_manifest_graph_path`.
+    nested_variables: BTreeMap<String, Map<String, Value>>,
     delays: BTreeMap<u32, DirectJsonDelay>,
     logs: BTreeMap<u32, DirectJsonLog>,
     errors: BTreeMap<u32, DirectJsonError>,
@@ -4820,6 +4942,7 @@ fn collect_graph_manifest(
             .insert(
                 condition.id,
                 DirectJsonCondition {
+                    owner_id: condition.owner_id.clone(),
                     value: condition.value.clone(),
                 },
             )
@@ -4984,6 +5107,12 @@ fn collect_graph_manifest(
         for nested in &step.nested_graphs {
             let mut nested_path = path.as_array().cloned().unwrap_or_default();
             nested_path.push(serde_json::json!([nested.role, step.id]));
+            let declared = declared_variable_values(&nested.graph.variables);
+            if !declared.is_empty() {
+                collections
+                    .nested_variables
+                    .insert(Value::Array(nested_path.clone()).to_string(), declared);
+            }
             collect_graph_manifest(
                 &nested.graph,
                 &Value::Array(nested_path),
@@ -5168,6 +5297,7 @@ fn split_iteration_variables(
     source: &Value,
     item: Value,
     index: u32,
+    declared: Option<&Map<String, Value>>,
 ) -> Result<Map<String, Value>, String> {
     let mut variables = source
         .get("variables")
@@ -5182,11 +5312,21 @@ fn split_iteration_variables(
         .cloned()
         .unwrap_or_default();
     let parent_loop = variables.get("_loop").cloned();
+    // The iteration's `data` is the item, never the root input envelope.
+    variables.remove(INPUT_ENVELOPE_VARIABLE);
+    if let Some(declared) = declared {
+        variables.extend(declared.clone());
+    }
 
     if let Some(extra_variables_mapping) = split.value.get("variables") {
         let extra_variables = apply_input_mapping(extra_variables_mapping, source)?;
         if let Value::Object(extra_variables) = extra_variables {
-            variables.extend(extra_variables);
+            // Authored values never shadow runtime-owned bindings (E137).
+            variables.extend(
+                extra_variables
+                    .into_iter()
+                    .filter(|(name, _)| !runtara_dsl::is_runtime_variable_name(name)),
+            );
         }
     }
     if let Some(parent_loop) = parent_loop {
@@ -5412,6 +5552,7 @@ fn while_iteration_variables(
     while_step: &DirectJsonWhile,
     source: &Value,
     state: &DirectJsonWhileState,
+    declared: Option<&Map<String, Value>>,
 ) -> Result<Map<String, Value>, String> {
     let mut variables = source
         .get("variables")
@@ -5426,10 +5567,18 @@ fn while_iteration_variables(
         .cloned()
         .unwrap_or_default();
     let parent_item = variables.get("_item").cloned();
+    if let Some(declared) = declared {
+        variables.extend(declared.clone());
+    }
     if let Some(extra_variables_mapping) = while_step.value.get("variables") {
         let extra_variables = apply_input_mapping(extra_variables_mapping, source)?;
         if let Value::Object(extra_variables) = extra_variables {
-            variables.extend(extra_variables);
+            // Authored values never shadow runtime-owned bindings (E137).
+            variables.extend(
+                extra_variables
+                    .into_iter()
+                    .filter(|(name, _)| !runtara_dsl::is_runtime_variable_name(name)),
+            );
         }
     }
     if let Some(parent_item) = parent_item {
@@ -5803,6 +5952,8 @@ fn apply_group_by(config: &Value, source: &Value) -> Result<Value, String> {
     Ok(serde_json::json!({
         "groups": groups,
         "counts": counts,
+        "totalGroups": groups.len(),
+        // Deprecated spelling, kept until DSL 4.0 (W093).
         "total_groups": groups.len(),
     }))
 }
@@ -6013,7 +6164,7 @@ fn workflow_retry_info(error: &[u8]) -> DirectJsonWorkflowRetryInfo {
 
     let category = parsed.get("category").and_then(Value::as_str);
     let code = parsed.get("code").and_then(Value::as_str).unwrap_or("");
-    let rate_limited = agent_error_code_is_rate_limited(code) || code == "HTTP_RATE_LIMITED";
+    let rate_limited = agent_error_code_is_rate_limited(code);
     let retry_after_ms = parsed.get("retryAfterMs").and_then(Value::as_u64);
     let auto_retry_429 = std::env::var("AUTO_RETRY_ON_429")
         .ok()
@@ -6029,8 +6180,11 @@ fn workflow_retry_info(error: &[u8]) -> DirectJsonWorkflowRetryInfo {
     }
 }
 
+/// Error codes that mean "the provider refused this call for rate reasons, retry
+/// later". `HTTP_429` is what the generic `http` and `openai` agents report for
+/// an HTTP 429, so it must count too or `rateLimitBudgetMs` never applies.
 fn agent_error_code_is_rate_limited(code: &str) -> bool {
-    code.contains("RATE_LIMITED")
+    code.contains("RATE_LIMITED") || code == "HTTP_429"
 }
 
 fn timestamp_ms() -> i64 {
@@ -6687,6 +6841,20 @@ fn is_condition_operation(expr: &Value) -> bool {
             .is_some_and(|value| value == "operation")
 }
 
+/// The argument count an operator needs, as validation enforces at save
+/// (`NOT` and `LENGTH` are not checked there and stay lenient). Shared by the
+/// interpreter and the compiled conditions so both reject the same shapes.
+fn condition_arity_error(op: &str, got: usize) -> Option<String> {
+    let expected = match op {
+        "GT" | "GTE" | "LT" | "LTE" | "EQ" | "NE" | "STARTS_WITH" | "ENDS_WITH" | "CONTAINS"
+        | "IN" | "NOT_IN" => 2,
+        "IS_DEFINED" | "IS_EMPTY" | "IS_NOT_EMPTY" => 1,
+        _ => return None,
+    };
+    (got != expected)
+        .then(|| format!("condition operator '{op}' requires {expected} argument(s), got {got}"))
+}
+
 fn eval_condition_operation(expr: &Value, source: &Value) -> Result<bool, String> {
     let op = expr
         .get("op")
@@ -6696,6 +6864,9 @@ fn eval_condition_operation(expr: &Value, source: &Value) -> Result<bool, String
         .get("arguments")
         .and_then(Value::as_array)
         .ok_or_else(|| "condition operation missing arguments".to_string())?;
+    if let Some(error) = condition_arity_error(op, args.len()) {
+        return Err(error);
+    }
 
     match op {
         "AND" => args.iter().try_fold(true, |acc, arg| {
@@ -6733,27 +6904,11 @@ fn eval_condition_operation(expr: &Value, source: &Value) -> Result<bool, String
             .unwrap_or(Ok(false)),
         "IS_EMPTY" => args
             .first()
-            .map(|arg| {
-                eval_condition_argument_as_value(arg, source).map(|value| match value {
-                    Value::Array(value) => value.is_empty(),
-                    Value::String(value) => value.is_empty(),
-                    Value::Object(value) => value.is_empty(),
-                    Value::Null => true,
-                    _ => false,
-                })
-            })
+            .map(|arg| eval_condition_argument_as_value(arg, source).map(|value| is_empty(&value)))
             .unwrap_or(Ok(true)),
         "IS_NOT_EMPTY" => args
             .first()
-            .map(|arg| {
-                eval_condition_argument_as_value(arg, source).map(|value| match value {
-                    Value::Array(value) => !value.is_empty(),
-                    Value::String(value) => !value.is_empty(),
-                    Value::Object(value) => !value.is_empty(),
-                    Value::Null => false,
-                    _ => true,
-                })
-            })
+            .map(|arg| eval_condition_argument_as_value(arg, source).map(|value| !is_empty(&value)))
             .unwrap_or(Ok(false)),
         // Query-only operators: evaluated server-side inside object-model
         // query conditions, never by the workflow runtime. Validation rejects
@@ -6804,30 +6959,24 @@ fn eval_condition_value(value: &Value, source: &Value) -> Result<Value, String> 
 }
 
 fn eval_comparison(op: &str, args: &[Value], source: &Value) -> Result<bool, String> {
-    if args.len() < 2 {
-        return Ok(false);
-    }
     let left = eval_condition_argument_as_value(&args[0], source)?;
     let right = eval_condition_argument_as_value(&args[1], source)?;
-    let Some(left) = to_number(&left) else {
-        return Ok(false);
-    };
-    let Some(right) = to_number(&right) else {
-        return Ok(false);
-    };
-    Ok(match op {
-        "GT" => left > right,
-        "GTE" => left >= right,
-        "LT" => left < right,
-        "LTE" => left <= right,
-        _ => false,
-    })
+    Ok(ordering_matches(op, &left, &right))
+}
+
+/// `GT`/`GTE`/`LT`/`LTE` through the shared [`ordering`].
+fn ordering_matches(op: &str, left: &Value, right: &Value) -> bool {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    matches!(
+        (op, ordering(left, right)),
+        ("GT", Some(Greater))
+            | ("LT", Some(Less))
+            | ("GTE", Some(Greater | Equal))
+            | ("LTE", Some(Less | Equal))
+    )
 }
 
 fn eval_equality(op: &str, args: &[Value], source: &Value) -> Result<bool, String> {
-    if args.len() < 2 {
-        return Ok(false);
-    }
     let left = eval_condition_argument_as_value(&args[0], source)?;
     let right = eval_condition_argument_as_value(&args[1], source)?;
     let equal = values_equal(&left, &right);
@@ -6835,9 +6984,6 @@ fn eval_equality(op: &str, args: &[Value], source: &Value) -> Result<bool, Strin
 }
 
 fn eval_string_match(op: &str, args: &[Value], source: &Value) -> Result<bool, String> {
-    if args.len() < 2 {
-        return Ok(false);
-    }
     let left = eval_condition_argument_as_value(&args[0], source)?;
     let right = eval_condition_argument_as_value(&args[1], source)?;
     let Some(left) = left.as_str() else {
@@ -6854,18 +7000,11 @@ fn eval_string_match(op: &str, args: &[Value], source: &Value) -> Result<bool, S
 }
 
 fn eval_array_match(op: &str, args: &[Value], source: &Value) -> Result<bool, String> {
-    if args.len() < 2 {
-        return Ok(false);
-    }
     let left = eval_condition_argument_as_value(&args[0], source)?;
     let right = eval_condition_argument_as_value(&args[1], source)?;
     let matched = match op {
-        "CONTAINS" => left
-            .as_array()
-            .is_some_and(|items| items.iter().any(|item| values_equal(item, &right))),
-        "IN" | "NOT_IN" => right
-            .as_array()
-            .is_some_and(|items| items.iter().any(|item| values_equal(&left, item))),
+        "CONTAINS" => contains(&left, &right),
+        "IN" | "NOT_IN" => value_in(&left, &right),
         _ => false,
     };
     Ok(if op == "NOT_IN" { !matched } else { matched })
@@ -6876,14 +7015,7 @@ fn eval_length_as_value(args: &[Value], source: &Value) -> Result<Value, String>
         return Ok(Value::Number(0.into()));
     };
     let value = eval_condition_argument_as_value(arg, source)?;
-    let len = match &value {
-        Value::String(value) => value.len() as i64,
-        Value::Array(value) => value.len() as i64,
-        Value::Object(value) => value.len() as i64,
-        Value::Null => 0,
-        _ => 1,
-    };
-    Ok(Value::Number(len.into()))
+    Ok(Value::Number(length(&value).into()))
 }
 
 /// Resolve a Finish step's mapped output to the workflow's return value.
@@ -7191,6 +7323,19 @@ fn apply_type_hint(value: Value, type_hint: Option<&str>) -> Result<Value, Strin
             Value::Array(value) => Value::Bool(!value.is_empty()),
             Value::Object(value) => Value::Bool(!value.is_empty()),
         },
+        // `object`/`array` take the value as it is, or parse a JSON string
+        // holding one.
+        Some(shape @ ("object" | "array")) => {
+            let parsed = match value {
+                Value::String(ref text) => serde_json::from_str::<Value>(text).ok(),
+                ref other => Some(other.clone()),
+            };
+            match parsed {
+                Some(Value::Object(_)) if shape == "object" => parsed.unwrap(),
+                Some(Value::Array(_)) if shape == "array" => parsed.unwrap(),
+                _ => return coercion_result(value, shape),
+            }
+        }
         // `json`/`file`, no hint, and any unrecognized hint pass through
         // untouched — see the overload note above.
         _ => value,
@@ -7592,6 +7737,9 @@ fn compile_op(expr: &Value) -> CompiledOp {
     let Some(args) = expr.get("arguments").and_then(Value::as_array) else {
         return CompiledOp::Error("condition operation missing arguments".to_string());
     };
+    if let Some(error) = condition_arity_error(op, args.len()) {
+        return CompiledOp::Error(error);
+    }
     let vals = || args.iter().map(compile_arg_value).collect::<Vec<_>>();
     match op {
         "AND" => CompiledOp::And(args.iter().map(compile_condition).collect()),
@@ -7759,33 +7907,23 @@ impl CompiledOp {
                 None => Ok(true),
             },
             CompiledOp::Compare { op, args } => {
-                if args.len() < 2 {
-                    return Ok(false);
-                }
-                let (Some(left), Some(right)) = (
-                    to_number(&args[0].eval(source)?),
-                    to_number(&args[1].eval(source)?),
-                ) else {
-                    return Ok(false);
+                let name = match op {
+                    CmpOp::Gt => "GT",
+                    CmpOp::Gte => "GTE",
+                    CmpOp::Lt => "LT",
+                    CmpOp::Lte => "LTE",
                 };
-                Ok(match op {
-                    CmpOp::Gt => left > right,
-                    CmpOp::Gte => left >= right,
-                    CmpOp::Lt => left < right,
-                    CmpOp::Lte => left <= right,
-                })
+                Ok(ordering_matches(
+                    name,
+                    &args[0].eval(source)?,
+                    &args[1].eval(source)?,
+                ))
             }
             CompiledOp::Equality { ne, args } => {
-                if args.len() < 2 {
-                    return Ok(false);
-                }
                 let equal = values_equal(&args[0].eval(source)?, &args[1].eval(source)?);
                 Ok(if *ne { !equal } else { equal })
             }
             CompiledOp::StringMatch { ends, args } => {
-                if args.len() < 2 {
-                    return Ok(false);
-                }
                 let left = args[0].eval(source)?;
                 let right = args[1].eval(source)?;
                 let (Some(left), Some(right)) = (left.as_str(), right.as_str()) else {
@@ -7798,18 +7936,11 @@ impl CompiledOp {
                 })
             }
             CompiledOp::ArrayMatch { kind, args } => {
-                if args.len() < 2 {
-                    return Ok(false);
-                }
                 let left = args[0].eval(source)?;
                 let right = args[1].eval(source)?;
                 let matched = match kind {
-                    ArrKind::Contains => left
-                        .as_array()
-                        .is_some_and(|items| items.iter().any(|i| values_equal(i, &right))),
-                    ArrKind::In | ArrKind::NotIn => right
-                        .as_array()
-                        .is_some_and(|items| items.iter().any(|i| values_equal(&left, i))),
+                    ArrKind::Contains => contains(&left, &right),
+                    ArrKind::In | ArrKind::NotIn => value_in(&left, &right),
                 };
                 Ok(if matches!(kind, ArrKind::NotIn) {
                     !matched
@@ -7830,23 +7961,11 @@ impl CompiledOp {
                 None => Ok(false),
             },
             CompiledOp::IsEmpty(arg) => match arg {
-                Some(a) => a.eval(source).map(|v| match v {
-                    Value::Array(v) => v.is_empty(),
-                    Value::String(v) => v.is_empty(),
-                    Value::Object(v) => v.is_empty(),
-                    Value::Null => true,
-                    _ => false,
-                }),
+                Some(a) => a.eval(source).map(|v| is_empty(&v)),
                 None => Ok(true),
             },
             CompiledOp::IsNotEmpty(arg) => match arg {
-                Some(a) => a.eval(source).map(|v| match v {
-                    Value::Array(v) => !v.is_empty(),
-                    Value::String(v) => !v.is_empty(),
-                    Value::Object(v) => !v.is_empty(),
-                    Value::Null => false,
-                    _ => true,
-                }),
+                Some(a) => a.eval(source).map(|v| !is_empty(&v)),
                 None => Ok(false),
             },
             CompiledOp::Error(message) => Err(message.clone()),
@@ -7871,14 +7990,7 @@ fn compiled_length_value(args: &[CompiledArgValue], source: &Value) -> Result<Va
     let Some(arg) = args.first() else {
         return Ok(Value::Number(0.into()));
     };
-    let len = match &arg.eval(source)? {
-        Value::String(v) => v.len() as i64,
-        Value::Array(v) => v.len() as i64,
-        Value::Object(v) => v.len() as i64,
-        Value::Null => 0,
-        _ => 1,
-    };
-    Ok(Value::Number(len.into()))
+    Ok(Value::Number(length(&arg.eval(source)?).into()))
 }
 
 impl CompiledMapping {
@@ -8174,6 +8286,7 @@ struct DirectJsonMapping {
 
 #[derive(Debug, Clone)]
 struct DirectJsonCondition {
+    owner_id: String,
     value: Value,
 }
 
@@ -9546,6 +9659,34 @@ mod tests {
     }
 
     #[test]
+    fn apply_type_hint_object_and_array_parse_json_strings() {
+        assert_eq!(
+            apply_type_hint(json!("[1,2]"), Some("array")).unwrap(),
+            json!([1, 2])
+        );
+        assert_eq!(
+            apply_type_hint(json!([3]), Some("array")).unwrap(),
+            json!([3])
+        );
+        assert_eq!(
+            apply_type_hint(json!("{\"a\":1}"), Some("object")).unwrap(),
+            json!({"a": 1})
+        );
+        assert_eq!(
+            apply_type_hint(Value::Null, Some("array")).unwrap(),
+            Value::Null
+        );
+        assert!(apply_type_hint(json!("{\"a\":1}"), Some("array")).is_err());
+        assert!(apply_type_hint(json!("not json"), Some("object")).is_err());
+        assert!(apply_type_hint(json!(5), Some("object")).is_err());
+        // The deprecated `json` hint still passes values through.
+        assert_eq!(
+            apply_type_hint(json!("[1]"), Some("json")).unwrap(),
+            json!("[1]")
+        );
+    }
+
+    #[test]
     fn apply_type_hint_string_and_boolean_are_total() {
         // String/boolean coercions never fail — every value has a representation.
         assert_eq!(
@@ -10019,6 +10160,76 @@ mod tests {
         let output: Value = serde_json::from_slice(&output).expect("output json");
 
         assert_eq!(output, json!({ "result": payload }));
+    }
+
+    /// The workflow runtime (interpreter and compiled form) and the shared
+    /// evaluator behind forms and Operations answers give one answer for every
+    /// condition, including the shapes the DSL audit found disagreeing.
+    #[test]
+    fn runtime_and_shared_conditions_agree() {
+        let imm = |value: Value| json!({"valueType": "immediate", "value": value});
+        let op = |name: &str, arguments: Vec<Value>| json!({"type": "operation", "op": name, "arguments": arguments});
+        let cases = [
+            (op("EQ", vec![imm(json!("5")), imm(json!(5))]), true),
+            (op("EQ", vec![imm(json!(5.0)), imm(json!(5))]), true),
+            (op("GT", vec![imm(json!("10")), imm(json!(9))]), true),
+            (op("GT", vec![imm(json!("10")), imm(json!("9"))]), true),
+            (op("GT", vec![imm(json!("b")), imm(json!("a"))]), true),
+            (
+                op(
+                    "LT",
+                    vec![imm(json!("2026-01-02")), imm(json!("2026-10-14"))],
+                ),
+                true,
+            ),
+            (op("GT", vec![imm(json!(true)), imm(json!(0))]), true),
+            (op("GT", vec![imm(json!("x")), imm(json!(1))]), false),
+            (
+                op(
+                    "EQ",
+                    vec![op("LENGTH", vec![imm(json!("é"))]), imm(json!(1))],
+                ),
+                true,
+            ),
+            (op("NOT", vec![]), true),
+            (
+                op("EQ", vec![imm(json!(0.30000000000000004)), imm(json!(0.3))]),
+                true,
+            ),
+            (
+                op("CONTAINS", vec![imm(json!("abc")), imm(json!("b"))]),
+                true,
+            ),
+            (
+                op("CONTAINS", vec![imm(json!([1, "2"])), imm(json!(2))]),
+                true,
+            ),
+            (op("IN", vec![imm(json!("2")), imm(json!([1, 2]))]), true),
+            (op("IS_EMPTY", vec![imm(json!(0))]), false),
+        ];
+        let source = json!({"data": {}, "variables": {}, "steps": {}});
+        for (condition, expected) in cases {
+            let interpreted = eval_condition_expression(&condition, &source).expect("evaluates");
+            let compiled = compile_condition(&condition)
+                .eval(&source)
+                .expect("evaluates");
+            let parsed: runtara_dsl::ConditionExpression =
+                serde_json::from_value(condition.clone()).expect("condition parses");
+            let shared = runtara_dsl::condition_eval::evaluate_condition(&parsed, &json!({}))
+                .expect("evaluates");
+            assert_eq!(
+                (interpreted, compiled, shared),
+                (expected, expected, expected),
+                "{condition}"
+            );
+        }
+
+        // Shapes validation rejects fail in every evaluator.
+        let bad = op("EQ", vec![imm(json!(1)), imm(json!(1)), imm(json!(1))]);
+        assert!(eval_condition_expression(&bad, &source).is_err());
+        assert!(compile_condition(&bad).eval(&source).is_err());
+        let parsed: runtara_dsl::ConditionExpression = serde_json::from_value(bad).unwrap();
+        assert!(runtara_dsl::condition_eval::evaluate_condition(&parsed, &json!({})).is_err());
     }
 
     #[test]
@@ -11330,6 +11541,7 @@ mod tests {
 
         assert_eq!(output["counts"], json!({ "active": 2, "inactive": 1 }));
         assert_eq!(output["total_groups"], json!(2));
+        assert_eq!(output["totalGroups"], json!(2));
         assert_eq!(output["groups"]["active"][0]["id"], json!(1));
         assert_eq!(output["groups"]["active"][1]["id"], json!(3));
         assert_eq!(steps["group"]["stepName"], json!("Group by Status"));
@@ -11950,7 +12162,7 @@ mod tests {
         // parent-injected site prefix (whitelisted through build_source).
         let scoped = build_source(
             br#"{"data":{},"variables":{"_cache_key_prefix":"parent-wf::call"}}"#,
-            br#"{"_workflow_id":"child-wf"}"#,
+            br#"{"_workflow_id":"child-wf","_input_envelope":true}"#,
             b"{}",
         )
         .expect("scoped source");
@@ -11964,7 +12176,7 @@ mod tests {
         // A second invocation site of the SAME child → a different id.
         let scoped_other = build_source(
             br#"{"data":{},"variables":{"_cache_key_prefix":"parent-wf::call2"}}"#,
-            br#"{"_workflow_id":"child-wf"}"#,
+            br#"{"_workflow_id":"child-wf","_input_envelope":true}"#,
             b"{}",
         )
         .expect("second scoped source");
@@ -13347,7 +13559,7 @@ mod tests {
         // double-wrapped `data.data.tpl` path worked).
         let source = build_source(
             br#"{"data":{"tpl":"hello world"},"variables":{"_workflow_id":"wf1"}}"#,
-            b"{}",
+            br#"{"_input_envelope":true}"#,
             b"{}",
         )
         .expect("source");
@@ -13367,6 +13579,139 @@ mod tests {
     }
 
     #[test]
+    fn build_source_keeps_non_root_data_with_a_data_key_intact() {
+        // A Split item (or an embedded child's mapped input) shaped like the
+        // root envelope must stay whole: only the root scope, marked by the
+        // compiler, carries the instance input envelope.
+        let item = br#"{"data":{"x":1},"id":5,"variables":{"region":"eu"}}"#;
+        let source = build_source(item, br#"{"_index":0}"#, b"{}").expect("source");
+        let source: Value = serde_json::from_slice(&source).expect("source json");
+        assert_eq!(
+            source["data"],
+            json!({"data": {"x": 1}, "id": 5, "variables": {"region": "eu"}})
+        );
+        assert!(source["variables"].get("region").is_none());
+    }
+
+    #[test]
+    fn nested_graph_declared_variables_extend_the_iteration_scope() {
+        // The Split's subgraph declares `color` and `size`; the parent scope
+        // has `color` too; `config.variables` sets `size`. Precedence:
+        // inherited < subgraph declarations < config.variables. Runtime-owned
+        // names declared on the subgraph are dropped.
+        let mut manifest: Value = serde_json::from_slice(&split_manifest(json!({
+            "value": {"valueType": "immediate", "value": [1]},
+            "variables": {"size": {"valueType": "immediate", "value": "from-config"}}
+        })))
+        .unwrap();
+        manifest["graph"]["steps"][0]["nestedGraphs"] = json!([{
+            "role": "split.subgraph",
+            "graph": {"variables": {
+                "color": {"type": "string", "value": "subgraph-blue"},
+                "size": {"type": "string", "value": "from-subgraph"},
+                "shade": {"type": "string", "value": "dark"},
+                "_instance_id": {"type": "string", "value": "forged"}
+            }, "steps": []}
+        }]);
+        let manifest =
+            DirectJsonManifest::parse(&serde_json::to_vec(&manifest).unwrap()).expect("manifest");
+        let source = serde_json::to_vec(&json!({
+            "data": {}, "steps": {},
+            "variables": {"color": "parent-red", "_instance_id": "real", "_manifest_graph_path": []}
+        }))
+        .unwrap();
+        let variables = manifest
+            .split_iteration_variables(0, &source, b"1", 0)
+            .expect("iteration variables");
+        let variables: Value = serde_json::from_slice(&variables).unwrap();
+        assert_eq!(variables["color"], "subgraph-blue");
+        assert_eq!(variables["shade"], "dark");
+        assert_eq!(variables["size"], "from-config");
+        assert_eq!(variables["_instance_id"], "real");
+    }
+
+    #[test]
+    fn on_wait_declared_variables_extend_the_handler_scope() {
+        let mut manifest: Value = serde_json::from_slice(&wait_manifest(json!({
+            "id": "wait",
+            "stepType": "WaitForSignal",
+            "name": "Review Input"
+        })))
+        .unwrap();
+        manifest["graph"]["steps"][0]["nestedGraphs"] = json!([{
+            "role": "waitForSignal.onWait",
+            "graph": {"variables": {
+                "color": {"type": "string", "value": "on-wait-blue"},
+                "_signal_id": {"type": "string", "value": "forged"}
+            }, "steps": []}
+        }]);
+        let manifest =
+            DirectJsonManifest::parse(&serde_json::to_vec(&manifest).unwrap()).expect("manifest");
+        let source = serde_json::to_vec(&json!({
+            "data": {}, "steps": {},
+            "variables": {"color": "parent-red", "tenant": "t1", "_manifest_graph_path": []}
+        }))
+        .unwrap();
+        let variables = manifest
+            .wait_on_wait_variables("wait", "inst-1", "inst-1/root/wait", &source)
+            .expect("on-wait variables");
+        let variables: Value = serde_json::from_slice(&variables).unwrap();
+        assert_eq!(variables["color"], "on-wait-blue");
+        assert_eq!(variables["tenant"], "t1");
+        assert_eq!(variables["_signal_id"], "inst-1/root/wait");
+    }
+
+    /// `workflow.inputs` is the run's input in a Split body too, not the item.
+    #[test]
+    fn workflow_inputs_are_the_run_input_inside_a_split_body() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({}))).expect("manifest");
+        let root = build_source(
+            br#"{"data":{"items":[1],"order":7},"variables":{}}"#,
+            br#"{"_input_envelope":true,"_workflow_id":"wf"}"#,
+            b"{}",
+        )
+        .expect("root source");
+        let root_value: Value = serde_json::from_slice(&root).unwrap();
+        assert_eq!(root_value["workflow"]["inputs"]["data"]["order"], 7);
+        let iteration = manifest
+            .split_iteration_variables(0, &root, br#"{"item":true}"#, 0)
+            .expect("iteration variables");
+        let body = build_source(br#"{"item":true}"#, &iteration, b"{}").expect("body source");
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["data"]["item"], true);
+        assert_eq!(body["workflow"]["inputs"]["data"]["order"], 7, "{body}");
+    }
+
+    #[test]
+    fn split_iterations_drop_the_root_envelope_marker() {
+        let manifest = DirectJsonManifest::parse(&split_manifest(json!({}))).expect("manifest");
+        let source = serde_json::to_vec(&json!({
+            "data": {}, "steps": {},
+            "variables": {"_input_envelope": true, "_instance_id": "real"}
+        }))
+        .unwrap();
+        let variables = manifest
+            .split_iteration_variables(0, &source, br#"{"data":{"x":1}}"#, 0)
+            .expect("iteration variables");
+        let variables: Value = serde_json::from_slice(&variables).unwrap();
+        assert!(variables.get(INPUT_ENVELOPE_VARIABLE).is_none());
+        assert_eq!(variables["_instance_id"], "real");
+    }
+
+    #[test]
+    fn http_429_counts_as_rate_limited() {
+        let info = workflow_retry_info(
+            br#"{"code":"HTTP_429","category":"transient","retryable":true,"retryAfterMs":1000}"#,
+        );
+        assert!(info.rate_limited);
+        assert!(info.retryable);
+        assert_eq!(info.retry_after_ms, Some(1000));
+        assert!(agent_error_code_is_rate_limited("HTTP_429"));
+        assert!(agent_error_code_is_rate_limited("STRIPE_RATE_LIMITED"));
+        assert!(!agent_error_code_is_rate_limited("HTTP_5XX"));
+    }
+
+    #[test]
     fn build_source_whitelists_cache_key_prefix_but_not_identity_vars() {
         // A parent invoking this workflow as a composed agent injects the
         // checkpoint-namespace through the input envelope. `_cache_key_prefix`
@@ -13374,7 +13719,7 @@ mod tests {
         // caller can namespace its child's state but never spoof identity.
         let source = build_source(
             br#"{"data":{"x":1},"variables":{"_cache_key_prefix":"wfP::call[2]","_workflow_id":"spoofed","_tenant_id":"spoofed","plain":"ok"}}"#,
-            br#"{"_workflow_id":"wf-real::inst-1"}"#,
+            br#"{"_workflow_id":"wf-real::inst-1","_input_envelope":true}"#,
             b"{}",
         )
         .expect("source");
@@ -13464,7 +13809,8 @@ mod tests {
         // default; `_`-prefixed identity vars are never overridable from input.
         let envelope =
             br#"{"data":{"x":1},"variables":{"greeting":"OVERRIDDEN","_workflow_id":"spoof"}}"#;
-        let defaults = br#"{"greeting":"DEFAULT","mood":"happy","_workflow_id":"real"}"#;
+        let defaults =
+            br#"{"greeting":"DEFAULT","mood":"happy","_workflow_id":"real","_input_envelope":true}"#;
         let source = build_source(envelope, defaults, b"{}").expect("source");
         let source: Value = serde_json::from_slice(&source).expect("source json");
 

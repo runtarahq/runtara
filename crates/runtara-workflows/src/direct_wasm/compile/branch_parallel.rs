@@ -402,6 +402,7 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
             breakpoint,
             max_retries,
             retry_delay_ms,
+            rate_limit_budget_ms,
             error_plan,
             ..
         } => DirectRunPlan::AiAgent {
@@ -413,6 +414,7 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
             breakpoint: *breakpoint,
             max_retries: *max_retries,
             retry_delay_ms: *retry_delay_ms,
+            rate_limit_budget_ms: *rate_limit_budget_ms,
             next_plan,
             error_plan: error_plan.clone(),
         },
@@ -429,6 +431,9 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
             max_iterations,
             tools,
             memory,
+            max_retries,
+            retry_delay_ms,
+            rate_limit_budget_ms,
             error_plan,
             ..
         } => DirectRunPlan::AiAgentLoop {
@@ -441,6 +446,9 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
             max_iterations: *max_iterations,
             tools: tools.clone(),
             memory: memory.clone(),
+            max_retries: *max_retries,
+            retry_delay_ms: *retry_delay_ms,
+            rate_limit_budget_ms: *rate_limit_budget_ms,
             next_plan,
             error_plan: error_plan.clone(),
         },

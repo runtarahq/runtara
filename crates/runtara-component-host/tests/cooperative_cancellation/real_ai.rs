@@ -397,15 +397,25 @@ async fn async_shared_providers_preserve_text_tools_usage_and_failures() -> anyh
             json!({"choice":[{"text":"answer"},{"id":"call-1","function":{"name":"echo","arguments":{"value":42}}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}})
         );
 
-        for body in [
-            json!({"status":429,"headers":{"retry-after":"2"},"body":{"error":"fixture"}}),
-            json!({"status":200,"headers":{},"body":{}}),
+        // A provider throttle is rate-limited, carrying its retry-after; any
+        // other failure keeps the completion-failed code.
+        for (body, code, retry_after_ms) in [
+            (
+                json!({"status":429,"headers":{"retry-after":"2"},"body":{"error":"fixture"}}),
+                "AI_RATE_LIMITED",
+                Some(2_000),
+            ),
+            (
+                json!({"status":200,"headers":{},"body":{}}),
+                "AI_CHAT_COMPLETION_FAILED",
+                None,
+            ),
         ] {
             let (_, result) = exchange("ai-tools", provider, "chat-completion", body).await?;
             let error = result.unwrap_err();
-            assert_eq!(error.code, "AI_CHAT_COMPLETION_FAILED");
+            assert_eq!(error.code, code);
             assert!(error.retryable);
-            assert_eq!(error.retry_after_ms, None);
+            assert_eq!(error.retry_after_ms, retry_after_ms);
         }
         // Ordinary provider failure still produces the documented summary
         // fallback; the cancellation tests above must never take this branch.

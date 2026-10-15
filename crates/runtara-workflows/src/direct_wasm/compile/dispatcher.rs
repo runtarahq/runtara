@@ -15,7 +15,7 @@
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction, MemArg};
 
-use super::abi::{emit_retptr_error_or_step_fail, push_retptr_arg};
+use super::abi::{emit_retptr_error_or_step_fail, load_retptr_list, push_retptr_arg};
 use super::agent::emit_agent_plan;
 use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::delay::emit_delay_plan;
@@ -23,7 +23,7 @@ use super::edge_route::emit_edge_route_dispatch;
 use super::embed_workflow::emit_embed_workflow_plan;
 use super::error_step::emit_error_plan;
 use super::log::emit_log_plan;
-use super::mapping::emit_apply_mapping_step_error;
+use super::mapping::{emit_apply_mapping_step_error, emit_build_source};
 use super::split::emit_split_plan;
 use super::step_context::emit_step_context_plan;
 use super::switch_route::emit_switch_route_plan;
@@ -699,6 +699,7 @@ pub(super) fn emit_run_plan_mapping(
             breakpoint,
             max_retries,
             retry_delay_ms,
+            rate_limit_budget_ms,
             next_plan,
             error_plan,
         } => {
@@ -706,8 +707,8 @@ pub(super) fn emit_run_plan_mapping(
             // (it is an invoke of `ai_tools`/`chat-completion`); only the output
             // transform differs (`ai-agent-output` builds the
             // `{response, iterations, toolCalls}` envelope). Retries are opt-in
-            // via config.maxRetries (plan default 0 — LLM calls re-bill); no
-            // rate-limit budget (ai-tools is not catalog-rate-limited).
+            // via config.maxRetries (plan default 0 — LLM calls re-bill), and
+            // rate-limited failures retry within the workflow's budget.
             emit_agent_plan(
                 body,
                 indices,
@@ -722,7 +723,7 @@ pub(super) fn emit_run_plan_mapping(
                 *breakpoint,
                 *max_retries,
                 *retry_delay_ms,
-                0,
+                *rate_limit_budget_ms,
                 next_plan,
                 error_plan.as_ref(),
                 data_ptr_local,
@@ -753,6 +754,9 @@ pub(super) fn emit_run_plan_mapping(
             max_iterations,
             tools,
             memory,
+            max_retries,
+            retry_delay_ms,
+            rate_limit_budget_ms,
             next_plan,
             error_plan,
         } => {
@@ -771,6 +775,11 @@ pub(super) fn emit_run_plan_mapping(
                 *max_iterations,
                 tools,
                 memory.as_ref(),
+                super::ai_agent_loop::TurnRetry {
+                    max_retries: *max_retries,
+                    retry_delay_ms: *retry_delay_ms,
+                    rate_limit_budget_ms: *rate_limit_budget_ms,
+                },
                 next_plan,
                 error_plan.as_ref(),
                 data_ptr_local,
@@ -874,6 +883,42 @@ pub(super) fn emit_run_plan_mapping(
                 memory_index: 0,
             }));
             body.instruction(&Instruction::LocalSet(DIRECT_CONDITION_RESULT_LOCAL));
+
+            // Persist `steps.<id>.outputs.result` so later steps can reference
+            // the decision, then rebuild source from the updated steps.
+            body.instruction(&Instruction::I32Const(*condition_id as i32));
+            body.instruction(&Instruction::LocalGet(source_ptr_local));
+            body.instruction(&Instruction::LocalGet(source_len_local));
+            body.instruction(&Instruction::LocalGet(DIRECT_CONDITION_RESULT_LOCAL));
+            push_retptr_arg(body);
+            body.instruction(&Instruction::Call(indices.stdlib_conditional_output));
+            emit_retptr_error_or_step_fail(
+                body,
+                indices,
+                static_data,
+                track_events,
+                failure_target,
+                step_id,
+                source_ptr_local,
+                source_len_local,
+                route_ptr_local,
+                route_len_local,
+                output_ptr_local,
+                output_len_local,
+            );
+            load_retptr_list(body, steps_ptr_local, steps_len_local);
+            emit_build_source(
+                body,
+                indices,
+                variables,
+                data_ptr_local,
+                data_len_local,
+                steps_ptr_local,
+                steps_len_local,
+                source_ptr_local,
+                source_len_local,
+                failure_target,
+            );
 
             emit_step_debug_event(
                 body,

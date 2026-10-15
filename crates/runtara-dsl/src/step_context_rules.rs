@@ -75,9 +75,9 @@ pub enum StepContext {
     ParallelBranchGroup,
     /// The step's effective durability is off.
     NonDurable,
-    /// The step has no `timeout`, or `timeout` is 0.
+    /// The step has no `timeoutMs`, or `timeoutMs` is 0.
     MissingTimeout,
-    /// The step's `timeout` leaves no room to park before its deadline.
+    /// The step's `timeoutMs` leaves no room to park before its deadline.
     TimeoutBelowDeadlineMargin,
     /// Reached only through an `onError` edge.
     OnErrorRegion,

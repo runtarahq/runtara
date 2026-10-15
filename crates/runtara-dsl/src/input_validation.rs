@@ -93,15 +93,19 @@ pub fn validate_workflow_inputs(inputs: Value) -> Result<Value, WorkflowInputVal
 ///
 /// The same function is used by backend execution paths and browser WASM
 /// validation. It first validates the canonical `{"data", "variables"}`
-/// envelope, then validates `data` against `input_schema` when the schema has
-/// fields.
+/// envelope, then fills omitted fields from their schema `default` and
+/// validates `data` against `input_schema` when the schema has fields. The
+/// returned inputs carry the filled-in defaults.
 pub fn validate_workflow_start_inputs(
     inputs: Value,
     input_schema: &Value,
 ) -> Result<Value, WorkflowInputValidationError> {
-    let validated_inputs = validate_workflow_inputs(inputs)?;
+    let mut validated_inputs = validate_workflow_inputs(inputs)?;
 
     if !is_empty_schema(input_schema) {
+        if let Some(data) = validated_inputs.get_mut("data") {
+            apply_input_defaults(data, input_schema);
+        }
         let data_to_validate = validated_inputs
             .get("data")
             .cloned()
@@ -214,6 +218,41 @@ fn convert_field(field: &Value) -> Value {
     dsl_schema_to_json_schema(&serde_json::json!({"item": field}))["properties"]["item"].clone()
 }
 
+/// Fill fields that `inputs` omits from their schema `default`, recursing into
+/// object `properties` and array `items`. A field that is present, even as
+/// `null`, keeps its value. Accepts the same schema shapes as
+/// [`validate_inputs`].
+pub fn apply_input_defaults(inputs: &mut Value, schema: &Value) {
+    apply_defaults(inputs, &dsl_schema_to_json_schema(schema));
+}
+
+fn apply_defaults(value: &mut Value, schema: &Value) {
+    let Some(schema_obj) = schema.as_object() else {
+        return;
+    };
+    if let Some(properties) = schema_obj.get("properties").and_then(Value::as_object)
+        && let Some(object) = value.as_object_mut()
+    {
+        for (field, field_schema) in properties {
+            match object.get_mut(field) {
+                Some(field_value) => apply_defaults(field_value, field_schema),
+                None => {
+                    if let Some(default) = field_schema.get("default") {
+                        object.insert(field.clone(), default.clone());
+                    }
+                }
+            }
+        }
+    }
+    if let Some(items_schema) = schema_obj.get("items")
+        && let Some(items) = value.as_array_mut()
+    {
+        for item in items {
+            apply_defaults(item, items_schema);
+        }
+    }
+}
+
 /// Validate inputs against a workflow input schema.
 ///
 /// Accepts both DSL flat-map format and the standard JSON Schema object shape
@@ -236,6 +275,11 @@ fn validate_value(value: &Value, schema: &Value, path: &str, errors: &mut Vec<St
     let Some(schema_obj) = schema.as_object() else {
         return;
     };
+
+    // `nullable: true` admits an explicit null in place of the declared type.
+    if value.is_null() && schema_obj.get("nullable").and_then(Value::as_bool) == Some(true) {
+        return;
+    }
 
     if let Some(enum_values) = schema_obj.get("enum").and_then(Value::as_array)
         && !enum_values.iter().any(|enum_value| enum_value == value)
@@ -274,17 +318,10 @@ fn validate_value(value: &Value, schema: &Value, path: &str, errors: &mut Vec<St
             if let Some(condition) = field_schema.get("requiredWhen") {
                 match serde_json::from_value::<crate::VisibleWhen>(condition.clone()) {
                     Ok(condition) => {
-                        let sibling = object.get(&condition.field);
-                        let applies = sibling.is_some()
-                            && (condition.equals.is_some() || condition.not_equals.is_some())
-                            && condition
-                                .equals
-                                .as_ref()
-                                .is_none_or(|expected| sibling == Some(expected))
-                            && condition
-                                .not_equals
-                                .as_ref()
-                                .is_none_or(|excluded| sibling != Some(excluded));
+                        // The same rule the form layer applies to this field.
+                        let applies = (condition.equals.is_some()
+                            || condition.not_equals.is_some())
+                            && condition.matches(object.get(&condition.field));
                         let missing = object.get(field).is_none_or(|value| {
                             value.is_null()
                                 || value.as_str().is_some_and(|text| text.trim().is_empty())
@@ -490,9 +527,81 @@ mod tests {
         }
     }
 
+    /// The server and the form layer read `requiredWhen` the same way:
+    /// condition equality (5.0 equals 5) and an absent sibling as null.
+    #[test]
+    fn required_when_matches_the_form_layer_on_numbers_and_absent_siblings() {
+        let schema = json!({
+            "amount":{"type":"number"},
+            "kind":{"type":"string"},
+            "note":{"type":"string","requiredWhen":{"field":"amount","equals":5}},
+            "reason":{"type":"string","requiredWhen":{"field":"kind","notEquals":"standard"}}
+        });
+        let fields = serde_json::from_value(schema.clone()).unwrap();
+        let form = crate::form::schema_fields_form_definition(&fields);
+        for (answer, valid) in [
+            (json!({"amount":5.0,"kind":"standard"}), false),
+            (json!({"amount":5,"kind":"standard"}), false),
+            (json!({"amount":5.0,"kind":"standard","note":"n"}), true),
+            (json!({"amount":6,"kind":"standard"}), true),
+            (json!({"amount":6}), false),
+            (json!({"amount":6,"reason":"r"}), true),
+        ] {
+            assert_eq!(
+                validate_inputs(&answer, &schema).is_ok(),
+                valid,
+                "server {answer}"
+            );
+            assert_eq!(
+                crate::form::analyze_form(&form, &answer).valid,
+                valid,
+                "form {answer}"
+            );
+        }
+    }
+
     // =========================================================================
     // is_empty_schema tests
     // =========================================================================
+
+    #[test]
+    fn start_inputs_are_filled_from_schema_defaults() {
+        let schema = serde_json::json!({
+            "name": {"type": "string", "required": true, "default": "anon"},
+            "greeting": {"type": "string", "default": "hi"},
+            "kept": {"type": "string", "default": "unused"},
+            "note": {"type": "string", "nullable": true, "default": "unused"},
+            "address": {"type": "object", "properties": {
+                "country": {"type": "string", "required": true, "default": "UA"}
+            }},
+            "lines": {"type": "array", "items": {"type": "object", "properties": {
+                "qty": {"type": "integer", "default": 1}
+            }}}
+        });
+        let inputs = serde_json::json!({"data": {
+            "kept": "mine", "note": null, "address": {}, "lines": [{}, {"qty": 3}]
+        }});
+        let validated = validate_workflow_start_inputs(inputs, &schema).expect("valid");
+        assert_eq!(
+            validated["data"],
+            serde_json::json!({
+                "name": "anon", "greeting": "hi", "kept": "mine", "note": null,
+                "address": {"country": "UA"}, "lines": [{"qty": 1}, {"qty": 3}]
+            })
+        );
+    }
+
+    #[test]
+    fn nullable_admits_null_and_nothing_else() {
+        let schema = serde_json::json!({
+            "note": {"type": "string", "nullable": true},
+            "strict": {"type": "string"}
+        });
+        assert!(validate_inputs(&serde_json::json!({"note": null}), &schema).is_ok());
+        assert!(validate_inputs(&serde_json::json!({"note": 5}), &schema).is_err());
+        let error = validate_inputs(&serde_json::json!({"strict": null}), &schema).unwrap_err();
+        assert!(error.contains("strict must be"), "{error}");
+    }
 
     #[test]
     fn test_empty_object_is_empty() {

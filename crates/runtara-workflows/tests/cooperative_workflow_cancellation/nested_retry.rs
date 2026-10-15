@@ -75,8 +75,8 @@ async fn run_retry_in_scope(
             {"fromStep":"fetch","toStep":"handled","label":"onError"}]
     });
     if rate_limited {
-        // Slack's RATE_LIMITED envelope uses the separate rate-limit budget.
-        // HTTP_429 currently follows ordinary retries in the shared classifier.
+        // Slack's RATE_LIMITED envelope uses the separate rate-limit budget,
+        // as does the generic agents' HTTP_429.
         graph["steps"]["fetch"]["agentId"] = "slack".into();
         graph["steps"]["fetch"]["capabilityId"] = "send-message".into();
         graph["steps"]["fetch"]["inputMapping"] = serde_json::json!({
@@ -310,7 +310,7 @@ async fn run_retry_in_scope(
                 unreachable!()
             };
             // Every scope preserves the originating structured retry policy.
-            let recognized_rate_limit = rate_limited;
+            let recognized_rate_limit = rate_limited || http_error == 429;
             let succeeds = !permanent && retries > 0 && (recognized_rate_limit || retries >= 2);
             let attempts = if permanent {
                 1
@@ -502,7 +502,7 @@ async fn published_split_retry_zero_retries_recovers_immediately() -> anyhow::Re
 }
 
 #[tokio::test]
-async fn published_split_retry_http_429_preserves_ordinary_budget() -> anyhow::Result<()> {
+async fn published_split_retry_http_429_uses_rate_limit_budget() -> anyhow::Result<()> {
     run_retry_in_scope(false, false, 1, 429, 2, Some(RetryScope::Split)).await
 }
 

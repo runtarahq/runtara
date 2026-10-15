@@ -649,6 +649,26 @@ function normalizeConditionExpression(condition: any): any {
   };
 }
 
+/**
+ * DSL 3.6 spells millisecond fields with an `Ms` suffix; the old names still
+ * parse as deprecated aliases (W093). The editor's form keeps the short
+ * names, reads either spelling and saves the canonical one.
+ */
+const DURATION_FIELDS = [
+  ['timeoutMs', 'timeout'],
+  ['retryDelayMs', 'retryDelay'],
+  ['turnTimeoutMs', 'turnTimeout'],
+] as const;
+
+/** A duration from a step or config, in either spelling. */
+function readDuration(
+  source: Record<string, any> | undefined | null,
+  canonical: (typeof DURATION_FIELDS)[number][0]
+): any {
+  const legacy = DURATION_FIELDS.find(([name]) => name === canonical)![1];
+  return source?.[canonical] ?? source?.[legacy];
+}
+
 function cleanNodeData(steps: Record<string, any>) {
   const cleaned: Record<string, any> = {};
 
@@ -979,8 +999,26 @@ function cleanNodeData(steps: Record<string, any>) {
       restData.stepType !== 'EmbedWorkflow'
     ) {
       delete cleaned[id].maxRetries;
-      delete cleaned[id].retryDelay;
-      delete cleaned[id].timeout;
+      const isWait =
+        restData.stepType === 'WaitForSignal' ||
+        (restData.stepType as string) === 'WaitForInstances';
+      for (const [canonical, legacy] of DURATION_FIELDS) {
+        // A Wait step's own `timeoutMs` is a mapping, not a step duration.
+        if (!(isWait && canonical === 'timeoutMs')) {
+          delete cleaned[id][canonical];
+        }
+        delete cleaned[id][legacy];
+      }
+    } else {
+      for (const [canonical, legacy] of DURATION_FIELDS) {
+        const value = cleaned[id][legacy] ?? cleaned[id][canonical];
+        delete cleaned[id][legacy];
+        if (value !== undefined && value !== null && value !== '') {
+          cleaned[id][canonical] = value;
+        } else {
+          delete cleaned[id][canonical];
+        }
+      }
     }
     if (restData.stepType !== 'Split') {
       delete cleaned[id].inputSchema;
@@ -1064,8 +1102,8 @@ function cleanNodeData(steps: Record<string, any>) {
           }
         >;
         maxRetries?: number;
-        retryDelay?: number;
-        timeout?: number;
+        retryDelayMs?: number;
+        timeoutMs?: number;
         allowNull?: boolean;
         convertSingleValue?: boolean;
         batchSize?: number;
@@ -1099,8 +1137,8 @@ function cleanNodeData(steps: Record<string, any>) {
         [keyof typeof splitConfig, unknown, (value: unknown) => unknown]
       > = [
         ['maxRetries', splitMaxRetries, Number],
-        ['retryDelay', splitRetryDelay, Number],
-        ['timeout', splitTimeout, Number],
+        ['retryDelayMs', splitRetryDelay, Number],
+        ['timeoutMs', splitTimeout, Number],
         ['allowNull', splitAllowNull, Boolean],
         ['convertSingleValue', splitConvertSingleValue, Boolean],
         ['batchSize', splitBatchSize, Number],
@@ -1110,6 +1148,14 @@ function cleanNodeData(steps: Record<string, any>) {
           (splitConfig as any)[field] = coerce(formValue);
         } else if (existingSplitConfig?.[field] !== undefined) {
           (splitConfig as any)[field] = existingSplitConfig[field];
+        } else if (
+          (field === 'retryDelayMs' || field === 'timeoutMs') &&
+          readDuration(existingSplitConfig, field) !== undefined
+        ) {
+          (splitConfig as any)[field] = readDuration(
+            existingSplitConfig,
+            field
+          );
         }
       }
 
@@ -1163,8 +1209,8 @@ function cleanNodeData(steps: Record<string, any>) {
           splitConfig.sequential !== undefined ||
           splitConfig.dontStopOnFailed !== undefined ||
           splitConfig.maxRetries !== undefined ||
-          splitConfig.retryDelay !== undefined ||
-          splitConfig.timeout !== undefined ||
+          splitConfig.retryDelayMs !== undefined ||
+          splitConfig.timeoutMs !== undefined ||
           splitConfig.allowNull !== undefined ||
           splitConfig.convertSingleValue !== undefined ||
           splitConfig.batchSize !== undefined)
@@ -1183,8 +1229,8 @@ function cleanNodeData(steps: Record<string, any>) {
         splitConfig.sequential !== undefined ||
         splitConfig.dontStopOnFailed !== undefined ||
         splitConfig.maxRetries !== undefined ||
-        splitConfig.retryDelay !== undefined ||
-        splitConfig.timeout !== undefined ||
+        splitConfig.retryDelayMs !== undefined ||
+        splitConfig.timeoutMs !== undefined ||
         splitConfig.allowNull !== undefined ||
         splitConfig.convertSingleValue !== undefined ||
         splitConfig.batchSize !== undefined
@@ -1320,7 +1366,7 @@ function cleanNodeData(steps: Record<string, any>) {
       // Build config object
       const whileConfig: {
         maxIterations?: number;
-        timeout?: number | null;
+        timeoutMs?: number | null;
         variables?: Record<
           string,
           {
@@ -1334,7 +1380,7 @@ function cleanNodeData(steps: Record<string, any>) {
         whileConfig.maxIterations = whileMaxIterations;
       }
       if (whileTimeout !== undefined && whileTimeout !== null) {
-        whileConfig.timeout = whileTimeout;
+        whileConfig.timeoutMs = whileTimeout;
       }
       if (
         Array.isArray(whileVariablesFields) &&
@@ -1426,7 +1472,8 @@ function cleanNodeData(steps: Record<string, any>) {
         temperature?: Record<string, unknown>;
         maxTokens?: Record<string, unknown>;
         maxRetries?: number | null;
-        retryDelay?: number | null;
+        retryDelayMs?: number | null;
+        turnTimeoutMs?: number | null;
       } = {};
 
       if (Array.isArray(inputMapping)) {
@@ -1519,7 +1566,17 @@ function cleanNodeData(steps: Record<string, any>) {
           retryDelayItem?.value !== undefined &&
           retryDelayItem.value !== ''
         ) {
-          aiAgentConfig.retryDelay = Number(retryDelayItem.value);
+          aiAgentConfig.retryDelayMs = Number(retryDelayItem.value);
+        }
+
+        const turnTimeoutItem = inputMapping.find(
+          (item: any) => item.type === 'turnTimeout'
+        );
+        if (
+          turnTimeoutItem?.value !== undefined &&
+          turnTimeoutItem.value !== ''
+        ) {
+          aiAgentConfig.turnTimeoutMs = Number(turnTimeoutItem.value);
         }
       }
 
@@ -1874,6 +1931,18 @@ function normalizeNodesAndEdges(
   // nodes
   for (const [id, step] of Object.entries(steps)) {
     const { subgraph, ...data } = step;
+    // The form keeps the short duration names (see DURATION_FIELDS). Only
+    // Agent and EmbedWorkflow carry them on the step; the Wait steps' own
+    // `timeoutMs` is a mapping and stays as it is.
+    if (step.stepType === 'Agent' || step.stepType === 'EmbedWorkflow') {
+      for (const [canonical, legacy] of DURATION_FIELDS) {
+        const record = data as Record<string, unknown>;
+        if (record[canonical] !== undefined) {
+          record[legacy] = record[canonical];
+          delete record[canonical];
+        }
+      }
+    }
     // A SetState step's `values` edit like an input mapping: one row per
     // state field it writes. The raw key leaves node.data so a save rebuilds
     // it from the rows.
@@ -2110,8 +2179,9 @@ function normalizeNodesAndEdges(
                 splitSequential: config?.sequential ?? false,
                 splitDontStopOnFailed: config?.dontStopOnFailed ?? false,
                 splitMaxRetries: config?.maxRetries ?? undefined,
-                splitRetryDelay: config?.retryDelay ?? undefined,
-                splitTimeout: config?.timeout ?? undefined,
+                splitRetryDelay:
+                  readDuration(config, 'retryDelayMs') ?? undefined,
+                splitTimeout: readDuration(config, 'timeoutMs') ?? undefined,
                 splitAllowNull: config?.allowNull ?? false,
                 splitConvertSingleValue: config?.convertSingleValue ?? false,
                 splitBatchSize: config?.batchSize ?? undefined,
@@ -2251,7 +2321,7 @@ function normalizeNodesAndEdges(
                 inputMapping: [],
                 whileCondition: (data as any).condition,
                 whileMaxIterations: config?.maxIterations ?? 10,
-                whileTimeout: config?.timeout ?? null,
+                whileTimeout: readDuration(config, 'timeoutMs') ?? null,
                 whileVariablesFields,
               };
             })()
@@ -2376,16 +2446,19 @@ function normalizeNodesAndEdges(
                 });
               }
 
-              if (
-                config?.retryDelay !== undefined &&
-                config.retryDelay !== null
-              ) {
-                aiInputMapping.push({
-                  type: 'retryDelay',
-                  value: config.retryDelay,
-                  valueType: 'immediate',
-                  typeHint: 'integer',
-                });
+              for (const [canonical, legacy] of [
+                ['retryDelayMs', 'retryDelay'],
+                ['turnTimeoutMs', 'turnTimeout'],
+              ] as const) {
+                const value = readDuration(config, canonical);
+                if (value !== undefined && value !== null) {
+                  aiInputMapping.push({
+                    type: legacy,
+                    value,
+                    valueType: 'immediate',
+                    typeHint: 'integer',
+                  });
+                }
               }
 
               // Memory config: deserialize config.memory into form fields

@@ -93,6 +93,12 @@ pub(super) fn direct_core_variables_json(
     // declaration to its `value`. Entries that are not `{type, value}` structs
     // are already bare values and kept unchanged.
     let mut variables = flatten_declared_variables(variables);
+    // Runtime-owned bindings (`_instance_id`, `_item`, …) are never authored:
+    // validation rejects them (E137) and the compiler drops any that slip
+    // through so they cannot shadow the runtime's values.
+    if let Some(map) = variables.as_object_mut() {
+        map.retain(|name, _| !runtara_dsl::is_runtime_variable_name(name));
+    }
     if manifest_version >= 3 {
         if !variables.is_object() {
             variables = serde_json::json!({"_variables": variables});
@@ -107,6 +113,11 @@ pub(super) fn direct_core_variables_json(
     }
 
     if let Some(map) = variables.as_object_mut() {
+        // Only the root scope's `data` is the instance input envelope.
+        map.insert(
+            runtara_workflow_stdlib::direct_json::INPUT_ENVELOPE_VARIABLE.into(),
+            serde_json::Value::Bool(true),
+        );
         if manifest_version >= 4 {
             map.insert("_manifest_graph_path".into(), serde_json::json!([]));
         } else {
@@ -859,7 +870,27 @@ mod tests {
         let bytes = direct_core_variables_json(&serde_json::json!({"user": "value"}), None, 2)
             .expect("variables");
         let variables: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
-        assert_eq!(variables, serde_json::json!({"user": "value"}));
+        assert_eq!(
+            variables,
+            serde_json::json!({"user": "value", "_input_envelope": true})
+        );
+    }
+
+    #[test]
+    fn variables_json_drops_authored_runtime_bindings() {
+        let declared = serde_json::json!({
+            "_instance_id": { "type": "string", "value": "forged" },
+            "_tenant_id": { "type": "string", "value": "forged" },
+            "_cache_key_prefix": { "type": "string", "value": "legacy" },
+            "color": { "type": "string", "value": "red" }
+        });
+        let bytes = direct_core_variables_json(&declared, Some("wf"), 4).expect("variables");
+        let variables: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert!(variables.get("_instance_id").is_none());
+        assert!(variables.get("_tenant_id").is_none());
+        assert_eq!(variables["_cache_key_prefix"], "legacy");
+        assert_eq!(variables["color"], "red");
+        assert_eq!(variables["_input_envelope"], true);
     }
 
     #[test]

@@ -215,7 +215,7 @@ pub fn compile_workflow_direct(
     } = input;
 
     let child_dependencies = child_dependencies_from_inputs(&child_workflows);
-    let default_variables = serde_json::to_value(&execution_graph.variables).unwrap_or(Value::Null);
+    let default_variables = default_variable_values(&execution_graph);
 
     report_progress(
         &progress_callback,
@@ -322,6 +322,21 @@ fn direct_compile_error_to_io(err: DirectCompileError) -> io::Error {
     }
 }
 
+/// Each declared variable's value, keyed by name.
+///
+/// Image metadata carries these as the defaults the environment merges into a
+/// run's stored input. The guest treats input variables as overrides, so this
+/// must be the bare value, never the `{type, value}` declaration.
+fn default_variable_values(execution_graph: &ExecutionGraph) -> Value {
+    Value::Object(
+        execution_graph
+            .variables
+            .iter()
+            .map(|(name, variable)| (name.clone(), variable.value.clone()))
+            .collect(),
+    )
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -329,6 +344,24 @@ fn direct_compile_error_to_io(err: DirectCompileError) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_variables_are_values_not_declarations() {
+        let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "finish",
+            "steps": {"finish": {"stepType": "Finish", "id": "finish"}},
+            "variables": {
+                "color": {"type": "string", "value": "red", "description": "d"},
+                "limits": {"type": "object", "value": {"type": "x", "value": 1}}
+            }
+        }))
+        .expect("graph parses");
+
+        assert_eq!(
+            default_variable_values(&graph),
+            serde_json::json!({"color": "red", "limits": {"type": "x", "value": 1}})
+        );
+    }
 
     #[test]
     fn template_major_version_matches_cargo() {

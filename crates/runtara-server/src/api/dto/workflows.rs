@@ -693,6 +693,86 @@ impl ValidationErrorDto {
                 Some(format!("values.{field_name}")),
                 None,
             ),
+            ValidationError::ReservedStepId { step_id } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some("id".into()),
+                None,
+            ),
+            ValidationError::ReservedVariableName { name, .. } => (
+                error.to_string(),
+                None,
+                Some(format!("variables.{name}")),
+                None,
+            ),
+            ValidationError::UnsupportedGraphShape { step_id, .. } => {
+                (error.to_string(), step_id.clone(), None, None)
+            }
+            ValidationError::ConditionedEdgesWithoutDefault { from_step }
+            | ValidationError::UnknownEdgeLabel { from_step, .. } => (
+                error.to_string(),
+                Some(from_step.clone()),
+                Some("executionPlan".into()),
+                None,
+            ),
+            ValidationError::ConditionalMissingBranch { step_id, .. }
+            | ValidationError::RoutingSwitchMissingDefault { step_id } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some("executionPlan".into()),
+                None,
+            ),
+            ValidationError::OnErrorUnsupportedSource { step_id, .. } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some("executionPlan".into()),
+                None,
+            ),
+            ValidationError::VariableTypeMismatch { name, .. } => (
+                error.to_string(),
+                None,
+                Some(format!("variables.{name}")),
+                None,
+            ),
+            ValidationError::FieldConditionWithoutTest { field, .. } => {
+                (error.to_string(), None, Some(field.clone()), None)
+            }
+            ValidationError::OnErrorNestingTooDeep { step_id, .. } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some("executionPlan".into()),
+                None,
+            ),
+            ValidationError::InvalidTemplateSyntax { step_id, .. } => {
+                (error.to_string(), Some(step_id.clone()), None, None)
+            }
+            ValidationError::MissingStepConfig { step_id, .. } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some("config".into()),
+                None,
+            ),
+            ValidationError::InvalidMillisecondsValue { step_id, field, .. } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some(field.clone()),
+                None,
+            ),
+            ValidationError::NonDurableDelay { step_id } => (
+                error.to_string(),
+                Some(step_id.clone()),
+                Some("durable".into()),
+                None,
+            ),
+            ValidationError::FanoutBranchConditionedExit {
+                from_step,
+                branch_step,
+            } => (
+                error.to_string(),
+                Some(branch_step.clone()),
+                Some("executionPlan".into()),
+                Some(vec![from_step.clone()]),
+            ),
         };
 
         Self {

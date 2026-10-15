@@ -119,6 +119,11 @@ const SPLIT_SIBLINGS: &[ShapeField] = &[
     ),
 ];
 
+const LOG_FIELDS: &[ShapeField] = &[
+    field("level", "string", "The log level"),
+    field("message", "string", "The logged message"),
+];
+
 const FILTER_FIELDS: &[ShapeField] = &[
     field("items", "array", "Input items that matched the condition"),
     field("count", "integer", "Number of items kept"),
@@ -149,7 +154,12 @@ const GROUP_BY_FIELDS: &[ShapeField] = &[
         "Map of group key to the array of items in that group",
     ),
     field("counts", "object", "Map of group key to item count"),
-    field("total_groups", "integer", "Number of distinct groups"),
+    field("totalGroups", "integer", "Number of distinct groups"),
+    field(
+        "total_groups",
+        "integer",
+        "Deprecated spelling of totalGroups (W093), removed in DSL 4.0",
+    ),
 ];
 
 const WAIT_FOR_INSTANCES_FIELDS: &[ShapeField] = &[
@@ -197,7 +207,7 @@ pub fn step_output_shape(step_type: &str) -> Option<StepOutputShape> {
             siblings: &[],
         },
         "Conditional" => StepOutputShape {
-            summary: "`outputs` is `{result: <bool>}` — the evaluated branch decision (materialized under track-events; used for edge routing otherwise).",
+            summary: "`outputs` is `{result: <bool>}` — the evaluated branch decision, readable by later steps.",
             outputs: OutputsShape::Object(CONDITIONAL_FIELDS),
             siblings: &[],
         },
@@ -207,7 +217,7 @@ pub fn step_output_shape(step_type: &str) -> Option<StepOutputShape> {
             siblings: SWITCH_SIBLINGS,
         },
         "GroupBy" => StepOutputShape {
-            summary: "`outputs` is `{groups: {<groupKey>: [items...]}, counts: {<groupKey>: <n>}, total_groups: <n>}`.",
+            summary: "`outputs` is `{groups: {<groupKey>: [items...]}, counts: {<groupKey>: <n>}, totalGroups: <n>}` (and the deprecated `total_groups`, the same number).",
             outputs: OutputsShape::Object(GROUP_BY_FIELDS),
             siblings: &[],
         },
@@ -252,8 +262,8 @@ pub fn step_output_shape(step_type: &str) -> Option<StepOutputShape> {
             siblings: &[],
         },
         "Log" => StepOutputShape {
-            summary: "Diagnostic only: emits a log/debug event and writes no referenceable `outputs`.",
-            outputs: OutputsShape::Dynamic,
+            summary: "Emits a log/debug event; `outputs` is `{level, message}`, the level and the message as logged.",
+            outputs: OutputsShape::Object(LOG_FIELDS),
             siblings: &[],
         },
         "Delay" => StepOutputShape {
@@ -393,7 +403,7 @@ mod tests {
         };
         assert_eq!(
             field_names(group_fields),
-            vec!["groups", "counts", "total_groups"]
+            vec!["groups", "counts", "totalGroups", "total_groups"]
         );
         let OutputsShape::Object(cond_fields) = step_output_shape("Conditional").unwrap().outputs
         else {

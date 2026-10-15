@@ -34,9 +34,56 @@ pub enum CompletionError {
     #[error("ResponseError: {0}")]
     ResponseError(String),
 
-    /// Error returned by the provider (e.g. rate limit, auth).
+    /// Error returned by the provider (e.g. auth, bad request, outage).
     #[error("ProviderError: {0}")]
     ProviderError(String),
+
+    /// The provider throttled the call: HTTP 429, or a Bedrock throttling
+    /// exception. Callers should back off, for `retry_after_ms` when given.
+    #[error("RateLimited: {message}")]
+    RateLimited {
+        message: String,
+        status: u16,
+        retry_after_ms: Option<u64>,
+    },
+}
+
+impl CompletionError {
+    /// Classify a provider's HTTP error response. `provider` names it in the
+    /// message (`"OpenAI API"`, `"Bedrock Converse API"`).
+    #[cfg(feature = "completion")]
+    pub(crate) fn from_http_status(
+        provider: &str,
+        status: u16,
+        headers: &std::collections::HashMap<String, String>,
+        body: &str,
+    ) -> Self {
+        let message = format!("{provider} returned {status}: {body}");
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.trim())
+        };
+        let throttled = status == 429
+            || header("x-amzn-errortype")
+                .is_some_and(|kind| kind.starts_with("ThrottlingException"));
+        if !throttled {
+            return Self::ProviderError(message);
+        }
+        let retry_after_ms = header("retry-after-ms")
+            .and_then(|value| value.parse::<u64>().ok())
+            .or_else(|| {
+                header("retry-after")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .map(|seconds| seconds.saturating_mul(1000))
+            });
+        Self::RateLimited {
+            message,
+            status,
+            retry_after_ms,
+        }
+    }
 }
 
 // ================================================================
@@ -215,5 +262,49 @@ fn merge_json(a: serde_json::Value, b: serde_json::Value) -> serde_json::Value {
             serde_json::Value::Object(a_map)
         }
         (_, b) => b,
+    }
+}
+
+#[cfg(all(test, feature = "completion"))]
+mod tests {
+    use super::CompletionError;
+    use std::collections::HashMap;
+
+    fn classify(status: u16, headers: &[(&str, &str)]) -> CompletionError {
+        let headers: HashMap<String, String> = headers
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        CompletionError::from_http_status("Test API", status, &headers, "body")
+    }
+
+    #[test]
+    fn provider_throttles_are_rate_limited() {
+        for (status, headers, wait) in [
+            (429, vec![("retry-after-ms", "250")], Some(250)),
+            (429, vec![("Retry-After", "2")], Some(2_000)),
+            (429, vec![], None),
+            (
+                400,
+                vec![("x-amzn-errortype", "ThrottlingException:http://internal")],
+                None,
+            ),
+        ] {
+            match classify(status, &headers) {
+                CompletionError::RateLimited {
+                    status: got,
+                    retry_after_ms,
+                    message,
+                } => {
+                    assert_eq!((got, retry_after_ms), (status, wait));
+                    assert_eq!(message, format!("Test API returned {status}: body"));
+                }
+                other => panic!("{status} {headers:?}: {other}"),
+            }
+        }
+        assert!(matches!(
+            classify(500, &[("retry-after", "1")]),
+            CompletionError::ProviderError(message) if message == "Test API returned 500: body"
+        ));
     }
 }

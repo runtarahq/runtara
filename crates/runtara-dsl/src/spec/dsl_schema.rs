@@ -113,6 +113,73 @@ pub fn get_dsl_changelog() -> Value {
         "version": DSL_VERSION,
         "changes": [
             {
+                "version": "3.6.0",
+                "date": "2026-10-15",
+                "breaking": false,
+                "changes": [
+                    {
+                        "type": "changed",
+                        "component": "execution-graph",
+                        "description": "workflow.inputs is the run's input in every scope; inside a Split, While or onWait body it used to be the item. Nested graphs inherit the workflow's rate-limit budget, their parent's variables and their own declared variables."
+                    },
+                    {
+                        "type": "changed",
+                        "component": "condition",
+                        "description": "The condition type tag is optional: an object with op is an operation and any other object is a value. A value condition may use type for a reference's type hint, written untagged, and a nested operation needs no tag. Workflow conditions, form conditions and requiredWhen share one comparison implementation; visibleWhen with both equals and notEquals requires both."
+                    },
+                    {
+                        "type": "changed",
+                        "component": "step-field",
+                        "description": "childVersion reads latest and current case-insensitively and a numeric string as the version number. An empty edge label is no label. Split sequential:true now runs one iteration at a time over parallelism."
+                    },
+                    {
+                        "type": "changed",
+                        "component": "schema-field",
+                        "description": "Workflow start inputs get SchemaField defaults before the required check, including nested properties and array items, and an explicit null passes a nullable field."
+                    },
+                    {
+                        "type": "changed",
+                        "component": "step-type",
+                        "description": "A failing step inside an onError handler runs that step's own onError edges, nested up to 4 handler levels. An AiAgent tool loop retries a failed chat turn up to maxRetries, and an LLM provider 429 or throttling exception fails with AI_RATE_LIMITED and the provider's retry-after."
+                    },
+                    {
+                        "type": "added",
+                        "component": "validation",
+                        "description": "E136 reserved step id, E137 reserved variable name, E138 unsupported graph shape, E139 conditioned edges without a default, E140 Conditional missing a branch, E141 routing Switch without a default edge, E142 onError edge from a step type that cannot route failures, E143 unknown edge label, E144 conditioned exit from a fan-out branch, E145 non-durable Delay, E146 Split or Switch without config, E147 a literal duration or timeout that is not a number, E148 template syntax error, E149 onError nesting too deep or looping, E150 variable value not of its declared type, E151 field condition without a test."
+                    },
+                    {
+                        "type": "added",
+                        "component": "validation",
+                        "description": "W084 workflow setting on a nested graph, W085 unknown error-context field, W086 ignored definition key, W087 sequential overrides parallelism, W088 pollIntervalMs ignored, W089 field condition that never matches, W090 reference inside an immediate that does not resolve, W091 timeout 0, W092 routing Switch case without a route, W093 deprecated spelling. W053 also covers the bare error root and the steps.error alias."
+                    },
+                    {
+                        "type": "changed",
+                        "component": "step-field",
+                        "description": "Millisecond fields end in Ms: timeoutMs and retryDelayMs on Agent and EmbedWorkflow, timeoutMs and retryDelayMs in Split config, timeoutMs in While config, retryDelayMs and turnTimeoutMs in AiAgent config, as durationMs and the Wait steps' timeoutMs already did. The old names still parse; giving both is an error."
+                    },
+                    {
+                        "type": "changed",
+                        "component": "mapping-value",
+                        "description": "One type vocabulary: reference type hints add object and array (a JSON string holding one is parsed), as schema fields have them, and variables add connection. The json hint, which passes values through like no hint, is deprecated (W093)."
+                    },
+                    {
+                        "type": "changed",
+                        "component": "step-output",
+                        "description": "One casing convention: camelCase fields and output keys, lowercase or camelCase enum values, SCREAMING_SNAKE operators, PascalCase stepType. GroupBy outputs totalGroups beside the deprecated total_groups (W093), and memoryTier reads lowercase as well."
+                    },
+                    {
+                        "type": "deprecated",
+                        "component": "execution-graph",
+                        "description": "To be removed in DSL 4.0: the steps.error, __error and error spellings of the error context (use steps.__error), the duration names timeout, retryDelay and turnTimeout (use timeoutMs, retryDelayMs, turnTimeoutMs; W093), the json type hint (use object, array or none; W093), GroupBy total_groups (use totalGroups; W093), WaitForSignal pollIntervalMs, memoryTier and trackEvents on Workflow (set them on the update request), and the While alias variables._previousOutputs (use loop.outputs)."
+                    },
+                    {
+                        "type": "planned",
+                        "component": "dsl-4.0",
+                        "description": "DSL 4.0 is to give timeoutMs one meaning and one placement on every step, including AiAgent, which has none at step level; an explicit single-value Finish output in place of unwrapping a lone outputs key; template support in Log and Error messages; and reserved _previousOutputs."
+                    }
+                ]
+            },
+            {
                 "version": "3.5.0",
                 "date": "2026-09-29",
                 "breaking": false,
@@ -227,8 +294,8 @@ pub fn get_dsl_changelog() -> Value {
                     {
                         "type": "removed",
                         "component": "step-type",
-                        "description": "Removed GroupBy step type",
-                        "migration": "Use Agent step with transform.group-by operator"
+                        "description": "Removed GroupBy step type (it was later reinstated and is a step type again)",
+                        "migration": "None needed now: use the GroupBy step"
                     }
                 ]
             },

@@ -754,7 +754,7 @@ pub fn build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
     }
     let root_durable = graph.durable.unwrap_or(true);
     let mut state = DirectManifestBuildState::default();
-    let root_graph = graph_manifest(graph, root_durable, &mut state, agent_catalog)?;
+    let root_graph = graph_manifest(graph, root_durable, None, &mut state, agent_catalog)?;
     let mut child_workflows = child_workflows.to_vec();
     child_workflows.sort_by(|left, right| {
         (
@@ -774,9 +774,11 @@ pub fn build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
         .into_iter()
         .map(|child| {
             let child_durable = child.execution_graph.durable.unwrap_or(true);
+            // An embedded child is its own workflow: its own budget applies.
             let graph = graph_manifest(
                 child.execution_graph,
                 child_durable,
+                None,
                 &mut state,
                 agent_catalog,
             )?;
@@ -911,20 +913,36 @@ impl DirectManifestBuildState {
     }
 }
 
+/// `inherited_rate_limit_budget_ms` is `None` for a workflow's own graph and
+/// the enclosing graph's budget for a nested graph (Split/While body, onWait):
+/// `rateLimitBudgetMs` is a workflow-wide setting, so a nested graph's own
+/// value is ignored. Durability instead follows the nearest explicit setting.
 fn graph_manifest(
     graph: &ExecutionGraph,
     inherited_durable: bool,
+    inherited_rate_limit_budget_ms: Option<u64>,
     state: &mut DirectManifestBuildState,
     agent_catalog: Option<&AgentCatalog>,
 ) -> Result<DirectGraphManifest, DirectManifestError> {
     let durable = graph.durable.unwrap_or(inherited_durable);
+    let rate_limit_budget_ms = inherited_rate_limit_budget_ms.unwrap_or(graph.rate_limit_budget_ms);
     let mut step_values = graph.steps.values().collect::<Vec<_>>();
     step_values.sort_by(|left, right| step_id(left).cmp(step_id(right)));
 
     let mut collections = DirectGraphManifestCollections::default();
     let steps = step_values
         .into_iter()
-        .map(|step| step_manifest(step, graph, durable, state, &mut collections, agent_catalog))
+        .map(|step| {
+            step_manifest(
+                step,
+                graph,
+                durable,
+                rate_limit_budget_ms,
+                state,
+                &mut collections,
+                agent_catalog,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     collections.mappings.sort_by_key(|left| left.id);
@@ -951,7 +969,7 @@ fn graph_manifest(
         name: graph.name.clone(),
         entry_point: graph.entry_point.clone(),
         durable,
-        rate_limit_budget_ms: graph.rate_limit_budget_ms,
+        rate_limit_budget_ms,
         variables: canonical_json(&graph.variables)?,
         input_schema: canonical_json(&graph.input_schema)?,
         output_schema: canonical_json(&graph.output_schema)?,
@@ -996,6 +1014,7 @@ fn step_manifest(
     step: &Step,
     graph: &ExecutionGraph,
     inherited_durable: bool,
+    rate_limit_budget_ms: u64,
     state: &mut DirectManifestBuildState,
     collections: &mut DirectGraphManifestCollections,
     agent_catalog: Option<&AgentCatalog>,
@@ -1049,6 +1068,7 @@ fn step_manifest(
                 graph: Box::new(graph_manifest(
                     &step.subgraph,
                     inherited_durable,
+                    Some(rate_limit_budget_ms),
                     state,
                     agent_catalog,
                 )?),
@@ -1106,6 +1126,7 @@ fn step_manifest(
                 graph: Box::new(graph_manifest(
                     &step.subgraph,
                     inherited_durable,
+                    Some(rate_limit_budget_ms),
                     state,
                     agent_catalog,
                 )?),
@@ -1518,6 +1539,7 @@ fn step_manifest(
                     graph: Box::new(graph_manifest(
                         on_wait,
                         inherited_durable,
+                        Some(rate_limit_budget_ms),
                         state,
                         agent_catalog,
                     )?),
@@ -1849,6 +1871,20 @@ fn step_type_name(step: &Step) -> &'static str {
     }
 }
 
+/// A millisecond field of a raw step body or config: its canonical `...Ms`
+/// key, or the deprecated name an older definition or manifest carries.
+pub(super) fn duration_ms(value: &serde_json::Value, canonical: &str) -> Option<u64> {
+    let legacy = match canonical {
+        "timeoutMs" => "timeout",
+        "retryDelayMs" => "retryDelay",
+        _ => canonical,
+    };
+    value
+        .get(canonical)
+        .or_else(|| value.get(legacy))
+        .and_then(serde_json::Value::as_u64)
+}
+
 /// Live deadlines need the standard clock, including inline and supplied graphs.
 pub(super) fn needs_monotonic_clock(
     root: &DirectGraphManifest,
@@ -1859,26 +1895,13 @@ pub(super) fn needs_monotonic_clock(
     while let Some(graph) = graphs.pop() {
         if graph.agents.iter().any(|agent| agent.timeout.is_some())
             || graph.steps.iter().any(|step| {
-                step.step_type == "EmbedWorkflow"
-                    && step
-                        .body
-                        .get("timeout")
-                        .and_then(serde_json::Value::as_u64)
-                        .is_some()
+                step.step_type == "EmbedWorkflow" && duration_ms(&step.body, "timeoutMs").is_some()
             })
             || graph.whiles.iter().any(|value| {
-                value
-                    .value
-                    .get("timeout")
-                    .and_then(|v| v.as_u64())
-                    .is_some_and(|timeout| timeout > 0)
+                duration_ms(&value.value, "timeoutMs").is_some_and(|timeout| timeout > 0)
             })
             || graph.splits.iter().any(|value| {
-                value
-                    .value
-                    .get("timeout")
-                    .and_then(|v| v.as_u64())
-                    .is_some_and(|timeout| timeout > 0)
+                duration_ms(&value.value, "timeoutMs").is_some_and(|timeout| timeout > 0)
             })
         {
             return true;
@@ -1903,13 +1926,7 @@ pub(super) fn has_embed_timeout(
     graphs.extend(children.iter().map(|child| &child.graph));
     while let Some(graph) = graphs.pop() {
         for step in &graph.steps {
-            if step.step_type == "EmbedWorkflow"
-                && step
-                    .body
-                    .get("timeout")
-                    .and_then(serde_json::Value::as_u64)
-                    .is_some()
-            {
+            if step.step_type == "EmbedWorkflow" && duration_ms(&step.body, "timeoutMs").is_some() {
                 return true;
             }
             graphs.extend(
@@ -1954,6 +1971,33 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    /// A manifest body or config written before DSL 3.6 carries the old
+    /// duration names; the canonical name wins when both are present.
+    #[test]
+    fn duration_ms_reads_the_canonical_or_the_deprecated_name() {
+        let read = |value: serde_json::Value, key| duration_ms(&value, key);
+        assert_eq!(
+            read(serde_json::json!({"timeoutMs": 5}), "timeoutMs"),
+            Some(5)
+        );
+        assert_eq!(
+            read(serde_json::json!({"timeout": 5}), "timeoutMs"),
+            Some(5)
+        );
+        assert_eq!(
+            read(serde_json::json!({"retryDelay": 7}), "retryDelayMs"),
+            Some(7)
+        );
+        assert_eq!(
+            read(
+                serde_json::json!({"timeoutMs": 1, "timeout": 2}),
+                "timeoutMs"
+            ),
+            Some(1)
+        );
+        assert_eq!(read(serde_json::json!({}), "timeoutMs"), None);
+    }
+
     use super::*;
 
     fn fixture(name: &str) -> ExecutionGraph {
@@ -1992,6 +2036,42 @@ mod tests {
         assert_eq!(first.version, DIRECT_WORKFLOW_MANIFEST_VERSION);
         assert_eq!(first.graph.entry_point, "finish");
         assert_eq!(first.graph.rate_limit_budget_ms, graph.rate_limit_budget_ms);
+    }
+
+    #[test]
+    fn nested_graphs_use_the_workflow_rate_limit_budget() {
+        // `rateLimitBudgetMs` is workflow-wide: Split/While bodies and onWait
+        // run with the root's budget, whatever their own graph says (an unset
+        // value deserializes to the 60 000 default).
+        let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "split",
+            "rateLimitBudgetMs": 1500,
+            "steps": {
+                "split": {"id": "split", "stepType": "Split",
+                    "config": {"value": {"valueType": "immediate", "value": [1]}},
+                    "subgraph": {"entryPoint": "loop", "rateLimitBudgetMs": 90000, "steps": {
+                        "loop": {"id": "loop", "stepType": "While",
+                            "condition": {"type": "value", "valueType": "immediate", "value": false},
+                            "subgraph": {"entryPoint": "f", "steps": {"f": {"id": "f", "stepType": "Finish"}}}},
+                        "done": {"id": "done", "stepType": "Finish"}
+                    }, "executionPlan": [{"fromStep": "loop", "toStep": "done"}]}},
+                "finish": {"id": "finish", "stepType": "Finish"}
+            },
+            "executionPlan": [{"fromStep": "split", "toStep": "finish"}]
+        }))
+        .expect("graph parses");
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        assert_eq!(manifest.graph.rate_limit_budget_ms, 1500);
+        let split = manifest
+            .graph
+            .steps
+            .iter()
+            .find(|s| s.id == "split")
+            .expect("split");
+        let body = &split.nested_graphs[0].graph;
+        assert_eq!(body.rate_limit_budget_ms, 1500);
+        let while_step = body.steps.iter().find(|s| s.id == "loop").expect("while");
+        assert_eq!(while_step.nested_graphs[0].graph.rate_limit_budget_ms, 1500);
     }
 
     #[test]

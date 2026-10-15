@@ -13,7 +13,7 @@ export const NODE_TYPES = {
 
 export type NodeTypeId = (typeof NODE_TYPES)[keyof typeof NODE_TYPES];
 
-// DSL v2.0.0 supported step types only
+// Canvas node type for each DSL step type (and its display name)
 // Note: Start step type has been removed - entry point now points to first real step
 export const STEP_TYPES: Record<string, string> = {
   Create: NODE_TYPES.CreateNode,

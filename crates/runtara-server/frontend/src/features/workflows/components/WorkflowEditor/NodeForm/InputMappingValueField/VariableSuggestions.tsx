@@ -171,8 +171,7 @@ export function composeVariableSuggestions(
   suggestions.push({
     label: '_workflow_id',
     value: 'variables._workflow_id',
-    description:
-      'Workflow ID and instance ID (format: {workflow_id}::{instance_id})',
+    description: 'ID of the running workflow',
     group: 'Variables',
     type: 'string',
   });

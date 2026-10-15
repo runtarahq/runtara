@@ -6,13 +6,16 @@
  */
 import type { ValueType } from '@/generated/RuntaraRuntimeApi.ts';
 
-// Valid ValueType values from the spec
+// ValueType hints the editor writes on references. `json` is deprecated in
+// DSL 3.6 (W093): it passes the value through, the same as no hint, so the
+// editor drops it. The editor derives `object`/`array` hints from field types,
+// and writing those would make every re-saved reference coerce at run time,
+// so they stay form-level: a reference keeps the pass-through it had.
 const VALID_VALUE_TYPES: ReadonlySet<ValueType> = new Set<ValueType>([
   'string',
   'integer',
   'number',
   'boolean',
-  'json',
   'file',
 ]);
 
@@ -176,10 +179,9 @@ export const processMappingEntry = ({
 
     if (!isTemplate) {
       // For non-template strings, only parse as JSON if the typeHint is
-      // explicitly JSON-shaped. 'object'/'array' are form-level hints
-      // (e.g. Finish output types) that keep the editors' object-vs-array
-      // distinction; they carry the same parse semantics as 'json' and
-      // are never emitted as backend type hints (isValidValueType).
+      // explicitly JSON-shaped. 'object'/'array' keep the editors'
+      // object-vs-array distinction and parse like 'json'; none of the three
+      // is written as a backend hint (isValidValueType).
       // No auto-detection - explicit typeHint required.
       if (
         typeHint === 'json' ||

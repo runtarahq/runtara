@@ -9,7 +9,7 @@
             "config": {
                 "value": { "valueType": "immediate", "value": [1] },
                 "sequential": true,
-                "timeout": 7200000
+                "timeoutMs": 7200000
             },
             "subgraph": {
                 "name": "Slow Process Item",

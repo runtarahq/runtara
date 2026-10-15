@@ -7,7 +7,8 @@
 //! - Compiler type-safe access to workflow structure
 //! - Auto-generation of JSON Schema via schemars (in build.rs)
 //!
-//! Changes to these types automatically update `specs/dsl/v{VERSION}/schema.json` on rebuild.
+//! Changes to these types update the generated JSON Schema on rebuild; the
+//! server serves it at `GET /api/runtime/specs/dsl`.
 
 // Provide imports needed by schema_types.rs. Derives use the fully-qualified
 // `schemars::JsonSchema` path (gated behind the `json-schema` feature), so no
@@ -40,6 +41,66 @@ pub mod run_label;
 
 // Path utilities
 pub mod paths;
+
+/// Variable names the runtime binds itself: identity, iteration and scope
+/// bookkeeping. Authored variables (declared or Split/While
+/// `config.variables`) must not use them, or they would shadow the real
+/// values; validation rejects them (E137) and the compiler and runtime drop
+/// them. Other `_`-prefixed names, such as a legacy `_cache_key_prefix`
+/// namespace, are not reserved.
+pub const RUNTIME_VARIABLE_NAMES: &[&str] = &[
+    "_workflow_id",
+    "_instance_id",
+    "_tenant_id",
+    "_signal_id",
+    "_index",
+    "_item",
+    "_loop",
+    "_loop_indices",
+    "_loop_path",
+    "_scope_id",
+    "_parent_scope_id",
+    "_manifest_graph_path",
+    "_durable_key_version",
+    "_input_envelope",
+    "_workflow_inputs",
+];
+
+/// The runtime-owned variables a workflow may read, with what each holds.
+/// The other [`RUNTIME_VARIABLE_NAMES`] are scope and durability bookkeeping
+/// and carry no stable meaning for authors. A While body also binds the
+/// legacy `_previousOutputs`, the same value as `loop.outputs`.
+pub const PUBLIC_RUNTIME_VARIABLES: &[(&str, &str)] = &[
+    ("_workflow_id", "ID of the running workflow"),
+    ("_instance_id", "ID of this run"),
+    ("_tenant_id", "Tenant the run belongs to"),
+    (
+        "_signal_id",
+        "Inside a WaitForSignal onWait graph: the signal being waited for",
+    ),
+    (
+        "_index",
+        "Inside a Split or While body: the innermost iteration's index, from 0",
+    ),
+    (
+        "_item",
+        "Inside a Split body: the current item (the body's `data`); inside a While in a Split, that Split's item",
+    ),
+    (
+        "_loop",
+        "Inside a While body: `{index, outputs}` of the current iteration, as `loop.*`; inside a Split in a While, that While's",
+    ),
+    (
+        "_loop_indices",
+        "Inside any Split or While body: the index of every enclosing iteration, outermost first",
+    ),
+];
+
+/// Whether `name` is a runtime-owned variable binding (see
+/// [`RUNTIME_VARIABLE_NAMES`]).
+pub fn is_runtime_variable_name(name: &str) -> bool {
+    RUNTIME_VARIABLE_NAMES.contains(&name)
+}
 
 // Agent capability metadata types for runtime introspection
 pub mod agent_meta;
@@ -885,8 +946,24 @@ mod tests {
     }
 
     #[test]
+    fn memory_tier_reads_lowercase_and_writes_uppercase() {
+        let tier: MemoryTier = serde_json::from_value(serde_json::json!("xl")).unwrap();
+        assert_eq!(tier, MemoryTier::XL);
+        assert_eq!(serde_json::to_value(tier).unwrap(), serde_json::json!("XL"));
+        let tier: MemoryTier = serde_json::from_value(serde_json::json!("M")).unwrap();
+        assert_eq!(tier, MemoryTier::M);
+    }
+
+    #[test]
+    fn public_runtime_variables_are_reserved() {
+        for (name, _) in PUBLIC_RUNTIME_VARIABLES {
+            assert!(is_runtime_variable_name(name), "{name} is not reserved");
+        }
+    }
+
+    #[test]
     fn test_dsl_version() {
-        assert_eq!(DSL_VERSION, "3.5.0");
+        assert_eq!(DSL_VERSION, "3.6.0");
     }
 
     #[test]
@@ -1760,12 +1837,12 @@ mod tests {
 
     #[test]
     fn test_template_value_from_json() {
-        let json = r#"{"valueType": "template", "value": "Bearer {{ steps.my_conn.outputs.parameters.api_key }}"}"#;
+        let json = r#"{"valueType": "template", "value": "Hello {{ data.user.name }}"}"#;
         let parsed: MappingValue = serde_json::from_str(json).unwrap();
         assert!(parsed.is_template());
         assert_eq!(
             parsed.as_template_str().unwrap(),
-            "Bearer {{ steps.my_conn.outputs.parameters.api_key }}"
+            "Hello {{ data.user.name }}"
         );
     }
 
@@ -1887,8 +1964,54 @@ mod tests {
             config["variables"]["tenant"]["value"],
             serde_json::json!("data.tenant")
         );
-        // WhileConfig uses "timeout" not "timeoutMs"
-        assert_eq!(config.get("timeout").unwrap(), 5000);
+        // Durations serialize with the `Ms` suffix; the old key still reads.
+        assert_eq!(config.get("timeoutMs").unwrap(), 5000);
+        assert!(config.get("timeout").is_none());
+    }
+
+    /// Millisecond fields are spelled `...Ms`; the old names are deprecated
+    /// aliases (W093), and giving both is an error.
+    #[test]
+    fn duration_fields_accept_the_deprecated_names() {
+        let agent = |extra: serde_json::Value| {
+            let mut step = serde_json::json!({"stepType": "Agent", "id": "a",
+                "agentId": "utils", "capabilityId": "return-input"});
+            step.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<Step>(step)
+        };
+        for extra in [
+            serde_json::json!({"timeoutMs": 50, "retryDelayMs": 5}),
+            serde_json::json!({"timeout": 50, "retryDelay": 5}),
+        ] {
+            let Step::Agent(step) = agent(extra.clone()).unwrap() else {
+                panic!("expected an agent");
+            };
+            assert_eq!(
+                (step.timeout, step.retry_delay),
+                (Some(50), Some(5)),
+                "{extra}"
+            );
+        }
+        let error = agent(serde_json::json!({"timeout": 1, "timeoutMs": 2}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("duplicate field"), "{error}");
+        let split = serde_json::from_value::<SplitConfig>(serde_json::json!({
+            "value": {"valueType": "immediate", "value": []},
+            "timeout": 7, "retryDelay": 3
+        }))
+        .unwrap();
+        assert_eq!((split.timeout, split.retry_delay), (Some(7), Some(3)));
+        let written = serde_json::to_value(&split).unwrap();
+        assert_eq!(
+            (
+                written["timeoutMs"].clone(),
+                written["retryDelayMs"].clone()
+            ),
+            (serde_json::json!(7), serde_json::json!(3))
+        );
     }
 
     #[test]

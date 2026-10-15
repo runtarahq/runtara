@@ -90,6 +90,23 @@ pub struct UpdateWorkflowRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "trackEvents")]
     pub track_events: Option<bool>,
+    /// Workflow-level durability, as in the DSL's `Workflow.durable`: copied
+    /// into `executionGraph.durable` when the graph does not set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable: Option<bool>,
+}
+
+impl UpdateWorkflowRequest {
+    /// The execution graph with a top-level `durable` applied where the graph
+    /// leaves durability unset (the graph's own value wins).
+    fn execution_graph_with_durable(mut self) -> Value {
+        if let (Some(durable), Some(graph)) = (self.durable, self.execution_graph.as_object_mut())
+            && graph.get("durable").is_none_or(Value::is_null)
+        {
+            graph.insert("durable".to_string(), Value::Bool(durable));
+        }
+        self.execution_graph
+    }
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -333,15 +350,18 @@ pub async fn update_workflow_handler(
     // Collect referenced capabilities before the graph is moved into the service, so a
     // successful save can emit one `agent.capability_used` per distinct capability.
     let capabilities = collect_workflow_capabilities(&request.execution_graph);
+    let memory_tier = request.memory_tier;
+    let track_events = request.track_events;
+    let execution_graph = request.execution_graph_with_durable();
 
     // Delegate to service (name/description are now inside execution_graph)
     let (version_num, warnings) = match service
         .update_workflow(
             &tenant_id,
             &workflow_id,
-            request.execution_graph,
-            request.memory_tier,
-            request.track_events,
+            execution_graph,
+            memory_tier,
+            track_events,
         )
         .await
     {
@@ -1125,6 +1145,7 @@ pub async fn compile_workflow_handler(
     State(pool): State<PgPool>,
     State(runtime_client): State<Option<Arc<crate::runtime_client::RuntimeClient>>>,
     State(_connections): State<Arc<ConnectionsFacade>>,
+    State(agent_catalog): State<Arc<runtara_dsl::agent_meta::AgentCatalog>>,
     State(events): State<ProductEventSink>,
     Path((workflow_id, version)): Path<(String, String)>,
     Extension(ctx): Extension<AuthContext>,
@@ -1375,8 +1396,11 @@ pub async fn compile_workflow_handler(
     // Fallback: Valkey not configured, compile directly (still protected by semaphore)
     tracing::warn!("Valkey not configured, compiling directly (no queue)");
     let repository = Arc::new(WorkflowRepository::new(pool));
+    // Same catalog as the queued path: rate-limited retry defaults, suspends
+    // and workflow-agent classification all come from it.
     let compilation_service =
         crate::api::services::compilation::CompilationService::new(repository, runtime_client)
+            .with_agent_catalog(agent_catalog)
             .with_direct_compilation(
                 crate::api::services::compilation::direct_compilation_settings_from_config(),
             );
@@ -2796,14 +2820,33 @@ pub async fn validate_graph_handler(
                 Some((child_id, _)) => format!("in child workflow '{}': {}", child_id, text),
                 None => text,
             };
-            let errors: Vec<String> = report
+            let mut errors: Vec<String> = report
                 .errors()
                 .map(|(origin, e)| attribute(origin, e.to_string()))
                 .collect();
-            let warnings: Vec<String> = report
+            // The save gate's definition checks, so validate and save agree.
+            for check in [
+                crate::api::services::workflows::validate_execution_graph_name,
+                crate::api::services::workflows::validate_execution_timeout,
+            ] {
+                if let Err(error) = check(&body) {
+                    errors.push(match error {
+                        crate::api::services::workflows::ServiceError::ValidationError(message) => {
+                            message
+                        }
+                        other => other.to_string(),
+                    });
+                }
+            }
+            let mut warnings: Vec<String> = report
                 .warnings()
                 .map(|(origin, w)| attribute(origin, w.to_string()))
                 .collect();
+            warnings.extend(
+                runtara_workflows::ignored_fields::raw_definition_warnings(&body)
+                    .iter()
+                    .map(ToString::to_string),
+            );
 
             let is_valid = errors.is_empty();
             let message = if is_valid {
@@ -3517,5 +3560,37 @@ mod checkpoint_pagination_tests {
 
         assert!(ids(&body).is_empty());
         assert_eq!(body["totalCount"], WRITE_ORDER.len());
+    }
+}
+
+#[cfg(test)]
+mod update_request_durable_tests {
+    use super::UpdateWorkflowRequest;
+    use serde_json::json;
+
+    fn graph_after(body: serde_json::Value) -> serde_json::Value {
+        serde_json::from_value::<UpdateWorkflowRequest>(body)
+            .unwrap()
+            .execution_graph_with_durable()
+    }
+
+    #[test]
+    fn top_level_durable_applies_where_the_graph_leaves_it_unset() {
+        assert_eq!(
+            graph_after(json!({"executionGraph": {"name": "w"}, "durable": false}))["durable"],
+            false
+        );
+        // The graph's own setting wins.
+        assert_eq!(
+            graph_after(
+                json!({"executionGraph": {"name": "w", "durable": true}, "durable": false})
+            )["durable"],
+            true
+        );
+        assert!(
+            graph_after(json!({"executionGraph": {"name": "w"}}))
+                .get("durable")
+                .is_none()
+        );
     }
 }

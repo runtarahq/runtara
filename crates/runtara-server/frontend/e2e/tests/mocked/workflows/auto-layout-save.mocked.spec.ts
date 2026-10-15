@@ -268,10 +268,11 @@ test.describe('Save round-trip preserves step data (mocked)', () => {
     });
 
     // --- Bug 3: Split variables must not be coerced ---
-    expect(savedGraph.steps.splitter.config.value).toMatchObject({
+    // The deprecated `json` hint passes values through like no hint (DSL 3.6,
+    // W093), so the editor saves the reference without it.
+    expect(savedGraph.steps.splitter.config.value).toEqual({
       valueType: 'reference',
       value: 'data.items',
-      type: 'json',
     });
     expect(savedGraph.steps.splitter.config.variables.counter).toEqual({
       valueType: 'immediate',

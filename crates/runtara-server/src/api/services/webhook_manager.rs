@@ -852,8 +852,18 @@ mod tests {
         )))
     }
 
+    /// Request budget for a fake that answers. It answers at once, but a fresh
+    /// client's first request can take most of a second to set up, and a
+    /// 500 ms budget timed these tests out on such machines.
+    const ANSWERING_PLATFORM_BUDGET: Duration = Duration::from_secs(10);
+    /// Request budget for a platform that never answers: the call must time out.
+    const SILENT_PLATFORM_BUDGET: Duration = Duration::from_millis(500);
+
     /// One `setWebhook` call against `telegram_api_base`, with no database.
-    async fn set_webhook_against(telegram_api_base: String) -> Result<(), WebhookError> {
+    async fn set_webhook_against(
+        telegram_api_base: String,
+        request_timeout: Duration,
+    ) -> Result<(), WebhookError> {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgresql://localhost:1/unused")
             .unwrap();
@@ -861,7 +871,7 @@ mod tests {
             connections_facade(pool),
             Some("http://runtime.test".into()),
             telegram_api_base,
-            Duration::from_millis(500),
+            request_timeout,
         )
         .telegram_set_webhook("000000:test-token", "http://runtime.test/hook", "secret")
         .await
@@ -909,7 +919,9 @@ mod tests {
     #[tokio::test]
     async fn a_refusal_from_telegram_is_known_not_to_have_applied() {
         let (base, received) = fake_telegram(REFUSED).await;
-        let error = set_webhook_against(base).await.unwrap_err();
+        let error = set_webhook_against(base, ANSWERING_PLATFORM_BUDGET)
+            .await
+            .unwrap_err();
         assert!(matches!(error, WebhookError::NotApplied(_)), "{error}");
         assert!(error.platform_unchanged());
         assert_eq!(received.lock().unwrap().len(), 1);
@@ -920,7 +932,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
-        let error = set_webhook_against(format!("http://{addr}"))
+        let error = set_webhook_against(format!("http://{addr}"), ANSWERING_PLATFORM_BUDGET)
             .await
             .unwrap_err();
         assert!(matches!(error, WebhookError::NotApplied(_)), "{error}");
@@ -930,7 +942,9 @@ mod tests {
     #[tokio::test]
     async fn a_lost_reply_leaves_the_outcome_unknown() {
         let (base, received) = fake_telegram(APPLIED_REPLY_LOST).await;
-        let error = set_webhook_against(base).await.unwrap_err();
+        let error = set_webhook_against(base, ANSWERING_PLATFORM_BUDGET)
+            .await
+            .unwrap_err();
         assert!(matches!(error, WebhookError::PlatformError(_)), "{error}");
         assert!(!error.platform_unchanged());
         assert_eq!(received.lock().unwrap().len(), 1);
@@ -939,7 +953,7 @@ mod tests {
     #[tokio::test]
     async fn a_reply_that_never_comes_leaves_the_outcome_unknown() {
         let addr = silent_platform().await;
-        let error = set_webhook_against(format!("http://{addr}"))
+        let error = set_webhook_against(format!("http://{addr}"), SILENT_PLATFORM_BUDGET)
             .await
             .unwrap_err();
         assert!(matches!(error, WebhookError::PlatformError(_)), "{error}");
@@ -949,7 +963,9 @@ mod tests {
     #[tokio::test]
     async fn an_accepted_set_webhook_succeeds() {
         let (base, _) = fake_telegram(ACCEPTED).await;
-        set_webhook_against(base).await.unwrap();
+        set_webhook_against(base, ANSWERING_PLATFORM_BUDGET)
+            .await
+            .unwrap();
     }
 
     #[test]

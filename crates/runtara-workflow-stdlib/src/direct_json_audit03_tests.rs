@@ -129,8 +129,9 @@ fn audit_03_real_loop_helpers_restore_identity_after_authored_variables() {
         index: 2,
         outputs: Value::Null,
     };
-    let while_vars = while_iteration_variables(&while_step, &parent, &state).unwrap();
-    let split_vars = split_iteration_variables(&split(config), &parent, json!({}), 2).unwrap();
+    let while_vars = while_iteration_variables(&while_step, &parent, &state, None).unwrap();
+    let split_vars =
+        split_iteration_variables(&split(config), &parent, json!({}), 2, None).unwrap();
     for (kind, vars) in [("While", while_vars), ("Split", split_vars)] {
         assert_eq!(
             vars["_loop_path"],
@@ -189,7 +190,7 @@ fn audit_03_large_interned_identity_preserves_keys_and_loop_ancestry() {
     let interned: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(wfref_id(&interned["variables"]["_loop_path"]).is_some());
     assert_eq!(all_keys(&plain), all_keys(&interned));
-    let vars = split_iteration_variables(&split(json!({})), &interned, json!({}), 2).unwrap();
+    let vars = split_iteration_variables(&split(json!({})), &interned, json!({}), 2, None).unwrap();
     assert_eq!(vars["_loop_path"][0], plain["variables"]["_loop_path"][0]);
     assert_eq!(vars["_loop_path"][1], json!(["Split", "same", 2]));
 }
@@ -231,7 +232,7 @@ fn audit_03_legacy_artifacts_keep_exact_checkpoint_and_signal_addresses() {
         "_durable_key_version":{"valueType":"immediate","value":2},
         "_cache_key_prefix":{"valueType":"immediate","value":"legacy-prefix"}
     }});
-    let vars = split_iteration_variables(&split(config), &legacy, Value::Null, 3).unwrap();
+    let vars = split_iteration_variables(&split(config), &legacy, Value::Null, 3, None).unwrap();
     assert!(
         !vars.contains_key("_durable_key_version"),
         "legacy loops must not opt into v2 via authored variables"

@@ -14354,3 +14354,280 @@ fn a_workflow_agent_failure_reaches_the_root_error_as_child_error() {
         assert_eq!(child_error["message"], "the child failed", "{persisted}");
     }
 }
+
+fn rate_limited_provider_reply() -> Value {
+    serde_json::json!({"status": 429, "headers": {"retry-after-ms": "1000"}, "body": {"error": {"message": "rate limited"}}})
+}
+
+fn ok_provider_reply() -> Value {
+    serde_json::json!({"status": 200, "headers": {}, "body": {"object": "list", "data": [], "has_more": false}})
+}
+
+fn rate_limited_stripe_step(id: &str) -> Value {
+    serde_json::json!({"id": id, "stepType": "Agent", "agentId": "stripe", "capabilityId": "list-customers",
+                       "connectionId": "conn-1", "maxRetries": 1, "retryDelay": 10, "inputMapping": {}})
+}
+
+/// Each 429 asks for a 1000 ms wait against a root budget of 1500 ms: a step
+/// may wait once and gives up on the second. A Split body obeys the root
+/// budget rather than the nested graph's 60 000 ms default.
+#[test]
+fn direct_wasm_execute_split_body_uses_root_rate_limit_budget() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = serde_json::json!({
+        "durable": false,
+        "rateLimitBudgetMs": 1500,
+        "entryPoint": "split",
+        "executionPlan": [{"fromStep": "split", "toStep": "finish"}],
+        "steps": {
+            "split": {"id": "split", "stepType": "Split", "config": {"value": {"valueType": "immediate", "value": [1]}},
+                      "subgraph": {"entryPoint": "call",
+                                   "executionPlan": [{"fromStep": "call", "toStep": "done"}],
+                                   "steps": {"call": rate_limited_stripe_step("call"),
+                                             "done": {"id": "done", "stepType": "Finish", "inputMapping": {}}}}},
+            "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {}}
+        }
+    })
+    .to_string();
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "split-body-root-rate-limit-budget",
+        &graph,
+        br#"{}"#,
+        vec![
+            rate_limited_provider_reply(),
+            rate_limited_provider_reply(),
+            rate_limited_provider_reply(),
+            ok_provider_reply(),
+        ],
+    );
+    assert!(
+        !result.status_success,
+        "the body must give up: {:?}",
+        result.output_json
+    );
+    let error = result.error_json.expect("failure envelope");
+    assert_eq!(error["code"], "STRIPE_RATE_LIMITED", "{error}");
+    assert_eq!(error["stepId"], "call", "{error}");
+    assert_eq!(result.llm_requests.len(), 2, "one wait, then give up");
+}
+
+/// The budget is per step: an earlier step's rate-limit waits do not count
+/// against a later step lowered into the same function.
+#[test]
+fn direct_wasm_execute_rate_limit_budget_restarts_for_each_step() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = serde_json::json!({
+        "durable": false,
+        "rateLimitBudgetMs": 1500,
+        "entryPoint": "first",
+        "executionPlan": [{"fromStep": "first", "toStep": "second"}, {"fromStep": "second", "toStep": "finish"}],
+        "steps": {
+            "first": rate_limited_stripe_step("first"),
+            "second": rate_limited_stripe_step("second"),
+            "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {}}
+        }
+    })
+    .to_string();
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "rate-limit-budget-per-step",
+        &graph,
+        br#"{}"#,
+        vec![
+            rate_limited_provider_reply(),
+            ok_provider_reply(),
+            rate_limited_provider_reply(),
+            ok_provider_reply(),
+        ],
+    );
+    assert!(result.status_success, "{:?}", result.error_json);
+    assert_eq!(result.llm_requests.len(), 4);
+}
+
+/// A timed WaitForSignal leaves its absolute deadline in the local the Agent
+/// retry loop sums rate-limit waits into. A later rate-limited step must still
+/// get its own budget, not start out over it.
+#[test]
+fn direct_wasm_execute_rate_limit_budget_ignores_earlier_wait_deadline() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = serde_json::json!({
+        "rateLimitBudgetMs": 1500,
+        "entryPoint": "wait",
+        "executionPlan": [
+            {"fromStep": "wait", "toStep": "call", "label": "onError"},
+            {"fromStep": "wait", "toStep": "call"},
+            {"fromStep": "call", "toStep": "finish"}
+        ],
+        "steps": {
+            "wait": {"id": "wait", "stepType": "WaitForSignal", "pollIntervalMs": 0,
+                     "timeoutMs": {"valueType": "immediate", "value": 1}},
+            "call": rate_limited_stripe_step("call"),
+            "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {}}
+        }
+    })
+    .to_string();
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "rate-limit-budget-after-wait",
+        &graph,
+        br#"{}"#,
+        vec![rate_limited_provider_reply(), ok_provider_reply()],
+    );
+    assert!(result.status_success, "{:?}", result.error_json);
+    assert_eq!(result.llm_requests.len(), 2);
+}
+
+fn ai_agent_tool_loop_with_retries(max_retries: u32, durable: bool) -> String {
+    let graph = ai_agent_tool_loop_on_error_graph_json("return-input").replace(
+        r#""model":{"valueType":"immediate","value":"gpt-4o"}}"#,
+        &format!(
+            r#""model":{{"valueType":"immediate","value":"gpt-4o"}},"maxRetries":{max_retries},"retryDelay":10}}"#
+        ),
+    );
+    let graph = graph.replacen(
+        r#""entryPoint": "ai","#,
+        &format!(r#""durable": {durable}, "entryPoint": "ai","#),
+        1,
+    );
+    assert!(graph.contains(r#""maxRetries""#) && graph.contains(r#""durable""#));
+    graph
+}
+
+/// `maxRetries` applies to every chat-turn call of a tool loop, in durable and
+/// non-durable workflows alike.
+#[test]
+fn direct_wasm_execute_ai_agent_loop_retries_a_failed_turn() {
+    let components_dir = direct_e2e_components_dir();
+    for durable in [true, false] {
+        let result = run_direct_workflow_with_llm_script(
+            &components_dir,
+            &format!("ai-loop-turn-retry-{durable}"),
+            &ai_agent_tool_loop_with_retries(2, durable),
+            br#"{}"#,
+            vec![llm_http_500(), llm_ok("recovered")],
+        );
+        assert!(result.status_success, "{}", result.stderr);
+        assert_eq!(result.llm_requests.len(), 2, "durable={durable}");
+        assert_eq!(
+            result.output_json.as_ref().and_then(|o| o.get("answer")),
+            Some(&Value::String("recovered".to_string())),
+            "durable={durable}: {:?}",
+            result.output_json
+        );
+    }
+}
+
+/// Once the retries are used up, the last failure routes to onError as an
+/// unretried one does.
+#[test]
+fn direct_wasm_execute_ai_agent_loop_exhausted_retries_route_to_on_error() {
+    let components_dir = direct_e2e_components_dir();
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-loop-turn-retry-exhausted",
+        &ai_agent_tool_loop_with_retries(1, false),
+        br#"{}"#,
+        vec![llm_http_500(), llm_http_500(), llm_ok("unused")],
+    );
+    assert!(result.status_success, "{}", result.stderr);
+    assert_eq!(result.llm_requests.len(), 2);
+    let output = result.output_json.expect("handler output");
+    assert_eq!(output.get("handled"), Some(&Value::Bool(true)), "{output}");
+}
+
+fn llm_rate_limited() -> Value {
+    serde_json::json!({"status": 429, "headers": {"retry-after-ms": "1"},
+                       "body": {"error": {"message": "slow down"}}})
+}
+
+/// A provider 429 is rate-limited for both AiAgent paths, so it retries within
+/// the workflow's rate-limit budget, past `maxRetries`.
+#[test]
+fn direct_wasm_execute_ai_agent_provider_429s_use_the_rate_limit_budget() {
+    let components_dir = direct_e2e_components_dir();
+    let tool_loop = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-loop-provider-429",
+        &ai_agent_tool_loop_with_retries(1, false),
+        br#"{}"#,
+        vec![llm_rate_limited(), llm_rate_limited(), llm_ok("recovered")],
+    );
+    assert!(tool_loop.status_success, "{}", tool_loop.stderr);
+    assert_eq!(tool_loop.llm_requests.len(), 3);
+    assert_eq!(
+        tool_loop.output_json.as_ref().and_then(|o| o.get("answer")),
+        Some(&Value::String("recovered".to_string())),
+        "{:?}",
+        tool_loop.output_json
+    );
+
+    let single = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-single-provider-429",
+        &single_shot_ai_agent_graph_json(r#","maxRetries":1,"retryDelay":10"#),
+        br#"{}"#,
+        vec![llm_rate_limited(), llm_rate_limited(), llm_ok("recovered")],
+    );
+    assert!(single.status_success, "{}", single.stderr);
+    assert_eq!(single.llm_requests.len(), 3, "{:?}", single.output_json);
+
+    // maxRetries 0 still disables every retry, rate-limited ones included.
+    let no_retries = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-loop-provider-429-no-retries",
+        &ai_agent_tool_loop_on_error_graph_json("return-input"),
+        br#"{}"#,
+        vec![llm_rate_limited(), llm_ok("unused")],
+    );
+    assert_eq!(no_retries.llm_requests.len(), 1);
+    assert_eq!(
+        no_retries.output_json.as_ref().and_then(|o| o.get("code")),
+        Some(&Value::String("AI_RATE_LIMITED".to_string())),
+        "{:?}",
+        no_retries.output_json
+    );
+}
+
+/// A step inside an onError handler keeps its own onError routing: when the
+/// handler's step fails too, its handler runs instead of the run failing.
+#[test]
+fn direct_wasm_execute_on_error_inside_an_on_error_handler_routes() {
+    let components_dir = direct_e2e_components_dir();
+    let boom = |id: &str| {
+        serde_json::json!({"id": id, "stepType": "Agent", "agentId": "transform",
+                           "capabilityId": "from-json-string", "maxRetries": 0,
+                           "inputMapping": {"value": {"valueType": "immediate", "value": "{not json"}}})
+    };
+    let graph = serde_json::json!({
+        "entryPoint": "first",
+        "executionPlan": [
+            {"fromStep": "first", "toStep": "ok"},
+            {"fromStep": "first", "toStep": "recover", "label": "onError"},
+            {"fromStep": "recover", "toStep": "recovered"},
+            {"fromStep": "recover", "toStep": "inner_handler", "label": "onError"}
+        ],
+        "steps": {
+            "first": boom("first"),
+            "recover": boom("recover"),
+            "ok": {"id": "ok", "stepType": "Finish", "inputMapping": {}},
+            "recovered": {"id": "recovered", "stepType": "Finish", "inputMapping": {
+                "stage": {"valueType": "immediate", "value": "recovered"}}},
+            "inner_handler": {"id": "inner_handler", "stepType": "Finish", "inputMapping": {
+                "stage": {"valueType": "immediate", "value": "inner handler"},
+                "failed": {"valueType": "reference", "value": "steps.__error.stepId"}}}
+        }
+    })
+    .to_string();
+    let result = run_direct_workflow_capture(
+        &components_dir,
+        "on-error-inside-handler",
+        &graph,
+        br#"{}"#,
+        false,
+    );
+    assert!(result.status_success, "{}", result.stderr);
+    let output = result.output_json.expect("inner handler output");
+    assert_eq!(output["stage"], "inner handler", "{output}");
+    assert_eq!(output["failed"], "recover", "{output}");
+}

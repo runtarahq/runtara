@@ -2,11 +2,11 @@
  * Type options offered when adding a custom parameter — a parameter the
  * capability schema does not declare.
  *
- * Values are API `ValueType`s, and that vocabulary has no separate `array`:
- * `VALID_VALUE_TYPES` in `CustomNodes/utils.tsx` is
- * {string, integer, number, boolean, json, file}, and `isValidValueType`
- * drops any hint outside it on save. `json` therefore covers both objects and
- * arrays.
+ * Values are editor type hints. `VALID_VALUE_TYPES` in
+ * `utils/mapping-serialization.ts` is {string, integer, number, boolean,
+ * file}, and `isValidValueType` drops any other hint on save, so `json`
+ * (deprecated as a DSL hint in 3.6) stays a form-level "parse as JSON" choice
+ * covering both objects and arrays.
  *
  * There used to be two entries here — `{value: 'json', label: 'JSON Object'}`
  * and `{value: 'json', label: 'Array'}`. Because a Radix Select renders the

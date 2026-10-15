@@ -55,7 +55,23 @@
 //! | E133 | InvalidWaitForInstancesConfig | WaitForInstances literal instanceIds or timeoutMs out of range |
 //! | E134 | StateStepWithoutStateSchema | SetState/GetState in a workflow without stateSchema |
 //! | E135 | UndeclaredStateField | SetState writes a field not declared in stateSchema |
-//! | E043 | InvalidChildVersion | Invalid child workflow version format |
+//! | E136 | ReservedStepId | A step id collides with the onError error context (`error`, `__error`) |
+//! | E137 | ReservedVariableName | A declared or config variable shadows a runtime-owned binding (`_instance_id`, `_item`, …) |
+//! | E138 | UnsupportedGraphShape | An otherwise valid graph the compiler's support gate rejects (save-time backstop) |
+//! | E139 | ConditionedEdgesWithoutDefault | Conditioned normal edges without a default edge |
+//! | E140 | ConditionalMissingBranch | Conditional without a `true` or `false` edge |
+//! | E141 | RoutingSwitchMissingDefault | Routing Switch without a `default` edge |
+//! | E142 | OnErrorUnsupportedSource | onError edge from a step type that cannot route failures |
+//! | E143 | UnknownEdgeLabel | Edge label the source step type does not route on |
+//! | E144 | FanoutBranchConditionedExit | Parallel fan-out branch with a conditioned exit before the merge |
+//! | E145 | NonDurableDelay | Delay in a non-durable workflow, body or step (a Delay must park) |
+//! | E146 | MissingStepConfig | Split or Switch without the config its value lives in |
+//! | E147 | InvalidMillisecondsValue | Literal Delay.durationMs / WaitForSignal.timeoutMs that is not a non-negative number |
+//! | E148 | InvalidTemplateSyntax | A template value that does not parse |
+//! | E149 | OnErrorNestingTooDeep | onError handlers nested more than 4 levels, or a handler chain that loops |
+//! | E150 | VariableTypeMismatch | A declared variable's value does not match its `type` |
+//! | E151 | FieldConditionWithoutTest | `visibleWhen`/`requiredWhen` with neither `equals` nor `notEquals` |
+//! | E050 | InvalidChildVersion | Invalid child workflow version format |
 //! | E051 | UndefinedDataReference | `data.*` field not in inputSchema |
 //! | E052 | MissingInputSchema | `data.*` used but no inputSchema defined |
 //! | E053 | UndefinedVariableReference | `variables.*` field not in variables |
@@ -607,6 +623,84 @@ pub enum ValidationError {
         field_name: String,
         declared: Vec<String>,
     },
+    /// A step id that onError handlers reuse for the error context
+    /// (`steps.error` / `steps.__error`), so the step's output would be
+    /// replaced by the error envelope inside handlers.
+    ReservedStepId { step_id: String },
+    /// An authored variable named like a runtime-owned binding
+    /// (`_instance_id`, `_tenant_id`, `_item`, …; see
+    /// `runtara_dsl::RUNTIME_VARIABLE_NAMES`), which it would shadow. `scope`
+    /// names where it was declared.
+    ReservedVariableName { scope: String, name: String },
+    /// The graph is otherwise valid, but the compiler cannot lower this shape
+    /// yet, so saving it would only fail at compile. Carries the compiler's
+    /// own reason.
+    UnsupportedGraphShape {
+        step_id: Option<String>,
+        feature: String,
+        reason: String,
+    },
+    /// A step has conditioned normal edges but no unconditioned one to take
+    /// when none matches.
+    ConditionedEdgesWithoutDefault { from_step: String },
+    /// A Conditional step is missing its `true` or `false` edge.
+    ConditionalMissingBranch { step_id: String, branch: String },
+    /// A routing Switch (a case has a `route`) has no `default` edge.
+    RoutingSwitchMissingDefault { step_id: String },
+    /// An `onError` edge leaves a step type that cannot route its failures.
+    OnErrorUnsupportedSource { step_id: String, step_type: String },
+    /// An edge label the source step type does not route on.
+    UnknownEdgeLabel {
+        from_step: String,
+        step_type: String,
+        label: String,
+        allowed: Vec<String>,
+    },
+    /// A parallel fan-out branch leaves through a conditioned edge before
+    /// reaching the merge point, so the branches cannot run as one region.
+    FanoutBranchConditionedExit {
+        from_step: String,
+        branch_step: String,
+    },
+    /// A Delay that is not durable (its own `durable: false`, or a
+    /// non-durable workflow or body): a Delay parks the run, which needs
+    /// durability, so it cannot be built.
+    NonDurableDelay { step_id: String },
+    /// A Split or Switch without `config`, whose `value` it requires.
+    MissingStepConfig { step_id: String, step_type: String },
+    /// A literal duration or timeout that is not a non-negative number of
+    /// milliseconds, which the runtime would reject on every run.
+    InvalidMillisecondsValue {
+        step_id: String,
+        field: String,
+        value: String,
+    },
+    /// A template value that does not parse.
+    InvalidTemplateSyntax {
+        step_id: String,
+        template: String,
+        reason: String,
+    },
+    /// onError handlers that themselves have onError handlers nest deeper
+    /// than the compiler lowers, or a handler chain leads back to a step
+    /// already in it.
+    OnErrorNestingTooDeep {
+        step_id: String,
+        max_depth: usize,
+        cyclic: bool,
+    },
+    /// A declared variable whose value does not match its `type`.
+    VariableTypeMismatch {
+        name: String,
+        declared: String,
+        actual: String,
+    },
+    /// A `visibleWhen` / `requiredWhen` with neither `equals` nor `notEquals`.
+    FieldConditionWithoutTest {
+        location: String,
+        field: String,
+        condition: String,
+    },
 }
 
 /// Information about a missing required input field.
@@ -684,6 +778,22 @@ impl ValidationError {
             Self::InvalidWaitForInstancesConfig { .. } => "E133",
             Self::StateStepWithoutStateSchema { .. } => "E134",
             Self::UndeclaredStateField { .. } => "E135",
+            Self::ReservedStepId { .. } => "E136",
+            Self::ReservedVariableName { .. } => "E137",
+            Self::UnsupportedGraphShape { .. } => "E138",
+            Self::ConditionedEdgesWithoutDefault { .. } => "E139",
+            Self::ConditionalMissingBranch { .. } => "E140",
+            Self::RoutingSwitchMissingDefault { .. } => "E141",
+            Self::OnErrorUnsupportedSource { .. } => "E142",
+            Self::UnknownEdgeLabel { .. } => "E143",
+            Self::FanoutBranchConditionedExit { .. } => "E144",
+            Self::NonDurableDelay { .. } => "E145",
+            Self::MissingStepConfig { .. } => "E146",
+            Self::InvalidMillisecondsValue { .. } => "E147",
+            Self::InvalidTemplateSyntax { .. } => "E148",
+            Self::OnErrorNestingTooDeep { .. } => "E149",
+            Self::VariableTypeMismatch { .. } => "E150",
+            Self::FieldConditionWithoutTest { .. } => "E151",
         }
     }
 }
@@ -1379,7 +1489,7 @@ impl std::fmt::Display for ValidationError {
             } => write!(
                 f,
                 "[E029] Step '{}' calls suspending capability '{}' without a timeout. \
-                 Set timeout (milliseconds, > 0): it is the hard deadline of the step, \
+                 Set timeoutMs (> 0): it is the hard deadline of the step, \
                  parked time included.",
                 step_id, capability
             ),
@@ -1441,6 +1551,155 @@ impl std::fmt::Display for ValidationError {
                 }
                 Ok(())
             }
+            ValidationError::ReservedStepId { step_id } => write!(
+                f,
+                "[E136] Step id '{}' is reserved: inside onError handlers `steps.{}` is the \
+                 error context, so this step's output would be replaced. Rename the step.",
+                step_id, step_id
+            ),
+            ValidationError::ReservedVariableName { scope, name } => write!(
+                f,
+                "[E137] Variable '{}' in {} is a runtime-owned binding and would shadow \
+                 the value the runtime sets. Rename the variable.",
+                name, scope
+            ),
+            ValidationError::UnsupportedGraphShape {
+                step_id,
+                feature,
+                reason,
+            } => match step_id {
+                Some(step_id) => write!(
+                    f,
+                    "[E138] Step '{}' uses a graph shape the compiler cannot build ({}): {}",
+                    step_id, feature, reason
+                ),
+                None => write!(
+                    f,
+                    "[E138] The workflow uses a graph shape the compiler cannot build ({}): {}",
+                    feature, reason
+                ),
+            },
+            ValidationError::ConditionedEdgesWithoutDefault { from_step } => write!(
+                f,
+                "[E139] Step '{}' has conditioned edges but no unconditioned edge to follow \
+                 when none of the conditions match. Add one default edge.",
+                from_step
+            ),
+            ValidationError::ConditionalMissingBranch { step_id, branch } => write!(
+                f,
+                "[E140] Conditional step '{}' has no '{}' edge. A Conditional needs both a \
+                 'true' and a 'false' edge.",
+                step_id, branch
+            ),
+            ValidationError::RoutingSwitchMissingDefault { step_id } => write!(
+                f,
+                "[E141] Routing Switch '{}' has no 'default' edge for values that match no \
+                 case. Add an edge labelled 'default'.",
+                step_id
+            ),
+            ValidationError::OnErrorUnsupportedSource { step_id, step_type } => write!(
+                f,
+                "[E142] {} step '{}' cannot route failures through onError. onError edges \
+                 are supported on Agent, AiAgent, EmbedWorkflow, Split, While, \
+                 WaitForSignal, WaitForInstances, SetState and GetState steps.",
+                step_type, step_id
+            ),
+            ValidationError::UnknownEdgeLabel {
+                from_step,
+                step_type,
+                label,
+                allowed,
+            } => write!(
+                f,
+                "[E143] Edge label '{}' on {} step '{}' is not one it routes on. Use one of: {}.",
+                label,
+                step_type,
+                from_step,
+                allowed.join(", ")
+            ),
+            ValidationError::FanoutBranchConditionedExit {
+                from_step,
+                branch_step,
+            } => write!(
+                f,
+                "[E144] Parallel branch step '{}' (fanned out from '{}') has a conditioned \
+                 exit. Branches of a fan-out must run straight to their merge point; route \
+                 conditionally after the merge.",
+                branch_step, from_step
+            ),
+            ValidationError::NonDurableDelay { step_id } => write!(
+                f,
+                "[E145] Delay step '{}' is not durable. A Delay parks the run instead of \
+                 holding a runner, which needs durability: enable durability for the \
+                 workflow or step, or remove the delay.",
+                step_id
+            ),
+            ValidationError::MissingStepConfig { step_id, step_type } => write!(
+                f,
+                "[E146] {} step '{}' has no config. It needs config.value (and, for a \
+                 Switch, config.cases).",
+                step_type, step_id
+            ),
+            ValidationError::InvalidMillisecondsValue {
+                step_id,
+                field,
+                value,
+            } => write!(
+                f,
+                "[E147] Step '{}' sets {} to {}, but it must be a non-negative number of \
+                 milliseconds (for example 5000, not \"5s\").",
+                step_id, field, value
+            ),
+            ValidationError::InvalidTemplateSyntax {
+                step_id,
+                template,
+                reason,
+            } => write!(
+                f,
+                "[E148] Step '{}' has a template that does not parse: {}. Template: {}",
+                step_id, reason, template
+            ),
+            ValidationError::OnErrorNestingTooDeep {
+                step_id,
+                max_depth,
+                cyclic,
+            } => {
+                if *cyclic {
+                    write!(
+                        f,
+                        "[E149] The onError handlers of step '{}' lead back to a step already \
+                         in the same handler chain.",
+                        step_id
+                    )
+                } else {
+                    write!(
+                        f,
+                        "[E149] The onError handlers of step '{}' nest more than {} levels deep \
+                         (handlers whose steps have their own onError handlers). Flatten the \
+                         chain.",
+                        step_id, max_depth
+                    )
+                }
+            }
+            ValidationError::VariableTypeMismatch {
+                name,
+                declared,
+                actual,
+            } => write!(
+                f,
+                "[E150] Variable '{}' is declared as {} but its value is {}.",
+                name, declared, actual
+            ),
+            ValidationError::FieldConditionWithoutTest {
+                location,
+                field,
+                condition,
+            } => write!(
+                f,
+                "[E151] Field '{}' in {} has a {} with neither 'equals' nor 'notEquals'. \
+                 Add one, or remove the condition.",
+                field, location, condition
+            ),
         }
     }
 }
@@ -1567,10 +1826,10 @@ pub enum ValidationWarning {
         reference: String,
         reason: String,
     },
-    /// A reference uses the bare `__error.*` root that older docs advertised.
-    /// The captured onError envelope lives at `steps.__error.*` (alias
-    /// `steps.error.*`); the runtime mirrors it to the bare root for
-    /// back-compat, but the canonical, typo-checked path is `steps.__error.*`.
+    /// A reference reads the onError error context through a deprecated
+    /// spelling: the bare `__error.*` / `error.*` roots older docs advertised,
+    /// or the `steps.error.*` alias. All resolve for back-compat; the canonical
+    /// path is `steps.__error.*`, and DSL 4.0 removes the others.
     BareErrorReference {
         step_id: String,
         reference_path: String,
@@ -1634,6 +1893,60 @@ pub enum ValidationWarning {
         step_id: String,
         child_workflow_id: String,
     },
+    /// A nested graph (Split/While body, onWait) sets a workflow-wide
+    /// setting that only the workflow's own graph honours, such as
+    /// `rateLimitBudgetMs`; the nested value has no effect.
+    NestedGraphSettingIgnored { scope: String, setting: String },
+    /// A reference reads a field the onError error context never carries
+    /// (`steps.__error.mesage`); it resolves to null.
+    UnknownErrorContextField {
+        step_id: String,
+        reference_path: String,
+        field: String,
+    },
+    /// A key of the definition that no DSL field matches, such as
+    /// `inputSchema.name.requird`; deserialization drops it.
+    IgnoredField { path: String },
+    /// A Split sets both `sequential: true` and `parallelism`; sequential
+    /// wins and the window is ignored.
+    SplitSequentialOverridesParallelism { step_id: String, parallelism: u32 },
+    /// `WaitForSignal.pollIntervalMs` is deprecated: a waiting run resumes
+    /// when the signal arrives, so the interval is never used.
+    PollIntervalIgnored { step_id: String },
+    /// A `visibleWhen` / `requiredWhen` whose `equals` and `notEquals` are
+    /// the same value, so it can never hold.
+    FieldConditionNeverMatches {
+        location: String,
+        field: String,
+        condition: String,
+    },
+    /// An immediate value outside an Agent mapping holds a reference
+    /// envelope. Only Agent inputs resolve references nested in immediates
+    /// (that is how a condition inside one reads workflow data); here it is
+    /// passed on literally.
+    ImmediateReferenceNotResolved { step_id: String, field: String },
+    /// `timeoutMs: 0` means different things by step type: no deadline for a
+    /// Split or While, a deadline already passed for an Agent or
+    /// EmbedWorkflow (the step fails before it runs).
+    ZeroTimeout {
+        step_id: String,
+        step_type: String,
+        fails: bool,
+    },
+    /// A routing Switch case without a `route`: when it matches, the switch
+    /// outputs that case's `output` and takes the `default` edge.
+    SwitchCaseWithoutRoute {
+        step_id: String,
+        case_indices: Vec<usize>,
+    },
+    /// A deprecated spelling that still reads as its canonical form until
+    /// DSL 4.0: a millisecond field without its `Ms` suffix, the `json` type
+    /// hint, GroupBy's `total_groups`.
+    DeprecatedSpelling {
+        path: String,
+        found: String,
+        canonical: String,
+    },
 }
 
 impl ValidationWarning {
@@ -1663,6 +1976,16 @@ impl ValidationWarning {
             Self::IneffectiveStateSchemaSetting { .. } => "W081",
             Self::NonDurableStateIsLocal { .. } => "W082",
             Self::EmbeddedChildStateIsLocal { .. } => "W083",
+            Self::NestedGraphSettingIgnored { .. } => "W084",
+            Self::UnknownErrorContextField { .. } => "W085",
+            Self::IgnoredField { .. } => "W086",
+            Self::SplitSequentialOverridesParallelism { .. } => "W087",
+            Self::PollIntervalIgnored { .. } => "W088",
+            Self::FieldConditionNeverMatches { .. } => "W089",
+            Self::ImmediateReferenceNotResolved { .. } => "W090",
+            Self::ZeroTimeout { .. } => "W091",
+            Self::SwitchCaseWithoutRoute { .. } => "W092",
+            Self::DeprecatedSpelling { .. } => "W093",
         }
     }
 }
@@ -1749,7 +2072,7 @@ impl std::fmt::Display for ValidationWarning {
             } => {
                 write!(
                     f,
-                    "[W034] Step '{}' has timeout={}ms ({}). Consider {} or less, or breaking into smaller steps.",
+                    "[W034] Step '{}' has timeoutMs={} ({}). Consider {} or less, or breaking into smaller steps.",
                     step_id,
                     timeout_ms,
                     format_duration(*timeout_ms),
@@ -1816,7 +2139,7 @@ impl std::fmt::Display for ValidationWarning {
             } => {
                 write!(
                     f,
-                    "[W052] Step '{}' template references '{}': {}. This is a warning because Minijinja resolves missing values at runtime.",
+                    "[W052] Step '{}' template references '{}': {}. A missing value renders empty, but reading a field of a missing value fails the run.",
                     step_id, reference, reason
                 )
             }
@@ -1827,7 +2150,7 @@ impl std::fmt::Display for ValidationWarning {
             } => {
                 write!(
                     f,
-                    "[W053] Step '{}' references the onError error context via '{}'. Use the canonical '{}' instead; the bare root still resolves for back-compat but is not typo-checked.",
+                    "[W053] Step '{}' references the onError error context via '{}', a deprecated spelling that still resolves. Use the canonical '{}' instead; DSL 4.0 removes the other spellings.",
                     step_id, reference_path, suggested_path
                 )
             }
@@ -1885,7 +2208,7 @@ impl std::fmt::Display for ValidationWarning {
                 margin_ms,
             } => write!(
                 f,
-                "[W078] Step '{}' calls a suspending capability with timeout={}ms, at most the {}ms deadline margin: it times out instead of parking. Raise the timeout.",
+                "[W078] Step '{}' calls a suspending capability with timeoutMs={}, at most the {}ms deadline margin: it times out instead of parking. Raise timeoutMs.",
                 step_id, timeout_ms, margin_ms
             ),
             ValidationWarning::IneffectiveStateSchemaSetting {
@@ -1909,6 +2232,115 @@ impl std::fmt::Display for ValidationWarning {
                 f,
                 "[W083] EmbedWorkflow step '{}' embeds '{}', whose SetState and GetState steps keep state local to the embedded run: only the outer run publishes state.",
                 step_id, child_workflow_id
+            ),
+            ValidationWarning::NestedGraphSettingIgnored { scope, setting } => write!(
+                f,
+                "[W084] {} sets {}, which has no effect there: it applies to the whole workflow. Set it on the workflow instead.",
+                scope, setting
+            ),
+            ValidationWarning::UnknownErrorContextField {
+                step_id,
+                reference_path,
+                field,
+            } => write!(
+                f,
+                "[W085] Step '{}' references '{}', but the error context has no '{}' field, so it resolves to null. Known fields: {}.",
+                step_id,
+                reference_path,
+                field,
+                ERROR_CONTEXT_FIELDS.join(", ")
+            ),
+            ValidationWarning::IgnoredField { path } => match path.as_str() {
+                "trackEvents" | "memoryTier" => write!(
+                    f,
+                    "[W086] '{}' is not an executionGraph field and is ignored here. Set it on \
+                     the workflow, beside executionGraph.",
+                    path
+                ),
+                _ => write!(
+                    f,
+                    "[W086] '{}' is not a workflow field and is ignored. Check the spelling.",
+                    path
+                ),
+            },
+            ValidationWarning::SplitSequentialOverridesParallelism {
+                step_id,
+                parallelism,
+            } => write!(
+                f,
+                "[W087] Split step '{}' sets sequential: true and parallelism {}. Iterations run \
+                 one at a time; remove one of the two.",
+                step_id, parallelism
+            ),
+            ValidationWarning::FieldConditionNeverMatches {
+                location,
+                field,
+                condition,
+            } => write!(
+                f,
+                "[W089] Field '{}' in {} has a {} whose equals and notEquals are the same \
+                 value, so it can never hold.",
+                field, location, condition
+            ),
+            ValidationWarning::ImmediateReferenceNotResolved { step_id, field } => write!(
+                f,
+                "[W090] Step '{}' field '{}' is an immediate value containing a reference \
+                 envelope. Only Agent inputs resolve references nested in immediates; here \
+                 it is passed on as literal JSON. Use a reference or composite mapping to \
+                 read workflow data.",
+                step_id, field
+            ),
+            ValidationWarning::ZeroTimeout {
+                step_id,
+                step_type,
+                fails,
+            } => {
+                if *fails {
+                    write!(
+                        f,
+                        "[W091] {} step '{}' sets timeoutMs 0, which is a deadline already \
+                         passed: the step fails before it runs. Omit timeoutMs for no deadline.",
+                        step_type, step_id
+                    )
+                } else {
+                    write!(
+                        f,
+                        "[W091] {} step '{}' sets timeoutMs 0, which means no timeout here \
+                         (unlike an Agent, where 0 fails the step). Omit it instead.",
+                        step_type, step_id
+                    )
+                }
+            }
+            ValidationWarning::SwitchCaseWithoutRoute {
+                step_id,
+                case_indices,
+            } => write!(
+                f,
+                "[W092] Routing Switch step '{}' has case(s) {} without a route. A matching \
+                 case without a route outputs its own output and takes the default edge. \
+                 Give it a route, or set route \"default\" to say so.",
+                step_id,
+                case_indices
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            ValidationWarning::DeprecatedSpelling {
+                path,
+                found,
+                canonical,
+            } => write!(
+                f,
+                "[W093] '{}' uses the deprecated spelling '{}'. Use '{}' instead; both are \
+                 read until DSL 4.0, which removes '{}'.",
+                path, found, canonical, found
+            ),
+            ValidationWarning::PollIntervalIgnored { step_id } => write!(
+                f,
+                "[W088] WaitForSignal step '{}' sets pollIntervalMs, which is deprecated and has \
+                 no effect: a waiting run resumes as soon as the signal arrives. Remove it.",
+                step_id
             ),
         }
     }
@@ -1944,6 +2376,9 @@ pub fn validate_workflow(
                 step_id: error.step_id,
             }),
     );
+
+    // Phase 0.5: names that collide with runtime-owned identifiers (E136, E137)
+    validate_reserved_names(graph, &mut result);
 
     // Phase 1: Graph structure validation
     validate_graph_structure(graph, &mut result);
@@ -2151,6 +2586,123 @@ impl ClosureValidationReport {
     }
 }
 
+/// Save-time backstop: run the compiler's own support gate on a graph that
+/// passed every other check, so a shape the emitter cannot lower is rejected
+/// at save with the compiler's reason instead of only at compile (E138).
+/// `children` is the closure keyed by call-site step id, as the compiler sees
+/// it; a child's own unsupported shapes are reported on the child, so the
+/// embed features that only repeat them are skipped here.
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
+fn report_unsupported_graph_shapes(
+    graph: &ExecutionGraph,
+    children: &[crate::compile::ChildWorkflowInput],
+    result: &mut ValidationResult,
+) {
+    if result.has_errors() {
+        return;
+    }
+    let report =
+        crate::direct_wasm::analyze_direct_wasm_support_with_child_workflows(graph, children);
+    let mut seen = HashSet::new();
+    for feature in report.unsupported {
+        if feature.feature.starts_with("embed-workflow")
+            || !seen.insert((feature.step_id.clone(), feature.feature.clone()))
+        {
+            continue;
+        }
+        result.errors.push(ValidationError::UnsupportedGraphShape {
+            step_id: feature.step_id,
+            feature: feature.feature,
+            reason: feature.reason,
+        });
+    }
+}
+
+/// Every EmbedWorkflow call site in `graph` (Split/While bodies included)
+/// paired with the child graph it runs, in the compiler's input shape.
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
+fn collect_closure_call_sites(
+    graph: &ExecutionGraph,
+    children_map: &HashMap<String, ExecutionGraph>,
+    out: &mut Vec<crate::compile::ChildWorkflowInput>,
+) {
+    for (step_id, step) in &graph.steps {
+        match step {
+            Step::EmbedWorkflow(embed) => {
+                if let Some(child) = children_map.get(&embed.child_workflow_id) {
+                    out.push(crate::compile::ChildWorkflowInput {
+                        step_id: step_id.clone(),
+                        workflow_id: embed.child_workflow_id.clone(),
+                        version_requested: "latest".to_string(),
+                        version_resolved: 0,
+                        execution_graph: child.clone(),
+                    });
+                }
+            }
+            Step::Split(split_step) => {
+                collect_closure_call_sites(&split_step.subgraph, children_map, out)
+            }
+            Step::While(while_step) => {
+                collect_closure_call_sites(&while_step.subgraph, children_map, out)
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
+fn report_closure_unsupported_shapes(
+    root: &ExecutionGraph,
+    root_result: &mut ValidationResult,
+    children: &[ClosureChildGraph],
+    child_reports: &mut [ChildValidationReport],
+    children_map: &HashMap<String, ExecutionGraph>,
+) {
+    let mut call_sites = Vec::new();
+    collect_closure_call_sites(root, children_map, &mut call_sites);
+    let mut seen = HashSet::new();
+    for child in children {
+        if seen.insert((child.workflow_id.as_str(), child.version)) {
+            collect_closure_call_sites(&child.execution_graph, children_map, &mut call_sites);
+        }
+    }
+    report_unsupported_graph_shapes(root, &call_sites, root_result);
+    for report in child_reports {
+        if let Some(child) = children
+            .iter()
+            .find(|c| c.workflow_id == report.workflow_id && c.version == report.version)
+        {
+            report_unsupported_graph_shapes(
+                &child.execution_graph,
+                &call_sites,
+                &mut report.result,
+            );
+        }
+    }
+}
+
+#[cfg(not(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+)))]
+fn report_closure_unsupported_shapes(
+    _root: &ExecutionGraph,
+    _root_result: &mut ValidationResult,
+    _children: &[ClosureChildGraph],
+    _child_reports: &mut [ChildValidationReport],
+    _children_map: &HashMap<String, ExecutionGraph>,
+) {
+}
+
 /// Recursively validate a workflow and its full static child closure.
 ///
 /// Every graph in the closure — the root and each unique child at any
@@ -2261,6 +2813,13 @@ pub fn validate_workflow_closure(
             .errors
             .push(ValidationError::DuplicateEmbedStepId { step_id });
     }
+    report_closure_unsupported_shapes(
+        root,
+        &mut root_result,
+        children,
+        &mut child_reports,
+        &children_map,
+    );
 
     ClosureValidationReport {
         root: root_result,
@@ -2446,7 +3005,10 @@ fn build_dependency_graph(
 /// Validate EmbedWorkflow input mappings against child workflow inputSchemas.
 /// Checks `steps.<embed>.outputs.<field>` references against the embedded
 /// child's declared output schema (E058). Children without an output schema
-/// are not checked: their outputs are whatever their Finish returns.
+/// are not checked: their outputs are whatever their Finish returns. Nor is a
+/// schema whose only field is `outputs`: it describes a Finish that maps only
+/// `outputs`, which returns that value unwrapped, so the caller's fields are
+/// the inner value's.
 fn validate_embed_workflow_outputs(
     graph: &ExecutionGraph,
     child_workflows: &HashMap<String, ExecutionGraph>,
@@ -2460,10 +3022,11 @@ fn validate_embed_workflow_outputs(
         for (id, step) in &graph.steps {
             match step {
                 Step::EmbedWorkflow(embed) => {
-                    if let Some(child) = children
-                        .get(&embed.child_workflow_id)
-                        .filter(|c| !c.output_schema.is_empty())
-                    {
+                    if let Some(child) = children.get(&embed.child_workflow_id).filter(|c| {
+                        !c.output_schema.is_empty()
+                            && !(c.output_schema.len() == 1
+                                && c.output_schema.contains_key("outputs"))
+                    }) {
                         out.insert(id.clone(), child);
                     }
                 }
@@ -2648,6 +3211,119 @@ fn validate_embed_workflow_inputs(
 // Phase 1: Graph Structure Validation
 // ============================================================================
 
+/// W084: workflow-wide settings on a nested graph, which only the workflow's
+/// own graph honours. `rateLimitBudgetMs` is compared with its default because
+/// an unset value deserializes to it.
+fn ignored_nested_settings(graph: &ExecutionGraph, scope: &str, result: &mut ValidationResult) {
+    let mut settings = Vec::new();
+    if graph.rate_limit_budget_ms != ExecutionGraph::default().rate_limit_budget_ms {
+        settings.push("rateLimitBudgetMs");
+    }
+    if graph.execution_timeout_seconds.is_some() {
+        settings.push("executionTimeoutSeconds");
+    }
+    for setting in settings {
+        result
+            .warnings
+            .push(ValidationWarning::NestedGraphSettingIgnored {
+                scope: scope.to_string(),
+                setting: setting.to_string(),
+            });
+    }
+}
+
+/// Step ids reused by onError handlers for the error context.
+const RESERVED_STEP_IDS: [&str; 2] = ["error", "__error"];
+
+/// E136/E137 across the root and every nested graph (Split/While subgraphs,
+/// WaitForSignal onWait).
+fn validate_reserved_names(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    fn reserved_variables<'a>(
+        names: impl Iterator<Item = &'a String>,
+        scope: &str,
+        result: &mut ValidationResult,
+    ) {
+        let mut names: Vec<&String> = names
+            .filter(|name| runtara_dsl::is_runtime_variable_name(name))
+            .collect();
+        names.sort();
+        for name in names {
+            result.errors.push(ValidationError::ReservedVariableName {
+                scope: scope.to_string(),
+                name: name.clone(),
+            });
+        }
+    }
+
+    /// `nested` names a nested graph (`None` for the workflow's own graph).
+    fn walk(graph: &ExecutionGraph, nested: Option<&str>, result: &mut ValidationResult) {
+        match nested {
+            Some(nested) => {
+                reserved_variables(
+                    graph.variables.keys(),
+                    &format!("{nested} variables"),
+                    result,
+                );
+                ignored_nested_settings(graph, nested, result);
+            }
+            None => reserved_variables(graph.variables.keys(), "workflow variables", result),
+        }
+        let mut step_ids: Vec<&String> = graph.steps.keys().collect();
+        step_ids.sort();
+        for step_id in step_ids {
+            if RESERVED_STEP_IDS.contains(&step_id.as_str()) {
+                result.errors.push(ValidationError::ReservedStepId {
+                    step_id: step_id.clone(),
+                });
+            }
+            match &graph.steps[step_id] {
+                Step::Split(step) => {
+                    if let Some(variables) = step.config.as_ref().and_then(|c| c.variables.as_ref())
+                    {
+                        reserved_variables(
+                            variables.keys(),
+                            &format!("Split '{step_id}' config.variables"),
+                            result,
+                        );
+                    }
+                    walk(
+                        &step.subgraph,
+                        Some(&format!("Split '{step_id}' subgraph")),
+                        result,
+                    );
+                }
+                Step::While(step) => {
+                    if let Some(variables) = step.config.as_ref().and_then(|c| c.variables.as_ref())
+                    {
+                        reserved_variables(
+                            variables.keys(),
+                            &format!("While '{step_id}' config.variables"),
+                            result,
+                        );
+                    }
+                    walk(
+                        &step.subgraph,
+                        Some(&format!("While '{step_id}' subgraph")),
+                        result,
+                    );
+                }
+                Step::WaitForSignal(step) => {
+                    if let Some(on_wait) = &step.on_wait {
+                        walk(
+                            on_wait,
+                            Some(&format!("WaitForSignal '{step_id}' onWait")),
+                            result,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    walk(graph, None, result);
+}
+
 fn validate_graph_structure(graph: &ExecutionGraph, result: &mut ValidationResult) {
     // Check for empty workflow
     if graph.steps.is_empty() {
@@ -2751,6 +3427,671 @@ fn parallel_branches_reconverge(graph: &ExecutionGraph, branch_starts: &[String]
     first
         .iter()
         .any(|node| rest.iter().all(|set| set.contains(node)))
+}
+
+/// The edge shapes the compiler can lower, checked with author-facing
+/// messages (E139–E144) instead of the support gate's cascade (E138).
+fn validate_edge_shapes(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    fn normal_label(edge: &runtara_dsl::ExecutionPlanEdge) -> Option<&str> {
+        edge.label.as_deref().filter(|label| *label != "next")
+    }
+    let outgoing = |step_id: &str| {
+        graph
+            .execution_plan
+            .iter()
+            .filter(|edge| edge.from_step == step_id)
+            .collect::<Vec<_>>()
+    };
+    let mut step_ids: Vec<&String> = graph.steps.keys().collect();
+    step_ids.sort();
+    for step_id in step_ids {
+        let step = &graph.steps[step_id];
+        let edges = outgoing(step_id);
+        let step_type = crate::workflow_features::step_type_name(step);
+        let routing_switch = matches!(
+            step,
+            Step::Switch(switch) if switch.config.as_ref().is_some_and(|c| c.is_routing())
+        );
+        match step {
+            Step::Conditional(_) => {
+                for branch in ["true", "false"] {
+                    if !edges.iter().any(|edge| normal_label(edge) == Some(branch)) {
+                        result
+                            .errors
+                            .push(ValidationError::ConditionalMissingBranch {
+                                step_id: step_id.clone(),
+                                branch: branch.to_string(),
+                            });
+                    }
+                }
+            }
+            Step::Switch(switch) if routing_switch => {
+                let routes: Vec<String> = switch
+                    .config
+                    .as_ref()
+                    .map(|config| {
+                        config
+                            .route_labels()
+                            .into_iter()
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !edges
+                    .iter()
+                    .any(|edge| normal_label(edge) == Some("default"))
+                {
+                    result
+                        .errors
+                        .push(ValidationError::RoutingSwitchMissingDefault {
+                            step_id: step_id.clone(),
+                        });
+                }
+                let mut allowed = routes.clone();
+                allowed.push("default".to_string());
+                for edge in &edges {
+                    if let Some(label) = normal_label(edge)
+                        && !allowed.iter().any(|known| known == label)
+                    {
+                        result.errors.push(ValidationError::UnknownEdgeLabel {
+                            from_step: step_id.clone(),
+                            step_type: step_type.to_string(),
+                            label: label.to_string(),
+                            allowed: allowed.clone(),
+                        });
+                    }
+                }
+            }
+            // Tool, memory and MCP labels are checked by the AiAgent rules.
+            Step::AiAgent(_) => {}
+            _ => {
+                for edge in &edges {
+                    if let Some(label) = normal_label(edge)
+                        && label != "onError"
+                    {
+                        result.errors.push(ValidationError::UnknownEdgeLabel {
+                            from_step: step_id.clone(),
+                            step_type: step_type.to_string(),
+                            label: label.to_string(),
+                            allowed: vec!["next".to_string(), "onError".to_string()],
+                        });
+                    }
+                }
+            }
+        }
+
+        if edges
+            .iter()
+            .any(|edge| edge.label.as_deref() == Some("onError"))
+            && !matches!(
+                step,
+                Step::Agent(_)
+                    | Step::AiAgent(_)
+                    | Step::EmbedWorkflow(_)
+                    | Step::Split(_)
+                    | Step::While(_)
+                    | Step::WaitForSignal(_)
+                    | Step::WaitForInstances(_)
+                    | Step::SetState(_)
+                    | Step::GetState(_)
+            )
+        {
+            result
+                .errors
+                .push(ValidationError::OnErrorUnsupportedSource {
+                    step_id: step_id.clone(),
+                    step_type: step_type.to_string(),
+                });
+        }
+
+        if !matches!(step, Step::Conditional(_)) && !routing_switch {
+            let normal: Vec<_> = edges
+                .iter()
+                .filter(|edge| normal_label(edge).is_none())
+                .collect();
+            if normal.iter().any(|edge| edge.condition.is_some())
+                && !normal.iter().any(|edge| edge.condition.is_none())
+            {
+                result
+                    .errors
+                    .push(ValidationError::ConditionedEdgesWithoutDefault {
+                        from_step: step_id.clone(),
+                    });
+            }
+        }
+    }
+    validate_fanout_branch_exits(graph, result);
+
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => result.in_subgraph(&split_step.id, |result| {
+                validate_edge_shapes(&split_step.subgraph, result)
+            }),
+            Step::While(while_step) => result.in_subgraph(&while_step.id, |result| {
+                validate_edge_shapes(&while_step.subgraph, result)
+            }),
+            Step::WaitForSignal(wait_step) => {
+                if let Some(on_wait) = &wait_step.on_wait {
+                    result.in_subgraph(&wait_step.id, |result| {
+                        validate_edge_shapes(on_wait, result)
+                    })
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// W090: immediates holding a reference envelope in mappings that keep
+/// immediates literal (everything but Agent / AiAgent inputs).
+fn validate_unresolved_immediate_references(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    fn holds_reference(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(map) => {
+                map.get("valueType").and_then(serde_json::Value::as_str) == Some("reference")
+                    || map.values().any(holds_reference)
+            }
+            serde_json::Value::Array(items) => items.iter().any(holds_reference),
+            _ => false,
+        }
+    }
+    let mut step_ids: Vec<&String> = graph.steps.keys().collect();
+    step_ids.sort();
+    for step_id in step_ids {
+        let step = &graph.steps[step_id];
+        if matches!(step, Step::Agent(_) | Step::AiAgent(_)) {
+            continue;
+        }
+        for mapping in collect_step_mappings(step) {
+            let mut fields: Vec<&String> = mapping.keys().collect();
+            fields.sort();
+            for field in fields {
+                if let MappingValue::Immediate(immediate) = &mapping[field]
+                    && holds_reference(&immediate.value)
+                {
+                    result
+                        .warnings
+                        .push(ValidationWarning::ImmediateReferenceNotResolved {
+                            step_id: step_id.clone(),
+                            field: field.clone(),
+                        });
+                }
+            }
+        }
+    }
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => result.in_subgraph(&split_step.id, |result| {
+                validate_unresolved_immediate_references(&split_step.subgraph, result)
+            }),
+            Step::While(while_step) => result.in_subgraph(&while_step.id, |result| {
+                validate_unresolved_immediate_references(&while_step.subgraph, result)
+            }),
+            _ => {}
+        }
+    }
+}
+
+/// E150: a declared variable's value must match its `type` (`null` is
+/// allowed as "no value yet"). Runtime-owned names are reported by E137.
+fn validate_variable_types(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    use runtara_dsl::VariableType;
+    let mut names: Vec<&String> = graph.variables.keys().collect();
+    names.sort();
+    for name in names {
+        let variable = &graph.variables[name];
+        let value = &variable.value;
+        let matches = value.is_null()
+            || match variable.var_type {
+                VariableType::String => value.is_string(),
+                VariableType::Number => value.is_number(),
+                VariableType::Integer => {
+                    value.is_i64()
+                        || value.is_u64()
+                        || value.as_f64().is_some_and(|n| n.fract() == 0.0)
+                }
+                VariableType::Boolean => value.is_boolean(),
+                VariableType::Array => value.is_array(),
+                VariableType::Object | VariableType::File => value.is_object(),
+                VariableType::Connection => value.is_string(),
+            };
+        if !matches {
+            let actual = match value {
+                serde_json::Value::String(_) => "a string",
+                serde_json::Value::Number(_) => "a number",
+                serde_json::Value::Bool(_) => "a boolean",
+                serde_json::Value::Array(_) => "an array",
+                serde_json::Value::Object(_) => "an object",
+                serde_json::Value::Null => "null",
+            };
+            result.errors.push(ValidationError::VariableTypeMismatch {
+                name: name.clone(),
+                declared: serde_json::to_value(&variable.var_type)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_else(|| format!("{:?}", variable.var_type)),
+                actual: actual.to_string(),
+            });
+        }
+    }
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => result.in_subgraph(&split_step.id, |result| {
+                validate_variable_types(&split_step.subgraph, result)
+            }),
+            Step::While(while_step) => result.in_subgraph(&while_step.id, |result| {
+                validate_variable_types(&while_step.subgraph, result)
+            }),
+            Step::WaitForSignal(wait_step) => {
+                if let Some(on_wait) = &wait_step.on_wait {
+                    result.in_subgraph(&wait_step.id, |result| {
+                        validate_variable_types(on_wait, result)
+                    })
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// E151 / W089: `visibleWhen` and `requiredWhen` on every schema the graph
+/// declares — its own, its steps' and nested properties and items.
+fn validate_field_conditions(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    fn check_fields(
+        location: &str,
+        fields: &HashMap<String, SchemaField>,
+        result: &mut ValidationResult,
+    ) {
+        let mut names: Vec<&String> = fields.keys().collect();
+        names.sort();
+        for name in names {
+            let field = &fields[name];
+            for (kind, condition) in [
+                ("visibleWhen", field.visible_when.as_ref()),
+                ("requiredWhen", field.required_when.as_ref()),
+            ] {
+                let Some(condition) = condition else {
+                    continue;
+                };
+                match (&condition.equals, &condition.not_equals) {
+                    (None, None) => {
+                        result
+                            .errors
+                            .push(ValidationError::FieldConditionWithoutTest {
+                                location: location.to_string(),
+                                field: name.clone(),
+                                condition: kind.to_string(),
+                            })
+                    }
+                    (Some(equals), Some(not_equals))
+                        if runtara_dsl::condition_eval::values_equal(equals, not_equals) =>
+                    {
+                        result
+                            .warnings
+                            .push(ValidationWarning::FieldConditionNeverMatches {
+                                location: location.to_string(),
+                                field: name.clone(),
+                                condition: kind.to_string(),
+                            })
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(properties) = &field.properties {
+                check_fields(&format!("{location}.{name}"), properties, result);
+            }
+            if let Some(items) = &field.items
+                && let Some(properties) = &items.properties
+            {
+                check_fields(&format!("{location}.{name}[]"), properties, result);
+            }
+        }
+    }
+    check_fields("inputSchema", &graph.input_schema, result);
+    check_fields("outputSchema", &graph.output_schema, result);
+    check_fields("stateSchema", &graph.state_schema, result);
+    let mut step_ids: Vec<&String> = graph.steps.keys().collect();
+    step_ids.sort();
+    for step_id in step_ids {
+        match &graph.steps[step_id] {
+            Step::Split(split_step) => {
+                check_fields(
+                    &format!("step '{step_id}' inputSchema"),
+                    &split_step.input_schema,
+                    result,
+                );
+                check_fields(
+                    &format!("step '{step_id}' outputSchema"),
+                    &split_step.output_schema,
+                    result,
+                );
+                result.in_subgraph(&split_step.id, |result| {
+                    validate_field_conditions(&split_step.subgraph, result)
+                });
+            }
+            Step::While(while_step) => result.in_subgraph(&while_step.id, |result| {
+                validate_field_conditions(&while_step.subgraph, result)
+            }),
+            Step::WaitForSignal(wait_step) => {
+                if let Some(schema) = &wait_step.response_schema {
+                    check_fields(&format!("step '{step_id}' responseSchema"), schema, result);
+                }
+                if let Some(on_wait) = &wait_step.on_wait {
+                    result.in_subgraph(&wait_step.id, |result| {
+                        validate_field_conditions(on_wait, result)
+                    })
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Deepest onError handler nesting the compiler lowers (its
+/// `MAX_NESTED_ON_ERROR_DEPTH`).
+const MAX_NESTED_ON_ERROR_DEPTH: usize = 4;
+
+/// E149: a handler region (the steps a handler reaches through normal flow)
+/// may contain steps with their own handlers, down to
+/// [`MAX_NESTED_ON_ERROR_DEPTH`] levels, and a chain may not lead back to a
+/// step already in it.
+fn validate_on_error_nesting(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    fn handler_depth(
+        graph: &ExecutionGraph,
+        step_id: &str,
+        chain: &mut Vec<String>,
+        memo: &mut HashMap<String, Option<usize>>,
+    ) -> Option<usize> {
+        if let Some(known) = memo.get(step_id) {
+            return *known;
+        }
+        if chain.iter().any(|visited| visited == step_id) {
+            return None;
+        }
+        chain.push(step_id.to_string());
+        let mut depth = Some(0);
+        for edge in graph
+            .execution_plan
+            .iter()
+            .filter(|edge| edge.from_step == step_id && edge.label.as_deref() == Some("onError"))
+        {
+            let mut region: Vec<String> = reachable_over_normal_flow(graph, &edge.to_step)
+                .into_iter()
+                .collect();
+            region.sort();
+            for node in region {
+                depth = match (depth, handler_depth(graph, &node, chain, memo)) {
+                    (Some(current), Some(inner)) => Some(current.max(inner + 1)),
+                    _ => None,
+                };
+                if depth.is_none() {
+                    break;
+                }
+            }
+            if depth.is_none() {
+                break;
+            }
+            depth = depth.map(|current| current.max(1));
+        }
+        chain.pop();
+        // A cycle depends on the chain it was reached through; only memoize
+        // finite answers.
+        if depth.is_some() {
+            memo.insert(step_id.to_string(), depth);
+        }
+        depth
+    }
+
+    let mut memo = HashMap::new();
+    let mut step_ids: Vec<&String> = graph.steps.keys().collect();
+    step_ids.sort();
+    for step_id in step_ids {
+        match handler_depth(graph, step_id, &mut Vec::new(), &mut memo) {
+            None => {
+                result.errors.push(ValidationError::OnErrorNestingTooDeep {
+                    step_id: step_id.clone(),
+                    max_depth: MAX_NESTED_ON_ERROR_DEPTH,
+                    cyclic: true,
+                });
+                return;
+            }
+            Some(depth) if depth > MAX_NESTED_ON_ERROR_DEPTH => {
+                result.errors.push(ValidationError::OnErrorNestingTooDeep {
+                    step_id: step_id.clone(),
+                    max_depth: MAX_NESTED_ON_ERROR_DEPTH,
+                    cyclic: false,
+                });
+                return;
+            }
+            Some(_) => {}
+        }
+    }
+    for step in graph.steps.values() {
+        match step {
+            Step::Split(split_step) => result.in_subgraph(&split_step.id, |result| {
+                validate_on_error_nesting(&split_step.subgraph, result)
+            }),
+            Step::While(while_step) => result.in_subgraph(&while_step.id, |result| {
+                validate_on_error_nesting(&while_step.subgraph, result)
+            }),
+            _ => {}
+        }
+    }
+}
+
+/// E146/E147: values the runtime would reject on every run, caught at save.
+/// Only literals are checked; references and templates resolve at runtime.
+fn validate_static_step_values(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    fn check_millis(
+        step_id: &str,
+        field: &str,
+        value: Option<&MappingValue>,
+        allow_null: bool,
+        result: &mut ValidationResult,
+    ) {
+        let Some(MappingValue::Immediate(immediate)) = value else {
+            return;
+        };
+        let literal = &immediate.value;
+        let valid =
+            literal.as_f64().is_some_and(|ms| ms >= 0.0) || (allow_null && literal.is_null());
+        if !valid {
+            result
+                .errors
+                .push(ValidationError::InvalidMillisecondsValue {
+                    step_id: step_id.to_string(),
+                    field: field.to_string(),
+                    value: literal.to_string(),
+                });
+        }
+    }
+    let mut step_ids: Vec<&String> = graph.steps.keys().collect();
+    step_ids.sort();
+    for step_id in step_ids {
+        let step = &graph.steps[step_id];
+        let missing_config = match step {
+            Step::Split(split) => split.config.is_none(),
+            Step::Switch(switch) => switch.config.is_none(),
+            _ => false,
+        };
+        if missing_config {
+            result.errors.push(ValidationError::MissingStepConfig {
+                step_id: step_id.clone(),
+                step_type: crate::workflow_features::step_type_name(step).to_string(),
+            });
+        }
+        let zero_timeout = match step {
+            Step::Agent(agent) => (agent.timeout == Some(0)).then_some(true),
+            Step::EmbedWorkflow(embed) => (embed.timeout == Some(0)).then_some(true),
+            Step::Split(split) => split
+                .config
+                .as_ref()
+                .is_some_and(|config| config.timeout == Some(0))
+                .then_some(false),
+            Step::While(while_step) => while_step
+                .config
+                .as_ref()
+                .is_some_and(|config| config.timeout == Some(0))
+                .then_some(false),
+            _ => None,
+        };
+        if let Some(fails) = zero_timeout {
+            result.warnings.push(ValidationWarning::ZeroTimeout {
+                step_id: step_id.clone(),
+                step_type: crate::workflow_features::step_type_name(step).to_string(),
+                fails,
+            });
+        }
+        if let Step::Switch(switch) = step
+            && let Some(config) = switch.config.as_ref()
+            && config.is_routing()
+        {
+            let case_indices: Vec<usize> = config
+                .cases
+                .iter()
+                .enumerate()
+                .filter(|(_, case)| case.route.is_none())
+                .map(|(index, _)| index)
+                .collect();
+            if !case_indices.is_empty() {
+                result
+                    .warnings
+                    .push(ValidationWarning::SwitchCaseWithoutRoute {
+                        step_id: step_id.clone(),
+                        case_indices,
+                    });
+            }
+        }
+        match step {
+            Step::Delay(delay) => check_millis(
+                step_id,
+                "durationMs",
+                Some(&delay.duration_ms),
+                false,
+                result,
+            ),
+            Step::WaitForSignal(wait) => {
+                check_millis(step_id, "timeoutMs", wait.timeout_ms.as_ref(), true, result);
+                if wait.poll_interval_ms.is_some() {
+                    result
+                        .warnings
+                        .push(ValidationWarning::PollIntervalIgnored {
+                            step_id: step_id.clone(),
+                        });
+                }
+            }
+            _ => {}
+        }
+        match step {
+            Step::Split(split_step) => result.in_subgraph(&split_step.id, |result| {
+                validate_static_step_values(&split_step.subgraph, result)
+            }),
+            Step::While(while_step) => result.in_subgraph(&while_step.id, |result| {
+                validate_static_step_values(&while_step.subgraph, result)
+            }),
+            Step::WaitForSignal(wait_step) => {
+                if let Some(on_wait) = &wait_step.on_wait {
+                    result.in_subgraph(&wait_step.id, |result| {
+                        validate_static_step_values(on_wait, result)
+                    })
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// E145: a Delay parks the run, so it needs effective durability. The rule
+/// matches the compiler's: nearest explicit `durable` wins and nested bodies
+/// inherit it, and a Delay's own `durable: false` opts it out.
+fn validate_delay_durability(
+    graph: &ExecutionGraph,
+    inherited_durable: bool,
+    result: &mut ValidationResult,
+) {
+    let durable = graph.durable.unwrap_or(inherited_durable);
+    let mut step_ids: Vec<&String> = graph.steps.keys().collect();
+    step_ids.sort();
+    for step_id in step_ids {
+        match &graph.steps[step_id] {
+            Step::Delay(delay) if !durable || delay.durable == Some(false) => {
+                result.errors.push(ValidationError::NonDurableDelay {
+                    step_id: step_id.clone(),
+                });
+            }
+            Step::Split(split_step) => result.in_subgraph(&split_step.id, |result| {
+                validate_delay_durability(&split_step.subgraph, durable, result)
+            }),
+            Step::While(while_step) => result.in_subgraph(&while_step.id, |result| {
+                validate_delay_durability(&while_step.subgraph, durable, result)
+            }),
+            Step::WaitForSignal(wait_step) => {
+                if let Some(on_wait) = &wait_step.on_wait {
+                    result.in_subgraph(&wait_step.id, |result| {
+                        validate_delay_durability(on_wait, durable, result)
+                    })
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// E144: in a parallel fan-out (two or more unconditioned normal edges and no
+/// conditioned ones), no step between a branch start and the merge point may
+/// leave the region through a conditioned edge.
+fn validate_fanout_branch_exits(graph: &ExecutionGraph, result: &mut ValidationResult) {
+    let is_normal = |edge: &&runtara_dsl::ExecutionPlanEdge| {
+        matches!(edge.label.as_deref(), None | Some("next"))
+    };
+    let mut sources: Vec<&String> = graph.steps.keys().collect();
+    sources.sort();
+    for from_step in sources {
+        let normal: Vec<_> = graph
+            .execution_plan
+            .iter()
+            .filter(|edge| edge.from_step == *from_step)
+            .filter(is_normal)
+            .collect();
+        if normal.len() < 2 || normal.iter().any(|edge| edge.condition.is_some()) {
+            continue;
+        }
+        let starts: Vec<String> = normal.iter().map(|edge| edge.to_step.clone()).collect();
+        let reachable: Vec<HashSet<String>> = starts
+            .iter()
+            .map(|start| reachable_over_normal_flow(graph, start))
+            .collect();
+        let merge: HashSet<&String> = reachable[0]
+            .iter()
+            .filter(|node| reachable[1..].iter().all(|set| set.contains(*node)))
+            .collect();
+        let mut flagged: Vec<String> = reachable
+            .iter()
+            .flatten()
+            .filter(|node| !merge.contains(node))
+            .filter(|node| {
+                // Only a conditioned edge that leaves the fan-out region; one
+                // into the merge point is harmless.
+                graph.execution_plan.iter().any(|edge| {
+                    edge.from_step == **node
+                        && is_normal(&edge)
+                        && edge.condition.is_some()
+                        && !merge.contains(&edge.to_step)
+                })
+            })
+            .cloned()
+            .collect();
+        flagged.sort();
+        flagged.dedup();
+        for branch_step in flagged {
+            result
+                .errors
+                .push(ValidationError::FanoutBranchConditionedExit {
+                    from_step: from_step.clone(),
+                    branch_step,
+                });
+        }
+    }
 }
 
 /// Steps reachable from `start` following normal-flow edges (everything except
@@ -2889,6 +4230,88 @@ const WHILE_SCOPE_VARIABLES: &[&str] = &["_index", "_previousOutputs", "_loop", 
 /// `_instance_id` is also injected there but is already a global built-in.
 const WAIT_ON_WAIT_SCOPE_VARIABLES: &[&str] = &["_signal_id"];
 
+/// Top-level fields the onError error context can carry: the agent error
+/// envelope (`error-info` in the agent WIT plus `stepId`/`agentId`/
+/// `capabilityId`), the Error step's `context`, the EmbedWorkflow child
+/// failure, and the missing-input failure (see `parse_error_envelope`,
+/// `DirectJsonManifest::error` and `child_failure_envelope` in the stdlib).
+const ERROR_CONTEXT_FIELDS: &[&str] = &[
+    "code",
+    "message",
+    "category",
+    "severity",
+    "retryable",
+    "retryAfterMs",
+    "attributes",
+    "details",
+    "context",
+    "stepId",
+    "stepName",
+    "stepType",
+    "agentId",
+    "capabilityId",
+    "childWorkflowId",
+    "childError",
+    "missingInputs",
+];
+
+/// Steer the bare `__error`/`error` roots and the `steps.error` alias to
+/// `steps.__error.*` (W053), and flag a field the error context never has
+/// (W085). Roots are read as the runtime reads them, so `["__error"].message`
+/// and `__error["message"]` are treated like the dotted spelling.
+fn check_error_context_reference(step_id: &str, ref_path: &str, result: &mut ValidationResult) {
+    let segments = reference_segments(ref_path);
+    let (bare, field) = match segments.first().map(String::as_str) {
+        Some("steps")
+            if matches!(
+                segments.get(1).map(String::as_str),
+                Some("__error" | "error")
+            ) =>
+        {
+            (false, segments.get(2))
+        }
+        Some("__error" | "error") => (true, segments.get(1)),
+        _ => return,
+    };
+    if !bare && segments.get(1).map(String::as_str) == Some("error") {
+        // `steps.error`, `steps["error"]`: the step segment is the first
+        // `error` after the `steps` root.
+        let at = "steps".len() + ref_path["steps".len()..].find("error").unwrap_or(0);
+        result.warnings.push(ValidationWarning::BareErrorReference {
+            step_id: step_id.to_string(),
+            reference_path: ref_path.to_string(),
+            suggested_path: format!("{}__error{}", &ref_path[..at], &ref_path[at + 5..]),
+        });
+    }
+    if bare {
+        let suggested_path = if let Some(rest) = ref_path.strip_prefix("__error") {
+            format!("steps.__error{rest}")
+        } else if let Some(rest) = ref_path.strip_prefix("error") {
+            format!("steps.__error{rest}")
+        } else {
+            // Bracketed root: `["error"].message` -> `steps["__error"].message`.
+            let rest = ref_path.find(']').map_or("", |end| &ref_path[end + 1..]);
+            format!("steps[\"__error\"]{rest}")
+        };
+        result.warnings.push(ValidationWarning::BareErrorReference {
+            step_id: step_id.to_string(),
+            reference_path: ref_path.to_string(),
+            suggested_path,
+        });
+    }
+    if let Some(field) = field
+        && !ERROR_CONTEXT_FIELDS.contains(&field.as_str())
+    {
+        result
+            .warnings
+            .push(ValidationWarning::UnknownErrorContextField {
+                step_id: step_id.to_string(),
+                reference_path: ref_path.to_string(),
+                field: field.clone(),
+            });
+    }
+}
+
 /// Step ids the runtime injects implicitly rather than as authored steps —
 /// `steps.__error` is the error context populated inside onError handlers.
 /// Referencing one outside its scope resolves to null at runtime, matching the
@@ -3006,6 +4429,8 @@ fn validate_references_with_inherited(
                 if variable_names.contains("_loop") {
                     injected_vars.insert("_loop".to_string());
                 }
+                // The body runs on a copy of the parent's variables.
+                injected_vars.extend(variable_names.iter().cloned());
                 result.in_subgraph(&split_step.id, |result| {
                     validate_references_with_inherited(&split_step.subgraph, &injected_vars, result)
                 });
@@ -3024,18 +4449,19 @@ fn validate_references_with_inherited(
                 if variable_names.contains("_item") {
                     injected_vars.insert("_item".to_string());
                 }
+                // The body runs on a copy of the parent's variables.
+                injected_vars.extend(variable_names.iter().cloned());
                 result.in_subgraph(&while_step.id, |result| {
                     validate_references_with_inherited(&while_step.subgraph, &injected_vars, result)
                 });
             }
             Step::WaitForSignal(wait_step) => {
                 if let Some(on_wait) = &wait_step.on_wait {
-                    // An onWait handler inherits no parent variables; the
-                    // runtime injects `_signal_id` and the global built-ins.
-                    let injected_vars: HashSet<String> = WAIT_ON_WAIT_SCOPE_VARIABLES
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect();
+                    // An onWait handler runs on a copy of the parent's
+                    // variables, plus `_signal_id` and the global built-ins.
+                    let mut injected_vars = variable_names.clone();
+                    injected_vars
+                        .extend(WAIT_ON_WAIT_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
                     result.in_subgraph(&wait_step.id, |result| {
                         validate_references_with_inherited(on_wait, &injected_vars, result)
                     });
@@ -3102,9 +4528,9 @@ fn validate_mapping_value_references(
             // Validate template syntax at compile time;
             // reference resolution happens at runtime via minijinja context
             if let Some(err) = validate_template_syntax(&tmpl_value.value) {
-                result.errors.push(ValidationError::InvalidReferencePath {
+                result.errors.push(ValidationError::InvalidTemplateSyntax {
                     step_id: step_id.to_string(),
-                    reference_path: tmpl_value.value.clone(),
+                    template: tmpl_value.value.clone(),
                     reason: err,
                 });
             }
@@ -3146,17 +4572,7 @@ fn validate_step_reference(
         return false;
     }
 
-    // Read the root as the runtime does, so `["__error"].message` and
-    // `__error["message"]` are steered to the canonical path like the dotted
-    // spelling.
-    if reference_root(ref_path).as_deref() == Some("__error") {
-        let separator = if ref_path.starts_with('[') { "" } else { "." };
-        result.warnings.push(ValidationWarning::BareErrorReference {
-            step_id: step_id.to_string(),
-            reference_path: ref_path.to_string(),
-            suggested_path: format!("steps{separator}{ref_path}"),
-        });
-    }
+    check_error_context_reference(step_id, ref_path, result);
 
     let Some(referenced_step_id) = extract_step_id_from_reference(ref_path) else {
         return true;
@@ -3750,6 +5166,8 @@ fn validate_template_static_references_with_context(
                 if variable_names.contains("_loop") {
                     injected_vars.insert("_loop".to_string());
                 }
+                // The body runs on a copy of the parent's variables.
+                injected_vars.extend(variable_names.iter().cloned());
                 result.in_subgraph(&split_step.id, |result| {
                     validate_template_static_references_with_context(
                         &split_step.subgraph,
@@ -3771,6 +5189,8 @@ fn validate_template_static_references_with_context(
                 if variable_names.contains("_item") {
                     injected_vars.insert("_item".to_string());
                 }
+                // The body runs on a copy of the parent's variables.
+                injected_vars.extend(variable_names.iter().cloned());
                 result.in_subgraph(&while_step.id, |result| {
                     validate_template_static_references_with_context(
                         &while_step.subgraph,
@@ -3782,10 +5202,9 @@ fn validate_template_static_references_with_context(
             }
             Step::WaitForSignal(wait_step) => {
                 if let Some(ref on_wait) = wait_step.on_wait {
-                    let injected_vars: HashSet<String> = WAIT_ON_WAIT_SCOPE_VARIABLES
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect();
+                    let mut injected_vars = variable_names.clone();
+                    injected_vars
+                        .extend(WAIT_ON_WAIT_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
                     result.in_subgraph(&wait_step.id, |result| {
                         validate_template_static_references_with_context(
                             on_wait,
@@ -3859,7 +5278,10 @@ fn validate_template_static_reference(
         return;
     }
 
-    if let Some(referenced_step_id) = extract_step_id_from_reference(reference) {
+    check_error_context_reference(step_id, reference, result);
+    if let Some(referenced_step_id) = extract_step_id_from_reference(reference)
+        && !RESERVED_IMPLICIT_STEP_IDS.contains(&referenced_step_id.as_str())
+    {
         if warn_on_self_reference && referenced_step_id == step_id {
             result.warnings.push(ValidationWarning::SelfReference {
                 step_id: step_id.to_string(),
@@ -4809,7 +6231,18 @@ fn validate_configuration(graph: &ExecutionGraph, result: &mut ValidationResult)
                     // parallelism=1 matches actual behavior, so only other
                     // values (0 = "unlimited", >1) warn. `sequential` also
                     // matches actual behavior and never warns.
-                    if let Some(parallelism) = config.parallelism
+                    if config.sequential == Some(true)
+                        && let Some(parallelism) = config.parallelism
+                        && parallelism != 1
+                    {
+                        // W087: sequential forces a window of one.
+                        result.warnings.push(
+                            ValidationWarning::SplitSequentialOverridesParallelism {
+                                step_id: step_id.clone(),
+                                parallelism,
+                            },
+                        );
+                    } else if let Some(parallelism) = config.parallelism
                         && parallelism != 1
                     {
                         result
@@ -5070,6 +6503,13 @@ fn collect_step_names(
 /// - Conditional step outgoing edges must be unconditioned `true`/`false` branches
 fn validate_edge_conditions(graph: &ExecutionGraph, result: &mut ValidationResult) {
     validate_edge_conditions_recursive(graph, result);
+    validate_edge_shapes(graph, result);
+    validate_delay_durability(graph, true, result);
+    validate_static_step_values(graph, result);
+    validate_on_error_nesting(graph, result);
+    validate_variable_types(graph, result);
+    validate_field_conditions(graph, result);
+    validate_unresolved_immediate_references(graph, result);
 }
 
 /// E027: workflow conditions must not use operators that only exist for
@@ -6006,6 +7446,7 @@ fn validate_data_and_variable_references(graph: &ExecutionGraph, result: &mut Va
         graph,
         &HashSet::new(),          // No inherited variables at top level
         DataScope::RequireSchema, // Top level requires inputSchema for data references
+        &graph.input_schema,      // What `workflow.inputs.data` is, in every scope
         result,
     );
 }
@@ -6016,11 +7457,14 @@ fn validate_data_and_variable_references(graph: &ExecutionGraph, result: &mut Va
 /// * `graph` - The execution graph to validate
 /// * `inherited_variables` - Variable names inherited from parent scope (e.g., Split config.variables)
 /// * `data_scope` - What `data.*` references resolve against in this scope (see [`DataScope`])
+/// * `run_input` - The workflow's own `inputSchema`, which `workflow.inputs.data`
+///   resolves against in every scope (a body's `data` may be its item instead)
 /// * `result` - Accumulator for validation errors
 fn validate_data_and_variable_references_with_context(
     graph: &ExecutionGraph,
     inherited_variables: &HashSet<String>,
     data_scope: DataScope<'_>,
+    run_input: &HashMap<String, SchemaField>,
     result: &mut ValidationResult,
 ) {
     // Merge inherited variables with graph's own variables + built-in runtime variables.
@@ -6052,6 +7496,7 @@ fn validate_data_and_variable_references_with_context(
                 reference,
                 graph,
                 data_scope,
+                run_input,
                 &all_variables,
                 &available_variables,
                 has_loop_context,
@@ -6071,6 +7516,7 @@ fn validate_data_and_variable_references_with_context(
                 reference,
                 graph,
                 data_scope,
+                run_input,
                 &all_variables,
                 &available_variables,
                 has_loop_context,
@@ -6085,6 +7531,7 @@ fn validate_data_and_variable_references_with_context(
                 reference,
                 graph,
                 data_scope,
+                run_input,
                 &all_variables,
                 &available_variables,
                 true,
@@ -6103,6 +7550,7 @@ fn validate_data_and_variable_references_with_context(
                 reference,
                 graph,
                 data_scope,
+                run_input,
                 &all_variables,
                 &available_variables,
                 has_loop_context,
@@ -6134,11 +7582,14 @@ fn validate_data_and_variable_references_with_context(
                 if all_variables.contains("_loop") {
                     injected_vars.insert("_loop".to_string());
                 }
+                // The body runs on a copy of the parent's variables.
+                injected_vars.extend(all_variables.iter().cloned());
                 result.in_subgraph(&split_step.id, |result| {
                     validate_data_and_variable_references_with_context(
                         &split_step.subgraph,
                         &injected_vars,
                         DataScope::for_split_body(&split_step.input_schema),
+                        run_input,
                         result,
                     )
                 });
@@ -6161,29 +7612,32 @@ fn validate_data_and_variable_references_with_context(
                 if all_variables.contains("_item") {
                     injected_vars.insert("_item".to_string());
                 }
+                // The body runs on a copy of the parent's variables.
+                injected_vars.extend(all_variables.iter().cloned());
                 result.in_subgraph(&while_step.id, |result| {
                     validate_data_and_variable_references_with_context(
                         &while_step.subgraph,
                         &injected_vars,
                         data_scope.for_while_body(graph),
+                        run_input,
                         result,
                     )
                 });
             }
             Step::WaitForSignal(wait_step) => {
                 if let Some(ref on_wait) = wait_step.on_wait {
-                    // WaitForSignal on_wait handlers don't inherit parent variables
-                    // or implicit data, but the runtime injects `_signal_id`
-                    // (plus the global built-ins) into the scope.
-                    let injected_vars: HashSet<String> = WAIT_ON_WAIT_SCOPE_VARIABLES
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect();
+                    // WaitForSignal on_wait handlers run on a copy of the
+                    // parent's variables (but no implicit data), plus
+                    // `_signal_id` and the global built-ins.
+                    let mut injected_vars = all_variables.clone();
+                    injected_vars
+                        .extend(WAIT_ON_WAIT_SCOPE_VARIABLES.iter().map(|s| s.to_string()));
                     result.in_subgraph(&wait_step.id, |result| {
                         validate_data_and_variable_references_with_context(
                             on_wait,
                             &injected_vars,
                             DataScope::RequireSchema,
+                            run_input,
                             result,
                         )
                     });
@@ -6208,6 +7662,7 @@ fn validate_reference_root(
     reference: &str,
     graph: &ExecutionGraph,
     data_scope: DataScope<'_>,
+    run_input: &HashMap<String, SchemaField>,
     all_variables: &HashSet<String>,
     available_variables: &[String],
     loop_allowed: bool,
@@ -6272,7 +7727,7 @@ fn validate_reference_root(
                 step_id,
                 reference,
                 graph,
-                data_scope,
+                run_input,
                 all_variables,
                 available_variables,
                 result,
@@ -6400,7 +7855,7 @@ fn validate_workflow_reference(
     step_id: &str,
     reference: &str,
     graph: &ExecutionGraph,
-    data_scope: DataScope<'_>,
+    run_input: &HashMap<String, SchemaField>,
     all_variables: &HashSet<String>,
     available_variables: &[String],
     result: &mut ValidationResult,
@@ -6425,12 +7880,17 @@ fn validate_workflow_reference(
         // `workflow.inputs` and either bare scope address a whole object;
         // there is nothing below them to check.
         [] | ["data"] | ["variables"] => {}
+        // The run's input, in every scope (a body's `data` may be its item).
         ["data", ..] => validate_data_reference_in_scope(
             step_id,
             reference,
             &["workflow", "inputs", "data"],
             graph,
-            data_scope,
+            if run_input.is_empty() {
+                DataScope::RequireSchema
+            } else {
+                DataScope::Declared(run_input)
+            },
             result,
         ),
         ["variables", field_name, ..] => {
@@ -6878,8 +8338,9 @@ fn validate_ai_agent_steps(graph: &ExecutionGraph, result: &mut ValidationResult
                 if edge.from_step == *step_id
                     && let Some(ref label) = edge.label
                 {
-                    // "next" is reserved for the default/continuation edge, not a tool
-                    if label == "next" {
+                    // "next" and "onError" route the step itself; neither is a
+                    // tool label (two conditioned onError edges are valid).
+                    if label == "next" || label == "onError" {
                         continue;
                     }
 
@@ -8964,6 +10425,96 @@ mod tests {
         );
         assert!(!canonical.has_errors());
         assert!(!canonical.has_warnings());
+    }
+
+    /// The `error` alias of the bare root warns like `__error`, and a field
+    /// the error context never has is flagged on every spelling.
+    #[test]
+    fn error_context_alias_and_unknown_fields_warn() {
+        let codes = |reference: &str| {
+            let mut result = ValidationResult::default();
+            validate_reference(
+                "handler",
+                reference,
+                &HashSet::new(),
+                &HashMap::new(),
+                &HashSet::new(),
+                &mut result,
+            );
+            assert!(!result.has_errors(), "{reference}: {:?}", result.errors);
+            result
+                .warnings
+                .iter()
+                .map(|warning| warning.to_string())
+                .collect::<Vec<_>>()
+        };
+        let bare = codes("error.message");
+        assert_eq!(bare.len(), 1, "{bare:?}");
+        assert!(bare[0].contains("[W053]") && bare[0].contains("'steps.__error.message'"));
+        assert!(codes(r#"error["code"]"#)[0].contains(r#"'steps.__error["code"]'"#));
+        // The `steps.error` alias is deprecated too (C7).
+        for (alias, canonical) in [
+            ("steps.error.code", "'steps.__error.code'"),
+            (r#"steps["error"].code"#, r#"'steps["__error"].code'"#),
+        ] {
+            let warned = codes(alias);
+            assert_eq!(warned.len(), 1, "{alias}: {warned:?}");
+            assert!(
+                warned[0].contains("[W053]") && warned[0].contains(canonical),
+                "{alias}: {warned:?}"
+            );
+        }
+
+        for typo in [
+            "steps.__error.mesage",
+            "steps.error.mesage",
+            "__error.mesage",
+        ] {
+            let warnings = codes(typo);
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.starts_with("[W085]") && w.contains("no 'mesage' field")),
+                "{typo}: {warnings:?}"
+            );
+        }
+        for known in [
+            "steps.__error.code",
+            "steps.__error.attributes.status_code",
+            "steps.__error.childError.code",
+            "steps.__error",
+        ] {
+            assert!(codes(known).is_empty(), "{known}");
+        }
+    }
+
+    /// Templates read the error context like mappings: no false "step does
+    /// not exist", and the same field check.
+    #[test]
+    fn template_error_context_references_are_checked_not_rejected() {
+        let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "done",
+            "steps": {"done": {"id": "done", "stepType": "Finish", "inputMapping": {
+                "ok": {"valueType": "template", "value": "{{ steps.__error.message }}"},
+                "typo": {"valueType": "template", "value": "{{ steps.__error.mesage }}"}
+            }}}
+        }))
+        .expect("graph parses");
+        let warnings: Vec<String> =
+            validate_workflow(&graph, &runtara_dsl::agent_meta::AgentCatalog::new())
+                .warnings
+                .iter()
+                .map(|warning| warning.to_string())
+                .collect();
+        assert!(
+            !warnings.iter().any(|w| w.contains("does not exist")),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            warnings.iter().filter(|w| w.starts_with("[W085]")).count(),
+            1,
+            "{warnings:?}"
+        );
     }
 
     /// The bare root is read with the runtime's tokenizer, so every spelling of
@@ -14477,28 +16028,44 @@ mod tests {
         );
     }
 
+    /// `workflow.inputs.data` is the run's input in a Split body too (not the
+    /// item), so it is checked against the workflow's own inputSchema.
     #[test]
-    fn test_split_subgraph_workflow_inputs_data_typo_errors() {
-        let mut mapping = InputMapping::new();
-        mapping.insert(
-            "item_name".to_string(),
-            ref_value("workflow.inputs.data.nmae"),
-        );
-
-        let graph = wrap_in_main_graph(
-            "split",
-            split_step_with_schema("split", subgraph_with_agent_mapping(mapping), item_schema()),
-        );
-        let result = validate_workflow(&graph, &test_catalog());
-
+    fn test_split_subgraph_workflow_inputs_data_is_the_run_input() {
+        let run_input = |path: &str| {
+            let mut mapping = InputMapping::new();
+            mapping.insert("value".to_string(), ref_value(path));
+            let mut graph = wrap_in_main_graph(
+                "split",
+                split_step_with_schema(
+                    "split",
+                    subgraph_with_agent_mapping(mapping),
+                    item_schema(),
+                ),
+            );
+            graph
+                .input_schema
+                .insert("order".to_string(), schema_field(SchemaFieldType::Integer));
+            validate_workflow(&graph, &test_catalog()).errors
+        };
+        let typo = run_input("workflow.inputs.data.ordr");
         assert!(
-            result.errors.iter().any(|e| matches!(
+            typo.iter().any(|e| matches!(
                 e,
                 ValidationError::UndefinedDataReference { step_id, field_name, .. }
-                    if step_id == "sub_agent" && field_name == "nmae"
+                    if step_id == "sub_agent" && field_name == "ordr"
             )),
-            "workflow.inputs.data mirrors the iteration data, so typos should error; got: {:?}",
-            result.errors
+            "{typo:?}"
+        );
+        // A run-input field the item does not have is valid in the body.
+        let valid = run_input("workflow.inputs.data.order");
+        assert!(
+            !valid.iter().any(|e| matches!(
+                e,
+                ValidationError::UndefinedDataReference { .. }
+                    | ValidationError::MissingInputSchema { .. }
+            )),
+            "{valid:?}"
         );
     }
 
@@ -14989,10 +16556,17 @@ mod tests {
         ];
 
         let result = validate_workflow(&graph, &test_catalog());
+        // Log keeps the fixture free of capability inputs; it cannot route
+        // onError (E142), which is not what this test is about.
+        let edge_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|error| error.code() != "E142")
+            .collect();
         assert!(
-            !result.has_errors(),
+            edge_errors.is_empty(),
             "Should pass: unique priorities on onError edges. Errors: {:?}",
-            result.errors
+            edge_errors
         );
     }
 
@@ -15130,10 +16704,17 @@ mod tests {
         ];
 
         let result = validate_workflow(&graph, &test_catalog());
+        // Log keeps the fixture free of capability inputs; it cannot route
+        // onError (E142), which is not what this test is about.
+        let edge_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|error| error.code() != "E142")
+            .collect();
         assert!(
-            !result.has_errors(),
+            edge_errors.is_empty(),
             "Should pass: one conditional + one default onError edge. Errors: {:?}",
-            result.errors
+            edge_errors
         );
     }
 
@@ -16039,10 +17620,10 @@ mod template_validation_tests {
         assert!(
             result.errors.iter().any(|e| matches!(
                 e,
-                ValidationError::InvalidReferencePath { reason, .. }
+                ValidationError::InvalidTemplateSyntax { reason, .. }
                     if reason.contains("syntax error")
             )),
-            "Expected template syntax error, got: {:?}",
+            "Expected template syntax error (E148), got: {:?}",
             result.errors
         );
     }
@@ -16920,5 +18501,670 @@ mod graph_path_tests {
         assert_eq!(outer.error_graph_path(0), ["a", "w"]);
         assert_eq!(outer.error_graph_path(1), ["a"]);
         assert!(outer.error_graph_path(2).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod reserved_name_tests {
+    use super::*;
+    use runtara_dsl::agent_meta::AgentCatalog;
+    use serde_json::json;
+
+    fn codes(workflow: serde_json::Value) -> Vec<String> {
+        let graph: ExecutionGraph = serde_json::from_value(workflow).expect("graph parses");
+        validate_workflow(&graph, &AgentCatalog::new())
+            .errors
+            .iter()
+            .map(|error| error.to_string())
+            .filter(|message| message.starts_with("[E136]") || message.starts_with("[E137]"))
+            .collect()
+    }
+
+    #[test]
+    fn step_ids_used_for_the_error_context_are_reserved() {
+        let found = codes(json!({
+            "entryPoint": "error",
+            "steps": {
+                "error": {"id": "error", "stepType": "Finish"},
+                "split": {
+                    "id": "split", "stepType": "Split",
+                    "config": {"value": {"valueType": "immediate", "value": [1]}},
+                    "subgraph": {"entryPoint": "__error", "steps": {
+                        "__error": {"id": "__error", "stepType": "Finish"}
+                    }}
+                }
+            }
+        }));
+        assert!(
+            found
+                .iter()
+                .any(|m| m.starts_with("[E136] Step id 'error'")),
+            "{found:?}"
+        );
+        assert!(
+            found
+                .iter()
+                .any(|m| m.starts_with("[E136] Step id '__error'")),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn nested_bodies_see_the_parent_variables() {
+        let body = |step: &str, value: &str| {
+            json!({"entryPoint": step, "steps": {step: {
+                "id": step, "stepType": "Finish",
+                "inputMapping": {
+                    "v": {"valueType": "reference", "value": value},
+                    "t": {"valueType": "template", "value": format!("{{{{ {value} }}}}")}
+                }
+            }}})
+        };
+        let graph: ExecutionGraph = serde_json::from_value(json!({
+            "entryPoint": "split",
+            "variables": {"color": {"type": "string", "value": "red"}},
+            "executionPlan": [
+                {"fromStep": "split", "toStep": "loop"},
+                {"fromStep": "loop", "toStep": "wait"},
+                {"fromStep": "wait", "toStep": "done"}
+            ],
+            "steps": {
+                "split": {"id": "split", "stepType": "Split",
+                          "config": {"value": {"valueType": "immediate", "value": [1]}},
+                          "subgraph": body("in_split", "variables.color")},
+                "loop": {"id": "loop", "stepType": "While",
+                         "condition": {"type": "value", "valueType": "immediate", "value": false},
+                         "subgraph": body("in_loop", "variables.color")},
+                "wait": {"id": "wait", "stepType": "WaitForSignal",
+                         "onWait": body("in_wait", "variables.color")},
+                "done": {"id": "done", "stepType": "Finish"}
+            }
+        }))
+        .expect("graph parses");
+        let errors: Vec<String> = validate_workflow(&graph, &AgentCatalog::new())
+            .errors
+            .iter()
+            .map(|error| error.to_string())
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // A name the parent doesn't have is still rejected.
+        let mut unknown = graph.clone();
+        unknown.variables.clear();
+        let errors: Vec<String> = validate_workflow(&unknown, &AgentCatalog::new())
+            .errors
+            .iter()
+            .map(|error| error.to_string())
+            .filter(|message| message.contains("'color'"))
+            .collect();
+        assert!(errors.len() >= 3, "{errors:?}");
+    }
+
+    #[test]
+    fn workflow_wide_settings_on_nested_graphs_warn() {
+        let graph: ExecutionGraph = serde_json::from_value(json!({
+            "entryPoint": "split",
+            "rateLimitBudgetMs": 5000,
+            "steps": {"split": {
+                "id": "split", "stepType": "Split",
+                "config": {"value": {"valueType": "immediate", "value": [1]}},
+                "subgraph": {
+                    "entryPoint": "f",
+                    "rateLimitBudgetMs": 1500,
+                    "executionTimeoutSeconds": 10,
+                    "steps": {"f": {"id": "f", "stepType": "Finish"}}
+                }
+            }}
+        }))
+        .expect("graph parses");
+        let warnings: Vec<String> = validate_workflow(&graph, &AgentCatalog::new())
+            .warnings
+            .iter()
+            .map(|warning| warning.to_string())
+            .filter(|message| message.starts_with("[W084]"))
+            .collect();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("Split 'split' subgraph sets rateLimitBudgetMs"));
+        assert!(warnings[1].contains("executionTimeoutSeconds"));
+    }
+
+    #[test]
+    fn runtime_owned_variable_names_are_rejected_wherever_authored() {
+        let found = codes(json!({
+            "entryPoint": "split",
+            "variables": {
+                "_instance_id": {"type": "string", "value": "forged"},
+                "_cache_key_prefix": {"type": "string", "value": "legacy"},
+                "color": {"type": "string", "value": "red"}
+            },
+            "steps": {
+                "split": {
+                    "id": "split", "stepType": "Split",
+                    "config": {
+                        "value": {"valueType": "immediate", "value": [1]},
+                        "variables": {"_tenant_id": {"valueType": "immediate", "value": "t"}}
+                    },
+                    "subgraph": {"entryPoint": "f", "steps": {"f": {"id": "f", "stepType": "Finish"}}}
+                }
+            }
+        }));
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("'_instance_id' in workflow variables"))
+        );
+        assert!(
+            found
+                .iter()
+                .any(|m| m.contains("'_tenant_id' in Split 'split' config.variables"))
+        );
+    }
+}
+
+#[cfg(test)]
+mod edge_shape_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn echo(id: &str) -> Value {
+        json!({"stepType": "Agent", "id": id, "agentId": "utils", "capabilityId": "return-input",
+               "inputMapping": {"value": {"valueType": "immediate", "value": 1}}})
+    }
+
+    fn fin(id: &str) -> Value {
+        json!({"stepType": "Finish", "id": id})
+    }
+
+    fn cond() -> Value {
+        json!({"type": "operation", "op": "EQ", "arguments": [
+            {"valueType": "immediate", "value": 1}, {"valueType": "immediate", "value": 1}]})
+    }
+
+    fn closure_codes(graph: Value) -> Vec<String> {
+        let graph: ExecutionGraph = serde_json::from_value(graph).expect("graph parses");
+        validate_workflow_closure("root", &graph, &super::tests::test_catalog(), &[])
+            .errors()
+            .map(|(_, error)| error.code().to_string())
+            .collect()
+    }
+
+    /// A child's Finish that maps only `outputs` returns that value unwrapped
+    /// (C3), so a schema declaring the lone `outputs` field does not describe
+    /// the caller's fields and is not checked against them.
+    #[test]
+    fn a_lone_outputs_schema_field_is_not_checked_against_callers() {
+        let codes = |child_schema: Value, reference: &str| -> Vec<String> {
+            let child: ExecutionGraph = serde_json::from_value(json!({"entryPoint": "f",
+                "outputSchema": child_schema,
+                "steps": {"f": {"stepType": "Finish", "id": "f", "inputMapping": {"outputs": {
+                    "valueType": "composite", "value": {"a": {"valueType": "immediate", "value": 1}}}}}}}))
+            .unwrap();
+            let parent: ExecutionGraph = serde_json::from_value(json!({"entryPoint": "e", "steps": {
+                "e": {"stepType": "EmbedWorkflow", "id": "e", "childWorkflowId": "kid", "childVersion": 1},
+                "f": {"stepType": "Finish", "id": "f", "inputMapping": {
+                    "x": {"valueType": "reference", "value": reference}}}},
+                "executionPlan": [{"fromStep": "e", "toStep": "f"}]}))
+            .unwrap();
+            let child = ClosureChildGraph {
+                workflow_id: "kid".into(),
+                version: 1,
+                execution_graph: child,
+            };
+            validate_workflow_closure("root", &parent, &super::tests::test_catalog(), &[child])
+                .errors()
+                .map(|(_, error)| error.code().to_string())
+                .collect()
+        };
+        assert!(codes(json!({"outputs": {"type": "object"}}), "steps.e.outputs.a").is_empty());
+        // A schema of the real fields is still checked.
+        assert_eq!(
+            codes(json!({"a": {"type": "integer"}}), "steps.e.outputs.b"),
+            ["E058"]
+        );
+        assert!(codes(json!({"a": {"type": "integer"}}), "steps.e.outputs.a").is_empty());
+    }
+
+    /// A routing Switch case without a route takes the default edge (C6).
+    #[test]
+    fn routing_switch_cases_without_a_route_warn() {
+        let switch = |cases: Value| {
+            json!({"entryPoint": "sw", "steps": {
+                "sw": {"stepType": "Switch", "id": "sw", "config": {
+                    "value": {"valueType": "immediate", "value": "y"}, "cases": cases, "default": "D"}},
+                "fx": fin("fx"), "fd": fin("fd")},
+                "executionPlan": [{"fromStep": "sw", "toStep": "fx", "label": "rx"},
+                                  {"fromStep": "sw", "toStep": "fd", "label": "default"}]})
+        };
+        let warnings = |graph: Value| -> Vec<String> {
+            let graph: ExecutionGraph = serde_json::from_value(graph).unwrap();
+            let result = validate_workflow(&graph, &super::tests::test_catalog());
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            result
+                .warnings
+                .iter()
+                .filter(|warning| warning.code() == "W092")
+                .map(ToString::to_string)
+                .collect()
+        };
+        let routed = json!({"matchType": "EQ", "match": "x", "output": "X", "route": "rx"});
+        let found = warnings(switch(json!([routed,
+            {"matchType": "EQ", "match": "y", "output": "Y"},
+            {"matchType": "EQ", "match": "z", "output": "Z"}])));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains("case(s) 1, 2 without a route"),
+            "{}",
+            found[0]
+        );
+        // An explicit default route, or a value switch, is fine.
+        assert!(
+            warnings(switch(json!([routed,
+            {"matchType": "EQ", "match": "y", "output": "Y", "route": "default"}])))
+            .is_empty()
+        );
+    }
+
+    /// A value condition can carry a reference's type hint (C1), and a nested
+    /// operation needs no `"type": "operation"` tag (C2).
+    #[test]
+    fn hinted_value_conditions_and_untagged_operations_validate() {
+        let hinted = json!({"valueType": "reference", "value": "data.count", "type": "integer"});
+        let graph = json!({"entryPoint": "c",
+            "inputSchema": {"count": {"type": "string"}},
+            "steps": {
+                "c": {"stepType": "Conditional", "id": "c", "condition": hinted},
+                "w": {"stepType": "While", "id": "w", "condition": {"op": "AND", "arguments": [
+                    {"op": "LT", "arguments": [
+                        {"valueType": "reference", "value": "data.count", "type": "integer"},
+                        {"valueType": "immediate", "value": 3}]},
+                    hinted]},
+                    "config": {"maxIterations": 3},
+                    "subgraph": {"entryPoint": "inner", "steps": {"inner": fin("inner")}}},
+                "f": fin("f")},
+            "executionPlan": [
+                {"fromStep": "c", "toStep": "w", "label": "true"},
+                {"fromStep": "c", "toStep": "f", "label": "false"},
+                {"fromStep": "w", "toStep": "f"}]});
+        assert_eq!(closure_codes(graph), Vec::<String>::new());
+    }
+
+    /// The shapes the DSL audit found saving cleanly and failing only at
+    /// compile (B3, B4, B6) each get one targeted error, not the gate's cascade.
+    #[test]
+    fn shapes_the_compiler_cannot_build_get_targeted_errors() {
+        let cases = [
+            (
+                "E141",
+                json!({"entryPoint": "sw", "steps": {
+                "sw": {"stepType": "Switch", "id": "sw", "config": {
+                    "value": {"valueType": "immediate", "value": "x"},
+                    "cases": [{"matchType": "EQ", "match": "x", "output": "X", "route": "rx"}]}},
+                "frx": fin("frx")},
+                "executionPlan": [{"fromStep": "sw", "toStep": "frx", "label": "rx"}]}),
+            ),
+            (
+                "E140",
+                json!({"entryPoint": "c", "steps": {
+                "c": {"stepType": "Conditional", "id": "c", "condition": cond()}, "t": fin("t")},
+                "executionPlan": [{"fromStep": "c", "toStep": "t", "label": "true"}]}),
+            ),
+            (
+                "E139",
+                json!({"entryPoint": "a", "steps": {"a": echo("a"), "b": fin("b"), "c": fin("c")},
+                "executionPlan": [
+                    {"fromStep": "a", "toStep": "b", "condition": cond(), "priority": 2},
+                    {"fromStep": "a", "toStep": "c", "condition": cond(), "priority": 1}]}),
+            ),
+            (
+                "E142",
+                json!({"entryPoint": "flt", "steps": {
+                "flt": {"stepType": "Filter", "id": "flt", "config": {
+                    "value": {"valueType": "immediate", "value": [1]}, "condition": cond()}},
+                "ok": fin("ok"), "h": fin("h")},
+                "executionPlan": [{"fromStep": "flt", "toStep": "ok"},
+                                  {"fromStep": "flt", "toStep": "h", "label": "onError"}]}),
+            ),
+            (
+                "E143",
+                json!({"entryPoint": "a", "steps": {"a": echo("a"), "b": fin("b"), "c": fin("c")},
+                "executionPlan": [{"fromStep": "a", "toStep": "b"},
+                                  {"fromStep": "a", "toStep": "c", "label": "bogusLabel"}]}),
+            ),
+            (
+                "E144",
+                json!({"entryPoint": "a", "steps": {
+                "a": echo("a"), "b": echo("b"), "c": echo("c"), "j": echo("j"),
+                "fj": fin("fj"), "fc": fin("fc")},
+                "executionPlan": [
+                    {"fromStep": "a", "toStep": "b"}, {"fromStep": "a", "toStep": "c"},
+                    {"fromStep": "b", "toStep": "j"}, {"fromStep": "c", "toStep": "j"},
+                    {"fromStep": "c", "toStep": "fc", "condition": cond(), "priority": 1},
+                    {"fromStep": "j", "toStep": "fj"}]}),
+            ),
+            // B6: "" is read as no label, so this is two default edges.
+            (
+                "E071",
+                json!({"entryPoint": "a", "steps": {
+                "a": echo("a"), "b": fin("b"), "c": fin("c"), "d": fin("d")},
+                "executionPlan": [
+                    {"fromStep": "a", "toStep": "b", "condition": cond(), "priority": 1},
+                    {"fromStep": "a", "toStep": "c"},
+                    {"fromStep": "a", "toStep": "d", "label": ""}]}),
+            ),
+        ];
+        for (expected, graph) in cases {
+            assert_eq!(
+                closure_codes(graph),
+                vec![expected.to_string()],
+                "{expected}"
+            );
+        }
+    }
+
+    /// A Delay needs durability, as the compiler requires; the deliberate
+    /// rejection fixtures fail at save with E145, not the backstop.
+    #[test]
+    fn non_durable_delays_are_rejected_at_save() {
+        let delay = |durable: Option<bool>| {
+            let mut step = json!({"stepType": "Delay", "id": "d",
+                                  "durationMs": {"valueType": "immediate", "value": 10}});
+            if let Some(durable) = durable {
+                step["durable"] = json!(durable);
+            }
+            step
+        };
+        let flow = |delay: Value, durable: Option<bool>| {
+            let mut graph = json!({"entryPoint": "d", "steps": {"d": delay, "done": fin("done")},
+                                   "executionPlan": [{"fromStep": "d", "toStep": "done"}]});
+            if let Some(durable) = durable {
+                graph["durable"] = json!(durable);
+            }
+            graph
+        };
+        assert_eq!(closure_codes(flow(delay(Some(false)), None)), vec!["E145"]);
+        assert_eq!(closure_codes(flow(delay(None), Some(false))), vec!["E145"]);
+        assert!(closure_codes(flow(delay(None), None)).is_empty());
+        // A durable step in a non-durable workflow is still non-durable.
+        assert_eq!(
+            closure_codes(flow(delay(Some(true)), Some(false))),
+            vec!["E145"]
+        );
+        for fixture in [
+            include_str!("../tests/fixtures/split_timeout.json"),
+            include_str!("../tests/fixtures/while_timeout.json"),
+        ] {
+            let graph: Value = serde_json::from_str(fixture).unwrap();
+            assert_eq!(closure_codes(graph), vec!["E145"]);
+        }
+    }
+
+    /// Values the runtime always rejects fail at save: a Split or Switch
+    /// without config, and a literal duration or timeout that is not a number.
+    #[test]
+    fn missing_configs_and_bad_literal_durations_are_rejected_at_save() {
+        assert_eq!(
+            closure_codes(json!({"entryPoint": "s", "steps": {
+                "s": {"stepType": "Split", "id": "s",
+                      "subgraph": {"entryPoint": "f", "steps": {"f": fin("f")}}},
+                "done": fin("done")},
+                "executionPlan": [{"fromStep": "s", "toStep": "done"}]})),
+            vec!["E146"]
+        );
+        let delay = |value: Value| {
+            json!({"entryPoint": "d", "steps": {
+                "d": {"stepType": "Delay", "id": "d",
+                      "durationMs": {"valueType": "immediate", "value": value}},
+                "done": fin("done")},
+                "executionPlan": [{"fromStep": "d", "toStep": "done"}]})
+        };
+        assert_eq!(closure_codes(delay(json!("5s"))), vec!["E147"]);
+        assert_eq!(closure_codes(delay(json!(-1))), vec!["E147"]);
+        assert!(closure_codes(delay(json!(5000))).is_empty());
+        let referenced = json!({"entryPoint": "d", "variables": {"ms": {"type": "number", "value": 10}},
+            "steps": {
+                "d": {"stepType": "Delay", "id": "d",
+                      "durationMs": {"valueType": "reference", "value": "variables.ms"}},
+                "done": fin("done")},
+            "executionPlan": [{"fromStep": "d", "toStep": "done"}]});
+        assert!(closure_codes(referenced).is_empty());
+    }
+
+    /// `sequential: true` with a parallelism window warns W087 (not W073), and
+    /// `pollIntervalMs` warns W088.
+    #[test]
+    fn sequential_and_poll_interval_warnings() {
+        let warning_codes = |graph: Value| {
+            let graph: ExecutionGraph = serde_json::from_value(graph).unwrap();
+            validate_workflow(&graph, &super::tests::test_catalog())
+                .warnings
+                .iter()
+                .map(|warning| warning.code().to_string())
+                .collect::<Vec<_>>()
+        };
+        let split = |config: Value| {
+            json!({"entryPoint": "s", "steps": {
+                "s": {"stepType": "Split", "id": "s", "config": config,
+                      "subgraph": {"entryPoint": "f", "steps": {"f": fin("f")}}},
+                "done": fin("done")},
+                "executionPlan": [{"fromStep": "s", "toStep": "done"}]})
+        };
+        let items = json!({"valueType": "immediate", "value": [1, 2]});
+        let both = warning_codes(split(
+            json!({"value": items, "sequential": true, "parallelism": 4}),
+        ));
+        assert!(
+            both.contains(&"W087".to_string()) && !both.contains(&"W073".to_string()),
+            "{both:?}"
+        );
+        let window = warning_codes(split(json!({"value": items, "parallelism": 4})));
+        assert!(window.contains(&"W073".to_string()), "{window:?}");
+        let wait = warning_codes(json!({"entryPoint": "w", "steps": {
+            "w": {"stepType": "WaitForSignal", "id": "w", "pollIntervalMs": 500}, "done": fin("done")},
+            "executionPlan": [{"fromStep": "w", "toStep": "done"}]}));
+        assert!(wait.contains(&"W088".to_string()), "{wait:?}");
+    }
+
+    /// `timeout: 0` warns with what it means for the step type.
+    #[test]
+    fn zero_timeouts_warn_with_their_meaning() {
+        let warnings = |graph: Value| {
+            let graph: ExecutionGraph = serde_json::from_value(graph).unwrap();
+            validate_workflow(&graph, &super::tests::test_catalog())
+                .warnings
+                .iter()
+                .filter(|warning| warning.code() == "W091")
+                .map(|warning| warning.to_string())
+                .collect::<Vec<_>>()
+        };
+        let mut agent = echo("a");
+        agent["timeout"] = json!(0);
+        let agent_warnings = warnings(
+            json!({"entryPoint": "a", "steps": {"a": agent, "done": fin("done")},
+            "executionPlan": [{"fromStep": "a", "toStep": "done"}]}),
+        );
+        assert!(agent_warnings.len() == 1 && agent_warnings[0].contains("fails before it runs"));
+        let split_warnings = warnings(json!({"entryPoint": "s", "steps": {
+            "s": {"stepType": "Split", "id": "s", "config": {
+                "value": {"valueType": "immediate", "value": [1]}, "timeout": 0},
+                "subgraph": {"entryPoint": "f", "steps": {"f": fin("f")}}},
+            "done": fin("done")},
+            "executionPlan": [{"fromStep": "s", "toStep": "done"}]}));
+        assert!(split_warnings.len() == 1 && split_warnings[0].contains("no timeout here"));
+    }
+
+    /// A reference inside an immediate resolves in Agent inputs and is literal
+    /// elsewhere; the literal case warns.
+    #[test]
+    fn immediate_references_outside_agent_inputs_warn() {
+        let warning_codes = |graph: Value| {
+            let graph: ExecutionGraph = serde_json::from_value(graph).unwrap();
+            validate_workflow(&graph, &super::tests::test_catalog())
+                .warnings
+                .iter()
+                .map(|warning| warning.code().to_string())
+                .collect::<Vec<_>>()
+        };
+        let nested = json!({"valueType": "immediate",
+                            "value": {"inner": {"valueType": "reference", "value": "data.x"}}});
+        let finish = json!({"entryPoint": "done", "steps": {"done": {"stepType": "Finish", "id": "done",
+            "inputMapping": {"out": nested}}}});
+        assert!(warning_codes(finish).contains(&"W090".to_string()));
+        let agent = json!({"entryPoint": "a", "steps": {
+            "a": {"stepType": "Agent", "id": "a", "agentId": "utils", "capabilityId": "return-input",
+                  "inputMapping": {"value": nested}},
+            "done": fin("done")},
+            "executionPlan": [{"fromStep": "a", "toStep": "done"}]});
+        assert!(!warning_codes(agent).contains(&"W090".to_string()));
+    }
+
+    /// A variable's value must match its declared type, and a field condition
+    /// needs a test.
+    #[test]
+    fn variable_types_and_field_conditions_are_checked() {
+        let with_variable = |var_type: &str, value: Value| {
+            json!({"entryPoint": "done", "steps": {"done": fin("done")},
+                   "variables": {"v": {"type": var_type, "value": value}}})
+        };
+        assert_eq!(
+            closure_codes(with_variable("integer", json!("hello"))),
+            vec!["E150"]
+        );
+        assert_eq!(
+            closure_codes(with_variable("boolean", json!(1))),
+            vec!["E150"]
+        );
+        // `connection` joins the variable types, as in schema fields: an id.
+        assert_eq!(
+            closure_codes(with_variable("connection", json!(7))),
+            vec!["E150"]
+        );
+        for (var_type, value) in [
+            ("connection", json!("4f6c0d0e-conn")),
+            ("integer", json!(3)),
+            ("number", json!(2.5)),
+            ("string", json!("x")),
+            ("object", json!({})),
+            ("array", json!([])),
+            ("string", json!(null)),
+        ] {
+            assert!(
+                closure_codes(with_variable(var_type, value)).is_empty(),
+                "{var_type}"
+            );
+        }
+        let with_condition = |condition: Value| {
+            json!({"entryPoint": "done", "steps": {"done": fin("done")}, "inputSchema": {
+                "kind": {"type": "string"},
+                "note": {"type": "string", "visibleWhen": condition}}})
+        };
+        assert_eq!(
+            closure_codes(with_condition(json!({"field": "kind"}))),
+            vec!["E151"]
+        );
+        assert!(closure_codes(with_condition(json!({"field": "kind", "equals": "a"}))).is_empty());
+        let graph: ExecutionGraph = serde_json::from_value(with_condition(
+            json!({"field": "kind", "equals": "a", "notEquals": "a"}),
+        ))
+        .unwrap();
+        let warnings: Vec<String> = validate_workflow(&graph, &super::tests::test_catalog())
+            .warnings
+            .iter()
+            .map(|warning| warning.code().to_string())
+            .collect();
+        assert!(warnings.contains(&"W089".to_string()), "{warnings:?}");
+    }
+
+    /// Handlers of handlers nest up to the compiler's limit; deeper nesting
+    /// and a chain that loops back are rejected at save.
+    #[test]
+    fn on_error_nesting_is_bounded_and_acyclic() {
+        let chain = |levels: usize| {
+            let mut steps = serde_json::Map::new();
+            let mut plan = Vec::new();
+            for level in 0..=levels {
+                let id = format!("s{level}");
+                steps.insert(id.clone(), echo(&id));
+                steps.insert(format!("ok{level}"), fin(&format!("ok{level}")));
+                plan.push(json!({"fromStep": id, "toStep": format!("ok{level}")}));
+                if level < levels {
+                    plan.push(json!({"fromStep": id, "toStep": format!("s{}", level + 1),
+                                     "label": "onError"}));
+                }
+            }
+            json!({"entryPoint": "s0", "steps": steps, "executionPlan": plan})
+        };
+        assert!(!closure_codes(chain(MAX_NESTED_ON_ERROR_DEPTH)).contains(&"E149".to_string()));
+        assert_eq!(
+            closure_codes(chain(MAX_NESTED_ON_ERROR_DEPTH + 1)),
+            vec!["E149".to_string()]
+        );
+        let looped = json!({"entryPoint": "a", "steps": {"a": echo("a"), "b": echo("b"), "ok": fin("ok")},
+            "executionPlan": [
+                {"fromStep": "a", "toStep": "ok"},
+                {"fromStep": "a", "toStep": "b", "label": "onError"},
+                {"fromStep": "b", "toStep": "ok"},
+                {"fromStep": "b", "toStep": "a", "label": "onError"}]});
+        assert!(closure_codes(looped).contains(&"E149".to_string()));
+    }
+
+    /// A conditioned edge from a fan-out branch into the merge point is not a
+    /// conditioned exit.
+    #[test]
+    fn a_conditioned_edge_into_the_merge_point_is_not_a_branch_exit() {
+        let codes = closure_codes(json!({"entryPoint": "a", "steps": {
+            "a": echo("a"), "b": echo("b"), "c": echo("c"), "j": echo("j"), "fj": fin("fj")},
+            "executionPlan": [
+                {"fromStep": "a", "toStep": "b"}, {"fromStep": "a", "toStep": "c"},
+                {"fromStep": "b", "toStep": "j"},
+                {"fromStep": "c", "toStep": "j", "condition": cond(), "priority": 1},
+                {"fromStep": "c", "toStep": "j"},
+                {"fromStep": "j", "toStep": "fj"}]}));
+        assert!(!codes.contains(&"E144".to_string()), "{codes:?}");
+    }
+
+    /// Two conditioned onError edges on an AiAgent are a valid shape, not a
+    /// duplicate tool label (the false E110 in B6).
+    #[test]
+    fn conditioned_on_error_edges_on_an_ai_agent_are_valid() {
+        let codes = closure_codes(json!({"entryPoint": "ai", "steps": {
+            "ai": {"stepType": "AiAgent", "id": "ai", "connectionId": "conn", "config": {
+                "systemPrompt": {"valueType": "immediate", "value": "s"},
+                "userPrompt": {"valueType": "immediate", "value": "u"}}},
+            "ok": fin("ok"), "h1": fin("h1"), "h2": fin("h2")},
+            "executionPlan": [
+                {"fromStep": "ai", "toStep": "ok"},
+                {"fromStep": "ai", "toStep": "h1", "label": "onError", "condition": cond(), "priority": 2},
+                {"fromStep": "ai", "toStep": "h2", "label": "onError", "condition": cond(), "priority": 1}]}));
+        assert!(codes.is_empty(), "{codes:?}");
+    }
+
+    /// The backstop reports the compiler's own reason for a shape no targeted
+    /// rule names, and stays quiet once another error explains the graph.
+    #[test]
+    fn the_support_gate_backstop_reports_only_otherwise_valid_graphs() {
+        let graph: ExecutionGraph = serde_json::from_value(json!({"entryPoint": "c", "steps": {
+            "c": {"stepType": "Conditional", "id": "c", "condition": cond()}, "t": fin("t")},
+            "executionPlan": [{"fromStep": "c", "toStep": "t", "label": "true"}]}))
+        .unwrap();
+        let mut clean = ValidationResult::default();
+        report_unsupported_graph_shapes(&graph, &[], &mut clean);
+        assert!(!clean.errors.is_empty());
+        assert!(clean.errors.iter().all(|error| error.code() == "E138"));
+        assert!(
+            clean.errors[0]
+                .to_string()
+                .contains("compiler cannot build")
+        );
+
+        let mut explained = ValidationResult::default();
+        explained
+            .errors
+            .push(ValidationError::ConditionalMissingBranch {
+                step_id: "c".into(),
+                branch: "false".into(),
+            });
+        report_unsupported_graph_shapes(&graph, &[], &mut explained);
+        assert_eq!(explained.errors.len(), 1);
     }
 }

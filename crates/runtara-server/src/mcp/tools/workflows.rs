@@ -564,7 +564,7 @@ pub(crate) fn wait_for_instances_step_shape() -> serde_json::Value {
         "purpose": "Park the run, without holding a runner or a concurrency slot, until direct child runs it started with control start have finished.",
         "required": ["id", "stepType", "instanceIds"],
         "optionalFields": ["name", "mode", "timeoutMs", "breakpoint"],
-        "doesNotAccept": ["inputMapping", "durable", "maxRetries", "retryDelay", "timeout"],
+        "doesNotAccept": ["inputMapping", "durable", "maxRetries", "retryDelayMs", "timeout"],
         "fields": {
             "instanceIds": format!("MappingValue resolving to an array of 1 to {} distinct, non-empty instance ids, each a direct child of this run: a composite array of control start outputs (steps.<start>.outputs.instanceId) or a reference to an array of ids. An empty array settles at once with resolution empty.", waits::MAX_WAIT_TARGETS),
             "mode": "all (default): settle when every run has finished. any: settle when the first has; wait again on remaining to handle the rest.",
@@ -643,9 +643,17 @@ fn run_state_step_shapes() -> serde_json::Value {
 /// condition-operator enum can be drift-tested against `ConditionOperator`
 /// (SYN-451).
 pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> serde_json::Value {
+    let runtime_variables: serde_json::Map<String, serde_json::Value> =
+        runtara_dsl::PUBLIC_RUNTIME_VARIABLES
+            .iter()
+            .map(|(name, meaning)| (format!("variables.{name}"), (*meaning).into()))
+            .collect();
     serde_json::json!({
         "schema": "workflow-authoring",
+        // Version of this authoring document's own format; the DSL it
+        // describes is `dslVersion`.
         "version": 1,
+        "dslVersion": runtara_dsl::DSL_VERSION,
         "purpose": "Canonical workflow JSON shapes for MCP clients and LLM authors.",
         "graphShape": {
             "required": ["name", "entryPoint", "steps", "executionPlan"],
@@ -665,7 +673,7 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                 "inputSchema": "optional; map of field name to SchemaField",
                 "outputSchema": "optional; map of field name to SchemaField",
                 "stateSchema": {
-                    "fieldName": {"type": "string | number | integer | boolean | array | object", "label": "Display label", "format": "optional display hint", "enum": ["optional allowed values"]}
+                    "fieldName": {"type": "string | number | integer | boolean | array | object | file | connection", "label": "Display label", "format": "optional display hint", "enum": ["optional allowed values"]}
                 },
                 "conditionalBranches": [
                     {"fromStep": "conditionalStepId", "toStep": "whenTrueStepId", "label": "true"},
@@ -691,7 +699,7 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
             },
             "Finish": {
                 "optionalFields": ["inputMapping"],
-                "executionLabels": "Pass run_label to execute_workflow or execute_workflow_and_wait. Finish cannot assign execution labels.",
+                "executionLabels": "Pass run_label to execute_workflow, execute_workflow_sync or execute_workflow_wait. Finish cannot assign execution labels.",
                 "example": {
                     "id": "finish",
                     "stepType": "Finish",
@@ -736,6 +744,7 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
             "compositeObject": {"valueType": "composite", "value": {"field": {"valueType": "reference", "value": "data.foo"}}},
             "compositeArray": {"valueType": "composite", "value": [{"valueType": "reference", "value": "data.foo"}]},
             "referencePrefixes": ["data.<workflowInput>", "variables.<name>", "steps.<stepId>.outputs.<field>", "steps.__error.<field> on onError paths"],
+            "runtimeVariables": runtime_variables,
             "conditionalOutput": {
                 "reference": "steps.<conditionalStepId>.outputs.result",
                 "type": "boolean",
@@ -1243,7 +1252,9 @@ fn extract_child_refs_recursive(graph: &serde_json::Value, refs: &mut Vec<ChildW
             let version = step_def
                 .get("childVersion")
                 .map(|v| match v {
-                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::String(s) => {
+                        runtara_workflows::dependency_analysis::canonical_child_version(s)
+                    }
                     serde_json::Value::Number(n) => n.to_string(),
                     _ => "latest".to_string(),
                 })
@@ -1341,7 +1352,8 @@ async fn validate_child_workflow_refs(
 
 /// Resolve a version string ("latest", "current", or numeric) against a workflow's metadata.
 fn resolve_child_version(version_str: &str, workflow_data: &serde_json::Value) -> Option<i32> {
-    match version_str {
+    let version_str = version_str.trim();
+    match version_str.to_ascii_lowercase().as_str() {
         "latest" => workflow_data
             .pointer("/data/latestVersion")
             .or_else(|| workflow_data.pointer("/data/latest_version"))
@@ -1936,6 +1948,67 @@ fn diff_step(a: &serde_json::Value, b: &serde_json::Value) -> Vec<String> {
 mod tests {
     use super::*;
     use schemars::JsonSchema;
+
+    /// The authoring document names its DSL version, every state field type,
+    /// and only tools that exist.
+    #[test]
+    fn authoring_schema_matches_the_dsl_and_the_registered_tools() {
+        let schema = workflow_authoring_schema("object_model", "bulk-update-instances");
+        assert_eq!(schema["dslVersion"], runtara_dsl::DSL_VERSION);
+        let state_types = schema["graphShape"]["shape"]["stateSchema"]["fieldName"]["type"]
+            .as_str()
+            .unwrap();
+        for field_type in [
+            "string",
+            "number",
+            "integer",
+            "boolean",
+            "array",
+            "object",
+            "file",
+            "connection",
+        ] {
+            assert!(
+                state_types.contains(field_type),
+                "{field_type}: {state_types}"
+            );
+        }
+        let text = schema.to_string();
+        assert!(!text.contains("execute_workflow_and_wait"), "{text}");
+        let runtime_variables = schema["mappingValue"]["runtimeVariables"]
+            .as_object()
+            .unwrap();
+        assert_eq!(
+            runtime_variables.len(),
+            runtara_dsl::PUBLIC_RUNTIME_VARIABLES.len()
+        );
+        assert!(runtime_variables.contains_key("variables._index"));
+    }
+
+    /// The editor's built-in variable types cover exactly the public runtime
+    /// variables the DSL documents.
+    #[test]
+    fn editor_builtin_variables_match_the_dsl() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/frontend/src/features/workflows/components/WorkflowEditor/NodeForm/reference-type.ts"
+        ))
+        .unwrap();
+        let start = source.find("BUILTIN_VARIABLE_TYPES").unwrap();
+        let body = &source[start..start + source[start..].find("};").unwrap()];
+        let mut editor: Vec<&str> = body
+            .lines()
+            .filter_map(|line| line.trim().split_once(':').map(|(name, _)| name))
+            .filter(|name| name.starts_with('_'))
+            .collect();
+        editor.sort_unstable();
+        let mut dsl: Vec<&str> = runtara_dsl::PUBLIC_RUNTIME_VARIABLES
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        dsl.sort_unstable();
+        assert_eq!(editor, dsl);
+    }
 
     #[test]
     fn authoring_schema_describes_error_step_without_input_mapping() {

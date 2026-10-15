@@ -129,10 +129,12 @@ impl BedrockCompletionModel {
                 body = %error_body,
                 "Bedrock Converse API error"
             );
-            return Err(CompletionError::ProviderError(format!(
-                "Bedrock Converse API returned {}: {}",
-                response.status, error_body
-            )));
+            return Err(CompletionError::from_http_status(
+                "Bedrock Converse API",
+                response.status,
+                &response.headers,
+                &error_body,
+            ));
         }
 
         let response_text = response.into_string().map_err(|e| {

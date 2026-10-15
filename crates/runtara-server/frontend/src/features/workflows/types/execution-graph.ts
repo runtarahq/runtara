@@ -21,7 +21,7 @@ export interface ExecutionGraphDto {
   inputSchema?: Record<string, unknown>;
   /** JSON Schema for workflow output validation */
   outputSchema?: Record<string, unknown>;
-  /** Typed state a run exposes (declaration only; not compiled) */
+  /** Typed state a run exposes; SetState/GetState are checked against it */
   stateSchema?: Record<string, unknown>;
   /** Execution timeout in seconds (default: 300, max: 3600) */
   executionTimeoutSeconds?: number;
@@ -54,8 +54,12 @@ export interface SplitStepConfig {
   /** Maximum retry attempts for the split operation */
   maxRetries?: number;
   /** Base delay between retries in milliseconds */
+  retryDelayMs?: number;
+  /** Deprecated spelling of retryDelayMs (DSL 3.6, W093) */
   retryDelay?: number;
   /** Step timeout in milliseconds */
+  timeoutMs?: number;
+  /** Deprecated spelling of timeoutMs (DSL 3.6, W093) */
   timeout?: number;
   /** Treat null input as an empty array */
   allowNull?: boolean;
@@ -82,10 +86,6 @@ export interface ExecutionGraphStepDto {
     | 'EmbedWorkflow'
     | 'Finish'
     | 'Split'
-    | 'Combine'
-    | 'Wait'
-    | 'Event'
-    | 'RepeatUntil'
     | 'Filter'
     | 'While'
     | 'Switch'
@@ -101,15 +101,16 @@ export interface ExecutionGraphStepDto {
   /** Configuration for Split steps (replaces inputMapping for Split) */
   config?: SplitStepConfig;
   links?: string[];
-  /** @format int64 */
-  executionTimeout?: number;
   /** @format int32 */
   maxRetries?: number;
   /** @format int64 */
+  retryDelayMs?: number;
+  /** Deprecated spelling of retryDelayMs (DSL 3.6, W093) */
   retryDelay?: number;
   /** @format int64 */
+  timeoutMs?: number;
+  /** Deprecated spelling of timeoutMs (DSL 3.6, W093) */
   timeout?: number;
-  retryStrategy?: 'Linear' | 'Exponential';
   durable?: boolean | null;
   renderingParameters?: ExecutionGraphStepRenderingParametersDto;
   subgraph?: ExecutionGraphDto;

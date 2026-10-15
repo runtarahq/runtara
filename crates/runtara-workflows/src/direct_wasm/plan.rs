@@ -196,6 +196,8 @@ pub(super) enum DirectRunPlan {
         /// model call, unlike Agent steps' default of 3).
         max_retries: u32,
         retry_delay_ms: u64,
+        /// The workflow's rate-limit wait budget, as for Agent steps.
+        rate_limit_budget_ms: u64,
         next_plan: Box<DirectRunPlan>,
         error_plan: Option<DirectErrorRoutePlan>,
     },
@@ -219,6 +221,11 @@ pub(super) enum DirectRunPlan {
         tools: Vec<DirectAiToolPlan>,
         /// Conversation memory: load history before the loop, save it after.
         memory: Option<DirectAiMemoryPlan>,
+        /// Per-turn LLM-call retries, with the same opt-in default and
+        /// budget as the single-shot path.
+        max_retries: u32,
+        retry_delay_ms: u64,
+        rate_limit_budget_ms: u64,
         next_plan: Box<DirectRunPlan>,
         /// Loop-level failure routing (GAP-05): chat-turn (provider) and
         /// memory load/save failures dispatch here. Individual TOOL failures
@@ -520,7 +527,10 @@ fn step_run_plan(
     )
 }
 
-fn step_run_plan_without_on_error(
+/// An onError handler's plan. Its own steps keep their onError routing, so a
+/// failure inside a handler reaches that step's handler instead of failing
+/// the run.
+fn handler_run_plan(
     graph: &DirectGraphManifest,
     child_workflows: &[DirectChildWorkflowGraphManifest],
     step_id: &str,
@@ -532,7 +542,7 @@ fn step_run_plan_without_on_error(
         child_workflows,
         step_id,
         stack,
-        false,
+        true,
         None,
         step_id,
         orders,
@@ -837,7 +847,7 @@ fn step_run_plan_inner(
                 breakpoint: step_breakpoint_enabled(graph, step),
                 max_retries: embed_workflow_effective_max_retries(step),
                 retry_delay_ms: embed_workflow_effective_retry_delay_ms(step),
-                timeout_ms: step.body.get("timeout").and_then(serde_json::Value::as_u64),
+                timeout_ms: super::manifest::duration_ms(&step.body, "timeoutMs"),
                 child_plan: Box::new(child_plan),
                 next_plan: Box::new(next_plan),
                 error_plan,
@@ -1061,6 +1071,7 @@ fn step_run_plan_inner(
                     breakpoint: step_breakpoint_enabled(graph, step),
                     max_retries: agent.max_retries.unwrap_or(0),
                     retry_delay_ms: agent.retry_delay.unwrap_or(1_000),
+                    rate_limit_budget_ms: graph.rate_limit_budget_ms,
                     next_plan: Box::new(next_plan),
                     error_plan,
                 });
@@ -1123,10 +1134,7 @@ fn step_run_plan_inner(
                                     .get("durable")
                                     .and_then(serde_json::Value::as_bool)
                                     .unwrap_or(true),
-                            timeout_ms: step
-                                .body
-                                .get("timeout")
-                                .and_then(serde_json::Value::as_u64),
+                            timeout_ms: super::manifest::duration_ms(&step.body, "timeoutMs"),
                             child_plan: Box::new(child_plan),
                         });
                         continue;
@@ -1287,6 +1295,9 @@ fn step_run_plan_inner(
                 max_iterations,
                 tools,
                 memory,
+                max_retries: agent.max_retries.unwrap_or(0),
+                retry_delay_ms: agent.retry_delay.unwrap_or(1_000),
+                rate_limit_budget_ms: graph.rate_limit_budget_ms,
                 next_plan: Box::new(next_plan),
                 error_plan: if include_on_error {
                     on_error_plan(graph, child_workflows, step_id, stack, orders)?
@@ -2672,6 +2683,15 @@ fn is_linear_chain_branch(plan: &DirectRunPlan) -> bool {
     }
 }
 
+/// Deepest onError handler nesting the planner lowers. Every handler region
+/// is planned inline at each site that can reach it, so unbounded nesting of
+/// handlers that have handlers would grow the plan exponentially; validation
+/// rejects deeper nesting at save (E149).
+pub(crate) const MAX_NESTED_ON_ERROR_DEPTH: usize = 4;
+
+/// Stack frame marking an onError handler level (never a step id).
+const ON_ERROR_FRAME: &str = "\u{1}onError";
+
 fn on_error_plan(
     graph: &DirectGraphManifest,
     child_workflows: &[DirectChildWorkflowGraphManifest],
@@ -2717,7 +2737,17 @@ fn on_error_plan(
             ))
     });
 
+    let depth = stack
+        .iter()
+        .filter(|frame| frame.as_str() == ON_ERROR_FRAME)
+        .count();
+    if depth >= MAX_NESTED_ON_ERROR_DEPTH {
+        return Err(DirectCompileError::Component(format!(
+            "onError handlers nest deeper than {MAX_NESTED_ON_ERROR_DEPTH} levels at step '{from_step}'"
+        )));
+    }
     stack.push(from_step.to_string());
+    stack.push(ON_ERROR_FRAME.to_string());
     let branches = conditional_edges
         .into_iter()
         .map(|edge| {
@@ -2726,13 +2756,7 @@ fn on_error_plan(
                     "missing onError condition id for direct step '{from_step}'"
                 ))
             })?;
-            let plan = step_run_plan_without_on_error(
-                graph,
-                child_workflows,
-                &edge.to_step,
-                stack,
-                orders,
-            )?;
+            let plan = handler_run_plan(graph, child_workflows, &edge.to_step, stack, orders)?;
             Ok(DirectEdgeConditionPlan {
                 condition_id,
                 plan: Box::new(plan),
@@ -2740,11 +2764,10 @@ fn on_error_plan(
         })
         .collect::<Result<Vec<_>, DirectCompileError>>()?;
     let default_plan = default_edge
-        .map(|edge| {
-            step_run_plan_without_on_error(graph, child_workflows, &edge.to_step, stack, orders)
-        })
+        .map(|edge| handler_run_plan(graph, child_workflows, &edge.to_step, stack, orders))
         .transpose()?
         .map(Box::new);
+    stack.pop();
     stack.pop();
 
     Ok(Some(DirectErrorRoutePlan {
@@ -2940,12 +2963,20 @@ fn split_config<'a>(
 
 /// The Split's requested `parallelism` window. 0 means "unlimited" per the
 /// DSL contract — normalized here to u32::MAX and clamped at emission time to
-/// the item count; absent/1 = sequential.
+/// the item count; absent/1 = sequential, and `sequential: true` forces it.
 fn split_parallel_window(
     graph: &DirectGraphManifest,
     step_id: &str,
 ) -> Result<Option<u32>, DirectCompileError> {
-    Ok(split_config(graph, step_id)?
+    let config = split_config(graph, step_id)?;
+    if config
+        .get("sequential")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Ok(None);
+    }
+    Ok(config
         .get("parallelism")
         .and_then(serde_json::Value::as_u64)
         .map(|window| {
@@ -2975,10 +3006,10 @@ fn split_timeout_ms(
     graph: &DirectGraphManifest,
     step_id: &str,
 ) -> Result<Option<u64>, DirectCompileError> {
-    Ok(split_config(graph, step_id)?
-        .get("timeout")
-        .and_then(serde_json::Value::as_u64)
-        .filter(|ms| *ms > 0))
+    Ok(
+        super::manifest::duration_ms(split_config(graph, step_id)?, "timeoutMs")
+            .filter(|ms| *ms > 0),
+    )
 }
 
 fn split_subgraph<'a>(
@@ -3031,8 +3062,7 @@ fn while_timeout_ms(graph: &DirectGraphManifest, step_id: &str) -> Option<u64> {
         .whiles
         .iter()
         .find(|while_step| while_step.step_id == step_id && while_step.purpose == "while.config")
-        .and_then(|while_step| while_step.value.get("timeout"))
-        .and_then(serde_json::Value::as_u64)
+        .and_then(|while_step| super::manifest::duration_ms(&while_step.value, "timeoutMs"))
         .filter(|ms| *ms > 0)
 }
 
@@ -3247,10 +3277,7 @@ fn embed_workflow_effective_max_retries(step: &DirectStepManifest) -> u32 {
 }
 
 fn embed_workflow_effective_retry_delay_ms(step: &DirectStepManifest) -> u64 {
-    step.body
-        .get("retryDelay")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(1_000)
+    super::manifest::duration_ms(&step.body, "retryDelayMs").unwrap_or(1_000)
 }
 
 fn split_effective_max_retries(split: &DirectSplitManifest) -> u32 {
@@ -3263,11 +3290,7 @@ fn split_effective_max_retries(split: &DirectSplitManifest) -> u32 {
 }
 
 fn split_effective_retry_delay_ms(split: &DirectSplitManifest) -> u64 {
-    split
-        .value
-        .get("retryDelay")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(1_000)
+    super::manifest::duration_ms(&split.value, "retryDelayMs").unwrap_or(1_000)
 }
 
 fn finish_mapping_id(
@@ -3960,6 +3983,9 @@ mod tests {
             max_iterations: 10,
             tools,
             memory: None,
+            max_retries: 0,
+            retry_delay_ms: 1_000,
+            rate_limit_budget_ms: 60_000,
             next_plan: Box::new(P::Join),
             error_plan: None,
         };
@@ -4169,6 +4195,64 @@ mod tests {
             body,
             nested_graphs: vec![],
         }
+    }
+
+    /// `sequential: true` forces a window of one whatever `parallelism` asks.
+    #[test]
+    fn sequential_split_overrides_the_parallelism_window() {
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "s",
+            "executionPlan": [{"fromStep": "s", "toStep": "done"}],
+            "steps": {
+                "s": {"stepType": "Split", "id": "s", "config": {
+                    "value": {"valueType": "immediate", "value": [1, 2]},
+                    "parallelism": 4, "sequential": true},
+                    "subgraph": {"entryPoint": "f", "steps": {"f": {"stepType": "Finish", "id": "f"}}}},
+                "done": {"stepType": "Finish", "id": "done"}
+            }
+        }))
+        .expect("graph parses");
+        let mut manifest =
+            super::super::manifest::build_direct_workflow_manifest(&graph).expect("manifest");
+        assert_eq!(split_parallel_window(&manifest.graph, "s").unwrap(), None);
+        manifest.graph.splits[0].value["sequential"] = serde_json::json!(false);
+        assert_eq!(
+            split_parallel_window(&manifest.graph, "s").unwrap(),
+            Some(4)
+        );
+    }
+
+    /// The rate-limited defaults come from the catalog the compile is given,
+    /// whatever spelling the step uses for the agent id.
+    #[test]
+    fn catalog_rate_limited_capability_gets_rate_limited_retry_defaults() {
+        use runtara_dsl::agent_meta::{AgentCatalog, workflow_agent_info};
+        let empty = std::collections::HashMap::new();
+        let mut info = workflow_agent_info("rate-flow", "rate-flow", "", &empty, &empty);
+        for capability in &mut info.capabilities {
+            capability.tags.clear();
+            capability.rate_limited = true;
+        }
+        let catalog = AgentCatalog::from_agents(vec![info]);
+        let graph: runtara_dsl::ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "call",
+            "executionPlan": [{"fromStep": "call", "toStep": "finish"}],
+            "steps": {
+                "call": {"id": "call", "stepType": "Agent", "agentId": "rate_flow",
+                         "capabilityId": "run", "inputMapping": {}},
+                "finish": {"id": "finish", "stepType": "Finish"}
+            }
+        }))
+        .expect("graph parses");
+        let manifest = super::super::manifest::build_direct_workflow_manifest_with_agent_catalog(
+            &graph,
+            Some(&catalog),
+        )
+        .expect("manifest");
+        let agent = &manifest.graph.agents[0];
+        assert!(agent.rate_limited);
+        assert_eq!(agent_effective_max_retries(agent), 5);
+        assert_eq!(agent_effective_retry_delay_ms(agent), 2_000);
     }
 
     #[test]

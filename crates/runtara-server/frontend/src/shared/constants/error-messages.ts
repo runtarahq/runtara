@@ -24,6 +24,10 @@ export const ERROR_MESSAGES: Record<string, string> = {
   OPENAI_RUNTIME_ERROR:
     'OpenAI agent runtime error. No async runtime available.',
 
+  // AI Agent step errors
+  AI_RATE_LIMITED:
+    'The LLM provider rate-limited this call. It is retried within the workflow rate-limit budget.',
+
   // Shopify Agent Errors
   SHOPIFY_MISSING_CONNECTION:
     'Shopify connection not configured. Please add a Shopify connection.',
@@ -114,6 +118,8 @@ export function getErrorGuidance(errorCode: string): string | null {
       'Wait a few minutes and try again. Shopify rate limits reset every second.',
     BEDROCK_RATE_LIMITED:
       'Wait a few minutes and try again. Consider requesting a quota increase from AWS.',
+    AI_RATE_LIMITED:
+      'Set maxRetries on the AI Agent step, or raise the workflow rateLimitBudgetMs, so throttled calls wait and retry.',
     OPENAI_INVALID_API_KEY:
       'Go to Connections and verify your OpenAI API key is correct.',
     SHOPIFY_INVALID_CONFIG:

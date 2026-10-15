@@ -8,14 +8,25 @@
 // 3. build.rs - for auto-generating JSON Schema via schemars
 //
 // IMPORTANT: Changes to these types automatically update the JSON Schema.
-// The schema is generated at build time to `specs/dsl/v{VERSION}/schema.json`.
+// The schema is generated at build time and served at `GET /api/runtime/specs/dsl`.
 //
 // NOTE: This file is included by build.rs via include!() macro, so it cannot
 // have `use` statements or `//!` doc comments. Imports are provided by the
 // including module.
+//
+// Spelling conventions (DSL 3.6):
+// - Field names and output keys are camelCase, and a millisecond field ends
+//   in `Ms` (`timeoutMs`, `retryDelayMs`, `durationMs`).
+// - Enum values are lowercase, camelCase when they are more than one word
+//   (`valueType`, type hints, schema field types, `slidingWindow`).
+// - Operators (condition `op`, Switch `matchType`) are SCREAMING_SNAKE_CASE,
+//   as in SQL; `stepType` is PascalCase, as type names are.
+// Deprecated spellings still read and warn (W093): `timeout`, `retryDelay`,
+// `turnTimeout`, the `json` hint and GroupBy's `total_groups`. `memoryTier`
+// (S, M, L, XL) also reads lowercase. DSL 4.0 removes the deprecated ones.
 
 /// DSL version - bump when making breaking changes
-pub const DSL_VERSION: &str = "3.5.0";
+pub const DSL_VERSION: &str = "3.6.0";
 
 // ============================================================================
 // Root Types
@@ -30,19 +41,21 @@ pub struct Workflow {
     /// The execution graph containing all steps
     pub execution_graph: ExecutionGraph,
 
-    /// Memory allocation tier for workflow execution
+    /// Memory allocation tier for workflow execution. Not read from this
+    /// type: the server takes it from the update request's `memoryTier`
+    /// and stores it on the workflow. To be removed in DSL 4.0.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_tier: Option<MemoryTier>,
 
-    /// Enable step-level debug instrumentation
+    /// Enable step-level debug instrumentation. Not read from this type: the
+    /// server takes it from the update request's `trackEvents` (stored per
+    /// workflow) and `runtara-compile` from `--debug`. To be removed in DSL 4.0.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub track_events: Option<bool>,
 
-    /// Disable durability for this workflow when `false`. Compiled code contains
-    /// no checkpoint reads/writes, no `sdk.sleep`, and no breakpoint
-    /// checkpoints. When this field is `Some(false)`, the setting propagates
-    /// into `ExecutionGraph.durable` (via `parse_workflow`) and then to every
-    /// nested subgraph and embedded child workflow at codegen time. Default: durable.
+    /// Disable durability for this workflow when `false`. Copied into
+    /// `ExecutionGraph.durable` by `parse_workflow` when that is unset; see
+    /// there for how nested graphs inherit it. Default: durable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub durable: Option<bool>,
 }
@@ -52,10 +65,15 @@ pub struct Workflow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum MemoryTier {
+    // Written uppercase; lowercase input is accepted too.
+    #[serde(alias = "s")]
     S,
+    #[serde(alias = "m")]
     M,
+    #[serde(alias = "l")]
     L,
     #[default]
+    #[serde(alias = "xl")]
     XL,
 }
 
@@ -107,9 +125,19 @@ pub struct ExecutionGraph {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub execution_plan: Vec<ExecutionPlanEdge>,
 
-    /// Constant variables available as `variables.<name>` during execution.
-    /// These are static values defined at design time, not overridable at runtime.
-    /// Keys are variable names, values contain type and value.
+    /// Variables available as `variables.<name>` during execution. Keys are
+    /// variable names, values contain type and value.
+    ///
+    /// On the workflow's own graph these are defaults that a run's input
+    /// `variables` can override. A nested graph (Split/While body, onWait)
+    /// sees its parent's variables; its own declarations are added to them,
+    /// replacing any with the same name, and the step's `config.variables`
+    /// win over both.
+    ///
+    /// The runtime also binds `_`-prefixed variables of its own, such as
+    /// `_instance_id` and, in a Split body, `_index` and `_item`
+    /// ([`crate::PUBLIC_RUNTIME_VARIABLES`] lists the ones to read). Those
+    /// names are reserved: declaring or overriding one is rejected (E137).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub variables: HashMap<String, Variable>,
 
@@ -150,7 +178,10 @@ pub struct ExecutionGraph {
     pub edges: Option<serde_json::Value>,
 
     /// Maximum cumulative time (in milliseconds) that rate-limited retries may
-    /// durable-sleep before giving up.  Applies to all steps in this workflow.
+    /// durable-sleep before giving up.  Applies to every step of this
+    /// workflow, including those in Split/While bodies and onWait; set it on
+    /// the workflow's own graph, as a nested graph's value is ignored (W084).
+    /// An embedded workflow uses its own setting.
     /// Default: 60 000 (1 minute).  Set higher for workflows that make many
     /// calls through a slow rate limit (e.g. 3 600 000 for 1 hour).
     #[serde(default = "default_rate_limit_budget_ms", skip_serializing_if = "is_default_rate_limit_budget")]
@@ -159,17 +190,30 @@ pub struct ExecutionGraph {
     /// Maximum wall-clock time (in seconds) an execution of this workflow may
     /// run before the server stops it. Written by the workflow editor
     /// (validated 1-3600 in the UI) and enforced server-side when scheduling
-    /// the execution — the compiler does not interpret this field.
+    /// the execution — the compiler does not interpret this field. Only the
+    /// workflow's own graph is read; a nested graph's value is ignored (W084).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_timeout_seconds: Option<u32>,
 
-    /// Disable durability for this workflow when `Some(false)`. Mirrors
-    /// `Workflow.durable`; `parse_workflow` copies the top-level flag here when
-    /// this field is `None`. Codegen reads `ctx.durable` from this value at
-    /// the root, then inherits it unconditionally into all nested subgraphs
-    /// and embedded children. `None` → durable (default).
+    /// Durability of this graph's steps. `None` inherits: the workflow's own
+    /// graph defaults to durable, and a nested graph (Split/While body, onWait)
+    /// takes its parent's setting. An explicit value wins for this graph and
+    /// everything nested in it, so a body can opt out with `false` inside a
+    /// durable workflow (or opt in under a non-durable one). An embedded
+    /// workflow follows its own definition, not the embedding run's.
+    /// `parse_workflow` copies `Workflow.durable` here when this is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable: Option<bool>,
+}
+
+/// Read an empty edge label as no label, so `""` and an absent label are the
+/// same normal edge everywhere (validation, compile, runtime).
+fn deserialize_edge_label<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let label = Option::<String>::deserialize(deserializer)?;
+    Ok(label.filter(|label| !label.is_empty()))
 }
 
 fn default_rate_limit_budget_ms() -> u64 {
@@ -240,8 +284,13 @@ pub struct ExecutionPlanEdge {
     /// Edge label for control flow:
     /// - `"true"`/`"false"` for Conditional step branches
     /// - `"onError"` for error handling transition (step failed after retries)
-    /// - `None` or empty for normal sequential flow
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// - `None` or empty for normal sequential flow (an empty label is read
+    ///   as no label)
+    #[serde(
+        default,
+        deserialize_with = "deserialize_edge_label",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub label: Option<String>,
 
     /// Optional condition expression for conditional transitions.
@@ -424,6 +473,12 @@ pub struct StepCommon {
 /// standard mapping system (`data.*`, `steps.<id>.outputs.*`, `variables.*`).
 ///
 /// There is no `outputMapping` field — Finish only takes `inputMapping`.
+///
+/// A mapping whose only key is `outputs` returns that value itself, not an
+/// object holding it, so `{"outputs": <array>}` returns the array. This is the
+/// one way to return a value that is not an object. An `outputSchema` that
+/// declares just `outputs` therefore describes the mapping, not the caller's
+/// fields, and references into the result are not checked against it.
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -493,12 +548,15 @@ pub struct AgentStep {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_mapping: Option<InputMapping>,
 
-    /// Maximum retry attempts (default: 3)
+    /// Maximum retry attempts (default: 3). Rate-limited failures (an HTTP 429
+    /// or a `*_RATE_LIMITED` code) retry within the workflow's
+    /// `rateLimitBudgetMs` and may exceed this count; `0` disables all
+    /// retries, rate-limited ones included.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
 
     /// Base delay between retries in milliseconds (default: 1000)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "retryDelayMs", alias = "retryDelay", default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
     /// Cooperative guest deadline in milliseconds, including preparation,
@@ -508,7 +566,7 @@ pub struct AgentStep {
     /// emergency whole-workflow abort. External effects are not rolled back.
     /// A step whose capability suspends must set it above zero (E029): it is
     /// the step's hard deadline, parked time included.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "timeoutMs", alias = "timeout", default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
     /// When true, execution pauses before this step in debug mode
@@ -659,14 +717,14 @@ pub struct EmbedWorkflowStep {
     pub max_retries: Option<u32>,
 
     /// Base delay between retries in milliseconds (default: 1000)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "retryDelayMs", alias = "retryDelay", default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
     /// Cooperative guest deadline for the inline child, in milliseconds,
     /// including retries and durable suspension. Zero prevents child execution;
     /// absence leaves only enclosing deadlines. Cleanup can extend beyond the
     /// budget, and uncooperative code may require whole-workflow abort.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "timeoutMs", alias = "timeout", default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
     /// When true, execution pauses before this step in debug mode
@@ -681,9 +739,11 @@ pub struct EmbedWorkflowStep {
     pub durable: Option<bool>,
 }
 
-/// Child workflow version specification
+/// Child workflow version specification: `"latest"`, `"current"`, or a
+/// version number. The keywords are case-insensitive and a numeric string
+/// (`"3"`) is the version number, so every spelling resolves the same way.
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(untagged)]
 pub enum ChildVersion {
@@ -691,6 +751,36 @@ pub enum ChildVersion {
     Latest(String),
     /// Use specific version number
     Specific(i32),
+}
+
+impl<'de> Deserialize<'de> for ChildVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Number(i32),
+            Text(String),
+        }
+        Ok(match Raw::deserialize(deserializer)? {
+            Raw::Number(version) => ChildVersion::Specific(version),
+            Raw::Text(text) => {
+                let trimmed = text.trim();
+                if let Ok(version) = trimmed.parse::<i32>() {
+                    ChildVersion::Specific(version)
+                } else if trimmed.eq_ignore_ascii_case("latest")
+                    || trimmed.eq_ignore_ascii_case("current")
+                {
+                    ChildVersion::Latest(trimmed.to_ascii_lowercase())
+                } else {
+                    // Kept as written; validation reports it (E050).
+                    ChildVersion::Latest(text)
+                }
+            }
+        })
+    }
 }
 
 /// Conditional loop - repeat subgraph until condition is false
@@ -742,8 +832,10 @@ pub struct WhileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variables: Option<InputMapping>,
 
-    /// Step timeout in milliseconds. If exceeded, step fails.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Step timeout in milliseconds. If exceeded, step fails. `0` means no
+    /// timeout here (unlike an Agent's `timeoutMs`, where 0 fails the step;
+    /// W091 flags both).
+    #[serde(rename = "timeoutMs", alias = "timeout", default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 }
 
@@ -924,12 +1016,12 @@ pub enum ErrorSeverity {
 ///   "stepType": "Filter",
 ///   "id": "filter-active",
 ///   "config": {
-///     "value": { "valueType": "reference", "path": "steps.get-users.outputs.items" },
+///     "value": { "valueType": "reference", "value": "steps.get-users.outputs.items" },
 ///     "condition": {
 ///       "type": "operation",
-///       "op": "eq",
+///       "op": "EQ",
 ///       "arguments": [
-///         { "valueType": "reference", "path": "item.status" },
+///         { "valueType": "reference", "value": "item.status" },
 ///         { "valueType": "immediate", "value": "active" }
 ///       ]
 ///     }
@@ -965,7 +1057,8 @@ pub struct FilterStep {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FilterConfig {
     /// Array to filter (MappingValue resolving to array).
-    /// If null or non-array, treated as empty array.
+    /// If null or non-array, treated as empty array. (A Split is stricter: it
+    /// fails on `null` unless `allowNull` is set.)
     pub value: MappingValue,
 
     /// Condition expression evaluated for each item.
@@ -1019,11 +1112,18 @@ pub struct GroupByStep {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GroupByConfig {
     /// Array to group (MappingValue resolving to array).
-    /// If null or non-array, treated as empty array.
+    /// If null or non-array, treated as empty array. (A Split is stricter: it
+    /// fails on `null` unless `allowNull` is set.)
     pub value: MappingValue,
 
-    /// Property path to group by (e.g., "status", "user.role", "data.category").
-    /// Supports nested paths with dot notation.
+    /// Path, inside each item, of the value to group by (e.g. `"status"`,
+    /// `"user.role"`). It is not a workflow reference: `"data.category"`
+    /// reads `item.data.category`, not the workflow's `data.category`.
+    ///
+    /// The group name is the value as text: strings as-is, numbers and
+    /// booleans in their JSON spelling, and other values as their JSON. An
+    /// item without the key (or with `null` there) goes into the `"_null"`
+    /// group.
     pub key: String,
 
     /// Optional list of expected key values.
@@ -1035,12 +1135,10 @@ pub struct GroupByConfig {
 
 /// Delay step - pause workflow execution for a specified duration.
 ///
-/// This is a **durable** delay: if the workflow crashes during the delay,
-/// it will resume from where it left off rather than restarting the delay.
-///
-/// For native platforms, this uses `sdk.sleep()` (which forwards to
-/// `backend.durable_sleep()`) and stores the wake time in the database.
-/// For WASI/embedded, it uses blocking sleep.
+/// This is a **durable** delay: the run parks with its wake time stored, so
+/// it holds no runner while it waits and a crash or restart resumes it at the
+/// same deadline rather than restarting the delay. It therefore requires a
+/// durable workflow and step (E145).
 ///
 /// Example:
 /// ```json
@@ -1048,7 +1146,7 @@ pub struct GroupByConfig {
 ///   "stepType": "Delay",
 ///   "id": "wait-for-cooldown",
 ///   "name": "Wait 5 seconds",
-///   "duration_ms": { "valueType": "immediate", "value": 5000 }
+///   "durationMs": { "valueType": "immediate", "value": 5000 }
 /// }
 /// ```
 ///
@@ -1057,7 +1155,7 @@ pub struct GroupByConfig {
 /// {
 ///   "stepType": "Delay",
 ///   "id": "dynamic-wait",
-///   "duration_ms": { "valueType": "reference", "value": "data.waitTimeMs" }
+///   "durationMs": { "valueType": "reference", "value": "data.waitTimeMs" }
 /// }
 /// ```
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
@@ -1081,9 +1179,9 @@ pub struct DelayStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub breakpoint: Option<bool>,
 
-    /// Disable durability for this step when `Some(false)`. Uses
-    /// `std::thread::sleep` instead of `sdk.sleep` — the delay is
-    /// not suspendable or resumable across crashes.
+    /// A Delay parks the run (a durable sleep) instead of holding a runner,
+    /// so it requires durability: `Some(false)` here, or a non-durable
+    /// workflow or enclosing body, is rejected at save (E145).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durable: Option<bool>,
 }
@@ -1128,7 +1226,7 @@ pub struct DelayStep {
 ///     },
 ///     "executionPlan": [{ "fromStep": "send_notification", "toStep": "finish" }]
 ///   },
-///   "timeoutMs": 86400000
+///   "timeoutMs": { "valueType": "immediate", "value": 86400000 }
 /// }
 /// ```
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
@@ -1161,8 +1259,9 @@ pub struct WaitForSignalStep {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<MappingValue>,
 
-    /// Polling interval in milliseconds for checking signal (default: 1000).
-    /// Lower values mean faster response but more server load.
+    /// Deprecated and ignored (W088): a waiting run resumes as soon as the
+    /// signal arrives, so there is no polling to tune. Accepted so stored
+    /// definitions keep parsing; to be removed in DSL 4.0.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub poll_interval_ms: Option<u64>,
 
@@ -1501,14 +1600,14 @@ pub struct AiAgentConfig {
     /// Maximum retry attempts for the LLM call (default: 0 — no retries).
     ///
     /// Retries are opt-in for AiAgent (unlike Agent steps' default of 3)
-    /// because every retry re-bills the model call. Applies to the
-    /// single-shot (chat-completion) path; per-turn retry inside the tool
-    /// loop is deliberately deferred until per-turn durability lands.
+    /// because every retry re-bills the model call. Applies to every LLM
+    /// call: the single-shot call and each turn of a tool loop, where a
+    /// failed turn is retried in place before routing to onError.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
 
     /// Base delay between retries in milliseconds (default: 1000).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "retryDelayMs", alias = "retryDelay", skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
     /// Maximum duration of a single LLM "brain" turn, per attempt, in
@@ -1520,9 +1619,9 @@ pub struct AiAgentConfig {
     /// outbound-HTTP layer: the emitter injects it into the LLM invoke and the
     /// server proxy honors it, so it bounds the model call rather than
     /// preempting in-guest compute. Agent tools use their own cooperative
-    /// per-step `timeout` budget. A capability's documented transport timeout
+    /// per-step `timeoutMs` budget. A capability's documented transport timeout
     /// input remains separate from that guest deadline.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "turnTimeoutMs", alias = "turnTimeout", skip_serializing_if = "Option::is_none")]
     pub turn_timeout: Option<u64>,
 
     /// Conversation memory configuration.
@@ -1632,10 +1731,13 @@ pub type InputMapping = HashMap<String, MappingValue>;
 /// - `reference`: Value is a path to data (e.g., "data.name", "steps.step1.outputs.result")
 /// - `immediate`: Value is a literal (string, number, boolean, object, array)
 /// - `composite`: Value is a structured object or array with nested MappingValues
+/// - `template`: Value is a minijinja template rendered against the execution
+///   context (`data`, `variables`, `steps`, ...) into a string
 ///
 /// Example reference: `{ "valueType": "reference", "value": "data.user.name" }`
 /// Example immediate: `{ "valueType": "immediate", "value": "Hello World" }`
 /// Example composite: `{ "valueType": "composite", "value": { "name": {...}, "id": {...} } }`
+/// Example template: `{ "valueType": "template", "value": "Order {{ data.orderId }}" }`
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -1666,8 +1768,8 @@ pub enum MappingValue {
 /// - `workflow.inputs` - Original workflow inputs
 ///
 /// Built-in variables (available in all steps, including subgraphs):
-/// - `variables._workflow_id` - Unique per execution: "{workflow_id}::{instance_id}"
-/// - `variables._instance_id` - Execution instance UUID
+/// - `variables._workflow_id` - The workflow's id (the same for every execution)
+/// - `variables._instance_id` - Execution instance UUID (unique per execution)
 /// - `variables._tenant_id` - Tenant identifier
 ///
 /// Example: `{ "valueType": "reference", "value": "data.user.name" }`
@@ -1713,7 +1815,13 @@ pub struct ReferenceValue {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImmediateValue {
-    /// The literal value (string, number, boolean, object, or array)
+    /// The literal value (string, number, boolean, object, or array).
+    ///
+    /// In an Agent or AiAgent `inputMapping`, `{valueType: "reference", ...}`
+    /// envelopes nested inside the value are resolved before the call: that
+    /// is how a condition held in an immediate (an Object Model query) reads
+    /// workflow data. Every other mapping passes the value on literally
+    /// (W090 flags a nested reference there).
     pub value: serde_json::Value,
 }
 
@@ -1778,7 +1886,7 @@ pub enum CompositeInner {
 /// - `steps.<id>.outputs.*` — previous step outputs
 /// - `workflow.inputs.*` — original workflow inputs
 ///
-/// Example: `{ "valueType": "template", "value": "Bearer {{ steps.my_conn.outputs.parameters.api_key }}" }`
+/// Example: `{ "valueType": "template", "value": "Hello {{ data.user.name }}, order {{ steps.fetch.outputs.id }}" }`
 /// With filter: `{ "valueType": "template", "value": "{{ data.name | upper }}" }`
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1818,7 +1926,12 @@ pub enum ValueType {
     Number,
     /// Boolean value
     Boolean,
-    /// JSON object or array (pass through as-is)
+    /// JSON object; a JSON string holding an object is parsed
+    Object,
+    /// JSON array; a JSON string holding an array is parsed
+    Array,
+    /// Deprecated: passes the value through unchanged, the same as no hint.
+    /// Use `object` or `array` (W093); DSL 4.0 removes it.
     Json,
     /// Base64-encoded file data (FileData structure with content, filename, mimeType)
     File,
@@ -1869,6 +1982,8 @@ pub enum VariableType {
     Object,
     /// Base64-encoded file data (FileData structure)
     File,
+    /// A connection id (a string), as a `connection` schema field holds
+    Connection,
 }
 
 /// Data types for schema fields.
@@ -1954,7 +2069,8 @@ pub struct SchemaField {
     #[serde(default)]
     pub required: bool,
 
-    /// Default value if not provided
+    /// Value used when the field is omitted. Workflow start inputs are filled
+    /// from it before the `required` check, so the run sees it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
 
@@ -2031,10 +2147,8 @@ pub struct SchemaField {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_when: Option<VisibleWhen>,
 
-    /// Whether the field value may be `null`.
-    ///
-    /// Form-layer hint written by the workflow editor (rendered as a
-    /// checkbox); the runtime does not enforce nullability today.
+    /// Whether the field value may be `null`: input validation accepts an
+    /// explicit `null` in place of the declared type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nullable: Option<bool>,
 }
@@ -2064,6 +2178,24 @@ pub struct VisibleWhen {
     /// Show this field when the sibling does NOT equal this value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub not_equals: Option<serde_json::Value>,
+}
+
+impl VisibleWhen {
+    /// Whether the condition holds for the sibling's value, an absent sibling
+    /// counting as `null`. Both `equals` and `notEquals` must hold when both
+    /// are set; with neither it always holds. Equality is condition equality
+    /// ([`crate::condition_eval::values_equal`]), as in a workflow condition,
+    /// so `5.0` equals `5`.
+    pub fn matches(&self, sibling: Option<&serde_json::Value>) -> bool {
+        let sibling = sibling.unwrap_or(&serde_json::Value::Null);
+        self.equals
+            .as_ref()
+            .is_none_or(|expected| crate::condition_eval::values_equal(sibling, expected))
+            && self
+                .not_equals
+                .as_ref()
+                .is_none_or(|excluded| !crate::condition_eval::values_equal(sibling, excluded))
+    }
 }
 
 // ============================================================================
@@ -2122,16 +2254,117 @@ pub enum ConditionOperator {
 
 /// A condition expression for conditional branching.
 /// Can be either an operation (with operator and arguments) or a simple value check.
+///
+/// The `type` tag is optional: an object with `op` is an operation, and any
+/// other object is a value. A value condition may therefore use `type` for a
+/// reference's type hint instead of the tag, which a tagged value can't carry
+/// (both are the `type` key). A value with a hint is written without the tag:
+///
+/// ```json
+/// {"condition": {"valueType": "reference", "value": "data.count", "type": "integer"}}
+/// ```
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[cfg_attr(
+    any(feature = "json-schema", feature = "utoipa"),
+    serde(tag = "type", rename_all = "lowercase")
+)]
 pub enum ConditionExpression {
     /// A comparison or logical operation
     Operation(ConditionOperation),
 
     /// A direct value (reference or immediate) - evaluated as truthy/falsy
     Value(MappingValue),
+}
+
+/// Whether a condition object is an operation: it has `op`, or the
+/// `"operation"` tag.
+fn is_operation_object(object: &serde_json::Map<String, serde_json::Value>) -> bool {
+    object.contains_key("op")
+        || object.get("type").and_then(serde_json::Value::as_str) == Some("operation")
+}
+
+/// Parse a condition object, tagged or not (see [`ConditionExpression`]).
+fn condition_from_object(
+    mut object: serde_json::Map<String, serde_json::Value>,
+) -> Result<ConditionExpression, String> {
+    if is_operation_object(&object) {
+        match object.remove("type") {
+            None => {}
+            Some(serde_json::Value::String(tag)) if tag == "operation" => {}
+            Some(other) => {
+                return Err(format!(
+                    "a condition with `op` is an operation, so its `type` must be \"operation\", got {other}"
+                ));
+            }
+        }
+        return serde_json::from_value(serde_json::Value::Object(object))
+            .map(ConditionExpression::Operation)
+            .map_err(|e| e.to_string());
+    }
+    if object.get("type").and_then(serde_json::Value::as_str) == Some("value") {
+        object.remove("type");
+    }
+    if !object.contains_key("valueType") {
+        return Err(
+            "a condition needs `op` (an operation) or `valueType` (a value)".to_string(),
+        );
+    }
+    serde_json::from_value(serde_json::Value::Object(object))
+        .map(ConditionExpression::Value)
+        .map_err(|e| e.to_string())
+}
+
+impl Serialize for ConditionExpression {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::Error;
+        let (tag, body) = match self {
+            ConditionExpression::Operation(operation) => (
+                Some("operation"),
+                serde_json::to_value(operation).map_err(S::Error::custom)?,
+            ),
+            // A hinted reference keeps its hint in `type`, so it goes untagged.
+            ConditionExpression::Value(
+                value @ MappingValue::Reference(ReferenceValue {
+                    type_hint: Some(_),
+                    ..
+                }),
+            ) => (None, serde_json::to_value(value).map_err(S::Error::custom)?),
+            ConditionExpression::Value(value) => (
+                Some("value"),
+                serde_json::to_value(value).map_err(S::Error::custom)?,
+            ),
+        };
+        let mut object = match body {
+            serde_json::Value::Object(object) => object,
+            _ => return Err(S::Error::custom("condition must serialize to an object")),
+        };
+        if let Some(tag) = tag {
+            object.insert("type".to_string(), serde_json::Value::String(tag.to_string()));
+        }
+        object.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ConditionExpression {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::Object(object) => {
+                condition_from_object(object).map_err(D::Error::custom)
+            }
+            other => Err(D::Error::custom(format!(
+                "a condition must be an object, got {other}"
+            ))),
+        }
+    }
 }
 
 /// An operation in a condition expression
@@ -2154,11 +2387,11 @@ pub struct ConditionOperation {
 /// Uses untagged serialization to avoid duplicate "type" fields when nesting
 /// expressions (since both ConditionExpression and MappingValue use internally-tagged enums).
 /// The deserializer distinguishes variants by structure:
-/// - Expression: has "op" and "arguments" fields (from ConditionExpression::Operation)
-///   or has "valueType" field (from ConditionExpression::Value -> MappingValue)
-/// - Value: has "valueType" field (from MappingValue)
+/// - Expression: has `op` (the `"operation"` tag is optional), or carries the
+///   `"value"` tag
+/// - Value: any other object, read as a mapping value (its `type` is a hint)
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(untagged)]
 pub enum ConditionArgument {
@@ -2170,12 +2403,38 @@ pub enum ConditionArgument {
     Value(MappingValue),
 }
 
+impl<'de> Deserialize<'de> for ConditionArgument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        let tagged_value = raw.get("type").and_then(serde_json::Value::as_str) == Some("value");
+        match raw {
+            serde_json::Value::Object(object) if is_operation_object(&object) || tagged_value => {
+                condition_from_object(object)
+                    .map(|expression| ConditionArgument::Expression(Box::new(expression)))
+                    .map_err(D::Error::custom)
+            }
+            other => serde_json::from_value(other)
+                .map(ConditionArgument::Value)
+                .map_err(D::Error::custom),
+        }
+    }
+}
+
 // ============================================================================
 // Switch Case Types
 // ============================================================================
 
 /// Match type for switch cases.
-/// Supports all ConditionOperator values plus compound match types.
+///
+/// The comparison (`GT`, `GTE`, `LT`, `LTE`, `EQ`, `NE`), string, array and
+/// emptiness operators of [`ConditionOperator`], plus the Switch-only `BETWEEN`
+/// and `RANGE`. The logical operators (`AND`, `OR`, `NOT`), `LENGTH` and the
+/// search operators (`MATCH`, `SIMILARITY_GTE`, the distance operators) are not
+/// match types: a case compares the switch value with its `match`.
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -2240,7 +2499,8 @@ pub struct SwitchConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cases: Vec<SwitchCase>,
 
-    /// Default output if no case matches
+    /// Default output if no case matches. A routing switch then takes the
+    /// `default` edge.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
 }
@@ -2286,6 +2546,10 @@ pub struct SwitchCase {
     /// Route label for routing switches. When present, the switch acts as a
     /// branching control flow step. The label corresponds to edge labels in
     /// the execution plan.
+    ///
+    /// In a routing switch, a matching case without a route outputs its own
+    /// `output` and takes the `default` edge (W092 warns). Write
+    /// `"route": "default"` to say so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<String>,
 }
@@ -2319,10 +2583,9 @@ pub struct SplitConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
 
-    /// Execute iterations sequentially instead of in parallel.
-    ///
-    /// **Redundant** — sequential execution is the only mode the WASM runtime
-    /// supports, so this flag changes nothing.
+    /// Run iterations one at a time. `true` overrides `parallelism` (W087
+    /// when both are set); the default already runs sequentially unless
+    /// `parallelism` asks for a window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequential: Option<bool>,
 
@@ -2339,11 +2602,13 @@ pub struct SplitConfig {
     pub max_retries: Option<u32>,
 
     /// Base delay between retries in milliseconds (default: 1000)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "retryDelayMs", alias = "retryDelay", default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
-    /// Step timeout in milliseconds. If exceeded, step fails.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Step timeout in milliseconds. If exceeded, step fails. `0` means no
+    /// timeout here (unlike an Agent's `timeoutMs`, where 0 fails the step;
+    /// W091 flags both).
+    #[serde(rename = "timeoutMs", alias = "timeout", default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 
     /// Allow null values as input (default: false).
@@ -2355,6 +2620,8 @@ pub struct SplitConfig {
     /// Convert single values to a single-element array (default: false).
     /// When true, non-array values are wrapped in an array.
     /// When false, non-array values raise an error.
+    /// `null` is not a single value here: it still fails unless `allowNull`
+    /// is set (unlike Filter and GroupBy, which read `null` as an empty array).
     /// Use `transform/ensure-array` agent for explicit conversion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub convert_single_value: Option<bool>,
@@ -2585,5 +2852,156 @@ mod note_metadata_tests {
         assert!(note.metadata.as_ref().unwrap().anchor_step_id.is_none());
         let back = serde_json::to_value(&note).unwrap();
         assert!(back["metadata"].get("anchorStepId").is_none());
+    }
+}
+
+#[cfg(test)]
+mod edge_label_tests {
+    use super::ExecutionPlanEdge;
+
+    #[test]
+    fn an_empty_edge_label_is_no_label() {
+        let edge: ExecutionPlanEdge =
+            serde_json::from_value(serde_json::json!({"fromStep": "a", "toStep": "b", "label": ""}))
+                .unwrap();
+        assert_eq!(edge.label, None);
+        let edge: ExecutionPlanEdge = serde_json::from_value(
+            serde_json::json!({"fromStep": "a", "toStep": "b", "label": "onError"}),
+        )
+        .unwrap();
+        assert_eq!(edge.label.as_deref(), Some("onError"));
+    }
+}
+
+#[cfg(test)]
+mod child_version_tests {
+    use super::ChildVersion;
+
+    fn parse(value: serde_json::Value) -> ChildVersion {
+        serde_json::from_value(value).expect("child version parses")
+    }
+
+    #[test]
+    fn every_spelling_of_a_child_version_resolves_the_same_way() {
+        assert!(matches!(parse(serde_json::json!(3)), ChildVersion::Specific(3)));
+        assert!(matches!(parse(serde_json::json!("3")), ChildVersion::Specific(3)));
+        assert!(matches!(parse(serde_json::json!("LATEST")), ChildVersion::Latest(v) if v == "latest"));
+        assert!(matches!(parse(serde_json::json!(" Current ")), ChildVersion::Latest(v) if v == "current"));
+        assert!(matches!(parse(serde_json::json!("newest")), ChildVersion::Latest(v) if v == "newest"));
+    }
+}
+
+#[cfg(test)]
+mod condition_tag_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn parse(value: serde_json::Value) -> Result<ConditionExpression, String> {
+        serde_json::from_value(value).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn a_value_condition_can_carry_a_type_hint() {
+        let condition = parse(json!({
+            "valueType": "reference", "value": "data.count", "type": "integer"
+        }))
+        .unwrap();
+        let ConditionExpression::Value(MappingValue::Reference(reference)) = &condition else {
+            panic!("expected a reference value, got {condition:?}");
+        };
+        assert_eq!(reference.type_hint, Some(ValueType::Integer));
+        // The hint survives a round trip, untagged.
+        let written = serde_json::to_value(&condition).unwrap();
+        assert_eq!(
+            written,
+            json!({"valueType": "reference", "value": "data.count", "type": "integer"})
+        );
+        assert!(matches!(
+            parse(written).unwrap(),
+            ConditionExpression::Value(MappingValue::Reference(ReferenceValue {
+                type_hint: Some(ValueType::Integer),
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn the_tag_is_optional_and_still_written() {
+        for (input, tag) in [
+            (json!({"op": "IS_DEFINED", "arguments": [{"valueType": "reference", "value": "data.x"}]}), "operation"),
+            (json!({"type": "operation", "op": "IS_DEFINED", "arguments": [{"valueType": "reference", "value": "data.x"}]}), "operation"),
+            (json!({"valueType": "immediate", "value": true}), "value"),
+            (json!({"type": "value", "valueType": "immediate", "value": true}), "value"),
+        ] {
+            let condition = parse(input.clone()).unwrap_or_else(|e| panic!("{input}: {e}"));
+            assert_eq!(serde_json::to_value(&condition).unwrap()["type"], tag, "{input}");
+        }
+    }
+
+    #[test]
+    fn a_nested_operation_needs_no_tag() {
+        let condition = parse(json!({
+            "op": "AND",
+            "arguments": [
+                {"op": "GT", "arguments": [
+                    {"valueType": "reference", "value": "data.n", "type": "integer"},
+                    {"valueType": "immediate", "value": 1}
+                ]},
+                {"type": "value", "valueType": "immediate", "value": true}
+            ]
+        }))
+        .unwrap();
+        let ConditionExpression::Operation(and) = condition else {
+            panic!("expected an operation");
+        };
+        let ConditionArgument::Expression(inner) = &and.arguments[0] else {
+            panic!("expected a nested expression");
+        };
+        let ConditionExpression::Operation(gt) = inner.as_ref() else {
+            panic!("expected a nested operation");
+        };
+        assert!(matches!(
+            &gt.arguments[0],
+            ConditionArgument::Value(MappingValue::Reference(ReferenceValue {
+                type_hint: Some(ValueType::Integer),
+                ..
+            }))
+        ));
+        assert!(matches!(
+            &and.arguments[1],
+            ConditionArgument::Expression(value) if matches!(value.as_ref(), ConditionExpression::Value(_))
+        ));
+    }
+
+    #[test]
+    fn malformed_conditions_say_what_is_missing() {
+        let error = parse(json!({"value": "data.x"})).unwrap_err();
+        assert!(error.contains("`op` (an operation) or `valueType`"), "{error}");
+        let error = parse(json!({"op": "EQ", "type": "value", "arguments": []})).unwrap_err();
+        assert!(error.contains("its `type` must be \"operation\""), "{error}");
+        let error = parse(json!({"op": "NOPE", "arguments": []})).unwrap_err();
+        assert!(error.contains("NOPE"), "{error}");
+        let error = parse(json!(true)).unwrap_err();
+        assert!(error.contains("must be an object"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod switch_match_type_tests {
+    use super::*;
+
+    /// The match types are the comparison operators plus BETWEEN and RANGE,
+    /// not every ConditionOperator (D).
+    #[test]
+    fn logical_and_length_operators_are_not_match_types() {
+        for op in ["AND", "LENGTH", "MATCH"] {
+            let error = serde_json::from_value::<SwitchMatchType>(serde_json::json!(op))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("BETWEEN"), "{op}: {error}");
+        }
+        for op in ["EQ", "STARTS_WITH", "IS_NOT_EMPTY", "BETWEEN", "RANGE"] {
+            serde_json::from_value::<SwitchMatchType>(serde_json::json!(op)).unwrap();
+        }
     }
 }

@@ -43,15 +43,7 @@ pub fn sort_fields(schema: &HashMap<String, SchemaField>) -> Vec<(&String, &Sche
 }
 
 /// Evaluate a `visible_when` condition against already-collected values.
+/// The same rule as the workflow form layer (see [`VisibleWhen::matches`]).
 pub fn evaluate_visible_when(vw: &VisibleWhen, collected: &Map<String, Value>) -> bool {
-    let sibling = collected.get(&vw.field);
-
-    if let Some(equals) = &vw.equals {
-        sibling == Some(equals)
-    } else if let Some(not_equals) = &vw.not_equals {
-        sibling != Some(not_equals)
-    } else {
-        // No condition specified — always visible.
-        true
-    }
+    vw.matches(collected.get(&vw.field))
 }
