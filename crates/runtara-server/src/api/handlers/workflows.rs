@@ -2707,8 +2707,9 @@ pub async fn set_current_version_handler(
 
 /// Validate graph structure
 ///
-/// Pure validation handler - no database or external dependencies.
-/// Validates the execution graph using runtara-workflows validation.
+/// Validates the execution graph using runtara-workflows validation, with the
+/// embedded child workflows it references (loaded from the database) and the
+/// tenant's published workflow-agents (read from its staging directory).
 #[utoipa::path(
     post,
     path = "/api/runtime/workflows/graph/validate",
@@ -2780,6 +2781,10 @@ pub async fn validate_graph_handler(
                 .name
                 .clone()
                 .unwrap_or_else(|| "root".to_string());
+            // Published workflow-agents are visible to validation via the tenant
+            // catalog overlay, as on save (a parent may target `agentId: <slug>`).
+            let catalog =
+                crate::workflow_agents::catalog_with_workflow_agents(&catalog, &tenant_id);
             let report = runtara_workflows::validate_workflow_closure(
                 &root_id,
                 &workflow.execution_graph,

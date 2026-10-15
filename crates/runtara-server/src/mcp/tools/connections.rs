@@ -371,4 +371,142 @@ mod tests {
             }))
         );
     }
+
+    fn mcp_json(result: CallToolResult) -> serde_json::Value {
+        let text = result.content[0].as_text().expect("text content");
+        serde_json::from_str(&text.text).expect("tool result is JSON")
+    }
+
+    #[tokio::test]
+    async fn mcp_validate_and_deploy_see_the_tenants_published_workflow_agents() {
+        use runtara_dsl::agent_meta::{AgentCatalog, workflow_agent_info};
+        // No other test uses this tenant, so code that resolves a tenant's
+        // agents while `DATA_DIR` points here never sees the one staged below.
+        const PUBLISHER: &str = "published-agent-publisher";
+
+        let _env = crate::test_env::ENV_MUTEX.lock().await;
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set("DATA_DIR", data_dir.path().to_str().unwrap());
+        let wasm = data_dir.path().join("published-child.wasm");
+        std::fs::write(&wasm, b"").unwrap();
+        crate::workflow_agents::stage(
+            PUBLISHER,
+            "published-child",
+            &wasm,
+            &workflow_agent_info(
+                "published-child",
+                "Published child",
+                "",
+                &Default::default(),
+                &Default::default(),
+            ),
+        )
+        .unwrap();
+
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/runtara_mcp_validate_test")
+            .unwrap();
+        let catalog = Arc::new(AgentCatalog::from_agents(Vec::new()));
+        let saved = CapturedResourceRequest::default();
+        let internal_router = {
+            let pool = pool.clone();
+            let saved = saved.clone();
+            axum::Router::new()
+                .route(
+                    "/api/runtime/workflows/graph/validate",
+                    post(
+                        move |org: crate::middleware::tenant_auth::OrgId,
+                              body: Json<serde_json::Value>| {
+                            let (pool, catalog) = (pool.clone(), catalog.clone());
+                            async move {
+                                crate::api::handlers::workflows::validate_graph_handler(
+                                    org,
+                                    State(pool),
+                                    State(catalog),
+                                    body,
+                                )
+                                .await
+                            }
+                        },
+                    ),
+                )
+                // Stands in for the save: it records the graph and ends the
+                // deploy there.
+                .route(
+                    "/api/runtime/workflows/{workflow_id}/update",
+                    post(move |Json(body): Json<serde_json::Value>| async move {
+                        *saved.0.lock().unwrap() = Some(body);
+                        (
+                            axum::http::StatusCode::CONFLICT,
+                            Json(serde_json::json!({"error": "saved"})),
+                        )
+                    }),
+                )
+        };
+        let server = |tenant: &str| {
+            SmoMcpServer::new(
+                pool.clone(),
+                Arc::new(ObjectStoreManager::new(String::new())),
+                None,
+                tenant.into(),
+                internal_router.clone(),
+            )
+        };
+        let parent = serde_json::json!({
+            "name": "Parent of a published workflow-agent",
+            "steps": {
+                "call": {"stepType": "Agent", "id": "call", "agentId": "published-child",
+                    "capabilityId": "run", "inputMapping": {}},
+                "finish": {"stepType": "Finish", "id": "finish", "inputMapping": {
+                    "result": {"valueType": "reference", "value": "steps.call.outputs"}}}
+            },
+            "entryPoint": "call",
+            "executionPlan": [{"fromStep": "call", "toStep": "finish"}],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        });
+        let validate = |tenant: &str| {
+            let server = server(tenant);
+            let execution_graph = parent.clone();
+            async move {
+                mcp_json(
+                    validate_graph(&server, ValidateGraphParams { execution_graph })
+                        .await
+                        .expect("validate_graph result"),
+                )
+            }
+        };
+
+        let report = validate(PUBLISHER).await;
+        assert_eq!(
+            (&report["valid"], &report["errors"]),
+            (&serde_json::json!(true), &serde_json::json!([])),
+            "the tenant's published workflow-agent is a known agent: {report:#}"
+        );
+
+        let deployed = crate::mcp::tools::workflows::deploy_workflow(
+            &server(PUBLISHER),
+            crate::mcp::tools::workflows::DeployWorkflowParams {
+                workflow_id: "parent".into(),
+                execution_graph: parent.clone(),
+            },
+        )
+        .await;
+        assert_eq!(
+            *saved.0.lock().unwrap(),
+            Some(serde_json::json!({"executionGraph": parent})),
+            "deploy_workflow passes validation and saves the graph, got {:?}",
+            deployed.map(mcp_json)
+        );
+
+        let report = validate("published-agent-other-tenant").await;
+        assert!(
+            report["errors"]
+                .as_array()
+                .is_some_and(|errors| errors.iter().any(|e| e.as_str().unwrap().contains("E020"))),
+            "another tenant does not see it: {report:#}"
+        );
+    }
 }

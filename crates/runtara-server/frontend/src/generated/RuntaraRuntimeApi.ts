@@ -7773,7 +7773,7 @@ export class Api<
       }),
 
     /**
-     * @description Pure validation handler - no database or external dependencies. Validates the execution graph using runtara-workflows validation.
+     * @description Validates the execution graph using runtara-workflows validation, with the embedded child workflows it references (loaded from the database) and the tenant's published workflow-agents (read from its staging directory).
      *
      * @tags workflow-controller
      * @name ValidateGraphHandler

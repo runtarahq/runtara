@@ -532,6 +532,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Graph validation sees the tenant's published workflow-agents.**
+  `POST /api/runtime/workflows/graph/validate` checked a graph against the
+  built-in agents only, so a parent whose Agent step calls a published
+  workflow-agent failed with `E020 unknown agent`. That stopped the MCP
+  `deploy_workflow` and `deploy_latest` tools before they saved or compiled
+  the graph, and the MCP `validate_graph` and `preflight_compile` tools
+  reported the same error, although `/update` accepts the graph. Validation
+  now uses the same tenant-scoped catalog as saving.
 - **An EmbedWorkflow inside an embedded child no longer breaks the child
   around it.** Running the inner child overwrote the enclosing child's
   variables, and nothing put them back. With step events on, the run failed
