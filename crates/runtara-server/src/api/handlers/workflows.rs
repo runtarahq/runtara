@@ -2707,8 +2707,9 @@ pub async fn set_current_version_handler(
 
 /// Validate graph structure
 ///
-/// Pure validation handler - no database or external dependencies.
-/// Validates the execution graph using runtara-workflows validation.
+/// Validates the execution graph using runtara-workflows validation, with the
+/// embedded child workflows it references (loaded from the database) and the
+/// tenant's published workflow-agents (read from its staging directory).
 #[utoipa::path(
     post,
     path = "/api/runtime/workflows/graph/validate",

@@ -380,6 +380,9 @@ mod tests {
     #[tokio::test]
     async fn mcp_validate_and_deploy_see_the_tenants_published_workflow_agents() {
         use runtara_dsl::agent_meta::{AgentCatalog, workflow_agent_info};
+        // No other test uses this tenant, so code that resolves a tenant's
+        // agents while `DATA_DIR` points here never sees the one staged below.
+        const PUBLISHER: &str = "published-agent-publisher";
 
         let _env = crate::test_env::ENV_MUTEX.lock().await;
         let data_dir = tempfile::tempdir().unwrap();
@@ -388,7 +391,7 @@ mod tests {
         let wasm = data_dir.path().join("published-child.wasm");
         std::fs::write(&wasm, b"").unwrap();
         crate::workflow_agents::stage(
-            "tenant-1",
+            PUBLISHER,
             "published-child",
             &wasm,
             &workflow_agent_info(
@@ -476,7 +479,7 @@ mod tests {
             }
         };
 
-        let report = validate("tenant-1").await;
+        let report = validate(PUBLISHER).await;
         assert_eq!(
             (&report["valid"], &report["errors"]),
             (&serde_json::json!(true), &serde_json::json!([])),
@@ -484,7 +487,7 @@ mod tests {
         );
 
         let deployed = crate::mcp::tools::workflows::deploy_workflow(
-            &server("tenant-1"),
+            &server(PUBLISHER),
             crate::mcp::tools::workflows::DeployWorkflowParams {
                 workflow_id: "parent".into(),
                 execution_graph: parent.clone(),
@@ -498,7 +501,7 @@ mod tests {
             deployed.map(mcp_json)
         );
 
-        let report = validate("tenant-2").await;
+        let report = validate("published-agent-other-tenant").await;
         assert!(
             report["errors"]
                 .as_array()
