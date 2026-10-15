@@ -5,9 +5,9 @@ import type { Condition } from '@/shared/components/ui/condition-editor';
  * These templates help users quickly build conditions that check the error
  * context available when a step fails.
  *
- * References use the canonical `steps.__error.*` path (validation.rs W053):
- * the bare `__error.*` root still resolves for back-compat but warns and is
- * not typo-checked.
+ * References use the canonical `steps.__error.*` path. The `steps.error.*`
+ * alias and the bare `__error.*` / `error.*` roots still resolve but are
+ * deprecated (validation.rs W053).
  */
 
 interface ErrorConditionTemplate {

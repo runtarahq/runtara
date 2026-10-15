@@ -460,6 +460,28 @@ def check_route_less_switch_cases():
           {"warnings": warned, "outputs": outputs})
 
 
+# ---------------------------------------------------------------------- C7
+
+
+def check_error_context_spellings():
+    boom = {"stepType": "Agent", "id": "boom", "agentId": "transform", "capabilityId": "from-json-string",
+            "maxRetries": 0, "inputMapping": {"value": imm("{not json")}}
+    g = graph("boom", [boom, fin("ok"),
+                       fin("handler", canonical=ref("steps.__error.stepId"), alias=ref("steps.error.stepId"))],
+              [edge("boom", "ok"), edge("boom", "handler", label="onError")])
+    _, body = call("POST", "/workflows/graph/validate", {"name": "rf-error-spellings", **g})
+    warned = [w for w in (body or {}).get("warnings") or [] if str(w).startswith("[W053]")]
+    r = run("rf-error-spellings", g)
+    out = r.get("outputs") or {}
+    check("C7 the steps.error alias warns with the canonical path and still resolves",
+          len(warned) == 1 and "'steps.__error.stepId'" in warned[0] and "DSL 4.0" in warned[0]
+          and out.get("canonical") == "boom" and out.get("alias") == "boom",
+          {"warnings": warned, "outputs": out, "status": r.get("status")})
+    _, status, body = save_status("rf-error-step-id", graph("error", [fin("error")]))
+    check("C7 a step may not be named error (E136)", status == 400 and "E136" in rejected_codes(body),
+          {"status": status, "codes": rejected_codes(body)})
+
+
 # ---------------------------------------------------------------- E2-E5
 
 
@@ -534,7 +556,7 @@ CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, chec
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
           check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions,
           check_nested_immediate_references, check_workflow_inputs_in_bodies, check_group_by_keys,
-          check_null_collections, check_zero_timeouts, check_condition_spellings, check_route_less_switch_cases, check_doc_drift, check_mcp_prose]
+          check_null_collections, check_zero_timeouts, check_condition_spellings, check_route_less_switch_cases, check_error_context_spellings, check_doc_drift, check_mcp_prose]
 
 
 def main():

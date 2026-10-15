@@ -56,11 +56,11 @@ interface HistoryEntry {
 export const STEP_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
 
 /**
- * Implicit step ids injected by the runtime (RESERVED_IMPLICIT_STEP_IDS in
- * crates/runtara-workflows/src/validation.rs). Renaming a step to one of
- * these would shadow the implicit onError envelope.
+ * Implicit step ids injected by the runtime (RESERVED_STEP_IDS in
+ * crates/runtara-workflows/src/validation.rs, rejected at save as E136).
+ * Renaming a step to one of these would shadow the implicit onError envelope.
  */
-const RESERVED_STEP_IDS = new Set(['__error']);
+const RESERVED_STEP_IDS = new Set(['__error', 'error']);
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

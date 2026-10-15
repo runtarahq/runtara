@@ -366,6 +366,7 @@ describe('workflowStore renameStep', () => {
     expect(rename('start', 'has space')).toMatch(/may only contain/);
     expect(rename('start', 'steps.foo')).toMatch(/may only contain/);
     expect(rename('start', '__error')).toMatch(/reserved/);
+    expect(rename('start', 'error')).toMatch(/reserved/);
     expect(rename('missing', 'whatever')).toMatch(/was not found/);
 
     const state = useWorkflowStore.getState();

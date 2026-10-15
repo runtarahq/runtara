@@ -1826,10 +1826,10 @@ pub enum ValidationWarning {
         reference: String,
         reason: String,
     },
-    /// A reference uses the bare `__error.*` root that older docs advertised.
-    /// The captured onError envelope lives at `steps.__error.*` (alias
-    /// `steps.error.*`); the runtime mirrors it to the bare root for
-    /// back-compat, but the canonical, typo-checked path is `steps.__error.*`.
+    /// A reference reads the onError error context through a deprecated
+    /// spelling: the bare `__error.*` / `error.*` roots older docs advertised,
+    /// or the `steps.error.*` alias. All resolve for back-compat; the canonical
+    /// path is `steps.__error.*`, and DSL 4.0 removes the others.
     BareErrorReference {
         step_id: String,
         reference_path: String,
@@ -2141,7 +2141,7 @@ impl std::fmt::Display for ValidationWarning {
             } => {
                 write!(
                     f,
-                    "[W053] Step '{}' references the onError error context via '{}'. Use the canonical '{}' instead; the bare root still resolves for back-compat but is not typo-checked.",
+                    "[W053] Step '{}' references the onError error context via '{}', a deprecated spelling that still resolves. Use the canonical '{}' instead; DSL 4.0 removes the other spellings.",
                     step_id, reference_path, suggested_path
                 )
             }
@@ -4231,10 +4231,10 @@ const ERROR_CONTEXT_FIELDS: &[&str] = &[
     "missingInputs",
 ];
 
-/// Steer the bare `__error`/`error` roots to `steps.__error.*` (W053), and
-/// flag a field the error context never has (W085). Roots are read as the
-/// runtime reads them, so `["__error"].message` and `__error["message"]`
-/// are treated like the dotted spelling.
+/// Steer the bare `__error`/`error` roots and the `steps.error` alias to
+/// `steps.__error.*` (W053), and flag a field the error context never has
+/// (W085). Roots are read as the runtime reads them, so `["__error"].message`
+/// and `__error["message"]` are treated like the dotted spelling.
 fn check_error_context_reference(step_id: &str, ref_path: &str, result: &mut ValidationResult) {
     let segments = reference_segments(ref_path);
     let (bare, field) = match segments.first().map(String::as_str) {
@@ -4249,6 +4249,16 @@ fn check_error_context_reference(step_id: &str, ref_path: &str, result: &mut Val
         Some("__error" | "error") => (true, segments.get(1)),
         _ => return,
     };
+    if !bare && segments.get(1).map(String::as_str) == Some("error") {
+        // `steps.error`, `steps["error"]`: the step segment is the first
+        // `error` after the `steps` root.
+        let at = "steps".len() + ref_path["steps".len()..].find("error").unwrap_or(0);
+        result.warnings.push(ValidationWarning::BareErrorReference {
+            step_id: step_id.to_string(),
+            reference_path: ref_path.to_string(),
+            suggested_path: format!("{}__error{}", &ref_path[..at], &ref_path[at + 5..]),
+        });
+    }
     if bare {
         let suggested_path = if let Some(rest) = ref_path.strip_prefix("__error") {
             format!("steps.__error{rest}")
@@ -10418,6 +10428,18 @@ mod tests {
         assert_eq!(bare.len(), 1, "{bare:?}");
         assert!(bare[0].contains("[W053]") && bare[0].contains("'steps.__error.message'"));
         assert!(codes(r#"error["code"]"#)[0].contains(r#"'steps.__error["code"]'"#));
+        // The `steps.error` alias is deprecated too (C7).
+        for (alias, canonical) in [
+            ("steps.error.code", "'steps.__error.code'"),
+            (r#"steps["error"].code"#, r#"'steps["__error"].code'"#),
+        ] {
+            let warned = codes(alias);
+            assert_eq!(warned.len(), 1, "{alias}: {warned:?}");
+            assert!(
+                warned[0].contains("[W053]") && warned[0].contains(canonical),
+                "{alias}: {warned:?}"
+            );
+        }
 
         for typo in [
             "steps.__error.mesage",
