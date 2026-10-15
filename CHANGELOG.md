@@ -550,8 +550,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **A workflow-agent whose slug has a word starting with a digit can be
-  called.** A workflow named like `SYN-686 child` gets the slug
-  `syn-686-child` and publishes as an agent, but every parent that called it
+  called.** A workflow named like `Q3 2024 sync` gets the slug
+  `q3-2024-sync` and publishes as an agent, but every parent that called it
   failed to compile with `failed to parse direct workflow wac document:
   unexpected token was encountered`: the document that composes the parent
   requires every word of a name to start with a letter. It now writes such a

@@ -8858,11 +8858,11 @@ fn parent_workflow_composes_and_invokes_published_workflow_agent() {
 }
 
 /// The same loop for a slug with a word that starts with a digit, as a name
-/// like "SYN-686 echo" derives. WIT accepts it, but the WAC document that
+/// like "Q3 2024 echo" derives. WIT accepts it, but the WAC document that
 /// composes the parent spells it in its own form.
 #[test]
 fn parent_workflow_composes_a_published_workflow_agent_with_a_digit_led_slug() {
-    parent_composes_and_invokes_published_workflow_agent("syn-686-echo");
+    parent_composes_and_invokes_published_workflow_agent("q3-2024-echo");
 }
 
 fn parent_composes_and_invokes_published_workflow_agent(slug: &str) {

@@ -720,17 +720,16 @@ fn compose_direct_workflow_selected(
         "compose: resolved + read component dependencies from disk",
     );
 
-    // Keyed by each package's name as the WAC document spells it.
     let mut overrides: HashMap<String, PathBuf> = HashMap::new();
     overrides.insert(
         "runtara:workflow-logic".to_string(),
         result.workflow_logic_wasm_path.clone(),
     );
     for component in &shared_components {
-        overrides.insert(wac_name(&component.package), component.wasm_path.clone());
+        overrides.insert(component.package.clone(), component.wasm_path.clone());
     }
     for component in &agent_components {
-        overrides.insert(wac_name(&component.package), component.wasm_path.clone());
+        overrides.insert(component.package.clone(), component.wasm_path.clone());
     }
 
     let mut children = Vec::new();
@@ -768,7 +767,7 @@ fn compose_direct_workflow_selected(
                 .build_dir
                 .join(format!("isolated-agent-{}.wasm", bindings.len()));
             fs::write(&adapter_path, adapter)?;
-            overrides.insert(wac_name(&component.package), adapter_path);
+            overrides.insert(component.package.clone(), adapter_path);
             children.push(child);
             bindings.push(binding);
         }
@@ -869,11 +868,13 @@ fn compose_direct_workflow_selected(
 /// This is the in-process equivalent of `wac compose <wac> -d pkg=path ...`,
 /// reusing the exact `workflow.wac` document the direct compiler already emits.
 /// `wac_source` is the WAC script, `deps_dir` is the search root for any package
-/// not in `overrides` (none are, in practice), and `overrides` maps each WAC
+/// not in `overrides` (none are, in practice), and `overrides` maps each
 /// package name (e.g. `runtara:workflow-logic`, `runtara:agent-http`) to its
-/// prebuilt `.wasm` path. Composition runs through `wac-parser`/`wac-resolver`/
-/// `wac-graph` — the same crates the `wac` CLI uses — so the output is identical
-/// to the former subprocess, with no external `wac` binary required.
+/// prebuilt `.wasm` path. The names are the real ones; they are looked up as
+/// the script spells them ([`wac_name`]). Composition runs through
+/// `wac-parser`/`wac-resolver`/`wac-graph` — the same crates the `wac` CLI
+/// uses — so the output is identical to the former subprocess, with no
+/// external `wac` binary required.
 fn compose_workflow_component_in_process(
     wac_source: &str,
     deps_dir: &Path,
@@ -902,6 +903,10 @@ fn compose_workflow_component_in_process(
     );
 
     let resolve_pkgs_start = Instant::now();
+    let overrides = overrides
+        .into_iter()
+        .map(|(package, path)| (wac_name(&package), path))
+        .collect();
     let resolver = FileSystemPackageResolver::new(deps_dir, overrides, false);
     let resolved = resolver.resolve(&keys).map_err(|err| {
         DirectCompileError::Component(format!(
