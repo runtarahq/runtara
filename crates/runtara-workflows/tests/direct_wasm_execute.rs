@@ -1115,6 +1115,65 @@ fn run_direct_workflow_capture_attempt(
     input_responses: Vec<Value>,
     managed_inputs: Option<Arc<direct_managed_inputs::ManagedInputs>>,
 ) -> CapturedRun {
+    run_direct_workflow_capture_attempt_with_children(
+        components_dir,
+        workflow_id,
+        graph_json,
+        workflow_input,
+        track_events,
+        preloaded_checkpoints,
+        llm_script,
+        extra_env,
+        sql_script,
+        input_responses,
+        managed_inputs,
+        Vec::new(),
+    )
+}
+
+/// [`run_direct_workflow_with_llm_script`] for a workflow whose EmbedWorkflow
+/// steps run `child_workflows`.
+fn run_direct_workflow_with_llm_script_and_children(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+    llm_script: Vec<Value>,
+    child_workflows: Vec<runtara_workflows::compile::ChildWorkflowInput>,
+) -> CapturedRun {
+    run_direct_workflow_capture_attempt_with_children(
+        components_dir,
+        workflow_id,
+        graph_json,
+        workflow_input,
+        false,
+        Vec::new(),
+        llm_script,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        child_workflows,
+    )
+}
+
+/// [`run_direct_workflow_capture_attempt`] with the child workflows its
+/// EmbedWorkflow steps run.
+#[allow(clippy::too_many_arguments)]
+fn run_direct_workflow_capture_attempt_with_children(
+    components_dir: &Path,
+    workflow_id: &str,
+    graph_json: &str,
+    workflow_input: &[u8],
+    track_events: bool,
+    preloaded_checkpoints: Vec<(String, Vec<u8>)>,
+    llm_script: Vec<Value>,
+    extra_env: Vec<(String, String)>,
+    sql_script: Vec<Result<Value, DatabaseError>>,
+    input_responses: Vec<Value>,
+    managed_inputs: Option<Arc<direct_managed_inputs::ManagedInputs>>,
+    child_workflows: Vec<runtara_workflows::compile::ChildWorkflowInput>,
+) -> CapturedRun {
     let temp = tempfile::tempdir().expect("tempdir");
     let graph: ExecutionGraph = serde_json::from_str(graph_json).expect("fixture parses");
     let compiled = compile_direct_workflow_composed_configured(
@@ -1123,7 +1182,7 @@ fn run_direct_workflow_capture_attempt(
             version: 1,
             source_checksum: None,
             execution_graph: graph,
-            child_workflows: vec![],
+            child_workflows,
             output_dir: temp.path().to_path_buf(),
             track_events,
             agent_catalog: None,
@@ -1922,6 +1981,9 @@ impl runtara_component_host::runtime_host::RuntimeHost for RecordingRuntimeHost 
     }
 }
 
+/// The command id of the pause [`PersistingRuntimeHost::pause_after`] raises.
+const PERSISTING_HOST_PAUSE: &str = "pause-after-checkpoint";
+
 /// A checkpoint-PERSISTING runtime host: records every id-carrying durable
 /// call and keeps checkpoints across `execute_invoke` calls, so a second run
 /// against the same host behaves exactly like a drain/resume replay (every
@@ -1940,6 +2002,8 @@ struct PersistingRuntimeHost {
     /// guest early-returns suspended from its wait poll loop — through the
     /// composed-agent sentinel when the wait lives inside a child.
     suspend_requested: std::sync::atomic::AtomicBool,
+    /// A checkpoint id whose first write is answered with a pause, once.
+    pause_after: Mutex<Option<String>>,
 }
 
 impl PersistingRuntimeHost {
@@ -1951,6 +2015,7 @@ impl PersistingRuntimeHost {
             managed_inputs: Default::default(),
             polled_input_ids: Mutex::new(Vec::new()),
             suspend_requested: std::sync::atomic::AtomicBool::new(false),
+            pause_after: Mutex::new(None),
         }
     }
 
@@ -2051,6 +2116,16 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
                 },
             );
         }
+        let mut pause_after = self.pause_after.lock().unwrap();
+        let pending_signal = (pause_after.as_deref() == Some(checkpoint_id.as_str())).then(|| {
+            pause_after.take();
+            runtara_component_host::runtime_host::RuntimeSignalInfo {
+                signal_type: "pause".into(),
+                command_id: PERSISTING_HOST_PAUSE.into(),
+                payload: Vec::new(),
+                checkpoint_id: None,
+            }
+        });
         if !state.is_empty() {
             store_checkpoint(&mut checkpoints, checkpoint_id, state);
         }
@@ -2058,7 +2133,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
             runtara_component_host::runtime_host::RuntimeCheckpointResult {
                 found: false,
                 state: Vec::new(),
-                pending_signal: None,
+                pending_signal,
                 custom_signal: None,
             },
         )
@@ -2066,9 +2141,9 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
     async fn handle_checkpoint_signal(
         &self,
         _signal_type: String,
-        _command_id: String,
+        command_id: String,
     ) -> Result<bool, String> {
-        Ok(false)
+        Ok(command_id == PERSISTING_HOST_PAUSE)
     }
     async fn record_retry_attempt(
         &self,
@@ -3515,6 +3590,107 @@ fn ai_agent_tool_loop_graph_json() -> String {
       }
     }"##
     .to_string()
+}
+
+/// An AiAgent inside an embedded child calls an EmbedWorkflow tool: the
+/// steps after the AiAgent read the embedded child's own variables and data,
+/// not the tool child's variables and the tool arguments.
+#[test]
+fn direct_wasm_execute_ai_embed_tool_in_an_embedded_child_keeps_its_context() {
+    let components_dir = direct_e2e_components_dir();
+    let parent = serde_json::json!({
+        "name": "Ai Embed Tool Parent",
+        "durable": true,
+        "steps": {
+            "call": {"stepType": "EmbedWorkflow", "id": "call", "childWorkflowId": "middle",
+                "childVersion": "latest",
+                "inputMapping": {"x": {"valueType": "reference", "value": "data.x"}}},
+            "finish": {"stepType": "Finish", "id": "finish", "inputMapping": {
+                "value": {"valueType": "reference", "value": "steps.call.outputs"}}}
+        },
+        "entryPoint": "call",
+        "executionPlan": [{"fromStep": "call", "toStep": "finish"}],
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+    });
+    let middle: ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "name": "Middle",
+        "entryPoint": "ai",
+        "executionPlan": [
+            {"fromStep": "ai", "toStep": "after", "label": "next"},
+            {"fromStep": "ai", "toStep": "tool", "label": "lookup"},
+            {"fromStep": "after", "toStep": "done"}
+        ],
+        "steps": {
+            "ai": {"id": "ai", "stepType": "AiAgent", "connectionId": "conn-1", "config": {
+                "systemPrompt": {"valueType": "immediate", "value": "You call tools"},
+                "userPrompt": {"valueType": "immediate", "value": "Use the lookup tool"},
+                "provider": {"valueType": "immediate", "value": "openai"},
+                "model": {"valueType": "immediate", "value": "gpt-4o"}}},
+            "tool": {"id": "tool", "stepType": "EmbedWorkflow", "name": "lookup",
+                "childWorkflowId": "tool-child", "childVersion": "latest", "inputMapping": {}},
+            "after": {"id": "after", "stepType": "Agent", "agentId": "utils",
+                "capabilityId": "return-input", "inputMapping": {
+                    "value": {"valueType": "reference", "value": "variables.who"}}},
+            "done": {"id": "done", "stepType": "Finish", "inputMapping": {
+                "who": {"valueType": "reference", "value": "steps.after.outputs"},
+                "x": {"valueType": "reference", "value": "data.x"},
+                "answer": {"valueType": "reference", "value": "steps.ai.outputs.response"}}}
+        },
+        "variables": {"who": {"type": "string", "value": "middle"}},
+        "inputSchema": {},
+        "outputSchema": {}
+    }))
+    .expect("middle parses");
+    let tool: ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "name": "Tool Child",
+        "entryPoint": "leaf",
+        "executionPlan": [{"fromStep": "leaf", "toStep": "done"}],
+        "steps": {
+            "leaf": {"id": "leaf", "stepType": "Agent", "agentId": "utils",
+                "capabilityId": "return-input", "inputMapping": {
+                    "value": {"valueType": "reference", "value": "variables.who"}}},
+            "done": {"id": "done", "stepType": "Finish", "inputMapping": {
+                "leaf": {"valueType": "reference", "value": "steps.leaf.outputs"}}}
+        },
+        "variables": {"who": {"type": "string", "value": "tool"}},
+        "inputSchema": {},
+        "outputSchema": {}
+    }))
+    .expect("tool child parses");
+    let child = |step_id: &str, workflow_id: &str, graph: ExecutionGraph| {
+        runtara_workflows::compile::ChildWorkflowInput {
+            step_id: step_id.to_string(),
+            workflow_id: workflow_id.to_string(),
+            version_requested: "latest".to_string(),
+            version_resolved: 1,
+            execution_graph: graph,
+        }
+    };
+
+    let result = run_direct_workflow_with_llm_script_and_children(
+        &components_dir,
+        "ai-embed-tool-nest",
+        &parent.to_string(),
+        br#"{"data":{"x":"from-parent"},"variables":{}}"#,
+        vec![llm_tool_call("lookup", r#"{"q":1}"#), llm_ok("done")],
+        vec![
+            child("call", "middle", middle),
+            child("tool", "tool-child", tool),
+        ],
+    );
+
+    assert!(
+        result.status_success,
+        "stderr: {} error: {:?}",
+        result.stderr, result.error_json
+    );
+    assert_eq!(
+        result.output_json.expect("workflow completes"),
+        serde_json::json!({"value": {"who": "middle", "x": "from-parent", "answer": "done"}}),
+        "the steps after the AiAgent read the embedded child's own variables and data"
+    );
 }
 
 fn llm_tool_call(tool_name: &str, arguments: &str) -> Value {
@@ -6957,6 +7133,198 @@ fn lifecycle_retry_split_graph() -> String {
         "outputSchema": {}
     })
     .to_string()
+}
+
+/// An EmbedWorkflow inside an embedded child: the middle child's steps after
+/// it read the middle child's own variables and data, and a durable one
+/// checkpoints under the middle child's namespace, not the inner child's.
+fn embed_in_embed_graphs() -> (
+    ExecutionGraph,
+    Vec<runtara_workflows::compile::ChildWorkflowInput>,
+) {
+    let parent = serde_json::from_value(serde_json::json!({
+        "name": "Embed In Embed Parent",
+        "durable": true,
+        "steps": {
+            "call": {"stepType": "EmbedWorkflow", "id": "call", "childWorkflowId": "middle",
+                "childVersion": "latest",
+                "inputMapping": {"x": {"valueType": "reference", "value": "data.x"}}},
+            "finish": {"stepType": "Finish", "id": "finish", "inputMapping": {
+                "value": {"valueType": "reference", "value": "steps.call.outputs"}}}
+        },
+        "entryPoint": "call",
+        "executionPlan": [{"fromStep": "call", "toStep": "finish"}],
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+    }))
+    .expect("parent parses");
+    let middle = serde_json::from_value(serde_json::json!({
+        "name": "Middle",
+        "steps": {
+            "mid": {"stepType": "EmbedWorkflow", "id": "mid", "childWorkflowId": "inner",
+                "childVersion": "latest", "inputMapping": {}},
+            "after": {"stepType": "Agent", "id": "after", "agentId": "utils",
+                "capabilityId": "return-input", "inputMapping": {
+                    "value": {"valueType": "reference", "value": "variables.who"}}},
+            "done": {"stepType": "Finish", "id": "done", "inputMapping": {
+                "mid": {"valueType": "reference", "value": "steps.mid.outputs"},
+                "who": {"valueType": "reference", "value": "steps.after.outputs"},
+                "x": {"valueType": "reference", "value": "data.x"}}}
+        },
+        "entryPoint": "mid",
+        "executionPlan": [
+            {"fromStep": "mid", "toStep": "after"},
+            {"fromStep": "after", "toStep": "done"}
+        ],
+        "variables": {"who": {"type": "string", "value": "middle"}},
+        "inputSchema": {},
+        "outputSchema": {}
+    }))
+    .expect("middle parses");
+    let inner = serde_json::from_value(serde_json::json!({
+        "name": "Inner",
+        "steps": {
+            "leaf": {"stepType": "Agent", "id": "leaf", "agentId": "utils",
+                "capabilityId": "return-input", "inputMapping": {
+                    "value": {"valueType": "reference", "value": "variables.who"}}},
+            "done": {"stepType": "Finish", "id": "done", "inputMapping": {
+                "leaf": {"valueType": "reference", "value": "steps.leaf.outputs"}}}
+        },
+        "entryPoint": "leaf",
+        "executionPlan": [{"fromStep": "leaf", "toStep": "done"}],
+        "variables": {"who": {"type": "string", "value": "inner"}},
+        "inputSchema": {},
+        "outputSchema": {}
+    }))
+    .expect("inner parses");
+    let child = |step_id: &str, workflow_id: &str, graph: ExecutionGraph| {
+        runtara_workflows::compile::ChildWorkflowInput {
+            step_id: step_id.to_string(),
+            workflow_id: workflow_id.to_string(),
+            version_requested: "latest".to_string(),
+            version_resolved: 1,
+            execution_graph: graph,
+        }
+    };
+    (
+        parent,
+        vec![
+            child("call", "middle", middle),
+            child("mid", "inner", inner),
+        ],
+    )
+}
+
+/// Compile and compose [`embed_in_embed_graphs`] under `dir`.
+fn compile_embed_in_embed(components_dir: &Path, dir: &Path, track_events: bool) -> PathBuf {
+    let (parent, children) = embed_in_embed_graphs();
+    let mut compiled = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "embed-nest".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: parent,
+            child_workflows: children,
+            output_dir: dir.join("build"),
+            track_events,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
+        false,
+    )
+    .expect("embed-in-embed parent compiles");
+    runtara_workflows::direct_wasm::compose_direct_workflow(&mut compiled, components_dir)
+        .expect("embed-in-embed parent composes");
+    compiled.wasm_path
+}
+
+const EMBED_IN_EMBED_INPUT: &[u8] = br#"{"data":{"x":"from-parent"},"variables":{}}"#;
+
+#[test]
+fn direct_wasm_execute_embed_in_embed_keeps_the_middle_childs_context() {
+    let components_dir = direct_e2e_components_dir();
+    for track_events in [false, true] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let wasm_path = compile_embed_in_embed(&components_dir, temp.path(), track_events);
+
+        let host = Arc::new(PersistingRuntimeHost::new());
+        let exit = run_invoke_once(&wasm_path, host.clone(), EMBED_IN_EMBED_INPUT.to_vec());
+        let output = match exit {
+            runtara_component_host::InvokeExit::Completed(output) => output,
+            other => {
+                panic!("track_events={track_events}: embed-in-embed must complete, got {other:?}")
+            }
+        };
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output).expect("output json"),
+            serde_json::json!({"value": {"mid": {"leaf": "inner"}, "who": "middle", "x": "from-parent"}}),
+            "track_events={track_events}: the middle child reads its own variables and data after the inner Embed"
+        );
+        let after = expected_key(
+            "agent",
+            "embed-nest",
+            serde_json::json!(["utils", "return-input", "after"]),
+            serde_json::json!([]),
+            serde_json::json!([["child", "embed-nest", [], ["call"]]]),
+        );
+        // The outer Embed's result collapses the middle child's rows, so the
+        // write log, not the final store, shows where `after` checkpointed.
+        let writes = host.checkpoint_writes.lock().unwrap();
+        assert!(
+            writes.contains(&after),
+            "track_events={track_events}: `after` checkpoints in the middle child's namespace; written: {writes:?}"
+        );
+    }
+}
+
+/// A run paused right after the inner Embed records its result resumes with
+/// that Embed answered from its row, and the middle child's steps after it
+/// still read the middle child's own data.
+#[test]
+fn direct_wasm_execute_embed_in_embed_replayed_from_its_row_keeps_the_middle_childs_data() {
+    use runtara_component_host::lifecycle::WorkflowWake;
+    let components_dir = direct_e2e_components_dir();
+    for track_events in [false, true] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let wasm_path = compile_embed_in_embed(&components_dir, temp.path(), track_events);
+
+        let host = Arc::new(PersistingRuntimeHost::new());
+        *host.pause_after.lock().unwrap() = Some(expected_key(
+            "embed_workflow",
+            "embed-nest",
+            serde_json::json!(["mid"]),
+            serde_json::json!([]),
+            serde_json::json!([["child", "embed-nest", [], ["call"]]]),
+        ));
+        match run_invoke_once(&wasm_path, host.clone(), EMBED_IN_EMBED_INPUT.to_vec()) {
+            runtara_component_host::InvokeExit::Suspended(wakes) => assert!(
+                matches!(wakes.as_slice(), [WorkflowWake::OnResume]),
+                "track_events={track_events}: a pause re-raises as an on-resume wake, got {wakes:?}"
+            ),
+            other => panic!(
+                "track_events={track_events}: the pause after `mid`'s result must suspend, got {other:?}"
+            ),
+        }
+        assert!(
+            host.pause_after.lock().unwrap().is_none(),
+            "track_events={track_events}: `mid` recorded its result before the pause"
+        );
+
+        let output = match run_invoke_once(&wasm_path, host.clone(), EMBED_IN_EMBED_INPUT.to_vec())
+        {
+            runtara_component_host::InvokeExit::Completed(output) => output,
+            other => {
+                panic!("track_events={track_events}: the resumed run must complete, got {other:?}")
+            }
+        };
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output).expect("output json"),
+            serde_json::json!({"value": {"mid": {"leaf": "inner"}, "who": "middle", "x": "from-parent"}}),
+            "track_events={track_events}: the middle child reads its own data after `mid` replays from its row"
+        );
+    }
 }
 
 const LIFECYCLE_RETRY_EMBED_PARENT: &str = r#"{
