@@ -395,11 +395,27 @@ def check_null_collections():
           {"split": strict.get("status"), "allowNull": allowed.get("status"), "filter": filtered.get("outputs")})
 
 
+# --------------------------------------------------------------- D-timeout0
+
+
+def check_zero_timeouts():
+    agent = graph("a", [{**echo("a"), "timeout": 0}, fin("done")], [edge("a", "done")])
+    split = graph("s", [{"stepType": "Split", "id": "s", "config": {"value": imm([1]), "timeout": 0},
+                         "subgraph": graph("f", [fin("f")])}, fin("done")], [edge("s", "done")])
+    seen = {}
+    for label, g in [("agent", agent), ("split", split)]:
+        status, body = call("POST", "/workflows/graph/validate", {"name": f"t0-{label}", **g})
+        seen[label] = [w for w in (body or {}).get("warnings") or [] if str(w).startswith("[W091]")]
+    check("D-timeout0 timeout 0 warns with what it means for the step type",
+          seen["agent"] and "fails before it runs" in seen["agent"][0]
+          and seen["split"] and "no timeout here" in seen["split"][0], seen)
+
+
 CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, check_child_version_spellings,
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
           check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions,
           check_nested_immediate_references, check_workflow_inputs_in_bodies, check_group_by_keys,
-          check_null_collections]
+          check_null_collections, check_zero_timeouts]
 
 
 def main():

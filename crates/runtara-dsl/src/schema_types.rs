@@ -805,7 +805,9 @@ pub struct WhileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variables: Option<InputMapping>,
 
-    /// Step timeout in milliseconds. If exceeded, step fails.
+    /// Step timeout in milliseconds. If exceeded, step fails. `0` means no
+    /// timeout here (unlike an Agent's `timeout`, where 0 fails the step;
+    /// W091 flags both).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 }
@@ -2434,7 +2436,9 @@ pub struct SplitConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_delay: Option<u64>,
 
-    /// Step timeout in milliseconds. If exceeded, step fails.
+    /// Step timeout in milliseconds. If exceeded, step fails. `0` means no
+    /// timeout here (unlike an Agent's `timeout`, where 0 fails the step;
+    /// W091 flags both).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
 

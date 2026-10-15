@@ -1925,6 +1925,14 @@ pub enum ValidationWarning {
     /// (that is how a condition inside one reads workflow data); here it is
     /// passed on literally.
     ImmediateReferenceNotResolved { step_id: String, field: String },
+    /// `timeout: 0` means different things by step type: no deadline for a
+    /// Split or While, a deadline already passed for an Agent or
+    /// EmbedWorkflow (the step fails before it runs).
+    ZeroTimeout {
+        step_id: String,
+        step_type: String,
+        fails: bool,
+    },
 }
 
 impl ValidationWarning {
@@ -1961,6 +1969,7 @@ impl ValidationWarning {
             Self::PollIntervalIgnored { .. } => "W088",
             Self::FieldConditionNeverMatches { .. } => "W089",
             Self::ImmediateReferenceNotResolved { .. } => "W090",
+            Self::ZeroTimeout { .. } => "W091",
         }
     }
 }
@@ -2265,6 +2274,27 @@ impl std::fmt::Display for ValidationWarning {
                  read workflow data.",
                 step_id, field
             ),
+            ValidationWarning::ZeroTimeout {
+                step_id,
+                step_type,
+                fails,
+            } => {
+                if *fails {
+                    write!(
+                        f,
+                        "[W091] {} step '{}' sets timeout 0, which is a deadline already \
+                         passed: the step fails before it runs. Omit timeout for no deadline.",
+                        step_type, step_id
+                    )
+                } else {
+                    write!(
+                        f,
+                        "[W091] {} step '{}' sets timeout 0, which means no timeout here \
+                         (unlike an Agent, where 0 fails the step). Omit it instead.",
+                        step_type, step_id
+                    )
+                }
+            }
             ValidationWarning::PollIntervalIgnored { step_id } => write!(
                 f,
                 "[W088] WaitForSignal step '{}' sets pollIntervalMs, which is deprecated and has \
@@ -3842,6 +3872,28 @@ fn validate_static_step_values(graph: &ExecutionGraph, result: &mut ValidationRe
             result.errors.push(ValidationError::MissingStepConfig {
                 step_id: step_id.clone(),
                 step_type: crate::workflow_features::step_type_name(step).to_string(),
+            });
+        }
+        let zero_timeout = match step {
+            Step::Agent(agent) => (agent.timeout == Some(0)).then_some(true),
+            Step::EmbedWorkflow(embed) => (embed.timeout == Some(0)).then_some(true),
+            Step::Split(split) => split
+                .config
+                .as_ref()
+                .is_some_and(|config| config.timeout == Some(0))
+                .then_some(false),
+            Step::While(while_step) => while_step
+                .config
+                .as_ref()
+                .is_some_and(|config| config.timeout == Some(0))
+                .then_some(false),
+            _ => None,
+        };
+        if let Some(fails) = zero_timeout {
+            result.warnings.push(ValidationWarning::ZeroTimeout {
+                step_id: step_id.clone(),
+                step_type: crate::workflow_features::step_type_name(step).to_string(),
+                fails,
             });
         }
         match step {
@@ -18723,6 +18775,34 @@ mod edge_shape_tests {
             "w": {"stepType": "WaitForSignal", "id": "w", "pollIntervalMs": 500}, "done": fin("done")},
             "executionPlan": [{"fromStep": "w", "toStep": "done"}]}));
         assert!(wait.contains(&"W088".to_string()), "{wait:?}");
+    }
+
+    /// `timeout: 0` warns with what it means for the step type.
+    #[test]
+    fn zero_timeouts_warn_with_their_meaning() {
+        let warnings = |graph: Value| {
+            let graph: ExecutionGraph = serde_json::from_value(graph).unwrap();
+            validate_workflow(&graph, &super::tests::test_catalog())
+                .warnings
+                .iter()
+                .filter(|warning| warning.code() == "W091")
+                .map(|warning| warning.to_string())
+                .collect::<Vec<_>>()
+        };
+        let mut agent = echo("a");
+        agent["timeout"] = json!(0);
+        let agent_warnings = warnings(
+            json!({"entryPoint": "a", "steps": {"a": agent, "done": fin("done")},
+            "executionPlan": [{"fromStep": "a", "toStep": "done"}]}),
+        );
+        assert!(agent_warnings.len() == 1 && agent_warnings[0].contains("fails before it runs"));
+        let split_warnings = warnings(json!({"entryPoint": "s", "steps": {
+            "s": {"stepType": "Split", "id": "s", "config": {
+                "value": {"valueType": "immediate", "value": [1]}, "timeout": 0},
+                "subgraph": {"entryPoint": "f", "steps": {"f": fin("f")}}},
+            "done": fin("done")},
+            "executionPlan": [{"fromStep": "s", "toStep": "done"}]}));
+        assert!(split_warnings.len() == 1 && split_warnings[0].contains("no timeout here"));
     }
 
     /// A reference inside an immediate resolves in Agent inputs and is literal
