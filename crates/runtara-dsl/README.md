@@ -1,30 +1,30 @@
 # runtara-dsl
 
-[![Crates.io](https://img.shields.io/crates/v/runtara-dsl.svg)](https://crates.io/crates/runtara-dsl)
-[![Documentation](https://docs.rs/runtara-dsl/badge.svg)](https://docs.rs/runtara-dsl)
-
 Single source of truth for Runtara's workflow DSL types — the Rust structs that define workflows, steps, and value mappings.
 
 ## What it is
 
-A typed representation of a workflow execution graph: `Workflow`, `ExecutionGraph`, `Step` (Agent, Conditional, Split, Switch, While, Log, Error, ...), and `MappingValue` (`Reference`, `Immediate`, `Composite`, `Template`). Serde handles JSON round-trips, `schemars` auto-generates the matching JSON Schema at build time (pinned to `DSL_VERSION`, currently `3.0.0`), and step metadata is exposed through a static registry so the schema stays in sync with the step structs themselves. The public entry points are `parse_workflow`, `parse_execution_graph`, `get_step_types`, plus helpers like `ExecutionGraph::get_terminal_errors` for introspection.
+A typed representation of a workflow execution graph: `Workflow`, `ExecutionGraph`, `Step` (Agent, Conditional, Split, Switch, While, Log, Error, ...), and `MappingValue` (`Reference`, `Immediate`, `Composite`, `Template`). Serde handles JSON round-trips, `schemars` auto-generates the matching JSON Schema at build time (stamped with `DSL_VERSION`), and step metadata is exposed through a static registry so the schema stays in sync with the step structs themselves. The public entry points are `parse_workflow`, `parse_execution_graph`, `get_step_types`, plus helpers like `ExecutionGraph::get_terminal_errors` for introspection.
 
 ## Using it standalone
 
-Add it to a crate that needs to read, validate, or emit workflow JSON:
+It is not published to crates.io; depend on it by path inside this workspace
+(or by git from outside it):
 
 ```toml
 [dependencies]
-runtara-dsl = "4.0"
+runtara-dsl = { path = "../runtara-dsl" }
 serde_json = "1"
 ```
 
 ```rust
-use runtara_dsl::{parse_workflow, MemoryTier};
+use runtara_dsl::parse_workflow;
 
-let json = serde_json::from_str(r#"{"executionGraph":{"entryPoint":"start","steps":{},"executionPlan":[],"variables":{},"inputSchema":{},"outputSchema":{}}}"#)?;
+let json = serde_json::from_str(
+    r#"{"executionGraph":{"name":"hello","entryPoint":"done","steps":{"done":{"stepType":"Finish","id":"done"}}}}"#,
+)?;
 let workflow = parse_workflow(&json)?;
-assert_eq!(workflow.memory_tier.unwrap_or(MemoryTier::XL).total_memory_bytes(), 256 * 1024 * 1024);
+assert_eq!(workflow.execution_graph.entry_point, "done");
 ```
 
 Enable the `utoipa` feature if you need `ToSchema` derives for OpenAPI generation.
@@ -50,8 +50,7 @@ conflicting label fails without modifying the original execution.
 Labels are stored at instance creation and remain unchanged through suspension,
 resume, retries, and completion. Execution lists display the label when present
 and otherwise the workflow name. Exact `runLabel` and other execution filters
-apply before pagination and counting. Workflow-backed reports use these same
-filters.
+apply before pagination and counting.
 
 `Finish` only maps outputs. It does not accept `runLabel`, and inline child
 workflows cannot label the parent execution. Independently started executions
@@ -63,7 +62,7 @@ can receive their own label through the start API.
 - Also pulled in by `runtara-core`, `runtara-connections`, `runtara-workflow-stdlib`, `runtara-text-parser`, `runtara-environment`, and `runtara-test-harness` — nearly every runtime crate touches these types.
 - Depends only on `serde`, `serde_json`, and `schemars`; `utoipa` is optional.
 - Step type metadata is defined in `step_registration.rs`, so `get_step_types()` and generated schema never drift from the actual enum variants.
-- Runs everywhere the rest of Runtara runs — native host, WASI agents, and build scripts (the schema JSON in `specs/dsl/v3.0.0/schema.json` is regenerated from these types).
+- Runs everywhere the rest of Runtara runs — native host, WASI agents, and build scripts. The JSON Schema is regenerated from these types at build time and served at `GET /api/runtime/specs/dsl` (the changelog at `/specs/dsl/changelog`).
 
 ## License
 

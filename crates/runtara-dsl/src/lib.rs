@@ -7,7 +7,8 @@
 //! - Compiler type-safe access to workflow structure
 //! - Auto-generation of JSON Schema via schemars (in build.rs)
 //!
-//! Changes to these types automatically update `specs/dsl/v{VERSION}/schema.json` on rebuild.
+//! Changes to these types update the generated JSON Schema on rebuild; the
+//! server serves it at `GET /api/runtime/specs/dsl`.
 
 // Provide imports needed by schema_types.rs. Derives use the fully-qualified
 // `schemars::JsonSchema` path (gated behind the `json-schema` feature), so no

@@ -8,7 +8,7 @@
 // 3. build.rs - for auto-generating JSON Schema via schemars
 //
 // IMPORTANT: Changes to these types automatically update the JSON Schema.
-// The schema is generated at build time to `specs/dsl/v{VERSION}/schema.json`.
+// The schema is generated at build time and served at `GET /api/runtime/specs/dsl`.
 //
 // NOTE: This file is included by build.rs via include!() macro, so it cannot
 // have `use` statements or `//!` doc comments. Imports are provided by the
@@ -989,12 +989,12 @@ pub enum ErrorSeverity {
 ///   "stepType": "Filter",
 ///   "id": "filter-active",
 ///   "config": {
-///     "value": { "valueType": "reference", "path": "steps.get-users.outputs.items" },
+///     "value": { "valueType": "reference", "value": "steps.get-users.outputs.items" },
 ///     "condition": {
 ///       "type": "operation",
-///       "op": "eq",
+///       "op": "EQ",
 ///       "arguments": [
-///         { "valueType": "reference", "path": "item.status" },
+///         { "valueType": "reference", "value": "item.status" },
 ///         { "valueType": "immediate", "value": "active" }
 ///       ]
 ///     }
@@ -1119,7 +1119,7 @@ pub struct GroupByConfig {
 ///   "stepType": "Delay",
 ///   "id": "wait-for-cooldown",
 ///   "name": "Wait 5 seconds",
-///   "duration_ms": { "valueType": "immediate", "value": 5000 }
+///   "durationMs": { "valueType": "immediate", "value": 5000 }
 /// }
 /// ```
 ///
@@ -1128,7 +1128,7 @@ pub struct GroupByConfig {
 /// {
 ///   "stepType": "Delay",
 ///   "id": "dynamic-wait",
-///   "duration_ms": { "valueType": "reference", "value": "data.waitTimeMs" }
+///   "durationMs": { "valueType": "reference", "value": "data.waitTimeMs" }
 /// }
 /// ```
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
@@ -1199,7 +1199,7 @@ pub struct DelayStep {
 ///     },
 ///     "executionPlan": [{ "fromStep": "send_notification", "toStep": "finish" }]
 ///   },
-///   "timeoutMs": 86400000
+///   "timeoutMs": { "valueType": "immediate", "value": 86400000 }
 /// }
 /// ```
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
@@ -1704,10 +1704,13 @@ pub type InputMapping = HashMap<String, MappingValue>;
 /// - `reference`: Value is a path to data (e.g., "data.name", "steps.step1.outputs.result")
 /// - `immediate`: Value is a literal (string, number, boolean, object, array)
 /// - `composite`: Value is a structured object or array with nested MappingValues
+/// - `template`: Value is a minijinja template rendered against the execution
+///   context (`data`, `variables`, `steps`, ...) into a string
 ///
 /// Example reference: `{ "valueType": "reference", "value": "data.user.name" }`
 /// Example immediate: `{ "valueType": "immediate", "value": "Hello World" }`
 /// Example composite: `{ "valueType": "composite", "value": { "name": {...}, "id": {...} } }`
+/// Example template: `{ "valueType": "template", "value": "Order {{ data.orderId }}" }`
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]

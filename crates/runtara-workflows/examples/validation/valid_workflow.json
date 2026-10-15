@@ -7,12 +7,15 @@
             "stepType": "Agent",
             "id": "transform_data",
             "agentId": "transform",
-            "capabilityId": "map",
+            "capabilityId": "extract",
             "inputMapping": {
-                "items": { "valueType": "reference", "value": "data.input" },
-                "expression": {
+                "value": {
+                    "valueType": "reference",
+                    "value": "data.input"
+                },
+                "property_path": {
                     "valueType": "immediate",
-                    "value": "item.value * 2"
+                    "value": "value"
                 }
             }
         },
@@ -27,8 +30,18 @@
             }
         }
     },
-    "executionPlan": [{ "fromStep": "transform_data", "toStep": "finish" }],
+    "executionPlan": [
+        {
+            "fromStep": "transform_data",
+            "toStep": "finish"
+        }
+    ],
     "variables": {},
-    "inputSchema": {},
+    "inputSchema": {
+        "input": {
+            "type": "array",
+            "required": true
+        }
+    },
     "outputSchema": {}
 }

@@ -7,7 +7,7 @@
             "stepType": "Agent",
             "id": "api_call",
             "agentId": "http",
-            "capabilityId": "request",
+            "capabilityId": "http-request",
             "maxRetries": 100,
             "retryDelay": 1000,
             "inputMapping": {
@@ -15,7 +15,10 @@
                     "valueType": "immediate",
                     "value": "https://api.example.com/data"
                 },
-                "method": { "valueType": "immediate", "value": "GET" }
+                "method": {
+                    "valueType": "immediate",
+                    "value": "GET"
+                }
             }
         },
         "finish": {
@@ -29,7 +32,12 @@
             }
         }
     },
-    "executionPlan": [{ "fromStep": "api_call", "toStep": "finish" }],
+    "executionPlan": [
+        {
+            "fromStep": "api_call",
+            "toStep": "finish"
+        }
+    ],
     "variables": {},
     "inputSchema": {},
     "outputSchema": {}
