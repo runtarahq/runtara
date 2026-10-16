@@ -122,6 +122,44 @@ so its caller's result collapses it the same way. Not collapsed: a
 `durable: false` step, which saves no result, and rows written before
 migration 049.
 
+## State and retry rows
+
+A workflow running embedded or as a published workflow-agent keeps its state
+locally. Where it can replay (it is durable and imports the runtime), it
+checkpoints that state: each SetState saves the record it produced
+(`state-local`: its patch and the whole local state, which is capped at
+64 KiB, so a record can approach twice that), each GetState what it read
+(`state-read-local`). Those rows carry the child's namespace, like every other
+row the child writes, so the result of the EmbedWorkflow or Agent call that
+runs the child closes them with the rest, under the rules above: a namespace
+another step may share, or one in a run whose list is unknown, is kept, and a
+row whose address is over 2 KB is never collapsed.
+
+Two kinds of state rows have no closing result:
+
+- a workflow-agent called as an AiAgent tool writes them under the tool
+  call's frame, and the tool call records no result of its own (AiAgent does
+  not close its scope);
+- a non-durable top-level workflow whose Split or While body is marked
+  `durable: true` checkpoints local state in that body, under a loop that
+  saves no result.
+
+A durable top-level run writes no such rows: it publishes its state to the
+host (`instance_state`, one row per instance, and `instance_state_writes`, its
+patch log), and only its GetState reads are checkpointed.
+
+Superseded state rows are not replaced while the child runs. Replay runs the
+child from its start, and a SetState whose row was gone would compute its
+state again from inputs a `durable: false` step may produce differently. So a
+running child keeps one row per SetState execution (a While loop in it adds
+rows on every iteration), and so does a child whose caller saves no result,
+until retention.
+
+A step's `::retry::N` row records an attempt's error message for audit. Only
+the generic checkpoint listing returns it; nothing reads it as retry history,
+so it goes with the step's other attempt rows once the step's result is
+recorded.
+
 ## Recovery progress
 
 Crash-loop recovery compares a progress marker across restarts. It used the
