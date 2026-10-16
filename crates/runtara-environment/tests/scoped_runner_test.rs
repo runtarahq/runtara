@@ -1307,6 +1307,234 @@ async fn split_parked_mid_iteration(h: &Harness, backend: &str) {
     assert!(!ids.iter().any(|id| in_iteration(id)), "{backend}: {ids:?}");
 }
 
+/// `call` (random-double), a While `poll` whose body runs a random-double
+/// `each`, then `body_tail` if given, for three iterations, then `after_loop`
+/// if given, then a Finish returning the loop's outputs and call's value.
+/// `timeout_ms` bounds the loop.
+fn while_graph(body_tail: Value, after_loop: Value, timeout_ms: Option<u64>) -> Value {
+    let mut body_steps = json!({
+        "each":{"id":"each","stepType":"Agent","agentId":"utils","capabilityId":"random-double","maxRetries":0,"inputMapping":{}},
+        "pass_done":{"id":"pass_done","stepType":"Finish","inputMapping":{"value":{"valueType":"reference","value":"steps.each.outputs"}}}
+    });
+    let mut body_plan = vec![json!({"fromStep":"each","toStep":"pass_done"})];
+    if let Some((id, step)) = body_tail.as_object().and_then(|o| o.iter().next()) {
+        body_steps[id] = step.clone();
+        body_plan = vec![
+            json!({"fromStep":"each","toStep":id}),
+            json!({"fromStep":id,"toStep":"pass_done"}),
+        ];
+    }
+    let mut config = json!({"maxIterations": 10});
+    if let Some(timeout_ms) = timeout_ms {
+        config["timeoutMs"] = json!(timeout_ms);
+    }
+    let mut steps = json!({
+        "call":{"id":"call","stepType":"Agent","agentId":"utils","capabilityId":"random-double","maxRetries":0,"inputMapping":{}},
+        "poll":{"id":"poll","stepType":"While",
+            "condition":{"type":"operation","op":"LT","arguments":[
+                {"valueType":"reference","value":"loop.index"},
+                {"valueType":"immediate","value":3}]},
+            "subgraph":{"name":"per pass","entryPoint":"each","steps":body_steps,"executionPlan":body_plan},
+            "config":config},
+        "finish":{"id":"finish","stepType":"Finish","inputMapping":{
+            "loop":{"valueType":"reference","value":"steps.poll.outputs"},
+            "value":{"valueType":"reference","value":"steps.call.outputs"}}}
+    });
+    let mut plan = vec![json!({"fromStep":"call","toStep":"poll"})];
+    match after_loop.as_object().and_then(|o| o.iter().next()) {
+        Some((id, step)) => {
+            steps[id] = step.clone();
+            plan.push(json!({"fromStep":"poll","toStep":id}));
+            plan.push(json!({"fromStep":id,"toStep":"finish"}));
+        }
+        None => plan.push(json!({"fromStep":"poll","toStep":"finish"})),
+    }
+    json!({"durable":true,"entryPoint":"call","steps":steps,"executionPlan":plan})
+}
+
+/// Rows written inside one of the While's iterations.
+fn in_pass(checkpoint_id: &str) -> bool {
+    checkpoint_id.contains(r#"["While","poll","#)
+}
+
+/// Once a While's result is recorded, its iterations' rows and its deadline
+/// rows are gone in the same transaction, and a replay is served by the
+/// result: the parked run holds three rows, and after relaunch the loop's
+/// outputs are the ones the result stored (the body did not run again).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_completed_while_keeps_one_row_and_replays_from_it() {
+    let h = Harness::new().await;
+    for backend in ["legacy", "scoped"] {
+        for timeout_ms in [None, Some(60_000)] {
+            let label = format!("{backend}, timeout {timeout_ms:?}");
+            let graph = while_graph(json!({}), delay("sleep", 1000), timeout_ms);
+            let artifact = compile(
+                graph,
+                &h.dir
+                    .path()
+                    .join(format!("while-{backend}-{}", timeout_ms.is_some())),
+                "utils",
+                backend,
+            );
+            let runner = h.runner(Some(bounds("utils")));
+            let mut options = h.options(&artifact.wasm_path).await;
+            run_until_exit(&runner, &options).await;
+            let parked = h
+                .persistence
+                .get_instance(&options.instance_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(parked.status, InstanceStatus::Suspended, "{label}");
+
+            let rows = h
+                .persistence
+                .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+                .await
+                .unwrap();
+            let ids: Vec<&str> = rows.iter().map(|c| c.checkpoint_id.as_str()).collect();
+            assert_eq!(
+                rows.len(),
+                3,
+                "{label}: call, the While's result and the delay: {ids:?}"
+            );
+            assert!(!ids.iter().any(|id| in_pass(id)), "{label}: {ids:?}");
+            let result = rows
+                .iter()
+                .find(|c| c.checkpoint_id.starts_with(r#"runtara:v2:["while""#))
+                .expect("the While's result row");
+            let stored: Value = serde_json::from_slice(&result.state).unwrap();
+            assert_eq!(stored["iterations"], 3, "{label}: {stored}");
+            let last = stored["outputs"]["value"]
+                .as_f64()
+                .expect("last pass value");
+
+            let remaining = (parked.sleep_until.unwrap() - chrono::Utc::now())
+                .to_std()
+                .unwrap_or_default();
+            tokio::time::sleep(remaining + Duration::from_millis(20)).await;
+            options.launch_id = format!("resume-{}", options.instance_id);
+            options.prepersisted_input = None;
+            run_until_exit(&runner, &options).await;
+            let completed = h
+                .persistence
+                .get_instance(&options.instance_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(completed.status, InstanceStatus::Completed, "{label}");
+            let output: Value = serde_json::from_slice(&completed.output.unwrap()).unwrap();
+            assert_eq!(output["loop"]["iterations"], 3, "{label}: {output}");
+            assert!(
+                close(
+                    output["loop"]["outputs"]["value"].as_f64().expect("value"),
+                    last
+                ),
+                "{label}: the loop's outputs are the stored result's: {output}"
+            );
+            let after = h
+                .persistence
+                .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                after.len(),
+                3,
+                "{label}: the replay wrote no iteration rows"
+            );
+        }
+    }
+}
+
+/// A run parked inside a While's iteration keeps the finished passes' rows,
+/// resumes from them on relaunch, and collapses them once the While's result
+/// is recorded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_while_parked_mid_iteration_resumes_from_its_rows_then_collapses() {
+    let h = Harness::new().await;
+    for backend in ["legacy", "scoped"] {
+        let graph = while_graph(delay("pause", 300), json!({}), None);
+        let artifact = compile(
+            graph,
+            &h.dir.path().join(format!("while-park-{backend}")),
+            "utils",
+            backend,
+        );
+        let runner = h.runner(Some(bounds("utils")));
+        let mut options = h.options(&artifact.wasm_path).await;
+        let mut first_pass = None;
+        let mut parks = 0;
+        for launch in 0..12 {
+            if launch > 0 {
+                options.launch_id = format!("resume-{launch}-{}", options.instance_id);
+                options.prepersisted_input = None;
+            }
+            run_until_exit(&runner, &options).await;
+            let instance = h
+                .persistence
+                .get_instance(&options.instance_id)
+                .await
+                .unwrap()
+                .unwrap();
+            if instance.status == InstanceStatus::Completed {
+                break;
+            }
+            assert_eq!(instance.status, InstanceStatus::Suspended, "{backend}");
+            parks += 1;
+            let rows = h
+                .persistence
+                .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+                .await
+                .unwrap();
+            assert!(
+                !rows
+                    .iter()
+                    .any(|c| c.checkpoint_id.starts_with(r#"runtara:v2:["while""#)),
+                "{backend}: no While result while a pass is parked"
+            );
+            let pass0 = rows
+                .iter()
+                .find(|c| {
+                    c.checkpoint_id.contains(r#"["While","poll",0]"#)
+                        && c.checkpoint_id.contains("random-double")
+                })
+                .expect("the first pass's step survives the park");
+            let value: f64 = serde_json::from_slice(&pass0.state).unwrap();
+            assert!(
+                first_pass.is_none_or(|first| close(first, value)),
+                "{backend}"
+            );
+            first_pass = Some(value);
+            let remaining = (instance.sleep_until.unwrap() - chrono::Utc::now())
+                .to_std()
+                .unwrap_or_default();
+            tokio::time::sleep(remaining + Duration::from_millis(20)).await;
+        }
+        assert_eq!(parks, 3, "{backend}: one park per pass");
+        let completed = h
+            .persistence
+            .get_instance(&options.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.status, InstanceStatus::Completed, "{backend}");
+        let ids: Vec<String> = h
+            .persistence
+            .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.checkpoint_id)
+            .collect();
+        assert_eq!(
+            ids.len(),
+            2,
+            "{backend}: call and the While's result: {ids:?}"
+        );
+        assert!(!ids.iter().any(|id| in_pass(id)), "{backend}: {ids:?}");
+    }
+}
+
 /// A child workflow: `r` (random-double), then `tail` if given, then a Finish
 /// returning r's value.
 fn random_child(tail: Value) -> Value {

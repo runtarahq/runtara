@@ -10,6 +10,11 @@
 //! capture pattern. Timeout and cancellation are enforced per-iteration with early
 //! returns (not delegated to the host), which is what keeps an unbounded loop
 //! durably interruptible.
+//!
+//! In a durable graph the loop checkpoints its result, `{iterations, outputs}`,
+//! once it exits, and a replay takes it from that row without entering the
+//! loop again. A failure, a timeout or a suspension inside the loop saves no
+//! result, so a replay resumes from the iterations' own rows.
 
 use wasm_encoder::{BlockType, Function as WasmFunction, Instruction};
 
@@ -18,6 +23,7 @@ use super::abi::{
     push_retptr_i32_load, push_retptr_u8_load,
 };
 use super::agent_error::emit_agent_error_route_or_fail;
+use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
 use super::debug::{emit_step_breakpoint, emit_step_debug_event};
 use super::dispatcher::emit_run_plan_mapping;
 use super::mapping::emit_build_source;
@@ -79,6 +85,7 @@ pub(super) fn emit_while_plan(
     variables: DirectVariables<'_>,
     step_id: &str,
     while_id: u32,
+    durable: bool,
     breakpoint: bool,
     nested_plan: &DirectRunPlan,
     next_plan: &DirectRunPlan,
@@ -162,13 +169,41 @@ pub(super) fn emit_while_plan(
         body.instruction(&Instruction::Block(BlockType::Empty));
     }
 
+    if durable {
+        body.instruction(&Instruction::I32Const(while_id as i32));
+        body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_while_cache_key));
+        emit_retptr_error_or_return(
+            body,
+            indices,
+            internal_failure_target,
+            route_ptr_local,
+            route_len_local,
+        );
+        load_retptr_list(body, route_ptr_local, route_len_local);
+        emit_checkpoint_lookup(
+            body,
+            indices,
+            route_ptr_local,
+            route_len_local,
+            output_ptr_local,
+            output_len_local,
+        );
+        body.instruction(&Instruction::Else);
+    }
+    // A durable loop runs in the result lookup's miss arm, one block deeper.
+    let miss_failure_target =
+        internal_failure_target.map(|target| target.nested(u32::from(durable)));
+
     body.instruction(&Instruction::I32Const(while_id as i32));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_while_max_iterations));
     emit_retptr_error_or_return(
         body,
         indices,
-        internal_failure_target,
+        miss_failure_target,
         route_ptr_local,
         route_len_local,
     );
@@ -181,7 +216,7 @@ pub(super) fn emit_while_plan(
     emit_retptr_error_or_return(
         body,
         indices,
-        internal_failure_target,
+        miss_failure_target,
         route_ptr_local,
         route_len_local,
     );
@@ -220,7 +255,7 @@ pub(super) fn emit_while_plan(
     body.instruction(&Instruction::LocalSet(DIRECT_WHILE_INDEX_LOCAL));
     body.instruction(&Instruction::Block(BlockType::Empty));
     body.instruction(&Instruction::Loop(BlockType::Empty));
-    let loop_failure_target = internal_failure_target.map(|target| target.nested(2));
+    let loop_failure_target = miss_failure_target.map(|target| target.nested(2));
 
     // Reclaim the previous iteration's scratch: compact the loop state back down
     // to the watermark and rewind the bump pointer. The condition-false and
@@ -461,32 +496,90 @@ pub(super) fn emit_while_plan(
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
 
-    body.instruction(&Instruction::I32Const(while_id as i32));
-    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_PTR_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_LEN_LOCAL));
-    push_retptr_arg(body);
-    body.instruction(&Instruction::Call(indices.stdlib_while_output));
-    emit_retptr_error_or_return(
-        body,
-        indices,
-        internal_failure_target,
-        route_ptr_local,
-        route_len_local,
+    let parent_source = (
+        DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL,
+        DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL,
     );
-    load_retptr_list(body, steps_ptr_local, steps_len_local);
-    if timeout_ms.is_some() {
-        super::loop_deadline::complete(
+    if durable {
+        // output = stdlib.while-result(parent_source, state)
+        body.instruction(&Instruction::I32Const(while_id as i32));
+        body.instruction(&Instruction::LocalGet(parent_source.0));
+        body.instruction(&Instruction::LocalGet(parent_source.1));
+        body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_LEN_LOCAL));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_while_result));
+        emit_retptr_error_or_return(
             body,
             indices,
-            static_data,
-            step_id,
-            (
-                DIRECT_WHILE_PARENT_SOURCE_PTR_LOCAL,
-                DIRECT_WHILE_PARENT_SOURCE_LEN_LOCAL,
-            ),
+            miss_failure_target,
+            route_ptr_local,
+            route_len_local,
         );
+        load_retptr_list(body, output_ptr_local, output_len_local);
+        if timeout_ms.is_some() {
+            super::loop_deadline::complete(body, indices, static_data, step_id, parent_source);
+        }
+        // The body's plans reused the route locals: compute the key again.
+        body.instruction(&Instruction::I32Const(while_id as i32));
+        body.instruction(&Instruction::LocalGet(parent_source.0));
+        body.instruction(&Instruction::LocalGet(parent_source.1));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_while_cache_key));
+        emit_retptr_error_or_return(
+            body,
+            indices,
+            miss_failure_target,
+            route_ptr_local,
+            route_len_local,
+        );
+        load_retptr_list(body, route_ptr_local, route_len_local);
+        emit_checkpoint_save(
+            body,
+            indices,
+            route_ptr_local,
+            route_len_local,
+            output_ptr_local,
+            output_len_local,
+        );
+        body.instruction(&Instruction::End);
+
+        // steps = stdlib.while-output-from-result(parent_source, result),
+        // the result computed above or taken from its checkpoint.
+        body.instruction(&Instruction::I32Const(while_id as i32));
+        body.instruction(&Instruction::LocalGet(parent_source.0));
+        body.instruction(&Instruction::LocalGet(parent_source.1));
+        body.instruction(&Instruction::LocalGet(output_ptr_local));
+        body.instruction(&Instruction::LocalGet(output_len_local));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_while_output_from_result));
+        emit_retptr_error_or_return(
+            body,
+            indices,
+            internal_failure_target,
+            route_ptr_local,
+            route_len_local,
+        );
+        load_retptr_list(body, steps_ptr_local, steps_len_local);
+    } else {
+        body.instruction(&Instruction::I32Const(while_id as i32));
+        body.instruction(&Instruction::LocalGet(parent_source.0));
+        body.instruction(&Instruction::LocalGet(parent_source.1));
+        body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_WHILE_STATE_LEN_LOCAL));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_while_output));
+        emit_retptr_error_or_return(
+            body,
+            indices,
+            internal_failure_target,
+            route_ptr_local,
+            route_len_local,
+        );
+        load_retptr_list(body, steps_ptr_local, steps_len_local);
+        if timeout_ms.is_some() {
+            super::loop_deadline::complete(body, indices, static_data, step_id, parent_source);
+        }
     }
 
     if has_error_plan {

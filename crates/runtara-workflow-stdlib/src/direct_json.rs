@@ -853,7 +853,7 @@ impl DirectJsonManifest {
             && let Value::Object(result) = &mut result
         {
             result.insert(
-                SPLIT_LOCAL_STATE_KEY.to_string(),
+                LOOP_LOCAL_STATE_KEY.to_string(),
                 Value::Object(state.clone()),
             );
         }
@@ -874,7 +874,7 @@ impl DirectJsonManifest {
             .map_err(|err| format!("failed to parse Split step result: {err}"))?;
         if let Some(Value::Object(state)) = step_result
             .as_object_mut()
-            .and_then(|result| result.remove(SPLIT_LOCAL_STATE_KEY))
+            .and_then(|result| result.remove(LOOP_LOCAL_STATE_KEY))
         {
             self.local_states
                 .borrow_mut()
@@ -1041,6 +1041,90 @@ impl DirectJsonManifest {
             while_step.name.as_deref(),
             "While",
             output,
+            None,
+        );
+        serde_json::to_vec(&Value::Object(steps))
+            .map_err(|err| format!("failed to serialize While steps context: {err}"))
+    }
+
+    /// The durable key of a While step's result:
+    /// `runtara:v2:["while", workflow, namespace, loop-path, [step]]`.
+    pub fn while_cache_key(&self, while_id: u32, source: &[u8]) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse While cache-key source: {err}"))?;
+        let while_step = self
+            .whiles
+            .get(&while_id)
+            .ok_or_else(|| format!("unknown direct While id {while_id}"))?;
+        durable_key_v2(&source, "while", serde_json::json!([while_step.step_id]))
+            .map(String::into_bytes)
+            .ok_or_else(|| {
+                format!(
+                    "While step '{}' needs v2 durable keys; recompile the workflow",
+                    while_step.step_id
+                )
+            })
+    }
+
+    /// A finished While's result, `{iterations, outputs}`. Replay takes it
+    /// from its checkpoint without running the loop again, so the local state
+    /// the loop's steps wrote rides along and is restored with it.
+    pub fn while_result(
+        &self,
+        while_id: u32,
+        source: &[u8],
+        state: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse While result source: {err}"))?;
+        let while_step = self
+            .whiles
+            .get(&while_id)
+            .ok_or_else(|| format!("unknown direct While id {while_id}"))?;
+        let state = parse_while_state(while_step, state)?;
+        let mut result = serde_json::Map::new();
+        result.insert("iterations".to_string(), serde_json::json!(state.index));
+        result.insert("outputs".to_string(), state.outputs);
+        if let Some(local) = self.local_states.borrow().get(&local_state_scope(&source)) {
+            result.insert(
+                LOOP_LOCAL_STATE_KEY.to_string(),
+                Value::Object(local.clone()),
+            );
+        }
+        serde_json::to_vec(&Value::Object(result))
+            .map_err(|err| format!("failed to serialize While step result: {err}"))
+    }
+
+    /// Store a While result, computed or taken from its checkpoint, in the
+    /// steps context, and restore the local state it carries.
+    pub fn while_output_from_result(
+        &self,
+        while_id: u32,
+        source: &[u8],
+        step_result: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let source: Value = serde_json::from_slice(source)
+            .map_err(|err| format!("failed to parse While output source: {err}"))?;
+        let mut step_result: Value = serde_json::from_slice(step_result)
+            .map_err(|err| format!("failed to parse While step result: {err}"))?;
+        if let Some(Value::Object(state)) = step_result
+            .as_object_mut()
+            .and_then(|result| result.remove(LOOP_LOCAL_STATE_KEY))
+        {
+            self.local_states
+                .borrow_mut()
+                .insert(local_state_scope(&source), state);
+        }
+        let while_step = self
+            .whiles
+            .get(&while_id)
+            .ok_or_else(|| format!("unknown direct While id {while_id}"))?;
+        let steps = insert_step_output(
+            &source,
+            &while_step.step_id,
+            while_step.name.as_deref(),
+            "While",
+            step_result,
             None,
         );
         serde_json::to_vec(&Value::Object(steps))
@@ -4585,8 +4669,9 @@ fn durable_key_v2(source: &Value, kind: &str, parts: Value) -> Option<String> {
     })
 }
 
-/// Where a checkpointed Split result carries the invocation's local state.
-const SPLIT_LOCAL_STATE_KEY: &str = "__runtaraLocalState";
+/// Where a checkpointed loop result (a Split's or a While's) carries the
+/// invocation's local state.
+const LOOP_LOCAL_STATE_KEY: &str = "__runtaraLocalState";
 
 /// Largest local state an invocation keeps (bytes of compact JSON), like the
 /// host's cap on published state.
@@ -10860,7 +10945,7 @@ mod tests {
 
         // Without local state the cached result is unchanged.
         let plain = manifest.split_result(0, &source, &results).expect("result");
-        assert!(!String::from_utf8_lossy(&plain).contains(SPLIT_LOCAL_STATE_KEY));
+        assert!(!String::from_utf8_lossy(&plain).contains(LOOP_LOCAL_STATE_KEY));
 
         manifest.local_states.borrow_mut().insert(
             scope.clone(),
@@ -10876,7 +10961,7 @@ mod tests {
             .split_output_from_result(0, &source, &cached)
             .expect("steps");
         let steps: Value = serde_json::from_slice(&steps).expect("steps json");
-        assert!(steps["split"].get(SPLIT_LOCAL_STATE_KEY).is_none());
+        assert!(steps["split"].get(LOOP_LOCAL_STATE_KEY).is_none());
         assert_eq!(
             replay.local_states.borrow().get(&scope),
             Some(json!({"count": 3}).as_object().unwrap())
@@ -11241,6 +11326,71 @@ mod tests {
         assert_eq!(
             steps["loop"]["outputs"],
             json!({ "iterations": 2, "outputs": { "counter": 2 } })
+        );
+    }
+
+    /// A durable While's result: its key names the loop at its position, a
+    /// replay builds the same steps context from it as the loop's own output,
+    /// and it carries the invocation's local state for a replay that skips
+    /// the loop.
+    #[test]
+    fn a_while_result_replays_as_its_output_and_carries_the_local_state() {
+        let parse = || {
+            DirectJsonManifest::parse(&while_manifest(
+                json!({ "maxIterations": 5 }),
+                json!({ "valueType": "immediate", "value": false }),
+            ))
+            .expect("manifest")
+        };
+        let manifest = parse();
+        let source = serde_json::to_vec(&json!({
+            "data": {},
+            "variables": {"_durable_key_version": 2, "_workflow_id": "wf",
+                "_loop_path": [["Split", "outer", 3]]},
+            "steps": {}
+        }))
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(manifest.while_cache_key(0, &source).unwrap()).unwrap(),
+            r#"runtara:v2:["while","wf",[],[["Split","outer",3]],["loop"]]"#
+        );
+        let legacy = build_source(b"{}", b"{}", b"{}").expect("source");
+        assert!(
+            manifest.while_cache_key(0, &legacy).is_err(),
+            "a While result needs v2 keys"
+        );
+
+        let state = br#"{"index":2,"outputs":{"counter":2}}"#;
+        let expected = manifest.while_output(0, &source, state).unwrap();
+        let result = manifest.while_result(0, &source, state).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&result).unwrap(),
+            json!({ "iterations": 2, "outputs": { "counter": 2 } })
+        );
+        assert_eq!(
+            parse()
+                .while_output_from_result(0, &source, &result)
+                .unwrap(),
+            expected
+        );
+
+        let scope = local_state_scope(&serde_json::from_slice(&source).unwrap());
+        manifest.local_states.borrow_mut().insert(
+            scope.clone(),
+            json!({"count": 3}).as_object().unwrap().clone(),
+        );
+        let cached = manifest.while_result(0, &source, state).unwrap();
+        let replay = parse();
+        assert_eq!(
+            replay
+                .while_output_from_result(0, &source, &cached)
+                .unwrap(),
+            expected,
+            "the local state never reaches the steps context"
+        );
+        assert_eq!(
+            replay.local_states.borrow().get(&scope),
+            Some(json!({"count": 3}).as_object().unwrap())
         );
     }
 

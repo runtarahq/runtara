@@ -59,11 +59,11 @@ its older rows unmatched: never collapsed, never collapsed wrongly.
 - `inner`: a prefix of every address inside the step, deleted as one index
   range scan.
 
-`loop_closure` builds one for a Split's result (its iterations), and
+`loop_closure` builds one for a Split's or While's result (its iterations), and
 `child_closure` for an EmbedWorkflow's or an Agent's (the child namespace of an
 embedded workflow or a workflow-agent call). The inner ranges name the step by
-its id alone. For a Split that is exactly as precise as its result key: two
-Splits with one id at one position already share it. A child namespace is
+its id alone. For a loop that is exactly as precise as its result key: two
+loops of one kind with one id at one position already share it. A child namespace is
 looser: every step that can call a child (EmbedWorkflow, Agent) shares one
 namespace with any other such step that has its id at its position, whatever
 its kind. Step ids are unique within a graph, so this happens only when an
@@ -108,11 +108,14 @@ end-to-end tests.
 | Result kind | Closes | Why it is safe |
 |---|---|---|
 | `split` | every iteration, and the Split's attempt, retry and loop-deadline/complete rows | The result is saved only once the loop has finished: every item succeeded, or with `dontStopOnFailed` every item ran and the result records the failures. Replay looks it up before entering the loop, its deadline or its retries. A failed attempt is a suffixed row with no closure, so a retry keeps the items that already succeeded. |
+| `while` | every iteration, and the While's loop-deadline/complete rows | The result, `{iterations, outputs}`, is saved only once the loop has exited (its condition false or its maximum reached), in a durable graph; a failure, a timeout, an `onError` route or a suspension inside it saves none. Replay looks it up before the first condition and the loop's deadline, so the body never runs again. A body that writes local state (inside a child) carries a snapshot of it in the result, as a Split's does. Older workflows, compiled before While saved a result, replay every iteration as they always have. |
 | `embed_workflow` | the child's rows, nested children included, and the Embed's attempt, retry, retry-sleep and deadline rows | The result is saved only once the child has finished: it succeeded, or, for an Embed called as an AiAgent tool, its failure became the tool result. A child that parks exits the run first, and an enclosing deadline that unwinds skips the save. Replay looks the result up before mapping the child's input, its deadline or its retries. |
 | `agent` | a workflow-agent's child rows, and the Agent's attempt, retry and retry-sleep rows | The result is saved only when the call succeeded; a failure goes to `onError` or fails the run. Replay looks it up before the Agent's deadline, its retries, its continuation and the call. The key does not say whether the agent is a workflow, so every durable Agent that retried also drops its retry rows. An AiAgent's tool and memory calls run under their own frames (`tool-child`, `agent-aux`) and are not touched; neither is the Agent's deadline row, which carries only its position. |
 
-`A → Split[N] → B` therefore keeps three rows, whatever N is, and so does
-`A → EmbedWorkflow → B` or `A → workflow-agent → B`, whatever the child does.
+`A → Split[N] → B` therefore keeps three rows, whatever N is, and so do
+`A → While[N] → B`, `A → EmbedWorkflow → B` and `A → workflow-agent → B`,
+whatever the loop or the child does. A resume after a finished While no
+longer replays its iterations.
 A composite step inside another one collapses first, and the outer step's
 range then covers its result: a Split inside an Embed's child, an Embed inside
 a Split's iteration or inside another Embed. A run parked or killed inside a
@@ -152,8 +155,8 @@ Superseded state rows are not replaced while the child runs. Replay runs the
 child from its start, and a SetState whose row was gone would compute its
 state again from inputs a `durable: false` step may produce differently. So a
 running child keeps one row per SetState execution (a While loop in it adds
-rows on every iteration), and so does a child whose caller saves no result,
-until retention.
+rows on every iteration until its own result collapses them), and so does a
+child whose caller saves no result, until retention.
 
 A step's `::retry::N` row records an attempt's error message for audit. Only
 the generic checkpoint listing returns it; nothing reads it as retry history,

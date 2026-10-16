@@ -97,6 +97,8 @@ pub(super) enum DirectRunPlan {
     While {
         step_id: String,
         while_id: u32,
+        /// Whether the loop checkpoints its result: its graph is durable.
+        durable: bool,
         breakpoint: bool,
         nested_plan: Box<DirectRunPlan>,
         next_plan: Box<DirectRunPlan>,
@@ -804,6 +806,7 @@ fn step_run_plan_inner(
             Ok(DirectRunPlan::While {
                 step_id: step_id.to_string(),
                 while_id,
+                durable: graph.durable,
                 breakpoint: step_breakpoint_enabled(graph, step),
                 nested_plan: Box::new(nested_plan),
                 next_plan: Box::new(next_plan),

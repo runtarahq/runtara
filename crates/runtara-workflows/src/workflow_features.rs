@@ -398,6 +398,10 @@ impl FeatureAnalyzer {
                 {
                     self.summary.features.insert(WorkflowFeature::Timeout);
                 }
+                // A While in a durable graph checkpoints its result.
+                if graph_durable {
+                    self.summary.features.insert(WorkflowFeature::Durability);
+                }
                 self.visit_graph(&step.subgraph, depth + 1, graph_durable);
             }
             Step::Log(_) => {
@@ -581,6 +585,54 @@ mod tests {
         assert!(summary.has(WorkflowFeature::LogEvent));
         assert!(summary.has(WorkflowFeature::Durability));
         assert!(summary.requires_composed_imports());
+    }
+
+    /// A While checkpoints its result in a durable graph, so it keeps the
+    /// runtime import even when nothing else in the workflow would, as in a
+    /// durable body nested in a non-durable workflow.
+    #[test]
+    fn a_while_in_a_durable_graph_needs_the_runtime() {
+        let workflow = |inner_durable: bool| {
+            graph(&format!(
+                r#"{{
+                  "durable": false,
+                  "steps": {{
+                    "outer": {{
+                      "stepType": "While",
+                      "id": "outer",
+                      "condition": {{"valueType": "immediate", "value": false}},
+                      "subgraph": {{
+                        "durable": {inner_durable},
+                        "entryPoint": "inner",
+                        "steps": {{
+                          "inner": {{
+                            "stepType": "While",
+                            "id": "inner",
+                            "condition": {{"valueType": "immediate", "value": false}},
+                            "subgraph": {{
+                              "entryPoint": "done",
+                              "steps": {{"done": {{"stepType": "Finish", "id": "done"}}}},
+                              "executionPlan": []
+                            }}
+                          }},
+                          "inner_done": {{"stepType": "Finish", "id": "inner_done"}}
+                        }},
+                        "executionPlan": [{{"fromStep": "inner", "toStep": "inner_done"}}]
+                      }}
+                    }},
+                    "finish": {{"stepType": "Finish", "id": "finish"}}
+                  }},
+                  "entryPoint": "outer",
+                  "executionPlan": [{{"fromStep": "outer", "toStep": "finish"}}]
+                }}"#
+            ))
+        };
+        let summary = analyze_workflow_features(&workflow(true));
+        assert!(summary.has(WorkflowFeature::Durability));
+        assert!(summary.needs_runtime(false));
+        let summary = analyze_workflow_features(&workflow(false));
+        assert!(!summary.has(WorkflowFeature::Durability));
+        assert!(!summary.needs_runtime(false));
     }
 
     #[test]

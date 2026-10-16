@@ -2004,6 +2004,8 @@ struct PersistingRuntimeHost {
     suspend_requested: std::sync::atomic::AtomicBool,
     /// A checkpoint id whose first write is answered with a pause, once.
     pause_after: Mutex<Option<String>>,
+    /// Ids looked up via `get-checkpoint`, in order.
+    checkpoint_reads: Mutex<Vec<String>>,
 }
 
 impl PersistingRuntimeHost {
@@ -2016,6 +2018,7 @@ impl PersistingRuntimeHost {
             polled_input_ids: Mutex::new(Vec::new()),
             suspend_requested: std::sync::atomic::AtomicBool::new(false),
             pause_after: Mutex::new(None),
+            checkpoint_reads: Mutex::new(Vec::new()),
         }
     }
 
@@ -2087,6 +2090,10 @@ impl runtara_component_host::runtime_host::RuntimeHost for PersistingRuntimeHost
         self.managed_inputs.close(&signal_id).await
     }
     async fn get_checkpoint(&self, checkpoint_id: String) -> Result<Option<Vec<u8>>, String> {
+        self.checkpoint_reads
+            .lock()
+            .unwrap()
+            .push(checkpoint_id.clone());
         Ok(self
             .checkpoints
             .lock()
@@ -2874,9 +2881,30 @@ fn direct_wasm_execute_while_loop_reports_completion() {
         result.sleeps.is_empty(),
         "normal While execution should not use durable sleep"
     );
+    // A durable While looks its result up and saves it, and checkpoints
+    // nothing else here: the body runs only a Finish. A lookup is captured
+    // with empty state.
+    let result_key = root_key(
+        "while",
+        "direct-wasm-execute-while-loop",
+        serde_json::json!(["loop"]),
+    );
     assert!(
-        result.checkpoints.is_empty(),
-        "normal While execution should not use durable checkpoints"
+        result
+            .checkpoints
+            .iter()
+            .all(|checkpoint| checkpoint.checkpoint_id == result_key),
+        "the While's result is its only checkpoint: {:?}",
+        result.checkpoints
+    );
+    assert_eq!(
+        result
+            .checkpoints
+            .iter()
+            .filter(|checkpoint| !checkpoint.state.is_empty())
+            .count(),
+        1,
+        "the result is saved once"
     );
 }
 
@@ -7327,6 +7355,203 @@ fn direct_wasm_execute_embed_in_embed_replayed_from_its_row_keeps_the_middle_chi
     }
 }
 
+/// `While[3]` over a durable random Agent, then a Finish returning the loop's
+/// outputs.
+const DURABLE_WHILE: &str = r#"{
+  "name": "Durable While",
+  "steps": {
+    "poll": {
+      "stepType": "While", "id": "poll",
+      "condition": {"type": "operation", "op": "LT", "arguments": [
+        {"valueType": "reference", "value": "loop.index"},
+        {"valueType": "immediate", "value": 3}]},
+      "subgraph": {
+        "name": "Poll once", "entryPoint": "r",
+        "steps": {
+          "r": {"stepType": "Agent", "id": "r", "agentId": "utils",
+            "capabilityId": "random-double", "inputMapping": {}},
+          "done": {"stepType": "Finish", "id": "done", "inputMapping": {
+            "value": {"valueType": "reference", "value": "steps.r.outputs"}}}
+        },
+        "executionPlan": [{"fromStep": "r", "toStep": "done"}]
+      },
+      "config": {"maxIterations": 10}
+    },
+    "finish": {"stepType": "Finish", "id": "finish", "inputMapping": {
+      "value": {"valueType": "reference", "value": "steps.poll.outputs"}}}
+  },
+  "entryPoint": "poll",
+  "executionPlan": [{"fromStep": "poll", "toStep": "finish"}],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}"#;
+
+/// A finished durable While checkpoints its result, and a replay takes it
+/// from that row: the loop is not entered again, so none of its iterations'
+/// rows is even read.
+#[test]
+fn direct_wasm_execute_a_finished_while_replays_from_its_result() {
+    let components_dir = direct_e2e_components_dir();
+    let compiled = compile_invoke_abi_artifact(&components_dir, "while-replay", DURABLE_WHILE);
+    let host = Arc::new(PersistingRuntimeHost::new());
+    let run = |host: &Arc<PersistingRuntimeHost>| match run_invoke_once(
+        &compiled.wasm_path,
+        host.clone(),
+        b"{}".to_vec(),
+    ) {
+        runtara_component_host::InvokeExit::Completed(output) => {
+            serde_json::from_slice::<Value>(&output).expect("output json")
+        }
+        other => panic!("the While workflow must complete, got {other:?}"),
+    };
+    let iteration = r#"["While","poll","#;
+    let first = run(&host);
+    assert_eq!(first["value"]["iterations"], 3, "{first}");
+    let result = root_key("while", "while-replay", serde_json::json!(["poll"]));
+    {
+        let writes = host.checkpoint_writes.lock().unwrap();
+        assert!(
+            writes.contains(&result),
+            "the While's result is written: {writes:?}"
+        );
+        assert!(
+            writes.iter().any(|id| id.contains(iteration)),
+            "its iterations checkpoint too: {writes:?}"
+        );
+    }
+
+    host.checkpoint_reads.lock().unwrap().clear();
+    let replay = run(&host);
+    assert_eq!(replay, first, "the replay returns the stored result");
+    let reads = host.checkpoint_reads.lock().unwrap();
+    assert!(
+        reads.contains(&result),
+        "the replay looks the result up: {reads:?}"
+    );
+    assert!(
+        !reads.iter().any(|id| id.contains(iteration)),
+        "the replay does not enter the loop: {reads:?}"
+    );
+}
+
+/// An embedded child whose While writes local state: paused right after the
+/// While's result is recorded, the resumed child takes the loop's result from
+/// its row without running the body again, and the state the body wrote comes
+/// back with it.
+#[test]
+fn direct_wasm_execute_a_while_result_restores_the_local_state_its_body_wrote() {
+    let components_dir = direct_e2e_components_dir();
+    let parent: ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "name": "While State Parent",
+        "durable": true,
+        "steps": {
+            "call": {"stepType": "EmbedWorkflow", "id": "call", "childWorkflowId": "counter",
+                "childVersion": "latest", "inputMapping": {}},
+            "finish": {"stepType": "Finish", "id": "finish", "inputMapping": {
+                "value": {"valueType": "reference", "value": "steps.call.outputs"}}}
+        },
+        "entryPoint": "call",
+        "executionPlan": [{"fromStep": "call", "toStep": "finish"}],
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+    }))
+    .expect("parent parses");
+    let counter: ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "name": "Counter",
+        "stateSchema": {"n": {"type": "integer"}},
+        "steps": {
+            "count": {
+                "stepType": "While", "id": "count",
+                "condition": {"type": "operation", "op": "LT", "arguments": [
+                    {"valueType": "reference", "value": "loop.index"},
+                    {"valueType": "immediate", "value": 3}]},
+                "subgraph": {
+                    "name": "Count once", "entryPoint": "set",
+                    "steps": {
+                        "set": {"stepType": "SetState", "id": "set", "values": {
+                            "n": {"valueType": "reference", "value": "loop.index"}}},
+                        "done": {"stepType": "Finish", "id": "done", "inputMapping": {}}
+                    },
+                    "executionPlan": [{"fromStep": "set", "toStep": "done"}]
+                },
+                "config": {"maxIterations": 10}
+            },
+            "get": {"stepType": "GetState", "id": "get"},
+            "done": {"stepType": "Finish", "id": "done", "inputMapping": {
+                "state": {"valueType": "reference", "value": "steps.get.outputs"}}}
+        },
+        "entryPoint": "count",
+        "executionPlan": [
+            {"fromStep": "count", "toStep": "get"},
+            {"fromStep": "get", "toStep": "done"}
+        ],
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+    }))
+    .expect("child parses");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut compiled = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+        DirectCompilationInput {
+            workflow_id: "while-state".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: parent,
+            child_workflows: vec![runtara_workflows::compile::ChildWorkflowInput {
+                step_id: "call".to_string(),
+                workflow_id: "counter".to_string(),
+                version_requested: "latest".to_string(),
+                version_resolved: 1,
+                execution_graph: counter,
+            }],
+            output_dir: temp.path().join("build"),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        runtara_workflows::direct_wasm::WorkflowRole::Root,
+        false,
+    )
+    .expect("parent compiles");
+    runtara_workflows::direct_wasm::compose_direct_workflow(&mut compiled, &components_dir)
+        .expect("parent composes");
+
+    let host = Arc::new(PersistingRuntimeHost::new());
+    *host.pause_after.lock().unwrap() = Some(expected_key(
+        "while",
+        "while-state",
+        serde_json::json!(["count"]),
+        serde_json::json!([]),
+        serde_json::json!([["child", "while-state", [], ["call"]]]),
+    ));
+    match run_invoke_once(&compiled.wasm_path, host.clone(), b"{}".to_vec()) {
+        runtara_component_host::InvokeExit::Suspended(_) => {}
+        other => panic!("the pause after the While's result must suspend, got {other:?}"),
+    }
+    assert!(
+        host.pause_after.lock().unwrap().is_none(),
+        "the While recorded its result before the pause"
+    );
+
+    host.checkpoint_reads.lock().unwrap().clear();
+    let output = match run_invoke_once(&compiled.wasm_path, host.clone(), b"{}".to_vec()) {
+        runtara_component_host::InvokeExit::Completed(output) => output,
+        other => panic!("the resumed run must complete, got {other:?}"),
+    };
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output).expect("output json"),
+        serde_json::json!({"value": {"state": {"n": 2}}}),
+        "the state the loop's body wrote is restored with its result"
+    );
+    let reads = host.checkpoint_reads.lock().unwrap();
+    assert!(
+        !reads.iter().any(|id| id.contains(r#"["While","count","#)),
+        "the resumed child does not run the loop's body again: {reads:?}"
+    );
+}
+
 const LIFECYCLE_RETRY_EMBED_PARENT: &str = r#"{
   "name": "Lifecycle Embed Retry Park",
   "durable": true,
@@ -7409,6 +7634,10 @@ fn spawn_retry_http_provider(
     (url, hits, handle)
 }
 
+/// The command id of the pause [`CheckpointingRuntimeHost::pause_on_write`]
+/// raises.
+const CHECKPOINTING_HOST_PAUSE: &str = "pause-on-write";
+
 /// Checkpoint-persisting runtime host: unlike [`RecordingRuntimeHost`] its
 /// checkpoint map survives across `execute_invoke` calls (share one `Arc`), so
 /// a store-freeing suspend that checkpoints its deadline on the first invoke
@@ -7420,6 +7649,11 @@ struct CheckpointingRuntimeHost {
     advance_clock_on_step_end: Mutex<Option<(String, u64)>>,
     delay_on_step_end: Mutex<Option<(String, u64)>>,
     checkpoints: Mutex<HashMap<String, Vec<u8>>>,
+    /// Ids stored by `checkpoint`, in order, rows a later result collapsed
+    /// included.
+    written: Mutex<Vec<String>>,
+    /// A checkpoint id prefix whose next write is answered with a pause, once.
+    pause_on_write: Mutex<Option<String>>,
     sleeps: Mutex<Vec<String>>,
     managed_inputs: direct_managed_inputs::ManagedInputs,
     /// Milliseconds added to the wall clock for every `now-ms` the guest asks
@@ -7446,6 +7680,8 @@ impl CheckpointingRuntimeHost {
             advance_clock_on_step_end: Mutex::new(None),
             delay_on_step_end: Mutex::new(None),
             checkpoints: Mutex::new(HashMap::new()),
+            written: Mutex::new(Vec::new()),
+            pause_on_write: Mutex::new(None),
             sleeps: Mutex::new(Vec::new()),
             managed_inputs: direct_managed_inputs::ManagedInputs::new("store-freeing-delay"),
             clock_offset_ms: Mutex::new(0),
@@ -7617,14 +7853,29 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
                 },
             );
         }
+        let mut pause_on_write = self.pause_on_write.lock().unwrap();
+        let pending_signal = (!state.is_empty()
+            && pause_on_write
+                .as_deref()
+                .is_some_and(|prefix| checkpoint_id.starts_with(prefix)))
+        .then(|| {
+            pause_on_write.take();
+            runtara_component_host::runtime_host::RuntimeSignalInfo {
+                signal_type: "pause".into(),
+                command_id: CHECKPOINTING_HOST_PAUSE.into(),
+                payload: Vec::new(),
+                checkpoint_id: None,
+            }
+        });
         if !state.is_empty() {
+            self.written.lock().unwrap().push(checkpoint_id.clone());
             store_checkpoint(&mut checkpoints, checkpoint_id, state);
         }
         Ok(
             runtara_component_host::runtime_host::RuntimeCheckpointResult {
                 found: false,
                 state: Vec::new(),
-                pending_signal: None,
+                pending_signal,
                 custom_signal: None,
             },
         )
@@ -7632,9 +7883,9 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
     async fn handle_checkpoint_signal(
         &self,
         _signal_type: String,
-        _command_id: String,
+        command_id: String,
     ) -> Result<bool, String> {
-        Ok(false)
+        Ok(command_id == CHECKPOINTING_HOST_PAUSE)
     }
     fn now_ms(&self) -> Result<u64, String> {
         if let Some(pinned) = *self.pinned_clock_ms.lock().unwrap() {

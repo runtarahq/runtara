@@ -156,6 +156,81 @@ pub async fn recording_a_split_result_collapses_its_iterations(p: &dyn Persisten
     p.delete_instances_batch(&[id, other]).await.unwrap();
 }
 
+/// Recording a While's result deletes its iterations, a Split nested in one
+/// included, the local state its body checkpointed, and its own deadline
+/// rows. The rows around the loop and another While's iterations stay.
+pub async fn recording_a_while_result_collapses_its_iterations(p: &dyn Persistence) {
+    let id = running(p, "while").await;
+    let result = key("while", json!([]), json!([]), json!(["poll"]));
+    let iteration = |index: u32| json!([["While", "poll", index]]);
+    let inside: Vec<String> = (0..20)
+        .map(|i| {
+            key(
+                "agent",
+                json!([]),
+                iteration(i),
+                json!(["utils", "random-double", "check"]),
+            )
+        })
+        .chain([
+            key("split", json!([]), iteration(3), json!(["fan"])),
+            key(
+                "agent",
+                json!([]),
+                json!([["While", "poll", 3], ["Split", "fan", 1]]),
+                json!(["utils", "random-double", "each"]),
+            ),
+            key("state-local", json!([]), iteration(7), json!(["set"])),
+            key(
+                "loop-deadline",
+                json!([]),
+                json!([]),
+                json!(["While", "root", "poll"]),
+            ),
+            key(
+                "loop-complete",
+                json!([]),
+                json!([]),
+                json!(["While", "root", "poll"]),
+            ),
+        ])
+        .collect();
+    let outside = vec![
+        key(
+            "agent",
+            json!([]),
+            json!([]),
+            json!(["utils", "random-double", "before"]),
+        ),
+        key(
+            "agent",
+            json!([]),
+            json!([["While", "other", 0]]),
+            json!(["utils", "random-double", "check"]),
+        ),
+        key(
+            "loop-deadline",
+            json!([]),
+            json!([]),
+            json!(["Split", "root", "poll"]),
+        ),
+    ];
+    save_all(p, &id, &inside).await;
+    save_all(p, &id, &outside).await;
+
+    assert_eq!(
+        p.record_checkpoint(&id, &result, b"{}", None)
+            .await
+            .unwrap(),
+        CheckpointWrite::Recorded
+    );
+
+    let mut expected = set(&outside);
+    expected.insert(result.clone());
+    assert_eq!(stored(p, &id).await, expected);
+    p.delete_instances_batch(&[id]).await.unwrap();
+}
+
 /// A failed Split attempt is a suffixed row with no closure: recording it
 /// keeps the items a retry will reuse.
 pub async fn a_failed_split_attempt_collapses_nothing(p: &dyn Persistence) {
@@ -296,6 +371,64 @@ pub async fn a_fenced_split_result_collapses_its_iterations(p: &dyn Persistence)
 
     let mut expected = set(&parent_items);
     expected.insert(child_result);
+    assert_eq!(stored(p, &id).await, expected);
+    p.delete_instances_batch(&[id]).await.unwrap();
+}
+
+/// A While inside an isolated child records its result through the fenced
+/// path: it collapses the child's iterations of that loop and nothing of the
+/// parent's.
+pub async fn a_fenced_while_result_collapses_its_iterations(p: &dyn Persistence) {
+    let id = running(p, "fenced-while").await;
+    let lease = claim(p, &id).await;
+    let attempt = fences(p)
+        .begin_invocation_attempt(&lease, "child", "start")
+        .await
+        .unwrap()
+        .fence;
+    let frame = json!([["child", "wf", [], ["call"]]]);
+    let checkpoint = |key: &String, state: &[u8]| {
+        let key = key.clone();
+        let state = state.to_vec();
+        let attempt = &attempt;
+        async move {
+            fences(p)
+                .invocation_checkpoint(
+                    attempt,
+                    &InvocationCheckpoint {
+                        checkpoint_id: key,
+                        state,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    };
+    let passes: Vec<String> = (0..3)
+        .map(|i| {
+            key(
+                "agent",
+                frame.clone(),
+                json!([["While", "poll", i]]),
+                json!(["utils", "random-double", "check"]),
+            )
+        })
+        .collect();
+    let result = key("while", frame, json!([]), json!(["poll"]));
+    let parent = vec![key(
+        "agent",
+        json!([]),
+        json!([["While", "poll", 0]]),
+        json!(["utils", "random-double", "check"]),
+    )];
+    save_all(p, &id, &parent).await;
+    for pass in &passes {
+        checkpoint(pass, b"x").await;
+    }
+    checkpoint(&result, b"{}").await;
+
+    let mut expected = set(&parent);
+    expected.insert(result);
     assert_eq!(stored(p, &id).await, expected);
     p.delete_instances_batch(&[id]).await.unwrap();
 }
@@ -732,10 +865,12 @@ pub async fn a_fenced_child_keeps_a_listed_namespace(p: &dyn Persistence) {
 /// Every case in this module.
 pub async fn run_all(p: &dyn Persistence) {
     recording_a_split_result_collapses_its_iterations(p).await;
+    recording_a_while_result_collapses_its_iterations(p).await;
     a_failed_split_attempt_collapses_nothing(p).await;
     nested_splits_collapse_level_by_level(p).await;
     a_result_found_stored_collapses_nothing(p).await;
     a_fenced_split_result_collapses_its_iterations(p).await;
+    a_fenced_while_result_collapses_its_iterations(p).await;
     recording_an_embed_result_collapses_its_child(p).await;
     recording_an_agent_result_collapses_its_child_and_retries(p).await;
     nested_child_scopes_collapse_level_by_level(p).await;

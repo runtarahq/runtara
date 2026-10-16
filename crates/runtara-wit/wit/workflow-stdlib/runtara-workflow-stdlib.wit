@@ -201,6 +201,23 @@ interface json {
         state: list<u8>,
     ) -> result<list<u8>, string>;
 
+    while-cache-key: func(
+        while-id: u32,
+        source: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    while-result: func(
+        while-id: u32,
+        source: list<u8>,
+        state: list<u8>,
+    ) -> result<list<u8>, string>;
+
+    while-output-from-result: func(
+        while-id: u32,
+        source: list<u8>,
+        step-result: list<u8>,
+    ) -> result<list<u8>, string>;
+
     filter: func(
         filter-id: u32,
         source: list<u8>,
