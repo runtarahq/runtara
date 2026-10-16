@@ -935,6 +935,72 @@ mod tests {
     }
 
     #[test]
+    fn a_childs_local_state_rows_go_with_its_caller() {
+        // A child keeps its state locally and checkpoints each SetState and
+        // GetState under its own namespace, so the caller's result closes them
+        // with the rest of the child's rows.
+        let state = |kind: &str, frames: Value, loops: Value, step: &str| {
+            key(kind, "wf", frames, loops, json!([step]))
+        };
+        let embed = key("embed_workflow", "wf", json!([]), json!([]), json!(["e"]));
+        let workflow_agent = key(
+            "agent",
+            "wf",
+            json!([]),
+            json!([]),
+            json!(["orders-sync", "run", "e"]),
+        );
+        for call in [embed, workflow_agent] {
+            let closure = child_closure(&call).unwrap();
+            for id in [
+                state(
+                    "state-local",
+                    json!([child("e", json!([]))]),
+                    json!([]),
+                    "s1",
+                ),
+                state(
+                    "state-read-local",
+                    json!([child("e", json!([]))]),
+                    json!([]),
+                    "g",
+                ),
+                state(
+                    "state-local",
+                    json!([child("e", json!([]))]),
+                    json!([["While", "w", 4]]),
+                    "s2",
+                ),
+                state(
+                    "state-local",
+                    json!([child("e", json!([])), child("inner", json!([]))]),
+                    json!([]),
+                    "s3",
+                ),
+            ] {
+                assert!(
+                    closure.covers(&scope(&id).unwrap()),
+                    "{call} should cover {id}"
+                );
+            }
+            for id in [
+                state("state-read", json!([]), json!([]), "g"),
+                state(
+                    "state-local",
+                    json!([child("other", json!([]))]),
+                    json!([]),
+                    "s1",
+                ),
+            ] {
+                assert!(
+                    !closure.covers(&scope(&id).unwrap()),
+                    "{call} should keep {id}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn closures_only_come_from_their_own_result_kinds() {
         let split = key("split", "wf", json!([]), json!([]), json!(["s"]));
         let embed = key("embed_workflow", "wf", json!([]), json!([]), json!(["s"]));

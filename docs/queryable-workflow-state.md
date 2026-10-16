@@ -86,10 +86,10 @@ Things an earlier draft assumed that do not exist:
 - **The 64 KiB continuation cap is a constant,** not configurable.
 - **Little compacts checkpoints of a live run.** A finished Split's or
   While's result replaces its iterations' rows, an EmbedWorkflow's or
-  workflow-agent call's result replaces its child's rows, and an Agent's
-  result replaces its retry rows (`docs/checkpoint-scope-collapse.md`); every
-  other row stays until retention or pinned-child pruning, which only touch
-  terminal runs.
+  workflow-agent call's result replaces its child's rows (its local state rows
+  included), and an Agent's result replaces its retry rows
+  (`docs/checkpoint-scope-collapse.md`); every other row stays until retention
+  or pinned-child pruning, which only touch terminal runs.
 
 ## Concepts
 
@@ -211,7 +211,8 @@ state-schema settings.
   local state therefore checkpoints a snapshot of the local state beside its
   result and restores it when replay takes the result from the checkpoint.
   An embedded child's result needs no snapshot: the parent never reads the
-  child's local state.
+  child's local state. Its state rows sit in the child's namespace, so they
+  go with the rest of the child's rows once that result is recorded.
 
 ### Durability
 

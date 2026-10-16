@@ -1948,6 +1948,284 @@ async fn an_embed_parked_in_its_child_resumes_from_the_child_rows_then_collapses
     }
 }
 
+/// A child that keeps local state: `r` (random-double, not durable, so a
+/// replay draws a new number), SetState `s1` `{a: r, stage: "before"}`, a
+/// Delay `pause` of `pause_ms` if given, SetState `s2` `{stage: "after"}`,
+/// GetState `g`, then a Finish returning g's state. After a replay `a` keeps
+/// its value only if `s1` was restored from its row.
+fn local_state_child(pause_ms: Option<u64>) -> Value {
+    let mut steps = json!({
+        "r":{"id":"r","stepType":"Agent","agentId":"utils","capabilityId":"random-double","maxRetries":0,"durable":false,"inputMapping":{}},
+        "s1":{"id":"s1","stepType":"SetState","values":{
+            "a":{"valueType":"reference","value":"steps.r.outputs"},
+            "stage":{"valueType":"immediate","value":"before"}}},
+        "s2":{"id":"s2","stepType":"SetState","values":{
+            "stage":{"valueType":"immediate","value":"after"}}},
+        "g":{"id":"g","stepType":"GetState"},
+        "done":{"id":"done","stepType":"Finish","inputMapping":{
+            "value":{"valueType":"reference","value":"steps.g.outputs"}}}
+    });
+    let mut order = vec!["r", "s1"];
+    if let Some(ms) = pause_ms {
+        steps["pause"] = delay("pause", ms)["pause"].clone();
+        order.push("pause");
+    }
+    order.extend(["s2", "g", "done"]);
+    let plan: Vec<Value> = order
+        .windows(2)
+        .map(|pair| json!({"fromStep":pair[0],"toStep":pair[1]}))
+        .collect();
+    json!({"durable":true,"entryPoint":"r","steps":steps,"executionPlan":plan,
+        "stateSchema":{"a":{"type":"number"},"stage":{"type":"string"}}})
+}
+
+/// The object in `value` that has a `stage` field.
+fn local_state_in(value: &Value) -> Option<&Value> {
+    if value.get("stage").is_some() {
+        return Some(value);
+    }
+    match value {
+        Value::Object(map) => map.values().find_map(local_state_in),
+        Value::Array(items) => items.iter().find_map(local_state_in),
+        _ => None,
+    }
+}
+
+/// The state in `output`, which must be the one [`local_state_child`] ends
+/// with: `stage` "after" and `a` a number, returned.
+fn final_local_state(output: &Value, label: &str) -> f64 {
+    let state = local_state_in(output).unwrap_or_else(|| panic!("{label}: {output}"));
+    assert_eq!(state["stage"], "after", "{label}: {output}");
+    state["a"].as_f64().expect("a number")
+}
+
+/// The run's rows, which must be call's result (starting with
+/// `result_prefix`) only: the child's rows, its state rows among them, went
+/// with the transaction that recorded it.
+async fn only_the_result_is_left(h: &Harness, instance_id: &str, result_prefix: &str, label: &str) {
+    let ids: Vec<String> = h
+        .persistence
+        .list_checkpoints(instance_id, None, 100, 0, None, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| c.checkpoint_id)
+        .collect();
+    assert_eq!(ids.len(), 1, "{label}: call's result only: {ids:?}");
+    assert!(ids[0].starts_with(result_prefix), "{label}: {ids:?}");
+}
+
+/// Run `artifact`, whose step `call` runs [`local_state_child`] with a pause,
+/// to the end.
+/// While it is parked in the child, the row `s1` checkpointed holds the state
+/// it wrote; a relaunch resumes from that row, so the state the child reads
+/// back keeps the value written before the park. Once call's result (starting
+/// with `result_prefix`) is recorded, it is the only row left: the child's
+/// state rows went with the rest of its rows.
+async fn local_state_resumes_then_goes_with_the_result(
+    h: &Harness,
+    runner: &EmbeddedWasmRunner,
+    artifact: &DirectCompilationResult,
+    result_prefix: &str,
+    label: &str,
+) {
+    let mut options = h.options(&artifact.wasm_path).await;
+    let mut written = None;
+    for launch in 0..8 {
+        if launch > 0 {
+            options.launch_id = format!("resume-{launch}-{}", options.instance_id);
+            options.prepersisted_input = None;
+        }
+        run_until_exit(runner, &options).await;
+        let instance = h
+            .persistence
+            .get_instance(&options.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        if instance.status == InstanceStatus::Completed {
+            break;
+        }
+        assert_eq!(
+            instance.status,
+            InstanceStatus::Suspended,
+            "{label}: {instance:?}"
+        );
+        let rows = h
+            .persistence
+            .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+            .await
+            .unwrap();
+        assert!(
+            !rows
+                .iter()
+                .any(|c| !in_child(&c.checkpoint_id) && c.checkpoint_id.starts_with(result_prefix)),
+            "{label}: no result while the child is parked"
+        );
+        let row = rows
+            .iter()
+            .find(|c| {
+                in_child(&c.checkpoint_id)
+                    && c.checkpoint_id.starts_with(r#"runtara:v2:["state-local""#)
+            })
+            .unwrap_or_else(|| {
+                let ids: Vec<&str> = rows.iter().map(|c| c.checkpoint_id.as_str()).collect();
+                panic!("{label}: s1's state row survives the park: {ids:?}")
+            });
+        let record: Value = serde_json::from_slice(&row.state).unwrap();
+        assert_eq!(record["state"]["stage"], "before", "{label}: {record}");
+        let a = record["state"]["a"].as_f64().expect("a number");
+        assert!(written.is_none_or(|w| close(w, a)), "{label}");
+        written = Some(a);
+        let remaining = (instance.sleep_until.unwrap() - chrono::Utc::now())
+            .to_std()
+            .unwrap_or_default();
+        tokio::time::sleep(remaining + Duration::from_millis(20)).await;
+    }
+    let completed = h
+        .persistence
+        .get_instance(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.status, InstanceStatus::Completed, "{label}");
+    let output: Value = serde_json::from_slice(&completed.output.unwrap()).unwrap();
+    let a = final_local_state(&output, label);
+    assert!(
+        close(a, written.expect("parked at least once")),
+        "{label}: the child read back the state written before the park: {output}"
+    );
+    only_the_result_is_left(h, &options.instance_id, result_prefix, label).await;
+}
+
+/// An embedded child keeps its state locally, checkpointed per SetState; the
+/// Embed's result closes those rows with the rest of the child's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_embedded_childs_local_state_resumes_from_its_rows_then_goes_with_the_result() {
+    let h = Harness::new().await;
+    for backend in ["legacy", "scoped"] {
+        let (call, children) = embed_call(local_state_child(Some(300)));
+        let artifact = compile_with_children(
+            calling_graph(call, json!({})),
+            children,
+            &h.dir.path().join(format!("embed-state-{backend}")),
+            "utils",
+            backend,
+        );
+        let runner = h.runner(Some(bounds("utils")));
+        local_state_resumes_then_goes_with_the_result(
+            &h,
+            &runner,
+            &artifact,
+            r#"runtara:v2:["embed_workflow""#,
+            backend,
+        )
+        .await;
+    }
+}
+
+/// A workflow-agent keeps its state locally too, composed or isolated; the
+/// result of the Agent calling it closes those rows with the rest of its.
+/// The composed child parks and resumes from them. An isolated one sleeps a
+/// Delay in-process instead of parking its root, so it runs through: its
+/// rows are seen where a failing call saves no result, and seen gone where
+/// the call succeeds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_workflow_agents_local_state_goes_with_the_result_of_its_call() {
+    let h = Harness::new().await;
+    let call = json!({"id":"call","stepType":"Agent","agentId":"random-child",
+        "capabilityId":"run","maxRetries":0,"inputMapping":{}});
+    let (artifact, config) = workflow_agent_parent(
+        calling_graph(call.clone(), json!({})),
+        local_state_child(Some(300)),
+        &h.dir.path().join("agent-state-legacy"),
+        "legacy",
+    );
+    let runner = h.runner(Some(config));
+    local_state_resumes_then_goes_with_the_result(
+        &h,
+        &runner,
+        &artifact,
+        r#"runtara:v2:["agent""#,
+        "legacy",
+    )
+    .await;
+
+    let (artifact, config) = workflow_agent_parent(
+        calling_graph(call.clone(), json!({})),
+        local_state_child(None),
+        &h.dir.path().join("agent-state-scoped"),
+        "scoped",
+    );
+    let runner = h.runner(Some(config));
+    let options = h.options(&artifact.wasm_path).await;
+    run_until_exit(&runner, &options).await;
+    let completed = h
+        .persistence
+        .get_instance(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        completed.status,
+        InstanceStatus::Completed,
+        "scoped: {completed:?}"
+    );
+    let output: Value = serde_json::from_slice(&completed.output.unwrap()).unwrap();
+    final_local_state(&output, "scoped");
+    only_the_result_is_left(&h, &options.instance_id, r#"runtara:v2:["agent""#, "scoped").await;
+
+    let mut failing = local_state_child(None);
+    failing["steps"]["done"] = json!({"id":"done","stepType":"Error","category":"permanent",
+        "code":"AFTER_STATE","message":"fails after writing its state","severity":"error"});
+    let handled = json!({"durable":true,"entryPoint":"call","steps":{
+        "call":call,
+        "finish":{"id":"finish","stepType":"Finish","inputMapping":{}},
+        "handled":{"id":"handled","stepType":"Finish","inputMapping":{}}},
+        "executionPlan":[{"fromStep":"call","toStep":"finish"},
+            {"fromStep":"call","toStep":"handled","label":"onError"}]});
+    let (artifact, config) = workflow_agent_parent(
+        handled,
+        failing,
+        &h.dir.path().join("agent-state-scoped-failing"),
+        "scoped",
+    );
+    let runner = h.runner(Some(config));
+    let options = h.options(&artifact.wasm_path).await;
+    run_until_exit(&runner, &options).await;
+    let completed = h
+        .persistence
+        .get_instance(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        completed.status,
+        InstanceStatus::Completed,
+        "scoped, failing: {completed:?}"
+    );
+    let ids: Vec<String> = h
+        .persistence
+        .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| c.checkpoint_id)
+        .collect();
+    for (kind, step) in [
+        ("state-local", "s1"),
+        ("state-local", "s2"),
+        ("state-read-local", "g"),
+    ] {
+        assert!(
+            ids.iter().any(|id| in_child(id)
+                && id.starts_with(&format!(r#"runtara:v2:["{kind}""#))
+                && id.ends_with(&format!(r#"["{step}"]]"#))),
+            "scoped, failing: the isolated child wrote {kind} for {step}: {ids:?}"
+        );
+    }
+}
+
 /// A loopback HTTP endpoint that answers 500 to the first `failures` requests
 /// and 200 after that. Returns its address and the count of requests served.
 async fn flaky_http(
