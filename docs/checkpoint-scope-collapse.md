@@ -122,6 +122,30 @@ so its caller's result collapses it the same way. Not collapsed: a
 `durable: false` step, which saves no result, and rows written before
 migration 049.
 
+## State and retry rows
+
+A workflow running embedded or as a published workflow-agent keeps its state
+locally and checkpoints it: each SetState saves the whole local state it
+produced (`state-local`, up to 64 KiB), each GetState what it read
+(`state-read-local`). Those rows carry the child's namespace, like every other
+row the child writes, so the caller's result closes them with the rest. A
+child that wrote its state ten times leaves nothing once its EmbedWorkflow or
+Agent call has recorded a result. A durable top-level run never writes such
+rows: it publishes its state to the host (`instance_state`, one row per
+instance, and `instance_state_writes`, its patch log), and only its GetState
+reads are checkpointed.
+
+Superseded state rows are not replaced while the child runs. Replay runs the
+child from its start, and a SetState whose row was gone would compute its
+state again from inputs a `durable: false` step may produce differently. So a
+running child keeps one row per SetState it has executed, and so does a child
+whose caller saves no result, until retention.
+
+A step's `::retry::N` row records an attempt's error message for audit. Only
+the generic checkpoint listing returns it; nothing reads it as retry history,
+so it goes with the step's other attempt rows once the step's result is
+recorded.
+
 ## Recovery progress
 
 Crash-loop recovery compares a progress marker across restarts. It used the
