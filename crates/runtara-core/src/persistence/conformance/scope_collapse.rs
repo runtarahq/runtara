@@ -375,6 +375,64 @@ pub async fn a_fenced_split_result_collapses_its_iterations(p: &dyn Persistence)
     p.delete_instances_batch(&[id]).await.unwrap();
 }
 
+/// A While inside an isolated child records its result through the fenced
+/// path: it collapses the child's iterations of that loop and nothing of the
+/// parent's.
+pub async fn a_fenced_while_result_collapses_its_iterations(p: &dyn Persistence) {
+    let id = running(p, "fenced-while").await;
+    let lease = claim(p, &id).await;
+    let attempt = fences(p)
+        .begin_invocation_attempt(&lease, "child", "start")
+        .await
+        .unwrap()
+        .fence;
+    let frame = json!([["child", "wf", [], ["call"]]]);
+    let checkpoint = |key: &String, state: &[u8]| {
+        let key = key.clone();
+        let state = state.to_vec();
+        let attempt = &attempt;
+        async move {
+            fences(p)
+                .invocation_checkpoint(
+                    attempt,
+                    &InvocationCheckpoint {
+                        checkpoint_id: key,
+                        state,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    };
+    let passes: Vec<String> = (0..3)
+        .map(|i| {
+            key(
+                "agent",
+                frame.clone(),
+                json!([["While", "poll", i]]),
+                json!(["utils", "random-double", "check"]),
+            )
+        })
+        .collect();
+    let result = key("while", frame, json!([]), json!(["poll"]));
+    let parent = vec![key(
+        "agent",
+        json!([]),
+        json!([["While", "poll", 0]]),
+        json!(["utils", "random-double", "check"]),
+    )];
+    save_all(p, &id, &parent).await;
+    for pass in &passes {
+        checkpoint(pass, b"x").await;
+    }
+    checkpoint(&result, b"{}").await;
+
+    let mut expected = set(&parent);
+    expected.insert(result);
+    assert_eq!(stored(p, &id).await, expected);
+    p.delete_instances_batch(&[id]).await.unwrap();
+}
+
 /// The frame a child invoked by step `step` at loop path `loops` (an
 /// EmbedWorkflow's, or a workflow-agent's called from an Agent) writes under.
 fn child(loops: Value, step: &str) -> Value {
@@ -812,6 +870,7 @@ pub async fn run_all(p: &dyn Persistence) {
     nested_splits_collapse_level_by_level(p).await;
     a_result_found_stored_collapses_nothing(p).await;
     a_fenced_split_result_collapses_its_iterations(p).await;
+    a_fenced_while_result_collapses_its_iterations(p).await;
     recording_an_embed_result_collapses_its_child(p).await;
     recording_an_agent_result_collapses_its_child_and_retries(p).await;
     nested_child_scopes_collapse_level_by_level(p).await;

@@ -7634,6 +7634,10 @@ fn spawn_retry_http_provider(
     (url, hits, handle)
 }
 
+/// The command id of the pause [`CheckpointingRuntimeHost::pause_on_write`]
+/// raises.
+const CHECKPOINTING_HOST_PAUSE: &str = "pause-on-write";
+
 /// Checkpoint-persisting runtime host: unlike [`RecordingRuntimeHost`] its
 /// checkpoint map survives across `execute_invoke` calls (share one `Arc`), so
 /// a store-freeing suspend that checkpoints its deadline on the first invoke
@@ -7648,6 +7652,8 @@ struct CheckpointingRuntimeHost {
     /// Ids stored by `checkpoint`, in order, rows a later result collapsed
     /// included.
     written: Mutex<Vec<String>>,
+    /// A checkpoint id prefix whose next write is answered with a pause, once.
+    pause_on_write: Mutex<Option<String>>,
     sleeps: Mutex<Vec<String>>,
     managed_inputs: direct_managed_inputs::ManagedInputs,
     /// Milliseconds added to the wall clock for every `now-ms` the guest asks
@@ -7675,6 +7681,7 @@ impl CheckpointingRuntimeHost {
             delay_on_step_end: Mutex::new(None),
             checkpoints: Mutex::new(HashMap::new()),
             written: Mutex::new(Vec::new()),
+            pause_on_write: Mutex::new(None),
             sleeps: Mutex::new(Vec::new()),
             managed_inputs: direct_managed_inputs::ManagedInputs::new("store-freeing-delay"),
             clock_offset_ms: Mutex::new(0),
@@ -7846,6 +7853,20 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
                 },
             );
         }
+        let mut pause_on_write = self.pause_on_write.lock().unwrap();
+        let pending_signal = (!state.is_empty()
+            && pause_on_write
+                .as_deref()
+                .is_some_and(|prefix| checkpoint_id.starts_with(prefix)))
+        .then(|| {
+            pause_on_write.take();
+            runtara_component_host::runtime_host::RuntimeSignalInfo {
+                signal_type: "pause".into(),
+                command_id: CHECKPOINTING_HOST_PAUSE.into(),
+                payload: Vec::new(),
+                checkpoint_id: None,
+            }
+        });
         if !state.is_empty() {
             self.written.lock().unwrap().push(checkpoint_id.clone());
             store_checkpoint(&mut checkpoints, checkpoint_id, state);
@@ -7854,7 +7875,7 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
             runtara_component_host::runtime_host::RuntimeCheckpointResult {
                 found: false,
                 state: Vec::new(),
-                pending_signal: None,
+                pending_signal,
                 custom_signal: None,
             },
         )
@@ -7862,9 +7883,9 @@ impl runtara_component_host::runtime_host::RuntimeHost for CheckpointingRuntimeH
     async fn handle_checkpoint_signal(
         &self,
         _signal_type: String,
-        _command_id: String,
+        command_id: String,
     ) -> Result<bool, String> {
-        Ok(false)
+        Ok(command_id == CHECKPOINTING_HOST_PAUSE)
     }
     fn now_ms(&self) -> Result<u64, String> {
         if let Some(pinned) = *self.pinned_clock_ms.lock().unwrap() {

@@ -788,7 +788,10 @@ fn audit_03_durable_agent_and_split_caches_keep_sibling_results_on_replay() {
         "invoke":{"id":"invoke","stepType":"Agent","agentId":"utils","capabilityId":"return-input","inputMapping":{"value":immediate(json!("A"))}},
         "agent_done":{"id":"agent_done","stepType":"Finish","inputMapping":{"value":reference("steps.invoke.outputs")}}
     },"executionPlan":[{"fromStep":"invoke","toStep":"agent_done"}]});
-    let body = json!({"entryPoint":"items","steps":{
+    // The loops' bodies are durable and the workflow is not, so the While
+    // loops save no result and the replay re-enters them: their Split and
+    // Agent caches are what serve it.
+    let body = json!({"durable":true,"entryPoint":"items","steps":{
         "items":audit_loop("items", "Split", 1, agent_body),
         "body_done":{"id":"body_done","stepType":"Finish","inputMapping":{"value":reference("steps.items.outputs.0.value")}}
     },"executionPlan":[{"fromStep":"items","toStep":"body_done"}]});
@@ -796,7 +799,7 @@ fn audit_03_durable_agent_and_split_caches_keep_sibling_results_on_replay() {
     let mut b = loop_step("b", body);
     b["subgraph"]["steps"]["items"]["subgraph"]["steps"]["invoke"]["inputMapping"]["value"] =
         immediate(json!("B"));
-    let graph = json!({"durable":true,"entryPoint":"a","steps":{
+    let graph = json!({"durable":false,"entryPoint":"a","steps":{
         "a":a,"b":b,"done":{"id":"done","stepType":"Finish","inputMapping":{
             "a":reference("steps.a.outputs.outputs.value"),"b":reference("steps.b.outputs.outputs.value")
         }}
@@ -818,29 +821,17 @@ fn audit_03_durable_agent_and_split_caches_keep_sibling_results_on_replay() {
             json!({"a":"A","b":"B"})
         );
     }
-    // Each site wrote Agent and Split rows of its own. Each While's result
-    // replaced the rows inside it when it was recorded, so the replay above
-    // was served by two distinct While rows.
+    // Each site's Split result replaced its Agent's row when it was
+    // recorded, so the replay above was served by two distinct Split rows.
     let checkpoints = host.checkpoints.lock().unwrap();
-    let written = host.written.lock().unwrap();
-    for (kind, rows) in [("agent", 0), ("split", 0), ("while", 2)] {
-        let prefix = format!("runtara:v2:[\"{kind}\"");
+    for (kind, rows) in [("agent", 0), ("split", 2), ("while", 0)] {
         assert_eq!(
             checkpoints
                 .keys()
-                .filter(|key| key.starts_with(&prefix))
+                .filter(|key| key.starts_with(&format!("runtara:v2:[\"{kind}\"")))
                 .count(),
             rows,
             "{kind}"
-        );
-        assert_eq!(
-            written
-                .iter()
-                .filter(|key| key.starts_with(&prefix))
-                .collect::<std::collections::HashSet<_>>()
-                .len(),
-            2,
-            "{kind}: one row per site"
         );
     }
 }
@@ -1197,6 +1188,116 @@ fn audit_05_completed_loops_do_not_expire_during_later_replay() {
             assert_eq!(completed(invoke()), json!({"ok":true}));
         }
     }
+}
+
+/// A pause between a While's completion marker and its result: the replay
+/// re-enters the loop past its original deadline, and the marker keeps the
+/// finished loop from expiring.
+#[test]
+fn audit_05_a_while_paused_after_its_completion_marker_does_not_expire() {
+    let mut graph = timeout_graph(0, false);
+    graph["steps"]["loop"]["subgraph"] =
+        json!({"entryPoint":"body_finish","steps":{"body_finish":finish("body_finish")}});
+    let (_temp, artifact) = compile("audit-while-marker", graph);
+    let host = audit_deadline_host(1_000_000);
+    *host.pause_on_write.lock().unwrap() = Some(r#"runtara:v2:["loop-complete""#.into());
+    let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
+    assert!(matches!(invoke(), InvokeExit::Suspended(_)));
+    {
+        let checkpoints = host.checkpoints.lock().unwrap();
+        assert!(
+            checkpoints
+                .keys()
+                .any(|key| key.starts_with(r#"runtara:v2:["loop-complete""#)),
+            "the marker is saved before the pause"
+        );
+        assert!(
+            !checkpoints
+                .keys()
+                .any(|key| key.starts_with(r#"runtara:v2:["while""#)),
+            "the result is not saved yet"
+        );
+    }
+    *host.pinned_clock_ms.lock().unwrap() = Some(1_060_001);
+    assert_eq!(completed(invoke()), json!({"ok":true}));
+    assert!(
+        host.checkpoints
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|key| key.starts_with(r#"runtara:v2:["while""#)),
+        "the replay records the result"
+    );
+}
+
+/// A While that times out, or whose body fails, saves no result even when
+/// its onError route handles the failure, and keeps its iteration rows for
+/// a replay.
+#[test]
+fn audit_05_a_failed_while_saves_no_result() {
+    let while_rows = |host: &CheckpointingRuntimeHost| {
+        let written = host.written.lock().unwrap();
+        assert!(
+            !written
+                .iter()
+                .any(|key| key.starts_with(r#"runtara:v2:["while""#)),
+            "no While result: {written:?}"
+        );
+        host.checkpoints
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|key| key.contains(r#"["While","loop",0]"#))
+            .count()
+    };
+
+    // A timeout routed to onError.
+    let mut graph = timeout_graph(60_000, false);
+    graph["executionPlan"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"fromStep":"loop","toStep":"recover","label":"onError"}));
+    graph["steps"]["recover"] = finish("recover");
+    let (_temp, artifact) = compile("audit-while-timeout", graph);
+    let host = audit_deadline_host(1_000_000);
+    let invoke = || run_invoke_once(&artifact.wasm_path, host.clone(), b"{}".to_vec());
+    assert_at(invoke(), 1_001_000);
+    *host.pinned_clock_ms.lock().unwrap() = Some(1_001_000);
+    assert_eq!(completed(invoke()), json!({"ok":true}));
+    assert!(
+        while_rows(&host) > 0,
+        "the timed-out pass keeps its Delay row"
+    );
+
+    // A body error routed to onError.
+    let body = json!({"entryPoint":"invoke","steps":{
+        "invoke":{"id":"invoke","stepType":"Agent","agentId":"utils","capabilityId":"return-input",
+            "inputMapping":{"value":immediate(json!("x"))}},
+        "fail":{"id":"fail","stepType":"Error","category":"permanent","code":"BODY_FAILS",
+            "message":"the pass fails","severity":"error"}
+    },"executionPlan":[{"fromStep":"invoke","toStep":"fail"}]});
+    let mut repeat = loop_step("loop", body);
+    repeat["config"]["maxIterations"] = json!(3);
+    let graph = json!({"durable":true,"entryPoint":"loop","steps":{
+        "loop":repeat,"recover":finish("recover"),"finish":finish("finish")
+    },"executionPlan":[{"fromStep":"loop","toStep":"finish"},
+        {"fromStep":"loop","toStep":"recover","label":"onError"}]});
+    let meta =
+        std::fs::read(direct_e2e_components_dir().join("runtara_agent_utils.meta.json")).unwrap();
+    let catalog = Arc::new(AgentCatalog::from_agents(vec![
+        serde_json::from_slice(&meta).unwrap(),
+    ]));
+    let (_temp, artifact) = compile_configured("audit-while-error", graph, vec![], Some(catalog));
+    let host = Arc::new(CheckpointingRuntimeHost::new());
+    assert_eq!(
+        completed(run_invoke_once(
+            &artifact.wasm_path,
+            host.clone(),
+            b"{}".to_vec()
+        )),
+        json!({"ok":true})
+    );
+    assert_eq!(while_rows(&host), 1, "the failed pass keeps its Agent row");
 }
 
 #[test]
