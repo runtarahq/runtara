@@ -1720,12 +1720,14 @@ async fn an_embed_parked_in_its_child_resumes_from_the_child_rows_then_collapses
     }
 }
 
-/// A child that keeps local state: `r` (random-double), SetState `s1`
-/// `{a: r, stage: "before"}`, a Delay `pause` of `pause_ms` if given, SetState
-/// `s2` `{stage: "after"}`, GetState `g`, then a Finish returning g's state.
+/// A child that keeps local state: `r` (random-double, not durable, so a
+/// replay draws a new number), SetState `s1` `{a: r, stage: "before"}`, a
+/// Delay `pause` of `pause_ms` if given, SetState `s2` `{stage: "after"}`,
+/// GetState `g`, then a Finish returning g's state. After a replay `a` keeps
+/// its value only if `s1` was restored from its row.
 fn local_state_child(pause_ms: Option<u64>) -> Value {
     let mut steps = json!({
-        "r":{"id":"r","stepType":"Agent","agentId":"utils","capabilityId":"random-double","maxRetries":0,"inputMapping":{}},
+        "r":{"id":"r","stepType":"Agent","agentId":"utils","capabilityId":"random-double","maxRetries":0,"durable":false,"inputMapping":{}},
         "s1":{"id":"s1","stepType":"SetState","values":{
             "a":{"valueType":"reference","value":"steps.r.outputs"},
             "stage":{"valueType":"immediate","value":"before"}}},
@@ -1896,9 +1898,10 @@ async fn an_embedded_childs_local_state_resumes_from_its_rows_then_goes_with_the
 
 /// A workflow-agent keeps its state locally too, composed or isolated; the
 /// result of the Agent calling it closes those rows with the rest of its.
-/// The composed child parks and resumes from them. The isolated one runs
-/// through: a Delay inside an isolated workflow-agent does not park its root
-/// here.
+/// The composed child parks and resumes from them. An isolated one sleeps a
+/// Delay in-process instead of parking its root, so it runs through: its
+/// rows are seen where a failing call saves no result, and seen gone where
+/// the call succeeds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_workflow_agents_local_state_goes_with_the_result_of_its_call() {
     let h = Harness::new().await;
@@ -1921,7 +1924,7 @@ async fn a_workflow_agents_local_state_goes_with_the_result_of_its_call() {
     .await;
 
     let (artifact, config) = workflow_agent_parent(
-        calling_graph(call, json!({})),
+        calling_graph(call.clone(), json!({})),
         local_state_child(None),
         &h.dir.path().join("agent-state-scoped"),
         "scoped",
@@ -1943,6 +1946,56 @@ async fn a_workflow_agents_local_state_goes_with_the_result_of_its_call() {
     let output: Value = serde_json::from_slice(&completed.output.unwrap()).unwrap();
     final_local_state(&output, "scoped");
     only_the_result_is_left(&h, &options.instance_id, r#"runtara:v2:["agent""#, "scoped").await;
+
+    let mut failing = local_state_child(None);
+    failing["steps"]["done"] = json!({"id":"done","stepType":"Error","category":"permanent",
+        "code":"AFTER_STATE","message":"fails after writing its state","severity":"error"});
+    let handled = json!({"durable":true,"entryPoint":"call","steps":{
+        "call":call,
+        "finish":{"id":"finish","stepType":"Finish","inputMapping":{}},
+        "handled":{"id":"handled","stepType":"Finish","inputMapping":{}}},
+        "executionPlan":[{"fromStep":"call","toStep":"finish"},
+            {"fromStep":"call","toStep":"handled","label":"onError"}]});
+    let (artifact, config) = workflow_agent_parent(
+        handled,
+        failing,
+        &h.dir.path().join("agent-state-scoped-failing"),
+        "scoped",
+    );
+    let runner = h.runner(Some(config));
+    let options = h.options(&artifact.wasm_path).await;
+    run_until_exit(&runner, &options).await;
+    let completed = h
+        .persistence
+        .get_instance(&options.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        completed.status,
+        InstanceStatus::Completed,
+        "scoped, failing: {completed:?}"
+    );
+    let ids: Vec<String> = h
+        .persistence
+        .list_checkpoints(&options.instance_id, None, 100, 0, None, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| c.checkpoint_id)
+        .collect();
+    for (kind, step) in [
+        ("state-local", "s1"),
+        ("state-local", "s2"),
+        ("state-read-local", "g"),
+    ] {
+        assert!(
+            ids.iter().any(|id| in_child(id)
+                && id.starts_with(&format!(r#"runtara:v2:["{kind}""#))
+                && id.ends_with(&format!(r#"["{step}"]]"#))),
+            "scoped, failing: the isolated child wrote {kind} for {step}: {ids:?}"
+        );
+    }
 }
 
 /// A loopback HTTP endpoint that answers 500 to the first `failures` requests

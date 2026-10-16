@@ -125,21 +125,35 @@ migration 049.
 ## State and retry rows
 
 A workflow running embedded or as a published workflow-agent keeps its state
-locally and checkpoints it: each SetState saves the whole local state it
-produced (`state-local`, up to 64 KiB), each GetState what it read
+locally. Where it can replay (it is durable and imports the runtime), it
+checkpoints that state: each SetState saves the record it produced
+(`state-local`: its patch and the whole local state, which is capped at
+64 KiB, so a record can approach twice that), each GetState what it read
 (`state-read-local`). Those rows carry the child's namespace, like every other
-row the child writes, so the caller's result closes them with the rest. A
-child that wrote its state ten times leaves nothing once its EmbedWorkflow or
-Agent call has recorded a result. A durable top-level run never writes such
-rows: it publishes its state to the host (`instance_state`, one row per
-instance, and `instance_state_writes`, its patch log), and only its GetState
-reads are checkpointed.
+row the child writes, so the result of the EmbedWorkflow or Agent call that
+runs the child closes them with the rest, under the rules above: a namespace
+another step may share, or one in a run whose list is unknown, is kept, and a
+row whose address is over 2 KB is never collapsed.
+
+Two kinds of state rows have no closing result:
+
+- a workflow-agent called as an AiAgent tool writes them under the tool
+  call's frame, and the tool call records no result of its own (AiAgent does
+  not close its scope);
+- a non-durable top-level workflow whose Split or While body is marked
+  `durable: true` checkpoints local state in that body, under a loop that
+  saves no result.
+
+A durable top-level run writes no such rows: it publishes its state to the
+host (`instance_state`, one row per instance, and `instance_state_writes`, its
+patch log), and only its GetState reads are checkpointed.
 
 Superseded state rows are not replaced while the child runs. Replay runs the
 child from its start, and a SetState whose row was gone would compute its
 state again from inputs a `durable: false` step may produce differently. So a
-running child keeps one row per SetState it has executed, and so does a child
-whose caller saves no result, until retention.
+running child keeps one row per SetState execution (a While loop in it adds
+rows on every iteration), and so does a child whose caller saves no result,
+until retention.
 
 A step's `::retry::N` row records an attempt's error message for audit. Only
 the generic checkpoint listing returns it; nothing reads it as retry history,
