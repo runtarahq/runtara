@@ -348,14 +348,78 @@ async fn shutdown_reaps_pending_children_and_is_idempotent() {
     assert!(dropped.load(Ordering::Acquire));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn real_non_cooperative_wasm_is_interrupted_and_its_store_dropped() {
-    assert_wasm_is_stopped(false, false).await;
+#[test]
+fn real_non_cooperative_wasm_is_interrupted_and_its_store_dropped() {
+    with_watchdog(|progress| async move {
+        assert_wasm_is_stopped(false, false, &progress).await;
+    });
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn infinite_wasm_initializer_is_interrupted_and_its_store_dropped() {
-    assert_wasm_is_stopped(true, false).await;
+#[test]
+fn infinite_wasm_initializer_is_interrupted_and_its_store_dropped() {
+    with_watchdog(|progress| async move {
+        assert_wasm_is_stopped(true, false, &progress).await;
+    });
+}
+
+/// The last step a watched test reached.
+#[derive(Clone, Default)]
+struct Progress(Arc<Mutex<&'static str>>);
+
+impl Progress {
+    fn step(&self, step: &'static str) {
+        *self.0.lock().unwrap() = step;
+    }
+
+    fn last(&self) -> &'static str {
+        *self.0.lock().unwrap()
+    }
+}
+
+/// How long a watched test may take before it fails as stuck.
+const WATCHDOG_LIMIT: Duration = Duration::from_secs(60);
+
+/// Run `test` on its own two-worker runtime and watch it from this thread.
+///
+/// A non-cooperative guest pins the runtime worker it runs on. A runtime
+/// whose workers are all pinned never fires its timers, so a stuck test
+/// would never reach the `tokio::time::timeout`s inside it, and its runtime
+/// could not shut down either. Waiting outside tokio turns that into a
+/// failure naming the last step the test reached; a stuck runtime's thread
+/// is left behind for the process to end.
+fn with_watchdog<F, Fut>(test: F)
+where
+    F: FnOnce(Progress) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let progress = Progress::default();
+    progress.step("starting the runtime");
+    let watched = progress.clone();
+    let (finished, outcome) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(test(watched.clone()))
+        }));
+        if result.is_ok() {
+            watched.step("shutting the runtime down");
+        }
+        // Returns after the limit even when a worker never stops.
+        let started = std::time::Instant::now();
+        runtime.shutdown_timeout(Duration::from_secs(10));
+        let stopped = started.elapsed() < Duration::from_secs(10);
+        let _ = finished.send((result, stopped));
+    });
+    match outcome.recv_timeout(WATCHDOG_LIMIT) {
+        Ok((Err(panic), _)) => std::panic::resume_unwind(panic),
+        Ok((Ok(()), true)) => {}
+        Ok((Ok(()), false)) => panic!("a runtime worker was still running after the test"),
+        Err(_) => panic!("stuck for {WATCHDOG_LIMIT:?} after: {}", progress.last()),
+    }
 }
 
 #[test]
@@ -368,8 +432,17 @@ fn spawn_outside_runtime_is_an_error_without_poisoning_registry() {
     assert_eq!(tasks.retained_result_bytes(), 0);
 }
 
-async fn assert_wasm_is_stopped(initializer: bool, nested: bool) {
+async fn assert_wasm_is_stopped(initializer: bool, nested: bool, progress: &Progress) {
+    progress.step(match (initializer, nested) {
+        (false, false) => "spawning a busy export",
+        (true, false) => "spawning a busy initializer",
+        (false, true) => "spawning a parent of a busy export",
+        (true, true) => "spawning a parent of a busy initializer",
+    });
     let children = Arc::new(registry(2, 1024));
+    // Production always ticks the epoch; without it the guest yields only when
+    // a task is cancelled, and pins its worker in between.
+    crate::engine::spawn_epoch_ticker(children.engine.clone());
     let engine = children.engine.clone();
     let entry = if initializer {
         "(start $busy) (func (export \"run\"))"
@@ -449,20 +522,23 @@ async fn assert_wasm_is_stopped(initializer: bool, nested: bool) {
     let sibling = tasks
         .spawn(|_| async { InvokeExit::Completed(vec![42]) })
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), rx)
+    tokio::time::timeout(Duration::from_secs(10), rx)
         .await
         .unwrap()
         .unwrap();
+    progress.step("cancelling the guest's task");
     tasks.cancel(id).unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(2), tasks.join(id))
+    let result = tokio::time::timeout(Duration::from_secs(10), tasks.join(id))
         .await
         .unwrap()
         .unwrap();
     assert!(matches!(result.outcome(), InvokeExit::Cancelled));
     assert!(dropped.load(Ordering::Acquire));
+    progress.step("joining the sibling");
     assert!(
         matches!(tasks.join(sibling).await.unwrap().outcome(),InvokeExit::Completed(b) if b==&[42])
     );
+    progress.step("shutting the registry down");
     tasks.shutdown().await.unwrap();
 }
 
@@ -582,10 +658,12 @@ async fn failed_or_panicking_cleanup_never_publishes_a_guest_outcome() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancelling_a_parent_reaps_non_cooperative_wasm_grandchildren() {
-    assert_wasm_is_stopped(false, true).await;
-    assert_wasm_is_stopped(true, true).await;
+#[test]
+fn cancelling_a_parent_reaps_non_cooperative_wasm_grandchildren() {
+    with_watchdog(|progress| async move {
+        assert_wasm_is_stopped(false, true, &progress).await;
+        assert_wasm_is_stopped(true, true, &progress).await;
+    });
 }
 
 #[tokio::test]
