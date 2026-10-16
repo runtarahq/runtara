@@ -322,6 +322,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run's other rows, even before the table has statistics (a Split's result
   could do that before). `A → Split[10000]{Agent} → B` takes as long as it
   did without the new rules.
+- **A finished While keeps one checkpoint row, and a resume skips it.** A
+  While in a durable graph now checkpoints its result, `{iterations,
+  outputs}`, once its loop exits, and deletes in the same transaction the
+  checkpoints of its iterations and its loop-deadline rows. A replay takes the
+  result from that row instead of running every iteration again, so a resume
+  after a long loop no longer gets slower with each iteration, and
+  `A → While[1000] → B` keeps 3 rows instead of one per step per iteration.
+  A loop that fails, times out, is handled by `onError` or is suspended saves
+  no result, and a run parked inside an iteration resumes from its rows as
+  before. A loop body that writes local state (in an embedded child or a
+  workflow-agent) carries a snapshot of it in the result. This applies to
+  workflows compiled on this release; an older artifact replays every
+  iteration as before until it is recompiled.
 - **A finished Split keeps one checkpoint row.** Recording a durable Split's
   result now deletes, in the same transaction, the checkpoints of its
   iterations and its own attempt, retry and loop-deadline rows: replay reads

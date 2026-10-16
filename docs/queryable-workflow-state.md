@@ -84,12 +84,12 @@ Things an earlier draft assumed that do not exist:
 - **The ordinary checkpoint save is an upsert,** not first-write-wins
   (`dialect/postgres.rs:95-100`).
 - **The 64 KiB continuation cap is a constant,** not configurable.
-- **Little compacts checkpoints of a live run.** A finished Split's result
-  replaces its iterations' rows, an EmbedWorkflow's or workflow-agent call's
-  result replaces its child's rows, and an Agent's result replaces its retry
-  rows (`docs/checkpoint-scope-collapse.md`); every other row, While
-  iterations included, stays until retention or pinned-child pruning, which
-  only touch terminal runs.
+- **Little compacts checkpoints of a live run.** A finished Split's or
+  While's result replaces its iterations' rows, an EmbedWorkflow's or
+  workflow-agent call's result replaces its child's rows, and an Agent's
+  result replaces its retry rows (`docs/checkpoint-scope-collapse.md`); every
+  other row stays until retention or pinned-child pruning, which only touch
+  terminal runs.
 
 ## Concepts
 

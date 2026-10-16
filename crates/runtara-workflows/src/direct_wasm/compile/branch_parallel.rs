@@ -329,6 +329,7 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
         DirectRunPlan::While {
             step_id,
             while_id,
+            durable,
             breakpoint,
             nested_plan,
             error_plan,
@@ -337,6 +338,7 @@ fn with_next_join(node: &DirectRunPlan) -> DirectRunPlan {
         } => DirectRunPlan::While {
             step_id: step_id.clone(),
             while_id: *while_id,
+            durable: *durable,
             breakpoint: *breakpoint,
             nested_plan: nested_plan.clone(),
             next_plan,

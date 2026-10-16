@@ -435,6 +435,40 @@ mod component {
             })
         }
 
+        fn while_cache_key(while_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.while_cache_key(while_id, &source)
+            })
+        }
+
+        fn while_result(while_id: u32, source: Vec<u8>, state: Vec<u8>) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.while_result(while_id, &source, &state)
+            })
+        }
+
+        fn while_output_from_result(
+            while_id: u32,
+            source: Vec<u8>,
+            step_result: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            MANIFEST.with(|slot| {
+                let slot = slot.borrow();
+                let manifest = slot
+                    .as_ref()
+                    .ok_or_else(|| "direct stdlib manifest was not initialized".to_string())?;
+                manifest.while_output_from_result(while_id, &source, &step_result)
+            })
+        }
+
         fn filter(filter_id: u32, source: Vec<u8>) -> Result<Vec<u8>, String> {
             MANIFEST.with(|slot| {
                 let slot = slot.borrow();

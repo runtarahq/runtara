@@ -29,15 +29,16 @@
 //! - `[kind, step, index]` is a loop iteration, exactly as in the key;
 //! - `["ns", kind, parts]` is a namespace frame's marker (child, tool-child,
 //!   agent-aux);
-//! - `["base", kind, parts]` tags a result row (Agent, Split, EmbedWorkflow),
-//!   and `["own", kind, parts]` the rows that result keeps for itself: its
-//!   retry attempts, retry records and retry sleeps, and a Split's or
-//!   EmbedWorkflow's deadline rows. The tag repeats the result key's kind and
-//!   parts, so it tells steps apart exactly as well as their result keys do.
-//!   A closure deletes `own` rows, never another step's `base` row.
+//! - `["base", kind, parts]` tags a result row (Agent, Split, While,
+//!   EmbedWorkflow), and `["own", kind, parts]` the rows that result keeps for
+//!   itself: its retry attempts, retry records and retry sleeps, and a
+//!   Split's, While's or EmbedWorkflow's deadline rows. The tag repeats the
+//!   result key's kind and parts, so it tells steps apart exactly as well as
+//!   their result keys do. A closure deletes `own` rows, never another step's
+//!   `base` row.
 //!
-//! A Split's or EmbedWorkflow's result key names only its step, so its
-//! deadline rows map onto it without losing anything. An Agent's deadline row
+//! A Split's, While's or EmbedWorkflow's result key names only its step, so
+//! its deadline rows map onto it without losing anything. An Agent's deadline row
 //! names the graph scope and its result key names the agent, so the two cannot
 //! be matched when steps share an id at one position (an `onWait` branch may
 //! reuse a main-graph id). It is left untagged, and goes when an enclosing
@@ -177,6 +178,11 @@ type Rule = fn(&Key) -> Option<ScopeClosure>;
 ///   the result records the failures), and replay looks it up before
 ///   entering the loop, its deadline or its retries, so its iterations and
 ///   its own rows are never read again.
+/// - `while`: a While's result is saved only once its loop has exited, its
+///   condition false or its maximum reached; a failure, a timeout or a
+///   suspension inside it saves none. Replay looks it up before the first
+///   condition and its deadline, so its iterations and its own rows are never
+///   read again.
 /// - `embed_workflow`: an EmbedWorkflow's result is saved only once its child
 ///   has finished (it succeeded, or, as an AiAgent tool, its failure became
 ///   the tool result), never when the child parks or an enclosing deadline
@@ -190,11 +196,13 @@ type Rule = fn(&Key) -> Option<ScopeClosure>;
 ///   that retried: the key does not say whether the agent is a workflow.
 const RULES: &[(&str, Rule)] = &[
     ("split", Key::loop_closure),
+    ("while", Key::loop_closure),
     ("embed_workflow", Key::child_closure),
     ("agent", Key::child_closure),
 ];
 
-/// The closure of a Split's result: its own rows and every iteration it ran.
+/// The closure of a Split's or While's result: its own rows and every
+/// iteration it ran.
 pub fn loop_closure(checkpoint_id: &str) -> Option<ScopeClosure> {
     Key::parse(checkpoint_id)?.loop_closure()
 }
@@ -268,26 +276,28 @@ impl Key {
     fn result_step(&self) -> Option<&str> {
         match (self.kind.as_str(), self.parts.as_array()?.as_slice()) {
             // agent_id, capability_id, step_id
-            ("agent", [_, _, step]) | ("split" | "embed_workflow", [step]) => step.as_str(),
+            ("agent", [_, _, step]) | ("split" | "while" | "embed_workflow", [step]) => {
+                step.as_str()
+            }
             _ => None,
         }
     }
 
-    /// The result a Split's or EmbedWorkflow's deadline row belongs to, as
-    /// that result key's kind and parts. Deadline parts are
+    /// The result a Split's, While's or EmbedWorkflow's deadline row belongs
+    /// to, as that result key's kind and parts. Deadline parts are
     /// `[step_type, graph_scope, step_id]`.
     fn deadline_result(&self) -> Option<(&'static str, Value)> {
-        let (step_type, result_kind) = match self.kind.as_str() {
-            "loop-deadline" | "loop-complete" => ("Split", "split"),
-            "embed-deadline" => ("EmbedWorkflow", "embed_workflow"),
+        let [Value::String(owner), _, Value::String(step)] = self.parts.as_array()?.as_slice()
+        else {
+            return None;
+        };
+        let result_kind = match (self.kind.as_str(), owner.as_str()) {
+            ("loop-deadline" | "loop-complete", "Split") => "split",
+            ("loop-deadline" | "loop-complete", "While") => "while",
+            ("embed-deadline", "EmbedWorkflow") => "embed_workflow",
             _ => return None,
         };
-        match self.parts.as_array()?.as_slice() {
-            [Value::String(owner), _, Value::String(step)] if owner == step_type => {
-                Some((result_kind, json!([step])))
-            }
-            _ => None,
-        }
+        Some((result_kind, json!([step])))
     }
 
     fn tag(&self) -> Option<Value> {
@@ -302,10 +312,12 @@ impl Key {
         Some(json!(["own", kind, parts]))
     }
 
-    /// A Split result's closure: its own rows and every iteration it ran.
+    /// A Split's or While's result closure: its own rows and every iteration
+    /// it ran.
     fn loop_closure(&self) -> Option<ScopeClosure> {
         let loop_kind = match self.kind.as_str() {
             "split" => "Split",
+            "while" => "While",
             _ => return None,
         };
         let step = self.result_step()?;
@@ -490,10 +502,12 @@ mod tests {
     }
 
     #[test]
-    fn split_and_embed_deadline_rows_are_owned_by_their_result() {
+    fn loop_and_embed_deadline_rows_are_owned_by_their_result() {
         let cases = [
             ("loop-deadline", "Split", r#"["own","split",["items"]]"#),
             ("loop-complete", "Split", r#"["own","split",["items"]]"#),
+            ("loop-deadline", "While", r#"["own","while",["items"]]"#),
+            ("loop-complete", "While", r#"["own","while",["items"]]"#),
             (
                 "embed-deadline",
                 "EmbedWorkflow",
@@ -517,11 +531,10 @@ mod tests {
     }
 
     #[test]
-    fn agent_and_while_deadline_rows_carry_their_position_only() {
+    fn agent_deadline_rows_carry_their_position_only() {
         let cases = [
             ("agent-deadline", "Agent"),
-            ("loop-deadline", "While"),
-            ("loop-complete", "While"),
+            ("loop-deadline", "Agent"),
             ("embed-deadline", "Split"),
         ];
         for (kind, step_type) in cases {
@@ -600,14 +613,23 @@ mod tests {
         );
         let embed = key("embed_workflow", "wf", json!([]), json!([]), json!(["e"]));
         let call = agent("a", json!([]), json!([]));
+        let repeat = key("while", "wf", json!([]), json!([]), json!(["w"]));
         assert_eq!(closure(&split), loop_closure(&split));
         assert_eq!(closure(&embed), child_closure(&embed));
         assert_eq!(closure(&call), child_closure(&call));
-        for id in [&split, &embed, &call] {
+        assert_eq!(closure(&repeat), loop_closure(&repeat));
+        for id in [&split, &embed, &call, &repeat] {
             assert!(closure(id).is_some(), "{id}");
         }
         for id in [
             format!("{split}::attempt::1"),
+            key(
+                "loop-complete",
+                "wf",
+                json!([]),
+                json!([]),
+                json!(["While", "root", "w"]),
+            ),
             format!("{embed}::retry_sleep::2"),
             format!("{call}::retry::3"),
             key(
@@ -773,6 +795,65 @@ mod tests {
                 outer.clone(),
                 json!(["While", "g", "t"]),
             ),
+        ];
+        for id in inside {
+            assert!(closure.covers(&scope(&id).unwrap()), "should cover {id}");
+        }
+        for id in outside {
+            assert!(!closure.covers(&scope(&id).unwrap()), "should keep {id}");
+        }
+    }
+
+    #[test]
+    fn a_while_closure_covers_its_iterations_and_owned_rows_only() {
+        let outer = json!([["Split", "s", 1]]);
+        let repeat = key("while", "wf", json!([]), outer.clone(), json!(["t"]));
+        let closure = loop_closure(&repeat).unwrap();
+        let iteration = |i: u64| json!([["Split", "s", 1], ["While", "t", i]]);
+        let deadline = |kind: &str, owner: &str, step: &str| {
+            key(
+                kind,
+                "wf",
+                json!([]),
+                outer.clone(),
+                json!([owner, "g", step]),
+            )
+        };
+
+        let inside = [
+            agent("x", json!([]), iteration(0)),
+            agent("x", json!([]), iteration(999)),
+            agent(
+                "y",
+                json!([]),
+                json!([["Split", "s", 1], ["While", "t", 3], ["Split", "inner", 2]]),
+            ),
+            agent("z", json!([child("e", iteration(4))]), json!([])),
+            key("state-local", "wf", json!([]), iteration(5), json!(["set"])),
+            deadline("loop-deadline", "While", "t"),
+            deadline("loop-complete", "While", "t"),
+        ];
+        let outside = [
+            repeat.clone(),
+            agent(
+                "x",
+                json!([]),
+                json!([["Split", "s", 2], ["While", "t", 0]]),
+            ),
+            agent(
+                "x",
+                json!([]),
+                json!([["Split", "s", 1], ["While", "t2", 0]]),
+            ),
+            agent(
+                "x",
+                json!([]),
+                json!([["Split", "s", 1], ["Split", "t", 0]]),
+            ),
+            agent("t", json!([]), outer.clone()),
+            key("split", "wf", json!([]), outer.clone(), json!(["t"])),
+            deadline("loop-deadline", "While", "t2"),
+            deadline("loop-deadline", "Split", "t"),
         ];
         for id in inside {
             assert!(closure.covers(&scope(&id).unwrap()), "should cover {id}");

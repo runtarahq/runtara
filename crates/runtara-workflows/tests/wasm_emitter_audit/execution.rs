@@ -766,14 +766,16 @@ fn audit_03_sibling_delays_checkpoint_independent_deadlines() {
         matches!(invoke(), InvokeExit::Suspended(_)),
         "second site must establish its own deadline"
     );
+    // The first loop's result collapsed its Delay's row; the second site
+    // still wrote one of its own.
     let keys = host
-        .checkpoints
+        .written
         .lock()
         .unwrap()
-        .keys()
+        .iter()
         .filter(|key| key.starts_with("runtara:v2:[\"delay\""))
         .cloned()
-        .collect::<Vec<_>>();
+        .collect::<std::collections::HashSet<_>>();
     assert_eq!(keys.len(), 2);
     *host.pinned_clock_ms.lock().unwrap() = Some(1_120_002);
     assert_eq!(completed(invoke()), json!({"ok":true}));
@@ -816,17 +818,29 @@ fn audit_03_durable_agent_and_split_caches_keep_sibling_results_on_replay() {
             json!({"a":"A","b":"B"})
         );
     }
-    // Each site's Split result replaced its Agent's row when it was
-    // recorded, so the replay above was served by two distinct Split rows.
+    // Each site wrote Agent and Split rows of its own. Each While's result
+    // replaced the rows inside it when it was recorded, so the replay above
+    // was served by two distinct While rows.
     let checkpoints = host.checkpoints.lock().unwrap();
-    for (kind, rows) in [("agent", 0), ("split", 2)] {
+    let written = host.written.lock().unwrap();
+    for (kind, rows) in [("agent", 0), ("split", 0), ("while", 2)] {
+        let prefix = format!("runtara:v2:[\"{kind}\"");
         assert_eq!(
             checkpoints
                 .keys()
-                .filter(|key| key.starts_with(&format!("runtara:v2:[\"{kind}\"")))
+                .filter(|key| key.starts_with(&prefix))
                 .count(),
             rows,
             "{kind}"
+        );
+        assert_eq!(
+            written
+                .iter()
+                .filter(|key| key.starts_with(&prefix))
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            2,
+            "{kind}: one row per site"
         );
     }
 }
@@ -1159,14 +1173,17 @@ fn audit_05_completed_loops_do_not_expire_during_later_replay() {
             let completion = checkpoints.iter().any(|(key, value)| {
                 key.starts_with("runtara:v2:[\"loop-complete\"") && value == &[1]
             });
-            if split && durable {
-                // A durable Split's result replaces its own deadline rows:
-                // replay finds the result before it would read them.
+            // A While in this durable graph saves its result, as a durable
+            // Split does.
+            if !split || durable {
+                // The loop's result replaces its own deadline rows: replay
+                // finds the result before it would read them.
+                let result = if split { "split" } else { "while" };
                 assert!(!completion);
                 assert!(
                     checkpoints
                         .keys()
-                        .any(|key| key.starts_with("runtara:v2:[\"split\""))
+                        .any(|key| key.starts_with(&format!("runtara:v2:[\"{result}\"")))
                 );
                 assert!(
                     !checkpoints

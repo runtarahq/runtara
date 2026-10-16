@@ -76,6 +76,9 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_while_iteration_variables: Option<u32>,
     stdlib_while_advance_state: Option<u32>,
     stdlib_while_output: Option<u32>,
+    stdlib_while_cache_key: Option<u32>,
+    stdlib_while_result: Option<u32>,
+    stdlib_while_output_from_result: Option<u32>,
     stdlib_delay_duration_ms: Option<u32>,
     stdlib_delay: Option<u32>,
     stdlib_loop_deadline_key: Option<u32>,
@@ -382,6 +385,15 @@ impl DirectCoreImportIndices {
                 "stdlib.while-advance-state",
             )?,
             stdlib_while_output: require_import(self.stdlib_while_output, "stdlib.while-output")?,
+            stdlib_while_cache_key: require_import(
+                self.stdlib_while_cache_key,
+                "stdlib.while-cache-key",
+            )?,
+            stdlib_while_result: require_import(self.stdlib_while_result, "stdlib.while-result")?,
+            stdlib_while_output_from_result: require_import(
+                self.stdlib_while_output_from_result,
+                "stdlib.while-output-from-result",
+            )?,
             stdlib_delay_duration_ms: require_import(
                 self.stdlib_delay_duration_ms,
                 "stdlib.delay-duration-ms",
@@ -775,6 +787,9 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_while_iteration_variables: u32,
     pub(super) stdlib_while_advance_state: u32,
     pub(super) stdlib_while_output: u32,
+    pub(super) stdlib_while_cache_key: u32,
+    pub(super) stdlib_while_result: u32,
+    pub(super) stdlib_while_output_from_result: u32,
     pub(super) stdlib_delay_duration_ms: u32,
     pub(super) stdlib_delay: u32,
     pub(super) stdlib_loop_deadline_key: u32,
@@ -1269,6 +1284,12 @@ pub(super) fn import_core_function(
         import_indices.stdlib_while_advance_state = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "while-output") {
         import_indices.stdlib_while_output = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "while-cache-key") {
+        import_indices.stdlib_while_cache_key = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "while-result") {
+        import_indices.stdlib_while_result = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "while-output-from-result") {
+        import_indices.stdlib_while_output_from_result = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "delay-duration-ms") {
         import_indices.stdlib_delay_duration_ms = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "delay") {

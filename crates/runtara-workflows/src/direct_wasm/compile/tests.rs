@@ -8072,6 +8072,77 @@ fn direct_core_lowers_durable_split_checkpoint_path() {
     );
 }
 
+/// The workflow-stdlib functions the first code body calls.
+fn stdlib_calls(core: &[u8]) -> std::collections::BTreeSet<String> {
+    let mut names = HashMap::new();
+    let mut next_function_index = 0;
+    let mut called = std::collections::BTreeSet::new();
+    let mut code_body_index = 0;
+    for payload in Parser::new(0).parse_all(core) {
+        match payload.expect("core wasm payload") {
+            Payload::ImportSection(reader) => {
+                for import in reader.into_imports() {
+                    let import = import.expect("core import");
+                    if matches!(import.ty, TypeRef::Func(_)) {
+                        if import.module.contains("runtara:workflow-stdlib/json") {
+                            names.insert(next_function_index, import.name.to_string());
+                        }
+                        next_function_index += 1;
+                    }
+                }
+            }
+            Payload::CodeSectionEntry(body) => {
+                if code_body_index == 0 {
+                    for operator in body.get_operators_reader().expect("operators").into_iter() {
+                        if let Operator::Call { function_index } = operator.expect("operator")
+                            && let Some(name) = names.get(&function_index)
+                        {
+                            called.insert(name.clone());
+                        }
+                    }
+                }
+                code_body_index += 1;
+            }
+            _ => {}
+        }
+    }
+    called
+}
+
+/// A While in a non-durable graph keeps no result: it builds its output from
+/// the loop state, and a replay runs the loop again.
+#[test]
+fn a_non_durable_while_saves_no_result() {
+    let mut graph = fixture("while_simple");
+    graph.durable = Some(false);
+    let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+    let manifest_json = manifest.to_canonical_json().expect("manifest json");
+    let core_config = DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+    let DirectRunPlan::Agent { next_plan, .. } = &core_config.run_plan else {
+        panic!("expected root Agent run plan");
+    };
+    let DirectRunPlan::While { durable, .. } = next_plan.as_ref() else {
+        panic!("expected While run plan after init Agent");
+    };
+    assert!(!durable);
+    let (resolve, world) =
+        build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+            .expect("agent resolve");
+    let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
+        .validate_all(&core)
+        .expect("non-durable While core module validates");
+    let called = stdlib_calls(&core);
+    assert!(called.contains("while-output"), "{called:?}");
+    for function in [
+        "while-cache-key",
+        "while-result",
+        "while-output-from-result",
+    ] {
+        assert!(!called.contains(function), "{function}: {called:?}");
+    }
+}
+
 #[test]
 fn direct_core_run_lowers_while_loop_through_stdlib() {
     let graph = fixture("while_simple");
@@ -8084,6 +8155,7 @@ fn direct_core_run_lowers_while_loop_through_stdlib() {
     };
     let DirectRunPlan::While {
         while_id,
+        durable,
         nested_plan,
         next_plan,
         ..
@@ -8092,6 +8164,10 @@ fn direct_core_run_lowers_while_loop_through_stdlib() {
         panic!("expected While run plan after init Agent");
     };
     assert_eq!(*while_id, 0);
+    assert!(
+        *durable,
+        "a While in a durable graph checkpoints its result"
+    );
     assert!(matches!(nested_plan.as_ref(), DirectRunPlan::Agent { .. }));
     assert!(matches!(next_plan.as_ref(), DirectRunPlan::Finish { .. }));
 
@@ -8253,7 +8329,21 @@ fn direct_core_run_lowers_while_loop_through_stdlib() {
         saw_while_advance_state_call,
         "While run should call while-advance-state"
     );
-    assert!(saw_while_output_call, "While run should call while-output");
+    assert!(
+        !saw_while_output_call,
+        "a durable While builds its output from its result"
+    );
+    let called = stdlib_calls(&core);
+    for function in [
+        "while-cache-key",
+        "while-result",
+        "while-output-from-result",
+    ] {
+        assert!(
+            called.contains(function),
+            "a durable While calls {function}: {called:?}"
+        );
+    }
     assert!(
         saw_runtime_is_cancelled_call,
         "While run should check cancellation before each iteration body"
