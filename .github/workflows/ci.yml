@@ -676,13 +676,6 @@ jobs:
           psql -h localhost -U postgres -d postgres -c 'CREATE DATABASE control_component_server_test;'
           cargo test -p runtara-server --features db-integration-tests,component-integration-tests --test control_component --test wait_for_instances
 
-      - name: Qualify emitted Agent deadlines before relaxing E128
-        env:
-          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
-        # These composed tests need private emitter access while the public
-        # support gate remains closed, so they are a feature-gated lib target.
-        run: cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib agent_deadline_tests
-
       # Direct WASM smoke: use the staged stdlib/runtime/agent component
       # bundle, then compile direct workflow fixtures, compose them in-process
       # (wac-graph), execute the final artifacts, and assert the fake SDK
@@ -719,6 +712,45 @@ jobs:
         # nothing and removes the whole class.
         run: cargo test -p runtara-environment --features scoped-workflow-integration-tests --test scoped_runner_test --test cooperative_stop_test --test managed_inputs --test agent_suspension_runner_test --test wait_for_instances_runner_test -- --test-threads=1
 
+  # Composed Agent and EmbedWorkflow deadline, suspension and cancellation
+  # tests. Split out of components-build so its ~12 minutes run alongside the
+  # smoke suite instead of after it. Each test runs in-process against its own
+  # mock, so the job needs the built components but no Postgres or Valkey.
+  test-composed-deadlines:
+    runs-on: ubuntu-latest
+    needs: wit-package
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-wasip2
+          cache: false
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Reads components-build's cache, which already holds this crate,
+          # feature set and wasm32 target, and never writes a second entry
+          # into the 10 GB per-repo budget.
+          shared-key: components-build
+          save-if: false
+
+      - name: Build all agent components + emit sidecar meta.json
+        env:
+          RUNTARA_NO_INSTALL_TOOLS: "1"
+        run: scripts/build-agent-components.sh
+
+      - name: Run composed Agent and EmbedWorkflow deadline, suspension and cancellation tests
+        env:
+          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
+        # These composed tests use private emitter internals, so they are a
+        # feature-gated lib target rather than an integration test.
+        run: cargo test -p runtara-workflows --features direct-wasm-integration-tests --lib agent_deadline_tests
+
   notify-result:
     # Posts success or failure once all build/test jobs finish.
     # Skipped on cancellation (avoids spurious "failure" pings when a run is
@@ -735,6 +767,7 @@ jobs:
       - test-connections
       - wit-package
       - components-build
+      - test-composed-deadlines
     if: |
       !cancelled() && github.actor != 'dependabot[bot]' && (
         (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
