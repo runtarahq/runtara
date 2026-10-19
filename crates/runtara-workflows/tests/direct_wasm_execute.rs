@@ -4624,6 +4624,86 @@ fn direct_wasm_execute_an_ai_agent_keeps_its_latest_turn_and_ends_with_one_row()
 }
 
 #[test]
+fn direct_wasm_execute_an_ai_agent_begun_before_the_slots_resumes_from_its_turns() {
+    // A run that started on an artifact compiled before the slots saved each
+    // turn under its per-turn key and has no slot. Resumed after the workflow
+    // is recompiled, it replays those turns and dispatches none of their
+    // tools again.
+    let components_dir = direct_e2e_components_dir();
+    let graph = ai_agent_tool_loop_durable_graph_json(true);
+    let key = |kind: &str, parts: Value| root_key(kind, "ai-before-slots", parts);
+    let crashed = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-before-slots",
+        &graph,
+        br#"{}"#,
+        vec![
+            llm_tool_call("echo", r#"{"value":1}"#),
+            llm_tool_call("echo", r#"{"value":2}"#),
+            llm_http_500(),
+        ],
+    );
+    assert!(!crashed.status_success);
+    let written = |id: &str| {
+        crashed
+            .checkpoints
+            .iter()
+            .find(|checkpoint| checkpoint.checkpoint_id == id && !checkpoint.state.is_empty())
+            .unwrap_or_else(|| panic!("{id} was written"))
+            .state
+            .clone()
+    };
+    // The rows the older artifact wrote: each turn's snapshot, as the slot
+    // holds it but without the slot's turn, under the turn's own key, and
+    // each turn's response.
+    let per_turn = |turn: u32, slot: u32| {
+        let mut snapshot: Value = serde_json::from_slice(&written(&key(
+            "ai_turn_slot",
+            serde_json::json!(["ai", slot]),
+        )))
+        .unwrap();
+        snapshot.as_object_mut().unwrap().remove("turn");
+        (
+            key("ai_turn", serde_json::json!(["ai", turn])),
+            serde_json::to_vec(&snapshot).unwrap(),
+        )
+    };
+    let response = |turn: u32| {
+        let id = key("ai_turn_response", serde_json::json!(["ai", turn]));
+        let state = written(&id);
+        (id, state)
+    };
+    let older = vec![per_turn(1, 1), per_turn(2, 0), response(1), response(2)];
+
+    let resumed = run_direct_workflow_capture_with_preloaded_checkpoints(
+        &components_dir,
+        "ai-before-slots",
+        &graph,
+        br#"{}"#,
+        false,
+        older,
+        vec![llm_ok("done after resume")],
+    );
+    assert!(resumed.status_success, "stderr: {}", resumed.stderr);
+    assert_eq!(resumed.llm_requests.len(), 1);
+    let request = resumed.llm_requests[0].to_string();
+    for value in [r#"\"value\":1"#, r#"\"value\":2"#] {
+        assert!(
+            request.contains(value),
+            "turn 3 sees both tool results: {request}"
+        );
+    }
+    assert_eq!(
+        written_ids(&resumed),
+        [
+            key("ai_turn_response", serde_json::json!(["ai", 3])),
+            key("ai_agent", serde_json::json!(["ai"])),
+        ],
+        "turns 1 and 2 come from their snapshots, so nothing is saved for them"
+    );
+}
+
+#[test]
 fn direct_wasm_execute_an_ai_agent_resumed_after_its_summary_does_not_summarize_again() {
     let components_dir = direct_e2e_components_dir();
     let graph = ai_agent_summarize_memory_graph_json();

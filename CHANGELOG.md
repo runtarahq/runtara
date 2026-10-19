@@ -338,7 +338,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot collapse the slots (an address over 2 KB), the loop also saves the
   turns under their per-turn keys and replays them as before. This applies
   to workflows compiled on this release; an older artifact keeps and replays
-  every turn as before until it is recompiled.
+  every turn as before until it is recompiled. A run that started on an
+  older artifact and resumes after the workflow is recompiled replays the
+  per-turn snapshots it saved, and keeps them and the model responses it
+  saved before this release until retention: a row keeps the address it was
+  written with, so the new rules do not match it.
 - **A finished While keeps one checkpoint row, and a resume skips it.** A
   While in a durable graph now checkpoints its result, `{iterations,
   outputs}`, once its loop exits, and deletes in the same transaction the

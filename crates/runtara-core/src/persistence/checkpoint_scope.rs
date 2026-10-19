@@ -209,7 +209,8 @@ type Rule = fn(&Key) -> Option<ScopeClosure>;
 ///   the turn's snapshot holds are never read again, so at most one slot
 ///   remains. A store that keeps the other slot (an address over
 ///   [`MAX_SCOPE_BYTES`]) makes the slot write find it, and the step falls
-///   back to its per-turn snapshots, which replay follows only then.
+///   back to its per-turn snapshots, which replay follows then, as it does in
+///   a run begun on an artifact compiled before the slots.
 /// - `ai_agent`: an AiAgent's result is saved once its loop and its memory
 ///   save have finished, and replay looks it up before loading memory, so
 ///   its last slot, its responses, its memory summary and its memory calls

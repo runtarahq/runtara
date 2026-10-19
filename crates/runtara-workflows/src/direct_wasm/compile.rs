@@ -355,9 +355,10 @@ const DIRECT_VALUE_STORE_SCOPE_LOCAL: u32 = 129;
 const DIRECT_AI_HEAP_BASE_LOCAL: u32 = 109;
 
 /// Whether an `AiAgent` loop replays through its per-turn snapshots. A loop
-/// keeps its latest turn in one of two slots; a store that did not collapse
-/// the other slot leaves both, and only then holds per-turn snapshots to
-/// follow (see `ai_agent_loop`). i32 local, saved with the AI child frame.
+/// keeps its latest turn in one of two slots; per-turn snapshots follow only
+/// where a store kept both, or where a run started on an artifact compiled
+/// before the slots (see `ai_agent_loop`). i32 local, saved with the AI child
+/// frame.
 const DIRECT_AI_TURN_CHAIN_LOCAL: u32 = 191;
 
 /// Per-attempt durable-retry scratch for the durable Agent retry loop. Makes each

@@ -465,8 +465,9 @@ pub(super) fn emit_ai_agent_loop_plan(
         DIRECT_AI_PENDING_LEN_LOCAL,
     );
 
-    // A store that kept both slots holds per-turn snapshots for the turns
-    // after the newer one: follow them until one is missing. A hit restores
+    // Per-turn snapshots follow the newer slot where a store kept both, and
+    // start at the first turn in a run begun on an artifact compiled before
+    // the slots: follow them until one is missing. A hit restores
     // the snapshot's state, pending tool results and tool counter without a
     // model call or tool dispatch; a completing turn's snapshot exits the
     // loop. Depths inside the hit: $turn = 2, $outer = 3.
@@ -1551,9 +1552,12 @@ fn emit_restore_turn_snapshot(
 
 /// Replay restores the newer of the step's two turn slots before its first
 /// turn, and sets the turn counter to it; a fresh step finds both empty.
-/// Both slots hold a turn only where the store kept the older one when the
-/// newer was saved (an address too long to collapse); the turns after it are
-/// then per-turn snapshots, and the chain local says to follow them.
+/// The chain local says whether per-turn snapshots may follow, which is so
+/// when both slots or neither hold a turn. Both do only where the store kept
+/// the older one when the newer was saved (an address too long to collapse),
+/// and the turns after it are per-turn snapshots. Neither does in a fresh
+/// step, and in a run that started on an artifact compiled before the slots
+/// and resumes on a recompiled one, which saved every turn that way.
 fn emit_restore_latest_turn_slot(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
@@ -1603,7 +1607,7 @@ fn emit_restore_latest_turn_slot(
         body.instruction(&Instruction::I32Const(0));
         body.instruction(&Instruction::I32Ne);
     }
-    body.instruction(&Instruction::I32And);
+    body.instruction(&Instruction::I32Eq);
     body.instruction(&Instruction::LocalSet(DIRECT_AI_TURN_CHAIN_LOCAL));
 
     // snapshot = ai-turn-latest(slot 0, slot 1) → TURN_INPUT

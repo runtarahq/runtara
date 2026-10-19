@@ -2326,17 +2326,7 @@ impl DirectJsonManifest {
         tool_calls: u32,
         complete: bool,
     ) -> Result<Vec<u8>, String> {
-        let state: Value = serde_json::from_slice(state)
-            .map_err(|err| format!("failed to parse ai-turn snapshot state: {err}"))?;
-        let pending: Value = serde_json::from_slice(pending)
-            .map_err(|err| format!("failed to parse ai-turn snapshot pending: {err}"))?;
-        serde_json::to_vec(&serde_json::json!({
-            "state": state,
-            "pending": pending,
-            "toolCalls": tool_calls,
-            "complete": complete,
-        }))
-        .map_err(|err| format!("failed to serialize ai-turn snapshot: {err}"))
+        turn_snapshot(state, pending, tool_calls, complete, None)
     }
 
     /// Per-turn durability: unpack a snapshot field (0 = state, 1 = pending).
@@ -2399,20 +2389,22 @@ impl DirectJsonManifest {
         tool_calls: u32,
         turn: u32,
     ) -> Result<Vec<u8>, String> {
-        let mut snapshot: Value =
-            serde_json::from_slice(&Self::ai_turn_snapshot(state, pending, tool_calls, false)?)
-                .map_err(|err| format!("failed to parse ai-turn snapshot: {err}"))?;
-        snapshot["turn"] = Value::from(turn);
-        serde_json::to_vec(&snapshot)
-            .map_err(|err| format!("failed to serialize ai-turn snapshot: {err}"))
+        turn_snapshot(state, pending, tool_calls, false, Some(turn))
     }
 
     /// The turn a slot snapshot was taken after; 0 for a snapshot without one.
+    /// Only that field is built: the conversation around it is skipped.
     pub fn ai_turn_snapshot_turn(snapshot: &[u8]) -> Result<u32, String> {
-        let snapshot: Value = serde_json::from_slice(snapshot)
+        #[derive(Deserialize)]
+        struct Snapshot {
+            #[serde(default)]
+            turn: Option<Value>,
+        }
+        let snapshot: Snapshot = serde_json::from_slice(snapshot)
             .map_err(|err| format!("failed to parse ai-turn snapshot: {err}"))?;
         Ok(snapshot
-            .get("turn")
+            .turn
+            .as_ref()
             .and_then(Value::as_u64)
             .and_then(|turn| u32::try_from(turn).ok())
             .unwrap_or(0))
@@ -6739,6 +6731,32 @@ pub fn child_cache_prefix(step_id: &str, source: &Value) -> String {
             format!("{workflow_id}::{step_id}{loop_indices_suffix}")
         }
     }
+}
+
+/// An AiAgent turn snapshot, `{state, pending, toolCalls, complete}`, plus the
+/// turn it follows when it is a slot's.
+fn turn_snapshot(
+    state: &[u8],
+    pending: &[u8],
+    tool_calls: u32,
+    complete: bool,
+    turn: Option<u32>,
+) -> Result<Vec<u8>, String> {
+    let state: Value = serde_json::from_slice(state)
+        .map_err(|err| format!("failed to parse ai-turn snapshot state: {err}"))?;
+    let pending: Value = serde_json::from_slice(pending)
+        .map_err(|err| format!("failed to parse ai-turn snapshot pending: {err}"))?;
+    let mut snapshot = serde_json::json!({
+        "state": state,
+        "pending": pending,
+        "toolCalls": tool_calls,
+        "complete": complete,
+    });
+    if let Some(turn) = turn {
+        snapshot["turn"] = Value::from(turn);
+    }
+    serde_json::to_vec(&snapshot)
+        .map_err(|err| format!("failed to serialize ai-turn snapshot: {err}"))
 }
 
 /// A v2 key of an AiAgent's own rows. Unlike the per-turn keys these have no
