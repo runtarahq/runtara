@@ -68,7 +68,9 @@ looser: every step that can call a child (EmbedWorkflow, Agent) shares one
 namespace with any other such step that has its id at its position, whatever
 its kind. Step ids are unique within a graph, so this happens only when an
 `onWait` graph, which keeps its wait step's position, reuses an id of the
-graph around it (the workflow editor never does). Deleting a shared namespace
+graph around it. The workflow editor never does, and validation rejects it
+since DSL 3.7.0 (E152), so only workflows saved before can hold such ids;
+their compiled artifacts still run. Deleting a shared namespace
 would hurt when the other step has no result to replay from: it is
 `durable: false`, it failed and its `onError` handled the failure, or it is
 still in progress. An `onWait` graph runs again on every replay of its wait,

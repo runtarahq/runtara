@@ -617,11 +617,12 @@ def check_casing():
 
 def check_dsl_version():
     _, changelog = call("GET", "/specs/dsl/changelog")
-    latest = ((changelog or {}).get("changes") or [{}])[0]
-    kinds = {change.get("type") for change in latest.get("changes") or []}
-    check("DSL 3.6.0 is served, with its deprecations and the 4.0 plan",
-          (changelog or {}).get("version") == "3.6.0" and latest.get("version") == "3.6.0"
-          and {"deprecated", "planned"} <= kinds, {"version": (changelog or {}).get("version"), "kinds": sorted(kinds)})
+    releases = {entry.get("version"): entry for entry in (changelog or {}).get("changes") or []}
+    release = releases.get("3.6.0") or {}
+    kinds = {change.get("type") for change in release.get("changes") or []}
+    check("DSL 3.6.0 is in the changelog, with its deprecations and the 4.0 plan",
+          bool(release) and {"deprecated", "planned"} <= kinds,
+          {"version": (changelog or {}).get("version"), "kinds": sorted(kinds)})
 
 
 # ---------------------------------------------------------------- E2-E5

@@ -737,6 +737,9 @@ impl ValidationErrorDto {
             ValidationError::FieldConditionWithoutTest { field, .. } => {
                 (error.to_string(), None, Some(field.clone()), None)
             }
+            ValidationError::OnWaitStepIdReused { step_id, .. } => {
+                (error.to_string(), Some(step_id.clone()), None, None)
+            }
             ValidationError::OnErrorNestingTooDeep { step_id, .. } => (
                 error.to_string(),
                 Some(step_id.clone()),

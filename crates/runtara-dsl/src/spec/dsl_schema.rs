@@ -113,6 +113,18 @@ pub fn get_dsl_changelog() -> Value {
         "version": DSL_VERSION,
         "changes": [
             {
+                "version": "3.7.0",
+                "date": "2026-10-19",
+                "breaking": false,
+                "changes": [
+                    {
+                        "type": "added",
+                        "component": "validation",
+                        "description": "E152 step id reused at one position. An onWait graph runs at its WaitForSignal step's position, so its step ids must differ from those of the graph around it and of the other onWait graphs there; a Split or While body is a position of its own. Steps with one id at one position shared their checkpoints, so one could return the other's result."
+                    }
+                ]
+            },
+            {
                 "version": "3.6.0",
                 "date": "2026-10-15",
                 "breaking": false,
