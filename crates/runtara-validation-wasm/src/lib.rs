@@ -681,6 +681,22 @@ mod tests {
     }
 
     #[test]
+    fn browser_validator_rejects_an_on_wait_step_sharing_a_checkpointing_id() {
+        let call = json!({"id":"call","stepType":"Agent","agentId":"utils","capabilityId":"random-double","inputMapping":{}});
+        let response = validate_execution_graph_json_impl(&json!({"entryPoint":"wait", "steps":{
+            "wait":{"id":"wait","stepType":"WaitForSignal","onWait":{"entryPoint":"call","steps":{"call":call.clone()}}},
+            "call":call
+        },"executionPlan":[{"fromStep":"wait","toStep":"call"}]}).to_string());
+        assert!(response.success);
+        assert!(!response.valid);
+        assert!(
+            response.errors.iter().any(|error| error.contains("[E152]")),
+            "{:?}",
+            response.errors
+        );
+    }
+
+    #[test]
     fn audit_07_browser_validator_accepts_matching_scoped_ids() {
         let finish = json!({"id":"finish","stepType":"Finish"});
         let response = validate_execution_graph_json_impl(&json!({"entryPoint":"wait", "steps":{

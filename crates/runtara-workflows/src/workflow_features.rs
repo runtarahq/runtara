@@ -485,7 +485,7 @@ fn child_version_to_string(version: &ChildVersion) -> String {
     }
 }
 
-fn step_has_breakpoint(step: &Step) -> bool {
+pub(crate) fn step_has_breakpoint(step: &Step) -> bool {
     match step {
         Step::Finish(step) => step.breakpoint.unwrap_or(false),
         Step::Agent(step) => step.breakpoint.unwrap_or(false),

@@ -612,16 +612,37 @@ def check_casing():
           and status < 300, {"outputs": out, "warnings": warned, "memoryTier": status})
 
 
+# -------------------------------------------------------------------- E152
+
+
+def check_on_wait_step_ids():
+    def with_on_wait(step_id):
+        wait = {"stepType": "WaitForSignal", "id": "wait",
+                "onWait": graph(step_id, [echo(step_id), fin("notified")], [edge(step_id, "notified")])}
+        return graph("wait", [wait, echo("x"), fin("done")], [edge("wait", "x"), edge("x", "done")])
+    _, status, body = save_status("rf-on-wait-ids", with_on_wait("x"))
+    check("E152 an onWait Agent reusing the id of an Agent around it is rejected",
+          status == 400 and rejected_codes(body) == ["E152"], {"status": status, "codes": rejected_codes(body)})
+    _, status, body = save_status("rf-on-wait-ids-renamed", with_on_wait("x_notify"))
+    check("E152 renamed, the graph saves (Finish steps may share an id)", status < 300,
+          {"status": status, "codes": rejected_codes(body)})
+
+
 # ------------------------------------------------------------------- 3.6.0
 
 
 def check_dsl_version():
     _, changelog = call("GET", "/specs/dsl/changelog")
-    latest = ((changelog or {}).get("changes") or [{}])[0]
-    kinds = {change.get("type") for change in latest.get("changes") or []}
-    check("DSL 3.6.0 is served, with its deprecations and the 4.0 plan",
-          (changelog or {}).get("version") == "3.6.0" and latest.get("version") == "3.6.0"
-          and {"deprecated", "planned"} <= kinds, {"version": (changelog or {}).get("version"), "kinds": sorted(kinds)})
+    newest = ((changelog or {}).get("changes") or [{}])[0]
+    check("the served DSL version is the newest changelog entry",
+          bool(newest.get("version")) and (changelog or {}).get("version") == newest.get("version"),
+          {"version": (changelog or {}).get("version"), "newest": newest.get("version")})
+    releases = {entry.get("version"): entry for entry in (changelog or {}).get("changes") or []}
+    release = releases.get("3.6.0") or {}
+    kinds = {change.get("type") for change in release.get("changes") or []}
+    check("DSL 3.6.0 is in the changelog, with its deprecations and the 4.0 plan",
+          bool(release) and {"deprecated", "planned"} <= kinds,
+          {"version": (changelog or {}).get("version"), "kinds": sorted(kinds)})
 
 
 # ---------------------------------------------------------------- E2-E5
@@ -704,7 +725,7 @@ CHECKS = [check_graph_shapes, check_non_durable_delay, check_static_values, chec
           check_validate_matches_save_on_name, check_template_messages, check_on_error_inside_handler,
           check_sequential_and_poll_interval, check_workflow_level_settings, check_variable_types_and_conditions,
           check_nested_immediate_references, check_workflow_inputs_in_bodies, check_group_by_keys,
-          check_null_collections, check_zero_timeouts, check_condition_spellings, check_route_less_switch_cases, check_error_context_spellings, check_runtime_variables, check_lone_outputs_unwrap, check_switch_match_types, check_duration_names, check_type_vocabulary, check_casing, check_dsl_version, check_doc_drift, check_mcp_prose]
+          check_null_collections, check_zero_timeouts, check_condition_spellings, check_route_less_switch_cases, check_error_context_spellings, check_runtime_variables, check_lone_outputs_unwrap, check_switch_match_types, check_duration_names, check_type_vocabulary, check_casing, check_on_wait_step_ids, check_dsl_version, check_doc_drift, check_mcp_prose]
 
 
 def main():

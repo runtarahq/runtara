@@ -26,7 +26,7 @@
 // (S, M, L, XL) also reads lowercase. DSL 4.0 removes the deprecated ones.
 
 /// DSL version - bump when making breaking changes
-pub const DSL_VERSION: &str = "3.6.0";
+pub const DSL_VERSION: &str = "3.7.0";
 
 // ============================================================================
 // Root Types
@@ -1246,6 +1246,12 @@ pub struct WaitForSignalStep {
     /// This runs before suspending and is typically used to notify
     /// external systems of the signal_id they should use.
     /// The subgraph has access to `variables._signal_id` and `variables._instance_id`.
+    ///
+    /// It runs at this step's position, so a step in it that keeps checkpoints
+    /// (any step except Finish, Log, Error, Conditional, Switch, Filter and
+    /// GroupBy without a breakpoint) needs an id no such step of the graph
+    /// around it, or of the other `onWait` graphs there, uses (E152): steps
+    /// with one id at one position share their checkpoints.
     ///
     /// **Ignored when this step is used as an AiAgent tool** (reached via a
     /// tool-labelled edge): the tool lowering emits the durable wait but never

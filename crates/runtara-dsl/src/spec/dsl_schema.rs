@@ -113,6 +113,18 @@ pub fn get_dsl_changelog() -> Value {
         "version": DSL_VERSION,
         "changes": [
             {
+                "version": "3.7.0",
+                "date": "2026-10-19",
+                "breaking": false,
+                "changes": [
+                    {
+                        "type": "added",
+                        "component": "validation",
+                        "description": "E152 step id reused at one position. An onWait graph runs at its WaitForSignal step's position, so a step there that keeps checkpoints needs an id no such step of the graph around it, or of the other onWait graphs there, uses; a Split or While body is a position of its own. Every step keeps checkpoints except Finish, Log, Error, Conditional, Switch, Filter and GroupBy without a breakpoint, and the onWait of a WaitForSignal only an AiAgent tool reaches never runs. Steps with one id at one position shared their checkpoints, so one could return the other's result."
+                    }
+                ]
+            },
+            {
                 "version": "3.6.0",
                 "date": "2026-10-15",
                 "breaking": false,
