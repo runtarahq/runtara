@@ -1155,6 +1155,45 @@ mod component {
             direct_json::DirectJsonManifest::ai_turn_snapshot_complete(&snapshot)
         }
 
+        fn ai_turn_slot_key(
+            step_id: String,
+            iteration: u32,
+            source: Vec<u8>,
+        ) -> Result<String, String> {
+            direct_json::DirectJsonManifest::ai_turn_slot_key(&step_id, iteration, &source)
+        }
+
+        fn ai_turn_slot_snapshot(
+            state: Vec<u8>,
+            pending: Vec<u8>,
+            tool_calls: u32,
+            turn: u32,
+        ) -> Result<Vec<u8>, String> {
+            direct_json::DirectJsonManifest::ai_turn_slot_snapshot(
+                &state, &pending, tool_calls, turn,
+            )
+        }
+
+        fn ai_turn_snapshot_turn(snapshot: Vec<u8>) -> Result<u32, String> {
+            direct_json::DirectJsonManifest::ai_turn_snapshot_turn(&snapshot)
+        }
+
+        fn ai_turn_latest(first: Vec<u8>, second: Vec<u8>) -> Result<Vec<u8>, String> {
+            direct_json::DirectJsonManifest::ai_turn_latest(&first, &second)
+        }
+
+        fn ai_agent_result_key(step_id: String, source: Vec<u8>) -> Result<String, String> {
+            direct_json::DirectJsonManifest::ai_agent_result_key(&step_id, &source)
+        }
+
+        fn ai_agent_result(state: Vec<u8>) -> Result<Vec<u8>, String> {
+            direct_json::DirectJsonManifest::ai_agent_result(&state)
+        }
+
+        fn ai_summary_key(step_id: String, source: Vec<u8>) -> Result<String, String> {
+            direct_json::DirectJsonManifest::ai_summary_key(&step_id, &source)
+        }
+
         fn ai_turn_output(
             agent_id: u32,
             source: Vec<u8>,

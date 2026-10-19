@@ -591,7 +591,8 @@ interface json {
     ) -> result<list<u8>, string>;
     // Per-turn durability: the checkpoint key for one AiAgent loop turn —
     // "{step-id}.turn.{iteration}", scoped by `variables._loop_indices` like
-    // breakpoint/agent cache keys.
+    // breakpoint/agent cache keys. A loop keeps its latest turn in a slot
+    // (ai-turn-slot-key) and uses this key only where a store kept both slots.
     ai-turn-cache-key: func(
         step-id: string,
         iteration: u32,
@@ -614,6 +615,26 @@ interface json {
     ai-turn-snapshot-tool-calls: func(snapshot: list<u8>) -> result<u32, string>;
     // Per-turn durability: whether the snapshotted turn completed the loop.
     ai-turn-snapshot-complete: func(snapshot: list<u8>) -> result<bool, string>;
+    // The key of the slot (one of two, alternating) that turn `iteration`
+    // saves its snapshot in.
+    ai-turn-slot-key: func(step-id: string, iteration: u32, source: list<u8>) -> result<string, string>;
+    // A slot snapshot: ai-turn-snapshot's fields plus the turn it follows.
+    ai-turn-slot-snapshot: func(
+        state: list<u8>,
+        pending: list<u8>,
+        tool-calls: u32,
+        turn: u32,
+    ) -> result<list<u8>, string>;
+    // The turn a slot snapshot follows (0 when it names none).
+    ai-turn-snapshot-turn: func(snapshot: list<u8>) -> result<u32, string>;
+    // The newer of two slot snapshots; an empty list is an empty slot.
+    ai-turn-latest: func(first: list<u8>, second: list<u8>) -> result<list<u8>, string>;
+    // The key of an AiAgent's result, and the result kept from its final
+    // state (the fields its output is built from).
+    ai-agent-result-key: func(step-id: string, source: list<u8>) -> result<string, string>;
+    ai-agent-result: func(state: list<u8>) -> result<list<u8>, string>;
+    // The key of an AiAgent's memory summary.
+    ai-summary-key: func(step-id: string, source: list<u8>) -> result<string, string>;
     // Build the AiAgent step output context from a completed turn.
     ai-turn-output: func(
         agent-id: u32,

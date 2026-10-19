@@ -676,11 +676,11 @@ export interface AiAgentStep {
   connectionRef?: null | MappingValue;
   /**
    * Disable durability for this step when `Some(false)`. Skips the
-   * per-turn checkpoints inside the tool loop (each completed turn — LLM
-   * response plus dispatched tool results — is snapshotted under
-   * `{step}.turn.{n}` so a crash never re-runs finished turns) and the
-   * invoke checkpoint on the single-shot path. Ignored when the enclosing
-   * workflow is already non-durable.
+   * checkpoints of the tool loop (the latest turn — LLM response plus
+   * dispatched tool results — so a crash never re-runs finished turns,
+   * and the finished step's result, so a replay runs no turn, memory call
+   * or summary again) and the invoke checkpoint on the single-shot path.
+   * Ignored when the enclosing workflow is already non-durable.
    */
   durable?: boolean | null;
   /** Unique step identifier */

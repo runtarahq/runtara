@@ -322,6 +322,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run's other rows, even before the table has statistics (a Split's result
   could do that before). `A → Split[10000]{Agent} → B` takes as long as it
   did without the new rules.
+- **An AiAgent keeps its latest turn, then one checkpoint row.** A durable
+  AiAgent tool loop no longer keeps a snapshot and a model response per turn,
+  each holding the whole conversation. It saves each turn whose tools ran in
+  one of two alternating slots, and recording one deletes, in the same
+  transaction, the other slot, the turn's model responses and its tool calls'
+  checkpoints, so the stored bytes no longer grow with the square of the
+  turns. A resume reads the two slots instead of every turn. Once the loop
+  and the memory save finish, the step saves its result (its output's fields,
+  not the conversation) and deletes its last slot, responses and memory
+  calls' rows: `A → AiAgent → B` keeps 3 rows. A replay of a finished AiAgent
+  now calls no model, loads and saves no memory, and no longer bills the
+  memory summary again; a summarize compaction also saves its output, so a
+  resume before the step's result does not repeat it either. Where a store
+  cannot collapse the slots (an address over 2 KB), the loop also saves the
+  turns under their per-turn keys and replays them as before. This applies
+  to workflows compiled on this release; an older artifact keeps and replays
+  every turn as before until it is recompiled.
 - **A finished While keeps one checkpoint row, and a resume skips it.** A
   While in a durable graph now checkpoints its result, `{iterations,
   outputs}`, once its loop exits, and deletes in the same transaction the

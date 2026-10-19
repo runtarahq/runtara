@@ -2375,6 +2375,92 @@ impl DirectJsonManifest {
             .unwrap_or(false))
     }
 
+    /// The checkpoint key of the slot turn `iteration` saves its snapshot in.
+    /// An AiAgent alternates two slots, and recording one deletes the other,
+    /// so the step keeps one snapshot that replay finds in two reads.
+    pub fn ai_turn_slot_key(
+        step_id: &str,
+        iteration: u32,
+        source: &[u8],
+    ) -> Result<String, String> {
+        ai_agent_key(
+            step_id,
+            source,
+            "ai_turn_slot",
+            serde_json::json!([step_id, iteration % 2]),
+        )
+    }
+
+    /// A turn's snapshot for its slot: [`Self::ai_turn_snapshot`] plus the
+    /// turn it was taken after, which tells the two slots apart on replay.
+    pub fn ai_turn_slot_snapshot(
+        state: &[u8],
+        pending: &[u8],
+        tool_calls: u32,
+        turn: u32,
+    ) -> Result<Vec<u8>, String> {
+        let mut snapshot: Value =
+            serde_json::from_slice(&Self::ai_turn_snapshot(state, pending, tool_calls, false)?)
+                .map_err(|err| format!("failed to parse ai-turn snapshot: {err}"))?;
+        snapshot["turn"] = Value::from(turn);
+        serde_json::to_vec(&snapshot)
+            .map_err(|err| format!("failed to serialize ai-turn snapshot: {err}"))
+    }
+
+    /// The turn a slot snapshot was taken after; 0 for a snapshot without one.
+    pub fn ai_turn_snapshot_turn(snapshot: &[u8]) -> Result<u32, String> {
+        let snapshot: Value = serde_json::from_slice(snapshot)
+            .map_err(|err| format!("failed to parse ai-turn snapshot: {err}"))?;
+        Ok(snapshot
+            .get("turn")
+            .and_then(Value::as_u64)
+            .and_then(|turn| u32::try_from(turn).ok())
+            .unwrap_or(0))
+    }
+
+    /// The newer of two slot snapshots, by turn. An empty list is a slot that
+    /// holds nothing; two empty slots give an empty list.
+    pub fn ai_turn_latest(first: &[u8], second: &[u8]) -> Result<Vec<u8>, String> {
+        Ok(match (first.is_empty(), second.is_empty()) {
+            (true, true) => Vec::new(),
+            (false, true) => first.to_vec(),
+            (true, false) => second.to_vec(),
+            (false, false) => {
+                if Self::ai_turn_snapshot_turn(second)? > Self::ai_turn_snapshot_turn(first)? {
+                    second.to_vec()
+                } else {
+                    first.to_vec()
+                }
+            }
+        })
+    }
+
+    /// The checkpoint key of an AiAgent's result, saved once its loop and its
+    /// memory save have finished.
+    pub fn ai_agent_result_key(step_id: &str, source: &[u8]) -> Result<String, String> {
+        ai_agent_key(step_id, source, "ai_agent", serde_json::json!([step_id]))
+    }
+
+    /// What an AiAgent's result keeps of its final loop state: the fields
+    /// [`Self::ai_turn_output`] builds the step output from, without the
+    /// conversation.
+    pub fn ai_agent_result(state: &[u8]) -> Result<Vec<u8>, String> {
+        let state: Value = serde_json::from_slice(state)
+            .map_err(|err| format!("failed to parse AiAgent state: {err}"))?;
+        let result: Map<String, Value> = ["response", "iterations", "tool_call_log"]
+            .into_iter()
+            .filter_map(|field| Some((field.to_string(), state.get(field)?.clone())))
+            .collect();
+        serde_json::to_vec(&Value::Object(result))
+            .map_err(|err| format!("failed to serialize AiAgent result: {err}"))
+    }
+
+    /// The checkpoint key of an AiAgent's memory summary, so replay never
+    /// bills the summarizing model call twice.
+    pub fn ai_summary_key(step_id: &str, source: &[u8]) -> Result<String, String> {
+        ai_agent_key(step_id, source, "ai_summary", serde_json::json!([step_id]))
+    }
+
     pub fn ai_turn_is_complete(turn_out: &[u8]) -> Result<bool, String> {
         let turn_out: Value = serde_json::from_slice(turn_out)
             .map_err(|err| format!("failed to parse ai-turn output: {err}"))?;
@@ -6655,6 +6741,16 @@ pub fn child_cache_prefix(step_id: &str, source: &Value) -> String {
     }
 }
 
+/// A v2 key of an AiAgent's own rows. Unlike the per-turn keys these have no
+/// v1 form: only a compile that writes v2 keys emits them.
+fn ai_agent_key(step_id: &str, source: &[u8], kind: &str, parts: Value) -> Result<String, String> {
+    let source: Value = serde_json::from_slice(source)
+        .map_err(|err| format!("failed to parse AiAgent key source: {err}"))?;
+    durable_key_v2(&source, kind, parts).ok_or_else(|| {
+        format!("AiAgent step '{step_id}' needs v2 durable keys; recompile the workflow")
+    })
+}
+
 fn ai_turn_checkpoint_key(
     step_id: &str,
     iteration: u32,
@@ -10331,6 +10427,115 @@ mod tests {
         let source = build_source(br#"{"flag":true}"#, b"{}", b"{}").expect("source");
 
         assert!(manifest.eval_condition(0, &source).expect("condition"));
+    }
+
+    fn ai_v2_source() -> Vec<u8> {
+        serde_json::to_vec(&json!({"data":{},"steps":{},
+            "variables":{"_durable_key_version":2,"_workflow_id":"wf"}}))
+        .unwrap()
+    }
+
+    #[test]
+    fn ai_agent_keys_name_the_step_and_alternate_two_slots() {
+        let source = ai_v2_source();
+        let slot = |turn| DirectJsonManifest::ai_turn_slot_key("ai", turn, &source).unwrap();
+        assert_eq!(
+            slot(1),
+            r#"runtara:v2:["ai_turn_slot","wf",[],null,["ai",1]]"#
+        );
+        assert_eq!(slot(1), slot(3));
+        assert_eq!(
+            slot(2),
+            r#"runtara:v2:["ai_turn_slot","wf",[],null,["ai",0]]"#
+        );
+        assert_ne!(
+            slot(1),
+            DirectJsonManifest::ai_turn_cache_key("ai", 1, &source).unwrap()
+        );
+        assert_ne!(
+            slot(1),
+            DirectJsonManifest::ai_turn_response_key("ai", 1, &source).unwrap()
+        );
+        assert_eq!(
+            DirectJsonManifest::ai_agent_result_key("ai", &source).unwrap(),
+            r#"runtara:v2:["ai_agent","wf",[],null,["ai"]]"#
+        );
+        assert_eq!(
+            DirectJsonManifest::ai_summary_key("ai", &source).unwrap(),
+            r#"runtara:v2:["ai_summary","wf",[],null,["ai"]]"#
+        );
+        // A tool call's rows sit under a frame whose parts start with the step.
+        let tool = DirectJsonManifest::tool_scope_source("ai", "lookup", 4, &source).unwrap();
+        assert_eq!(
+            DirectJsonManifest::ai_turn_response_key("inner", 1, &tool).unwrap(),
+            r#"runtara:v2:["ai_turn_response","wf",[["tool-child","wf",null,["ai","lookup",4]]],null,["inner",1]]"#
+        );
+
+        let legacy = build_source(b"{}", b"{}", b"{}").expect("source");
+        assert!(DirectJsonManifest::ai_turn_slot_key("ai", 1, &legacy).is_err());
+        assert!(DirectJsonManifest::ai_agent_result_key("ai", &legacy).is_err());
+        assert!(DirectJsonManifest::ai_summary_key("ai", &legacy).is_err());
+    }
+
+    #[test]
+    fn a_slot_snapshot_carries_its_turn_and_the_newer_slot_wins() {
+        let state = br#"{"chat_history":[{"role":"user"}],"iterations":2}"#;
+        let older = DirectJsonManifest::ai_turn_slot_snapshot(state, b"[1]", 3, 2).unwrap();
+        let newer = DirectJsonManifest::ai_turn_slot_snapshot(state, b"[]", 5, 3).unwrap();
+        assert_eq!(
+            DirectJsonManifest::ai_turn_snapshot_turn(&older).unwrap(),
+            2
+        );
+        assert_eq!(
+            DirectJsonManifest::ai_turn_snapshot_part(&older, 0).unwrap(),
+            serde_json::to_vec(&serde_json::from_slice::<Value>(state).unwrap()).unwrap()
+        );
+        assert_eq!(
+            DirectJsonManifest::ai_turn_snapshot_part(&older, 1).unwrap(),
+            b"[1]".to_vec()
+        );
+        assert_eq!(
+            DirectJsonManifest::ai_turn_snapshot_tool_calls(&older).unwrap(),
+            3
+        );
+        assert!(!DirectJsonManifest::ai_turn_snapshot_complete(&older).unwrap());
+        let per_turn = DirectJsonManifest::ai_turn_snapshot(state, b"[]", 1, false).unwrap();
+        assert_eq!(
+            DirectJsonManifest::ai_turn_snapshot_turn(&per_turn).unwrap(),
+            0
+        );
+
+        let latest = DirectJsonManifest::ai_turn_latest;
+        assert_eq!(latest(&older, &newer).unwrap(), newer);
+        assert_eq!(latest(&newer, &older).unwrap(), newer);
+        assert_eq!(latest(&older, b"").unwrap(), older);
+        assert_eq!(latest(b"", &newer).unwrap(), newer);
+        assert!(latest(b"", b"").unwrap().is_empty());
+        assert!(latest(&older, b"not json").is_err());
+    }
+
+    #[test]
+    fn an_ai_agent_result_keeps_its_output_without_the_conversation() {
+        let manifest = DirectJsonManifest::parse(&agent_manifest(json!({}))).expect("manifest");
+        let source = build_source(b"{}", b"{}", b"{}").expect("source");
+        let state = json!({
+            "chat_history": [{"role": "user", "content": "a long conversation"}],
+            "iterations": 3,
+            "response": {"answer": 42},
+            "tool_call_log": [{"name": "lookup"}],
+            "action": "complete",
+        });
+        let state = serde_json::to_vec(&state).unwrap();
+        let result = DirectJsonManifest::ai_agent_result(&state).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&result).unwrap(),
+            json!({"iterations": 3, "response": {"answer": 42}, "tool_call_log": [{"name": "lookup"}]})
+        );
+        assert_eq!(
+            manifest.ai_turn_output(0, &source, &result).unwrap(),
+            manifest.ai_turn_output(0, &source, &state).unwrap(),
+            "the result builds the same output as the state"
+        );
     }
 
     #[test]

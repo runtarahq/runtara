@@ -32,8 +32,8 @@ one address, a compact JSON array of segments, outermost first:
 | `["wf", workflow]` | Opens each namespace level |
 | `["Split", step, i]`, `["While", step, i]` | A loop iteration, as in the key |
 | `["ns", kind, parts]` | A namespace frame (`child`, `tool-child`, `agent-aux`) |
-| `["base", kind, parts]` | A result row (Agent, Split, EmbedWorkflow), with its key's kind and parts |
-| `["own", kind, parts]` | Rows that result keeps for itself: attempts, retry records, retry sleeps, and a Split's or EmbedWorkflow's deadline rows |
+| `["base", kind, parts]` | A result row (Agent, Split, While, EmbedWorkflow, AiAgent), with its key's kind and parts |
+| `["own", kind, parts]` | Rows that result keeps for itself: attempts, retry records, retry sleeps, a Split's, While's or EmbedWorkflow's deadline rows, and an AiAgent's turn slots, model responses and memory summary |
 
 Every row inside a step then shares a byte prefix of the address. The tags
 repeat the result key's kind and parts, so they tell steps apart exactly as
@@ -110,12 +110,15 @@ end-to-end tests.
 | `split` | every iteration, and the Split's attempt, retry and loop-deadline/complete rows | The result is saved only once the loop has finished: every item succeeded, or with `dontStopOnFailed` every item ran and the result records the failures. Replay looks it up before entering the loop, its deadline or its retries. A failed attempt is a suffixed row with no closure, so a retry keeps the items that already succeeded. |
 | `while` | every iteration, and the While's loop-deadline/complete rows | The result, `{iterations, outputs}`, is saved only once the loop has exited (its condition false or its maximum reached), in a durable graph; a failure, a timeout, an `onError` route or a suspension inside it saves none. Replay looks it up before the first condition and the loop's deadline, so the body never runs again. A body that writes local state (inside a child) carries a snapshot of it in the result, as a Split's does. Older workflows, compiled before While saved a result, replay every iteration as they always have. |
 | `embed_workflow` | the child's rows, nested children included, and the Embed's attempt, retry, retry-sleep and deadline rows | The result is saved only once the child has finished: it succeeded, or, for an Embed called as an AiAgent tool, its failure became the tool result. A child that parks exits the run first, and an enclosing deadline that unwinds skips the save. Replay looks the result up before mapping the child's input, its deadline or its retries. |
-| `agent` | a workflow-agent's child rows, and the Agent's attempt, retry and retry-sleep rows | The result is saved only when the call succeeded; a failure goes to `onError` or fails the run. Replay looks it up before the Agent's deadline, its retries, its continuation and the call. The key does not say whether the agent is a workflow, so every durable Agent that retried also drops its retry rows. An AiAgent's tool and memory calls run under their own frames (`tool-child`, `agent-aux`) and are not touched; neither is the Agent's deadline row, which carries only its position. |
+| `agent` | a workflow-agent's child rows, and the Agent's attempt, retry and retry-sleep rows | The result is saved only when the call succeeded; a failure goes to `onError` or fails the run. Replay looks it up before the Agent's deadline, its retries, its continuation and the call. The key does not say whether the agent is a workflow, so every durable Agent that retried also drops its retry rows. An AiAgent's tool and memory calls run under their own frames (`tool-child`, `agent-aux`), which the rules below close; the Agent's deadline row, which carries only its position, is not touched. |
+| `ai_turn_slot` | the AiAgent's other slot and model responses, and its tool calls' rows | An AiAgent saves each turn whose tools it dispatched in one of two slots, alternating (`[step, turn % 2]`): the conversation, the tool results and the tool counter. Replay restores the newer slot before the first turn, so the turns before it, their responses and their tool calls are never read again, and one turn snapshot remains. The completing turn saves no slot: replay restores the turn before it and takes the completing turn's response from its row. Where the store keeps the other slot (an address over 2 KB), the slot write finds it taken by an older turn; the turn is then also saved under its per-turn `ai_turn` key, which replay follows only when it found both slots. |
+| `ai_agent` | the AiAgent's last slot, model responses and memory summary, and its memory calls' rows | The result, the fields the step output is built from without the conversation, is saved once the loop and the memory save have finished. Replay looks it up before loading memory, so no turn, summary or memory call runs again. A summarize compaction saves its output first (`ai_summary`), so a resume between it and the result does not bill it again. Older workflows, compiled before AiAgent saved a result, replay every turn snapshot and summarize again. |
 
 `A → Split[N] → B` therefore keeps three rows, whatever N is, and so do
-`A → While[N] → B`, `A → EmbedWorkflow → B` and `A → workflow-agent → B`,
-whatever the loop or the child does. A resume after a finished While no
-longer replays its iterations.
+`A → While[N] → B`, `A → EmbedWorkflow → B`, `A → workflow-agent → B` and
+`A → AiAgent → B`, whatever the loop, the child or the conversation does. A
+resume after a finished While no longer replays its iterations, and one
+after a finished AiAgent calls no model.
 A composite step inside another one collapses first, and the outer step's
 range then covers its result: a Split inside an Embed's child, an Embed inside
 a Split's iteration or inside another Embed. A run parked or killed inside a
@@ -138,14 +141,11 @@ runs the child closes them with the rest, under the rules above: a namespace
 another step may share, or one in a run whose list is unknown, is kept, and a
 row whose address is over 2 KB is never collapsed.
 
-Two kinds of state rows have no closing result:
-
-- a workflow-agent called as an AiAgent tool writes them under the tool
-  call's frame, and the tool call records no result of its own (AiAgent does
-  not close its scope);
-- a non-durable top-level workflow whose Split or While body is marked
-  `durable: true` checkpoints local state in that body, under a loop that
-  saves no result.
+A workflow-agent called as an AiAgent tool writes them under the tool call's
+frame, which the AiAgent's next turn slot closes. One kind of state row has
+no closing result: a non-durable top-level workflow whose Split or While body
+is marked `durable: true` checkpoints local state in that body, under a loop
+that saves no result.
 
 A durable top-level run writes no such rows: it publishes its state to the
 host (`instance_state`, one row per instance, and `instance_state_writes`, its

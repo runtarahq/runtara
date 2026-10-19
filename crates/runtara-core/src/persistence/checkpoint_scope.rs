@@ -30,9 +30,10 @@
 //! - `["ns", kind, parts]` is a namespace frame's marker (child, tool-child,
 //!   agent-aux);
 //! - `["base", kind, parts]` tags a result row (Agent, Split, While,
-//!   EmbedWorkflow), and `["own", kind, parts]` the rows that result keeps for
-//!   itself: its retry attempts, retry records and retry sleeps, and a
-//!   Split's, While's or EmbedWorkflow's deadline rows. The tag repeats the
+//!   EmbedWorkflow, AiAgent), and `["own", kind, parts]` the rows that result
+//!   keeps for itself: its retry attempts, retry records and retry sleeps, a
+//!   Split's, While's or EmbedWorkflow's deadline rows, and an AiAgent's turn
+//!   snapshots, model responses and memory summary. The tag repeats the
 //!   result key's kind and parts, so it tells steps apart exactly as well as
 //!   their result keys do. A closure deletes `own` rows, never another step's
 //!   `base` row.
@@ -43,6 +44,12 @@
 //! be matched when steps share an id at one position (an `onWait` branch may
 //! reuse a main-graph id). It is left untagged, and goes when an enclosing
 //! step collapses.
+//!
+//! An AiAgent's turn slots, model responses and memory summary name its step,
+//! so they belong to its result like deadline rows do. Its tool calls and
+//! memory calls open `tool-child` and `agent-aux` frames whose parts start
+//! with the step id: a turn slot closes the tool calls, the result the memory
+//! calls.
 //!
 //! Stores keep the address in each row, and later closures match rows written
 //! earlier, so the format only grows: a change that renders an existing kind
@@ -84,15 +91,17 @@ pub struct ScopeClosure {
     /// A byte prefix of every address inside the step.
     pub inner: String,
     /// The calling step, when `inner` is a child namespace (an EmbedWorkflow
-    /// or an Agent result); `None` for a loop's iterations. A child namespace
-    /// names its step by id alone, so another step with that id at the same
-    /// position may share it (see [`SharedChildSteps`]).
+    /// or an Agent result, an AiAgent's tool or memory calls); `None` for a
+    /// loop's iterations. A child namespace names its step by id alone, so
+    /// another step with that id at the same position may share it (see
+    /// [`SharedChildSteps`]).
     pub child_step: Option<String>,
 }
 
 impl ScopeClosure {
-    /// Whether a row at `scope` is obsolete. The recorded row itself is
-    /// tagged `base`, never `own`, and no inner prefix reaches its position.
+    /// Whether a row at `scope` is obsolete. A store keeps the row being
+    /// recorded whatever this says: an AiAgent's turn snapshot sits at the
+    /// `owned` address its closure deletes.
     pub fn covers(&self, scope: &str) -> bool {
         scope == self.owned || scope.starts_with(&self.inner)
     }
@@ -194,11 +203,24 @@ type Rule = fn(&Key) -> Option<ScopeClosure>;
 ///   and the call itself. A workflow-agent's child rows are never read again,
 ///   and neither are the attempt, retry and retry-sleep rows of any Agent
 ///   that retried: the key does not say whether the agent is a workflow.
+/// - `ai_turn_slot`: an AiAgent saves each turn whose tools it dispatched in
+///   one of two slots, alternating, and replay restores the newer slot before
+///   the first turn. The other slot, the model responses and the tool calls
+///   the turn's snapshot holds are never read again, so at most one slot
+///   remains. A store that keeps the other slot (an address over
+///   [`MAX_SCOPE_BYTES`]) makes the slot write find it, and the step falls
+///   back to its per-turn snapshots, which replay follows only then.
+/// - `ai_agent`: an AiAgent's result is saved once its loop and its memory
+///   save have finished, and replay looks it up before loading memory, so
+///   its last slot, its responses, its memory summary and its memory calls
+///   are never read again.
 const RULES: &[(&str, Rule)] = &[
     ("split", Key::loop_closure),
     ("while", Key::loop_closure),
     ("embed_workflow", Key::child_closure),
     ("agent", Key::child_closure),
+    ("ai_turn_slot", Key::turn_closure),
+    ("ai_agent", Key::ai_agent_closure),
 ];
 
 /// The closure of a Split's or While's result: its own rows and every
@@ -272,13 +294,33 @@ impl Key {
         segments
     }
 
-    /// The step id of a result key (Agent, Split, EmbedWorkflow).
+    /// The step id of a result key (Agent, Split, While, EmbedWorkflow,
+    /// AiAgent).
     fn result_step(&self) -> Option<&str> {
         match (self.kind.as_str(), self.parts.as_array()?.as_slice()) {
             // agent_id, capability_id, step_id
-            ("agent", [_, _, step]) | ("split" | "while" | "embed_workflow", [step]) => {
-                step.as_str()
-            }
+            ("agent", [_, _, step])
+            | ("split" | "while" | "embed_workflow" | "ai_agent", [step]) => step.as_str(),
+            _ => None,
+        }
+    }
+
+    /// The result a row that is not one belongs to, as that result key's kind
+    /// and parts.
+    fn owner(&self) -> Option<(&'static str, Value)> {
+        self.ai_agent_row()
+            .map(|step| ("ai_agent", json!([step])))
+            .or_else(|| self.deadline_result())
+    }
+
+    /// The AiAgent step whose turn slot (`[step_id, slot]`), model response
+    /// (`[step_id, turn]`) or memory summary (`[step_id]`) this row is. The
+    /// per-turn `ai_turn` snapshot is not one: it keeps its position-only
+    /// address, since artifacts compiled before the slots replay through it.
+    fn ai_agent_row(&self) -> Option<&str> {
+        match (self.kind.as_str(), self.parts.as_array()?.as_slice()) {
+            ("ai_turn_slot" | "ai_turn_response", [step, Value::Number(_)])
+            | ("ai_summary", [step]) => step.as_str(),
             _ => None,
         }
     }
@@ -308,7 +350,7 @@ impl Key {
         if self.suffixed {
             return None;
         }
-        let (kind, parts) = self.deadline_result()?;
+        let (kind, parts) = self.owner()?;
         Some(json!(["own", kind, parts]))
     }
 
@@ -334,6 +376,31 @@ impl Key {
         self.closure(encode(&json!(["ns", "child", [step]])), Some(step))
     }
 
+    /// An AiAgent turn slot's closure: the step's own rows (the other slot,
+    /// its model responses) and every tool call it dispatched.
+    fn turn_closure(&self) -> Option<ScopeClosure> {
+        if self.kind != "ai_turn_slot" || self.suffixed {
+            return None;
+        }
+        let step = self.ai_agent_row()?;
+        self.closure_of(
+            "ai_agent",
+            &json!([step]),
+            ai_agent_frames("tool-child", step),
+            Some(step),
+        )
+    }
+
+    /// An AiAgent result's closure: its own rows (its last slot, its model
+    /// responses, its memory summary) and every memory call it made.
+    fn ai_agent_closure(&self) -> Option<ScopeClosure> {
+        if self.kind != "ai_agent" {
+            return None;
+        }
+        let step = self.result_step()?;
+        self.closure(ai_agent_frames("agent-aux", step), Some(step))
+    }
+
     /// The closure of this result key: its `own` rows, plus every address
     /// starting with the position followed by `inner`, which is the child
     /// namespace of `child_step` when there is one.
@@ -341,8 +408,19 @@ impl Key {
         if self.suffixed || self.result_step().is_none() {
             return None;
         }
+        self.closure_of(&self.kind, &self.parts, inner, child_step)
+    }
+
+    /// The closure of the result `kind` and `parts` at this key's position.
+    fn closure_of(
+        &self,
+        kind: &str,
+        parts: &Value,
+        inner: String,
+        child_step: Option<&str>,
+    ) -> Option<ScopeClosure> {
         let mut owned = self.position();
-        owned.push(json!(["own", self.kind, self.parts]));
+        owned.push(json!(["own", kind, parts]));
         let owned = bounded(encode(&owned))?;
         let inner = opened(encode(&self.position())) + &inner;
         Some(ScopeClosure {
@@ -351,6 +429,12 @@ impl Key {
             child_step: child_step.map(str::to_string),
         })
     }
+}
+
+/// A byte prefix of every frame marker of `kind` (`tool-child` or
+/// `agent-aux`) an AiAgent step opens: their parts start with its id.
+fn ai_agent_frames(kind: &str, step: &str) -> String {
+    format!(r#"["ns",{},{}"#, encode(kind), opened(encode(&[step])))
 }
 
 /// `Some(true)` for a well-formed attempt suffix, `Some(false)` for none.
@@ -655,9 +739,27 @@ mod tests {
             ),
             key("wait", "wf", json!([]), json!([]), json!(["instance", "w"])),
             key("ai_turn", "wf", json!([]), json!([]), json!(["ai", 0])),
+            key(
+                "ai_turn_response",
+                "wf",
+                json!([]),
+                json!([]),
+                json!(["ai", 0]),
+            ),
+            key("ai_summary", "wf", json!([]), json!([]), json!(["ai"])),
+            format!(
+                "{}::attempt::1",
+                key("ai_turn_slot", "wf", json!([]), json!([]), json!(["ai", 0]))
+            ),
             key("state", "wf", json!([]), json!([]), json!(["set"])),
         ] {
             assert_eq!(closure(&id), None, "{id}");
+        }
+        for id in [
+            key("ai_turn_slot", "wf", json!([]), json!([]), json!(["ai", 1])),
+            key("ai_agent", "wf", json!([]), json!([]), json!(["ai"])),
+        ] {
+            assert!(closure(&id).is_some(), "{id}");
         }
     }
 
@@ -721,6 +823,170 @@ mod tests {
             let call = agent("ai", json!([frame]), json!([]));
             assert!(!closure.covers(&scope(&call).unwrap()), "{call}");
         }
+    }
+
+    fn ai_row(kind: &str, loops: Value, parts: Value) -> String {
+        key(kind, "wf", json!([]), loops, parts)
+    }
+
+    /// A row an AiAgent's call `label` (a tool or a memory phase) writes under
+    /// the frame `kind` the stdlib opens for it.
+    fn ai_call_row(kind: &str, step: &str, loops: Value, label: &str) -> String {
+        let frame = match kind {
+            "tool-child" => json!(["tool-child", "wf", loops, [step, label, 0]]),
+            _ => json!(["agent-aux", "wf", loops, [step, "object-model", label]]),
+        };
+        agent("call", json!([frame]), json!([]))
+    }
+
+    #[test]
+    fn an_ai_agents_rows_are_owned_by_its_result() {
+        let loops = json!([["While", "w", 0]]);
+        for (kind, parts) in [
+            ("ai_turn_slot", json!(["ai", 0])),
+            ("ai_turn_slot", json!(["ai", 1])),
+            ("ai_turn_response", json!(["ai", 7])),
+            ("ai_summary", json!(["ai"])),
+        ] {
+            assert_eq!(
+                scope(&ai_row(kind, loops.clone(), parts)).unwrap(),
+                r#"[["wf","wf"],["While","w",0],["own","ai_agent",["ai"]]]"#,
+                "{kind}"
+            );
+        }
+        assert_eq!(
+            scope(&ai_row("ai_agent", loops, json!(["ai"]))).unwrap(),
+            r#"[["wf","wf"],["While","w",0],["base","ai_agent",["ai"]]]"#
+        );
+    }
+
+    #[test]
+    fn a_turn_slot_closes_the_other_slot_the_responses_and_the_tool_calls() {
+        let at = json!([["Split", "s", 1]]);
+        let elsewhere = json!([["Split", "s", 2]]);
+        let slot = ai_row("ai_turn_slot", at.clone(), json!(["ai", 1]));
+        let closure = closure(&slot).unwrap();
+        assert_eq!(closure.child_step.as_deref(), Some("ai"));
+
+        let inside = [
+            ai_row("ai_turn_slot", at.clone(), json!(["ai", 0])),
+            ai_row("ai_turn_response", at.clone(), json!(["ai", 1])),
+            ai_row("ai_turn_response", at.clone(), json!(["ai", 12])),
+            ai_call_row("tool-child", "ai", at.clone(), "lookup"),
+            // A workflow-agent tool's own rows, nested children included.
+            agent(
+                "deep",
+                json!([
+                    ["tool-child", "wf", at.clone(), ["ai", "lookup", 3]],
+                    child("e", json!([["Split", "items", 0]]))
+                ]),
+                json!([]),
+            ),
+        ];
+        // The slot itself is at the address it deletes; a store keeps the row
+        // it records.
+        assert!(closure.covers(&scope(&slot).unwrap()));
+        let outside = [
+            ai_row("ai_agent", at.clone(), json!(["ai"])),
+            ai_row("ai_turn", at.clone(), json!(["ai", 1])),
+            ai_row("ai_turn_slot", elsewhere.clone(), json!(["ai", 0])),
+            ai_row("ai_turn_slot", at.clone(), json!(["ai2", 0])),
+            ai_row("ai_turn_response", at.clone(), json!(["a", 1])),
+            ai_call_row("tool-child", "ai", elsewhere, "lookup"),
+            ai_call_row("tool-child", "ai2", at.clone(), "lookup"),
+            ai_call_row("tool-child", "a", at.clone(), "lookup"),
+            ai_call_row("agent-aux", "ai", at.clone(), "load-memory"),
+            agent("ai", json!([]), at.clone()),
+        ];
+        for id in inside {
+            assert!(closure.covers(&scope(&id).unwrap()), "should cover {id}");
+        }
+        for id in outside {
+            assert!(!closure.covers(&scope(&id).unwrap()), "should keep {id}");
+        }
+    }
+
+    #[test]
+    fn an_ai_agent_result_closes_its_own_rows_and_its_memory_calls() {
+        let at = json!([]);
+        let result = ai_row("ai_agent", at.clone(), json!(["ai"]));
+        let closure = closure(&result).unwrap();
+        assert_eq!(closure.child_step.as_deref(), Some("ai"));
+
+        let inside = [
+            ai_row("ai_turn_slot", at.clone(), json!(["ai", 0])),
+            ai_row("ai_turn_slot", at.clone(), json!(["ai", 1])),
+            ai_row("ai_turn_response", at.clone(), json!(["ai", 3])),
+            ai_row("ai_summary", at.clone(), json!(["ai"])),
+            ai_call_row("agent-aux", "ai", at.clone(), "load-memory"),
+            ai_call_row("agent-aux", "ai", at.clone(), "save-memory"),
+            key(
+                "agent-deadline",
+                "wf",
+                json!([["agent-aux", "wf", [], ["ai", "object-model", "load-memory"]]]),
+                json!([]),
+                json!(["Agent", "g", "mem"]),
+            ),
+        ];
+        let outside = [
+            result.clone(),
+            ai_row("ai_turn", at.clone(), json!(["ai", 1])),
+            ai_row("ai_agent", at.clone(), json!(["ai2"])),
+            ai_row("ai_summary", at.clone(), json!(["ai2"])),
+            ai_call_row("agent-aux", "ai2", at.clone(), "load-memory"),
+            ai_call_row("tool-child", "ai", at.clone(), "lookup"),
+            ai_row("ai_turn_slot", json!([["While", "w", 0]]), json!(["ai", 0])),
+        ];
+        for id in inside {
+            assert!(closure.covers(&scope(&id).unwrap()), "should cover {id}");
+        }
+        for id in outside {
+            assert!(!closure.covers(&scope(&id).unwrap()), "should keep {id}");
+        }
+    }
+
+    #[test]
+    fn a_shared_ai_agent_keeps_its_calls_and_still_drops_its_own_rows() {
+        let slot = closure(&ai_row("ai_turn_slot", json!([]), json!(["ai", 0]))).unwrap();
+        let result = closure(&ai_row("ai_agent", json!([]), json!(["ai"]))).unwrap();
+        let other_slot = scope(&ai_row("ai_turn_slot", json!([]), json!(["ai", 1]))).unwrap();
+        let tool = scope(&ai_call_row("tool-child", "ai", json!([]), "lookup")).unwrap();
+        let memory = scope(&ai_call_row("agent-aux", "ai", json!([]), "load-memory")).unwrap();
+        for (shared, deletes) in [
+            (SharedChildSteps::unknown(), false),
+            (SharedChildSteps::known(["ai"]), false),
+            (SharedChildSteps::known(["other"]), true),
+        ] {
+            assert_eq!(slot.covers_in(&tool, &shared), deletes, "{shared:?}");
+            assert_eq!(result.covers_in(&memory, &shared), deletes, "{shared:?}");
+            assert!(slot.covers_in(&other_slot, &shared), "{shared:?}");
+            assert!(result.covers_in(&other_slot, &shared), "{shared:?}");
+        }
+    }
+
+    #[test]
+    fn ai_agent_keys_the_stdlib_emits_have_addresses() {
+        // Literals asserted by the stdlib's own key tests.
+        let cases = [
+            (
+                r#"runtara:v2:["ai_turn_slot","wf",[],null,["ai",1]]"#,
+                r#"[["wf","wf"],["own","ai_agent",["ai"]]]"#,
+            ),
+            (
+                r#"runtara:v2:["ai_agent","wf",[],null,["ai"]]"#,
+                r#"[["wf","wf"],["base","ai_agent",["ai"]]]"#,
+            ),
+            (
+                r#"runtara:v2:["ai_summary","wf",[],null,["ai"]]"#,
+                r#"[["wf","wf"],["own","ai_agent",["ai"]]]"#,
+            ),
+        ];
+        for (id, address) in cases {
+            assert_eq!(scope(id).as_deref(), Some(address), "{id}");
+        }
+        let slot = closure(cases[0].0).unwrap();
+        let tool_row = r#"runtara:v2:["ai_turn_response","wf",[["tool-child","wf",null,["ai","lookup",4]]],null,["inner",1]]"#;
+        assert!(slot.covers(&scope(tool_row).unwrap()), "{tool_row}");
     }
 
     #[test]
