@@ -133,6 +133,13 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_ai_turn_snapshot_part: Option<u32>,
     stdlib_ai_turn_snapshot_tool_calls: Option<u32>,
     stdlib_ai_turn_snapshot_complete: Option<u32>,
+    stdlib_ai_turn_slot_key: Option<u32>,
+    stdlib_ai_turn_slot_snapshot: Option<u32>,
+    stdlib_ai_turn_snapshot_turn: Option<u32>,
+    stdlib_ai_turn_latest: Option<u32>,
+    stdlib_ai_agent_result_key: Option<u32>,
+    stdlib_ai_agent_result: Option<u32>,
+    stdlib_ai_summary_key: Option<u32>,
     stdlib_ai_turn_output: Option<u32>,
     stdlib_ai_tool_debug_start: Option<u32>,
     stdlib_ai_tool_debug_end: Option<u32>,
@@ -586,6 +593,34 @@ impl DirectCoreImportIndices {
                 self.stdlib_ai_turn_snapshot_complete,
                 "stdlib.ai-turn-snapshot-complete",
             )?,
+            stdlib_ai_turn_slot_key: require_import(
+                self.stdlib_ai_turn_slot_key,
+                "stdlib.ai-turn-slot-key",
+            )?,
+            stdlib_ai_turn_slot_snapshot: require_import(
+                self.stdlib_ai_turn_slot_snapshot,
+                "stdlib.ai-turn-slot-snapshot",
+            )?,
+            stdlib_ai_turn_snapshot_turn: require_import(
+                self.stdlib_ai_turn_snapshot_turn,
+                "stdlib.ai-turn-snapshot-turn",
+            )?,
+            stdlib_ai_turn_latest: require_import(
+                self.stdlib_ai_turn_latest,
+                "stdlib.ai-turn-latest",
+            )?,
+            stdlib_ai_agent_result_key: require_import(
+                self.stdlib_ai_agent_result_key,
+                "stdlib.ai-agent-result-key",
+            )?,
+            stdlib_ai_agent_result: require_import(
+                self.stdlib_ai_agent_result,
+                "stdlib.ai-agent-result",
+            )?,
+            stdlib_ai_summary_key: require_import(
+                self.stdlib_ai_summary_key,
+                "stdlib.ai-summary-key",
+            )?,
             stdlib_ai_turn_output: require_import(
                 self.stdlib_ai_turn_output,
                 "stdlib.ai-turn-output",
@@ -844,6 +879,13 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) stdlib_ai_turn_snapshot_part: u32,
     pub(super) stdlib_ai_turn_snapshot_tool_calls: u32,
     pub(super) stdlib_ai_turn_snapshot_complete: u32,
+    pub(super) stdlib_ai_turn_slot_key: u32,
+    pub(super) stdlib_ai_turn_slot_snapshot: u32,
+    pub(super) stdlib_ai_turn_snapshot_turn: u32,
+    pub(super) stdlib_ai_turn_latest: u32,
+    pub(super) stdlib_ai_agent_result_key: u32,
+    pub(super) stdlib_ai_agent_result: u32,
+    pub(super) stdlib_ai_summary_key: u32,
     pub(super) stdlib_ai_turn_output: u32,
     pub(super) stdlib_ai_tool_debug_start: u32,
     pub(super) stdlib_ai_tool_debug_end: u32,
@@ -1408,6 +1450,20 @@ pub(super) fn import_core_function(
         import_indices.stdlib_ai_turn_snapshot_tool_calls = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-turn-snapshot-complete") {
         import_indices.stdlib_ai_turn_snapshot_complete = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-turn-slot-key") {
+        import_indices.stdlib_ai_turn_slot_key = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-turn-slot-snapshot") {
+        import_indices.stdlib_ai_turn_slot_snapshot = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-turn-snapshot-turn") {
+        import_indices.stdlib_ai_turn_snapshot_turn = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-turn-latest") {
+        import_indices.stdlib_ai_turn_latest = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-agent-result-key") {
+        import_indices.stdlib_ai_agent_result_key = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-agent-result") {
+        import_indices.stdlib_ai_agent_result = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "ai-summary-key") {
+        import_indices.stdlib_ai_summary_key = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-turn-output") {
         import_indices.stdlib_ai_turn_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-tool-debug-start") {

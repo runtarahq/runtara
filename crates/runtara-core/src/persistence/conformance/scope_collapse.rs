@@ -862,6 +862,201 @@ pub async fn a_fenced_child_keeps_a_listed_namespace(p: &dyn Persistence) {
     p.delete_instances_batch(&[id]).await.unwrap();
 }
 
+/// A row of AiAgent `ai`'s tool call `counter`, and one its tool's own child
+/// wrote, as the stdlib frames them.
+fn ai_tool_rows(loops: Value, counter: u32) -> [String; 2] {
+    let frame = json!(["tool-child", "wf", loops, ["ai", "lookup", counter]]);
+    [
+        key(
+            "agent",
+            json!([frame.clone()]),
+            json!([]),
+            json!(["utils", "random-double", "lookup"]),
+        ),
+        key(
+            "agent",
+            json!([frame, ["child", "wf", [], ["lookup"]]]),
+            json!([]),
+            json!(["utils", "random-double", "inner"]),
+        ),
+    ]
+}
+
+/// A row of AiAgent `ai`'s memory call `label`.
+fn ai_memory_row(label: &str) -> String {
+    key(
+        "agent",
+        json!([["agent-aux", "wf", [], ["ai", "object-model", label]]]),
+        json!([]),
+        json!(["object-model", label, "mem"]),
+    )
+}
+
+fn ai_row(kind: &str, parts: Value) -> String {
+    key(kind, json!([]), json!([]), parts)
+}
+
+/// An AiAgent keeps one turn snapshot: recording the slot of turn `n` deletes
+/// the other slot (turn `n - 1`), the model responses and the tool calls the
+/// new snapshot holds. Recording the step's result then leaves that one row,
+/// its memory calls and its memory summary gone. Another AiAgent's rows, the
+/// rows around the step and older per-turn snapshots stay.
+pub async fn an_ai_agent_keeps_its_latest_turn_then_one_row(p: &dyn Persistence) {
+    let id = running(p, "ai-agent").await;
+    let outside = vec![
+        key(
+            "agent",
+            json!([]),
+            json!([]),
+            json!(["utils", "random-double", "before"]),
+        ),
+        ai_row("ai_turn_response", json!(["ai2", 1])),
+        ai_row("ai_turn_slot", json!(["ai2", 1])),
+        ai_row("ai_turn", json!(["ai", 1])),
+        key(
+            "ai_turn_slot",
+            json!([]),
+            json!([["While", "w", 0]]),
+            json!(["ai", 1]),
+        ),
+    ];
+    save_all(p, &id, &outside).await;
+    save_all(p, &id, &[ai_memory_row("load-memory")]).await;
+
+    let mut slots = Vec::new();
+    for turn in 1..=3u32 {
+        let response = ai_row("ai_turn_response", json!(["ai", turn]));
+        save_all(p, &id, std::slice::from_ref(&response)).await;
+        save_all(p, &id, &ai_tool_rows(json!([]), turn)).await;
+        let slot = ai_row("ai_turn_slot", json!(["ai", turn % 2]));
+        assert_eq!(
+            p.record_checkpoint(&id, &slot, b"snapshot", None)
+                .await
+                .unwrap(),
+            CheckpointWrite::Recorded,
+            "turn {turn}: the other slot is gone, so this one is fresh"
+        );
+        let mut expected = set(&outside);
+        expected.insert(ai_memory_row("load-memory"));
+        expected.insert(slot.clone());
+        assert_eq!(stored(p, &id).await, expected, "after turn {turn}");
+        slots.push(slot);
+    }
+
+    // The completing turn's response, then the memory phases.
+    save_all(
+        p,
+        &id,
+        &[
+            ai_row("ai_turn_response", json!(["ai", 4])),
+            ai_row("ai_summary", json!(["ai"])),
+            ai_memory_row("save-memory"),
+        ],
+    )
+    .await;
+    let result = ai_row("ai_agent", json!(["ai"]));
+    p.record_checkpoint(&id, &result, b"{}", None)
+        .await
+        .unwrap();
+
+    let mut expected = set(&outside);
+    expected.insert(result);
+    assert_eq!(stored(p, &id).await, expected);
+    p.delete_instances_batch(&[id]).await.unwrap();
+}
+
+/// In a run whose shared steps are unknown, an AiAgent's slot and result
+/// still delete its own rows, and keep its tool and memory calls.
+pub async fn an_unknown_run_keeps_an_ai_agents_calls(p: &dyn Persistence) {
+    let id = running_with(p, "ai-unknown", None).await;
+    let tools = ai_tool_rows(json!([]), 0);
+    let memory = ai_memory_row("load-memory");
+    save_all(p, &id, &tools).await;
+    save_all(
+        p,
+        &id,
+        &[
+            memory.clone(),
+            ai_row("ai_turn_response", json!(["ai", 1])),
+            ai_row("ai_turn_slot", json!(["ai", 0])),
+        ],
+    )
+    .await;
+    let slot = ai_row("ai_turn_slot", json!(["ai", 1]));
+    p.record_checkpoint(&id, &slot, b"snapshot", None)
+        .await
+        .unwrap();
+    let mut expected = set(&tools);
+    expected.insert(memory.clone());
+    expected.insert(slot);
+    assert_eq!(stored(p, &id).await, expected);
+
+    let result = ai_row("ai_agent", json!(["ai"]));
+    p.record_checkpoint(&id, &result, b"{}", None)
+        .await
+        .unwrap();
+    let mut expected = set(&tools);
+    expected.insert(memory);
+    expected.insert(result);
+    assert_eq!(stored(p, &id).await, expected);
+    p.delete_instances_batch(&[id]).await.unwrap();
+}
+
+/// An AiAgent inside an isolated child records its slot through the fenced
+/// path: the child's other slot, response and tool calls go, and the
+/// parent's AiAgent with the same step id keeps its rows.
+pub async fn a_fenced_ai_agent_slot_replaces_the_previous_turn(p: &dyn Persistence) {
+    let id = running(p, "fenced-ai").await;
+    let lease = claim(p, &id).await;
+    let attempt = fences(p)
+        .begin_invocation_attempt(&lease, "child", "start")
+        .await
+        .unwrap()
+        .fence;
+    let frame = json!([["child", "wf", [], ["call"]]]);
+    let child_row = |kind: &str, parts: Value| key(kind, frame.clone(), json!([]), parts);
+    let child_tool = key(
+        "agent",
+        json!([
+            ["child", "wf", [], ["call"]],
+            ["tool-child", "wf", [], ["ai", "lookup", 0]]
+        ]),
+        json!([]),
+        json!(["utils", "random-double", "lookup"]),
+    );
+    let parent = vec![
+        ai_row("ai_turn_slot", json!(["ai", 0])),
+        ai_row("ai_turn_response", json!(["ai", 1])),
+    ];
+    save_all(p, &id, &parent).await;
+    let slot = child_row("ai_turn_slot", json!(["ai", 1]));
+    for (key, state) in [
+        (child_row("ai_turn_slot", json!(["ai", 0])), b"old".to_vec()),
+        (
+            child_row("ai_turn_response", json!(["ai", 1])),
+            b"r".to_vec(),
+        ),
+        (child_tool, b"t".to_vec()),
+        (slot.clone(), b"snapshot".to_vec()),
+    ] {
+        fences(p)
+            .invocation_checkpoint(
+                &attempt,
+                &InvocationCheckpoint {
+                    checkpoint_id: key,
+                    state,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let mut expected = set(&parent);
+    expected.insert(slot);
+    assert_eq!(stored(p, &id).await, expected);
+    p.delete_instances_batch(&[id]).await.unwrap();
+}
+
 /// Every case in this module.
 pub async fn run_all(p: &dyn Persistence) {
     recording_a_split_result_collapses_its_iterations(p).await;
@@ -880,4 +1075,7 @@ pub async fn run_all(p: &dyn Persistence) {
     a_listed_step_keeps_its_child_namespace(p).await;
     a_split_collapse_ignores_shared_steps(p).await;
     a_fenced_child_keeps_a_listed_namespace(p).await;
+    an_ai_agent_keeps_its_latest_turn_then_one_row(p).await;
+    an_unknown_run_keeps_an_ai_agents_calls(p).await;
+    a_fenced_ai_agent_slot_replaces_the_previous_turn(p).await;
 }

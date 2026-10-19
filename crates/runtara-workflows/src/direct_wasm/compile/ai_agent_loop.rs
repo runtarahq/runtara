@@ -25,7 +25,7 @@ use super::agent_retry::{
     emit_agent_advance_retry_attempt, emit_agent_capture_retry_sleep, emit_agent_retry_condition,
     emit_agent_retry_delay, emit_agent_retry_error_info, emit_agent_retry_sleep,
 };
-use super::checkpoint::{emit_checkpoint_lookup, emit_checkpoint_save};
+use super::checkpoint::{emit_checkpoint, emit_checkpoint_lookup, emit_checkpoint_save};
 use super::debug::{
     emit_ai_memory_debug_event, emit_ai_tool_debug_event, emit_step_breakpoint,
     emit_step_debug_event,
@@ -44,10 +44,11 @@ use super::{
     DIRECT_AI_STATE_LEN_LOCAL, DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
     DIRECT_AI_TOOL_ARGS_PTR_LOCAL, DIRECT_AI_TOOL_CALL_COUNTER_LOCAL, DIRECT_AI_TOOL_COUNT_LOCAL,
     DIRECT_AI_TOOL_IDX_LOCAL, DIRECT_AI_TOOL_MATCH_LOCAL, DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
-    DIRECT_AI_TOOL_RESULT_PTR_LOCAL, DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+    DIRECT_AI_TOOL_RESULT_PTR_LOCAL, DIRECT_AI_TURN_CHAIN_LOCAL, DIRECT_AI_TURN_INPUT_LEN_LOCAL,
     DIRECT_AI_TURN_INPUT_PTR_LOCAL, DIRECT_AI_TURN_OUT_LEN_LOCAL, DIRECT_AI_TURN_OUT_PTR_LOCAL,
-    DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U32_OK_OFFSET, DirectCoreFunctionIndices,
-    DirectCoreStaticData, DirectDataSegment, DirectRunPlan, DirectVariables,
+    DIRECT_CHECKPOINT_FOUND_OFFSET, DIRECT_RET_BOOL_OK_OFFSET, DIRECT_RET_U32_OK_OFFSET,
+    DirectCoreFunctionIndices, DirectCoreStaticData, DirectDataSegment, DirectRunPlan,
+    DirectVariables,
 };
 use crate::direct_wasm::plan::{
     DirectAiMemoryPlan, DirectAiToolPlan, DirectErrorRoutePlan, DirectFailureTarget,
@@ -62,7 +63,7 @@ const AI_MEMORY_DEBUG_PHASE_COMPACT_SUMMARIZE: u32 = 3;
 
 // Inline children share these locals with an enclosing AI loop. Keep the
 // caller's state on the guest operand stack; only the child's result escapes.
-const CHILD_FRAME: [u32; 22] = [
+const CHILD_FRAME: [u32; 23] = [
     DIRECT_AI_BASE_PTR_LOCAL,
     DIRECT_AI_BASE_LEN_LOCAL,
     DIRECT_AI_STATE_PTR_LOCAL,
@@ -85,6 +86,7 @@ const CHILD_FRAME: [u32; 22] = [
     DIRECT_AI_CONV_LEN_LOCAL,
     DIRECT_AI_TOOL_CALL_COUNTER_LOCAL,
     DIRECT_AI_HEAP_BASE_LOCAL,
+    DIRECT_AI_TURN_CHAIN_LOCAL,
 ];
 
 pub(super) fn push_child_frame(body: &mut WasmFunction, result: (u32, u32)) {
@@ -190,6 +192,35 @@ pub(super) fn emit_ai_agent_loop_plan(
     let step_id_segment = static_data
         .step_id(step_id)
         .expect("run plan step ids are present in static data");
+    let source = (source_ptr_local, source_len_local);
+    let route = (route_ptr_local, route_len_local);
+
+    // A finished step replays from its result, the fields its output is built
+    // from: no memory load, model call, compaction or memory save. The rest
+    // of the step is the result's miss arm, one block deeper.
+    if durable_checkpoint {
+        emit_ai_agent_key(
+            body,
+            indices,
+            indices.stdlib_ai_agent_result_key,
+            step_id_segment,
+            source,
+            route,
+            (DIRECT_AI_TOOL_ARGS_PTR_LOCAL, DIRECT_AI_TOOL_ARGS_LEN_LOCAL),
+        );
+        emit_checkpoint_lookup(
+            body,
+            indices,
+            DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
+            DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+            DIRECT_AI_STATE_PTR_LOCAL,
+            DIRECT_AI_STATE_LEN_LOCAL,
+        );
+        body.instruction(&Instruction::Else);
+    }
+    let failure_target = failure_target.map(|target| target.nested(u32::from(durable_checkpoint)));
+    let handled_target = handled_target.map(|target| target.nested(u32::from(durable_checkpoint)));
+
     // Build the constant base turn config from the input mapping.
     emit_apply_mapping(
         body,
@@ -367,6 +398,9 @@ pub(super) fn emit_ai_agent_loop_plan(
     body.instruction(&Instruction::LocalSet(DIRECT_AI_HEAP_BASE_LOCAL));
 
     body.instruction(&Instruction::Block(BlockType::Empty)); // $outer
+    if durable_checkpoint {
+        emit_restore_latest_turn_slot(body, indices, step_id_segment, source, route);
+    }
     body.instruction(&Instruction::Loop(BlockType::Empty)); // $turn
 
     // Safety bound: break to output when the turn budget is exhausted.
@@ -431,27 +465,24 @@ pub(super) fn emit_ai_agent_loop_plan(
         DIRECT_AI_PENDING_LEN_LOCAL,
     );
 
-    // Per-turn durability (GAP-04): a completed turn's snapshot under
-    // `{step}.turn.{n}` replays without re-running (and re-billing) the LLM
-    // call or its tool dispatches. On a hit the snapshot's state/pending/
-    // tool-counter are restored; a completing turn's snapshot exits the loop
-    // directly. Depths at this point: $turn = 0, $outer = 1.
+    // Per-turn snapshots follow the newer slot where a store kept both, and
+    // start at the first turn in a run begun on an artifact compiled before
+    // the slots: follow them until one is missing. A hit restores
+    // the snapshot's state, pending tool results and tool counter without a
+    // model call or tool dispatch; a completing turn's snapshot exits the
+    // loop. Depths inside the hit: $turn = 2, $outer = 3.
     if durable_checkpoint {
-        // key = ai-turn-cache-key(step_id, iter, source) → TOOL_ARGS scratch
-        push_segment_args(body, step_id_segment);
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_ITER_LOCAL));
-        body.instruction(&Instruction::LocalGet(source_ptr_local));
-        body.instruction(&Instruction::LocalGet(source_len_local));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.stdlib_ai_turn_cache_key));
-        emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
-        load_retptr_list(
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_CHAIN_LOCAL));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        emit_ai_turn_key(
             body,
-            DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
-            DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+            indices,
+            indices.stdlib_ai_turn_cache_key,
+            step_id_segment,
+            KeyTurn::Current,
+            source,
+            route,
         );
-        // Opens If(found); snapshot lands in TURN_INPUT scratch. Inside the
-        // If, depths shift: $turn = 1, $outer = 2.
         emit_checkpoint_lookup(
             body,
             indices,
@@ -460,49 +491,21 @@ pub(super) fn emit_ai_agent_loop_plan(
             DIRECT_AI_TURN_INPUT_PTR_LOCAL,
             DIRECT_AI_TURN_INPUT_LEN_LOCAL,
         );
-        // state = snapshot.state
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_PTR_LOCAL));
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_LEN_LOCAL));
-        body.instruction(&Instruction::I32Const(0));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.stdlib_ai_turn_snapshot_part));
-        emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
-        load_retptr_list(body, DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL);
-        // pending = snapshot.pending
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_PTR_LOCAL));
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_LEN_LOCAL));
-        body.instruction(&Instruction::I32Const(1));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.stdlib_ai_turn_snapshot_part));
-        emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
-        load_retptr_list(
-            body,
-            DIRECT_AI_PENDING_PTR_LOCAL,
-            DIRECT_AI_PENDING_LEN_LOCAL,
-        );
-        // tool_counter = snapshot.toolCalls (WaitForSignal-tool signal ids
-        // embed it, so replayed ids must keep advancing from where they were)
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_PTR_LOCAL));
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_LEN_LOCAL));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(
-            indices.stdlib_ai_turn_snapshot_tool_calls,
-        ));
-        emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
-        push_retptr_i32_load(body, DIRECT_RET_U32_OK_OFFSET);
-        body.instruction(&Instruction::LocalSet(DIRECT_AI_TOOL_CALL_COUNTER_LOCAL));
-        // complete? → exit the loop with the restored state
+        emit_restore_turn_snapshot(body, indices, route);
         body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_PTR_LOCAL));
         body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_LEN_LOCAL));
         push_retptr_arg(body);
         body.instruction(&Instruction::Call(indices.stdlib_ai_turn_snapshot_complete));
         emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
         push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-        body.instruction(&Instruction::BrIf(2)); // Br $outer
-        // Not complete: continue with the next turn (its own lookup decides
-        // whether it replays or runs live).
-        body.instruction(&Instruction::Br(1)); // Br $turn
-        body.instruction(&Instruction::End); // close lookup If(found)
+        body.instruction(&Instruction::BrIf(3)); // Br $outer
+        body.instruction(&Instruction::Br(2)); // Br $turn
+        body.instruction(&Instruction::Else);
+        // The turns after a missing one are live.
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::LocalSet(DIRECT_AI_TURN_CHAIN_LOCAL));
+        body.instruction(&Instruction::End); // lookup
+        body.instruction(&Instruction::End); // chain
     }
 
     if durable_checkpoint {
@@ -724,57 +727,16 @@ pub(super) fn emit_ai_agent_loop_plan(
         DIRECT_AI_PENDING_LEN_LOCAL,
     );
 
-    // if ai-turn-is-complete(turn_out): snapshot the completing turn (so a
-    // crash after completion but before downstream checkpoints replays it
-    // without a model call), then break to output. Inside the If, depths
-    // shift: $turn = 1, $outer = 2.
+    // if ai-turn-is-complete(turn_out): break to output. The completing turn
+    // saves no snapshot: replay restores the turn before it and takes this
+    // turn's response from its row, which stays until the step's result.
     body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_PTR_LOCAL));
     body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_LEN_LOCAL));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(indices.stdlib_ai_turn_is_complete));
     emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
     push_retptr_u8_load(body, DIRECT_RET_BOOL_OK_OFFSET);
-    body.instruction(&Instruction::If(BlockType::Empty));
-    if durable_checkpoint {
-        // key = ai-turn-cache-key(step_id, iter, source) → TOOL_ARGS scratch
-        push_segment_args(body, step_id_segment);
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_ITER_LOCAL));
-        body.instruction(&Instruction::LocalGet(source_ptr_local));
-        body.instruction(&Instruction::LocalGet(source_len_local));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.stdlib_ai_turn_cache_key));
-        emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
-        load_retptr_list(
-            body,
-            DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
-            DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
-        );
-        // snapshot = ai-turn-snapshot(state, pending, counter, complete)
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_PTR_LOCAL));
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_LEN_LOCAL));
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_PENDING_PTR_LOCAL));
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_PENDING_LEN_LOCAL));
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_CALL_COUNTER_LOCAL));
-        body.instruction(&Instruction::I32Const(1));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.stdlib_ai_turn_snapshot));
-        emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
-        load_retptr_list(
-            body,
-            DIRECT_AI_TURN_INPUT_PTR_LOCAL,
-            DIRECT_AI_TURN_INPUT_LEN_LOCAL,
-        );
-        emit_checkpoint_save(
-            body,
-            indices,
-            DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
-            DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
-            DIRECT_AI_TURN_INPUT_PTR_LOCAL,
-            DIRECT_AI_TURN_INPUT_LEN_LOCAL,
-        );
-    }
-    body.instruction(&Instruction::Br(2)); // Br $outer
-    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::BrIf(1)); // Br $outer
 
     // Dispatch each requested tool call.
     body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_PTR_LOCAL));
@@ -1074,47 +1036,12 @@ pub(super) fn emit_ai_agent_loop_plan(
     body.instruction(&Instruction::End); // $tool_iter
     body.instruction(&Instruction::End); // $tools_done
 
-    // Per-turn durability: snapshot the completed turn (LLM response in
-    // `state`, dispatched tool results in `pending`, advanced tool counter)
-    // before looping — replaying this iteration restores instead of
-    // re-running. Depths here: $turn = 0, $outer = 1.
+    // Snapshot the turn (the model's response in `state`, the dispatched tool
+    // results in `pending`, the advanced tool counter) in its slot before
+    // looping: replay restores it instead of running the turn again, and the
+    // rows it replaces go. Depths here: $turn = 0, $outer = 1.
     if durable_checkpoint {
-        // key = ai-turn-cache-key(step_id, iter, source) → TOOL_ARGS scratch
-        push_segment_args(body, step_id_segment);
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_ITER_LOCAL));
-        body.instruction(&Instruction::LocalGet(source_ptr_local));
-        body.instruction(&Instruction::LocalGet(source_len_local));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.stdlib_ai_turn_cache_key));
-        emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
-        load_retptr_list(
-            body,
-            DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
-            DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
-        );
-        // snapshot = ai-turn-snapshot(state, pending, counter, complete)
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_PTR_LOCAL));
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_LEN_LOCAL));
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_PENDING_PTR_LOCAL));
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_PENDING_LEN_LOCAL));
-        body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_CALL_COUNTER_LOCAL));
-        body.instruction(&Instruction::I32Const(0));
-        push_retptr_arg(body);
-        body.instruction(&Instruction::Call(indices.stdlib_ai_turn_snapshot));
-        emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
-        load_retptr_list(
-            body,
-            DIRECT_AI_TURN_INPUT_PTR_LOCAL,
-            DIRECT_AI_TURN_INPUT_LEN_LOCAL,
-        );
-        emit_checkpoint_save(
-            body,
-            indices,
-            DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
-            DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
-            DIRECT_AI_TURN_INPUT_PTR_LOCAL,
-            DIRECT_AI_TURN_INPUT_LEN_LOCAL,
-        );
+        emit_save_turn_slot(body, indices, step_id_segment, source, route);
     }
 
     body.instruction(&Instruction::Br(0)); // continue $turn
@@ -1161,7 +1088,34 @@ pub(super) fn emit_ai_agent_loop_plan(
             // Summarize strategy: state = summarize-memory(ai-summarize-input(
             // base, state, max_messages)). The capability LLM-summarizes the
             // oldest messages (or no-ops below the threshold) and returns the
-            // compacted state.
+            // compacted state. A durable step saves the capability's output,
+            // so replay never bills the summary twice. The TOOL_RESULT
+            // scratch is free between the compaction debug events.
+            let summary_key = (
+                DIRECT_AI_TOOL_RESULT_PTR_LOCAL,
+                DIRECT_AI_TOOL_RESULT_LEN_LOCAL,
+            );
+            if durable_checkpoint {
+                emit_ai_agent_key(
+                    body,
+                    indices,
+                    indices.stdlib_ai_summary_key,
+                    step_id_segment,
+                    source,
+                    route,
+                    summary_key,
+                );
+                emit_checkpoint_lookup(
+                    body,
+                    indices,
+                    summary_key.0,
+                    summary_key.1,
+                    DIRECT_AI_TURN_OUT_PTR_LOCAL,
+                    DIRECT_AI_TURN_OUT_LEN_LOCAL,
+                );
+                body.instruction(&Instruction::Else);
+            }
+            let summary_depth = u32::from(durable_checkpoint);
             body.instruction(&Instruction::LocalGet(DIRECT_AI_BASE_PTR_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AI_BASE_LEN_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_PTR_LOCAL));
@@ -1197,7 +1151,7 @@ pub(super) fn emit_ai_agent_loop_plan(
             super::deadline_scope::propagate(
                 body,
                 indices,
-                failure_target.map(|target| target.nested(0)),
+                failure_target.map(|target| target.nested(summary_depth)),
             );
             emit_agent_invoke_error_branch(
                 body,
@@ -1220,14 +1174,35 @@ pub(super) fn emit_ai_agent_loop_plan(
                 data_len_local,
                 workflow_log_kind,
                 workflow_error_kind,
-                failure_target,
-                handled_target,
+                failure_target.map(|target| target.nested(summary_depth)),
+                handled_target.map(|target| target.nested(summary_depth)),
             );
             load_agent_retptr_list(
                 body,
                 DIRECT_AI_TURN_OUT_PTR_LOCAL,
                 DIRECT_AI_TURN_OUT_LEN_LOCAL,
             );
+            if durable_checkpoint {
+                // The call may have reused the scratch the key was in.
+                emit_ai_agent_key(
+                    body,
+                    indices,
+                    indices.stdlib_ai_summary_key,
+                    step_id_segment,
+                    source,
+                    route,
+                    summary_key,
+                );
+                emit_checkpoint_save(
+                    body,
+                    indices,
+                    summary_key.0,
+                    summary_key.1,
+                    DIRECT_AI_TURN_OUT_PTR_LOCAL,
+                    DIRECT_AI_TURN_OUT_LEN_LOCAL,
+                );
+                body.instruction(&Instruction::End);
+            }
             // state = ai-summarize-output(summarize_out)
             body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_PTR_LOCAL));
             body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_LEN_LOCAL));
@@ -1393,7 +1368,38 @@ pub(super) fn emit_ai_agent_loop_plan(
         );
     }
 
-    // Build the AiAgent step output from the final (complete or at-bound) turn.
+    // Save the step's result and close its miss arm. Recording it deletes the
+    // step's last slot, its responses, its memory summary and its memory
+    // calls: one row remains.
+    if durable_checkpoint {
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_LEN_LOCAL));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_ai_agent_result));
+        emit_retptr_error_or_return(body, indices, None, route_ptr_local, route_len_local);
+        load_retptr_list(body, DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL);
+        emit_ai_agent_key(
+            body,
+            indices,
+            indices.stdlib_ai_agent_result_key,
+            step_id_segment,
+            source,
+            route,
+            (DIRECT_AI_TOOL_ARGS_PTR_LOCAL, DIRECT_AI_TOOL_ARGS_LEN_LOCAL),
+        );
+        emit_checkpoint_save(
+            body,
+            indices,
+            DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
+            DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+            DIRECT_AI_STATE_PTR_LOCAL,
+            DIRECT_AI_STATE_LEN_LOCAL,
+        );
+        body.instruction(&Instruction::End);
+    }
+
+    // Build the AiAgent step output from the final (complete or at-bound)
+    // turn, or from the result a replay found.
     body.instruction(&Instruction::I32Const(agent_id as i32));
     body.instruction(&Instruction::LocalGet(source_ptr_local));
     body.instruction(&Instruction::LocalGet(source_len_local));
@@ -1454,6 +1460,240 @@ pub(super) fn emit_ai_agent_loop_plan(
         None,
         None,
     );
+}
+
+/// The turn a turn key names: the loop's current one, or a fixed slot.
+#[derive(Clone, Copy)]
+enum KeyTurn {
+    Current,
+    Slot(i32),
+}
+
+/// key = `key_function(step_id, turn, source)`, into the TOOL_ARGS scratch.
+#[allow(clippy::too_many_arguments)]
+fn emit_ai_turn_key(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    key_function: u32,
+    step_id_segment: &DirectDataSegment,
+    turn: KeyTurn,
+    source: (u32, u32),
+    route: (u32, u32),
+) {
+    push_segment_args(body, step_id_segment);
+    match turn {
+        KeyTurn::Current => body.instruction(&Instruction::LocalGet(DIRECT_AI_ITER_LOCAL)),
+        KeyTurn::Slot(slot) => body.instruction(&Instruction::I32Const(slot)),
+    };
+    body.instruction(&Instruction::LocalGet(source.0));
+    body.instruction(&Instruction::LocalGet(source.1));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(key_function));
+    emit_retptr_error_or_return(body, indices, None, route.0, route.1);
+    load_retptr_list(
+        body,
+        DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
+        DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+    );
+}
+
+/// key = `key_function(step_id, source)`, into `key`.
+fn emit_ai_agent_key(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    key_function: u32,
+    step_id_segment: &DirectDataSegment,
+    source: (u32, u32),
+    route: (u32, u32),
+    key: (u32, u32),
+) {
+    push_segment_args(body, step_id_segment);
+    body.instruction(&Instruction::LocalGet(source.0));
+    body.instruction(&Instruction::LocalGet(source.1));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(key_function));
+    emit_retptr_error_or_return(body, indices, None, route.0, route.1);
+    load_retptr_list(body, key.0, key.1);
+}
+
+/// Restore the loop's state, pending tool results and tool-call counter from
+/// the turn snapshot in TURN_INPUT. The counter must survive replay because
+/// WaitForSignal-tool signal ids embed it.
+fn emit_restore_turn_snapshot(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    route: (u32, u32),
+) {
+    for (part, (ptr, len)) in [
+        (0, (DIRECT_AI_STATE_PTR_LOCAL, DIRECT_AI_STATE_LEN_LOCAL)),
+        (
+            1,
+            (DIRECT_AI_PENDING_PTR_LOCAL, DIRECT_AI_PENDING_LEN_LOCAL),
+        ),
+    ] {
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_LEN_LOCAL));
+        body.instruction(&Instruction::I32Const(part));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_ai_turn_snapshot_part));
+        emit_retptr_error_or_return(body, indices, None, route.0, route.1);
+        load_retptr_list(body, ptr, len);
+    }
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_LEN_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(
+        indices.stdlib_ai_turn_snapshot_tool_calls,
+    ));
+    emit_retptr_error_or_return(body, indices, None, route.0, route.1);
+    push_retptr_i32_load(body, DIRECT_RET_U32_OK_OFFSET);
+    body.instruction(&Instruction::LocalSet(DIRECT_AI_TOOL_CALL_COUNTER_LOCAL));
+}
+
+/// Replay restores the newer of the step's two turn slots before its first
+/// turn, and sets the turn counter to it; a fresh step finds both empty.
+/// The chain local says whether per-turn snapshots may follow, which is so
+/// when both slots or neither hold a turn. Both do only where the store kept
+/// the older one when the newer was saved (an address too long to collapse),
+/// and the turns after it are per-turn snapshots. Neither does in a fresh
+/// step, and in a run that started on an artifact compiled before the slots
+/// and resumes on a recompiled one, which saved every turn that way.
+fn emit_restore_latest_turn_slot(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    step_id_segment: &DirectDataSegment,
+    source: (u32, u32),
+    route: (u32, u32),
+) {
+    for (slot, (ptr, len)) in [
+        (
+            0,
+            (
+                DIRECT_AI_TURN_INPUT_PTR_LOCAL,
+                DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+            ),
+        ),
+        (
+            1,
+            (DIRECT_AI_TURN_OUT_PTR_LOCAL, DIRECT_AI_TURN_OUT_LEN_LOCAL),
+        ),
+    ] {
+        // An empty list stands for an empty slot.
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::LocalSet(ptr));
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::LocalSet(len));
+        emit_ai_turn_key(
+            body,
+            indices,
+            indices.stdlib_ai_turn_slot_key,
+            step_id_segment,
+            KeyTurn::Slot(slot),
+            source,
+            route,
+        );
+        emit_checkpoint_lookup(
+            body,
+            indices,
+            DIRECT_AI_TOOL_ARGS_PTR_LOCAL,
+            DIRECT_AI_TOOL_ARGS_LEN_LOCAL,
+            ptr,
+            len,
+        );
+        body.instruction(&Instruction::End);
+    }
+    for len in [DIRECT_AI_TURN_INPUT_LEN_LOCAL, DIRECT_AI_TURN_OUT_LEN_LOCAL] {
+        body.instruction(&Instruction::LocalGet(len));
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::I32Ne);
+    }
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::LocalSet(DIRECT_AI_TURN_CHAIN_LOCAL));
+
+    // snapshot = ai-turn-latest(slot 0, slot 1) → TURN_INPUT
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_OUT_LEN_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_ai_turn_latest));
+    emit_retptr_error_or_return(body, indices, None, route.0, route.1);
+    load_retptr_list(
+        body,
+        DIRECT_AI_TURN_INPUT_PTR_LOCAL,
+        DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+    );
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_LEN_LOCAL));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    emit_restore_turn_snapshot(body, indices, route);
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_LEN_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_ai_turn_snapshot_turn));
+    emit_retptr_error_or_return(body, indices, None, route.0, route.1);
+    push_retptr_i32_load(body, DIRECT_RET_U32_OK_OFFSET);
+    body.instruction(&Instruction::LocalSet(DIRECT_AI_ITER_LOCAL));
+    body.instruction(&Instruction::End);
+}
+
+/// Save the turn whose tools were just dispatched in its slot. Recording the
+/// slot deletes the other one, this step's model responses and its tool
+/// calls. Where the store kept the other slot instead (the write finds this
+/// slot taken by an older turn), the turn is also saved under its per-turn
+/// key, which replay then follows; signals are handled once, after both.
+fn emit_save_turn_slot(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    step_id_segment: &DirectDataSegment,
+    source: (u32, u32),
+    route: (u32, u32),
+) {
+    emit_ai_turn_key(
+        body,
+        indices,
+        indices.stdlib_ai_turn_slot_key,
+        step_id_segment,
+        KeyTurn::Current,
+        source,
+        route,
+    );
+    // snapshot = ai-turn-slot-snapshot(state, pending, counter, turn)
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_STATE_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_PENDING_PTR_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_PENDING_LEN_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_CALL_COUNTER_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_AI_ITER_LOCAL));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(indices.stdlib_ai_turn_slot_snapshot));
+    emit_retptr_error_or_return(body, indices, None, route.0, route.1);
+    load_retptr_list(
+        body,
+        DIRECT_AI_TURN_INPUT_PTR_LOCAL,
+        DIRECT_AI_TURN_INPUT_LEN_LOCAL,
+    );
+    let record = |body: &mut WasmFunction| {
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_ARGS_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_TOOL_ARGS_LEN_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_PTR_LOCAL));
+        body.instruction(&Instruction::LocalGet(DIRECT_AI_TURN_INPUT_LEN_LOCAL));
+        emit_checkpoint(body, indices);
+    };
+    record(body);
+    push_retptr_u8_load(body, DIRECT_CHECKPOINT_FOUND_OFFSET);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    emit_ai_turn_key(
+        body,
+        indices,
+        indices.stdlib_ai_turn_cache_key,
+        step_id_segment,
+        KeyTurn::Current,
+        source,
+        route,
+    );
+    record(body);
+    body.instruction(&Instruction::End);
+    super::cooperative_wait::emit_checkpoint_signal(body, indices);
 }
 
 /// Load a static data segment's offset/length into a pointer/length local pair.

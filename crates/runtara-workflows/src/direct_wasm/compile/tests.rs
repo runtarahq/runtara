@@ -2720,6 +2720,50 @@ fn direct_compile_supports_ai_agent_tool_loop_graph() {
 }
 
 #[test]
+fn a_durable_ai_agent_loop_keeps_turn_slots_and_a_result() {
+    let durable_calls = [
+        "ai-turn-slot-key",
+        "ai-turn-slot-snapshot",
+        "ai-turn-snapshot-turn",
+        "ai-turn-latest",
+        "ai-agent-result-key",
+        "ai-agent-result",
+        "ai-turn-cache-key",
+        "ai-turn-response-key",
+    ];
+    for durable in [true, false] {
+        let mut graph = fixture("ai_agent_tool_loop");
+        if !durable {
+            let mut value = serde_json::to_value(&graph).expect("graph json");
+            value["steps"]["ai"]["durable"] = serde_json::json!(false);
+            graph = serde_json::from_value(value).expect("graph");
+        }
+        let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
+        let manifest_json = manifest.to_canonical_json().expect("manifest json");
+        let core_config =
+            DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+        let (resolve, world) =
+            build_direct_component_resolve_with_agents(&manifest.feature_summary.agent_ids)
+                .expect("agent resolve");
+        let core = emit_direct_core_module(&resolve, world, &core_config).expect("core module");
+        Validator::new_with_features(wasmparser::WasmFeatures::all())
+            .validate_all(&core)
+            .expect("AiAgent loop core module validates");
+        let called = stdlib_calls(&core);
+        assert!(called.contains("ai-turn-output"), "{called:?}");
+        // Without memory there is no summary to save.
+        assert!(!called.contains("ai-summary-key"), "{called:?}");
+        for function in durable_calls {
+            assert_eq!(
+                called.contains(function),
+                durable,
+                "durable {durable}: {function} in {called:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn direct_compile_supports_ai_agent_embed_workflow_tool_graph() {
     let temp = tempfile::tempdir().expect("tempdir");
     let result = compile_direct_workflow(DirectCompilationInput {

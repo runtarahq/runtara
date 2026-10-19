@@ -426,6 +426,9 @@ struct CapturedRun {
     events: Vec<RuntimeEvent>,
     sleeps: Vec<SleepRequest>,
     checkpoints: Vec<CheckpointRequest>,
+    /// The rows the host holds once the run ends, sorted by id: what a
+    /// relaunch would replay from.
+    stored: Vec<(String, Vec<u8>)>,
     /// LLM-proxy request envelopes the workflow sent (one per model call).
     llm_requests: Vec<Value>,
     /// Connection ids described through the host resolver, in request order.
@@ -1279,12 +1282,21 @@ fn run_direct_workflow_capture_attempt_with_children(
         .lock()
         .expect("slow_item_arrivals lock")
         .clone();
+    let mut stored: Vec<(String, Vec<u8>)> = server_state_for_assertions
+        .checkpoints
+        .lock()
+        .expect("checkpoint state lock")
+        .clone()
+        .into_iter()
+        .collect();
+    stored.sort();
     CapturedRun {
         output_json,
         error_json,
         events,
         sleeps,
         checkpoints,
+        stored,
         llm_requests,
         connection_metadata_requests,
         sql_requests,
@@ -4298,6 +4310,82 @@ fn direct_wasm_execute_ai_agent_memory_emits_debug_events() {
     );
 }
 
+fn ai_agent_summarize_memory_graph_json() -> String {
+    ai_agent_memory_graph_json().replace(
+        r#""compaction":{"maxMessages":1}"#,
+        r#""compaction":{"maxMessages":1,"strategy":"summarize"}"#,
+    )
+}
+
+#[test]
+fn direct_wasm_execute_a_finished_ai_agent_replays_without_summarizing_again() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = ai_agent_summarize_memory_graph_json();
+    assert!(graph.contains("summarize"), "{graph}");
+
+    // The turn and the summary of the over-threshold history are two model
+    // calls.
+    let first = run_direct_workflow_capture_full(
+        &components_dir,
+        "ai-summarize-replay",
+        &graph,
+        br#"{}"#,
+        true,
+        Vec::new(),
+        vec![llm_ok("hello there"), llm_ok("a short summary")],
+        Vec::new(),
+    );
+    assert!(first.status_success, "stderr: {}", first.stderr);
+    assert_eq!(first.llm_requests.len(), 2, "the turn and the summary");
+    let stored: Vec<&String> = first.stored.iter().map(|(id, _)| id).collect();
+    assert_eq!(
+        stored,
+        vec![&root_key(
+            "ai_agent",
+            "ai-summarize-replay",
+            serde_json::json!(["ai"])
+        )],
+        "the response and the summary go with the result"
+    );
+
+    // A relaunch replays the finished step from what the run left: it calls
+    // no model, so the summary is not billed again, and runs no memory phase.
+    let replay = run_direct_workflow_capture_full(
+        &components_dir,
+        "ai-summarize-replay",
+        &graph,
+        br#"{}"#,
+        true,
+        first.stored.clone(),
+        Vec::new(),
+        Vec::new(),
+    );
+    assert!(
+        replay.status_success,
+        "error: {:?}; stderr: {}",
+        replay.error_json, replay.stderr
+    );
+    assert_eq!(
+        replay.output_json, first.output_json,
+        "the replay returns the first run's output"
+    );
+    assert!(
+        replay.llm_requests.is_empty(),
+        "a finished AiAgent must not call the model again: {:?}",
+        replay.llm_requests
+    );
+    let memory_phases: Vec<&str> = replay
+        .events
+        .iter()
+        .filter_map(|event| event.payload_json["step_id"].as_str())
+        .filter(|step| step.starts_with("ai.memory"))
+        .collect();
+    assert!(
+        memory_phases.is_empty(),
+        "a finished AiAgent must not load, compact or save memory again: {memory_phases:?}"
+    );
+}
+
 fn ai_agent_tool_loop_durable_graph_json(durable: bool) -> String {
     format!(
         r##"{{
@@ -4326,9 +4414,9 @@ fn ai_agent_tool_loop_durable_graph_json(durable: bool) -> String {
 fn direct_wasm_execute_ai_agent_loop_replays_completed_turns_without_rebilling() {
     let components_dir = direct_e2e_components_dir();
 
-    // Each completed turn is checkpointed under its versioned invocation key.
-    // Run 1 completes the tool-call turn (turn 1: LLM + echo tool dispatch)
-    // and then dies on a provider error at turn 2 - a mid-loop crash.
+    // A turn whose tools ran is kept in its slot. Run 1 completes the
+    // tool-call turn (turn 1: LLM + echo tool dispatch) and then dies on a
+    // provider error at turn 2 - a mid-loop crash.
     let crashed = run_direct_workflow_with_llm_script(
         &components_dir,
         "ai-loop-durability",
@@ -4341,33 +4429,19 @@ fn direct_wasm_execute_ai_agent_loop_replays_completed_turns_without_rebilling()
         "run 1 must fail at the second turn"
     );
     assert_eq!(crashed.llm_requests.len(), 2, "turn 1 + failed turn 2");
-    // The capture stream includes the empty lookup PROBES as well as the
-    // saves; only non-empty states are real stored checkpoints.
-    let turn_checkpoints: Vec<(String, Vec<u8>)> = crashed
-        .checkpoints
-        .iter()
-        .filter(|checkpoint| {
-            checkpoint
-                .checkpoint_id
-                .starts_with("runtara:v2:[\"ai_turn\"")
-                && !checkpoint.state.is_empty()
-        })
-        .map(|checkpoint| (checkpoint.checkpoint_id.clone(), checkpoint.state.clone()))
-        .collect();
-    assert!(
-        turn_checkpoints.iter().any(|(id, _)| id
-            == &root_key(
-                "ai_turn",
-                "ai-loop-durability",
-                serde_json::json!(["ai", 1])
-            )),
-        "turn 1 must be checkpointed before the crash: {:?}",
-        crashed
-            .checkpoints
-            .iter()
-            .map(|c| &c.checkpoint_id)
-            .collect::<Vec<_>>()
+    // Recording the slot deleted turn 1's response; the failed turn saved
+    // nothing.
+    let stored_ids: Vec<&String> = crashed.stored.iter().map(|(id, _)| id).collect();
+    assert_eq!(
+        stored_ids,
+        vec![&root_key(
+            "ai_turn_slot",
+            "ai-loop-durability",
+            serde_json::json!(["ai", 1])
+        )],
+        "turn 1's slot is the one row left"
     );
+    let turn_checkpoints = crashed.stored.clone();
 
     // Run 2 (replay after the crash): the preloaded turn-1 snapshot restores
     // the conversation + tool results WITHOUT a model call or tool dispatch;
@@ -4411,6 +4485,353 @@ fn direct_wasm_execute_ai_agent_loop_replays_completed_turns_without_rebilling()
         request_body.contains("42"),
         "replayed turn must see turn 1's tool result: {request_body}"
     );
+    assert!(
+        !resumed
+            .checkpoints
+            .iter()
+            .any(|c| c.checkpoint_id.starts_with(r#"runtara:v2:["ai_turn","#)),
+        "the resume reads the slots, not per-turn snapshots: {:?}",
+        resumed
+            .checkpoints
+            .iter()
+            .map(|c| &c.checkpoint_id)
+            .collect::<Vec<_>>()
+    );
+    let stored_ids: Vec<&String> = resumed.stored.iter().map(|(id, _)| id).collect();
+    assert_eq!(
+        stored_ids,
+        vec![&root_key(
+            "ai_agent",
+            "ai-loop-durability",
+            serde_json::json!(["ai"])
+        )],
+        "the finished step keeps its result only"
+    );
+}
+
+/// The ids a run wrote, in order: the capture log also holds lookup probes,
+/// which carry no state.
+fn written_ids(run: &CapturedRun) -> Vec<&str> {
+    run.checkpoints
+        .iter()
+        .filter(|checkpoint| !checkpoint.state.is_empty())
+        .map(|checkpoint| checkpoint.checkpoint_id.as_str())
+        .collect()
+}
+
+fn stored_ids(run: &CapturedRun) -> Vec<&str> {
+    run.stored.iter().map(|(id, _)| id.as_str()).collect()
+}
+
+#[test]
+fn direct_wasm_execute_an_ai_agent_keeps_its_latest_turn_and_ends_with_one_row() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = ai_agent_tool_loop_durable_graph_json(true);
+    let key = |kind: &str, parts: Value| root_key(kind, "ai-latest-turn", parts);
+
+    // Three turns: two dispatch the echo tool, the third completes.
+    let finished = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-latest-turn",
+        &graph,
+        br#"{}"#,
+        vec![
+            llm_tool_call("echo", r#"{"value":1}"#),
+            llm_tool_call("echo", r#"{"value":2}"#),
+            llm_ok("all done"),
+        ],
+    );
+    assert!(finished.status_success, "stderr: {}", finished.stderr);
+    assert_eq!(
+        finished.output_json.as_ref().unwrap()["answer"],
+        serde_json::json!("all done")
+    );
+    // Each tool turn saves its response, then its slot; the completing turn
+    // only its response.
+    assert_eq!(
+        written_ids(&finished),
+        [
+            key("ai_turn_response", serde_json::json!(["ai", 1])),
+            key("ai_turn_slot", serde_json::json!(["ai", 1])),
+            key("ai_turn_response", serde_json::json!(["ai", 2])),
+            key("ai_turn_slot", serde_json::json!(["ai", 0])),
+            key("ai_turn_response", serde_json::json!(["ai", 3])),
+            key("ai_agent", serde_json::json!(["ai"])),
+        ]
+    );
+    assert_eq!(
+        stored_ids(&finished),
+        [key("ai_agent", serde_json::json!(["ai"]))]
+    );
+
+    // A run that dies at turn 3 keeps turn 2's slot only.
+    let crashed = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-latest-turn",
+        &graph,
+        br#"{}"#,
+        vec![
+            llm_tool_call("echo", r#"{"value":1}"#),
+            llm_tool_call("echo", r#"{"value":2}"#),
+            llm_http_500(),
+        ],
+    );
+    assert!(!crashed.status_success);
+    assert_eq!(
+        stored_ids(&crashed),
+        [key("ai_turn_slot", serde_json::json!(["ai", 0]))]
+    );
+
+    // The resume restores turn 2 and makes the one model call left, reading
+    // the two slots and no per-turn snapshot.
+    let resumed = run_direct_workflow_capture_with_preloaded_checkpoints(
+        &components_dir,
+        "ai-latest-turn",
+        &graph,
+        br#"{}"#,
+        false,
+        crashed.stored.clone(),
+        vec![llm_ok("done after resume")],
+    );
+    assert!(resumed.status_success, "stderr: {}", resumed.stderr);
+    assert_eq!(resumed.llm_requests.len(), 1);
+    let request = resumed.llm_requests[0].to_string();
+    for value in [r#"\"value\":1"#, r#"\"value\":2"#] {
+        assert!(
+            request.contains(value),
+            "turn 3 sees both tool results: {request}"
+        );
+    }
+    let read: Vec<&str> = resumed
+        .checkpoints
+        .iter()
+        .filter(|checkpoint| checkpoint.state.is_empty())
+        .map(|checkpoint| checkpoint.checkpoint_id.as_str())
+        .collect();
+    assert_eq!(
+        read,
+        [
+            key("ai_agent", serde_json::json!(["ai"])),
+            key("ai_turn_slot", serde_json::json!(["ai", 0])),
+            key("ai_turn_slot", serde_json::json!(["ai", 1])),
+            key("ai_turn_response", serde_json::json!(["ai", 3])),
+        ]
+    );
+    assert_eq!(
+        stored_ids(&resumed),
+        [key("ai_agent", serde_json::json!(["ai"]))]
+    );
+}
+
+#[test]
+fn direct_wasm_execute_an_ai_agent_begun_before_the_slots_resumes_from_its_turns() {
+    // A run that started on an artifact compiled before the slots saved each
+    // turn under its per-turn key and has no slot. Resumed after the workflow
+    // is recompiled, it replays those turns and dispatches none of their
+    // tools again.
+    let components_dir = direct_e2e_components_dir();
+    let graph = ai_agent_tool_loop_durable_graph_json(true);
+    let key = |kind: &str, parts: Value| root_key(kind, "ai-before-slots", parts);
+    let crashed = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-before-slots",
+        &graph,
+        br#"{}"#,
+        vec![
+            llm_tool_call("echo", r#"{"value":1}"#),
+            llm_tool_call("echo", r#"{"value":2}"#),
+            llm_http_500(),
+        ],
+    );
+    assert!(!crashed.status_success);
+    let written = |id: &str| {
+        crashed
+            .checkpoints
+            .iter()
+            .find(|checkpoint| checkpoint.checkpoint_id == id && !checkpoint.state.is_empty())
+            .unwrap_or_else(|| panic!("{id} was written"))
+            .state
+            .clone()
+    };
+    // The rows the older artifact wrote: each turn's snapshot, as the slot
+    // holds it but without the slot's turn, under the turn's own key, and
+    // each turn's response.
+    let per_turn = |turn: u32, slot: u32| {
+        let mut snapshot: Value = serde_json::from_slice(&written(&key(
+            "ai_turn_slot",
+            serde_json::json!(["ai", slot]),
+        )))
+        .unwrap();
+        snapshot.as_object_mut().unwrap().remove("turn");
+        (
+            key("ai_turn", serde_json::json!(["ai", turn])),
+            serde_json::to_vec(&snapshot).unwrap(),
+        )
+    };
+    let response = |turn: u32| {
+        let id = key("ai_turn_response", serde_json::json!(["ai", turn]));
+        let state = written(&id);
+        (id, state)
+    };
+    let older = vec![per_turn(1, 1), per_turn(2, 0), response(1), response(2)];
+
+    let resumed = run_direct_workflow_capture_with_preloaded_checkpoints(
+        &components_dir,
+        "ai-before-slots",
+        &graph,
+        br#"{}"#,
+        false,
+        older,
+        vec![llm_ok("done after resume")],
+    );
+    assert!(resumed.status_success, "stderr: {}", resumed.stderr);
+    assert_eq!(resumed.llm_requests.len(), 1);
+    let request = resumed.llm_requests[0].to_string();
+    for value in [r#"\"value\":1"#, r#"\"value\":2"#] {
+        assert!(
+            request.contains(value),
+            "turn 3 sees both tool results: {request}"
+        );
+    }
+    assert_eq!(
+        written_ids(&resumed),
+        [
+            key("ai_turn_response", serde_json::json!(["ai", 3])),
+            key("ai_agent", serde_json::json!(["ai"])),
+        ],
+        "turns 1 and 2 come from their snapshots, so nothing is saved for them"
+    );
+}
+
+#[test]
+fn direct_wasm_execute_an_ai_agent_resumed_after_its_summary_does_not_summarize_again() {
+    let components_dir = direct_e2e_components_dir();
+    let graph = ai_agent_summarize_memory_graph_json();
+    let finished = run_direct_workflow_capture_full(
+        &components_dir,
+        "ai-summary-resume",
+        &graph,
+        br#"{}"#,
+        false,
+        Vec::new(),
+        vec![llm_ok("hello there"), llm_ok("a short summary")],
+        Vec::new(),
+    );
+    assert!(finished.status_success, "stderr: {}", finished.stderr);
+    let result = root_key("ai_agent", "ai-summary-resume", serde_json::json!(["ai"]));
+    let summary = root_key("ai_summary", "ai-summary-resume", serde_json::json!(["ai"]));
+    assert_eq!(stored_ids(&finished), [result.as_str()]);
+
+    // The store as it was when the run stopped right before its result:
+    // every write before it, collapsed as the stores collapse.
+    let mut before_result = HashMap::new();
+    for checkpoint in finished
+        .checkpoints
+        .iter()
+        .filter(|checkpoint| !checkpoint.state.is_empty())
+        .take_while(|checkpoint| checkpoint.checkpoint_id != result)
+    {
+        store_checkpoint(
+            &mut before_result,
+            checkpoint.checkpoint_id.clone(),
+            checkpoint.state.clone(),
+        );
+    }
+    assert!(before_result.contains_key(&summary), "{before_result:?}");
+
+    let resumed = run_direct_workflow_capture_full(
+        &components_dir,
+        "ai-summary-resume",
+        &graph,
+        br#"{}"#,
+        false,
+        before_result.into_iter().collect(),
+        Vec::new(),
+        Vec::new(),
+    );
+    assert!(
+        resumed.status_success,
+        "error: {:?}; stderr: {}",
+        resumed.error_json, resumed.stderr
+    );
+    assert!(
+        resumed.llm_requests.is_empty(),
+        "the turn and the summary come from their rows: {:?}",
+        resumed.llm_requests
+    );
+    assert_eq!(resumed.output_json, finished.output_json);
+    assert_eq!(stored_ids(&resumed), [result.as_str()]);
+}
+
+#[test]
+fn direct_wasm_execute_an_ai_agent_whose_rows_cannot_collapse_resumes_from_its_turns() {
+    // An address over 2 KB is never collapsed, so both slots fill up and a
+    // slot write finds an older turn: the step also saves that turn under its
+    // per-turn key, and replay follows those.
+    let components_dir = direct_e2e_components_dir();
+    let step = format!("ai{}", "x".repeat(2100));
+    let graph = ai_agent_tool_loop_durable_graph_json(true)
+        .replace(r#""ai""#, &format!(r#""{step}""#))
+        .replace("steps.ai.", &format!("steps.{step}."));
+    let key = |kind: &str, turn: u32| {
+        root_key(
+            kind,
+            "ai-no-collapse",
+            serde_json::json!([step.as_str(), turn]),
+        )
+    };
+    assert!(runtara_core::persistence::checkpoint_scope::scope(&key("ai_turn_slot", 0)).is_none());
+
+    let crashed = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-no-collapse",
+        &graph,
+        br#"{}"#,
+        vec![
+            llm_tool_call("echo", r#"{"value":1}"#),
+            llm_tool_call("echo", r#"{"value":2}"#),
+            llm_tool_call("echo", r#"{"value":3}"#),
+            llm_http_500(),
+        ],
+    );
+    assert!(!crashed.status_success);
+    let mut expected = vec![
+        key("ai_turn", 3),
+        key("ai_turn_response", 1),
+        key("ai_turn_response", 2),
+        key("ai_turn_response", 3),
+        key("ai_turn_slot", 0),
+        key("ai_turn_slot", 1),
+    ];
+    expected.sort();
+    assert_eq!(stored_ids(&crashed), expected);
+
+    // The resume restores turn 2, the newer slot, then turn 3 from its
+    // per-turn snapshot: it dispatches no tool again and makes one call.
+    let resumed = run_direct_workflow_capture_with_preloaded_checkpoints(
+        &components_dir,
+        "ai-no-collapse",
+        &graph,
+        br#"{}"#,
+        false,
+        crashed.stored.clone(),
+        vec![llm_ok("done after resume")],
+    );
+    assert!(resumed.status_success, "stderr: {}", resumed.stderr);
+    assert_eq!(resumed.llm_requests.len(), 1);
+    let request = resumed.llm_requests[0].to_string();
+    assert!(request.contains(r#"\"value\":3"#), "{request}");
+    assert_eq!(
+        written_ids(&resumed),
+        [
+            key("ai_turn_response", 4).as_str(),
+            &root_key(
+                "ai_agent",
+                "ai-no-collapse",
+                serde_json::json!([step.as_str()])
+            ),
+        ]
+    );
 }
 
 #[test]
@@ -4432,10 +4853,11 @@ fn direct_wasm_execute_ai_agent_loop_non_durable_skips_turn_checkpoints() {
     assert!(result.status_success, "stderr: {}", result.stderr);
     assert_eq!(result.llm_requests.len(), 2);
     assert!(
-        !result.checkpoints.iter().any(|checkpoint| checkpoint
-            .checkpoint_id
-            .starts_with("runtara:v2:[\"ai_turn\"")),
-        "non-durable loop must not write turn checkpoints: {:?}",
+        !result
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.checkpoint_id.starts_with(r#"runtara:v2:["ai_"#)),
+        "non-durable loop must not read or write turn, slot or result checkpoints: {:?}",
         result
             .checkpoints
             .iter()

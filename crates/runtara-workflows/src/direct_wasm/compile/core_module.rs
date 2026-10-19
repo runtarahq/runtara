@@ -868,6 +868,8 @@ pub(super) const CANONICAL_LOCAL_GROUPS: &[(u32, ValType)] = &[
     // 189-190: the wakes a composed workflow-agent returned, then the signal
     // route of its forwarded `on-signal` wake.
     (2, ValType::I32),
+    // 191: whether an AiAgent loop replays through its per-turn snapshots.
+    (1, ValType::I32),
 ];
 
 /// Drop `n` leading local slots from `groups`, splitting (never merging) the
