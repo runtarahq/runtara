@@ -120,7 +120,7 @@ pub fn get_dsl_changelog() -> Value {
                     {
                         "type": "added",
                         "component": "validation",
-                        "description": "E152 step id reused at one position. An onWait graph runs at its WaitForSignal step's position, so its step ids must differ from those of the graph around it and of the other onWait graphs there; a Split or While body is a position of its own. Steps with one id at one position shared their checkpoints, so one could return the other's result."
+                        "description": "E152 step id reused at one position. An onWait graph runs at its WaitForSignal step's position, so a step there that keeps checkpoints needs an id no such step of the graph around it, or of the other onWait graphs there, uses; a Split or While body is a position of its own. Every step keeps checkpoints except Finish, Log, Error, Conditional, Switch, Filter and GroupBy without a breakpoint, and the onWait of a WaitForSignal only an AiAgent tool reaches never runs. Steps with one id at one position shared their checkpoints, so one could return the other's result."
                     }
                 ]
             },

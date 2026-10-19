@@ -37,8 +37,9 @@ one address, a compact JSON array of segments, outermost first:
 
 Every row inside a step then shares a byte prefix of the address. The tags
 repeat the result key's kind and parts, so they tell steps apart exactly as
-well as the result keys do; an `onWait` branch may reuse a main-graph step id
-at the same position. An Agent's deadline row cannot be matched to its result
+well as the result keys do; an `onWait` branch saved before DSL 3.7.0 may
+reuse a main-graph step id at the same position (validation now rejects it,
+E152). An Agent's deadline row cannot be matched to its result
 key (one names the graph scope, the other the agent), so it carries only its
 position and goes when an enclosing step collapses.
 
@@ -68,9 +69,10 @@ looser: every step that can call a child (EmbedWorkflow, Agent) shares one
 namespace with any other such step that has its id at its position, whatever
 its kind. Step ids are unique within a graph, so this happens only when an
 `onWait` graph, which keeps its wait step's position, reuses an id of the
-graph around it. The workflow editor never does, and validation rejects it
-since DSL 3.7.0 (E152), so only workflows saved before can hold such ids;
-their compiled artifacts still run. Deleting a shared namespace
+graph around it. The workflow editor never does, and since DSL 3.7.0
+validation rejects it for every step that keeps checkpoints (E152), so only
+workflows saved before can hold such ids; their compiled artifacts still run.
+Deleting a shared namespace
 would hurt when the other step has no result to replay from: it is
 `durable: false`, it failed and its `onError` handled the failure, or it is
 still in progress. An `onWait` graph runs again on every replay of its wait,

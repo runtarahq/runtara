@@ -18,12 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   position, so a step there with the id of a step around it, or of a step in
   another `onWait` graph at that position, shared that step's checkpoints:
   one could return the other's result, read the other's child rows, or
-  delete its saved work. Saving, validating or deploying such a graph now
-  fails with E152, naming the id and where it is used; a Split or While body
-  is a position of its own, so its ids may repeat the workflow's. The editor
-  never produced such ids, so this reaches only graphs written through MCP or
-  the API. Recompiling does not validate, so a workflow saved before keeps
-  compiling and running until it is saved again.
+  delete its saved work. E152 names the id and where it is used. It counts
+  only steps that keep checkpoints: every step but Finish, Log, Error,
+  Conditional, Switch, Filter and GroupBy, which count too when they have a
+  breakpoint. So a `finish` in the workflow and one in its `onWait` stay
+  valid. A Split or While body is a position of its own, and the `onWait` of
+  a WaitForSignal that only an AiAgent tool reaches never runs, so neither
+  is compared with the graph around it. The editor never produced such ids,
+  so this reaches only graphs written through MCP or the API:
+  - saving a workflow (`PUT`/`POST …/update`, MCP `deploy_workflow`),
+    `validate_graph` and MCP `deploy_latest` fail with E152;
+  - an MCP graph edit still saves, with E152 as a warning like every other
+    error, since a sequence of edits may pass through a reused id;
+  - compiling (`compile_workflow`, `set_current_version`) does not validate,
+    so a workflow saved before keeps compiling and running.
+
+  Validation covers a workflow's embedded children, so a parent whose child
+  reuses such an id fails to save until the child is renamed and saved.
 
 - **DSL 3.6.0: fixes from the DSL audit** (`docs/dsl-audit-2026-10-14.md`).
   Graphs the compiler cannot build, non-durable Delays, missing Split or

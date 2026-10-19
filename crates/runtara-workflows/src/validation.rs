@@ -3355,14 +3355,15 @@ fn validate_reserved_names(graph: &ExecutionGraph, result: &mut ValidationResult
     walk(graph, None, result);
 }
 
-/// E152: a step id appears at most once per position. An `onWait` graph runs
-/// at its WaitForSignal step's position: its steps' checkpoint keys keep the
-/// wait step's loop path and namespace, and step ids are unique only per
-/// graph. So a position is a graph plus every `onWait` graph under it,
-/// through `onWait` graphs only; a Split or While body starts a new one (its
-/// iterations extend the loop path), as does an embedded child (its own
-/// namespace). Every step kind counts, since any row keyed by a step id can
-/// collide. The error sits on the deepest graph that uses the id.
+/// E152: a step that keeps checkpoints has an id no other such step uses at
+/// its position. An `onWait` graph runs at its WaitForSignal step's position:
+/// its steps' checkpoint keys keep the wait step's loop path and namespace,
+/// and step ids are unique only per graph. So a position is a graph plus every
+/// `onWait` graph under it, through `onWait` graphs only; a Split or While
+/// body starts a new one (its iterations extend the loop path), as does an
+/// embedded child (its own namespace). The `onWait` of a WaitForSignal that
+/// only an AiAgent tool reaches never runs (W072), so its steps are skipped.
+/// The error sits on the deepest graph that uses the id.
 fn validate_step_ids_per_position(graph: &ExecutionGraph, result: &mut ValidationResult) {
     /// Where an id is used: a graph's label and its path below the position.
     type Place = (String, Vec<String>);
@@ -3377,15 +3378,19 @@ fn validate_step_ids_per_position(graph: &ExecutionGraph, result: &mut Validatio
         places: &mut BTreeMap<String, Vec<Place>>,
         bodies: &mut Vec<Body<'a>>,
     ) {
+        let tool_only_waits = tool_only_waits(graph);
         let mut step_ids: Vec<&String> = graph.steps.keys().collect();
         step_ids.sort();
         for step_id in step_ids {
-            places
-                .entry(step_id.clone())
-                .or_default()
-                .push((label.to_string(), path.to_vec()));
+            let step = &graph.steps[step_id];
+            if keeps_checkpoints(step) {
+                places
+                    .entry(step_id.clone())
+                    .or_default()
+                    .push((label.to_string(), path.to_vec()));
+            }
             let below = || path.iter().cloned().chain([step_id.clone()]).collect();
-            match &graph.steps[step_id] {
+            match step {
                 Step::Split(step) => bodies.push((
                     below(),
                     &step.subgraph,
@@ -3396,7 +3401,7 @@ fn validate_step_ids_per_position(graph: &ExecutionGraph, result: &mut Validatio
                     &step.subgraph,
                     format!("the body of While '{step_id}'"),
                 )),
-                Step::WaitForSignal(step) => {
+                Step::WaitForSignal(step) if !tool_only_waits.contains(step_id.as_str()) => {
                     if let Some(on_wait) = &step.on_wait {
                         collect(
                             on_wait,
@@ -3410,6 +3415,53 @@ fn validate_step_ids_per_position(graph: &ExecutionGraph, result: &mut Validatio
                 _ => {}
             }
         }
+    }
+
+    /// Whether `step` writes checkpoints keyed by its id: a result, a child
+    /// namespace, a wait, a sleep, a state record, or a breakpoint. A Finish,
+    /// Log, Error, Conditional, Switch, Filter or GroupBy writes none.
+    fn keeps_checkpoints(step: &Step) -> bool {
+        matches!(
+            step,
+            Step::Agent(_)
+                | Step::AiAgent(_)
+                | Step::EmbedWorkflow(_)
+                | Step::Split(_)
+                | Step::While(_)
+                | Step::WaitForSignal(_)
+                | Step::WaitForInstances(_)
+                | Step::Delay(_)
+                | Step::SetState(_)
+                | Step::GetState(_)
+        ) || crate::workflow_features::step_has_breakpoint(step)
+    }
+
+    /// WaitForSignal steps of `graph` that only AiAgent tool edges reach: the
+    /// tool lowering emits the wait but never runs its `onWait`.
+    fn tool_only_waits(graph: &ExecutionGraph) -> HashSet<&str> {
+        let is_tool_edge = |edge: &runtara_dsl::ExecutionPlanEdge| {
+            matches!(graph.steps.get(&edge.from_step), Some(Step::AiAgent(_)))
+                && edge.label.as_deref().is_some_and(|label| {
+                    !matches!(label, "next" | "onError" | "memory") && !label.starts_with("mcp.")
+                })
+        };
+        let mut tool_targets: HashSet<&str> = HashSet::new();
+        let mut other_targets: HashSet<&str> = HashSet::new();
+        for edge in &graph.execution_plan {
+            if is_tool_edge(edge) {
+                tool_targets.insert(&edge.to_step);
+            } else {
+                other_targets.insert(&edge.to_step);
+            }
+        }
+        tool_targets
+            .into_iter()
+            .filter(|step_id| {
+                !other_targets.contains(step_id)
+                    && *step_id != graph.entry_point
+                    && matches!(graph.steps.get(*step_id), Some(Step::WaitForSignal(_)))
+            })
+            .collect()
     }
 
     fn position(graph: &ExecutionGraph, label: &str, result: &mut ValidationResult) {
@@ -19378,7 +19430,7 @@ mod step_ids_per_position_tests {
     }
 
     #[test]
-    fn every_step_kind_counts() {
+    fn steps_of_different_kinds_collide() {
         // An Embed in the workflow and a While with its id in onWait share a
         // position, though their checkpoints have different kinds.
         let found = reused(vec![
@@ -19470,6 +19522,93 @@ mod step_ids_per_position_tests {
             ]),
             []
         );
+    }
+
+    #[test]
+    fn steps_that_write_no_checkpoint_may_share_an_id() {
+        // A Finish, Log or Error writes nothing keyed by its id, so it may
+        // repeat an id at its position, also next to a step that does.
+        let log = |id: &str| json!({"stepType": "Log", "id": id, "message": "hi"});
+        assert_eq!(
+            reused(vec![
+                agent("x"),
+                log("note"),
+                wait("w", vec![fin("x"), log("note"), fin("done")]),
+                fin("done"),
+            ]),
+            []
+        );
+    }
+
+    #[test]
+    fn a_breakpoint_makes_any_step_count() {
+        let log = |breakpoint: bool| json!({"stepType": "Log", "id": "note", "message": "hi", "breakpoint": breakpoint});
+        let found = reused(vec![
+            log(true),
+            wait("w", vec![log(true), fin("n")]),
+            fin("done"),
+        ]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].0, "note");
+        assert_eq!(
+            reused(vec![
+                log(true),
+                wait("w", vec![log(false), fin("n")]),
+                fin("done")
+            ]),
+            []
+        );
+    }
+
+    /// An AiAgent `ai` whose `approval` tool is WaitForSignal `tw`, its onWait
+    /// running an Agent `x` like the workflow's; with `on_main_path`, the
+    /// workflow also reaches `tw` as a step of its own.
+    fn tool_wait(on_main_path: bool) -> Vec<(String, Vec<String>, Vec<String>)> {
+        let mut plan = vec![
+            json!({"fromStep": "x", "toStep": "ai"}),
+            json!({"fromStep": "ai", "toStep": "tw", "label": "approval"}),
+            json!({"fromStep": "ai", "toStep": "done", "label": "next"}),
+        ];
+        if on_main_path {
+            plan.push(json!({"fromStep": "done_wait", "toStep": "tw"}));
+        }
+        let mut steps = json!({
+            "x": agent("x"),
+            "ai": {"id": "ai", "stepType": "AiAgent", "connectionId": "conn-1", "config": {
+                "systemPrompt": {"valueType": "immediate", "value": "You are helpful"},
+                "userPrompt": {"valueType": "immediate", "value": "Do the thing"}}},
+            "tw": wait("tw", vec![agent("x"), fin("notified")]),
+            "done": fin("done"),
+        });
+        if on_main_path {
+            steps["done_wait"] = agent("done_wait");
+        }
+        let graph: ExecutionGraph = serde_json::from_value(
+            json!({"entryPoint": "x", "steps": steps, "executionPlan": plan}),
+        )
+        .expect("graph parses");
+        let result = validate_workflow(&graph, &tests::test_catalog());
+        result
+            .errors
+            .iter()
+            .enumerate()
+            .filter_map(|(index, error)| match error {
+                ValidationError::OnWaitStepIdReused { step_id, places } => Some((
+                    step_id.clone(),
+                    places.clone(),
+                    result.error_graph_path(index).to_vec(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_on_wait_of_a_wait_only_a_tool_reaches_never_runs() {
+        assert_eq!(tool_wait(false), []);
+        let found = tool_wait(true);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].2, ["tw"]);
     }
 
     #[test]

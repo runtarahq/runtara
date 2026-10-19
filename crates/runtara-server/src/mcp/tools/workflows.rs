@@ -685,7 +685,7 @@ pub(crate) fn workflow_authoring_schema(agent_id: &str, capability_id: &str) -> 
                 "For step types that declare it, use inputMapping, not inputMappings",
                 "Error steps do not accept inputMapping; put static error fields directly on the step and dynamic mappings in context",
                 "executionPlan edges use fromStep/toStep",
-                "Step ids are unique per graph, and a WaitForSignal onWait graph runs at its wait step's position: give its steps ids that the graph around it and that graph's other onWait graphs do not use (E152), or the steps share checkpoints",
+                "Step ids are unique per graph, and a WaitForSignal onWait graph runs at its wait step's position: a step there that keeps checkpoints (anything but Finish, Log, Error, Conditional, Switch, Filter and GroupBy without a breakpoint) needs an id no such step of the graph around it or of its other onWait graphs uses (E152), or the steps share checkpoints",
                 "Conditional outgoing edges must use label 'true' or 'false'; do not put condition on those edges",
                 "stateSchema (optional, root graph only) declares the typed state a run exposes, as SchemaField rows with label, format (string: date, datetime, email, url, ...; number/integer: currency) and enum. State starts empty and is written by SetState steps (read back with GetState; see stepShapes), so required, default and visibleWhen have no effect (W081). Edit it with get_state_schema/set_state_schema."
             ]

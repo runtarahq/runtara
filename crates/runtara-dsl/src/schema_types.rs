@@ -1247,9 +1247,11 @@ pub struct WaitForSignalStep {
     /// external systems of the signal_id they should use.
     /// The subgraph has access to `variables._signal_id` and `variables._instance_id`.
     ///
-    /// It runs at this step's position, so its step ids must differ from those
-    /// of the graph around it and of the other `onWait` graphs there (E152):
-    /// steps with one id at one position share their checkpoints.
+    /// It runs at this step's position, so a step in it that keeps checkpoints
+    /// (any step except Finish, Log, Error, Conditional, Switch, Filter and
+    /// GroupBy without a breakpoint) needs an id no such step of the graph
+    /// around it, or of the other `onWait` graphs there, uses (E152): steps
+    /// with one id at one position share their checkpoints.
     ///
     /// **Ignored when this step is used as an AiAgent tool** (reached via a
     /// tool-labelled edge): the tool lowering emits the durable wait but never
