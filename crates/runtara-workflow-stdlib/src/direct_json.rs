@@ -8659,6 +8659,30 @@ mod tests {
         assert_eq!(materialize(user_field.clone()), user_field);
     }
 
+    /// Step outputs are re-parsed at every step boundary, so a float must come
+    /// back bit-for-bit. Without serde_json's `float_roundtrip` feature this
+    /// value parses to its neighbouring double and prints as `...556`.
+    #[test]
+    fn step_output_floats_survive_reparse_exactly() {
+        reset_value_store();
+        let exact = "0.9093910740085555";
+        // `big` is past the interning threshold, so it also takes the arena path.
+        let steps = format!(
+            r#"{{"stamp":{{"outputs":{exact}}},"big":{{"outputs":{{"r":{exact},"pad":"{}"}}}}}}"#,
+            "x".repeat(20_000)
+        );
+        let source_bytes = build_source(b"{}", b"{}", steps.as_bytes()).unwrap();
+        let source: Value = serde_json::from_slice(&source_bytes).unwrap();
+        assert!(
+            wfref_id(&source["steps"]["big"]).is_some(),
+            "the large step output should be interned"
+        );
+        for path in ["steps.stamp.outputs", "steps.big.outputs.r"] {
+            let value = lookup_source_path(&source, path).unwrap();
+            assert_eq!(serde_json::to_string(&value).unwrap(), exact, "{path}");
+        }
+    }
+
     /// Resetting the store rotates the nonce, so a handle minted before the
     /// reset is plain data afterwards — a stale handle can never resolve
     /// against a fresh arena generation.

@@ -5459,6 +5459,36 @@ fn direct_wasm_execute_durable_agent_invokes_and_saves_checkpoint() {
     );
 }
 
+/// A float must cross the workflow → agent → workflow boundaries bit-for-bit.
+/// Each hop re-parses JSON, and serde_json without `float_roundtrip` parses
+/// this value to its neighbouring double, which prints as `...556`.
+#[test]
+fn direct_wasm_execute_agent_round_trips_floats_exactly() {
+    let components_dir = direct_e2e_components_dir();
+    let workflow_id = "direct-wasm-execute-agent-float-round-trip";
+    let exact = "0.9093910740085555";
+
+    let result = run_direct_workflow_with_events(
+        &components_dir,
+        workflow_id,
+        AGENT_CACHED_REPLAY,
+        format!(r#"{{"value":{exact}}}"#).as_bytes(),
+    );
+
+    assert_eq!(result.checkpoints.len(), 2, "lookup, then save");
+    let save = &result.checkpoints[1];
+    assert_eq!(
+        save.checkpoint_id,
+        root_key(
+            "agent",
+            workflow_id,
+            serde_json::json!(["utils", "return-input", "agent"]),
+        )
+    );
+    assert_eq!(String::from_utf8_lossy(&save.state), exact);
+    assert_eq!(result.output_json["result"].to_string(), exact);
+}
+
 #[test]
 fn direct_wasm_execute_non_durable_agent_invokes_without_checkpoint() {
     let components_dir = direct_e2e_components_dir();
