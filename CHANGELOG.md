@@ -606,6 +606,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Step-debug events show large step outputs.** With step events on, a
+  step whose output was 16 KiB or more recorded an internal reference such
+  as `{"$wfref":1,"$wfnonce":…}` as its `step_debug_end` outputs, so the
+  debug view showed nothing usable for it. Such an output is now recorded
+  as the same `_truncated` summary as other large values: its type and its
+  keys, length or size. This applies to workflows compiled on this release;
+  recompile a workflow to pick it up.
 - **Numbers no longer change as they pass between workflow steps.** A value
   is re-read from JSON at every step, and the JSON parser could round a float
   to the neighbouring value, so `0.9093910740085555` reached the next step as

@@ -2508,6 +2508,45 @@ fn direct_wasm_execute_finish_passthrough_track_events_emits_step_debug_events()
     );
 }
 
+/// A step output of 16 KiB or more is carried between steps as an interning
+/// handle. Its `step_debug_end` event must hold the bounded summary of the real
+/// output, not the handle.
+#[test]
+fn direct_wasm_execute_track_events_summarises_large_step_outputs() {
+    let components_dir = direct_e2e_components_dir();
+    let blob = "x".repeat(20_000);
+
+    let result = run_direct_workflow_with_events_and_tracking(
+        &components_dir,
+        "direct-wasm-execute-track-events-large-output",
+        AGENT_CACHED_REPLAY,
+        serde_json::to_string(&serde_json::json!({ "value": blob }))
+            .expect("input json")
+            .as_bytes(),
+        true,
+    );
+
+    assert_eq!(result.output_json, serde_json::json!({ "result": blob }));
+    for event in &result.events {
+        assert!(
+            !event.payload_json.to_string().contains("$wfref"),
+            "{} for {} carries an interning handle",
+            event.subtype,
+            event.payload_json["step_id"]
+        );
+    }
+    let end = result
+        .events
+        .iter()
+        .find(|event| event.subtype == "step_debug_end" && event.payload_json["step_id"] == "agent")
+        .expect("agent step_debug_end");
+    assert_eq!(end.payload_json["outputs"]["stepType"], "Agent");
+    assert_eq!(
+        end.payload_json["outputs"]["outputs"],
+        serde_json::json!({ "_truncated": true, "_type": "string", "_length": 20_000 })
+    );
+}
+
 #[test]
 fn direct_wasm_execute_agent_input_mapping_failure_records_step_error() {
     // Diagnostic-gap regression: an Agent whose input mapping fails to resolve

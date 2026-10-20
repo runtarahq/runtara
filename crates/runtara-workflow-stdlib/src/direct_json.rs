@@ -3654,9 +3654,12 @@ impl DirectJsonManifest {
             .unwrap_or(0);
 
         let mut payload = debug_event_base(step, &source, timestamp);
+        // Most arms read the stored `steps.<id>` envelope straight from the
+        // source, where a large one is an interning handle. A debug event leaves
+        // the stdlib, so resolve handles before bounding the real value.
         payload.insert(
             "outputs".to_string(),
-            bound_debug_output(self.debug_end_output(step, &source)?),
+            bound_debug_output(materialize(self.debug_end_output(step, &source)?)),
         );
         payload.insert(
             "duration_ms".to_string(),
@@ -14684,6 +14687,77 @@ mod tests {
         // A small error envelope is left intact so `_error` survives for status.
         let err = json!({ "_error": true, "message": "boom" });
         assert_eq!(bound_debug_output(err.clone()), err);
+    }
+
+    /// `build_source` replaces a step envelope of 16 KiB or more with a `$wfref`
+    /// handle. `step_debug_end` must summarise the value behind it, not record the
+    /// handle, whether the handle is the whole envelope or sits inside one.
+    #[test]
+    fn debug_end_output_resolves_interned_step_outputs() {
+        fn debug_end(manifest: &DirectJsonManifest, step_id: &str, steps: &Value) -> Value {
+            let steps = serde_json::to_vec(steps).expect("steps json");
+            let source = build_source(b"{}", b"{}", &steps).expect("source");
+            let end = manifest
+                .step_debug_end(step_id, &source, 0, 0)
+                .expect("debug end");
+            let end: Value = serde_json::from_slice(&end).expect("end json");
+            assert!(
+                !end.to_string().contains(WFREF_KEY),
+                "debug-end payload must not carry an interning handle: {end}"
+            );
+            end
+        }
+        let blob = "x".repeat(20_000);
+
+        // Agent: the whole `steps.agent` envelope is interned.
+        let agent = DirectJsonManifest::parse(&debug_manifest("Agent", "agent", None, json!({})))
+            .expect("manifest");
+        reset_value_store();
+        let end = debug_end(
+            &agent,
+            "agent",
+            &json!({ "agent": {
+                "stepId": "agent", "stepName": "Agent", "stepType": "Agent",
+                "outputs": { "blob": blob }
+            }}),
+        );
+        assert_eq!(end["outputs"]["stepType"], json!("Agent"));
+        assert_eq!(end["outputs"]["outputs"]["_truncated"], json!(true));
+        assert_eq!(end["outputs"]["outputs"]["_type"], json!("object"));
+        assert_eq!(end["outputs"]["outputs"]["_keys"], json!(["blob"]));
+
+        // A small envelope whose output holds a handle further down.
+        reset_value_store();
+        let handle = intern_if_large(json!(blob));
+        assert!(wfref_id(&handle).is_some(), "the blob should be interned");
+        let end = debug_end(
+            &agent,
+            "agent",
+            &json!({ "agent": {
+                "stepId": "agent", "stepName": "Agent", "stepType": "Agent",
+                "outputs": { "blob": handle }
+            }}),
+        );
+        assert_eq!(end["outputs"]["outputs"]["_truncated"], json!(true));
+        assert_eq!(end["outputs"]["outputs"]["_keys"], json!(["blob"]));
+
+        // Split: a large result recorded through `split_output`.
+        let split = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "immediate", "value": [1] }
+        })))
+        .expect("manifest");
+        reset_value_store();
+        let source = build_source(b"{}", b"{}", b"{}").expect("source");
+        let results = serde_json::to_vec(&json!([{ "blob": blob }])).expect("results json");
+        let steps = split
+            .split_output(0, &source, &results)
+            .expect("Split steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+        let end = debug_end(&split, "split", &steps);
+        assert_eq!(end["outputs"]["stepType"], json!("Split"));
+        assert_eq!(end["outputs"]["outputs"]["_truncated"], json!(true));
+        assert_eq!(end["outputs"]["outputs"]["_type"], json!("array"));
+        assert_eq!(end["outputs"]["outputs"]["_length"], json!(1));
     }
 
     #[test]
