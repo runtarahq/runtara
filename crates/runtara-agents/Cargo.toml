@@ -18,6 +18,6 @@ crate-type = ["rlib"]
 runtara-dsl = { path = "../runtara-dsl", version = "9.0" }
 runtara-agent-macro = { path = "../runtara-agent-macro", version = "9.0" }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { workspace = true }
 tracing = "0.1"
 base64 = "0.22"
