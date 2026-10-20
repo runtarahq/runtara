@@ -606,6 +606,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Numbers no longer change as they pass between workflow steps.** A value
+  is re-read from JSON at every step, and the JSON parser could round a float
+  to the neighbouring value, so `0.9093910740085555` reached the next step as
+  `0.9093910740085556`. About one random value in ten could change this way,
+  which matters for amounts, IDs and equality checks. Floats are now parsed
+  exactly everywhere: in the server, the workflow runtime and every agent.
+  The workflow runtime and agents are built into each compiled workflow, and
+  an unchanged workflow keeps its compiled copy after an upgrade, so an
+  already-deployed workflow keeps the old behaviour until it is recompiled:
+  `POST /api/runtime/workflows/{id}/versions/{version}/compile?forceRecompile=true`
+  or MCP `compile_workflow` with `force: true`. A workflow whose definition
+  has changed gets the fix the next time it is compiled.
 - **A workflow-agent whose slug has a word starting with a digit can be
   called.** A workflow named like `Q3 2024 sync` gets the slug
   `q3-2024-sync` and publishes as an agent, but every parent that called it

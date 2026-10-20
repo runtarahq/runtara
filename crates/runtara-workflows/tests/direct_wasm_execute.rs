@@ -5465,16 +5465,26 @@ fn direct_wasm_execute_durable_agent_invokes_and_saves_checkpoint() {
 #[test]
 fn direct_wasm_execute_agent_round_trips_floats_exactly() {
     let components_dir = direct_e2e_components_dir();
+    let workflow_id = "direct-wasm-execute-agent-float-round-trip";
     let exact = "0.9093910740085555";
 
     let result = run_direct_workflow_with_events(
         &components_dir,
-        "direct-wasm-execute-agent-float-round-trip",
+        workflow_id,
         AGENT_CACHED_REPLAY,
         format!(r#"{{"value":{exact}}}"#).as_bytes(),
     );
 
-    let save = result.checkpoints.last().expect("agent result checkpoint");
+    assert_eq!(result.checkpoints.len(), 2, "lookup, then save");
+    let save = &result.checkpoints[1];
+    assert_eq!(
+        save.checkpoint_id,
+        root_key(
+            "agent",
+            workflow_id,
+            serde_json::json!(["utils", "return-input", "agent"]),
+        )
+    );
     assert_eq!(String::from_utf8_lossy(&save.state), exact);
     assert_eq!(result.output_json["result"].to_string(), exact);
 }
