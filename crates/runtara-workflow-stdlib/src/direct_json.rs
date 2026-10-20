@@ -3654,9 +3654,12 @@ impl DirectJsonManifest {
             .unwrap_or(0);
 
         let mut payload = debug_event_base(step, &source, timestamp);
+        // Most arms read the stored `steps.<id>` envelope straight from the
+        // source, where a large one is an interning handle. A debug event leaves
+        // the stdlib, so resolve handles before bounding the real value.
         payload.insert(
             "outputs".to_string(),
-            bound_debug_output(self.debug_end_output(step, &source)?),
+            bound_debug_output(materialize(self.debug_end_output(step, &source)?)),
         );
         payload.insert(
             "duration_ms".to_string(),
@@ -5382,19 +5385,23 @@ fn bounded_debug_value(value: Value) -> Value {
     }
 }
 
-/// Bound a step-debug-end `outputs` value. The step-output envelope keeps the
-/// real payload under an `"outputs"` key alongside `stepId`/`stepName`/
-/// `stepType`/`route` and the `_error` flag the step-summary status query reads;
-/// bound only the heavy nested payload so the envelope and `_error` survive.
-/// Non-envelope values (e.g. the Error step's bare `{_error,..}`) are bounded
-/// whole — they are small, so `bounded_debug_value` leaves them unchanged.
+/// Bound a step-debug-end `outputs` value. A step record keeps its payload
+/// under `"outputs"` beside `stepId`/`stepName`/`stepType`/`route` and the
+/// `_error` flag the step-summary status query reads, and some records carry
+/// more large fields (a Split that continues past failures repeats its result
+/// lists under `data`; a failed EmbedWorkflow carries `childError`). Bound each
+/// field on its own: large ones collapse to summaries, while the small identity
+/// fields and `_error` pass through unchanged. Other values (e.g. the Error
+/// step's bare `{_error,..}`) are bounded whole; they are small, so
+/// `bounded_debug_value` leaves them unchanged.
 fn bound_debug_output(value: Value) -> Value {
     match value {
-        Value::Object(mut map) if map.contains_key("outputs") => {
-            if let Some(inner) = map.remove("outputs") {
-                map.insert("outputs".to_string(), bounded_debug_value(inner));
-            }
-            Value::Object(map)
+        Value::Object(map) if map.contains_key("outputs") || map.contains_key("stepId") => {
+            Value::Object(
+                map.into_iter()
+                    .map(|(key, value)| (key, bounded_debug_value(value)))
+                    .collect(),
+            )
         }
         other => bounded_debug_value(other),
     }
@@ -14684,6 +14691,130 @@ mod tests {
         // A small error envelope is left intact so `_error` survives for status.
         let err = json!({ "_error": true, "message": "boom" });
         assert_eq!(bound_debug_output(err.clone()), err);
+    }
+
+    /// `build_source` replaces a step envelope of 16 KiB or more with a `$wfref`
+    /// handle. `step_debug_end` must summarise the value behind it, not record the
+    /// handle, whether the handle is the whole envelope or sits inside one.
+    #[test]
+    fn debug_end_output_resolves_interned_step_outputs() {
+        fn debug_end(manifest: &DirectJsonManifest, step_id: &str, steps: &Value) -> Value {
+            let steps = serde_json::to_vec(steps).expect("steps json");
+            let source = build_source(b"{}", b"{}", &steps).expect("source");
+            let end = manifest
+                .step_debug_end(step_id, &source, 0, 0)
+                .expect("debug end");
+            let end: Value = serde_json::from_slice(&end).expect("end json");
+            assert!(
+                !end.to_string().contains(WFREF_KEY),
+                "debug-end payload must not carry an interning handle: {end}"
+            );
+            end
+        }
+        let blob = "x".repeat(20_000);
+
+        // Agent: the whole `steps.agent` envelope is interned.
+        let agent = DirectJsonManifest::parse(&debug_manifest("Agent", "agent", None, json!({})))
+            .expect("manifest");
+        reset_value_store();
+        let end = debug_end(
+            &agent,
+            "agent",
+            &json!({ "agent": {
+                "stepId": "agent", "stepName": "Agent", "stepType": "Agent",
+                "outputs": { "blob": blob }
+            }}),
+        );
+        assert_eq!(end["outputs"]["stepType"], json!("Agent"));
+        assert_eq!(end["outputs"]["outputs"]["_truncated"], json!(true));
+        assert_eq!(end["outputs"]["outputs"]["_type"], json!("object"));
+        assert_eq!(end["outputs"]["outputs"]["_keys"], json!(["blob"]));
+
+        // A small envelope whose output holds a handle further down.
+        reset_value_store();
+        let handle = intern_if_large(json!(blob));
+        assert!(wfref_id(&handle).is_some(), "the blob should be interned");
+        let end = debug_end(
+            &agent,
+            "agent",
+            &json!({ "agent": {
+                "stepId": "agent", "stepName": "Agent", "stepType": "Agent",
+                "outputs": { "blob": handle }
+            }}),
+        );
+        assert_eq!(end["outputs"]["outputs"]["_truncated"], json!(true));
+        assert_eq!(end["outputs"]["outputs"]["_keys"], json!(["blob"]));
+
+        // Split: a large result recorded through `split_output`.
+        let split = DirectJsonManifest::parse(&split_manifest(json!({
+            "value": { "valueType": "immediate", "value": [1] }
+        })))
+        .expect("manifest");
+        reset_value_store();
+        let source = build_source(b"{}", b"{}", b"{}").expect("source");
+        let results = serde_json::to_vec(&json!([{ "blob": blob }])).expect("results json");
+        let steps = split
+            .split_output(0, &source, &results)
+            .expect("Split steps context");
+        let steps: Value = serde_json::from_slice(&steps).expect("steps json");
+        let end = debug_end(&split, "split", &steps);
+        assert_eq!(end["outputs"]["stepType"], json!("Split"));
+        assert_eq!(end["outputs"]["outputs"]["_truncated"], json!(true));
+        assert_eq!(end["outputs"]["outputs"]["_type"], json!("array"));
+        assert_eq!(end["outputs"]["outputs"]["_length"], json!(1));
+
+        // A Split that continues past failures repeats its results under `data`;
+        // every large field is summarised, the small ones are kept as they are.
+        reset_value_store();
+        let stats = json!({
+            "success": 1, "error": 0, "aborted": 0, "unknown": 0, "skipped": 0, "total": 1
+        });
+        let end = debug_end(
+            &split,
+            "split",
+            &json!({ "split": {
+                "stepId": "split", "stepName": "Split", "stepType": "Split",
+                "data": {
+                    "success": [{ "blob": blob }],
+                    "error": [], "aborted": [], "unknown": [], "skipped": []
+                },
+                "stats": stats,
+                "hasFailures": false,
+                "outputs": [{ "blob": blob }]
+            }}),
+        );
+        let record = &end["outputs"];
+        assert_eq!(record["outputs"]["_truncated"], json!(true));
+        assert_eq!(record["data"]["_truncated"], json!(true));
+        assert_eq!(
+            record["data"]["_keys"],
+            json!(["aborted", "error", "skipped", "success", "unknown"])
+        );
+        assert_eq!(record["stats"], stats);
+        assert_eq!(record["hasFailures"], json!(false));
+        assert_eq!(record["stepId"], json!("split"));
+
+        // A failed EmbedWorkflow record has no `outputs`; its error fields stay
+        // readable and only the large `childError` is summarised.
+        let embed =
+            DirectJsonManifest::parse(&debug_manifest("EmbedWorkflow", "embed", None, json!({})))
+                .expect("manifest");
+        reset_value_store();
+        let end = debug_end(
+            &embed,
+            "embed",
+            &json!({ "embed": {
+                "stepId": "embed", "stepName": "Embed", "stepType": "EmbedWorkflow",
+                "code": "CHILD_WORKFLOW_FAILED", "message": "Child workflow child failed",
+                "childWorkflowId": "child",
+                "childError": { "message": blob }
+            }}),
+        );
+        let record = &end["outputs"];
+        assert_eq!(record["code"], json!("CHILD_WORKFLOW_FAILED"));
+        assert_eq!(record["message"], json!("Child workflow child failed"));
+        assert_eq!(record["childError"]["_truncated"], json!(true));
+        assert_eq!(record["childError"]["_keys"], json!(["message"]));
     }
 
     #[test]
