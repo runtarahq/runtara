@@ -1385,19 +1385,20 @@ impl DirectJsonManifest {
         // The steps context, and the Conditional and EmbedWorkflow inputs, are
         // whole scopes read straight from the source, where each large entry is
         // an interning handle. A breakpoint event leaves the stdlib, so resolve
-        // the handles, then bound each entry on its own.
-        let steps_context = bounded_debug_entries(
-            materialize(Value::Object(
+        // the handles and bound each entry on its own.
+        let mut scopes = BoundedDebugScopes::default();
+        let steps_context = scopes.entries(
+            Value::Object(
                 source
                     .get("steps")
                     .and_then(Value::as_object)
                     .cloned()
                     .unwrap_or_default(),
-            )),
-            bound_debug_output,
+            ),
+            DebugEntryKind::StepResult,
         );
         let inputs = match step.step_type.as_str() {
-            "Conditional" => bounded_debug_source(materialize(debug_source_view(&source))),
+            "Conditional" => scopes.source(debug_source_view(&source)),
             "Finish" => self
                 .finish_mapping(step)
                 .map(|mapping| apply_input_mapping(&mapping.value, &source))
@@ -1465,9 +1466,9 @@ impl DirectJsonManifest {
                 })?;
                 apply_input_mapping(&mapping.value, &source)?
             }
-            "EmbedWorkflow" => bounded_debug_entries(
-                materialize(source.get("data").cloned().unwrap_or(Value::Null)),
-                bounded_debug_value,
+            "EmbedWorkflow" => scopes.entries(
+                source.get("data").cloned().unwrap_or(Value::Null),
+                DebugEntryKind::Value,
             ),
             "SetState" => step
                 .body
@@ -5419,41 +5420,99 @@ fn bound_debug_output(value: Value) -> Value {
     }
 }
 
-/// Bound each entry of a scope (`data`, `variables`, `steps`) on its own with
-/// `bound`, so a large entry collapses to a summary while its small siblings
-/// stay exactly as they are. A value that is not an object is bounded whole.
-fn bounded_debug_entries(value: Value, bound: fn(Value) -> Value) -> Value {
-    match value {
-        Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(key, value)| (key, bound(value)))
-                .collect(),
-        ),
-        other => bounded_debug_value(other),
+/// How one scope entry is bounded for a breakpoint payload.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum DebugEntryKind {
+    /// Any value, bounded whole by `bounded_debug_value`.
+    Value,
+    /// A step result, bounded field by field by `bound_debug_output`.
+    StepResult,
+}
+
+impl DebugEntryKind {
+    fn bound(self, value: Value) -> Value {
+        match self {
+            Self::Value => bounded_debug_value(value),
+            Self::StepResult => bound_debug_output(value),
+        }
     }
 }
 
-/// Bound a whole source for a breakpoint payload, one scope entry at a time.
-/// Step results keep their identity fields (see `bound_debug_output`), and
-/// `workflow.inputs` is the run's own `{data, variables}`, so its entries are
-/// bounded like the root scopes'.
-fn bounded_debug_source(source: Value) -> Value {
-    let Value::Object(source) = source else {
-        return bounded_debug_value(source);
-    };
-    Value::Object(
-        source
-            .into_iter()
-            .map(|(key, scope)| {
-                let scope = match key.as_str() {
-                    "steps" => bounded_debug_entries(scope, bound_debug_output),
-                    "workflow" => bounded_debug_entries(scope, bounded_debug_source),
-                    _ => bounded_debug_entries(scope, bounded_debug_value),
-                };
-                (key, scope)
-            })
-            .collect(),
-    )
+/// Resolves and bounds the scopes a breakpoint payload shows: the steps
+/// context, a Conditional's whole source and an EmbedWorkflow's `data`.
+///
+/// Entries are resolved, bounded and dropped one at a time, so a breakpoint
+/// never holds more than one large value parsed at once (interning keeps them
+/// as compact bytes until then). The source holds some values in several
+/// places under one handle (`data.x` and `workflow.inputs.data.x`; the Split
+/// item under `variables._item`, `iteration.item` and `item`), so each
+/// handle's summary is kept and the value behind it is parsed once.
+#[derive(Default)]
+struct BoundedDebugScopes {
+    summaries: HashMap<(u64, DebugEntryKind), Value>,
+}
+
+impl BoundedDebugScopes {
+    /// Resolve one entry and bound it.
+    fn entry(&mut self, value: Value, kind: DebugEntryKind) -> Value {
+        match wfref_id(&value) {
+            Some(id) => self
+                .summaries
+                .entry((id, kind))
+                .or_insert_with(|| kind.bound(materialize(stored_value(id))))
+                .clone(),
+            None => kind.bound(materialize(value)),
+        }
+    }
+
+    /// Bound each entry of a scope on its own, so a large entry collapses to a
+    /// summary while its small siblings stay exactly as they are. A scope that
+    /// is not an object, or is itself one interned value (the Split item), is
+    /// bounded whole.
+    fn entries(&mut self, scope: Value, kind: DebugEntryKind) -> Value {
+        if wfref_id(&scope).is_some() {
+            return self.entry(scope, DebugEntryKind::Value);
+        }
+        match scope {
+            Value::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(key, value)| (key, self.entry(value, kind)))
+                    .collect(),
+            ),
+            other => self.entry(other, DebugEntryKind::Value),
+        }
+    }
+
+    /// Bound a whole source one scope entry at a time. `steps` entries and the
+    /// root onError alias are step results, and `workflow.inputs` is the run's
+    /// own `{data, variables}`, bounded like the root scopes.
+    fn source(&mut self, source: Value) -> Value {
+        let Value::Object(source) = source else {
+            return self.entry(source, DebugEntryKind::Value);
+        };
+        Value::Object(
+            source
+                .into_iter()
+                .map(|(key, scope)| {
+                    let scope = match key.as_str() {
+                        "steps" => self.entries(scope, DebugEntryKind::StepResult),
+                        "__error" | "error" => self.entry(scope, DebugEntryKind::StepResult),
+                        "workflow" => match scope {
+                            Value::Object(workflow) => Value::Object(
+                                workflow
+                                    .into_iter()
+                                    .map(|(key, inputs)| (key, self.source(inputs)))
+                                    .collect(),
+                            ),
+                            other => self.entry(other, DebugEntryKind::Value),
+                        },
+                        _ => self.entries(scope, DebugEntryKind::Value),
+                    };
+                    (key, scope)
+                })
+                .collect(),
+        )
+    }
 }
 
 fn split_debug_inputs(split: &DirectJsonSplit, source: &Value) -> Result<Value, String> {
@@ -12668,7 +12727,6 @@ mod tests {
         assert_eq!(inputs["data"]["big"], summary);
         assert_eq!(inputs["data"]["status"], json!("active"));
         assert_eq!(inputs["variables"]["tenant"], json!("t1"));
-        assert_eq!(inputs["variables"]["_item"]["_truncated"], json!(true));
         assert_eq!(inputs["steps"]["large"]["stepType"], json!("Agent"));
         assert_eq!(inputs["steps"]["large"]["outputs"], summary);
         assert_eq!(inputs["steps"]["small"], small_step);
@@ -12681,9 +12739,13 @@ mod tests {
             inputs["workflow"]["inputs"]["variables"]["tenant"],
             json!("t1")
         );
-        assert_eq!(inputs["item"]["blob"], summary);
         assert_eq!(inputs["iteration"]["index"], json!(0));
-        assert_eq!(inputs["iteration"]["item"]["_keys"], json!(["blob"]));
+        // The Split item is one interned value, summarised whole wherever the
+        // source shows it.
+        assert_eq!(inputs["item"]["_type"], json!("object"));
+        assert_eq!(inputs["item"]["_keys"], json!(["blob"]));
+        assert_eq!(inputs["iteration"]["item"], inputs["item"]);
+        assert_eq!(inputs["variables"]["_item"], inputs["item"]);
 
         // EmbedWorkflow: its inputs are the child's `data`.
         let embed = DirectJsonManifest::parse(&debug_manifest(
@@ -12699,6 +12761,41 @@ mod tests {
             event["inputs"],
             json!({ "big": summary, "status": "active" })
         );
+    }
+
+    /// A source holds some interned values in several places under one handle.
+    /// A breakpoint parses and summarises each handle once, however many times
+    /// the steps context and the source view show it.
+    #[test]
+    fn bounded_debug_scopes_parse_each_shared_handle_once() {
+        reset_value_store();
+        let blob = "x".repeat(20_000);
+        let source = build_source(
+            &serde_json::to_vec(&json!({ "big": blob, "status": "active" })).expect("data"),
+            &serde_json::to_vec(&json!({ "_loop_indices": [0], "_item": { "blob": blob } }))
+                .expect("variables"),
+            &serde_json::to_vec(&json!({
+                "large": { "stepId": "large", "stepType": "Agent", "outputs": blob }
+            }))
+            .expect("steps"),
+        )
+        .expect("source");
+        let source: Value = serde_json::from_slice(&source).expect("source json");
+
+        let mut scopes = BoundedDebugScopes::default();
+        let context = scopes.entries(source["steps"].clone(), DebugEntryKind::StepResult);
+        let view = scopes.source(debug_source_view(&source));
+
+        // Three handles: `data.big` (also under `workflow.inputs.data`), the
+        // Split item (`variables._item`, `workflow.inputs.variables._item`,
+        // `iteration.item`, `item`) and `steps.large` (in both payloads).
+        assert_eq!(scopes.summaries.len(), 3);
+        assert_eq!(view["steps"]["large"], context["large"]);
+        assert_eq!(
+            view["workflow"]["inputs"]["data"]["big"],
+            view["data"]["big"]
+        );
+        assert_eq!(view["item"], view["iteration"]["item"]);
     }
 
     #[test]
