@@ -160,6 +160,12 @@ impl EntitlementSnapshot {
                     .is_none_or(|allowed| allowed.contains(&agent)))
     }
 
+    /// Whether the agent is a registered dispatcher module, whether or not
+    /// the tenant's allowlist enables it.
+    pub fn is_registered_agent(&self, agent: &str) -> bool {
+        self.registered_agents.contains(&canonical_agent_id(agent))
+    }
+
     pub fn require_agent(&self, agent: &str) -> Result<(), EntitlementError> {
         if self.is_agent_enabled(agent) {
             Ok(())
