@@ -627,6 +627,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now uses the requested or latest version, as `deploy_latest` does. Both
   tools now return an error when the mapping check fails to run, instead of
   reading it as no mapping errors.
+- **`deploy_latest` and `preflight_compile` validate the graph of the
+  version they work on.** Without a `version` they validated the graph of
+  the deployed version while compiling and deploying a newer draft. A draft
+  that fixed an error in the deployed version could not be deployed: the
+  error in the deployed graph stopped it. They now fetch and validate the
+  draft.
 - **Agent lookup sees the tenant's published workflow-agents.**
   `GET /api/runtime/agents` did not list them, and
   `GET /api/runtime/agents/{name}` and `…/capabilities/{capability_id}`

@@ -1369,20 +1369,54 @@ fn resolve_child_version(version_str: &str, workflow_data: &serde_json::Value) -
     }
 }
 
-/// The version a deploy or preflight works on: the requested one, else the
-/// latest version of the fetched workflow.
-fn target_version(workflow: &serde_json::Value, requested: Option<i32>) -> Option<i32> {
-    requested.or_else(|| {
-        workflow
-            .pointer("/data/latestVersion")
-            .or_else(|| workflow.pointer("/data/latest_version"))
-            .or_else(|| workflow.pointer("/data/lastVersionNumber"))
-            .or_else(|| workflow.pointer("/data/last_version_number"))
-            .or_else(|| workflow.pointer("/data/currentVersionNumber"))
-            .or_else(|| workflow.pointer("/data/current_version_number"))
+/// The workflow at the version a deploy or preflight works on, and that
+/// version: the requested one, else the latest. Without a requested version
+/// the endpoint returns the current version, which lags the latest while an
+/// undeployed draft exists, so the latest is then fetched by number.
+async fn fetch_target_version(
+    server: &SmoMcpServer,
+    workflow_id: &str,
+    requested: Option<i32>,
+) -> Result<(serde_json::Value, Option<i32>), rmcp::ErrorData> {
+    let qs = match requested {
+        Some(v) => format!("?versionNumber={}", v),
+        None => String::new(),
+    };
+    let workflow = api_get(
+        server,
+        &format!("/api/runtime/workflows/{}{}", workflow_id, qs),
+    )
+    .await?;
+    let version_at = |pointers: &[&str]| {
+        pointers
+            .iter()
+            .find_map(|p| workflow.pointer(p))
             .and_then(|v| v.as_i64())
             .map(|v| v as i32)
-    })
+    };
+    let current = ["/data/currentVersionNumber", "/data/current_version_number"];
+    let version = requested.or_else(|| {
+        version_at(&[
+            "/data/latestVersion",
+            "/data/latest_version",
+            "/data/lastVersionNumber",
+            "/data/last_version_number",
+            current[0],
+            current[1],
+        ])
+    });
+    let fetched = requested.or_else(|| version_at(&current));
+    match version {
+        Some(v) if fetched != Some(v) => {
+            let workflow = api_get(
+                server,
+                &format!("/api/runtime/workflows/{}?versionNumber={}", workflow_id, v),
+            )
+            .await?;
+            Ok((workflow, version))
+        }
+        _ => Ok((workflow, version)),
+    }
 }
 
 /// The graph validate endpoint for a graph of `workflow_id`, which it then
@@ -1522,19 +1556,11 @@ pub async fn deploy_latest(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("workflow_id", &params.workflow_id)?;
 
-    // Fetch workflow to get graph and resolve version
-    let qs = match params.version {
-        Some(v) => format!("?versionNumber={}", v),
-        None => String::new(),
-    };
-    let workflow = api_get(
-        server,
-        &format!("/api/runtime/workflows/{}{}", params.workflow_id, qs),
-    )
-    .await?;
-
-    let version = target_version(&workflow, params.version)
-        .ok_or_else(|| err("Could not determine version to deploy"))?;
+    // Fetch the workflow at the version to deploy, so the graph checked below
+    // is the one compiled.
+    let (workflow, version) =
+        fetch_target_version(server, &params.workflow_id, params.version).await?;
+    let version = version.ok_or_else(|| err("Could not determine version to deploy"))?;
 
     let graph = workflow
         .pointer("/data/definition/executionGraph")
@@ -1670,19 +1696,11 @@ pub async fn preflight_compile(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("workflow_id", &params.workflow_id)?;
 
-    // Fetch workflow
-    let qs = match params.version {
-        Some(v) => format!("?versionNumber={}", v),
-        None => String::new(),
-    };
-    let workflow = api_get(
-        server,
-        &format!("/api/runtime/workflows/{}{}", params.workflow_id, qs),
-    )
-    .await?;
-
-    let version = target_version(&workflow, params.version)
-        .ok_or_else(|| err("Could not determine version to check"))?;
+    // Fetch the workflow at the version to check, so its graph and its
+    // mappings are checked together.
+    let (workflow, version) =
+        fetch_target_version(server, &params.workflow_id, params.version).await?;
+    let version = version.ok_or_else(|| err("Could not determine version to check"))?;
 
     let graph = workflow
         .pointer("/data/definition/executionGraph")
@@ -2048,9 +2066,9 @@ mod tests {
         );
     }
 
-    /// `deploy_latest` and `preflight_compile` validate the graph under the
-    /// workflow's id and the mappings of the version they work on, and a
-    /// mapping check that fails to run stops them.
+    /// `deploy_latest` and `preflight_compile` validate the graph and the
+    /// mappings of the version they work on, the graph under the workflow's
+    /// id, and a mapping check that fails to run stops them.
     #[tokio::test]
     async fn deploy_tools_check_the_version_they_work_on() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -2065,8 +2083,8 @@ mod tests {
         use crate::api::repositories::object_model::ObjectStoreManager;
 
         type Params = Query<std::collections::HashMap<String, String>>;
-        // The `workflowId` of each graph validation and the `versionNumber`
-        // of each mapping check.
+        // The `workflowId` and graph of each graph validation, and the
+        // `versionNumber` of each mapping check.
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         let mappings_fail = Arc::new(AtomicBool::new(false));
         let router = {
@@ -2074,23 +2092,32 @@ mod tests {
             axum::Router::new()
                 .route(
                     "/api/runtime/workflows/{workflow_id}",
-                    get(|| async {
+                    // Version 2 is deployed and version 3 is a draft: without
+                    // a version number the endpoint returns version 2.
+                    get(|Query(query): Params| async move {
+                        let name = match query.get("versionNumber").map(String::as_str) {
+                            Some("3") => "Draft",
+                            None | Some("2") => "Deployed",
+                            Some(other) => panic!("no version {other}"),
+                        };
                         Json(serde_json::json!({"data": {
                             "currentVersionNumber": 2,
                             "lastVersionNumber": 3,
-                            "definition": {"executionGraph": {"name": "Parent"}}
+                            "definition": {"executionGraph": {"name": name}}
                         }}))
                     }),
                 )
                 .route(
                     "/api/runtime/workflows/graph/validate",
-                    post(move |Query(query): Params| async move {
-                        validated
-                            .lock()
-                            .unwrap()
-                            .push(format!("workflowId={}", query["workflowId"]));
-                        Json(serde_json::json!({"valid": true, "errors": []}))
-                    }),
+                    post(
+                        move |Query(query): Params, Json(graph): Json<serde_json::Value>| async move {
+                            validated.lock().unwrap().push(format!(
+                                "workflowId={} {}",
+                                query["workflowId"], graph["name"]
+                            ));
+                            Json(serde_json::json!({"valid": true, "errors": []}))
+                        },
+                    ),
                 )
                 .route(
                     "/api/runtime/workflows/{workflow_id}/validate-mappings",
@@ -2138,13 +2165,24 @@ mod tests {
             (&serde_json::json!(false), &serde_json::json!(3)),
             "{deploy:#}"
         );
+        // A requested version is checked as fetched.
+        let at_version_2 = || {
+            serde_json::from_value::<PreflightCompileParams>(
+                serde_json::json!({"workflow_id": "parent", "version": 2}),
+            )
+            .unwrap()
+        };
+        let preflight = json(preflight_compile(&server, at_version_2()).await.unwrap());
+        assert_eq!(preflight["version"], 2, "{preflight:#}");
         assert_eq!(
             *calls.lock().unwrap(),
             [
-                "workflowId=parent",
+                r#"workflowId=parent "Draft""#,
                 "versionNumber=3",
-                "workflowId=parent",
-                "versionNumber=3"
+                r#"workflowId=parent "Draft""#,
+                "versionNumber=3",
+                r#"workflowId=parent "Deployed""#,
+                "versionNumber=2"
             ]
         );
 
