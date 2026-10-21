@@ -614,6 +614,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `outputs`, replaced by the same `_truncated` summary as other large
   values: its type and its keys, length or size. This applies to workflows
   compiled on this release; recompile a workflow to pick it up.
+- **Breakpoint events no longer show internal references for large
+  values.** When a debug run stopped at a breakpoint, any earlier step
+  result, input field or variable of about 16 KiB or more appeared in the
+  breakpoint event as an internal reference such as
+  `{"$wfref":1,"$wfnonce":…}`. The debug view then showed no outputs for
+  that step, and a Conditional or EmbedWorkflow step paused at the
+  breakpoint showed the references in its inputs. These parts of the event
+  now use the same limits as step-debug events: each field of a step
+  result, and each entry of `data` or `variables`, that is over 8 KiB or is
+  an array of more than 50 items is replaced by a `_truncated` summary of
+  its type and its keys, length or size. Other values appear in full. This
+  applies to workflows compiled on this release; recompile a workflow to
+  pick it up.
 - **Numbers no longer change as they pass between workflow steps.** A value
   is re-read from JSON at every step, and the JSON parser could round a float
   to the neighbouring value, so `0.9093910740085555` reached the next step as

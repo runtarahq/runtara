@@ -1382,13 +1382,23 @@ impl DirectJsonManifest {
         let source: Value = serde_json::from_slice(source)
             .map_err(|err| format!("failed to parse breakpoint-event source: {err}"))?;
         let step = self.step(step_id, &source)?;
-        let steps_context = source
-            .get("steps")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
+        // The steps context, and the Conditional and EmbedWorkflow inputs, are
+        // whole scopes read straight from the source, where each large entry is
+        // an interning handle. A breakpoint event leaves the stdlib, so resolve
+        // the handles and bound each entry on its own.
+        let mut scopes = BoundedDebugScopes::default();
+        let steps_context = scopes.entries(
+            Value::Object(
+                source
+                    .get("steps")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
+            DebugEntryKind::StepResult,
+        );
         let inputs = match step.step_type.as_str() {
-            "Conditional" => debug_source_view(&source),
+            "Conditional" => scopes.source(debug_source_view(&source)),
             "Finish" => self
                 .finish_mapping(step)
                 .map(|mapping| apply_input_mapping(&mapping.value, &source))
@@ -1456,7 +1466,10 @@ impl DirectJsonManifest {
                 })?;
                 apply_input_mapping(&mapping.value, &source)?
             }
-            "EmbedWorkflow" => source.get("data").cloned().unwrap_or(Value::Null),
+            "EmbedWorkflow" => scopes.entries(
+                source.get("data").cloned().unwrap_or(Value::Null),
+                DebugEntryKind::Value,
+            ),
             "SetState" => step
                 .body
                 .get("values")
@@ -1474,7 +1487,7 @@ impl DirectJsonManifest {
             "step_name": step.name.clone(),
             "step_type": step.step_type.clone(),
             "inputs": inputs,
-            "steps_context": Value::Object(steps_context),
+            "steps_context": steps_context,
             "scope_id": scope_id,
             "parent_scope_id": parent_scope_id,
             "loop_indices": loop_indices,
@@ -5404,6 +5417,108 @@ fn bound_debug_output(value: Value) -> Value {
             )
         }
         other => bounded_debug_value(other),
+    }
+}
+
+/// How one scope entry is bounded for a breakpoint payload.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum DebugEntryKind {
+    /// Any value, bounded whole by `bounded_debug_value`.
+    Value,
+    /// A step result, bounded field by field by `bound_debug_output`.
+    StepResult,
+}
+
+impl DebugEntryKind {
+    fn bound(self, value: Value) -> Value {
+        match self {
+            Self::Value => bounded_debug_value(value),
+            Self::StepResult => bound_debug_output(value),
+        }
+    }
+}
+
+/// Resolves and bounds the scopes a breakpoint payload shows: the steps
+/// context, a Conditional's whole source and an EmbedWorkflow's `data`.
+///
+/// Entries are resolved, bounded and dropped one at a time, so a breakpoint
+/// never holds more than one large value parsed at once (interning keeps them
+/// as compact bytes until then). The source holds some values in several
+/// places under one handle (`data.x` and `workflow.inputs.data.x`; the Split
+/// item under `variables._item`, `iteration.item` and `item`), so each
+/// handle's summary is kept and the value behind it is parsed once.
+#[derive(Default)]
+struct BoundedDebugScopes {
+    summaries: HashMap<(u64, DebugEntryKind), Value>,
+}
+
+impl BoundedDebugScopes {
+    /// Resolve one entry and bound it.
+    fn entry(&mut self, value: Value, kind: DebugEntryKind) -> Value {
+        match wfref_id(&value) {
+            Some(id) => self
+                .summaries
+                .entry((id, kind))
+                .or_insert_with(|| kind.bound(materialize(stored_value(id))))
+                .clone(),
+            None => kind.bound(materialize(value)),
+        }
+    }
+
+    /// Bound each entry of a scope on its own, so a large entry collapses to a
+    /// summary while its small siblings stay exactly as they are. A scope that
+    /// is not an object, or is itself one interned value (the Split item), is
+    /// bounded whole.
+    fn entries(&mut self, scope: Value, kind: DebugEntryKind) -> Value {
+        if wfref_id(&scope).is_some() {
+            return self.entry(scope, DebugEntryKind::Value);
+        }
+        match scope {
+            Value::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(key, value)| (key, self.entry(value, kind)))
+                    .collect(),
+            ),
+            other => self.entry(other, DebugEntryKind::Value),
+        }
+    }
+
+    /// Bound a whole source one scope entry at a time. `steps` entries and the
+    /// root onError alias are step results, and `workflow.inputs` is the run's
+    /// own `{data, variables}`, bounded like the root scopes. A nested body
+    /// inherits `workflow.inputs` as a variable, so it can arrive as one
+    /// interned value; open it one level and leave its own handles to the
+    /// entries below.
+    fn source(&mut self, source: Value) -> Value {
+        let source = match wfref_id(&source) {
+            Some(id) => stored_value(id),
+            None => source,
+        };
+        let Value::Object(source) = source else {
+            return self.entry(source, DebugEntryKind::Value);
+        };
+        Value::Object(
+            source
+                .into_iter()
+                .map(|(key, scope)| {
+                    let scope = match key.as_str() {
+                        "steps" => self.entries(scope, DebugEntryKind::StepResult),
+                        "__error" | "error" => self.entry(scope, DebugEntryKind::StepResult),
+                        "workflow" => match scope {
+                            Value::Object(workflow) => Value::Object(
+                                workflow
+                                    .into_iter()
+                                    .map(|(key, inputs)| (key, self.source(inputs)))
+                                    .collect(),
+                            ),
+                            other => self.entry(other, DebugEntryKind::Value),
+                        },
+                        _ => self.entries(scope, DebugEntryKind::Value),
+                    };
+                    (key, scope)
+                })
+                .collect(),
+        )
     }
 }
 
@@ -12524,6 +12639,244 @@ mod tests {
             json!({ "childInput": "mapped", "count": 2 })
         );
         assert_eq!(event["steps_context"]["before"]["outputs"], json!(true));
+    }
+
+    /// `build_source` replaces each scope entry of 16 KiB or more with a `$wfref`
+    /// handle. A breakpoint event must carry a summary of the value behind each
+    /// one and leave the small entries as they are.
+    #[test]
+    fn breakpoint_event_resolves_and_bounds_interned_scope_values() {
+        fn breakpoint(
+            manifest: &DirectJsonManifest,
+            step_id: &str,
+            data: &Value,
+            variables: &Value,
+            steps: &Value,
+        ) -> Value {
+            let data = serde_json::to_vec(data).expect("data json");
+            let variables = serde_json::to_vec(variables).expect("variables json");
+            let steps = serde_json::to_vec(steps).expect("steps json");
+            let source = build_source(&data, &variables, &steps).expect("source");
+            let event = manifest
+                .breakpoint_event(step_id, &source)
+                .expect("breakpoint event");
+            let event: Value = serde_json::from_slice(&event).expect("event json");
+            assert!(
+                !event.to_string().contains(WFREF_KEY),
+                "breakpoint payload must not carry an interning handle: {event}"
+            );
+            event
+        }
+        let blob = "x".repeat(20_000);
+        let summary = json!({ "_truncated": true, "_type": "string", "_length": 20_000 });
+        let data = json!({ "big": blob, "status": "active" });
+        let small_step =
+            json!({ "stepId": "small", "stepType": "Agent", "outputs": { "ok": true } });
+        let steps = json!({
+            "large": {
+                "stepId": "large", "stepName": "Large", "stepType": "Agent", "outputs": blob
+            },
+            "small": small_step
+        });
+
+        // Steps context: a large step result keeps its identity fields and only
+        // its `outputs` is summarised; a small one is unchanged.
+        let finish = DirectJsonManifest::parse(&debug_manifest(
+            "Finish",
+            "finish",
+            None,
+            json!({ "mappings": [] }),
+        ))
+        .expect("manifest");
+        reset_value_store();
+        let event = breakpoint(&finish, "finish", &json!({}), &json!({}), &steps);
+        let context = &event["steps_context"];
+        assert_eq!(context["large"]["stepId"], json!("large"));
+        assert_eq!(context["large"]["stepName"], json!("Large"));
+        assert_eq!(context["large"]["stepType"], json!("Agent"));
+        assert_eq!(context["large"]["outputs"], summary);
+        assert_eq!(context["small"], small_step);
+
+        // Conditional: its inputs are the whole source. Large entries of every
+        // scope are summarised, including the copies under `workflow.inputs`
+        // and the Split item.
+        let conditional = DirectJsonManifest::parse(&debug_manifest(
+            "Conditional",
+            "check",
+            None,
+            json!({
+                "conditions": [{
+                    "id": 0,
+                    "ownerId": "check",
+                    "ownerType": "Conditional",
+                    "purpose": "conditional.condition",
+                    "value": {
+                        "type": "operation",
+                        "op": "EQ",
+                        "arguments": [
+                            { "valueType": "reference", "value": "data.status" },
+                            { "valueType": "immediate", "value": "active" }
+                        ]
+                    }
+                }]
+            }),
+        ))
+        .expect("manifest");
+        reset_value_store();
+        let event = breakpoint(
+            &conditional,
+            "check",
+            &data,
+            &json!({ "tenant": "t1", "_loop_indices": [0], "_item": { "blob": blob } }),
+            &steps,
+        );
+        let inputs = &event["inputs"];
+        assert_eq!(inputs["data"]["big"], summary);
+        assert_eq!(inputs["data"]["status"], json!("active"));
+        assert_eq!(inputs["variables"]["tenant"], json!("t1"));
+        assert_eq!(inputs["steps"]["large"]["stepType"], json!("Agent"));
+        assert_eq!(inputs["steps"]["large"]["outputs"], summary);
+        assert_eq!(inputs["steps"]["small"], small_step);
+        assert_eq!(inputs["workflow"]["inputs"]["data"]["big"], summary);
+        assert_eq!(
+            inputs["workflow"]["inputs"]["data"]["status"],
+            json!("active")
+        );
+        assert_eq!(
+            inputs["workflow"]["inputs"]["variables"]["tenant"],
+            json!("t1")
+        );
+        assert_eq!(inputs["iteration"]["index"], json!(0));
+        // The Split item is one interned value, summarised whole wherever the
+        // source shows it.
+        assert_eq!(inputs["item"]["_type"], json!("object"));
+        assert_eq!(inputs["item"]["_keys"], json!(["blob"]));
+        assert_eq!(inputs["iteration"]["item"], inputs["item"]);
+        assert_eq!(inputs["variables"]["_item"], inputs["item"]);
+
+        // EmbedWorkflow: its inputs are the child's `data`.
+        let embed = DirectJsonManifest::parse(&debug_manifest(
+            "EmbedWorkflow",
+            "call_child",
+            None,
+            json!({}),
+        ))
+        .expect("manifest");
+        reset_value_store();
+        let event = breakpoint(&embed, "call_child", &data, &json!({}), &json!({}));
+        assert_eq!(
+            event["inputs"],
+            json!({ "big": summary, "status": "active" })
+        );
+    }
+
+    /// A source holds some interned values in several places under one handle.
+    /// A breakpoint parses and summarises each handle once, however many times
+    /// the steps context and the source view show it.
+    #[test]
+    fn bounded_debug_scopes_parse_each_shared_handle_once() {
+        reset_value_store();
+        let blob = "x".repeat(20_000);
+        let source = build_source(
+            &serde_json::to_vec(&json!({ "big": blob, "status": "active" })).expect("data"),
+            &serde_json::to_vec(&json!({ "_loop_indices": [0], "_item": { "blob": blob } }))
+                .expect("variables"),
+            &serde_json::to_vec(&json!({
+                "large": { "stepId": "large", "stepType": "Agent", "outputs": blob }
+            }))
+            .expect("steps"),
+        )
+        .expect("source");
+        let source: Value = serde_json::from_slice(&source).expect("source json");
+
+        let mut scopes = BoundedDebugScopes::default();
+        let context = scopes.entries(source["steps"].clone(), DebugEntryKind::StepResult);
+        let view = scopes.source(debug_source_view(&source));
+
+        // Three handles: `data.big` (also under `workflow.inputs.data`), the
+        // Split item (`variables._item`, `workflow.inputs.variables._item`,
+        // `iteration.item`, `item`) and `steps.large` (in both payloads).
+        assert_eq!(scopes.summaries.len(), 3);
+        assert_eq!(view["steps"]["large"], context["large"]);
+        assert_eq!(
+            view["workflow"]["inputs"]["data"]["big"],
+            view["data"]["big"]
+        );
+        assert_eq!(view["item"], view["iteration"]["item"]);
+    }
+
+    /// A nested body inherits the run input as `variables._workflow_inputs`,
+    /// and `build_source` interns that envelope once it reaches 16 KiB, even
+    /// when every field in it is small. A Conditional breakpoint inside the body
+    /// must show `workflow.inputs`, not the handle.
+    #[test]
+    fn breakpoint_event_opens_an_interned_workflow_inputs_envelope() {
+        let manifest = DirectJsonManifest::parse(&debug_manifest(
+            "Conditional",
+            "check",
+            None,
+            json!({
+                "conditions": [{
+                    "id": 0,
+                    "ownerId": "check",
+                    "ownerType": "Conditional",
+                    "purpose": "conditional.condition",
+                    "value": {
+                        "type": "operation",
+                        "op": "EQ",
+                        "arguments": [
+                            { "valueType": "reference", "value": "data.flag" },
+                            { "valueType": "immediate", "value": true }
+                        ]
+                    }
+                }]
+            }),
+        ))
+        .expect("manifest");
+        reset_value_store();
+        let field = "y".repeat(600);
+        let blob = "x".repeat(20_000);
+        let mut data: Map<String, Value> = (0..30)
+            .map(|index| (format!("f{index}"), json!(field)))
+            .collect();
+        data.insert("big".to_string(), json!(blob));
+        let root = build_source(&serde_json::to_vec(&data).expect("data json"), b"{}", b"{}")
+            .expect("root source");
+        let root: Value = serde_json::from_slice(&root).expect("root json");
+
+        // The body's source, built from the root variables as a Split does.
+        let mut variables = root["variables"].clone();
+        variables["_loop_indices"] = json!([0]);
+        let body = build_source(
+            br#"{"flag":true}"#,
+            &serde_json::to_vec(&variables).expect("variables json"),
+            b"{}",
+        )
+        .expect("body source");
+        let body_source: Value = serde_json::from_slice(&body).expect("body json");
+        assert!(
+            wfref_id(&body_source["workflow"]["inputs"]).is_some(),
+            "the inherited envelope should be interned: {}",
+            body_source["workflow"]["inputs"]
+        );
+
+        let event = manifest
+            .breakpoint_event("check", &body)
+            .expect("breakpoint event");
+        let event: Value = serde_json::from_slice(&event).expect("event json");
+        assert!(
+            !event.to_string().contains(WFREF_KEY),
+            "breakpoint payload must not carry an interning handle: {event}"
+        );
+        let inputs = &event["inputs"]["workflow"]["inputs"];
+        for index in 0..30 {
+            assert_eq!(inputs["data"][format!("f{index}")], json!(field));
+        }
+        assert_eq!(
+            inputs["data"]["big"],
+            json!({ "_truncated": true, "_type": "string", "_length": 20_000 })
+        );
+        assert_eq!(event["inputs"]["data"]["flag"], json!(true));
     }
 
     #[test]
