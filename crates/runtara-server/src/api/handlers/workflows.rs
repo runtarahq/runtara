@@ -2729,26 +2729,91 @@ pub async fn set_current_version_handler(
 // Metadata Handlers
 // ============================================================================
 
+/// The graph validate route over `pool` and `catalog`, with a connections
+/// facade on the same pool, for tests that reach it through an MCP server's
+/// internal router.
+#[cfg(test)]
+pub(crate) fn graph_validate_routes(
+    pool: PgPool,
+    catalog: Arc<runtara_dsl::agent_meta::AgentCatalog>,
+) -> axum::Router {
+    use runtara_connections::{
+        ConnectionsConfig, ConnectionsState, crypto::noop::NoOpCipher,
+        integration_compatibility::IntegrationCompatibility,
+    };
+    let connections = Arc::new(ConnectionsFacade::new(ConnectionsState::from_config(
+        ConnectionsConfig {
+            db_pool: pool.clone(),
+            redis_manager: None,
+            public_base_url: "http://localhost".into(),
+            http_client: runtara_connections::net::build_hardened_client(),
+            cipher: Arc::new(NoOpCipher),
+            compatibility: Arc::new(IntegrationCompatibility::new(Default::default())),
+            agent_catalog: catalog.clone(),
+            connection_events: None,
+        },
+    )));
+    axum::Router::new().route(
+        "/api/runtime/workflows/graph/validate",
+        axum::routing::post(
+            move |org: crate::middleware::tenant_auth::OrgId,
+                  query: Query<ValidateGraphQuery>,
+                  body: Json<Value>| {
+                let (pool, catalog, connections) =
+                    (pool.clone(), catalog.clone(), connections.clone());
+                async move {
+                    validate_graph_handler(
+                        org,
+                        State(pool),
+                        State(catalog),
+                        State(connections),
+                        query,
+                        body,
+                    )
+                    .await
+                }
+            },
+        ),
+    )
+}
+
+/// Query params for the graph validate endpoint
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ValidateGraphQuery {
+    #[serde(rename = "workflowId")]
+    pub workflow_id: Option<String>,
+}
+
 /// Validate graph structure
 ///
-/// Validates the execution graph using runtara-workflows validation, with the
-/// embedded child workflows it references (loaded from the database) and the
-/// tenant's published workflow-agents (read from its staging directory).
+/// Validates the execution graph with the checks saving it applies: the
+/// runtara-workflows validation with the embedded child workflows it
+/// references (loaded from the database) and the tenant's published
+/// workflow-agents (read from its staging directory), the agent allowlist
+/// across that closure, the existence of the connections it pins, and the
+/// definition limits. Pass `workflowId` when validating a saved workflow's
+/// graph, so that a child embedding that workflow is checked against this
+/// graph, as on save.
 #[utoipa::path(
     post,
     path = "/api/runtime/workflows/graph/validate",
     request_body = Value,
+    params(
+        ("workflowId" = Option<String>, Query, description = "Id of the workflow whose graph this is")
+    ),
     responses(
         (status = 200, description = "Validation completed"),
         (status = 400, description = "Validation failed")
     ),
     tag = "workflow-controller"
 )]
-#[instrument(skip(pool, catalog, body))]
+#[instrument(skip(pool, catalog, connections, body))]
 pub async fn validate_graph_handler(
     crate::middleware::tenant_auth::OrgId(tenant_id): crate::middleware::tenant_auth::OrgId,
     State(pool): State<PgPool>,
     State(catalog): State<std::sync::Arc<runtara_dsl::agent_meta::AgentCatalog>>,
+    State(connections): State<Arc<ConnectionsFacade>>,
+    Query(query): Query<ValidateGraphQuery>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
     // Validate that it's a valid JSON object
@@ -2800,11 +2865,16 @@ pub async fn validate_graph_handler(
                 })
                 .collect();
 
-            let root_id = workflow
-                .execution_graph
-                .name
-                .clone()
-                .unwrap_or_else(|| "root".to_string());
+            // Save validates the closure under the workflow's own id, so a
+            // child that embeds the workflow resolves to this graph rather
+            // than to its stored version.
+            let root_id = query.workflow_id.unwrap_or_else(|| {
+                workflow
+                    .execution_graph
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| "root".to_string())
+            });
             // Published workflow-agents are visible to validation via the tenant
             // catalog overlay, as on save (a parent may target `agentId: <slug>`).
             let catalog =
@@ -2820,14 +2890,27 @@ pub async fn validate_graph_handler(
                 Some((child_id, _)) => format!("in child workflow '{}': {}", child_id, text),
                 None => text,
             };
-            let mut errors: Vec<String> = report
-                .errors()
-                .map(|(origin, e)| attribute(origin, e.to_string()))
-                .collect();
+            let mut errors: Vec<String> = Vec::new();
+            // The save gate's allowlist walk over the whole closure, with the
+            // tenant's published workflow-agents exempt.
+            if let Err(denial) = crate::middleware::entitlement::walk_closure_for_agents(
+                crate::config::entitlements(),
+                &workflow.execution_graph,
+                closure_children.iter().map(|c| &c.execution_graph),
+                &crate::workflow_agents::published_agent_ids(&tenant_id),
+            ) {
+                errors.push(format!("[{}] {}", denial.code(), denial.message()));
+            }
+            errors.extend(
+                report
+                    .errors()
+                    .map(|(origin, e)| attribute(origin, e.to_string())),
+            );
             // The save gate's definition checks, so validate and save agree.
             for check in [
                 crate::api::services::workflows::validate_execution_graph_name,
                 crate::api::services::workflows::validate_execution_timeout,
+                crate::api::services::workflows::validate_description_length,
             ] {
                 if let Err(error) = check(&body) {
                     errors.push(match error {
@@ -2836,6 +2919,26 @@ pub async fn validate_graph_handler(
                         }
                         other => other.to_string(),
                     });
+                }
+            }
+            // The save gate's check that every connection a step pins exists.
+            match crate::api::services::workflows::tenant_connection_issues(
+                &connections,
+                &tenant_id,
+                &workflow,
+                &catalog,
+            )
+            .await
+            {
+                Ok(issues) => errors.extend(issues.into_iter().map(|issue| issue.message)),
+                Err(e) => {
+                    let error_response = json!({
+                        "success": false,
+                        "valid": false,
+                        "error": "Failed to validate connections",
+                        "message": e.to_string()
+                    });
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response));
                 }
             }
             let mut warnings: Vec<String> = report

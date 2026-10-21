@@ -7868,17 +7868,25 @@ export class Api<
       }),
 
     /**
-     * @description Validates the execution graph using runtara-workflows validation, with the embedded child workflows it references (loaded from the database) and the tenant's published workflow-agents (read from its staging directory).
+     * @description Validates the execution graph with the checks saving it applies: the runtara-workflows validation with the embedded child workflows it references (loaded from the database) and the tenant's published workflow-agents (read from its staging directory), the agent allowlist across that closure, the existence of the connections it pins, and the definition limits. Pass `workflowId` when validating a saved workflow's graph, so that a child embedding that workflow is checked against this graph, as on save.
      *
      * @tags workflow-controller
      * @name ValidateGraphHandler
      * @summary Validate graph structure
      * @request POST:/api/runtime/workflows/graph/validate
      */
-    validateGraphHandler: (data: any, params: RequestParams = {}) =>
+    validateGraphHandler: (
+      data: any,
+      query?: {
+        /** Id of the workflow whose graph this is */
+        workflowId?: string;
+      },
+      params: RequestParams = {},
+    ) =>
       this.request<void, void>({
         path: `/api/runtime/workflows/graph/validate`,
         method: "POST",
+        query: query,
         body: data,
         type: "application/json",
         ...params,
