@@ -5485,8 +5485,15 @@ impl BoundedDebugScopes {
 
     /// Bound a whole source one scope entry at a time. `steps` entries and the
     /// root onError alias are step results, and `workflow.inputs` is the run's
-    /// own `{data, variables}`, bounded like the root scopes.
+    /// own `{data, variables}`, bounded like the root scopes. A nested body
+    /// inherits `workflow.inputs` as a variable, so it can arrive as one
+    /// interned value; open it one level and leave its own handles to the
+    /// entries below.
     fn source(&mut self, source: Value) -> Value {
+        let source = match wfref_id(&source) {
+            Some(id) => stored_value(id),
+            None => source,
+        };
         let Value::Object(source) = source else {
             return self.entry(source, DebugEntryKind::Value);
         };
@@ -12796,6 +12803,80 @@ mod tests {
             view["data"]["big"]
         );
         assert_eq!(view["item"], view["iteration"]["item"]);
+    }
+
+    /// A nested body inherits the run input as `variables._workflow_inputs`,
+    /// and `build_source` interns that envelope once it reaches 16 KiB, even
+    /// when every field in it is small. A Conditional breakpoint inside the body
+    /// must show `workflow.inputs`, not the handle.
+    #[test]
+    fn breakpoint_event_opens_an_interned_workflow_inputs_envelope() {
+        let manifest = DirectJsonManifest::parse(&debug_manifest(
+            "Conditional",
+            "check",
+            None,
+            json!({
+                "conditions": [{
+                    "id": 0,
+                    "ownerId": "check",
+                    "ownerType": "Conditional",
+                    "purpose": "conditional.condition",
+                    "value": {
+                        "type": "operation",
+                        "op": "EQ",
+                        "arguments": [
+                            { "valueType": "reference", "value": "data.flag" },
+                            { "valueType": "immediate", "value": true }
+                        ]
+                    }
+                }]
+            }),
+        ))
+        .expect("manifest");
+        reset_value_store();
+        let field = "y".repeat(600);
+        let blob = "x".repeat(20_000);
+        let mut data: Map<String, Value> = (0..30)
+            .map(|index| (format!("f{index}"), json!(field)))
+            .collect();
+        data.insert("big".to_string(), json!(blob));
+        let root = build_source(&serde_json::to_vec(&data).expect("data json"), b"{}", b"{}")
+            .expect("root source");
+        let root: Value = serde_json::from_slice(&root).expect("root json");
+
+        // The body's source, built from the root variables as a Split does.
+        let mut variables = root["variables"].clone();
+        variables["_loop_indices"] = json!([0]);
+        let body = build_source(
+            br#"{"flag":true}"#,
+            &serde_json::to_vec(&variables).expect("variables json"),
+            b"{}",
+        )
+        .expect("body source");
+        let body_source: Value = serde_json::from_slice(&body).expect("body json");
+        assert!(
+            wfref_id(&body_source["workflow"]["inputs"]).is_some(),
+            "the inherited envelope should be interned: {}",
+            body_source["workflow"]["inputs"]
+        );
+
+        let event = manifest
+            .breakpoint_event("check", &body)
+            .expect("breakpoint event");
+        let event: Value = serde_json::from_slice(&event).expect("event json");
+        assert!(
+            !event.to_string().contains(WFREF_KEY),
+            "breakpoint payload must not carry an interning handle: {event}"
+        );
+        let inputs = &event["inputs"]["workflow"]["inputs"];
+        for index in 0..30 {
+            assert_eq!(inputs["data"][format!("f{index}")], json!(field));
+        }
+        assert_eq!(
+            inputs["data"]["big"],
+            json!({ "_truncated": true, "_type": "string", "_length": 20_000 })
+        );
+        assert_eq!(event["inputs"]["data"]["flag"], json!(true));
     }
 
     #[test]
