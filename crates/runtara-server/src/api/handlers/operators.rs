@@ -73,15 +73,17 @@ pub async fn get_agent_handler(
     State(service): State<AgentsService>,
     Path(name): Path<String>,
 ) -> Result<Json<AgentInfo>, Response> {
-    // A published workflow-agent of this tenant is exempt from the allowlist,
-    // as on save. None of them shares an id with a built-in.
-    if let Some(agent) = service.published_agent(&tenant_id, &name) {
-        return Ok(Json(agent));
-    }
     // Per-agent allowlist check. Surfaces AGENT_NOT_ENABLED with the same
     // stable code the workflow compile gate emits.
     if let Err(err) = crate::config::entitlements().require_agent(&name) {
-        return Err(EntitlementDenial::from(err).into_response());
+        // A denied id may be one of this tenant's published workflow-agents,
+        // which are exempt, as on save. None of them shares an id with a
+        // built-in, so a built-in stays denied. Checking the allowlist first
+        // keeps the staging-directory read off the common path.
+        return match service.published_agent(&tenant_id, &name) {
+            Some(agent) => Ok(Json(agent)),
+            None => Err(EntitlementDenial::from(err).into_response()),
+        };
     }
     match service.get_agent(&name) {
         Ok(agent) => Ok(Json(agent)),
@@ -111,16 +113,14 @@ pub async fn get_capability_handler(
     State(service): State<AgentsService>,
     Path((name, capability_id)): Path<(String, String)>,
 ) -> Result<Json<CapabilityInfo>, Response> {
-    let capability = match service.published_agent(&tenant_id, &name) {
-        // Exempt from the allowlist, as in `get_agent_handler`.
-        Some(agent) => AgentsService::capability_of(agent, &capability_id),
-        None => {
-            // Per-agent allowlist check.
-            if let Err(err) = crate::config::entitlements().require_agent(&name) {
-                return Err(EntitlementDenial::from(err).into_response());
-            }
-            service.get_capability(&name, &capability_id)
-        }
+    // Per-agent allowlist check, with the tenant's published workflow-agents
+    // exempt as in `get_agent_handler`.
+    let capability = match crate::config::entitlements().require_agent(&name) {
+        Ok(()) => service.get_capability(&name, &capability_id),
+        Err(err) => match service.published_agent(&tenant_id, &name) {
+            Some(agent) => AgentsService::capability_of(agent, &capability_id),
+            None => return Err(EntitlementDenial::from(err).into_response()),
+        },
     };
     match capability {
         Ok(capability) => Ok(Json(capability)),

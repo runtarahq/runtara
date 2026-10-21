@@ -33,15 +33,13 @@ pub fn require_feature(_server: &SmoMcpServer, feature: FeatureKey) -> Result<()
 /// Fail with a stable `AGENT_NOT_ENABLED` rmcp error when the given agent
 /// module is not in the tenant's allowlist (or not a registered dispatcher
 /// module at all). The tenant's published workflow-agents are its own
-/// workflows, not licensed integrations, so they are exempt, as on save.
+/// workflows, not licensed integrations, so they are exempt, as on save;
+/// see [`crate::middleware::entitlement::tenant_agent_decision`].
 pub fn require_agent(server: &SmoMcpServer, module_id: &str) -> Result<(), ErrorData> {
-    if crate::workflow_agents::published_agent_ids(&server.tenant_id)
-        .contains(&runtara_dsl::agent_meta::canonical_agent_id(module_id))
-    {
-        return Ok(());
-    }
-    crate::config::entitlements()
-        .require_agent(module_id)
-        .map_err(EntitlementDenial::from)
-        .map_err(|d| d.to_rmcp_error())
+    crate::middleware::entitlement::tenant_agent_decision(
+        crate::config::entitlements(),
+        module_id,
+        || crate::workflow_agents::published_agent_ids(&server.tenant_id),
+    )
+    .map_err(|d| d.to_rmcp_error())
 }

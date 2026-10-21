@@ -82,6 +82,27 @@ pub fn agent_decision(
         .map_err(EntitlementDenial::from)
 }
 
+/// The allowlist check for one agent, with the tenant's published
+/// workflow-agents exempt, as on save. A registered dispatcher module is
+/// never exempt: a built-in id always wins, so a publication that carries
+/// one stays under the allowlist. The allowlist is checked first, so
+/// `published_agent_ids` (a read of the tenant's staging directory) runs
+/// only for a denied id.
+pub fn tenant_agent_decision(
+    snapshot: &EntitlementSnapshot,
+    module_id: &str,
+    published_agent_ids: impl FnOnce() -> std::collections::HashSet<String>,
+) -> Result<(), EntitlementDenial> {
+    let Err(err) = snapshot.require_agent(module_id) else {
+        return Ok(());
+    };
+    let agent_id = runtara_dsl::agent_meta::canonical_agent_id(module_id);
+    if !snapshot.is_registered_agent(&agent_id) && published_agent_ids().contains(&agent_id) {
+        return Ok(());
+    }
+    Err(EntitlementDenial::from(err))
+}
+
 /// Walk an `ExecutionGraph` and return the first `AGENT_NOT_ENABLED` denial
 /// for any `AgentStep` whose `agent_id` is not allowed by the snapshot, or
 /// `Ok(())` if every agent step references an allowed module.
@@ -710,6 +731,29 @@ mod tests {
         let exempt: std::collections::HashSet<String> =
             ["shout-echo".to_string()].into_iter().collect();
         assert!(walk_graph_for_agents(&snap, &graph, &exempt).is_ok());
+    }
+
+    #[test]
+    fn a_publication_carrying_a_built_in_id_stays_under_the_allowlist() {
+        // `csv` is a registered built-in this tenant is not licensed for. An
+        // older publication that carries its id must not lift the allowlist.
+        let snap = snapshot_with(None, Some(r#"{"agents":["http"]}"#));
+        let published = || -> std::collections::HashSet<String> {
+            ["csv", "shout-echo"].map(String::from).into()
+        };
+
+        let denial = tenant_agent_decision(&snap, "csv", published)
+            .expect_err("a built-in id always wins over a publication");
+        assert_eq!(denial.code(), codes::AGENT_NOT_ENABLED);
+        assert!(tenant_agent_decision(&snap, "Shout_Echo", published).is_ok());
+        assert!(tenant_agent_decision(&snap, "unpublished", published).is_err());
+        // An allowed agent never reads the tenant's publications.
+        assert!(
+            tenant_agent_decision(&snap, "http", || unreachable!(
+                "no read for an allowed agent"
+            ))
+            .is_ok()
+        );
     }
 
     #[test]
