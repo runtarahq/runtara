@@ -212,6 +212,113 @@ fn requires_run_result(capability_id: &str) -> serde_json::Value {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn a_published_workflow_agent_is_known_to_agent_lookup_for_its_tenant_only() {
+        use std::sync::Arc;
+
+        use runtara_dsl::agent_meta::workflow_agent_info;
+
+        use crate::api::repositories::object_model::ObjectStoreManager;
+        // No other test uses these tenants, so code that resolves a tenant's
+        // agents while `DATA_DIR` points here never sees the one staged below.
+        const PUBLISHER: &str = "lookup-publisher";
+        const OTHER: &str = "lookup-other-tenant";
+
+        let _env = crate::test_env::ENV_MUTEX.lock().await;
+        crate::config::init_for_test();
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set("DATA_DIR", data_dir.path().to_str().unwrap());
+        let wasm = data_dir.path().join("published-child.wasm");
+        std::fs::write(&wasm, b"").unwrap();
+        crate::workflow_agents::stage(
+            PUBLISHER,
+            "published-child",
+            &wasm,
+            &workflow_agent_info(
+                "published-child",
+                "Published child",
+                "",
+                &Default::default(),
+                &Default::default(),
+            ),
+        )
+        .unwrap();
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/runtara_mcp_agent_lookup_test")
+            .unwrap();
+        let server = |tenant: &str| {
+            SmoMcpServer::new(
+                pool.clone(),
+                Arc::new(ObjectStoreManager::new(String::new())),
+                None,
+                tenant.into(),
+                crate::api::handlers::operators::agent_lookup_routes(),
+            )
+        };
+        let json = |result: CallToolResult| -> serde_json::Value {
+            serde_json::from_str(&result.content[0].as_text().expect("text content").text)
+                .expect("tool result is JSON")
+        };
+        let agent_ids = |listing: serde_json::Value| -> Vec<String> {
+            listing["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a["id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let get = |tenant: &str| {
+            let server = server(tenant);
+            async move {
+                let agent_id = "published-child".into();
+                get_agent(&server, GetAgentParams { agent_id }).await
+            }
+        };
+
+        let listing = json(list_agents(&server(PUBLISHER)).await.unwrap());
+        assert_eq!(agent_ids(listing), ["published-child"]);
+        let agent = json(get(PUBLISHER).await.expect("the publisher sees it"));
+        assert_eq!(
+            (&agent["id"], &agent["capabilities"][0]["id"]),
+            (
+                &serde_json::json!("published-child"),
+                &serde_json::json!("run")
+            ),
+            "{agent:#}"
+        );
+        let capability = json(
+            get_capability(
+                &server(PUBLISHER),
+                GetCapabilityParams {
+                    agent_id: "published-child".into(),
+                    capability_id: "run".into(),
+                },
+            )
+            .await
+            .expect("the publisher gets its capability"),
+        );
+        assert_eq!(capability["id"], "run", "{capability:#}");
+
+        let listing = json(list_agents(&server(OTHER)).await.unwrap());
+        assert!(agent_ids(listing).is_empty());
+        let code = |err: rmcp::ErrorData| err.data.and_then(|d| d.get("code").cloned());
+        assert_eq!(
+            get(OTHER).await.map(json).map_err(code).unwrap_err(),
+            Some(serde_json::json!("AGENT_NOT_ENABLED")),
+            "the MCP gate denies it to another tenant"
+        );
+        assert_eq!(
+            api_get(&server(OTHER), "/api/runtime/agents/published-child")
+                .await
+                .map_err(code)
+                .unwrap_err(),
+            Some(serde_json::json!("AGENT_NOT_ENABLED")),
+            "and so does the REST lookup"
+        );
+    }
+
     #[test]
     fn run_only_capabilities_answer_requires_instance_without_running() {
         let run_only = serde_json::json!({"id": "cancel", "tags": ["runtime:requires-run"]});

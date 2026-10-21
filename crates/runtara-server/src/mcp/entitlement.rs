@@ -11,10 +11,9 @@
 //! fired here (tool layer) or via the 403-to-rmcp translation in
 //! [`crate::mcp::tools::internal_api`] (REST layer fallback).
 //!
-//! The `server` argument is currently unused — the resolved snapshot lives
-//! in `config::entitlements()` for the whole process. It stays in the
-//! signature so call sites match the doc's proposed shape and so a future
-//! per-tenant lookup can plug in without touching every tool.
+//! The resolved snapshot lives in `config::entitlements()` for the whole
+//! process. The `server` argument carries the tenant for the per-tenant part:
+//! [`require_agent`] exempts the tenant's published workflow-agents.
 
 use rmcp::ErrorData;
 
@@ -33,8 +32,14 @@ pub fn require_feature(_server: &SmoMcpServer, feature: FeatureKey) -> Result<()
 
 /// Fail with a stable `AGENT_NOT_ENABLED` rmcp error when the given agent
 /// module is not in the tenant's allowlist (or not a registered dispatcher
-/// module at all).
-pub fn require_agent(_server: &SmoMcpServer, module_id: &str) -> Result<(), ErrorData> {
+/// module at all). The tenant's published workflow-agents are its own
+/// workflows, not licensed integrations, so they are exempt, as on save.
+pub fn require_agent(server: &SmoMcpServer, module_id: &str) -> Result<(), ErrorData> {
+    if crate::workflow_agents::published_agent_ids(&server.tenant_id)
+        .contains(&runtara_dsl::agent_meta::canonical_agent_id(module_id))
+    {
+        return Ok(());
+    }
     crate::config::entitlements()
         .require_agent(module_id)
         .map_err(EntitlementDenial::from)

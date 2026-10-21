@@ -3,7 +3,8 @@
 //! HTTP endpoints for querying agent metadata. The handlers read a single
 //! shared `AgentsService` from `AppState` (built once at startup with the
 //! embedded component dispatcher attached) so component-backed agents
-//! consistently override the legacy registry on every call.
+//! consistently override the legacy registry on every call. The calling
+//! tenant's published workflow-agents are served next to them.
 
 use axum::{
     extract::{Path, State},
@@ -14,6 +15,7 @@ use axum::{
 use crate::api::dto::operators::{AgentInfo, AgentSummary, CapabilityInfo, ListAgentsResponse};
 use crate::api::services::operators::{AgentsService, ServiceError};
 use crate::entitlement_error::EntitlementDenial;
+use crate::middleware::tenant_auth::OrgId;
 
 /// Get all available agents (without capabilities details)
 #[utoipa::path(
@@ -25,13 +27,18 @@ use crate::entitlement_error::EntitlementDenial;
     )
 )]
 pub async fn list_agents_handler(
+    OrgId(tenant_id): OrgId,
     State(service): State<AgentsService>,
 ) -> Result<Json<ListAgentsResponse>, StatusCode> {
     // Filter against the tenant's materialised allowlist so discovery matches
     // invocation: an agent the per-handler gates would deny must not appear
     // in the listing the SPA and MCP `list_agents` tool render from.
     let allowlist = crate::config::entitlements().materialised_agents();
-    let agents = filter_agents_by_allowlist(service.list_agents(), &allowlist);
+    let mut agents = filter_agents_by_allowlist(service.list_agents(), &allowlist);
+    // The tenant's published workflow-agents are its own workflows, not
+    // licensed integrations: they are exempt from the allowlist, as on save.
+    agents.extend(service.published_agent_summaries(&tenant_id));
+    agents.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(Json(ListAgentsResponse { agents }))
 }
 
@@ -62,9 +69,15 @@ fn filter_agents_by_allowlist(
     )
 )]
 pub async fn get_agent_handler(
+    OrgId(tenant_id): OrgId,
     State(service): State<AgentsService>,
     Path(name): Path<String>,
 ) -> Result<Json<AgentInfo>, Response> {
+    // A published workflow-agent of this tenant is exempt from the allowlist,
+    // as on save. None of them shares an id with a built-in.
+    if let Some(agent) = service.published_agent(&tenant_id, &name) {
+        return Ok(Json(agent));
+    }
     // Per-agent allowlist check. Surfaces AGENT_NOT_ENABLED with the same
     // stable code the workflow compile gate emits.
     if let Err(err) = crate::config::entitlements().require_agent(&name) {
@@ -94,19 +107,42 @@ pub async fn get_agent_handler(
     )
 )]
 pub async fn get_capability_handler(
+    OrgId(tenant_id): OrgId,
     State(service): State<AgentsService>,
     Path((name, capability_id)): Path<(String, String)>,
 ) -> Result<Json<CapabilityInfo>, Response> {
-    // Per-agent allowlist check.
-    if let Err(err) = crate::config::entitlements().require_agent(&name) {
-        return Err(EntitlementDenial::from(err).into_response());
-    }
-    match service.get_capability(&name, &capability_id) {
+    let capability = match service.published_agent(&tenant_id, &name) {
+        // Exempt from the allowlist, as in `get_agent_handler`.
+        Some(agent) => AgentsService::capability_of(agent, &capability_id),
+        None => {
+            // Per-agent allowlist check.
+            if let Err(err) = crate::config::entitlements().require_agent(&name) {
+                return Err(EntitlementDenial::from(err).into_response());
+            }
+            service.get_capability(&name, &capability_id)
+        }
+    };
+    match capability {
         Ok(capability) => Ok(Json(capability)),
         Err(ServiceError::AgentNotFound) | Err(ServiceError::CapabilityNotFound) => {
             Err(StatusCode::NOT_FOUND.into_response())
         }
     }
+}
+
+/// The agent lookup routes over a service with no built-in agents, for tests
+/// that reach them through an MCP server's internal router.
+#[cfg(test)]
+pub(crate) fn agent_lookup_routes() -> axum::Router {
+    use axum::routing::get;
+    axum::Router::new()
+        .route("/api/runtime/agents", get(list_agents_handler))
+        .route("/api/runtime/agents/{name}", get(get_agent_handler))
+        .route(
+            "/api/runtime/agents/{name}/capabilities/{capability_id}",
+            get(get_capability_handler),
+        )
+        .with_state(AgentsService::new().with_agent_catalog(Default::default()))
 }
 
 /// Get connection schema for an agent (STUB)

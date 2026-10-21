@@ -1376,18 +1376,17 @@ pub async fn deploy_workflow(
     validate_path_param("workflow_id", &params.workflow_id)?;
     let execution_graph = normalize_json_arg(params.execution_graph, "execution_graph")?;
 
-    // Step 0a: Validate graph structure before doing anything
+    // Step 0a: Validate graph structure before doing anything. A validation
+    // call that fails is an error, not a pass.
     let graph_validation = api_post(
         server,
         "/api/runtime/workflows/graph/validate",
         Some(execution_graph.clone()),
     )
-    .await
-    .ok();
+    .await?;
 
     let has_graph_errors = graph_validation
-        .as_ref()
-        .and_then(|v| v.get("errors"))
+        .get("errors")
         .and_then(|e| e.as_array())
         .is_some_and(|a| !a.is_empty());
 
@@ -1529,18 +1528,16 @@ pub async fn deploy_latest(
         .cloned()
         .unwrap_or(serde_json::json!({}));
 
-    // Validate graph
+    // Validate graph; a validation call that fails is an error, not a pass.
     let graph_validation = api_post(
         server,
         "/api/runtime/workflows/graph/validate",
         Some(graph.clone()),
     )
-    .await
-    .ok();
+    .await?;
 
     let has_graph_errors = graph_validation
-        .as_ref()
-        .and_then(|v| v.get("errors"))
+        .get("errors")
         .and_then(|e| e.as_array())
         .is_some_and(|a| !a.is_empty());
 
@@ -1686,18 +1683,17 @@ pub async fn preflight_compile(
 
     let mut blockers = Vec::new();
 
-    // 1. Validate graph structure
+    // 1. Validate graph structure. A validation call that fails is an error,
+    // not a pass.
     let graph_validation = api_post(
         server,
         "/api/runtime/workflows/graph/validate",
         Some(graph.clone()),
     )
-    .await
-    .ok();
+    .await?;
 
     let graph_errors = graph_validation
-        .as_ref()
-        .and_then(|v| v.get("errors"))
+        .get("errors")
         .and_then(|e| e.as_array())
         .map(|a| a.len())
         .unwrap_or(0);
@@ -1949,6 +1945,101 @@ fn diff_step(a: &serde_json::Value, b: &serde_json::Value) -> Vec<String> {
 mod tests {
     use super::*;
     use schemars::JsonSchema;
+
+    /// A graph-validation call that fails stops a deploy instead of counting
+    /// as a graph with no errors.
+    #[tokio::test]
+    async fn deploy_tools_stop_when_graph_validation_fails_to_run() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::Json;
+        use axum::http::{StatusCode, Uri};
+        use axum::routing::{get, post};
+
+        use crate::api::repositories::object_model::ObjectStoreManager;
+
+        let graph = serde_json::json!({
+            "name": "Parent",
+            "steps": {"finish": {"stepType": "Finish", "id": "finish", "inputMapping": {}}},
+            "entryPoint": "finish",
+            "executionPlan": [],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        });
+        // Every request past the validation call: saves, compiles, mapping checks.
+        let reached = Arc::new(Mutex::new(Vec::<String>::new()));
+        let router = {
+            let (stored, reached) = (graph.clone(), reached.clone());
+            axum::Router::new()
+                .route(
+                    "/api/runtime/workflows/graph/validate",
+                    post(|| async {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error": "Failed to load child workflows"})),
+                        )
+                    }),
+                )
+                .route(
+                    "/api/runtime/workflows/{workflow_id}",
+                    get(move || {
+                        let graph = stored.clone();
+                        async move {
+                            Json(serde_json::json!({"data": {
+                                "lastVersionNumber": 1,
+                                "currentVersionNumber": 1,
+                                "definition": {"executionGraph": graph}
+                            }}))
+                        }
+                    }),
+                )
+                .fallback(move |uri: Uri| {
+                    reached.lock().unwrap().push(uri.path().to_string());
+                    async { StatusCode::NOT_FOUND }
+                })
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/runtara_mcp_deploy_validation_test")
+            .unwrap();
+        let server = SmoMcpServer::new(
+            pool,
+            Arc::new(ObjectStoreManager::new(String::new())),
+            None,
+            "deploy-validation-tenant".into(),
+            router,
+        );
+        fn by_id<T: serde::de::DeserializeOwned>() -> T {
+            serde_json::from_value(serde_json::json!({"workflow_id": "parent"})).unwrap()
+        }
+
+        let results = [
+            (
+                "deploy_workflow",
+                deploy_workflow(
+                    &server,
+                    DeployWorkflowParams {
+                        workflow_id: "parent".into(),
+                        execution_graph: graph.clone(),
+                    },
+                )
+                .await,
+            ),
+            ("deploy_latest", deploy_latest(&server, by_id()).await),
+            (
+                "preflight_compile",
+                preflight_compile(&server, by_id()).await,
+            ),
+        ];
+        for (tool, result) in results {
+            assert!(result.is_err(), "{tool} went on: {result:?}");
+        }
+        assert!(
+            reached.lock().unwrap().is_empty(),
+            "no tool went past validation: {:?}",
+            reached.lock().unwrap()
+        );
+    }
 
     /// The authoring document names its DSL version, every state field type,
     /// and only tools that exist.

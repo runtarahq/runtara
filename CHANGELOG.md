@@ -606,6 +606,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Agent lookup sees the tenant's published workflow-agents.**
+  `GET /api/runtime/agents` did not list them, and
+  `GET /api/runtime/agents/{name}` and `…/capabilities/{capability_id}`
+  answered `AGENT_NOT_ENABLED` for them. The MCP `get_agent`,
+  `get_capability` and `add_agent_step` tools failed the same way, and
+  `list_unmapped_inputs` failed on a step that calls one. So a parent of a
+  workflow-agent could be deployed through MCP as a whole graph but not
+  built one step at a time. The editor's validator, which loads its agents
+  from the same list, reported `E020 unknown agent` for such a step. The
+  endpoints now serve a tenant's published workflow-agents to that tenant,
+  exempt from the agent allowlist as on save. A built-in agent's id still
+  wins, and other tenants do not see them.
+- **The MCP deploy tools stop when graph validation fails to run.**
+  `deploy_workflow`, `deploy_latest` and `preflight_compile` read a failed
+  `graph/validate` call as a graph with no errors. Such a call fails, for
+  example, with a 500 when embedded children cannot be loaded. The deploy
+  tools then went on to save and compile the graph, and `preflight_compile`
+  reported it ready. They now return the error.
 - **Step-debug events show large step outputs.** With step events on, a
   step with a large output (a stored step result of about 16 KiB or more)
   recorded an internal reference such as `{"$wfref":1,"$wfnonce":…}` as its

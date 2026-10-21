@@ -135,12 +135,52 @@ impl AgentsService {
         agent_name: &str,
         capability_id: &str,
     ) -> Result<CapabilityInfo, ServiceError> {
-        let agent = self.get_agent(agent_name)?;
+        Self::capability_of(self.get_agent(agent_name)?, capability_id)
+    }
+
+    /// The capability of `agent` with the given id, ignoring ASCII case.
+    pub fn capability_of(
+        agent: AgentInfo,
+        capability_id: &str,
+    ) -> Result<CapabilityInfo, ServiceError> {
         agent
             .capabilities
             .into_iter()
             .find(|cap| cap.id.eq_ignore_ascii_case(capability_id))
             .ok_or(ServiceError::CapabilityNotFound)
+    }
+
+    /// The tenant's published workflow-agents, with the catalog overlay's
+    /// rules: a built-in id always wins, so none of these is a built-in.
+    fn published_agents(&self, tenant_id: &str) -> Vec<AgentInfo> {
+        let no_built_ins = runtara_dsl::agent_meta::AgentCatalog::default();
+        let base = self.agent_catalog.as_deref().unwrap_or(&no_built_ins);
+        crate::workflow_agents::tenant_overlay(base, tenant_id)
+    }
+
+    /// One of the tenant's published workflow-agents by id (canonical match,
+    /// as in the catalog), or `None` for a built-in or an unknown id.
+    pub fn published_agent(&self, tenant_id: &str, name: &str) -> Option<AgentInfo> {
+        let query = runtara_dsl::agent_meta::canonical_agent_id(name);
+        self.published_agents(tenant_id)
+            .into_iter()
+            .find(|info| runtara_dsl::agent_meta::canonical_agent_id(&info.id) == query)
+    }
+
+    /// Summary view of the tenant's published workflow-agents. Their
+    /// integration ids are the sidecar's own: the boot catalog never saw them.
+    pub fn published_agent_summaries(&self, tenant_id: &str) -> Vec<AgentSummary> {
+        self.published_agents(tenant_id)
+            .into_iter()
+            .map(|info| AgentSummary {
+                component_backed: true,
+                id: info.id,
+                name: info.name,
+                description: info.description,
+                supports_connections: info.supports_connections,
+                integration_ids: info.integration_ids,
+            })
+            .collect()
     }
 
     /// Snapshot of the component dispatcher state for

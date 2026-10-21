@@ -3997,6 +3997,142 @@ mod add_agent_step_tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn a_published_workflow_agent_can_be_added_step_by_step_by_its_tenant_only() {
+        use std::sync::{Arc, Mutex};
+
+        use axum::Json;
+        use axum::routing::{get, post};
+        use runtara_dsl::agent_meta::workflow_agent_info;
+
+        use crate::api::repositories::object_model::ObjectStoreManager;
+        use crate::mcp::server::SmoMcpServer;
+        // No other test uses these tenants, so code that resolves a tenant's
+        // agents while `DATA_DIR` points here never sees the one staged below.
+        const PUBLISHER: &str = "step-by-step-publisher";
+        const OTHER: &str = "step-by-step-other-tenant";
+
+        let _env = crate::test_env::ENV_MUTEX.lock().await;
+        crate::config::init_for_test();
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set("DATA_DIR", data_dir.path().to_str().unwrap());
+        let wasm = data_dir.path().join("published-child.wasm");
+        std::fs::write(&wasm, b"").unwrap();
+        let input_schema = serde_json::from_value(serde_json::json!({
+            "orderId": {"type": "string", "required": true}
+        }))
+        .unwrap();
+        crate::workflow_agents::stage(
+            PUBLISHER,
+            "published-child",
+            &wasm,
+            &workflow_agent_info(
+                "published-child",
+                "Published child",
+                "",
+                &input_schema,
+                &Default::default(),
+            ),
+        )
+        .unwrap();
+
+        // The parent's stored graph: read by the graph fetch, replaced by a save.
+        let graph = Arc::new(Mutex::new(serde_json::json!({
+            "name": "Parent",
+            "steps": {},
+            "executionPlan": [],
+            "variables": {},
+            "inputSchema": {},
+            "outputSchema": {}
+        })));
+        let workflow_routes = {
+            let (read, saved) = (graph.clone(), graph.clone());
+            axum::Router::new()
+                .route(
+                    "/api/runtime/workflows/{workflow_id}",
+                    get(move || {
+                        let graph = read.lock().unwrap().clone();
+                        async move {
+                            Json(serde_json::json!({"data": {
+                                "lastVersionNumber": 1,
+                                "currentVersionNumber": 1,
+                                "definition": {"executionGraph": graph}
+                            }}))
+                        }
+                    }),
+                )
+                .route(
+                    "/api/runtime/workflows/{workflow_id}/update",
+                    post(move |Json(body): Json<serde_json::Value>| async move {
+                        *saved.lock().unwrap() = body["executionGraph"].clone();
+                        Json(serde_json::json!({"version": "2"}))
+                    }),
+                )
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/runtara_mcp_step_by_step_test")
+            .unwrap();
+        let server = |tenant: &str| {
+            SmoMcpServer::new(
+                pool.clone(),
+                Arc::new(ObjectStoreManager::new(String::new())),
+                None,
+                tenant.into(),
+                crate::api::handlers::operators::agent_lookup_routes()
+                    .merge(workflow_routes.clone()),
+            )
+        };
+        let add = |tenant: &str, step_id: &str| {
+            let server = server(tenant);
+            let params = serde_json::from_value(serde_json::json!({
+                "workflow_id": "parent",
+                "step_id": step_id,
+                "step_name": "Call the child",
+                "agent_id": "published-child",
+                "capability_id": "run",
+            }))
+            .unwrap();
+            async move { add_agent_step(&server, params).await }
+        };
+
+        add(PUBLISHER, "call")
+            .await
+            .expect("the publisher adds a step calling its workflow-agent");
+        let saved = graph.lock().unwrap().clone();
+        assert_eq!(
+            (&saved["steps"]["call"]["agentId"], &saved["entryPoint"]),
+            (
+                &serde_json::json!("published-child"),
+                &serde_json::json!("call")
+            ),
+            "{saved:#}"
+        );
+
+        let unmapped = list_unmapped_inputs(
+            &server(PUBLISHER),
+            serde_json::from_value(serde_json::json!({"workflow_id": "parent"})).unwrap(),
+        )
+        .await
+        .expect("the capability's inputs resolve");
+        let unmapped: serde_json::Value =
+            serde_json::from_str(&unmapped.content[0].as_text().unwrap().text).unwrap();
+        assert_eq!(
+            unmapped["reports"][0]["missingInputs"][0]["name"], "orderId",
+            "{unmapped:#}"
+        );
+
+        let denied = add(OTHER, "other").await.map(|_| ()).unwrap_err();
+        assert_eq!(
+            denied.data.and_then(|d| d.get("code").cloned()),
+            Some(serde_json::json!("AGENT_NOT_ENABLED"))
+        );
+        assert!(
+            graph.lock().unwrap()["steps"].get("other").is_none(),
+            "another tenant cannot add it"
+        );
+    }
+
     #[test]
     fn timeout_and_durable_land_on_the_step_and_parse_as_an_agent_step() {
         let (step, _) =

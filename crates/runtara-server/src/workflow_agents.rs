@@ -113,14 +113,33 @@ pub fn catalog_with_workflow_agents(
 
 fn merge_catalog(base: &Arc<AgentCatalog>, overlay: Vec<AgentInfo>) -> Arc<AgentCatalog> {
     let mut agents = base.agents().to_vec();
-    let built_in_ids: std::collections::HashSet<_> =
-        agents.iter().map(|a| canonical_agent_id(&a.id)).collect();
-    agents.extend(overlay.into_iter().filter(|a| {
-        !claims_host_execution_mode(a)
-            && !folds_onto_reserved_agent(&a.id)
-            && !built_in_ids.contains(&canonical_agent_id(&a.id))
-    }));
+    agents.extend(admitted(base, overlay));
     Arc::new(AgentCatalog::from_agents(agents))
+}
+
+/// The tenant's published workflow-agents as the catalog overlay admits them
+/// on top of `base`, for lookups that serve them alongside the built-ins.
+pub fn tenant_overlay(base: &AgentCatalog, tenant_id: &str) -> Vec<AgentInfo> {
+    admitted(base, load_tenant_agents(tenant_id))
+}
+
+/// The overlay entries that may join `base`: a built-in id always wins, and
+/// metadata claiming a host-enforced execution mode or the `control` id never
+/// gets in.
+fn admitted(base: &AgentCatalog, overlay: Vec<AgentInfo>) -> Vec<AgentInfo> {
+    let built_in_ids: std::collections::HashSet<_> = base
+        .agents()
+        .iter()
+        .map(|a| canonical_agent_id(&a.id))
+        .collect();
+    overlay
+        .into_iter()
+        .filter(|a| {
+            !claims_host_execution_mode(a)
+                && !folds_onto_reserved_agent(&a.id)
+                && !built_in_ids.contains(&canonical_agent_id(&a.id))
+        })
+        .collect()
 }
 
 /// Canonical ids of the tenant's published workflow-agents — the exemption
@@ -231,6 +250,31 @@ mod tests {
             &base,
             vec![parks, info("control"), info("CONTROL"), info("tenant-safe")],
         );
+        let ids: Vec<_> = merged.agents().iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["s3-storage", "tenant-safe"]);
+    }
+
+    #[tokio::test]
+    async fn the_tenant_overlay_serves_what_the_catalog_merge_admits() {
+        // No other test uses this tenant.
+        const TENANT: &str = "overlay-lookup-tenant";
+        let _env = crate::test_env::ENV_MUTEX.lock().await;
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set("DATA_DIR", data_dir.path().to_str().unwrap());
+        let wasm = data_dir.path().join("agent.wasm");
+        std::fs::write(&wasm, b"").unwrap();
+        // `stage` leaves slug reservation to the publish path, so a stale
+        // publication can still carry a built-in's id.
+        for id in ["s3-storage", "tenant-safe"] {
+            stage(TENANT, id, &wasm, &info(id)).unwrap();
+        }
+        let base = Arc::new(AgentCatalog::from_agents(vec![info("s3-storage")]));
+
+        let overlay = tenant_overlay(&base, TENANT);
+        let ids: Vec<_> = overlay.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["tenant-safe"], "a built-in id always wins");
+        let merged = catalog_with_workflow_agents(&base, TENANT);
         let ids: Vec<_> = merged.agents().iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["s3-storage", "tenant-safe"]);
     }
