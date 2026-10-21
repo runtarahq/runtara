@@ -2547,6 +2547,100 @@ fn direct_wasm_execute_track_events_summarises_large_step_outputs() {
     );
 }
 
+/// A breakpoint event carries the steps context and, for a Conditional, the
+/// whole source. Values of 16 KiB or more sit there as interning handles; the
+/// event must hold their bounded summaries instead.
+#[test]
+fn direct_wasm_execute_breakpoint_summarises_large_scope_values() {
+    let components_dir = direct_e2e_components_dir();
+    let blob = "x".repeat(20_000);
+    let graph = serde_json::json!({
+        "steps": {
+            "agent": {
+                "stepType": "Agent",
+                "id": "agent",
+                "name": "Return Input",
+                "agentId": "utils",
+                "capabilityId": "return-input",
+                "maxRetries": 0,
+                "inputMapping": {
+                    "value": { "valueType": "reference", "value": "data.value" }
+                }
+            },
+            "check": {
+                "stepType": "Conditional",
+                "id": "check",
+                "breakpoint": true,
+                "condition": {
+                    "type": "operation",
+                    "op": "EQ",
+                    "arguments": [
+                        { "valueType": "reference", "value": "data.flag" },
+                        { "valueType": "immediate", "value": true }
+                    ]
+                }
+            },
+            "finish_true": {
+                "stepType": "Finish",
+                "id": "finish_true",
+                "inputMapping": { "matched": { "valueType": "immediate", "value": true } }
+            },
+            "finish_false": {
+                "stepType": "Finish",
+                "id": "finish_false",
+                "inputMapping": { "matched": { "valueType": "immediate", "value": false } }
+            }
+        },
+        "entryPoint": "agent",
+        "executionPlan": [
+            { "fromStep": "agent", "toStep": "check" },
+            { "fromStep": "check", "toStep": "finish_true", "label": "true" },
+            { "fromStep": "check", "toStep": "finish_false", "label": "false" }
+        ]
+    });
+
+    let result = run_direct_workflow_capture_full(
+        &components_dir,
+        "direct-wasm-execute-breakpoint-large-scope",
+        &graph.to_string(),
+        serde_json::to_string(&serde_json::json!({ "value": blob, "flag": true }))
+            .expect("input json")
+            .as_bytes(),
+        false,
+        Vec::new(),
+        Vec::new(),
+        vec![("DEBUG_MODE".to_string(), "true".to_string())],
+    );
+
+    assert!(
+        result.status_success,
+        "breakpoint pause is a clean exit; stderr: {}",
+        result.stderr
+    );
+    assert!(result.output_json.is_none(), "paused run must not complete");
+    for event in &result.events {
+        assert!(
+            !event.payload_json.to_string().contains("$wfref"),
+            "{} for {} carries an interning handle",
+            event.subtype,
+            event.payload_json["step_id"]
+        );
+    }
+    let hit = result
+        .events
+        .iter()
+        .find(|event| event.subtype == "breakpoint_hit")
+        .expect("breakpoint_hit event");
+    let summary = serde_json::json!({ "_truncated": true, "_type": "string", "_length": 20_000 });
+    let payload = &hit.payload_json;
+    assert_eq!(payload["step_id"], "check");
+    assert_eq!(payload["steps_context"]["agent"]["stepType"], "Agent");
+    assert_eq!(payload["steps_context"]["agent"]["outputs"], summary);
+    assert_eq!(payload["inputs"]["steps"]["agent"]["outputs"], summary);
+    assert_eq!(payload["inputs"]["data"]["value"], summary);
+    assert_eq!(payload["inputs"]["data"]["flag"], true);
+}
+
 #[test]
 fn direct_wasm_execute_agent_input_mapping_failure_records_step_error() {
     // Diagnostic-gap regression: an Agent whose input mapping fails to resolve
