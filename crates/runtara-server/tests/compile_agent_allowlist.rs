@@ -5,7 +5,9 @@
 //! A cached parent image keeps the children it was built with, so the check
 //! must refuse a closure it cannot load in full rather than walk what is left
 //! of it: the agents of a child that has since been deleted, or whose version
-//! no longer resolves, are still in that image.
+//! no longer resolves, are still in that image. A child that has changed
+//! since likewise leaves agents in the image the check does not see, so a
+//! compile rebuilds a version that embeds workflows instead of reusing it.
 //!
 //! This binary boots the process-wide configuration with an allowlist that
 //! enables no agents, so every agent step the check can see is denied.
@@ -172,7 +174,42 @@ async fn record_cached_image(pool: &PgPool, tenant: &str, workflow_id: &str, def
     );
 }
 
-fn expect_unchecked(result: Result<(), CompileAgentGateError>, needle: &str) {
+/// Save `definition` as `version` of `workflow_id` and make it the latest.
+async fn publish_version(
+    pool: &PgPool,
+    tenant: &str,
+    workflow_id: &str,
+    version: i32,
+    definition: &Value,
+) {
+    let file_size = serde_json::to_vec(definition)
+        .expect("definition must serialize")
+        .len() as i32;
+    sqlx::query(
+        "INSERT INTO workflow_definitions (tenant_id, workflow_id, version, definition, file_size, track_events)
+         VALUES ($1, $2, $3, $4, $5, false)",
+    )
+    .bind(tenant)
+    .bind(workflow_id)
+    .bind(version)
+    .bind(definition)
+    .bind(file_size)
+    .execute(pool)
+    .await
+    .expect("saving a new version must succeed");
+    sqlx::query(
+        "UPDATE workflows SET latest_version = $3, version_count = $3
+         WHERE tenant_id = $1 AND workflow_id = $2",
+    )
+    .bind(tenant)
+    .bind(workflow_id)
+    .bind(version)
+    .execute(pool)
+    .await
+    .expect("moving latest must succeed");
+}
+
+fn expect_unchecked<T: std::fmt::Debug>(result: Result<T, CompileAgentGateError>, needle: &str) {
     match result {
         Err(CompileAgentGateError::Unchecked(message)) => {
             assert!(message.contains(needle), "{message}");
@@ -202,6 +239,46 @@ async fn the_check_walks_the_children_it_loads() {
         }
         other => panic!("expected the child's agent to be denied, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn a_cached_parent_whose_child_changed_is_rebuilt_not_reused() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let tenant = format!("t-{}", Uuid::new_v4());
+
+    // The parent's image was built while its latest child called csv.
+    let child = seed_workflow(&pool, &tenant, &calling("csv")).await;
+    let parent_definition = embedding(&child, "latest");
+    let parent = seed_workflow(&pool, &tenant, &parent_definition).await;
+    record_cached_image(&pool, &tenant, &parent, &parent_definition).await;
+
+    // A new child version calls no agent, so the closure as it resolves today
+    // passes, while the freshness lookup still answers with the old image.
+    publish_version(&pool, &tenant, &child, 2, &finish_only()).await;
+    let closure = check_compile_agent_allowlist(&pool, &tenant, &parent, 1)
+        .await
+        .expect("the child as it resolves today calls no agent");
+    let cached = WorkflowRepository::new(pool.clone())
+        .get_fresh_registered_image_id(&tenant, &parent, 1)
+        .await
+        .expect("the freshness lookup must succeed");
+    assert_eq!(cached.as_deref(), Some("cached-parent-image"));
+    assert!(
+        !closure.may_reuse_cached_image(),
+        "the cached image may hold the csv child, so the compile must rebuild"
+    );
+
+    // A version that embeds nothing keeps its cached image.
+    let lone_definition = finish_only();
+    let lone = seed_workflow(&pool, &tenant, &lone_definition).await;
+    record_cached_image(&pool, &tenant, &lone, &lone_definition).await;
+    assert!(
+        check_compile_agent_allowlist(&pool, &tenant, &lone, 1)
+            .await
+            .expect("a closure without agent steps passes")
+            .may_reuse_cached_image()
+    );
 }
 
 #[tokio::test]

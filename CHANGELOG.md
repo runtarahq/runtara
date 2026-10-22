@@ -633,7 +633,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own graph fails to load or parse, as saving does. They also refuse when an
   embedded child no longer resolves (deleted, or its pinned version gone):
   the cached image still carries that child's agents, which the check can no
-  longer see.
+  longer see. And a compile of a version that embeds other workflows now
+  rebuilds it instead of handing back its cached image: the image keeps the
+  children it was built with, which may have changed since ("latest" or
+  "current" moved, or a version edited in place).
 - **`preflight_compile` checks the mappings of the right version.** It read
   its version from fields the workflow response does not have, so it
   reported version 0, and its mapping check of version 0 failed unseen. It

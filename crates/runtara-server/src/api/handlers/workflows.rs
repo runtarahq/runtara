@@ -1170,7 +1170,7 @@ pub async fn compile_workflow_handler(
     // Re-check the persisted graph and its full EmbedWorkflow closure against
     // the current allowlist, even when a compiled binary is cached: the
     // allowlist may have changed since the version was saved.
-    match crate::api::services::compilation::check_compile_agent_allowlist(
+    let closure = match crate::api::services::compilation::check_compile_agent_allowlist(
         &pool,
         &tenant_id,
         &workflow_id,
@@ -1178,7 +1178,7 @@ pub async fn compile_workflow_handler(
     )
     .await
     {
-        Ok(()) => {}
+        Ok(closure) => closure,
         Err(crate::api::services::compilation::CompileAgentGateError::Denied(denial)) => {
             return (StatusCode::FORBIDDEN, Json(denial.json_body()));
         }
@@ -1192,9 +1192,12 @@ pub async fn compile_workflow_handler(
             });
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response));
         }
-    }
+    };
 
-    let force_recompile = query.force_recompile.unwrap_or(false);
+    // A cached image of a version that embeds workflows may hold children
+    // other than the ones just checked, so it is rebuilt rather than reused.
+    let force_recompile =
+        query.force_recompile.unwrap_or(false) || !closure.may_reuse_cached_image();
     if force_recompile {
         // Stamp `queued` in Redis BEFORE invalidating the DB row. Without
         // this, the frontend's first compilation-progress poll can race

@@ -461,6 +461,29 @@ pub enum CompileAgentGateError {
     Unchecked(String),
 }
 
+/// What [`check_compile_agent_allowlist`] found in a closure it allowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AllowedClosure {
+    /// The version embeds other workflows.
+    pub embeds_workflows: bool,
+}
+
+impl AllowedClosure {
+    /// Whether a compile may hand back the version's cached image instead of
+    /// building one from the closure just checked.
+    ///
+    /// The check reads each embedded child as it resolves today, but a cached
+    /// image keeps the children it was built with, and its freshness covers
+    /// only the version's own definition. A child published since ("latest"
+    /// or "current" moved) or edited in place would leave agents in the image
+    /// the check never saw, and nothing records the children an image was
+    /// built from where this could compare them. So a version that embeds
+    /// workflows is rebuilt rather than reused.
+    pub fn may_reuse_cached_image(self) -> bool {
+        !self.embeds_workflows
+    }
+}
+
 /// The agent allowlist check on a stored version's graph and its whole
 /// EmbedWorkflow closure, with the tenant's published workflow-agents exempt,
 /// as on save.
@@ -477,6 +500,8 @@ pub enum CompileAgentGateError {
 /// was built with, so a child that has since been deleted, or a child version
 /// that no longer resolves, would leave agents in that image this check
 /// cannot see: such a closure is refused, as a fresh compile of it would be.
+/// A closure that resolves can still differ from the one a cached image was
+/// built with; see [`AllowedClosure::may_reuse_cached_image`].
 ///
 /// A version that does not exist passes: the compile reports it as not found.
 pub async fn check_compile_agent_allowlist(
@@ -484,7 +509,7 @@ pub async fn check_compile_agent_allowlist(
     tenant_id: &str,
     workflow_id: &str,
     version: i32,
-) -> Result<(), CompileAgentGateError> {
+) -> Result<AllowedClosure, CompileAgentGateError> {
     let definition = WorkflowRepository::new(pool.clone())
         .get_definition(tenant_id, workflow_id, version)
         .await
@@ -492,15 +517,19 @@ pub async fn check_compile_agent_allowlist(
             CompileAgentGateError::Unchecked(format!("Failed to load workflow definition: {}", e))
         })?;
     let Some(definition) = definition else {
-        return Ok(());
+        return Ok(AllowedClosure {
+            embeds_workflows: false,
+        });
     };
     let children = load_child_workflows(pool, tenant_id, workflow_id, version, &definition).await;
+    let embeds_workflows = children.as_ref().is_ok_and(|children| !children.is_empty());
     compile_agent_allowlist_decision(
         crate::config::entitlements(),
         &definition,
         children,
         &crate::workflow_agents::published_agent_ids(tenant_id),
-    )
+    )?;
+    Ok(AllowedClosure { embeds_workflows })
 }
 
 /// The decision [`check_compile_agent_allowlist`] makes once the closure is

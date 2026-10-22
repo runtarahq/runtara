@@ -45,7 +45,7 @@ async fn compile_workflow_for_mcp(
 
     // The REST compile's allowlist check, before the cached image below can
     // answer: the allowlist may have changed since the version was saved.
-    crate::api::services::compilation::check_compile_agent_allowlist(
+    let closure = crate::api::services::compilation::check_compile_agent_allowlist(
         &server.pool,
         &server.tenant_id,
         workflow_id,
@@ -63,7 +63,11 @@ async fn compile_workflow_for_mcp(
 
     let repository = WorkflowRepository::new(server.pool.clone());
 
+    // A version that embeds workflows skips the cached image: it may hold
+    // children other than the ones just checked. Below, a stale row is
+    // invalidated and rebuilt, and a compile already queued is reused.
     if !force_recompile
+        && closure.may_reuse_cached_image()
         && let Some(image_id) = repository
             .get_fresh_registered_image_id(&server.tenant_id, workflow_id, version)
             .await
