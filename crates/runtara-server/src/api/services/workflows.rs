@@ -163,6 +163,49 @@ pub(crate) fn validate_execution_timeout(definition: &Value) -> Result<(), Servi
         })
 }
 
+pub(crate) fn validate_description_length(definition: &Value) -> Result<(), ServiceError> {
+    match definition.get("description").and_then(|v| v.as_str()) {
+        Some(description) if description.len() > 1000 => Err(ServiceError::ValidationError(
+            "Workflow description cannot exceed 1000 characters".to_string(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The connection problems saving rejects `workflow` for: each connection a
+/// step pins that the tenant does not have, with the tenant's candidate
+/// connections in the message. The tenant's connections are listed only when
+/// the workflow pins one.
+pub(crate) async fn tenant_connection_issues(
+    connections: &ConnectionsFacade,
+    tenant_id: &str,
+    workflow: &runtara_dsl::Workflow,
+    catalog: &AgentCatalog,
+) -> Result<Vec<crate::api::utils::reference_validation::ValidationIssue>, ServiceError> {
+    use crate::api::utils::connection_validation::{
+        ConnectionRef, extract_connection_ids, validate_connections_with_candidates,
+    };
+    if extract_connection_ids(workflow).is_empty() {
+        return Ok(Vec::new());
+    }
+    let tenant_refs: Vec<ConnectionRef> = connections
+        .list_connections(tenant_id, None, None)
+        .await
+        .map_err(|e| ServiceError::DatabaseError(format!("Failed to validate connections: {}", e)))?
+        .into_iter()
+        .map(|c| ConnectionRef {
+            id: c.id,
+            integration_id: c.integration_id,
+            title: c.title,
+        })
+        .collect();
+    Ok(validate_connections_with_candidates(
+        workflow,
+        &tenant_refs,
+        catalog,
+    ))
+}
+
 fn json_value_kind(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",
@@ -614,15 +657,7 @@ impl WorkflowService {
 
         validate_execution_graph_name(&definition)?;
         validate_execution_timeout(&definition)?;
-
-        // Validate description length if present
-        if let Some(description) = definition.get("description").and_then(|v| v.as_str())
-            && description.len() > 1000
-        {
-            return Err(ServiceError::ValidationError(
-                "Workflow description cannot exceed 1000 characters".to_string(),
-            ));
-        }
+        validate_description_length(&definition)?;
 
         // Process notes: ensure all notes have IDs (generate if missing)
         let mut definition = definition;
@@ -816,54 +851,19 @@ impl WorkflowService {
                 .map(ToString::to_string),
         );
 
-        // Validate connection existence in database
-        let referenced_conn_ids =
-            crate::api::utils::connection_validation::extract_connection_ids(&workflow);
-
-        if !referenced_conn_ids.is_empty() {
-            // Fetch tenant connections so candidate suggestions can be appended
-            // to "not found" errors when the LLM picked the wrong id.
-            let tenant_conns = self
-                .connections
-                .list_connections(tenant_id, None, None)
-                .await
-                .map_err(|e| {
-                    ServiceError::DatabaseError(format!("Failed to validate connections: {}", e))
-                })?;
-
-            let tenant_refs: Vec<crate::api::utils::connection_validation::ConnectionRef> =
-                tenant_conns
-                    .iter()
-                    .map(
-                        |c| crate::api::utils::connection_validation::ConnectionRef {
-                            id: c.id.clone(),
-                            integration_id: c.integration_id.clone(),
-                            title: c.title.clone(),
-                        },
-                    )
-                    .collect();
-
-            let connection_issues =
-                crate::api::utils::connection_validation::validate_connections_with_candidates(
-                    &workflow,
-                    &tenant_refs,
-                    &crate::workflow_agents::catalog_with_workflow_agents(
-                        &self.agent_catalog,
-                        tenant_id,
-                    ),
-                );
-
-            let conn_errors: Vec<String> = connection_issues
-                .iter()
-                .map(|i| i.message.clone())
+        // Validate connection existence in database. Candidate suggestions are
+        // appended to "not found" errors for when the LLM picked the wrong id.
+        let conn_errors: Vec<String> =
+            tenant_connection_issues(&self.connections, tenant_id, &workflow, &effective_catalog)
+                .await?
+                .into_iter()
+                .map(|issue| issue.message)
                 .collect();
-
-            if !conn_errors.is_empty() {
-                return Err(ServiceError::ValidationError(format!(
-                    "Connection validation failed: {}",
-                    conn_errors.join("; ")
-                )));
-            }
+        if !conn_errors.is_empty() {
+            return Err(ServiceError::ValidationError(format!(
+                "Connection validation failed: {}",
+                conn_errors.join("; ")
+            )));
         }
 
         // Delegate to repository (name/description are now in execution graph)
@@ -903,15 +903,7 @@ impl WorkflowService {
 
         validate_execution_graph_name(&definition)?;
         validate_execution_timeout(&definition)?;
-
-        // Validate description length if present
-        if let Some(description) = definition.get("description").and_then(|v| v.as_str())
-            && description.len() > 1000
-        {
-            return Err(ServiceError::ValidationError(
-                "Workflow description cannot exceed 1000 characters".to_string(),
-            ));
-        }
+        validate_description_length(&definition)?;
 
         // Process notes: ensure all notes have IDs
         let mut definition = definition;
@@ -1321,10 +1313,9 @@ impl WorkflowService {
 
         // Run comprehensive workflow validation from runtara-workflows
         // This validates security (connection leaks), structure, and configuration
-        let validation_result = validate_workflow(
-            &workflow.execution_graph,
-            &crate::workflow_agents::catalog_with_workflow_agents(&self.agent_catalog, tenant_id),
-        );
+        let catalog =
+            crate::workflow_agents::catalog_with_workflow_agents(&self.agent_catalog, tenant_id);
+        let validation_result = validate_workflow(&workflow.execution_graph, &catalog);
 
         // Convert workflow errors to ValidationIssue format
         for error in &validation_result.errors {
@@ -1358,53 +1349,18 @@ impl WorkflowService {
             );
         }
 
-        // Validate connection existence in database
-        let referenced_conn_ids =
-            crate::api::utils::connection_validation::extract_connection_ids(&workflow);
-
-        if !referenced_conn_ids.is_empty() {
-            // Pull the tenant's connections so the validator can suggest
-            // candidates when a referenced connection is missing.
-            let tenant_conns = self
-                .connections
-                .list_connections(tenant_id, None, None)
-                .await
-                .map_err(|e| {
-                    ServiceError::DatabaseError(format!("Failed to validate connections: {}", e))
-                })?;
-
-            let tenant_refs: Vec<crate::api::utils::connection_validation::ConnectionRef> =
-                tenant_conns
-                    .iter()
-                    .map(
-                        |c| crate::api::utils::connection_validation::ConnectionRef {
-                            id: c.id.clone(),
-                            integration_id: c.integration_id.clone(),
-                            title: c.title.clone(),
-                        },
-                    )
-                    .collect();
-
-            let connection_issues =
-                crate::api::utils::connection_validation::validate_connections_with_candidates(
-                    &workflow,
-                    &tenant_refs,
-                    &crate::workflow_agents::catalog_with_workflow_agents(
-                        &self.agent_catalog,
-                        tenant_id,
-                    ),
-                );
-
-            // Convert connection issues to the same format
-            for issue in connection_issues {
-                all_issues.push(
-                    crate::api::utils::reference_validation::ValidationIssue::error(
-                        crate::api::utils::reference_validation::IssueCategory::MissingConnection,
-                        &issue.step_id,
-                        issue.message,
-                    ),
-                );
-            }
+        // Validate connection existence in database, converting each issue to
+        // the same format.
+        for issue in
+            tenant_connection_issues(&self.connections, tenant_id, &workflow, &catalog).await?
+        {
+            all_issues.push(
+                crate::api::utils::reference_validation::ValidationIssue::error(
+                    crate::api::utils::reference_validation::IssueCategory::MissingConnection,
+                    &issue.step_id,
+                    issue.message,
+                ),
+            );
         }
 
         Ok(all_issues)

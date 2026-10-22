@@ -19,6 +19,10 @@ pub struct ValidateGraphParams {
     #[schemars(description = "Execution graph JSON to validate")]
     #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub execution_graph: serde_json::Value,
+    #[schemars(
+        description = "Id of the workflow this graph belongs to. Pass it when validating a saved workflow's graph, so a child workflow that embeds this workflow is checked against this graph, as on save."
+    )]
+    pub workflow_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -191,12 +195,14 @@ pub async fn validate_graph(
     params: ValidateGraphParams,
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     let execution_graph = normalize_json_arg(params.execution_graph, "execution_graph")?;
-    let result = api_post(
-        server,
-        "/api/runtime/workflows/graph/validate",
-        Some(execution_graph),
-    )
-    .await?;
+    let path = match &params.workflow_id {
+        Some(workflow_id) => {
+            validate_path_param("workflow_id", workflow_id)?;
+            super::workflows::graph_validate_path(workflow_id)
+        }
+        None => "/api/runtime/workflows/graph/validate".to_string(),
+    };
+    let result = api_post(server, &path, Some(execution_graph)).await?;
     json_result(result)
 }
 
@@ -385,6 +391,7 @@ mod tests {
         const PUBLISHER: &str = "published-agent-publisher";
 
         let _env = crate::test_env::ENV_MUTEX.lock().await;
+        crate::config::init_for_test();
         let data_dir = tempfile::tempdir().unwrap();
         let mut env = crate::test_env::EnvGuard::new();
         env.set("DATA_DIR", data_dir.path().to_str().unwrap());
@@ -410,27 +417,8 @@ mod tests {
         let catalog = Arc::new(AgentCatalog::from_agents(Vec::new()));
         let saved = CapturedResourceRequest::default();
         let internal_router = {
-            let pool = pool.clone();
             let saved = saved.clone();
-            axum::Router::new()
-                .route(
-                    "/api/runtime/workflows/graph/validate",
-                    post(
-                        move |org: crate::middleware::tenant_auth::OrgId,
-                              body: Json<serde_json::Value>| {
-                            let (pool, catalog) = (pool.clone(), catalog.clone());
-                            async move {
-                                crate::api::handlers::workflows::validate_graph_handler(
-                                    org,
-                                    State(pool),
-                                    State(catalog),
-                                    body,
-                                )
-                                .await
-                            }
-                        },
-                    ),
-                )
+            crate::api::handlers::workflows::graph_validate_routes(pool.clone(), catalog)
                 // Stands in for the save: it records the graph and ends the
                 // deploy there.
                 .route(
@@ -472,9 +460,15 @@ mod tests {
             let execution_graph = parent.clone();
             async move {
                 mcp_json(
-                    validate_graph(&server, ValidateGraphParams { execution_graph })
-                        .await
-                        .expect("validate_graph result"),
+                    validate_graph(
+                        &server,
+                        ValidateGraphParams {
+                            execution_graph,
+                            workflow_id: None,
+                        },
+                    )
+                    .await
+                    .expect("validate_graph result"),
                 )
             }
         };
@@ -507,6 +501,208 @@ mod tests {
                 .as_array()
                 .is_some_and(|errors| errors.iter().any(|e| e.as_str().unwrap().contains("E020"))),
             "another tenant does not see it: {report:#}"
+        );
+    }
+
+    /// `validate_graph` rejects what saving rejects: an agent outside the
+    /// tenant's allowlist, and a description over the save limit.
+    #[tokio::test]
+    async fn validate_graph_applies_the_save_gate_checks() {
+        use runtara_dsl::agent_meta::{AgentCatalog, workflow_agent_info};
+
+        let _env = crate::test_env::ENV_MUTEX.lock().await;
+        crate::config::init_for_test();
+        // Known to the catalog, so the graph is well formed, but not a module
+        // the test entitlements register.
+        let catalog = Arc::new(AgentCatalog::from_agents(vec![workflow_agent_info(
+            "unlicensed",
+            "Unlicensed",
+            "",
+            &Default::default(),
+            &Default::default(),
+        )]));
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/runtara_mcp_validate_gate_test")
+            .unwrap();
+        let server = SmoMcpServer::new(
+            pool.clone(),
+            Arc::new(ObjectStoreManager::new(String::new())),
+            None,
+            "validate-gate-tenant".into(),
+            crate::api::handlers::workflows::graph_validate_routes(pool, catalog),
+        );
+        let errors = |execution_graph: serde_json::Value| {
+            let params = ValidateGraphParams {
+                execution_graph,
+                workflow_id: None,
+            };
+            let server = &server;
+            async move {
+                let report = mcp_json(validate_graph(server, params).await.unwrap());
+                serde_json::from_value::<Vec<String>>(report["errors"].clone()).unwrap()
+            }
+        };
+        let finish = serde_json::json!({"stepType": "Finish", "id": "finish", "inputMapping": {}});
+
+        let calls_unlicensed = serde_json::json!({
+            "name": "Calls an unlicensed agent",
+            "steps": {
+                "call": {"stepType": "Agent", "id": "call", "agentId": "unlicensed",
+                    "capabilityId": "run", "inputMapping": {}},
+                "finish": finish
+            },
+            "entryPoint": "call",
+            "executionPlan": [{"fromStep": "call", "toStep": "finish"}]
+        });
+        assert_eq!(
+            errors(calls_unlicensed).await,
+            ["[AGENT_NOT_ENABLED] Agent 'unlicensed' is not enabled for this tenant."]
+        );
+
+        let long_description = serde_json::json!({
+            "name": "Long description",
+            "description": "x".repeat(1001),
+            "steps": {"finish": finish},
+            "entryPoint": "finish",
+            "executionPlan": []
+        });
+        assert_eq!(
+            errors(long_description).await,
+            ["Workflow description cannot exceed 1000 characters"]
+        );
+    }
+}
+
+#[cfg(all(test, feature = "db-integration-tests"))]
+mod validate_db_tests {
+    use std::sync::Arc;
+
+    use runtara_dsl::agent_meta::{AgentCatalog, workflow_agent_info};
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::api::repositories::object_model::ObjectStoreManager;
+    use crate::api::repositories::workflows::WorkflowRepository;
+
+    /// The server database, migrated, and a tenant no other test uses.
+    async fn database() -> (PgPool, String) {
+        let url = std::env::var("TEST_RUNTARA_SERVER_DATABASE_URL")
+            .expect("db-integration-tests requires TEST_RUNTARA_SERVER_DATABASE_URL");
+        let pool = PgPool::connect(&url).await.expect("server database");
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        (pool, format!("t-{}", Uuid::new_v4()))
+    }
+
+    fn server(pool: &PgPool, tenant: &str, catalog: AgentCatalog) -> SmoMcpServer {
+        SmoMcpServer::new(
+            pool.clone(),
+            Arc::new(ObjectStoreManager::new(String::new())),
+            None,
+            tenant.into(),
+            crate::api::handlers::workflows::graph_validate_routes(pool.clone(), Arc::new(catalog)),
+        )
+    }
+
+    async fn errors(
+        server: &SmoMcpServer,
+        execution_graph: serde_json::Value,
+        workflow_id: Option<&str>,
+    ) -> Vec<String> {
+        let params = ValidateGraphParams {
+            execution_graph,
+            workflow_id: workflow_id.map(String::from),
+        };
+        let result = validate_graph(server, params).await.unwrap();
+        let report: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
+        serde_json::from_value(report["errors"].clone()).unwrap()
+    }
+
+    fn graph(name: &str, first: serde_json::Value) -> serde_json::Value {
+        let first_id = first["id"].clone();
+        serde_json::json!({
+            "name": name,
+            "steps": {
+                first_id.as_str().unwrap(): first,
+                "finish": {"stepType": "Finish", "id": "finish", "inputMapping": {}}
+            },
+            "entryPoint": first_id,
+            "executionPlan": [{"fromStep": first_id, "toStep": "finish"}]
+        })
+    }
+
+    fn embedding(name: &str, child_workflow_id: &str) -> serde_json::Value {
+        graph(
+            name,
+            serde_json::json!({"stepType": "EmbedWorkflow", "id": "embed",
+                "childWorkflowId": child_workflow_id, "childVersion": "latest",
+                "inputMapping": {}}),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_cycle_through_the_validated_workflow_is_found_under_its_id() {
+        let _env = crate::test_env::ENV_MUTEX.lock().await;
+        crate::config::init_for_test();
+        let (pool, tenant) = database().await;
+        let (parent, child) = (
+            format!("parent-{}", Uuid::new_v4()),
+            format!("child-{}", Uuid::new_v4()),
+        );
+        let repository = WorkflowRepository::new(pool.clone());
+        // The parent as stored embeds nothing; the child embeds the parent.
+        let finish_only = serde_json::json!({"name": "Parent",
+            "steps": {"finish": {"stepType": "Finish", "id": "finish", "inputMapping": {}}},
+            "entryPoint": "finish", "executionPlan": []});
+        for (id, definition) in [
+            (&parent, finish_only),
+            (&child, embedding("Child", &parent)),
+        ] {
+            repository.create(&tenant, id, None, id, "/").await.unwrap();
+            repository
+                .update_workflow(&tenant, id, &definition, None, None)
+                .await
+                .unwrap();
+        }
+        let server = server(&pool, &tenant, AgentCatalog::default());
+        let new_parent = embedding("Parent", &child);
+        let is_cycle = |error: &String| error.starts_with("[E056]");
+
+        let found = errors(&server, new_parent.clone(), Some(&parent)).await;
+        assert!(found.iter().any(is_cycle), "{found:?}");
+        // Under the graph's name, the child resolves to the stored parent,
+        // which embeds nothing: the workflow id is what closes the cycle.
+        let found = errors(&server, new_parent, None).await;
+        assert!(!found.iter().any(is_cycle), "{found:?}");
+    }
+
+    #[tokio::test]
+    async fn a_connection_the_tenant_does_not_have_is_reported() {
+        let _env = crate::test_env::ENV_MUTEX.lock().await;
+        crate::config::init_for_test();
+        let (pool, tenant) = database().await;
+        let mut crm =
+            workflow_agent_info("crm", "CRM", "", &Default::default(), &Default::default());
+        crm.supports_connections = true;
+        let server = server(&pool, &tenant, AgentCatalog::from_agents(vec![crm]));
+        let missing = format!("conn-{}", Uuid::new_v4());
+
+        let found = errors(
+            &server,
+            graph(
+                "Uses a missing connection",
+                serde_json::json!({"stepType": "Agent", "id": "call", "agentId": "crm",
+                    "capabilityId": "run", "connectionId": missing, "inputMapping": {}}),
+            ),
+            None,
+        )
+        .await;
+        assert!(
+            found
+                .iter()
+                .any(|e| e.contains(&format!("Connection '{missing}' not found"))),
+            "{found:?}"
         );
     }
 }

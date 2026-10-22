@@ -1369,6 +1369,65 @@ fn resolve_child_version(version_str: &str, workflow_data: &serde_json::Value) -
     }
 }
 
+/// The workflow at the version a deploy or preflight works on, and that
+/// version: the requested one, else the latest. Without a requested version
+/// the endpoint returns the current version, which lags the latest while an
+/// undeployed draft exists, so the latest is then fetched by number.
+async fn fetch_target_version(
+    server: &SmoMcpServer,
+    workflow_id: &str,
+    requested: Option<i32>,
+) -> Result<(serde_json::Value, Option<i32>), rmcp::ErrorData> {
+    let qs = match requested {
+        Some(v) => format!("?versionNumber={}", v),
+        None => String::new(),
+    };
+    let workflow = api_get(
+        server,
+        &format!("/api/runtime/workflows/{}{}", workflow_id, qs),
+    )
+    .await?;
+    let version_at = |pointers: &[&str]| {
+        pointers
+            .iter()
+            .find_map(|p| workflow.pointer(p))
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32)
+    };
+    let current = ["/data/currentVersionNumber", "/data/current_version_number"];
+    let version = requested.or_else(|| {
+        version_at(&[
+            "/data/latestVersion",
+            "/data/latest_version",
+            "/data/lastVersionNumber",
+            "/data/last_version_number",
+            current[0],
+            current[1],
+        ])
+    });
+    let fetched = requested.or_else(|| version_at(&current));
+    match version {
+        Some(v) if fetched != Some(v) => {
+            let workflow = api_get(
+                server,
+                &format!("/api/runtime/workflows/{}?versionNumber={}", workflow_id, v),
+            )
+            .await?;
+            Ok((workflow, version))
+        }
+        _ => Ok((workflow, version)),
+    }
+}
+
+/// The graph validate endpoint for a graph of `workflow_id`, which it then
+/// validates under that id, as saving does.
+pub(crate) fn graph_validate_path(workflow_id: &str) -> String {
+    format!(
+        "/api/runtime/workflows/graph/validate?workflowId={}",
+        urlencoding::encode(workflow_id)
+    )
+}
+
 pub async fn deploy_workflow(
     server: &SmoMcpServer,
     params: DeployWorkflowParams,
@@ -1380,7 +1439,7 @@ pub async fn deploy_workflow(
     // call that fails is an error, not a pass.
     let graph_validation = api_post(
         server,
-        "/api/runtime/workflows/graph/validate",
+        &graph_validate_path(&params.workflow_id),
         Some(execution_graph.clone()),
     )
     .await?;
@@ -1497,30 +1556,11 @@ pub async fn deploy_latest(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("workflow_id", &params.workflow_id)?;
 
-    // Fetch workflow to get graph and resolve version
-    let qs = match params.version {
-        Some(v) => format!("?versionNumber={}", v),
-        None => String::new(),
-    };
-    let workflow = api_get(
-        server,
-        &format!("/api/runtime/workflows/{}{}", params.workflow_id, qs),
-    )
-    .await?;
-
-    let version = workflow
-        .pointer("/data/latestVersion")
-        .or_else(|| workflow.pointer("/data/latest_version"))
-        .or_else(|| workflow.pointer("/data/lastVersionNumber"))
-        .or_else(|| workflow.pointer("/data/last_version_number"))
-        .or_else(|| workflow.pointer("/data/currentVersionNumber"))
-        .or_else(|| workflow.pointer("/data/current_version_number"))
-        .and_then(|v| v.as_i64())
-        .map(|v| v as i32)
-        .or(params.version)
-        .ok_or_else(|| err("Could not determine version to deploy"))?;
-
-    let version = params.version.unwrap_or(version);
+    // Fetch the workflow at the version to deploy, so the graph checked below
+    // is the one compiled.
+    let (workflow, version) =
+        fetch_target_version(server, &params.workflow_id, params.version).await?;
+    let version = version.ok_or_else(|| err("Could not determine version to deploy"))?;
 
     let graph = workflow
         .pointer("/data/definition/executionGraph")
@@ -1531,7 +1571,7 @@ pub async fn deploy_latest(
     // Validate graph; a validation call that fails is an error, not a pass.
     let graph_validation = api_post(
         server,
-        "/api/runtime/workflows/graph/validate",
+        &graph_validate_path(&params.workflow_id),
         Some(graph.clone()),
     )
     .await?;
@@ -1552,7 +1592,7 @@ pub async fn deploy_latest(
         }));
     }
 
-    // Validate mappings
+    // Validate mappings; as with the graph, a call that fails is an error.
     let mapping_validation = api_post(
         server,
         &format!(
@@ -1561,12 +1601,10 @@ pub async fn deploy_latest(
         ),
         None,
     )
-    .await
-    .ok();
+    .await?;
 
     let has_mapping_errors = mapping_validation
-        .as_ref()
-        .and_then(|v| v.get("errorCount"))
+        .get("errorCount")
         .and_then(|c| c.as_u64())
         .is_some_and(|c| c > 0);
 
@@ -1658,22 +1696,11 @@ pub async fn preflight_compile(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("workflow_id", &params.workflow_id)?;
 
-    // Fetch workflow
-    let qs = match params.version {
-        Some(v) => format!("?versionNumber={}", v),
-        None => String::new(),
-    };
-    let workflow = api_get(
-        server,
-        &format!("/api/runtime/workflows/{}{}", params.workflow_id, qs),
-    )
-    .await?;
-
-    let version = workflow
-        .pointer("/data/version")
-        .or_else(|| workflow.pointer("/data/latestVersion"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0) as i32;
+    // Fetch the workflow at the version to check, so its graph and its
+    // mappings are checked together.
+    let (workflow, version) =
+        fetch_target_version(server, &params.workflow_id, params.version).await?;
+    let version = version.ok_or_else(|| err("Could not determine version to check"))?;
 
     let graph = workflow
         .pointer("/data/definition/executionGraph")
@@ -1687,7 +1714,7 @@ pub async fn preflight_compile(
     // not a pass.
     let graph_validation = api_post(
         server,
-        "/api/runtime/workflows/graph/validate",
+        &graph_validate_path(&params.workflow_id),
         Some(graph.clone()),
     )
     .await?;
@@ -1701,7 +1728,7 @@ pub async fn preflight_compile(
         blockers.push(format!("{} graph validation error(s)", graph_errors));
     }
 
-    // 2. Validate mappings
+    // 2. Validate mappings; a call that fails is an error, not a pass.
     let mapping_validation = api_post(
         server,
         &format!(
@@ -1710,12 +1737,10 @@ pub async fn preflight_compile(
         ),
         None,
     )
-    .await
-    .ok();
+    .await?;
 
     let mapping_errors = mapping_validation
-        .as_ref()
-        .and_then(|v| v.get("errorCount"))
+        .get("errorCount")
         .and_then(|c| c.as_u64())
         .unwrap_or(0);
     if mapping_errors > 0 {
@@ -2039,6 +2064,131 @@ mod tests {
             "no tool went past validation: {:?}",
             reached.lock().unwrap()
         );
+    }
+
+    /// `deploy_latest` and `preflight_compile` validate the graph and the
+    /// mappings of the version they work on, the graph under the workflow's
+    /// id, and a mapping check that fails to run stops them.
+    #[tokio::test]
+    async fn deploy_tools_check_the_version_they_work_on() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        use axum::Json;
+        use axum::extract::Query;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::{get, post};
+
+        use crate::api::repositories::object_model::ObjectStoreManager;
+
+        type Params = Query<std::collections::HashMap<String, String>>;
+        // The `workflowId` and graph of each graph validation, and the
+        // `versionNumber` of each mapping check.
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mappings_fail = Arc::new(AtomicBool::new(false));
+        let router = {
+            let (validated, mapped, fail) = (calls.clone(), calls.clone(), mappings_fail.clone());
+            axum::Router::new()
+                .route(
+                    "/api/runtime/workflows/{workflow_id}",
+                    // Version 2 is deployed and version 3 is a draft: without
+                    // a version number the endpoint returns version 2.
+                    get(|Query(query): Params| async move {
+                        let name = match query.get("versionNumber").map(String::as_str) {
+                            Some("3") => "Draft",
+                            None | Some("2") => "Deployed",
+                            Some(other) => panic!("no version {other}"),
+                        };
+                        Json(serde_json::json!({"data": {
+                            "currentVersionNumber": 2,
+                            "lastVersionNumber": 3,
+                            "definition": {"executionGraph": {"name": name}}
+                        }}))
+                    }),
+                )
+                .route(
+                    "/api/runtime/workflows/graph/validate",
+                    post(
+                        move |Query(query): Params, Json(graph): Json<serde_json::Value>| async move {
+                            validated.lock().unwrap().push(format!(
+                                "workflowId={} {}",
+                                query["workflowId"], graph["name"]
+                            ));
+                            Json(serde_json::json!({"valid": true, "errors": []}))
+                        },
+                    ),
+                )
+                .route(
+                    "/api/runtime/workflows/{workflow_id}/validate-mappings",
+                    post(move |Query(query): Params| async move {
+                        mapped
+                            .lock()
+                            .unwrap()
+                            .push(format!("versionNumber={}", query["versionNumber"]));
+                        if fail.load(Ordering::SeqCst) {
+                            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                        }
+                        Json(serde_json::json!({"errorCount": 1, "issues": []})).into_response()
+                    }),
+                )
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/runtara_mcp_deploy_version_test")
+            .unwrap();
+        let server = SmoMcpServer::new(
+            pool,
+            Arc::new(ObjectStoreManager::new(String::new())),
+            None,
+            "deploy-version-tenant".into(),
+            router,
+        );
+        fn by_id<T: serde::de::DeserializeOwned>() -> T {
+            serde_json::from_value(serde_json::json!({"workflow_id": "parent"})).unwrap()
+        }
+        let json = |result: CallToolResult| -> serde_json::Value {
+            serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap()
+        };
+
+        let preflight = json(preflight_compile(&server, by_id()).await.unwrap());
+        assert_eq!(
+            (&preflight["version"], &preflight["blockers"]),
+            (
+                &serde_json::json!(3),
+                &serde_json::json!(["1 mapping validation error(s)"])
+            ),
+            "{preflight:#}"
+        );
+        let deploy = json(deploy_latest(&server, by_id()).await.unwrap());
+        assert_eq!(
+            (&deploy["success"], &deploy["version"]),
+            (&serde_json::json!(false), &serde_json::json!(3)),
+            "{deploy:#}"
+        );
+        // A requested version is checked as fetched.
+        let at_version_2 = || {
+            serde_json::from_value::<PreflightCompileParams>(
+                serde_json::json!({"workflow_id": "parent", "version": 2}),
+            )
+            .unwrap()
+        };
+        let preflight = json(preflight_compile(&server, at_version_2()).await.unwrap());
+        assert_eq!(preflight["version"], 2, "{preflight:#}");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                r#"workflowId=parent "Draft""#,
+                "versionNumber=3",
+                r#"workflowId=parent "Draft""#,
+                "versionNumber=3",
+                r#"workflowId=parent "Deployed""#,
+                "versionNumber=2"
+            ]
+        );
+
+        mappings_fail.store(true, Ordering::SeqCst);
+        assert!(preflight_compile(&server, by_id()).await.is_err());
+        assert!(deploy_latest(&server, by_id()).await.is_err());
     }
 
     /// The authoring document names its DSL version, every state field type,
