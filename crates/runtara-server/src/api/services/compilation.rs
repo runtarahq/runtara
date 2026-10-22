@@ -53,6 +53,27 @@ fn image_source_checksum(image: &ImageSummary) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
+/// The agents an image was composed with, from the direct artifact metadata
+/// stored at registration. A launch checks them against the allowlist, since
+/// an image keeps the children it was built with. `None` when the image
+/// carries no such record (registered before it existed, or without its
+/// artifact metadata), or when the record is malformed.
+pub(crate) fn image_agent_ids(image: &ImageSummary) -> Option<Vec<String>> {
+    image
+        .metadata
+        .as_ref()?
+        .pointer("/workflow/directArtifact/agentComponents")?
+        .as_array()?
+        .iter()
+        .map(|component| {
+            component
+                .get("agentId")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
 /// `templateMajor` stored in image metadata at registration time. Used by the
 /// cache check below to invalidate every workflow on a major-version bump of
 /// the compiler (e.g. `5` → `6`); minor / patch bumps don't recompile.
@@ -449,6 +470,224 @@ pub fn reject_uninstalled_trusted_pins(trusted_pins: &[String]) -> Result<(), Se
         message: trusted_dependency_unavailable_message(&uninstalled),
         trusted_pins: trusted_pins.to_vec(),
     })
+}
+
+/// Why [`check_compile_agent_allowlist`] refused a compile.
+#[derive(Debug)]
+pub enum CompileAgentGateError {
+    /// A step in the version's closure calls an agent the tenant's allowlist
+    /// leaves out.
+    Denied(crate::entitlement_error::EntitlementDenial),
+    /// The database could not load the closure, so it was not checked.
+    Unchecked(String),
+    /// The closure as stored cannot be checked: an EmbedWorkflow reference
+    /// does not resolve, or a graph does not parse. It stays that way until
+    /// the workflow changes.
+    Invalid(String),
+}
+
+/// What [`check_compile_agent_allowlist`] found in a closure it allowed.
+#[derive(Debug, Clone, Default)]
+pub struct AllowedClosure {
+    /// The embedded children the check walked, as they resolve today.
+    children: Vec<crate::compiler::child_workflows::ChildWorkflowInfo>,
+}
+
+/// One embedded child as an image records it: the EmbedWorkflow step, the
+/// child workflow, its resolved version, and its direct manifest checksum.
+type ChildFingerprint = (String, String, i64, String);
+
+impl AllowedClosure {
+    /// The version embeds other workflows.
+    pub fn embeds_workflows(&self) -> bool {
+        !self.children.is_empty()
+    }
+
+    /// Whether a compile may hand back `image_id`, the version's cached
+    /// image, instead of building one from the closure just checked.
+    ///
+    /// The check reads each embedded child as it resolves today, but a cached
+    /// image keeps the children it was built with, and its freshness covers
+    /// only the version's own definition. A child published since ("latest"
+    /// or "current" moved) or edited in place would leave agents in the image
+    /// the check never saw. So the image of a version that embeds workflows
+    /// is reused only when it was built from the children just checked; see
+    /// [`Self::built_from_these_children`]. Anything that cannot show that,
+    /// including an image the runtime cannot read, is rebuilt.
+    pub async fn may_reuse_cached_image(
+        &self,
+        runtime_client: Option<&RuntimeClient>,
+        tenant_id: &str,
+        image_id: &str,
+    ) -> bool {
+        if self.children.is_empty() {
+            return true;
+        }
+        let Some(runtime_client) = runtime_client else {
+            return false;
+        };
+        match runtime_client.get_image(image_id, tenant_id).await {
+            Ok(image) => self.built_from_these_children(image.as_ref()),
+            Err(error) => {
+                warn!(
+                    image_id,
+                    error = %error,
+                    "Failed to read the cached image's children; rebuilding it"
+                );
+                false
+            }
+        }
+    }
+
+    /// Whether `image` records exactly the embedded children just checked:
+    /// the same EmbedWorkflow steps, child workflows, resolved versions and
+    /// manifest checksums. The checksum is the child manifest the compiler
+    /// recorded, so a child version edited in place counts as changed too.
+    pub fn built_from_these_children(&self, image: Option<&ImageSummary>) -> bool {
+        if self.children.is_empty() {
+            return true;
+        }
+        let Some(recorded) = image.and_then(image_child_fingerprints) else {
+            return false;
+        };
+        self.child_fingerprints()
+            .is_some_and(|checked| checked == recorded)
+    }
+
+    fn child_fingerprints(&self) -> Option<Vec<ChildFingerprint>> {
+        let mut fingerprints = self
+            .children
+            .iter()
+            .map(|child| {
+                let graph = parse_execution_graph(&child.execution_graph).ok()?;
+                let manifest =
+                    runtara_workflows::direct_wasm::manifest::build_direct_workflow_manifest(
+                        &graph,
+                    )
+                    .ok()?;
+                Some((
+                    child.step_id.clone(),
+                    child.workflow_ref.workflow_id.clone(),
+                    i64::from(child.workflow_ref.version),
+                    manifest.checksum().to_owned(),
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        fingerprints.sort();
+        Some(fingerprints)
+    }
+}
+
+/// The embedded children an image was built with, from the direct artifact
+/// metadata stored at registration. `None` when the image records none.
+fn image_child_fingerprints(image: &ImageSummary) -> Option<Vec<ChildFingerprint>> {
+    let mut fingerprints = image
+        .metadata
+        .as_ref()?
+        .pointer("/workflow/directArtifact/childWorkflows")?
+        .as_array()?
+        .iter()
+        .map(|child| {
+            Some((
+                child.get("stepId")?.as_str()?.to_owned(),
+                child.get("workflowId")?.as_str()?.to_owned(),
+                child.get("versionResolved")?.as_i64()?,
+                child.get("manifestChecksum")?.as_str()?.to_owned(),
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    fingerprints.sort();
+    Some(fingerprints)
+}
+
+/// The agent allowlist check on a stored version's graph and its whole
+/// EmbedWorkflow closure, with the tenant's published workflow-agents exempt,
+/// as on save.
+///
+/// Save checks the closure when the version is written, but the allowlist can
+/// change afterwards. The REST and MCP compiles run this before their
+/// compiled-image fast paths, so a version saved under an older allowlist can
+/// neither compile nor keep handing out its cached image with an agent the
+/// tenant may no longer use. A closure that cannot be loaded or parsed is
+/// refused, as save refuses it, rather than checked in part.
+///
+/// The closure is loaded the way the compiler loads it, so every
+/// EmbedWorkflow reference must resolve. A cached image keeps the children it
+/// was built with, so a child that has since been deleted, or a child version
+/// that no longer resolves, would leave agents in that image this check
+/// cannot see: such a closure is refused, as a fresh compile of it would be.
+/// A closure that resolves can still differ from the one a cached image was
+/// built with; see [`AllowedClosure::may_reuse_cached_image`].
+///
+/// A version that does not exist passes: the compile reports it as not found.
+pub async fn check_compile_agent_allowlist(
+    pool: &sqlx::PgPool,
+    tenant_id: &str,
+    workflow_id: &str,
+    version: i32,
+) -> Result<AllowedClosure, CompileAgentGateError> {
+    let definition = WorkflowRepository::new(pool.clone())
+        .get_definition(tenant_id, workflow_id, version)
+        .await
+        .map_err(|e| {
+            CompileAgentGateError::Unchecked(format!("Failed to load workflow definition: {}", e))
+        })?;
+    let Some(definition) = definition else {
+        return Ok(AllowedClosure::default());
+    };
+    let children = load_child_workflows(pool, tenant_id, workflow_id, version, &definition).await;
+    let checked_children = children.as_ref().ok().cloned().unwrap_or_default();
+    compile_agent_allowlist_decision(
+        crate::config::entitlements(),
+        &definition,
+        children,
+        &crate::workflow_agents::published_agent_ids(tenant_id),
+    )?;
+    Ok(AllowedClosure {
+        children: checked_children,
+    })
+}
+
+/// The decision [`check_compile_agent_allowlist`] makes once the closure is
+/// loaded, taking the snapshot as an argument so unit tests can restrict it.
+/// `children` is the closure load's result: a failed or incomplete load, or a
+/// child whose graph does not parse, refuses the compile. The loader reports
+/// a database failure with a `Database error` prefix, as
+/// `load_child_workflows_for_validation` relies on too; anything else it
+/// reports is a reference that does not resolve.
+pub fn compile_agent_allowlist_decision(
+    snapshot: &crate::entitlements::EntitlementSnapshot,
+    definition: &serde_json::Value,
+    children: Result<Vec<crate::compiler::child_workflows::ChildWorkflowInfo>, String>,
+    published_agent_ids: &std::collections::HashSet<String>,
+) -> Result<(), CompileAgentGateError> {
+    let root = parse_execution_graph(definition).map_err(CompileAgentGateError::Invalid)?;
+    let children = children.map_err(|e| {
+        let message = format!("Failed to load child workflows: {}", e);
+        if e.starts_with("Database error") {
+            CompileAgentGateError::Unchecked(message)
+        } else {
+            CompileAgentGateError::Invalid(message)
+        }
+    })?;
+    let child_graphs = children
+        .into_iter()
+        .map(|info| {
+            parse_execution_graph(&info.execution_graph).map_err(|e| {
+                CompileAgentGateError::Invalid(format!(
+                    "Failed to parse child workflow '{}': {}",
+                    info.workflow_ref.workflow_id, e
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    crate::middleware::entitlement::walk_closure_for_agents(
+        snapshot,
+        &root,
+        &child_graphs,
+        published_agent_ids,
+    )
+    .map_err(CompileAgentGateError::Denied)
 }
 
 /// A failed direct compile as a service error. A parent refused because a
@@ -1043,7 +1282,9 @@ impl CompilationService {
             // gone from disk is precisely what a forced recompile is here to
             // repair — and reusing it re-registers nothing, so the file stays
             // missing and the caller retries into the same failure until its
-            // budget runs out.
+            // budget runs out. A row without the agents the image records is
+            // the same: a launch rebuilds such an image to check them, and
+            // only re-registering stores the record.
             Ok(Some(existing_image))
                 if image_matches_compiled_artifact(
                     &existing_image,
@@ -1051,9 +1292,10 @@ impl CompilationService {
                     result.compiler_mode,
                     track_events,
                     &result.binary_checksum,
-                ) && self
-                    .artifact_present_for_reuse(client, &existing_image.image_id)
-                    .await =>
+                ) && image_agent_ids(&existing_image).is_some()
+                    && self
+                        .artifact_present_for_reuse(client, &existing_image.image_id)
+                        .await =>
             {
                 info!(
                     image_id = %existing_image.image_id,
@@ -1073,7 +1315,7 @@ impl CompilationService {
                 warn!(
                     image_id = %existing_image.image_id,
                     image_name = %image_name,
-                    "Registered artifact is missing from disk; re-registering the compiled binary"
+                    "Registered artifact is missing from disk or records no agents; re-registering the compiled binary"
                 );
                 self.register_image(client, &result, registration, &image_name)
                     .await?
@@ -2201,6 +2443,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_image_records_the_agents_it_was_composed_with() {
+        let image = image_summary_with_metadata(serde_json::json!({
+            "workflow": {
+                "directArtifact": {
+                    "agentComponents": [
+                        {"kind": "agent", "agentId": "csv", "package": "runtara:agent-csv"},
+                        {"kind": "agent", "agentId": "http", "package": "runtara:agent-http"}
+                    ]
+                }
+            }
+        }));
+        assert_eq!(
+            image_agent_ids(&image),
+            Some(vec!["csv".to_string(), "http".to_string()])
+        );
+
+        // No record to check: an image registered before it existed, or
+        // without its artifact metadata, or one whose record is malformed.
+        let without_metadata = ImageSummary {
+            metadata: None,
+            ..image_summary_with_metadata(serde_json::json!({}))
+        };
+        assert_eq!(image_agent_ids(&without_metadata), None);
+        for metadata in [
+            serde_json::json!({"workflow": {"executionTimeoutSeconds": 30}}),
+            serde_json::json!({
+                "workflow": {"directArtifact": {"agentComponents": [{"kind": "agent"}]}}
+            }),
+        ] {
+            assert_eq!(
+                image_agent_ids(&image_summary_with_metadata(metadata)),
+                None
+            );
+        }
+    }
+
     fn direct_artifact_metadata_fixture() -> DirectArtifactMetadata {
         let wasm = |filename: &str, sha256: &str| DirectArtifactFileMetadata {
             filename: filename.to_string(),
@@ -2355,5 +2634,216 @@ mod tests {
         };
 
         assert_eq!(result.binary_size, 104_857_600);
+    }
+
+    fn http_only_snapshot() -> crate::entitlements::EntitlementSnapshot {
+        crate::entitlements::EntitlementSnapshot::parse_entitlements(
+            "tenant-test",
+            None,
+            Some(r#"{"agents":["http"]}"#),
+            None,
+            &crate::entitlements::parse_agents(&["http", "csv"]),
+        )
+        .expect("snapshot parses")
+    }
+
+    fn graph_calling(agent: &str) -> serde_json::Value {
+        serde_json::json!({
+            "entryPoint": "call",
+            "steps": {
+                "call": {"stepType": "Agent", "id": "call", "agentId": agent, "capabilityId": "run"}
+            }
+        })
+    }
+
+    fn graph_embedding_child() -> serde_json::Value {
+        serde_json::json!({
+            "entryPoint": "embed",
+            "steps": {
+                "embed": {"stepType": "EmbedWorkflow", "id": "embed", "childWorkflowId": "child-wf", "childVersion": "latest"}
+            }
+        })
+    }
+
+    fn child_with_graph(
+        execution_graph: serde_json::Value,
+    ) -> crate::compiler::child_workflows::ChildWorkflowInfo {
+        crate::compiler::child_workflows::ChildWorkflowInfo {
+            step_id: "embed".to_string(),
+            workflow_ref: runtara_workflows::dependency_analysis::WorkflowReference {
+                workflow_id: "child-wf".to_string(),
+                version: 1,
+            },
+            execution_graph,
+            version_requested: "latest".to_string(),
+        }
+    }
+
+    fn expect_denied_agent(result: Result<(), CompileAgentGateError>, agent: &str) {
+        match result {
+            Err(CompileAgentGateError::Denied(denial)) => {
+                assert_eq!(
+                    denial.code(),
+                    crate::entitlement_error::codes::AGENT_NOT_ENABLED
+                );
+                assert_eq!(denial.json_body()["agent"], agent);
+            }
+            other => panic!("expected AGENT_NOT_ENABLED for '{agent}', got {other:?}"),
+        }
+    }
+
+    fn expect_unchecked(result: Result<(), CompileAgentGateError>, needle: &str) {
+        match result {
+            Err(CompileAgentGateError::Unchecked(message)) => {
+                assert!(message.contains(needle), "{message}");
+            }
+            other => panic!("expected an unchecked refusal mentioning '{needle}', got {other:?}"),
+        }
+    }
+
+    fn expect_invalid(result: Result<(), CompileAgentGateError>, needle: &str) {
+        match result {
+            Err(CompileAgentGateError::Invalid(message)) => {
+                assert!(message.contains(needle), "{message}");
+            }
+            other => {
+                panic!("expected an invalid-closure refusal mentioning '{needle}', got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn compile_gate_denies_an_agent_outside_the_allowlist_in_the_root_or_a_child() {
+        let snapshot = http_only_snapshot();
+        let none_published = std::collections::HashSet::new();
+
+        expect_denied_agent(
+            compile_agent_allowlist_decision(
+                &snapshot,
+                &graph_calling("csv"),
+                Ok(Vec::new()),
+                &none_published,
+            ),
+            "csv",
+        );
+        expect_denied_agent(
+            compile_agent_allowlist_decision(
+                &snapshot,
+                &graph_embedding_child(),
+                Ok(vec![child_with_graph(graph_calling("csv"))]),
+                &none_published,
+            ),
+            "csv",
+        );
+
+        assert!(
+            compile_agent_allowlist_decision(
+                &snapshot,
+                &graph_embedding_child(),
+                Ok(vec![child_with_graph(graph_calling("http"))]),
+                &none_published,
+            )
+            .is_ok()
+        );
+        // The tenant's published workflow-agents are exempt, as on save.
+        let published = std::collections::HashSet::from(["shout-echo".to_string()]);
+        assert!(
+            compile_agent_allowlist_decision(
+                &snapshot,
+                &graph_calling("shout-echo"),
+                Ok(Vec::new()),
+                &published,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_cached_image_is_reused_only_when_built_from_the_checked_children() {
+        let child_graph = graph_calling("http");
+        let closure = AllowedClosure {
+            children: vec![child_with_graph(child_graph.clone())],
+        };
+        let checksum = runtara_workflows::direct_wasm::manifest::build_direct_workflow_manifest(
+            &parse_execution_graph(&child_graph).expect("child parses"),
+        )
+        .expect("manifest builds")
+        .checksum()
+        .to_owned();
+        let image_recording = |version: i64, checksum: &str| {
+            image_summary_with_metadata(serde_json::json!({
+                "workflow": {"directArtifact": {"childWorkflows": [{
+                    "stepId": "embed",
+                    "workflowId": "child-wf",
+                    "versionRequested": "latest",
+                    "versionResolved": version,
+                    "manifestChecksum": checksum,
+                }]}}
+            }))
+        };
+
+        assert!(closure.built_from_these_children(Some(&image_recording(1, &checksum))));
+        // Built from another child version, or the same version edited in
+        // place, or with no record of its children at all.
+        assert!(!closure.built_from_these_children(Some(&image_recording(2, &checksum))));
+        assert!(!closure.built_from_these_children(Some(&image_recording(1, "edited"))));
+        assert!(
+            !closure.built_from_these_children(Some(&image_summary_with_metadata(
+                serde_json::json!({"workflow": {}})
+            )))
+        );
+        assert!(!closure.built_from_these_children(None));
+
+        // A version that embeds nothing has no children to differ.
+        assert!(AllowedClosure::default().built_from_these_children(None));
+    }
+
+    #[test]
+    fn compile_gate_refuses_a_closure_it_cannot_load_or_parse() {
+        let snapshot = http_only_snapshot();
+        let none_published = std::collections::HashSet::new();
+
+        // The root only calls an allowed agent, so walking it alone would pass.
+        expect_unchecked(
+            compile_agent_allowlist_decision(
+                &snapshot,
+                &graph_calling("http"),
+                Err("Database error: connection reset".to_string()),
+                &none_published,
+            ),
+            "Failed to load child workflows: Database error: connection reset",
+        );
+        // A reference that does not resolve stays that way until the
+        // workflow changes, unlike a database failure.
+        expect_invalid(
+            compile_agent_allowlist_decision(
+                &snapshot,
+                &graph_embedding_child(),
+                Err("EmbedWorkflow step 'embed': child workflow 'child-wf' not found".to_string()),
+                &none_published,
+            ),
+            "child workflow 'child-wf' not found",
+        );
+        expect_invalid(
+            compile_agent_allowlist_decision(
+                &snapshot,
+                &graph_embedding_child(),
+                Ok(vec![
+                    child_with_graph(graph_calling("http")),
+                    child_with_graph(serde_json::json!({"steps": "not a map"})),
+                ]),
+                &none_published,
+            ),
+            "Failed to parse child workflow 'child-wf'",
+        );
+        expect_invalid(
+            compile_agent_allowlist_decision(
+                &snapshot,
+                &serde_json::json!({"steps": "not a map"}),
+                Ok(Vec::new()),
+                &none_published,
+            ),
+            "Failed to parse execution graph",
+        );
     }
 }

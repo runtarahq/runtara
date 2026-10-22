@@ -43,13 +43,43 @@ async fn compile_workflow_for_mcp(
 ) -> Result<McpCompileResult, rmcp::ErrorData> {
     validate_path_param("workflow_id", workflow_id)?;
 
+    // The REST compile's allowlist check, before the cached image below can
+    // answer: the allowlist may have changed since the version was saved.
+    let closure = crate::api::services::compilation::check_compile_agent_allowlist(
+        &server.pool,
+        &server.tenant_id,
+        workflow_id,
+        version,
+    )
+    .await
+    .map_err(|e| match e {
+        crate::api::services::compilation::CompileAgentGateError::Denied(denial) => {
+            denial.to_rmcp_error()
+        }
+        crate::api::services::compilation::CompileAgentGateError::Unchecked(message)
+        | crate::api::services::compilation::CompileAgentGateError::Invalid(message) => {
+            err(message)
+        }
+    })?;
+
     let repository = WorkflowRepository::new(server.pool.clone());
 
+    // The cached image of a version that embeds workflows answers only when
+    // it was built from the children just checked, such as a rebuild that
+    // finished after an earlier call timed out. Otherwise a stale row is
+    // invalidated and rebuilt below, and a compile already queued is reused.
     if !force_recompile
         && let Some(image_id) = repository
             .get_fresh_registered_image_id(&server.tenant_id, workflow_id, version)
             .await
             .map_err(|e| err(format!("Failed to check compilation freshness: {}", e)))?
+        && closure
+            .may_reuse_cached_image(
+                server.runtime_client.as_deref(),
+                &server.tenant_id,
+                &image_id,
+            )
+            .await
     {
         return Ok(McpCompileResult {
             completed: true,

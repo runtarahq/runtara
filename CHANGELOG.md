@@ -637,6 +637,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The MCP `validate_graph` tool takes the id as `workflow_id`. The MCP
   deploy tools pass it.
+- **Compiling checks the agent allowlist on every path, and refuses what it
+  cannot check.** The MCP `compile_workflow` tool did not check the stored
+  graph against the tenant's allowlist: a version saved before an agent left
+  the allowlist still compiled, and its cached image was still returned as
+  compiled. It now runs the check the REST compile runs, over the graph and
+  its embedded children, before the cached image can answer
+  (`AGENT_NOT_ENABLED`). The REST compile checked only the root graph when
+  the embedded children failed to load, and skipped a child whose graph did
+  not parse. Both compiles now refuse in those cases, and when the version's
+  own graph fails to load or parse, as saving does. They also refuse when an
+  embedded child no longer resolves (deleted, or its pinned version gone):
+  the cached image still carries that child's agents, which the check can no
+  longer see. And a compile of a version that embeds other workflows hands
+  back its cached image only when the image records the children just
+  checked (the same child versions and manifests); otherwise it rebuilds it.
+  The image keeps the children it was built with, which may have changed
+  since ("latest" or "current" moved, or a version edited in place). A
+  rebuild that finishes after an MCP compile timed out is reused by the
+  retry.
+- **Running a workflow checks the agent allowlist.** Nothing between a run's
+  request and its launch checked it: a version compiled before an agent left
+  the allowlist kept running from its cached image, and one not compiled yet
+  was compiled on the first run. Every launch (HTTP, MCP, cron, webhooks,
+  events, sessions, chat, replay and `control` children) now runs the
+  compile's check before the image starts or a compile is queued. A refused
+  run never starts: its execution reads "The run never started" with the
+  `AGENT_NOT_ENABLED` message. Starting a run over HTTP or MCP, and
+  `control:start`, refuse it up front instead (`AGENT_NOT_ENABLED`, HTTP
+  403). An image that passed is remembered for the life of the process, so
+  later runs of it do not repeat the check. A compiled image is judged by
+  the agents it recorded when it was registered, since it keeps the
+  children it was built with, whatever the stored ones say now: an agent in
+  it that the allowlist leaves out refuses the run, unless it is a
+  workflow-agent the tenant publishes and no built-in has its id. The
+  `ai-tools` agent every AiAgent step brings is not gated there. An image
+  registered without that record is rebuilt once, before it runs; without
+  Valkey, where nothing can rebuild it, it is left in place and its runs
+  wait until the workflow is compiled with `forceRecompile`. A version not
+  compiled yet is checked as stored and refused only for a forbidden agent
+  the check finds; a graph it cannot read is left to the compile, which
+  reports it as before.
 - **`preflight_compile` checks the mappings of the right version.** It read
   its version from fields the workflow response does not have, so it
   reported version 0, and its mapping check of version 0 failed unseen. It

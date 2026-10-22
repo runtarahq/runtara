@@ -452,13 +452,19 @@ async fn a_composed_control_start_launches_a_real_child() -> anyhow::Result<()> 
     let child_workflow = format!("child-{}", Uuid::new_v4());
     let child_wasm = harness.compile(child_definition())?;
     let image = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO images (image_id, tenant_id, name, binary_path) VALUES ($1,$2,$3,$4)")
-        .bind(&image)
-        .bind(&tenant)
-        .bind(format!("{child_workflow}:1@fixture"))
-        .bind(child_wasm.to_string_lossy().as_ref())
-        .execute(&harness.pool)
-        .await?;
+    // Registered as a compile registers it: with the agents it was composed
+    // with (none), which a launch checks against the allowlist.
+    sqlx::query(
+        "INSERT INTO images (image_id, tenant_id, name, binary_path, metadata) \
+         VALUES ($1,$2,$3,$4,$5)",
+    )
+    .bind(&image)
+    .bind(&tenant)
+    .bind(format!("{child_workflow}:1@fixture"))
+    .bind(child_wasm.to_string_lossy().as_ref())
+    .bind(json!({"workflow": {"directArtifact": {"agentComponents": []}}}))
+    .execute(&harness.pool)
+    .await?;
     sqlx::query(
         "INSERT INTO workflows (tenant_id, workflow_id, version_count, latest_version) VALUES ($1,$2,1,1)",
     )

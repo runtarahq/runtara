@@ -1167,73 +1167,53 @@ pub async fn compile_workflow_handler(
         Ok(v) => v,
     };
 
-    // Re-walk the persisted graph — and its full EmbedWorkflow closure —
-    // against the current entitlement snapshot. Update/patch already gate
-    // at write time, but a graph that was valid when persisted can later
-    // become invalid if the tenant's `enabled_agents` allowlist changes
-    // across a restart. We must reject here even when a cached compiled
-    // binary exists; otherwise the "already compiled" fast path below would
-    // let a stale workflow keep running with a now-forbidden agent, whether
-    // that agent lives in the root graph or in a previously-saved embedded
-    // child (children only ever got structural validation at save time, not
-    // this allowlist check).
+    // Re-check the persisted graph and its full EmbedWorkflow closure against
+    // the current allowlist, even when a compiled binary is cached: the
+    // allowlist may have changed since the version was saved.
+    let closure = match crate::api::services::compilation::check_compile_agent_allowlist(
+        &pool,
+        &tenant_id,
+        &workflow_id,
+        version_num,
+    )
+    .await
     {
-        let repository = WorkflowRepository::new(pool.clone());
-        match repository
-            .get_definition(&tenant_id, &workflow_id, version_num)
-            .await
-        {
-            Ok(Some(definition)) => {
-                let workflow_wrapper = serde_json::json!({ "executionGraph": definition.clone() });
-                if let Ok(workflow) =
-                    serde_json::from_value::<runtara_dsl::Workflow>(workflow_wrapper)
-                {
-                    let child_graphs: Vec<runtara_dsl::ExecutionGraph> =
-                        match crate::compiler::child_workflows::load_child_workflows_for_validation(
-                            &pool,
-                            &tenant_id,
-                            &definition,
-                        )
-                        .await
-                        {
-                            Ok(child_infos) => child_infos
-                                .into_iter()
-                                .filter_map(|info| {
-                                    serde_json::from_value::<runtara_dsl::ExecutionGraph>(
-                                        info.execution_graph,
-                                    )
-                                    .ok()
-                                })
-                                .collect(),
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Failed to load embedded child workflows for entitlement gate, checking root graph only"
-                                );
-                                Vec::new()
-                            }
-                        };
-
-                    if let Err(denial) = crate::middleware::entitlement::walk_closure_for_agents(
-                        crate::config::entitlements(),
-                        &workflow.execution_graph,
-                        child_graphs.iter(),
-                        &crate::workflow_agents::published_agent_ids(&tenant_id),
-                    ) {
-                        return (StatusCode::FORBIDDEN, Json(denial.json_body()));
-                    }
-                }
-                // If the persisted graph fails to parse, fall through —
-                // the existing compile path will surface a meaningful error.
-            }
-            Ok(None) => {} // Not found; existing flow returns 404.
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to fetch definition for entitlement gate, falling through");
-            }
+        Ok(closure) => closure,
+        Err(crate::api::services::compilation::CompileAgentGateError::Denied(denial)) => {
+            return (StatusCode::FORBIDDEN, Json(denial.json_body()));
         }
-    }
+        Err(
+            crate::api::services::compilation::CompileAgentGateError::Unchecked(message)
+            | crate::api::services::compilation::CompileAgentGateError::Invalid(message),
+        ) => {
+            let error_response = json!({
+                "success": false,
+                "error": "Agent allowlist check failed",
+                "message": message,
+                "workflowId": workflow_id,
+                "version": version
+            });
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response));
+        }
+    };
 
-    let force_recompile = query.force_recompile.unwrap_or(false);
+    // A cached image of a version that embeds workflows may hold children
+    // other than the ones just checked; such an image is rebuilt, not reused.
+    let mut force_recompile = query.force_recompile.unwrap_or(false);
+    if !force_recompile {
+        let cached_image = WorkflowRepository::new(pool.clone())
+            .get_fresh_registered_image_id(&tenant_id, &workflow_id, version_num)
+            .await;
+        force_recompile = match cached_image {
+            Ok(Some(image_id)) => {
+                !closure
+                    .may_reuse_cached_image(runtime_client.as_deref(), &tenant_id, &image_id)
+                    .await
+            }
+            Ok(None) => false,
+            Err(_) => closure.embeds_workflows(),
+        };
+    }
     if force_recompile {
         // Stamp `queued` in Redis BEFORE invalidating the DB row. Without
         // this, the frontend's first compilation-progress poll can race
