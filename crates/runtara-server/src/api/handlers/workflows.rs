@@ -1198,9 +1198,22 @@ pub async fn compile_workflow_handler(
     };
 
     // A cached image of a version that embeds workflows may hold children
-    // other than the ones just checked, so it is rebuilt rather than reused.
-    let force_recompile =
-        query.force_recompile.unwrap_or(false) || !closure.may_reuse_cached_image();
+    // other than the ones just checked; such an image is rebuilt, not reused.
+    let mut force_recompile = query.force_recompile.unwrap_or(false);
+    if !force_recompile {
+        let cached_image = WorkflowRepository::new(pool.clone())
+            .get_fresh_registered_image_id(&tenant_id, &workflow_id, version_num)
+            .await;
+        force_recompile = match cached_image {
+            Ok(Some(image_id)) => {
+                !closure
+                    .may_reuse_cached_image(runtime_client.as_deref(), &tenant_id, &image_id)
+                    .await
+            }
+            Ok(None) => false,
+            Err(_) => closure.embeds_workflows(),
+        };
+    }
     if force_recompile {
         // Stamp `queued` in Redis BEFORE invalidating the DB row. Without
         // this, the frontend's first compilation-progress poll can race

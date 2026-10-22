@@ -7,7 +7,8 @@
 //! of it: the agents of a child that has since been deleted, or whose version
 //! no longer resolves, are still in that image. A child that has changed
 //! since likewise leaves agents in the image the check does not see, so a
-//! compile rebuilds a version that embeds workflows instead of reusing it.
+//! compile reuses the image of a version that embeds workflows only when the
+//! image records the children just checked.
 //!
 //! This binary boots the process-wide configuration with an allowlist that
 //! enables no agents, so every agent step the check can see is denied.
@@ -21,6 +22,7 @@ use runtara_server::api::services::compilation::{
     CompileAgentGateError, check_compile_agent_allowlist,
 };
 use runtara_server::entitlement_error::codes;
+use runtara_server::runtime_types::ImageSummary;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -248,14 +250,17 @@ async fn a_cached_parent_whose_child_changed_is_rebuilt_not_reused() {
     let tenant = format!("t-{}", Uuid::new_v4());
 
     // The parent's image was built while its latest child called csv.
-    let child = seed_workflow(&pool, &tenant, &calling("csv")).await;
+    let csv_child = calling("csv");
+    let child = seed_workflow(&pool, &tenant, &csv_child).await;
     let parent_definition = embedding(&child, "latest");
     let parent = seed_workflow(&pool, &tenant, &parent_definition).await;
     record_cached_image(&pool, &tenant, &parent, &parent_definition).await;
+    let stale_image = image_built_from(&child, 1, &csv_child);
 
     // A new child version calls no agent, so the closure as it resolves today
     // passes, while the freshness lookup still answers with the old image.
-    publish_version(&pool, &tenant, &child, 2, &finish_only()).await;
+    let quiet_child = finish_only();
+    publish_version(&pool, &tenant, &child, 2, &quiet_child).await;
     let closure = check_compile_agent_allowlist(&pool, &tenant, &parent, 1)
         .await
         .expect("the child as it resolves today calls no agent");
@@ -265,9 +270,13 @@ async fn a_cached_parent_whose_child_changed_is_rebuilt_not_reused() {
         .expect("the freshness lookup must succeed");
     assert_eq!(cached.as_deref(), Some("cached-parent-image"));
     assert!(
-        !closure.may_reuse_cached_image(),
-        "the cached image may hold the csv child, so the compile must rebuild"
+        !closure.built_from_these_children(Some(&stale_image)),
+        "the cached image holds the csv child, so the compile must rebuild"
     );
+
+    // The rebuild finishes after the call that queued it timed out: its image
+    // records the children just checked, so a retry reuses it.
+    assert!(closure.built_from_these_children(Some(&image_built_from(&child, 2, &quiet_child))));
 
     // A version that embeds nothing keeps its cached image.
     let lone_definition = finish_only();
@@ -277,8 +286,40 @@ async fn a_cached_parent_whose_child_changed_is_rebuilt_not_reused() {
         check_compile_agent_allowlist(&pool, &tenant, &lone, 1)
             .await
             .expect("a closure without agent steps passes")
-            .may_reuse_cached_image()
+            .built_from_these_children(None)
     );
+}
+
+/// An image whose record says it was built with version `version` of
+/// `child_workflow_id`, embedded by step `embed`, from `child_definition`.
+fn image_built_from(
+    child_workflow_id: &str,
+    version: i32,
+    child_definition: &Value,
+) -> ImageSummary {
+    let graph =
+        runtara_dsl::parse_execution_graph(child_definition).expect("child definition parses");
+    let manifest_checksum =
+        runtara_workflows::direct_wasm::manifest::build_direct_workflow_manifest(&graph)
+            .expect("child manifest builds")
+            .checksum()
+            .to_owned();
+    ImageSummary {
+        image_id: "cached-parent-image".to_string(),
+        tenant_id: "test-tenant".to_string(),
+        name: "parent:1".to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        metadata: Some(json!({
+            "workflow": {"directArtifact": {"childWorkflows": [{
+                "stepId": "embed",
+                "workflowId": child_workflow_id,
+                "versionRequested": "latest",
+                "versionResolved": version,
+                "manifestChecksum": manifest_checksum,
+            }]}}
+        })),
+    }
 }
 
 #[tokio::test]

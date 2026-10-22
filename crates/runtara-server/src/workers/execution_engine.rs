@@ -570,8 +570,8 @@ pub struct ExecutionEngine {
     /// across processes/restarts; this prevents a local cached-count race
     /// before the next background runtime refresh observes a launch.
     concurrency_admission: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// Registered images whose workflow passed the agent allowlist check in
-    /// this process; see [`Self::require_allowed_agents`].
+    /// Registered images whose recorded agents passed the allowlist in this
+    /// process; see [`Self::require_allowed_image_agents`].
     allowlisted_images: DashSet<String>,
 }
 
@@ -583,61 +583,31 @@ const ALLOWLISTED_IMAGES_CAPACITY: usize = 4096;
 /// The agent the compiler adds to an image for every AiAgent step.
 const AI_TOOLS_AGENT_ID: &str = "ai-tools";
 
-/// Refuse an image that records a built-in agent the allowlist leaves out.
+/// Refuse an image that records an agent the tenant may not use.
 ///
-/// Only built-in agents are gated. An id that is not a registered agent is a
-/// workflow-agent the tenant published: its own steps were checked when it
-/// was saved, and the image keeps its bytes even if it has since been
-/// unpublished. `ai-tools` is skipped, because the compiler adds it for every
-/// AiAgent step and the allowlist does not gate AiAgent steps on save or
-/// compile.
+/// Each agent goes through the rule the MCP step tools apply
+/// ([`crate::middleware::entitlement::tenant_agent_decision`]): the allowlist
+/// must enable it, unless it is a workflow-agent the tenant publishes now and
+/// no built-in has its id. An agent that is neither, such as a built-in
+/// uninstalled since the image was built, is refused rather than assumed to
+/// be a workflow-agent. `ai-tools` is skipped, because the compiler adds it
+/// for every AiAgent step and the allowlist does not gate AiAgent steps on
+/// save or compile. `published_agent_ids` is read at most once, and only
+/// for an agent the allowlist refuses.
 fn image_agents_decision(
     snapshot: &crate::entitlements::EntitlementSnapshot,
     agents: &[String],
+    published_agent_ids: impl Fn() -> std::collections::HashSet<String>,
 ) -> Result<(), crate::entitlement_error::EntitlementDenial> {
+    let published = std::cell::OnceCell::new();
     agents
         .iter()
-        .filter(|agent| agent.as_str() != AI_TOOLS_AGENT_ID && snapshot.is_registered_agent(agent))
-        .try_for_each(|agent| crate::middleware::entitlement::agent_decision(snapshot, agent))
-}
-
-/// What a run does with the agent allowlist check of its workflow version.
-///
-/// A ready image is about to run, so a check that cannot read its closure
-/// refuses it. A closure that cannot be checked as stored (an embedded child
-/// deleted, a pinned child version gone, a graph that does not parse) leaves
-/// agents in the image the check cannot see; that stays so until the
-/// workflow changes, so the run is reported as one that cannot run as
-/// authored rather than as a system fault.
-///
-/// A version not compiled yet is refused only for a denial the check finds:
-/// the compile it waits for reads the same closure and reports what it cannot
-/// load or parse, as before, and its image is checked again before it runs.
-fn allowlist_check_outcome(
-    checked: Result<(), CompileAgentGateError>,
-    ready_image: bool,
-    workflow_id: &str,
-    version: i32,
-) -> Result<(), ExecutionError> {
-    match checked {
-        Ok(()) => Ok(()),
-        Err(CompileAgentGateError::Denied(denial)) => {
-            Err(ExecutionError::EntitlementDenied(denial))
-        }
-        Err(CompileAgentGateError::Unchecked(_) | CompileAgentGateError::Invalid(_))
-            if !ready_image =>
-        {
-            Ok(())
-        }
-        Err(CompileAgentGateError::Unchecked(message)) => Err(ExecutionError::DatabaseError(
-            format!("Failed to check the agent allowlist: {message}"),
-        )),
-        Err(CompileAgentGateError::Invalid(message)) => Err(ExecutionError::WorkflowNotRunnable {
-            workflow_id: workflow_id.to_string(),
-            version,
-            error: message,
-        }),
-    }
+        .filter(|agent| agent.as_str() != AI_TOOLS_AGENT_ID)
+        .try_for_each(|agent| {
+            crate::middleware::entitlement::tenant_agent_decision(snapshot, agent, || {
+                published.get_or_init(&published_agent_ids).clone()
+            })
+        })
 }
 
 /// How long an in-flight execution count stays usable for the concurrency gate.
@@ -2596,20 +2566,19 @@ impl ExecutionEngine {
     ///
     /// Save and compile check the allowlist, but it can change after a version
     /// was compiled, and a compiled image runs whatever it was built with. So
-    /// every launch, and the admissions in front of it, check the version's
-    /// graph and its EmbedWorkflow closure again with
-    /// [`check_compile_agent_allowlist`], before the ready image runs or a
-    /// compile of the version is queued.
+    /// every launch, and the admissions in front of it, check again before
+    /// the ready image runs or a compile of the version is queued:
     ///
-    /// A ready image is also checked by the agents it recorded when it was
-    /// registered; see [`Self::require_allowed_image_agents`]. The allowlist
-    /// is fixed for the life of the process and a registered image never
-    /// changes, so a ready image that passed both is remembered by its id and
-    /// later runs of it skip the checks. A version whose compile failed for
-    /// good passes: it cannot run, and the caller reports why.
-    ///
-    /// See [`allowlist_check_outcome`] for what a run does with a check that
-    /// could not read the closure.
+    /// - A ready image is judged by the agents it recorded when it was
+    ///   registered, since it keeps the children it was built with, whatever
+    ///   the stored ones say now; see [`Self::require_allowed_image_agents`].
+    /// - A version not compiled yet is checked as stored, with
+    ///   [`check_compile_agent_allowlist`], since that is what its compile
+    ///   builds. Only a denial the check finds refuses it: the compile reports
+    ///   a closure it cannot load or parse, as before, and the image it builds
+    ///   is checked before it runs.
+    /// - A version whose compile failed for good passes: it cannot run, and
+    ///   the caller reports why.
     async fn require_allowed_agents(
         &self,
         tenant_id: &str,
@@ -2617,43 +2586,43 @@ impl ExecutionEngine {
         version: i32,
         compilation: &CompilationStatus,
     ) -> Result<(), ExecutionError> {
-        let image_id = match compilation {
+        match compilation {
             CompilationStatus::Ready {
                 registered_image_id,
                 ..
-            } => Some(registered_image_id.as_str()),
-            CompilationStatus::Failed { terminal: true, .. } => return Ok(()),
-            _ => None,
-        };
-        if image_id.is_some_and(|image_id| self.allowlisted_images.contains(image_id)) {
-            return Ok(());
+            } => {
+                self.require_allowed_image_agents(
+                    tenant_id,
+                    workflow_id,
+                    version,
+                    registered_image_id,
+                )
+                .await
+            }
+            CompilationStatus::Failed { terminal: true, .. } => Ok(()),
+            _ => match check_compile_agent_allowlist(&self.pool, tenant_id, workflow_id, version)
+                .await
+            {
+                Err(CompileAgentGateError::Denied(denial)) => {
+                    denial.audit_log(tenant_id);
+                    Err(ExecutionError::EntitlementDenied(denial))
+                }
+                Ok(_)
+                | Err(CompileAgentGateError::Unchecked(_) | CompileAgentGateError::Invalid(_)) => {
+                    Ok(())
+                }
+            },
         }
-        // Whether the version embeds workflows decides whether a compile may
-        // reuse its image; a run checks the image's own agents below instead.
-        let checked = check_compile_agent_allowlist(&self.pool, tenant_id, workflow_id, version)
-            .await
-            .map(|_| ());
-        if let Err(CompileAgentGateError::Denied(denial)) = &checked {
-            denial.audit_log(tenant_id);
-        }
-        allowlist_check_outcome(checked, image_id.is_some(), workflow_id, version)?;
-        let Some(image_id) = image_id else {
-            return Ok(());
-        };
-        self.require_allowed_image_agents(tenant_id, workflow_id, version, image_id)
-            .await
     }
 
-    /// Refuse a ready image that runs a built-in agent the allowlist leaves
-    /// out, and remember one that does not.
+    /// Refuse a ready image that records an agent the tenant may not use, and
+    /// remember one that does not; see [`image_agents_decision`].
     ///
-    /// An image keeps the children it was built with, which can differ from
-    /// the ones [`check_compile_agent_allowlist`] reads today ("latest" or
-    /// "current" moved, or a version edited in place), so the agents the image
-    /// recorded when it was registered are checked too; see
-    /// [`image_agents_decision`]. An image registered without that record is
-    /// rebuilt, and the run waits for the compile like any version not
-    /// compiled yet ([`ExecutionError::NotCompiled`]).
+    /// The allowlist is fixed for the life of the process and a registered
+    /// image never changes, so an image that passed is remembered by its id
+    /// and later runs of it skip the check. An image registered without the
+    /// record is rebuilt, and the run waits for the compile like any version
+    /// not compiled yet ([`ExecutionError::NotCompiled`]).
     async fn require_allowed_image_agents(
         &self,
         tenant_id: &str,
@@ -2661,6 +2630,9 @@ impl ExecutionEngine {
         version: i32,
         image_id: &str,
     ) -> Result<(), ExecutionError> {
+        if self.allowlisted_images.contains(image_id) {
+            return Ok(());
+        }
         // Admission can run without a runtime; a launch cannot, and checks
         // the image then.
         let Some(runtime_client) = self.runtime_client.as_ref() else {
@@ -2678,6 +2650,23 @@ impl ExecutionEngine {
             .as_ref()
             .and_then(crate::api::services::compilation::image_agent_ids)
         else {
+            // Without Valkey nothing could rebuild it, so its compile row
+            // stays: dropping it would leave nothing to run at all. A forced
+            // compile re-registers the image with the record.
+            if crate::valkey::ValkeyConfig::from_env().is_none() {
+                warn!(
+                    tenant_id,
+                    workflow_id,
+                    version,
+                    image_id,
+                    "Image records no agents to check against the allowlist, and no compile can be queued to rebuild it; compile the workflow with forceRecompile"
+                );
+                return Err(ExecutionError::NotCompiled {
+                    workflow_id: workflow_id.to_string(),
+                    version,
+                    compilation_queued: false,
+                });
+            }
             warn!(
                 tenant_id,
                 workflow_id,
@@ -2689,7 +2678,10 @@ impl ExecutionEngine {
                 .recompile_image(tenant_id, workflow_id, version, image_id)
                 .await);
         };
-        image_agents_decision(crate::config::entitlements(), &agents).map_err(|denial| {
+        image_agents_decision(crate::config::entitlements(), &agents, || {
+            crate::workflow_agents::published_agent_ids(tenant_id)
+        })
+        .map_err(|denial| {
             denial.audit_log(tenant_id);
             ExecutionError::EntitlementDenied(denial)
         })?;
@@ -3331,25 +3323,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_ready_image_the_allowlist_could_not_be_checked_for_is_refused() {
+    async fn a_ready_image_is_judged_by_its_record_not_the_stored_closure() {
         let engine = engine_without_database();
 
-        match engine
-            .require_allowed_agents("tenant", "wf", 1, &ready_image("img-unchecked"))
-            .await
-        {
-            Err(ExecutionError::DatabaseError(message)) => {
-                assert!(message.contains("agent allowlist"), "{message}");
-            }
-            other => panic!("expected the run to be refused, got {other:?}"),
-        }
+        // The database refuses connections, so reading the stored closure
+        // would fail: a ready image never reads it. Admission has no runtime
+        // here to read the image's record, so the launch checks it, and the
+        // image is not remembered.
         assert!(
-            !engine.allowlisted_images.contains("img-unchecked"),
-            "an image that was not checked must not be remembered"
+            engine
+                .require_allowed_agents("tenant", "wf", 1, &ready_image("img-unchecked"))
+                .await
+                .is_ok()
         );
+        assert!(!engine.allowlisted_images.contains("img-unchecked"));
 
-        // Not compiled yet: the compile reads the same closure and reports
-        // what it cannot, and the image it builds is checked before it runs.
+        // Not compiled yet: the stored closure is what its compile builds.
+        // A check that cannot read it is left to the compile, which reports
+        // what it cannot load or parse.
         assert!(
             engine
                 .require_allowed_agents("tenant", "wf", 1, &CompilationStatus::NotReady)
@@ -3359,52 +3350,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ready_image_whose_closure_does_not_resolve_cannot_run() {
-        let invalid = || {
-            Err(CompileAgentGateError::Invalid(
-                "Failed to load child workflows: EmbedWorkflow step 'embed': child workflow 'child' not found"
-                    .to_string(),
-            ))
-        };
-        match allowlist_check_outcome(invalid(), true, "parent", 2) {
-            Err(ExecutionError::WorkflowNotRunnable {
-                workflow_id,
-                version,
-                error,
-            }) => {
-                assert_eq!((workflow_id.as_str(), version), ("parent", 2));
-                assert!(
-                    error.contains("child workflow 'child' not found"),
-                    "{error}"
-                );
-            }
-            other => panic!("expected the run to be reported as not runnable, got {other:?}"),
-        }
-        // Not compiled yet: the compile reports it.
-        assert!(allowlist_check_outcome(invalid(), false, "parent", 2).is_ok());
-
-        // A database failure is not the workflow's fault.
-        let unchecked = Err(CompileAgentGateError::Unchecked(
-            "connection reset".to_string(),
-        ));
-        assert!(matches!(
-            allowlist_check_outcome(unchecked, true, "parent", 2),
-            Err(ExecutionError::DatabaseError(_))
-        ));
-        // A denial refuses whether or not the version is compiled.
-        for ready_image in [true, false] {
-            let denied = Err(CompileAgentGateError::Denied(
-                crate::entitlement_error::EntitlementDenial::AgentNotEnabled("csv".to_string()),
-            ));
-            assert!(matches!(
-                allowlist_check_outcome(denied, ready_image, "parent", 2),
-                Err(ExecutionError::EntitlementDenied(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn only_built_in_agents_in_an_image_are_gated() {
+    fn image_agents_are_gated_unless_published_workflow_agents() {
         let snapshot = crate::entitlements::EntitlementSnapshot::parse_entitlements(
             "tenant-test",
             None,
@@ -3414,24 +3360,49 @@ mod tests {
         )
         .expect("snapshot parses");
         let agents = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let published = || std::collections::HashSet::from(["shout-echo".to_string()]);
+        let denied_agent = |result: Result<(), crate::entitlement_error::EntitlementDenial>| {
+            let denial = result.expect_err("the image must be refused");
+            assert_eq!(
+                denial.code(),
+                crate::entitlement_error::codes::AGENT_NOT_ENABLED
+            );
+            denial.json_body()["agent"].as_str().map(str::to_owned)
+        };
 
-        match image_agents_decision(&snapshot, &agents(&["http", "csv"])) {
-            Err(denial) => {
-                assert_eq!(
-                    denial.code(),
-                    crate::entitlement_error::codes::AGENT_NOT_ENABLED
-                );
-                assert_eq!(denial.json_body()["agent"], "csv");
-            }
-            Ok(()) => panic!("a csv component the allowlist leaves out must be refused"),
-        }
+        assert_eq!(
+            denied_agent(image_agents_decision(
+                &snapshot,
+                &agents(&["http", "csv"]),
+                published
+            )),
+            Some("csv".to_string())
+        );
+        // A built-in uninstalled since the image was built is no longer
+        // registered, and no workflow-agent of the tenant has its id.
+        assert_eq!(
+            denied_agent(image_agents_decision(
+                &snapshot,
+                &agents(&["xlsx"]),
+                published
+            )),
+            Some("xlsx".to_string())
+        );
         // `ai-tools` comes with every AiAgent step, `control` is always
-        // enabled, and `shout-echo` is no built-in: a workflow-agent.
+        // enabled, and `shout-echo` is a workflow-agent the tenant publishes.
         assert!(
             image_agents_decision(
                 &snapshot,
-                &agents(&["http", "ai-tools", "control", "shout-echo"])
+                &agents(&["http", "ai-tools", "control", "shout-echo"]),
+                published
             )
+            .is_ok()
+        );
+        // The published ids are read only when the allowlist refuses one.
+        assert!(
+            image_agents_decision(&snapshot, &agents(&["http"]), || {
+                panic!("an allowed image must not read the published workflow-agents")
+            })
             .is_ok()
         );
     }

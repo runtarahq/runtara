@@ -311,9 +311,6 @@ impl ExecutionEngine {
             Err(super::ExecutionError::EntitlementDenied(denial)) => {
                 return Err(StartChildError::Denied(denial.message()));
             }
-            Err(error @ super::ExecutionError::WorkflowNotRunnable { .. }) => {
-                return Err(StartChildError::NotRunnable(error.to_string()));
-            }
             Err(other) => return Err(unavailable(other)),
         }
 

@@ -64,15 +64,22 @@ async fn compile_workflow_for_mcp(
 
     let repository = WorkflowRepository::new(server.pool.clone());
 
-    // A version that embeds workflows skips the cached image: it may hold
-    // children other than the ones just checked. Below, a stale row is
-    // invalidated and rebuilt, and a compile already queued is reused.
+    // The cached image of a version that embeds workflows answers only when
+    // it was built from the children just checked, such as a rebuild that
+    // finished after an earlier call timed out. Otherwise a stale row is
+    // invalidated and rebuilt below, and a compile already queued is reused.
     if !force_recompile
-        && closure.may_reuse_cached_image()
         && let Some(image_id) = repository
             .get_fresh_registered_image_id(&server.tenant_id, workflow_id, version)
             .await
             .map_err(|e| err(format!("Failed to check compilation freshness: {}", e)))?
+        && closure
+            .may_reuse_cached_image(
+                server.runtime_client.as_deref(),
+                &server.tenant_id,
+                &image_id,
+            )
+            .await
     {
         return Ok(McpCompileResult {
             completed: true,

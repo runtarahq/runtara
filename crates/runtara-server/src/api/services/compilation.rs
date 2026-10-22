@@ -487,26 +487,117 @@ pub enum CompileAgentGateError {
 }
 
 /// What [`check_compile_agent_allowlist`] found in a closure it allowed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct AllowedClosure {
-    /// The version embeds other workflows.
-    pub embeds_workflows: bool,
+    /// The embedded children the check walked, as they resolve today.
+    children: Vec<crate::compiler::child_workflows::ChildWorkflowInfo>,
 }
 
+/// One embedded child as an image records it: the EmbedWorkflow step, the
+/// child workflow, its resolved version, and its direct manifest checksum.
+type ChildFingerprint = (String, String, i64, String);
+
 impl AllowedClosure {
-    /// Whether a compile may hand back the version's cached image instead of
-    /// building one from the closure just checked.
+    /// The version embeds other workflows.
+    pub fn embeds_workflows(&self) -> bool {
+        !self.children.is_empty()
+    }
+
+    /// Whether a compile may hand back `image_id`, the version's cached
+    /// image, instead of building one from the closure just checked.
     ///
     /// The check reads each embedded child as it resolves today, but a cached
     /// image keeps the children it was built with, and its freshness covers
     /// only the version's own definition. A child published since ("latest"
     /// or "current" moved) or edited in place would leave agents in the image
-    /// the check never saw, and nothing records the children an image was
-    /// built from where this could compare them. So a version that embeds
-    /// workflows is rebuilt rather than reused.
-    pub fn may_reuse_cached_image(self) -> bool {
-        !self.embeds_workflows
+    /// the check never saw. So the image of a version that embeds workflows
+    /// is reused only when it was built from the children just checked; see
+    /// [`Self::built_from_these_children`]. Anything that cannot show that,
+    /// including an image the runtime cannot read, is rebuilt.
+    pub async fn may_reuse_cached_image(
+        &self,
+        runtime_client: Option<&RuntimeClient>,
+        tenant_id: &str,
+        image_id: &str,
+    ) -> bool {
+        if self.children.is_empty() {
+            return true;
+        }
+        let Some(runtime_client) = runtime_client else {
+            return false;
+        };
+        match runtime_client.get_image(image_id, tenant_id).await {
+            Ok(image) => self.built_from_these_children(image.as_ref()),
+            Err(error) => {
+                warn!(
+                    image_id,
+                    error = %error,
+                    "Failed to read the cached image's children; rebuilding it"
+                );
+                false
+            }
+        }
     }
+
+    /// Whether `image` records exactly the embedded children just checked:
+    /// the same EmbedWorkflow steps, child workflows, resolved versions and
+    /// manifest checksums. The checksum is the child manifest the compiler
+    /// recorded, so a child version edited in place counts as changed too.
+    pub fn built_from_these_children(&self, image: Option<&ImageSummary>) -> bool {
+        if self.children.is_empty() {
+            return true;
+        }
+        let Some(recorded) = image.and_then(image_child_fingerprints) else {
+            return false;
+        };
+        self.child_fingerprints()
+            .is_some_and(|checked| checked == recorded)
+    }
+
+    fn child_fingerprints(&self) -> Option<Vec<ChildFingerprint>> {
+        let mut fingerprints = self
+            .children
+            .iter()
+            .map(|child| {
+                let graph = parse_execution_graph(&child.execution_graph).ok()?;
+                let manifest =
+                    runtara_workflows::direct_wasm::manifest::build_direct_workflow_manifest(
+                        &graph,
+                    )
+                    .ok()?;
+                Some((
+                    child.step_id.clone(),
+                    child.workflow_ref.workflow_id.clone(),
+                    i64::from(child.workflow_ref.version),
+                    manifest.checksum().to_owned(),
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        fingerprints.sort();
+        Some(fingerprints)
+    }
+}
+
+/// The embedded children an image was built with, from the direct artifact
+/// metadata stored at registration. `None` when the image records none.
+fn image_child_fingerprints(image: &ImageSummary) -> Option<Vec<ChildFingerprint>> {
+    let mut fingerprints = image
+        .metadata
+        .as_ref()?
+        .pointer("/workflow/directArtifact/childWorkflows")?
+        .as_array()?
+        .iter()
+        .map(|child| {
+            Some((
+                child.get("stepId")?.as_str()?.to_owned(),
+                child.get("workflowId")?.as_str()?.to_owned(),
+                child.get("versionResolved")?.as_i64()?,
+                child.get("manifestChecksum")?.as_str()?.to_owned(),
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    fingerprints.sort();
+    Some(fingerprints)
 }
 
 /// The agent allowlist check on a stored version's graph and its whole
@@ -542,19 +633,19 @@ pub async fn check_compile_agent_allowlist(
             CompileAgentGateError::Unchecked(format!("Failed to load workflow definition: {}", e))
         })?;
     let Some(definition) = definition else {
-        return Ok(AllowedClosure {
-            embeds_workflows: false,
-        });
+        return Ok(AllowedClosure::default());
     };
     let children = load_child_workflows(pool, tenant_id, workflow_id, version, &definition).await;
-    let embeds_workflows = children.as_ref().is_ok_and(|children| !children.is_empty());
+    let checked_children = children.as_ref().ok().cloned().unwrap_or_default();
     compile_agent_allowlist_decision(
         crate::config::entitlements(),
         &definition,
         children,
         &crate::workflow_agents::published_agent_ids(tenant_id),
     )?;
-    Ok(AllowedClosure { embeds_workflows })
+    Ok(AllowedClosure {
+        children: checked_children,
+    })
 }
 
 /// The decision [`check_compile_agent_allowlist`] makes once the closure is
@@ -2665,6 +2756,46 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn a_cached_image_is_reused_only_when_built_from_the_checked_children() {
+        let child_graph = graph_calling("http");
+        let closure = AllowedClosure {
+            children: vec![child_with_graph(child_graph.clone())],
+        };
+        let checksum = runtara_workflows::direct_wasm::manifest::build_direct_workflow_manifest(
+            &parse_execution_graph(&child_graph).expect("child parses"),
+        )
+        .expect("manifest builds")
+        .checksum()
+        .to_owned();
+        let image_recording = |version: i64, checksum: &str| {
+            image_summary_with_metadata(serde_json::json!({
+                "workflow": {"directArtifact": {"childWorkflows": [{
+                    "stepId": "embed",
+                    "workflowId": "child-wf",
+                    "versionRequested": "latest",
+                    "versionResolved": version,
+                    "manifestChecksum": checksum,
+                }]}}
+            }))
+        };
+
+        assert!(closure.built_from_these_children(Some(&image_recording(1, &checksum))));
+        // Built from another child version, or the same version edited in
+        // place, or with no record of its children at all.
+        assert!(!closure.built_from_these_children(Some(&image_recording(2, &checksum))));
+        assert!(!closure.built_from_these_children(Some(&image_recording(1, "edited"))));
+        assert!(
+            !closure.built_from_these_children(Some(&image_summary_with_metadata(
+                serde_json::json!({"workflow": {}})
+            )))
+        );
+        assert!(!closure.built_from_these_children(None));
+
+        // A version that embeds nothing has no children to differ.
+        assert!(AllowedClosure::default().built_from_these_children(None));
     }
 
     #[test]
