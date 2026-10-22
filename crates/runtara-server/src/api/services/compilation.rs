@@ -451,6 +451,91 @@ pub fn reject_uninstalled_trusted_pins(trusted_pins: &[String]) -> Result<(), Se
     })
 }
 
+/// Why [`check_compile_agent_allowlist`] refused a compile.
+#[derive(Debug)]
+pub enum CompileAgentGateError {
+    /// A step in the version's closure calls an agent the tenant's allowlist
+    /// leaves out.
+    Denied(crate::entitlement_error::EntitlementDenial),
+    /// The closure could not be loaded or parsed, so it was not checked.
+    Unchecked(String),
+}
+
+/// The agent allowlist check on a stored version's graph and its whole
+/// EmbedWorkflow closure, with the tenant's published workflow-agents exempt,
+/// as on save.
+///
+/// Save checks the closure when the version is written, but the allowlist can
+/// change afterwards. The REST and MCP compiles run this before their
+/// compiled-image fast paths, so a version saved under an older allowlist can
+/// neither compile nor keep handing out its cached image with an agent the
+/// tenant may no longer use. A closure that cannot be loaded or parsed is
+/// refused, as save refuses it, rather than checked in part.
+///
+/// A version that does not exist passes: the compile reports it as not found.
+pub async fn check_compile_agent_allowlist(
+    pool: &sqlx::PgPool,
+    tenant_id: &str,
+    workflow_id: &str,
+    version: i32,
+) -> Result<(), CompileAgentGateError> {
+    let definition = WorkflowRepository::new(pool.clone())
+        .get_definition(tenant_id, workflow_id, version)
+        .await
+        .map_err(|e| {
+            CompileAgentGateError::Unchecked(format!("Failed to load workflow definition: {}", e))
+        })?;
+    let Some(definition) = definition else {
+        return Ok(());
+    };
+    let children = crate::compiler::child_workflows::load_child_workflows_for_validation(
+        pool,
+        tenant_id,
+        &definition,
+    )
+    .await;
+    compile_agent_allowlist_decision(
+        crate::config::entitlements(),
+        &definition,
+        children,
+        &crate::workflow_agents::published_agent_ids(tenant_id),
+    )
+}
+
+/// The decision [`check_compile_agent_allowlist`] makes once the closure is
+/// loaded, taking the snapshot as an argument so unit tests can restrict it.
+/// `children` is the closure load's result: a failed load, or a child whose
+/// graph does not parse, refuses the compile.
+pub fn compile_agent_allowlist_decision(
+    snapshot: &crate::entitlements::EntitlementSnapshot,
+    definition: &serde_json::Value,
+    children: Result<Vec<crate::compiler::child_workflows::ChildWorkflowInfo>, String>,
+    published_agent_ids: &std::collections::HashSet<String>,
+) -> Result<(), CompileAgentGateError> {
+    let root = parse_execution_graph(definition).map_err(CompileAgentGateError::Unchecked)?;
+    let children = children.map_err(|e| {
+        CompileAgentGateError::Unchecked(format!("Failed to load child workflows: {}", e))
+    })?;
+    let child_graphs = children
+        .into_iter()
+        .map(|info| {
+            parse_execution_graph(&info.execution_graph).map_err(|e| {
+                CompileAgentGateError::Unchecked(format!(
+                    "Failed to parse child workflow '{}': {}",
+                    info.workflow_ref.workflow_id, e
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    crate::middleware::entitlement::walk_closure_for_agents(
+        snapshot,
+        &root,
+        &child_graphs,
+        published_agent_ids,
+    )
+    .map_err(CompileAgentGateError::Denied)
+}
+
 /// A failed direct compile as a service error. A parent refused because a
 /// published workflow-agent it composes pins a stale trusted version keeps
 /// those pins, so its recorded failure is released when the workflow-agent is
@@ -2355,5 +2440,154 @@ mod tests {
         };
 
         assert_eq!(result.binary_size, 104_857_600);
+    }
+
+    fn http_only_snapshot() -> crate::entitlements::EntitlementSnapshot {
+        crate::entitlements::EntitlementSnapshot::parse_entitlements(
+            "tenant-test",
+            None,
+            Some(r#"{"agents":["http"]}"#),
+            None,
+            &crate::entitlements::parse_agents(&["http", "csv"]),
+        )
+        .expect("snapshot parses")
+    }
+
+    fn graph_calling(agent: &str) -> serde_json::Value {
+        serde_json::json!({
+            "entryPoint": "call",
+            "steps": {
+                "call": {"stepType": "Agent", "id": "call", "agentId": agent, "capabilityId": "run"}
+            }
+        })
+    }
+
+    fn graph_embedding_child() -> serde_json::Value {
+        serde_json::json!({
+            "entryPoint": "embed",
+            "steps": {
+                "embed": {"stepType": "EmbedWorkflow", "id": "embed", "childWorkflowId": "child-wf", "childVersion": "latest"}
+            }
+        })
+    }
+
+    fn child_with_graph(
+        execution_graph: serde_json::Value,
+    ) -> crate::compiler::child_workflows::ChildWorkflowInfo {
+        crate::compiler::child_workflows::ChildWorkflowInfo {
+            step_id: "embed".to_string(),
+            workflow_ref: runtara_workflows::dependency_analysis::WorkflowReference {
+                workflow_id: "child-wf".to_string(),
+                version: 1,
+            },
+            execution_graph,
+            version_requested: "latest".to_string(),
+        }
+    }
+
+    fn expect_denied_agent(result: Result<(), CompileAgentGateError>, agent: &str) {
+        match result {
+            Err(CompileAgentGateError::Denied(denial)) => {
+                assert_eq!(
+                    denial.code(),
+                    crate::entitlement_error::codes::AGENT_NOT_ENABLED
+                );
+                assert_eq!(denial.json_body()["agent"], agent);
+            }
+            other => panic!("expected AGENT_NOT_ENABLED for '{agent}', got {other:?}"),
+        }
+    }
+
+    fn expect_unchecked(result: Result<(), CompileAgentGateError>, needle: &str) {
+        match result {
+            Err(CompileAgentGateError::Unchecked(message)) => {
+                assert!(message.contains(needle), "{message}");
+            }
+            other => panic!("expected an unchecked refusal mentioning '{needle}', got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compile_gate_denies_an_agent_outside_the_allowlist_in_the_root_or_a_child() {
+        let snapshot = http_only_snapshot();
+        let none_published = std::collections::HashSet::new();
+
+        expect_denied_agent(
+            compile_agent_allowlist_decision(
+                &snapshot,
+                &graph_calling("csv"),
+                Ok(Vec::new()),
+                &none_published,
+            ),
+            "csv",
+        );
+        expect_denied_agent(
+            compile_agent_allowlist_decision(
+                &snapshot,
+                &graph_embedding_child(),
+                Ok(vec![child_with_graph(graph_calling("csv"))]),
+                &none_published,
+            ),
+            "csv",
+        );
+
+        assert!(
+            compile_agent_allowlist_decision(
+                &snapshot,
+                &graph_embedding_child(),
+                Ok(vec![child_with_graph(graph_calling("http"))]),
+                &none_published,
+            )
+            .is_ok()
+        );
+        // The tenant's published workflow-agents are exempt, as on save.
+        let published = std::collections::HashSet::from(["shout-echo".to_string()]);
+        assert!(
+            compile_agent_allowlist_decision(
+                &snapshot,
+                &graph_calling("shout-echo"),
+                Ok(Vec::new()),
+                &published,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn compile_gate_refuses_a_closure_it_cannot_load_or_parse() {
+        let snapshot = http_only_snapshot();
+        let none_published = std::collections::HashSet::new();
+
+        // The root only calls an allowed agent, so walking it alone would pass.
+        expect_unchecked(
+            compile_agent_allowlist_decision(
+                &snapshot,
+                &graph_calling("http"),
+                Err("Database error: connection reset".to_string()),
+                &none_published,
+            ),
+            "Failed to load child workflows: Database error: connection reset",
+        );
+        expect_unchecked(
+            compile_agent_allowlist_decision(
+                &snapshot,
+                &graph_embedding_child(),
+                Ok(vec![
+                    child_with_graph(graph_calling("http")),
+                    child_with_graph(serde_json::json!({"steps": "not a map"})),
+                ]),
+                &none_published,
+            ),
+            "Failed to parse child workflow 'child-wf'",
+        );
+        expect_unchecked(
+            compile_agent_allowlist_decision(
+                &snapshot,
+                &serde_json::json!({"steps": "not a map"}),
+                Ok(Vec::new()),
+                &none_published,
+            ),
+            "Failed to parse execution graph",
+        );
     }
 }

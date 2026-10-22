@@ -621,6 +621,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The MCP `validate_graph` tool takes the id as `workflow_id`. The MCP
   deploy tools pass it.
+- **Compiling checks the agent allowlist on every path, and refuses what it
+  cannot check.** The MCP `compile_workflow` tool did not check the stored
+  graph against the tenant's allowlist: a version saved before an agent left
+  the allowlist still compiled, and its cached image was still returned as
+  compiled. It now runs the check the REST compile runs, over the graph and
+  its embedded children, before the cached image can answer
+  (`AGENT_NOT_ENABLED`). The REST compile checked only the root graph when
+  the embedded children failed to load, and skipped a child whose graph did
+  not parse. Both compiles now refuse in those cases, and when the version's
+  own graph fails to load or parse, as saving does.
 - **`preflight_compile` checks the mappings of the right version.** It read
   its version from fields the workflow response does not have, so it
   reported version 0, and its mapping check of version 0 failed unseen. It

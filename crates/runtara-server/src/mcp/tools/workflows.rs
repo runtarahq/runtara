@@ -43,6 +43,24 @@ async fn compile_workflow_for_mcp(
 ) -> Result<McpCompileResult, rmcp::ErrorData> {
     validate_path_param("workflow_id", workflow_id)?;
 
+    // The REST compile's allowlist check, before the cached image below can
+    // answer: the allowlist may have changed since the version was saved.
+    crate::api::services::compilation::check_compile_agent_allowlist(
+        &server.pool,
+        &server.tenant_id,
+        workflow_id,
+        version,
+    )
+    .await
+    .map_err(|e| match e {
+        crate::api::services::compilation::CompileAgentGateError::Denied(denial) => {
+            denial.to_rmcp_error()
+        }
+        crate::api::services::compilation::CompileAgentGateError::Unchecked(message) => {
+            err(message)
+        }
+    })?;
+
     let repository = WorkflowRepository::new(server.pool.clone());
 
     if !force_recompile
