@@ -105,6 +105,11 @@ path = "tests/compilation_failure_terminality.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
+name = "compile_agent_allowlist"
+path = "tests/compile_agent_allowlist.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
 name = "invocation_cleanup_test"
 path = "tests/invocation_cleanup_test.rs"
 required-features = ["db-integration-tests"]

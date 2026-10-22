@@ -472,6 +472,12 @@ pub enum CompileAgentGateError {
 /// tenant may no longer use. A closure that cannot be loaded or parsed is
 /// refused, as save refuses it, rather than checked in part.
 ///
+/// The closure is loaded the way the compiler loads it, so every
+/// EmbedWorkflow reference must resolve. A cached image keeps the children it
+/// was built with, so a child that has since been deleted, or a child version
+/// that no longer resolves, would leave agents in that image this check
+/// cannot see: such a closure is refused, as a fresh compile of it would be.
+///
 /// A version that does not exist passes: the compile reports it as not found.
 pub async fn check_compile_agent_allowlist(
     pool: &sqlx::PgPool,
@@ -488,12 +494,7 @@ pub async fn check_compile_agent_allowlist(
     let Some(definition) = definition else {
         return Ok(());
     };
-    let children = crate::compiler::child_workflows::load_child_workflows_for_validation(
-        pool,
-        tenant_id,
-        &definition,
-    )
-    .await;
+    let children = load_child_workflows(pool, tenant_id, workflow_id, version, &definition).await;
     compile_agent_allowlist_decision(
         crate::config::entitlements(),
         &definition,
@@ -504,8 +505,8 @@ pub async fn check_compile_agent_allowlist(
 
 /// The decision [`check_compile_agent_allowlist`] makes once the closure is
 /// loaded, taking the snapshot as an argument so unit tests can restrict it.
-/// `children` is the closure load's result: a failed load, or a child whose
-/// graph does not parse, refuses the compile.
+/// `children` is the closure load's result: a failed or incomplete load, or a
+/// child whose graph does not parse, refuses the compile.
 pub fn compile_agent_allowlist_decision(
     snapshot: &crate::entitlements::EntitlementSnapshot,
     definition: &serde_json::Value,

@@ -630,7 +630,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`AGENT_NOT_ENABLED`). The REST compile checked only the root graph when
   the embedded children failed to load, and skipped a child whose graph did
   not parse. Both compiles now refuse in those cases, and when the version's
-  own graph fails to load or parse, as saving does.
+  own graph fails to load or parse, as saving does. They also refuse when an
+  embedded child no longer resolves (deleted, or its pinned version gone):
+  the cached image still carries that child's agents, which the check can no
+  longer see.
 - **`preflight_compile` checks the mappings of the right version.** It read
   its version from fields the workflow response does not have, so it
   reported version 0, and its mapping check of version 0 failed unseen. It
