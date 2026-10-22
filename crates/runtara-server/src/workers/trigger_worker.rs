@@ -91,9 +91,10 @@ enum ProcessResult {
     Deduplicated,
     /// Event failed permanently - ACK it to prevent infinite retries
     PermanentFailure(String),
-    /// The workflow cannot run as authored. ACKed like a permanent failure,
-    /// but recorded as an author-facing outcome rather than a system fault so
-    /// it does not raise alerts every time someone runs an unfinished workflow.
+    /// The workflow cannot run as authored, or calls an agent the tenant may
+    /// not use. ACKed like a permanent failure, but recorded as an
+    /// author-facing outcome rather than a system fault so it does not raise
+    /// alerts every time someone runs an unfinished workflow.
     NotRunnable(String),
     /// Event should be retried later - DON'T ACK (stays in PEL)
     RetryLater(String),
@@ -911,6 +912,29 @@ async fn process_trigger_event(
                 instance_id = %event.instance_id,
                 error = %e,
                 "Workflow cannot run as authored"
+            );
+            ProcessResult::NotRunnable(e.to_string())
+        }
+        Err(e @ ExecutionError::EntitlementDenied(_)) => {
+            if !terminalize_source_launch_claim(
+                outbox,
+                source_request_id,
+                handoff_owner,
+                "entitlement_denied",
+                Some(&e.to_string()),
+            )
+            .await
+            {
+                return ProcessResult::HandoffInProgress(
+                    "source terminalization is pending for a denied run".to_string(),
+                );
+            }
+            // Permanent until the tenant's entitlements or the workflow
+            // change, and nothing is wrong with the system.
+            warn!(
+                instance_id = %event.instance_id,
+                error = %e,
+                "Run refused by the tenant's entitlements"
             );
             ProcessResult::NotRunnable(e.to_string())
         }

@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use serde_json::Value;
 use sqlx::PgPool;
 use tracing::{debug, info, instrument, warn};
@@ -32,6 +32,7 @@ use crate::api::dto::workflows::{
 };
 use crate::api::repositories::trigger_stream::TriggerStreamPublisher;
 use crate::api::repositories::workflows::{CompilationStatus, WorkflowRepository};
+use crate::api::services::compilation::{CompileAgentGateError, check_compile_agent_allowlist};
 use crate::metrics::MetricsService;
 use crate::product_events::{ActorType, EventSource, EventType, ProductEvent, ProductEventSink};
 use crate::runtime_client::{RuntimeClient, RuntimeError};
@@ -569,7 +570,15 @@ pub struct ExecutionEngine {
     /// across processes/restarts; this prevents a local cached-count race
     /// before the next background runtime refresh observes a launch.
     concurrency_admission: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Registered images whose workflow passed the agent allowlist check in
+    /// this process; see [`Self::require_allowed_agents`].
+    allowlisted_images: DashSet<String>,
 }
+
+/// Images [`ExecutionEngine::allowlisted_images`] remembers before it starts
+/// over. Each recompile registers a new image, so the set would otherwise grow
+/// for as long as the process runs.
+const ALLOWLISTED_IMAGES_CAPACITY: usize = 4096;
 
 /// How long an in-flight execution count stays usable for the concurrency gate.
 ///
@@ -618,6 +627,7 @@ impl ExecutionEngine {
             concurrency_reservations: Arc::new(DashMap::new()),
             concurrency_refresh: Arc::new(DashMap::new()),
             concurrency_admission: Arc::new(DashMap::new()),
+            allowlisted_images: DashSet::new(),
         }
     }
 
@@ -964,14 +974,19 @@ impl ExecutionEngine {
             error,
             terminal: true,
             ..
-        } = compilation
+        } = &compilation
         {
             return Err(ExecutionError::WorkflowNotRunnable {
                 workflow_id: req.workflow_id.to_string(),
                 version,
-                error,
+                error: error.clone(),
             });
         }
+
+        // 1.6 The launch refuses a workflow that calls an agent the tenant may
+        // not use; refuse it here too, so the caller hears it now.
+        self.require_allowed_agents(req.tenant_id, req.workflow_id, version, &compilation)
+            .await?;
 
         // 2. Get workflow for input schema
         let workflow = self
@@ -2542,6 +2557,64 @@ impl ExecutionEngine {
         }
     }
 
+    /// Refuse a run whose workflow calls an agent the tenant's allowlist
+    /// leaves out.
+    ///
+    /// Save and compile check the allowlist, but it can change after a version
+    /// was compiled, and a compiled image runs whatever it was built with. So
+    /// every launch, and the admissions in front of it, check the version's
+    /// graph and its EmbedWorkflow closure again with
+    /// [`check_compile_agent_allowlist`], before the ready image runs or a
+    /// compile of the version is queued.
+    ///
+    /// The allowlist is fixed for the life of the process and a registered
+    /// image never changes, so a ready image that passed is remembered by its
+    /// id and later runs of it skip the check. A version whose compile failed
+    /// for good passes: it cannot run, and the caller reports why.
+    async fn require_allowed_agents(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+        compilation: &CompilationStatus,
+    ) -> Result<(), ExecutionError> {
+        let image_id = match compilation {
+            CompilationStatus::Ready {
+                registered_image_id,
+                ..
+            } => Some(registered_image_id.as_str()),
+            CompilationStatus::Failed { terminal: true, .. } => return Ok(()),
+            _ => None,
+        };
+        if image_id.is_some_and(|image_id| self.allowlisted_images.contains(image_id)) {
+            return Ok(());
+        }
+        match check_compile_agent_allowlist(&self.pool, tenant_id, workflow_id, version).await {
+            Ok(()) => {
+                if let Some(image_id) = image_id {
+                    self.remember_allowlisted_image(image_id);
+                }
+                Ok(())
+            }
+            Err(CompileAgentGateError::Denied(denial)) => {
+                denial.audit_log(tenant_id);
+                Err(ExecutionError::EntitlementDenied(denial))
+            }
+            Err(CompileAgentGateError::Unchecked(message)) => Err(ExecutionError::DatabaseError(
+                format!("Failed to check the agent allowlist: {message}"),
+            )),
+        }
+    }
+
+    /// Remember an image that passed [`Self::require_allowed_agents`],
+    /// starting over once [`ALLOWLISTED_IMAGES_CAPACITY`] are remembered.
+    fn remember_allowlisted_image(&self, image_id: &str) {
+        if self.allowlisted_images.len() >= ALLOWLISTED_IMAGES_CAPACITY {
+            self.allowlisted_images.clear();
+        }
+        self.allowlisted_images.insert(image_id.to_string());
+    }
+
     /// Ensure the workflow is compiled (non-blocking: queues compilation if
     /// needed and returns `NotCompiled` for the caller to retry).
     ///
@@ -2565,6 +2638,11 @@ impl ExecutionEngine {
                 "No runnable version for workflow '{workflow_id}'"
             ))
         })?;
+
+        // Every launch passes here, so this is the check that holds for runs
+        // no admission saw (cron, events, requests queued before a restart).
+        self.require_allowed_agents(tenant_id, workflow_id, version, &status)
+            .await?;
 
         if let CompilationStatus::Ready {
             registered_image_id,
@@ -2699,6 +2777,9 @@ impl ExecutionEngine {
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
             })?;
+        // Before the compile this may queue, as on launch.
+        self.require_allowed_agents(tenant_id, workflow_id, version, &status)
+            .await?;
         if let CompilationStatus::Ready {
             registered_image_id,
             execution_timeout,
@@ -3050,6 +3131,92 @@ mod tests {
         let fresh = format!("tenant-{}", uuid::Uuid::new_v4());
         engine.reservations_for(&fresh).store(3, Ordering::SeqCst);
         assert_eq!(engine.active_execution_count(&fresh, 100), 3);
+    }
+
+    /// An engine whose database refuses connections, so any allowlist check
+    /// that reaches it fails.
+    fn engine_without_database() -> ExecutionEngine {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(500))
+            .connect_lazy("postgres://127.0.0.1:1/unused")
+            .expect("lazy pool");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        ExecutionEngine::new(
+            pool.clone(),
+            Arc::new(WorkflowRepository::new(pool)),
+            None,
+            None,
+            ProductEventSink::new(tx),
+        )
+    }
+
+    fn ready_image(image_id: &str) -> CompilationStatus {
+        CompilationStatus::Ready {
+            translated_path: String::new(),
+            registered_image_id: image_id.to_string(),
+            execution_timeout: None,
+            track_events: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_image_that_passed_the_allowlist_runs_without_another_check() {
+        let engine = engine_without_database();
+        engine.remember_allowlisted_image("img-passed");
+
+        assert!(
+            engine
+                .require_allowed_agents("tenant", "wf", 1, &ready_image("img-passed"))
+                .await
+                .is_ok(),
+            "a remembered image must not reach the database"
+        );
+        // A compile that failed for good is reported by the caller, unchecked.
+        let failed = CompilationStatus::Failed {
+            error: "no steps".to_string(),
+            terminal: true,
+            authoring: true,
+        };
+        assert!(
+            engine
+                .require_allowed_agents("tenant", "wf", 1, &failed)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_the_allowlist_could_not_be_checked_for_is_refused() {
+        let engine = engine_without_database();
+
+        for status in [ready_image("img-unchecked"), CompilationStatus::NotReady] {
+            match engine
+                .require_allowed_agents("tenant", "wf", 1, &status)
+                .await
+            {
+                Err(ExecutionError::DatabaseError(message)) => {
+                    assert!(message.contains("agent allowlist"), "{message}");
+                }
+                other => panic!("expected the run to be refused, got {other:?}"),
+            }
+        }
+        assert!(
+            !engine.allowlisted_images.contains("img-unchecked"),
+            "an image that was not checked must not be remembered"
+        );
+    }
+
+    #[tokio::test]
+    async fn remembered_images_start_over_at_capacity() {
+        let engine = engine_without_database();
+        for n in 0..ALLOWLISTED_IMAGES_CAPACITY {
+            engine.remember_allowlisted_image(&format!("img-{n}"));
+        }
+        assert_eq!(engine.allowlisted_images.len(), ALLOWLISTED_IMAGES_CAPACITY);
+
+        engine.remember_allowlisted_image("img-next");
+        assert_eq!(engine.allowlisted_images.len(), 1);
+        assert!(engine.allowlisted_images.contains("img-next"));
     }
 
     /// Admissions the gate has made but the cached count cannot see yet must

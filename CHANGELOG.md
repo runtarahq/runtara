@@ -631,6 +631,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the embedded children failed to load, and skipped a child whose graph did
   not parse. Both compiles now refuse in those cases, and when the version's
   own graph fails to load or parse, as saving does.
+- **Running a workflow checks the agent allowlist.** Nothing between a run's
+  request and its launch checked it: a version compiled before an agent left
+  the allowlist kept running from its cached image, and one not compiled yet
+  was compiled on the first run. Every launch (HTTP, MCP, cron, webhooks,
+  events, sessions, chat, replay and `control` children) now runs the
+  compile's check before the image starts or a compile is queued. A refused
+  run never starts: its execution reads "The run never started" with the
+  `AGENT_NOT_ENABLED` message. Starting a run over HTTP or MCP, and
+  `control:start`, refuse it up front instead (`AGENT_NOT_ENABLED`, HTTP
+  403). An image that passed is remembered for the life of the process, so
+  later runs of it do not repeat the check.
 - **`preflight_compile` checks the mappings of the right version.** It read
   its version from fields the workflow response does not have, so it
   reported version 0, and its mapping check of version 0 failed unseen. It

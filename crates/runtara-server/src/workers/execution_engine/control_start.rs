@@ -294,13 +294,22 @@ impl ExecutionEngine {
             error,
             terminal: true,
             ..
-        } = compilation
+        } = &compilation
         {
             return Err(StartChildError::NotRunnable(format!(
                 "workflow '{}' version {version} failed to compile: {error}",
                 start.workflow_id
             )));
         }
+        // The launch would refuse it, so refuse it before admitting it.
+        self.require_allowed_agents(tenant_id, &start.workflow_id, version, &compilation)
+            .await
+            .map_err(|error| match error {
+                super::ExecutionError::EntitlementDenied(denial) => {
+                    StartChildError::Denied(denial.message())
+                }
+                other => unavailable(other),
+            })?;
 
         let cap = self.effective_concurrency_cap();
         let limit = u32::try_from(cap).unwrap_or(u32::MAX);
