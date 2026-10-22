@@ -641,7 +641,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AGENT_NOT_ENABLED` message. Starting a run over HTTP or MCP, and
   `control:start`, refuse it up front instead (`AGENT_NOT_ENABLED`, HTTP
   403). An image that passed is remembered for the life of the process, so
-  later runs of it do not repeat the check.
+  later runs of it do not repeat the check. A version not compiled yet is
+  refused only for a forbidden agent the check finds; a graph it cannot read
+  is left to the compile, which reports it as before.
 - **`preflight_compile` checks the mappings of the right version.** It read
   its version from fields the workflow response does not have, so it
   reported version 0, and its mapping check of version 0 failed unseen. It

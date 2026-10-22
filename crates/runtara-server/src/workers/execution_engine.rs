@@ -2571,6 +2571,12 @@ impl ExecutionEngine {
     /// image never changes, so a ready image that passed is remembered by its
     /// id and later runs of it skip the check. A version whose compile failed
     /// for good passes: it cannot run, and the caller reports why.
+    ///
+    /// A ready image is about to run, so a check that cannot read its closure
+    /// refuses it. A version not compiled yet is refused only for a denial the
+    /// check finds: the compile it waits for reads the same closure and
+    /// reports a graph it cannot load or parse, as before, and its image is
+    /// checked again before it runs.
     async fn require_allowed_agents(
         &self,
         tenant_id: &str,
@@ -2600,6 +2606,7 @@ impl ExecutionEngine {
                 denial.audit_log(tenant_id);
                 Err(ExecutionError::EntitlementDenied(denial))
             }
+            Err(CompileAgentGateError::Unchecked(_)) if image_id.is_none() => Ok(()),
             Err(CompileAgentGateError::Unchecked(message)) => Err(ExecutionError::DatabaseError(
                 format!("Failed to check the agent allowlist: {message}"),
             )),
@@ -3186,23 +3193,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_run_the_allowlist_could_not_be_checked_for_is_refused() {
+    async fn a_ready_image_the_allowlist_could_not_be_checked_for_is_refused() {
         let engine = engine_without_database();
 
-        for status in [ready_image("img-unchecked"), CompilationStatus::NotReady] {
-            match engine
-                .require_allowed_agents("tenant", "wf", 1, &status)
-                .await
-            {
-                Err(ExecutionError::DatabaseError(message)) => {
-                    assert!(message.contains("agent allowlist"), "{message}");
-                }
-                other => panic!("expected the run to be refused, got {other:?}"),
+        match engine
+            .require_allowed_agents("tenant", "wf", 1, &ready_image("img-unchecked"))
+            .await
+        {
+            Err(ExecutionError::DatabaseError(message)) => {
+                assert!(message.contains("agent allowlist"), "{message}");
             }
+            other => panic!("expected the run to be refused, got {other:?}"),
         }
         assert!(
             !engine.allowlisted_images.contains("img-unchecked"),
             "an image that was not checked must not be remembered"
+        );
+
+        // Not compiled yet: the compile reads the same closure and reports
+        // what it cannot, and the image it builds is checked before it runs.
+        assert!(
+            engine
+                .require_allowed_agents("tenant", "wf", 1, &CompilationStatus::NotReady)
+                .await
+                .is_ok()
         );
     }
 
