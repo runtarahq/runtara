@@ -53,6 +53,27 @@ fn image_source_checksum(image: &ImageSummary) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
+/// The agents an image was composed with, from the direct artifact metadata
+/// stored at registration. A launch checks them against the allowlist, since
+/// an image keeps the children it was built with. `None` when the image
+/// carries no such record (registered before it existed, or without its
+/// artifact metadata), or when the record is malformed.
+pub(crate) fn image_agent_ids(image: &ImageSummary) -> Option<Vec<String>> {
+    image
+        .metadata
+        .as_ref()?
+        .pointer("/workflow/directArtifact/agentComponents")?
+        .as_array()?
+        .iter()
+        .map(|component| {
+            component
+                .get("agentId")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
 /// `templateMajor` stored in image metadata at registration time. Used by the
 /// cache check below to invalidate every workflow on a major-version bump of
 /// the compiler (e.g. `5` → `6`); minor / patch bumps don't recompile.
@@ -1141,7 +1162,9 @@ impl CompilationService {
             // gone from disk is precisely what a forced recompile is here to
             // repair — and reusing it re-registers nothing, so the file stays
             // missing and the caller retries into the same failure until its
-            // budget runs out.
+            // budget runs out. A row without the agents the image records is
+            // the same: a launch rebuilds such an image to check them, and
+            // only re-registering stores the record.
             Ok(Some(existing_image))
                 if image_matches_compiled_artifact(
                     &existing_image,
@@ -1149,9 +1172,10 @@ impl CompilationService {
                     result.compiler_mode,
                     track_events,
                     &result.binary_checksum,
-                ) && self
-                    .artifact_present_for_reuse(client, &existing_image.image_id)
-                    .await =>
+                ) && image_agent_ids(&existing_image).is_some()
+                    && self
+                        .artifact_present_for_reuse(client, &existing_image.image_id)
+                        .await =>
             {
                 info!(
                     image_id = %existing_image.image_id,
@@ -1171,7 +1195,7 @@ impl CompilationService {
                 warn!(
                     image_id = %existing_image.image_id,
                     image_name = %image_name,
-                    "Registered artifact is missing from disk; re-registering the compiled binary"
+                    "Registered artifact is missing from disk or records no agents; re-registering the compiled binary"
                 );
                 self.register_image(client, &result, registration, &image_name)
                     .await?
@@ -2296,6 +2320,43 @@ mod tests {
             description: None,
             created_at: chrono::Utc::now(),
             metadata: Some(metadata),
+        }
+    }
+
+    #[test]
+    fn an_image_records_the_agents_it_was_composed_with() {
+        let image = image_summary_with_metadata(serde_json::json!({
+            "workflow": {
+                "directArtifact": {
+                    "agentComponents": [
+                        {"kind": "agent", "agentId": "csv", "package": "runtara:agent-csv"},
+                        {"kind": "agent", "agentId": "http", "package": "runtara:agent-http"}
+                    ]
+                }
+            }
+        }));
+        assert_eq!(
+            image_agent_ids(&image),
+            Some(vec!["csv".to_string(), "http".to_string()])
+        );
+
+        // No record to check: an image registered before it existed, or
+        // without its artifact metadata, or one whose record is malformed.
+        let without_metadata = ImageSummary {
+            metadata: None,
+            ..image_summary_with_metadata(serde_json::json!({}))
+        };
+        assert_eq!(image_agent_ids(&without_metadata), None);
+        for metadata in [
+            serde_json::json!({"workflow": {"executionTimeoutSeconds": 30}}),
+            serde_json::json!({
+                "workflow": {"directArtifact": {"agentComponents": [{"kind": "agent"}]}}
+            }),
+        ] {
+            assert_eq!(
+                image_agent_ids(&image_summary_with_metadata(metadata)),
+                None
+            );
         }
     }
 

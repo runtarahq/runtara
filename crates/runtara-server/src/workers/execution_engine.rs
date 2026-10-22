@@ -580,6 +580,27 @@ pub struct ExecutionEngine {
 /// for as long as the process runs.
 const ALLOWLISTED_IMAGES_CAPACITY: usize = 4096;
 
+/// The agent the compiler adds to an image for every AiAgent step.
+const AI_TOOLS_AGENT_ID: &str = "ai-tools";
+
+/// Refuse an image that records a built-in agent the allowlist leaves out.
+///
+/// Only built-in agents are gated. An id that is not a registered agent is a
+/// workflow-agent the tenant published: its own steps were checked when it
+/// was saved, and the image keeps its bytes even if it has since been
+/// unpublished. `ai-tools` is skipped, because the compiler adds it for every
+/// AiAgent step and the allowlist does not gate AiAgent steps on save or
+/// compile.
+fn image_agents_decision(
+    snapshot: &crate::entitlements::EntitlementSnapshot,
+    agents: &[String],
+) -> Result<(), crate::entitlement_error::EntitlementDenial> {
+    agents
+        .iter()
+        .filter(|agent| agent.as_str() != AI_TOOLS_AGENT_ID && snapshot.is_registered_agent(agent))
+        .try_for_each(|agent| crate::middleware::entitlement::agent_decision(snapshot, agent))
+}
+
 /// What a run does with the agent allowlist check of its workflow version.
 ///
 /// A ready image is about to run, so a check that cannot read its closure
@@ -1023,9 +1044,15 @@ impl ExecutionEngine {
         }
 
         // 1.6 The launch refuses a workflow that calls an agent the tenant may
-        // not use; refuse it here too, so the caller hears it now.
-        self.require_allowed_agents(req.tenant_id, req.workflow_id, version, &compilation)
-            .await?;
+        // not use; refuse it here too, so the caller hears it now. An image
+        // being rebuilt is admitted like a version not compiled yet.
+        match self
+            .require_allowed_agents(req.tenant_id, req.workflow_id, version, &compilation)
+            .await
+        {
+            Ok(()) | Err(ExecutionError::NotCompiled { .. }) => {}
+            Err(error) => return Err(error),
+        }
 
         // 2. Get workflow for input schema
         let workflow = self
@@ -1560,42 +1587,10 @@ impl ExecutionEngine {
                 );
 
                 // The local compilation record and Environment image metadata
-                // can both outlive the on-disk artifact. Invalidate only the
-                // exact image this launch selected: another compile may have
-                // attached a newer immutable image for the same version while
-                // this old launch was in flight.
-                let _ = sqlx::query(
-                    "DELETE FROM workflow_compilations \
-                     WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3 \
-                       AND registered_image_id = $4",
-                )
-                .bind(&event.tenant_id)
-                .bind(&event.workflow_id)
-                .bind(version)
-                .bind(&image_id)
-                .execute(&self.pool)
-                .await;
-
-                let compilation_queued =
-                    if let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() {
-                        crate::workers::compilation_worker::enqueue_compilation(
-                            &valkey_config.connection_url(),
-                            &event.tenant_id,
-                            &event.workflow_id,
-                            version,
-                            true,
-                        )
-                        .await
-                        .unwrap_or(false)
-                    } else {
-                        false
-                    };
-
-                return Err(ExecutionError::NotCompiled {
-                    workflow_id: event.workflow_id.clone(),
-                    version,
-                    compilation_queued,
-                });
+                // can both outlive the on-disk artifact.
+                return Err(self
+                    .recompile_image(&event.tenant_id, &event.workflow_id, version, &image_id)
+                    .await);
             }
             Err(RuntimeError::SingleInstanceActive) => {
                 return Err(ExecutionError::SingleInstanceActive);
@@ -2606,10 +2601,12 @@ impl ExecutionEngine {
     /// [`check_compile_agent_allowlist`], before the ready image runs or a
     /// compile of the version is queued.
     ///
-    /// The allowlist is fixed for the life of the process and a registered
-    /// image never changes, so a ready image that passed is remembered by its
-    /// id and later runs of it skip the check. A version whose compile failed
-    /// for good passes: it cannot run, and the caller reports why.
+    /// A ready image is also checked by the agents it recorded when it was
+    /// registered; see [`Self::require_allowed_image_agents`]. The allowlist
+    /// is fixed for the life of the process and a registered image never
+    /// changes, so a ready image that passed both is remembered by its id and
+    /// later runs of it skip the checks. A version whose compile failed for
+    /// good passes: it cannot run, and the caller reports why.
     ///
     /// See [`allowlist_check_outcome`] for what a run does with a check that
     /// could not read the closure.
@@ -2633,13 +2630,114 @@ impl ExecutionEngine {
         }
         let checked =
             check_compile_agent_allowlist(&self.pool, tenant_id, workflow_id, version).await;
-        if let (Ok(()), Some(image_id)) = (&checked, image_id) {
-            self.remember_allowlisted_image(image_id);
-        }
         if let Err(CompileAgentGateError::Denied(denial)) = &checked {
             denial.audit_log(tenant_id);
         }
-        allowlist_check_outcome(checked, image_id.is_some(), workflow_id, version)
+        allowlist_check_outcome(checked, image_id.is_some(), workflow_id, version)?;
+        let Some(image_id) = image_id else {
+            return Ok(());
+        };
+        self.require_allowed_image_agents(tenant_id, workflow_id, version, image_id)
+            .await
+    }
+
+    /// Refuse a ready image that runs a built-in agent the allowlist leaves
+    /// out, and remember one that does not.
+    ///
+    /// An image keeps the children it was built with, which can differ from
+    /// the ones [`check_compile_agent_allowlist`] reads today ("latest" or
+    /// "current" moved, or a version edited in place), so the agents the image
+    /// recorded when it was registered are checked too; see
+    /// [`image_agents_decision`]. An image registered without that record is
+    /// rebuilt, and the run waits for the compile like any version not
+    /// compiled yet ([`ExecutionError::NotCompiled`]).
+    async fn require_allowed_image_agents(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+        image_id: &str,
+    ) -> Result<(), ExecutionError> {
+        // Admission can run without a runtime; a launch cannot, and checks
+        // the image then.
+        let Some(runtime_client) = self.runtime_client.as_ref() else {
+            return Ok(());
+        };
+        let image = runtime_client
+            .get_image(image_id, tenant_id)
+            .await
+            .map_err(|e| {
+                ExecutionError::RuntimeError(format!(
+                    "Failed to read image '{image_id}' to check its agents: {e}"
+                ))
+            })?;
+        let Some(agents) = image
+            .as_ref()
+            .and_then(crate::api::services::compilation::image_agent_ids)
+        else {
+            warn!(
+                tenant_id,
+                workflow_id,
+                version,
+                image_id,
+                "Image records no agents to check against the allowlist; rebuilding it"
+            );
+            return Err(self
+                .recompile_image(tenant_id, workflow_id, version, image_id)
+                .await);
+        };
+        image_agents_decision(crate::config::entitlements(), &agents).map_err(|denial| {
+            denial.audit_log(tenant_id);
+            ExecutionError::EntitlementDenied(denial)
+        })?;
+        self.remember_allowlisted_image(image_id);
+        Ok(())
+    }
+
+    /// Drop the compile row of exactly `image_id` and queue a forced compile
+    /// of the version, returning the [`ExecutionError::NotCompiled`] a launch
+    /// reports while it waits. Another compile may have attached a newer
+    /// immutable image to the same version meanwhile, so only this image's
+    /// row goes.
+    async fn recompile_image(
+        &self,
+        tenant_id: &str,
+        workflow_id: &str,
+        version: i32,
+        image_id: &str,
+    ) -> ExecutionError {
+        let _ = sqlx::query(
+            "DELETE FROM workflow_compilations \
+             WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3 \
+               AND registered_image_id = $4",
+        )
+        .bind(tenant_id)
+        .bind(workflow_id)
+        .bind(version)
+        .bind(image_id)
+        .execute(&self.pool)
+        .await;
+
+        let compilation_queued =
+            if let Some(valkey_config) = crate::valkey::ValkeyConfig::from_env() {
+                crate::workers::compilation_worker::enqueue_compilation(
+                    &valkey_config.connection_url(),
+                    tenant_id,
+                    workflow_id,
+                    version,
+                    true,
+                )
+                .await
+                .unwrap_or(false)
+            } else {
+                false
+            };
+
+        ExecutionError::NotCompiled {
+            workflow_id: workflow_id.to_string(),
+            version,
+            compilation_queued,
+        }
     }
 
     /// Remember an image that passed [`Self::require_allowed_agents`],
@@ -2813,14 +2911,22 @@ impl ExecutionEngine {
             .map_err(|e| {
                 ExecutionError::DatabaseError(format!("Failed to check compilation: {}", e))
             })?;
-        // Before the compile this may queue, as on launch.
-        self.require_allowed_agents(tenant_id, workflow_id, version, &status)
-            .await?;
-        if let CompilationStatus::Ready {
-            registered_image_id,
-            execution_timeout,
-            ..
-        } = status
+        // Before the compile this may queue, as on launch. An image being
+        // rebuilt is waited for like a version not compiled yet.
+        let rebuilding = match self
+            .require_allowed_agents(tenant_id, workflow_id, version, &status)
+            .await
+        {
+            Ok(()) => false,
+            Err(ExecutionError::NotCompiled { .. }) => true,
+            Err(error) => return Err(error),
+        };
+        if !rebuilding
+            && let CompilationStatus::Ready {
+                registered_image_id,
+                execution_timeout,
+                ..
+            } = status
         {
             return Ok(ReadyLaunch {
                 image_id: registered_image_id,
@@ -3292,6 +3398,39 @@ mod tests {
                 Err(ExecutionError::EntitlementDenied(_))
             ));
         }
+    }
+
+    #[test]
+    fn only_built_in_agents_in_an_image_are_gated() {
+        let snapshot = crate::entitlements::EntitlementSnapshot::parse_entitlements(
+            "tenant-test",
+            None,
+            Some(r#"{"agents":["http"]}"#),
+            None,
+            &crate::entitlements::parse_agents(&["http", "csv", "ai-tools", "control"]),
+        )
+        .expect("snapshot parses");
+        let agents = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+
+        match image_agents_decision(&snapshot, &agents(&["http", "csv"])) {
+            Err(denial) => {
+                assert_eq!(
+                    denial.code(),
+                    crate::entitlement_error::codes::AGENT_NOT_ENABLED
+                );
+                assert_eq!(denial.json_body()["agent"], "csv");
+            }
+            Ok(()) => panic!("a csv component the allowlist leaves out must be refused"),
+        }
+        // `ai-tools` comes with every AiAgent step, `control` is always
+        // enabled, and `shout-echo` is no built-in: a workflow-agent.
+        assert!(
+            image_agents_decision(
+                &snapshot,
+                &agents(&["http", "ai-tools", "control", "shout-echo"])
+            )
+            .is_ok()
+        );
     }
 
     #[tokio::test]

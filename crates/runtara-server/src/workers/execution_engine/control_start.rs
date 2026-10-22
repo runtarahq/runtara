@@ -301,18 +301,21 @@ impl ExecutionEngine {
                 start.workflow_id
             )));
         }
-        // The launch would refuse it, so refuse it before admitting it.
-        self.require_allowed_agents(tenant_id, &start.workflow_id, version, &compilation)
+        // The launch would refuse it, so refuse it before admitting it. An
+        // image being rebuilt is admitted like a version not compiled yet.
+        match self
+            .require_allowed_agents(tenant_id, &start.workflow_id, version, &compilation)
             .await
-            .map_err(|error| match error {
-                super::ExecutionError::EntitlementDenied(denial) => {
-                    StartChildError::Denied(denial.message())
-                }
-                error @ super::ExecutionError::WorkflowNotRunnable { .. } => {
-                    StartChildError::NotRunnable(error.to_string())
-                }
-                other => unavailable(other),
-            })?;
+        {
+            Ok(()) | Err(super::ExecutionError::NotCompiled { .. }) => {}
+            Err(super::ExecutionError::EntitlementDenied(denial)) => {
+                return Err(StartChildError::Denied(denial.message()));
+            }
+            Err(error @ super::ExecutionError::WorkflowNotRunnable { .. }) => {
+                return Err(StartChildError::NotRunnable(error.to_string()));
+            }
+            Err(other) => return Err(unavailable(other)),
+        }
 
         let cap = self.effective_concurrency_cap();
         let limit = u32::try_from(cap).unwrap_or(u32::MAX);
