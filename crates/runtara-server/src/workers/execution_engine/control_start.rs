@@ -308,6 +308,9 @@ impl ExecutionEngine {
                 super::ExecutionError::EntitlementDenied(denial) => {
                     StartChildError::Denied(denial.message())
                 }
+                error @ super::ExecutionError::WorkflowNotRunnable { .. } => {
+                    StartChildError::NotRunnable(error.to_string())
+                }
                 other => unavailable(other),
             })?;
 

@@ -56,7 +56,8 @@ async fn compile_workflow_for_mcp(
         crate::api::services::compilation::CompileAgentGateError::Denied(denial) => {
             denial.to_rmcp_error()
         }
-        crate::api::services::compilation::CompileAgentGateError::Unchecked(message) => {
+        crate::api::services::compilation::CompileAgentGateError::Unchecked(message)
+        | crate::api::services::compilation::CompileAgentGateError::Invalid(message) => {
             err(message)
         }
     })?;

@@ -172,9 +172,9 @@ async fn record_cached_image(pool: &PgPool, tenant: &str, workflow_id: &str, def
     );
 }
 
-fn expect_unchecked(result: Result<(), CompileAgentGateError>, needle: &str) {
+fn expect_invalid(result: Result<(), CompileAgentGateError>, needle: &str) {
     match result {
-        Err(CompileAgentGateError::Unchecked(message)) => {
+        Err(CompileAgentGateError::Invalid(message)) => {
             assert!(message.contains(needle), "{message}");
         }
         other => panic!("expected a refusal mentioning '{needle}', got {other:?}"),
@@ -224,7 +224,7 @@ async fn a_deleted_child_refuses_the_cached_parent() {
     .await
     .expect("deleting the child must succeed");
 
-    expect_unchecked(
+    expect_invalid(
         check_compile_agent_allowlist(&pool, &tenant, &parent, 1).await,
         &format!("child workflow '{child}' not found"),
     );
@@ -246,7 +246,7 @@ async fn a_child_version_that_does_not_resolve_refuses_the_cached_parent() {
         let parent = seed_workflow(&pool, &tenant, &parent_definition).await;
         record_cached_image(&pool, &tenant, &parent, &parent_definition).await;
 
-        expect_unchecked(
+        expect_invalid(
             check_compile_agent_allowlist(&pool, &tenant, &parent, 1).await,
             &needle,
         );

@@ -457,8 +457,12 @@ pub enum CompileAgentGateError {
     /// A step in the version's closure calls an agent the tenant's allowlist
     /// leaves out.
     Denied(crate::entitlement_error::EntitlementDenial),
-    /// The closure could not be loaded or parsed, so it was not checked.
+    /// The database could not load the closure, so it was not checked.
     Unchecked(String),
+    /// The closure as stored cannot be checked: an EmbedWorkflow reference
+    /// does not resolve, or a graph does not parse. It stays that way until
+    /// the workflow changes.
+    Invalid(String),
 }
 
 /// The agent allowlist check on a stored version's graph and its whole
@@ -506,22 +510,30 @@ pub async fn check_compile_agent_allowlist(
 /// The decision [`check_compile_agent_allowlist`] makes once the closure is
 /// loaded, taking the snapshot as an argument so unit tests can restrict it.
 /// `children` is the closure load's result: a failed or incomplete load, or a
-/// child whose graph does not parse, refuses the compile.
+/// child whose graph does not parse, refuses the compile. The loader reports
+/// a database failure with a `Database error` prefix, as
+/// `load_child_workflows_for_validation` relies on too; anything else it
+/// reports is a reference that does not resolve.
 pub fn compile_agent_allowlist_decision(
     snapshot: &crate::entitlements::EntitlementSnapshot,
     definition: &serde_json::Value,
     children: Result<Vec<crate::compiler::child_workflows::ChildWorkflowInfo>, String>,
     published_agent_ids: &std::collections::HashSet<String>,
 ) -> Result<(), CompileAgentGateError> {
-    let root = parse_execution_graph(definition).map_err(CompileAgentGateError::Unchecked)?;
+    let root = parse_execution_graph(definition).map_err(CompileAgentGateError::Invalid)?;
     let children = children.map_err(|e| {
-        CompileAgentGateError::Unchecked(format!("Failed to load child workflows: {}", e))
+        let message = format!("Failed to load child workflows: {}", e);
+        if e.starts_with("Database error") {
+            CompileAgentGateError::Unchecked(message)
+        } else {
+            CompileAgentGateError::Invalid(message)
+        }
     })?;
     let child_graphs = children
         .into_iter()
         .map(|info| {
             parse_execution_graph(&info.execution_graph).map_err(|e| {
-                CompileAgentGateError::Unchecked(format!(
+                CompileAgentGateError::Invalid(format!(
                     "Failed to parse child workflow '{}': {}",
                     info.workflow_ref.workflow_id, e
                 ))
@@ -2508,6 +2520,17 @@ mod tests {
         }
     }
 
+    fn expect_invalid(result: Result<(), CompileAgentGateError>, needle: &str) {
+        match result {
+            Err(CompileAgentGateError::Invalid(message)) => {
+                assert!(message.contains(needle), "{message}");
+            }
+            other => {
+                panic!("expected an invalid-closure refusal mentioning '{needle}', got {other:?}")
+            }
+        }
+    }
+
     #[test]
     fn compile_gate_denies_an_agent_outside_the_allowlist_in_the_root_or_a_child() {
         let snapshot = http_only_snapshot();
@@ -2569,7 +2592,18 @@ mod tests {
             ),
             "Failed to load child workflows: Database error: connection reset",
         );
-        expect_unchecked(
+        // A reference that does not resolve stays that way until the
+        // workflow changes, unlike a database failure.
+        expect_invalid(
+            compile_agent_allowlist_decision(
+                &snapshot,
+                &graph_embedding_child(),
+                Err("EmbedWorkflow step 'embed': child workflow 'child-wf' not found".to_string()),
+                &none_published,
+            ),
+            "child workflow 'child-wf' not found",
+        );
+        expect_invalid(
             compile_agent_allowlist_decision(
                 &snapshot,
                 &graph_embedding_child(),
@@ -2581,7 +2615,7 @@ mod tests {
             ),
             "Failed to parse child workflow 'child-wf'",
         );
-        expect_unchecked(
+        expect_invalid(
             compile_agent_allowlist_decision(
                 &snapshot,
                 &serde_json::json!({"steps": "not a map"}),

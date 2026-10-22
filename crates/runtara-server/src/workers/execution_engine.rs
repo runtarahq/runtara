@@ -580,6 +580,45 @@ pub struct ExecutionEngine {
 /// for as long as the process runs.
 const ALLOWLISTED_IMAGES_CAPACITY: usize = 4096;
 
+/// What a run does with the agent allowlist check of its workflow version.
+///
+/// A ready image is about to run, so a check that cannot read its closure
+/// refuses it. A closure that cannot be checked as stored (an embedded child
+/// deleted, a pinned child version gone, a graph that does not parse) leaves
+/// agents in the image the check cannot see; that stays so until the
+/// workflow changes, so the run is reported as one that cannot run as
+/// authored rather than as a system fault.
+///
+/// A version not compiled yet is refused only for a denial the check finds:
+/// the compile it waits for reads the same closure and reports what it cannot
+/// load or parse, as before, and its image is checked again before it runs.
+fn allowlist_check_outcome(
+    checked: Result<(), CompileAgentGateError>,
+    ready_image: bool,
+    workflow_id: &str,
+    version: i32,
+) -> Result<(), ExecutionError> {
+    match checked {
+        Ok(()) => Ok(()),
+        Err(CompileAgentGateError::Denied(denial)) => {
+            Err(ExecutionError::EntitlementDenied(denial))
+        }
+        Err(CompileAgentGateError::Unchecked(_) | CompileAgentGateError::Invalid(_))
+            if !ready_image =>
+        {
+            Ok(())
+        }
+        Err(CompileAgentGateError::Unchecked(message)) => Err(ExecutionError::DatabaseError(
+            format!("Failed to check the agent allowlist: {message}"),
+        )),
+        Err(CompileAgentGateError::Invalid(message)) => Err(ExecutionError::WorkflowNotRunnable {
+            workflow_id: workflow_id.to_string(),
+            version,
+            error: message,
+        }),
+    }
+}
+
 /// How long an in-flight execution count stays usable for the concurrency gate.
 ///
 /// Short enough that the cap still tracks reality, long enough that a
@@ -2572,11 +2611,8 @@ impl ExecutionEngine {
     /// id and later runs of it skip the check. A version whose compile failed
     /// for good passes: it cannot run, and the caller reports why.
     ///
-    /// A ready image is about to run, so a check that cannot read its closure
-    /// refuses it. A version not compiled yet is refused only for a denial the
-    /// check finds: the compile it waits for reads the same closure and
-    /// reports a graph it cannot load or parse, as before, and its image is
-    /// checked again before it runs.
+    /// See [`allowlist_check_outcome`] for what a run does with a check that
+    /// could not read the closure.
     async fn require_allowed_agents(
         &self,
         tenant_id: &str,
@@ -2595,22 +2631,15 @@ impl ExecutionEngine {
         if image_id.is_some_and(|image_id| self.allowlisted_images.contains(image_id)) {
             return Ok(());
         }
-        match check_compile_agent_allowlist(&self.pool, tenant_id, workflow_id, version).await {
-            Ok(()) => {
-                if let Some(image_id) = image_id {
-                    self.remember_allowlisted_image(image_id);
-                }
-                Ok(())
-            }
-            Err(CompileAgentGateError::Denied(denial)) => {
-                denial.audit_log(tenant_id);
-                Err(ExecutionError::EntitlementDenied(denial))
-            }
-            Err(CompileAgentGateError::Unchecked(_)) if image_id.is_none() => Ok(()),
-            Err(CompileAgentGateError::Unchecked(message)) => Err(ExecutionError::DatabaseError(
-                format!("Failed to check the agent allowlist: {message}"),
-            )),
+        let checked =
+            check_compile_agent_allowlist(&self.pool, tenant_id, workflow_id, version).await;
+        if let (Ok(()), Some(image_id)) = (&checked, image_id) {
+            self.remember_allowlisted_image(image_id);
         }
+        if let Err(CompileAgentGateError::Denied(denial)) = &checked {
+            denial.audit_log(tenant_id);
+        }
+        allowlist_check_outcome(checked, image_id.is_some(), workflow_id, version)
     }
 
     /// Remember an image that passed [`Self::require_allowed_agents`],
@@ -3218,6 +3247,51 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn a_ready_image_whose_closure_does_not_resolve_cannot_run() {
+        let invalid = || {
+            Err(CompileAgentGateError::Invalid(
+                "Failed to load child workflows: EmbedWorkflow step 'embed': child workflow 'child' not found"
+                    .to_string(),
+            ))
+        };
+        match allowlist_check_outcome(invalid(), true, "parent", 2) {
+            Err(ExecutionError::WorkflowNotRunnable {
+                workflow_id,
+                version,
+                error,
+            }) => {
+                assert_eq!((workflow_id.as_str(), version), ("parent", 2));
+                assert!(
+                    error.contains("child workflow 'child' not found"),
+                    "{error}"
+                );
+            }
+            other => panic!("expected the run to be reported as not runnable, got {other:?}"),
+        }
+        // Not compiled yet: the compile reports it.
+        assert!(allowlist_check_outcome(invalid(), false, "parent", 2).is_ok());
+
+        // A database failure is not the workflow's fault.
+        let unchecked = Err(CompileAgentGateError::Unchecked(
+            "connection reset".to_string(),
+        ));
+        assert!(matches!(
+            allowlist_check_outcome(unchecked, true, "parent", 2),
+            Err(ExecutionError::DatabaseError(_))
+        ));
+        // A denial refuses whether or not the version is compiled.
+        for ready_image in [true, false] {
+            let denied = Err(CompileAgentGateError::Denied(
+                crate::entitlement_error::EntitlementDenial::AgentNotEnabled("csv".to_string()),
+            ));
+            assert!(matches!(
+                allowlist_check_outcome(denied, ready_image, "parent", 2),
+                Err(ExecutionError::EntitlementDenied(_))
+            ));
+        }
     }
 
     #[tokio::test]
