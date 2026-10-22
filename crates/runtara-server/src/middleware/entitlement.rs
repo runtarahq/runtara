@@ -122,10 +122,12 @@ pub fn walk_graph_for_agents(
                 // the allowlist: they are user content, not licensed
                 // integrations — any native agents INSIDE the published child
                 // were already allowlist-checked when the child itself was
-                // saved.
-                if exempt_agents.contains(&runtara_dsl::agent_meta::canonical_agent_id(
-                    &agent_step.agent_id,
-                )) {
+                // saved. A registered dispatcher module is never exempt, as in
+                // [`tenant_agent_decision`]: a built-in id always wins, so a
+                // publication that carries one resolves to the built-in and
+                // stays under the allowlist.
+                let agent_id = runtara_dsl::agent_meta::canonical_agent_id(&agent_step.agent_id);
+                if !snapshot.is_registered_agent(&agent_id) && exempt_agents.contains(&agent_id) {
                     continue;
                 }
                 agent_decision(snapshot, &agent_step.agent_id)?;
@@ -753,6 +755,58 @@ mod tests {
                 "no read for an allowed agent"
             ))
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn graph_walks_keep_a_publication_carrying_a_built_in_id_under_the_allowlist() {
+        // Save, the graph patch, compile and graph/validate exempt every id
+        // the tenant has published. One of them, `csv`, is now a registered
+        // built-in this tenant is not licensed for: the step resolves to the
+        // built-in, so it must be denied wherever it sits.
+        let snap = snapshot_with(None, Some(r#"{"agents":["http"]}"#));
+        let published: std::collections::HashSet<String> =
+            ["csv", "shout-echo"].map(String::from).into();
+        let agent_step = |agent: &str| serde_json::json!({"stepType": "Agent", "id": "call", "agentId": agent, "capabilityId": "run"});
+        let root_calling = |agent: &str| {
+            parse_graph(serde_json::json!({
+                "entryPoint": "call",
+                "steps": {"call": agent_step(agent)}
+            }))
+        };
+        let split_calling = |agent: &str| {
+            parse_graph(serde_json::json!({
+                "entryPoint": "split",
+                "steps": {
+                    "split": {
+                        "stepType": "Split",
+                        "id": "split",
+                        "subgraph": {"entryPoint": "call", "steps": {"call": agent_step(agent)}}
+                    }
+                }
+            }))
+        };
+        let no_agents = parse_graph(serde_json::json!({
+            "entryPoint": "done",
+            "steps": {"done": {"stepType": "Finish", "id": "done"}}
+        }));
+
+        for denial in [
+            walk_graph_for_agents(&snap, &root_calling("csv"), &published),
+            walk_graph_for_agents(&snap, &split_calling("csv"), &published),
+            walk_closure_for_agents(&snap, &no_agents, [&root_calling("csv")], &published),
+        ] {
+            let denial = denial.expect_err("a built-in id always wins over a publication");
+            assert_eq!(denial.code(), codes::AGENT_NOT_ENABLED);
+            assert_eq!(denial.json_body()["agent"], "csv");
+        }
+
+        // A real published workflow-agent is still exempt, in any spelling.
+        assert!(walk_graph_for_agents(&snap, &root_calling("shout-echo"), &published).is_ok());
+        assert!(walk_graph_for_agents(&snap, &split_calling("Shout_Echo"), &published).is_ok());
+        assert!(
+            walk_closure_for_agents(&snap, &no_agents, [&root_calling("shout-echo")], &published)
+                .is_ok()
         );
     }
 
