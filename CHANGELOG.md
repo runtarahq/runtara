@@ -609,12 +609,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A published workflow-agent that carries a built-in agent's id no longer
   lifts the allowlist for that built-in.** Saving (`/update`, MCP
   `deploy_workflow`), the graph patch (`PUT …/versions/{version}/graph`),
-  compiling and `graph/validate` exempted every id the tenant had published
-  as a workflow-agent, including one a built-in agent shipped with after the
+  compiling through `POST …/versions/{version}/compile` and
+  `graph/validate` exempted every id the tenant had published as a
+  workflow-agent, including one a built-in agent shipped with after the
   publication. A step with that id runs the built-in, so a tenant whose
   allowlist leaves the built-in out could save and compile a graph that
   calls it. These checks now exempt a published id only when no built-in
   agent has it, as agent lookup and the MCP step tools already did.
+
+  A saved workflow, or an embedded child, with a step that calls such an id
+  now fails to save, validate and compile with `AGENT_NOT_ENABLED`, even
+  when it is already compiled. To keep it, enable the built-in for the
+  tenant, or republish the workflow-agent under another slug and point the
+  step at it.
 - **Graph validation applies the checks saving applies.**
   `POST /api/runtime/workflows/graph/validate`, and so the MCP
   `validate_graph` and `preflight_compile` tools, could call a graph valid

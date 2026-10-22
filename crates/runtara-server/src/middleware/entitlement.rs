@@ -766,7 +766,7 @@ mod tests {
         // built-in, so it must be denied wherever it sits.
         let snap = snapshot_with(None, Some(r#"{"agents":["http"]}"#));
         let published: std::collections::HashSet<String> =
-            ["csv", "shout-echo"].map(String::from).into();
+            ["csv", "http", "shout-echo"].map(String::from).into();
         let agent_step = |agent: &str| serde_json::json!({"stepType": "Agent", "id": "call", "agentId": agent, "capabilityId": "run"});
         let root_calling = |agent: &str| {
             parse_graph(serde_json::json!({
@@ -808,6 +808,9 @@ mod tests {
             walk_closure_for_agents(&snap, &no_agents, [&root_calling("shout-echo")], &published)
                 .is_ok()
         );
+        // A built-in the tenant is licensed for stays allowed when a
+        // publication carries its id too.
+        assert!(walk_graph_for_agents(&snap, &root_calling("http"), &published).is_ok());
     }
 
     #[test]
