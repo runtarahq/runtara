@@ -630,7 +630,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`AGENT_NOT_ENABLED`). The REST compile checked only the root graph when
   the embedded children failed to load, and skipped a child whose graph did
   not parse. Both compiles now refuse in those cases, and when the version's
-  own graph fails to load or parse, as saving does.
+  own graph fails to load or parse, as saving does. They also refuse when an
+  embedded child no longer resolves (deleted, or its pinned version gone):
+  the cached image still carries that child's agents, which the check can no
+  longer see.
 - **Running a workflow checks the agent allowlist.** Nothing between a run's
   request and its launch checked it: a version compiled before an agent left
   the allowlist kept running from its cached image, and one not compiled yet
