@@ -53,6 +53,27 @@ fn image_source_checksum(image: &ImageSummary) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
+/// The agents an image was composed with, from the direct artifact metadata
+/// stored at registration. A launch checks them against the allowlist, since
+/// an image keeps the children it was built with. `None` when the image
+/// carries no such record (registered before it existed, or without its
+/// artifact metadata), or when the record is malformed.
+pub(crate) fn image_agent_ids(image: &ImageSummary) -> Option<Vec<String>> {
+    image
+        .metadata
+        .as_ref()?
+        .pointer("/workflow/directArtifact/agentComponents")?
+        .as_array()?
+        .iter()
+        .map(|component| {
+            component
+                .get("agentId")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
 /// `templateMajor` stored in image metadata at registration time. Used by the
 /// cache check below to invalidate every workflow on a major-version bump of
 /// the compiler (e.g. `5` → `6`); minor / patch bumps don't recompile.
@@ -457,8 +478,12 @@ pub enum CompileAgentGateError {
     /// A step in the version's closure calls an agent the tenant's allowlist
     /// leaves out.
     Denied(crate::entitlement_error::EntitlementDenial),
-    /// The closure could not be loaded or parsed, so it was not checked.
+    /// The database could not load the closure, so it was not checked.
     Unchecked(String),
+    /// The closure as stored cannot be checked: an EmbedWorkflow reference
+    /// does not resolve, or a graph does not parse. It stays that way until
+    /// the workflow changes.
+    Invalid(String),
 }
 
 /// What [`check_compile_agent_allowlist`] found in a closure it allowed.
@@ -535,22 +560,30 @@ pub async fn check_compile_agent_allowlist(
 /// The decision [`check_compile_agent_allowlist`] makes once the closure is
 /// loaded, taking the snapshot as an argument so unit tests can restrict it.
 /// `children` is the closure load's result: a failed or incomplete load, or a
-/// child whose graph does not parse, refuses the compile.
+/// child whose graph does not parse, refuses the compile. The loader reports
+/// a database failure with a `Database error` prefix, as
+/// `load_child_workflows_for_validation` relies on too; anything else it
+/// reports is a reference that does not resolve.
 pub fn compile_agent_allowlist_decision(
     snapshot: &crate::entitlements::EntitlementSnapshot,
     definition: &serde_json::Value,
     children: Result<Vec<crate::compiler::child_workflows::ChildWorkflowInfo>, String>,
     published_agent_ids: &std::collections::HashSet<String>,
 ) -> Result<(), CompileAgentGateError> {
-    let root = parse_execution_graph(definition).map_err(CompileAgentGateError::Unchecked)?;
+    let root = parse_execution_graph(definition).map_err(CompileAgentGateError::Invalid)?;
     let children = children.map_err(|e| {
-        CompileAgentGateError::Unchecked(format!("Failed to load child workflows: {}", e))
+        let message = format!("Failed to load child workflows: {}", e);
+        if e.starts_with("Database error") {
+            CompileAgentGateError::Unchecked(message)
+        } else {
+            CompileAgentGateError::Invalid(message)
+        }
     })?;
     let child_graphs = children
         .into_iter()
         .map(|info| {
             parse_execution_graph(&info.execution_graph).map_err(|e| {
-                CompileAgentGateError::Unchecked(format!(
+                CompileAgentGateError::Invalid(format!(
                     "Failed to parse child workflow '{}': {}",
                     info.workflow_ref.workflow_id, e
                 ))
@@ -1158,7 +1191,9 @@ impl CompilationService {
             // gone from disk is precisely what a forced recompile is here to
             // repair — and reusing it re-registers nothing, so the file stays
             // missing and the caller retries into the same failure until its
-            // budget runs out.
+            // budget runs out. A row without the agents the image records is
+            // the same: a launch rebuilds such an image to check them, and
+            // only re-registering stores the record.
             Ok(Some(existing_image))
                 if image_matches_compiled_artifact(
                     &existing_image,
@@ -1166,9 +1201,10 @@ impl CompilationService {
                     result.compiler_mode,
                     track_events,
                     &result.binary_checksum,
-                ) && self
-                    .artifact_present_for_reuse(client, &existing_image.image_id)
-                    .await =>
+                ) && image_agent_ids(&existing_image).is_some()
+                    && self
+                        .artifact_present_for_reuse(client, &existing_image.image_id)
+                        .await =>
             {
                 info!(
                     image_id = %existing_image.image_id,
@@ -1188,7 +1224,7 @@ impl CompilationService {
                 warn!(
                     image_id = %existing_image.image_id,
                     image_name = %image_name,
-                    "Registered artifact is missing from disk; re-registering the compiled binary"
+                    "Registered artifact is missing from disk or records no agents; re-registering the compiled binary"
                 );
                 self.register_image(client, &result, registration, &image_name)
                     .await?
@@ -2316,6 +2352,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_image_records_the_agents_it_was_composed_with() {
+        let image = image_summary_with_metadata(serde_json::json!({
+            "workflow": {
+                "directArtifact": {
+                    "agentComponents": [
+                        {"kind": "agent", "agentId": "csv", "package": "runtara:agent-csv"},
+                        {"kind": "agent", "agentId": "http", "package": "runtara:agent-http"}
+                    ]
+                }
+            }
+        }));
+        assert_eq!(
+            image_agent_ids(&image),
+            Some(vec!["csv".to_string(), "http".to_string()])
+        );
+
+        // No record to check: an image registered before it existed, or
+        // without its artifact metadata, or one whose record is malformed.
+        let without_metadata = ImageSummary {
+            metadata: None,
+            ..image_summary_with_metadata(serde_json::json!({}))
+        };
+        assert_eq!(image_agent_ids(&without_metadata), None);
+        for metadata in [
+            serde_json::json!({"workflow": {"executionTimeoutSeconds": 30}}),
+            serde_json::json!({
+                "workflow": {"directArtifact": {"agentComponents": [{"kind": "agent"}]}}
+            }),
+        ] {
+            assert_eq!(
+                image_agent_ids(&image_summary_with_metadata(metadata)),
+                None
+            );
+        }
+    }
+
     fn direct_artifact_metadata_fixture() -> DirectArtifactMetadata {
         let wasm = |filename: &str, sha256: &str| DirectArtifactFileMetadata {
             filename: filename.to_string(),
@@ -2537,6 +2610,17 @@ mod tests {
         }
     }
 
+    fn expect_invalid(result: Result<(), CompileAgentGateError>, needle: &str) {
+        match result {
+            Err(CompileAgentGateError::Invalid(message)) => {
+                assert!(message.contains(needle), "{message}");
+            }
+            other => {
+                panic!("expected an invalid-closure refusal mentioning '{needle}', got {other:?}")
+            }
+        }
+    }
+
     #[test]
     fn compile_gate_denies_an_agent_outside_the_allowlist_in_the_root_or_a_child() {
         let snapshot = http_only_snapshot();
@@ -2598,7 +2682,18 @@ mod tests {
             ),
             "Failed to load child workflows: Database error: connection reset",
         );
-        expect_unchecked(
+        // A reference that does not resolve stays that way until the
+        // workflow changes, unlike a database failure.
+        expect_invalid(
+            compile_agent_allowlist_decision(
+                &snapshot,
+                &graph_embedding_child(),
+                Err("EmbedWorkflow step 'embed': child workflow 'child-wf' not found".to_string()),
+                &none_published,
+            ),
+            "child workflow 'child-wf' not found",
+        );
+        expect_invalid(
             compile_agent_allowlist_decision(
                 &snapshot,
                 &graph_embedding_child(),
@@ -2610,7 +2705,7 @@ mod tests {
             ),
             "Failed to parse child workflow 'child-wf'",
         );
-        expect_unchecked(
+        expect_invalid(
             compile_agent_allowlist_decision(
                 &snapshot,
                 &serde_json::json!({"steps": "not a map"}),

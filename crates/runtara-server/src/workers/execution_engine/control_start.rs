@@ -294,12 +294,27 @@ impl ExecutionEngine {
             error,
             terminal: true,
             ..
-        } = compilation
+        } = &compilation
         {
             return Err(StartChildError::NotRunnable(format!(
                 "workflow '{}' version {version} failed to compile: {error}",
                 start.workflow_id
             )));
+        }
+        // The launch would refuse it, so refuse it before admitting it. An
+        // image being rebuilt is admitted like a version not compiled yet.
+        match self
+            .require_allowed_agents(tenant_id, &start.workflow_id, version, &compilation)
+            .await
+        {
+            Ok(()) | Err(super::ExecutionError::NotCompiled { .. }) => {}
+            Err(super::ExecutionError::EntitlementDenied(denial)) => {
+                return Err(StartChildError::Denied(denial.message()));
+            }
+            Err(error @ super::ExecutionError::WorkflowNotRunnable { .. }) => {
+                return Err(StartChildError::NotRunnable(error.to_string()));
+            }
+            Err(other) => return Err(unavailable(other)),
         }
 
         let cap = self.effective_concurrency_cap();

@@ -637,6 +637,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rebuilds it instead of handing back its cached image: the image keeps the
   children it was built with, which may have changed since ("latest" or
   "current" moved, or a version edited in place).
+- **Running a workflow checks the agent allowlist.** Nothing between a run's
+  request and its launch checked it: a version compiled before an agent left
+  the allowlist kept running from its cached image, and one not compiled yet
+  was compiled on the first run. Every launch (HTTP, MCP, cron, webhooks,
+  events, sessions, chat, replay and `control` children) now runs the
+  compile's check before the image starts or a compile is queued. A refused
+  run never starts: its execution reads "The run never started" with the
+  `AGENT_NOT_ENABLED` message. Starting a run over HTTP or MCP, and
+  `control:start`, refuse it up front instead (`AGENT_NOT_ENABLED`, HTTP
+  403). An image that passed is remembered for the life of the process, so
+  later runs of it do not repeat the check. A version not compiled yet is
+  refused only for a forbidden agent the check finds; a graph it cannot read
+  is left to the compile, which reports it as before. A compiled parent
+  whose embedded child was deleted, or whose pinned child version is gone,
+  no longer runs from its cached image: the check cannot see the agents that
+  child left in it, so the run is refused as one that cannot run as authored
+  (HTTP 422 up front, "The run never started" at launch). A compiled image
+  is also checked by the agents it recorded when it was registered, since it
+  keeps the children it was built with, which may have changed since: a
+  built-in agent in it that the allowlist leaves out refuses the run
+  (`AGENT_NOT_ENABLED`). Published workflow-agents, and the `ai-tools` agent
+  every AiAgent step brings, are not gated there. An image registered
+  without that record is rebuilt once, before it runs.
 - **`preflight_compile` checks the mappings of the right version.** It read
   its version from fields the workflow response does not have, so it
   reported version 0, and its mapping check of version 0 failed unseen. It

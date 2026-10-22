@@ -1182,7 +1182,10 @@ pub async fn compile_workflow_handler(
         Err(crate::api::services::compilation::CompileAgentGateError::Denied(denial)) => {
             return (StatusCode::FORBIDDEN, Json(denial.json_body()));
         }
-        Err(crate::api::services::compilation::CompileAgentGateError::Unchecked(message)) => {
+        Err(
+            crate::api::services::compilation::CompileAgentGateError::Unchecked(message)
+            | crate::api::services::compilation::CompileAgentGateError::Invalid(message),
+        ) => {
             let error_response = json!({
                 "success": false,
                 "error": "Agent allowlist check failed",
