@@ -144,7 +144,9 @@ fn admitted(base: &AgentCatalog, overlay: Vec<AgentInfo>) -> Vec<AgentInfo> {
 
 /// Canonical ids of the tenant's published workflow-agents — the exemption
 /// set for the `enabled_agents` entitlement gate (a tenant's own workflows
-/// are not licensed integrations).
+/// are not licensed integrations). Unlike [`tenant_overlay`], it keeps an id
+/// a built-in agent took after the publication; the gates never exempt a
+/// registered dispatcher module, so such an id stays under the allowlist.
 pub fn published_agent_ids(tenant_id: &str) -> std::collections::HashSet<String> {
     load_tenant_agents(tenant_id)
         .into_iter()
