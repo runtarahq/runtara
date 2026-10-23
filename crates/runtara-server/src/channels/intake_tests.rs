@@ -962,11 +962,14 @@ async fn a_telegram_call_is_rejected_when_the_trigger_holds_no_secret() {
     .await
     .unwrap();
 
-    for secret in [None, Some(TELEGRAM_SECRET)] {
+    for (case, secret) in [
+        ("without a secret header", None),
+        ("with the secret it used to hold", Some(TELEGRAM_SECRET)),
+    ] {
         assert_eq!(
             post(&router, telegram_request(&connection, 1, secret)).await,
             StatusCode::UNAUTHORIZED,
-            "with secret {secret:?}"
+            "{case}"
         );
     }
     assert!(harness.intake(&connection).await.is_empty());
