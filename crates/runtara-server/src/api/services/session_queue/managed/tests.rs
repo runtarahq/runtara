@@ -39,8 +39,8 @@ async fn fixture() -> (ConnectionManager, QueueScope, Cleanup) {
     cleanup.track(&scope);
     (conn, scope, cleanup)
 }
-/// Every queue `scan_scopes` returns for `tenant_id`, one key per SCAN call so
-/// that cursor progress is exercised too.
+/// Every queue `scan_scopes` returns for `tenant_id`, once each and sorted, one
+/// key per SCAN call so that cursor progress is exercised too.
 async fn scan_all(conn: &mut ConnectionManager, tenant_id: &str) -> ScopeScan {
     let mut all = ScopeScan {
         cursor: 0,
@@ -53,6 +53,12 @@ async fn scan_all(conn: &mut ConnectionManager, tenant_id: &str) -> ScopeScan {
         all.corrupt_keys.extend(scan.corrupt_keys);
         all.cursor = scan.cursor;
         if all.cursor == 0 {
+            // SCAN may return a key more than once, for example when the
+            // keyspace is resized while concurrent tests add and delete keys.
+            all.scopes.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+            all.scopes.dedup_by(|a, b| a.prefix == b.prefix);
+            all.corrupt_keys.sort();
+            all.corrupt_keys.dedup();
             return all;
         }
     }
@@ -712,9 +718,7 @@ async fn queues_of_another_tenant_are_neither_discovered_nor_reported() {
     );
     let mut expected = vec![mismatched.keys()[4].clone(), no_tenant.keys()[4].clone()];
     expected.sort();
-    let mut reported = theirs.corrupt_keys;
-    reported.sort();
-    assert_eq!(reported, expected);
+    assert_eq!(theirs.corrupt_keys, expected);
 }
 
 #[tokio::test]
