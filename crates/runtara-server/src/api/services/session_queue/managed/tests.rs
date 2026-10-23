@@ -610,8 +610,12 @@ async fn corrupt_owner_is_reported_without_blocking_discovery_of_other_queues() 
     // Owners that name this tenant but do not match their key's digest.
     let mismatched = QueueScope::new(scope.tenant_id(), &Uuid::new_v4().to_string()).unwrap();
     let missing_session = QueueScope::new(scope.tenant_id(), &Uuid::new_v4().to_string()).unwrap();
-    cleanup.track(&mismatched);
-    cleanup.track(&missing_session);
+    // An owner that lost its tenant, but whose session still digests to its key
+    // together with this tenant.
+    let lost_tenant = QueueScope::new(scope.tenant_id(), &Uuid::new_v4().to_string()).unwrap();
+    for corrupt in [&mismatched, &missing_session, &lost_tenant] {
+        cleanup.track(corrupt);
+    }
     conn.hset_multiple::<_, _, _, ()>(
         &mismatched.keys()[4],
         &[
@@ -624,13 +628,20 @@ async fn corrupt_owner_is_reported_without_blocking_discovery_of_other_queues() 
     conn.hset::<_, _, _, ()>(&missing_session.keys()[4], "tenant_id", scope.tenant_id())
         .await
         .unwrap();
+    conn.hset::<_, _, _, ()>(
+        &lost_tenant.keys()[4],
+        "session_id",
+        lost_tenant.session_id(),
+    )
+    .await
+    .unwrap();
     let scan = scan_all(&mut conn, scope.tenant_id()).await;
     assert!(
         scan.scopes
             .iter()
             .any(|candidate| candidate.prefix == scope.prefix)
     );
-    for corrupt in [&mismatched, &missing_session] {
+    for corrupt in [&mismatched, &missing_session, &lost_tenant] {
         assert!(scan.corrupt_keys.contains(&corrupt.keys()[4]));
         assert!(
             !scan
@@ -650,8 +661,9 @@ async fn queues_of_another_tenant_are_neither_discovered_nor_reported() {
     let other_tenant = format!("other-{}", Uuid::new_v4());
     let healthy = QueueScope::new(&other_tenant, &Uuid::new_v4().to_string()).unwrap();
     let mismatched = QueueScope::new(&other_tenant, &Uuid::new_v4().to_string()).unwrap();
-    // Neither owner names a tenant, so no server can attribute them.
+    // Not a hash, so it names no tenant or session for any server to match.
     let not_a_hash = QueueScope::new(&other_tenant, &Uuid::new_v4().to_string()).unwrap();
+    // Names no tenant, but its session digests to its key only with its own.
     let no_tenant = QueueScope::new(&other_tenant, &Uuid::new_v4().to_string()).unwrap();
     for other in [&healthy, &mismatched, &not_a_hash, &no_tenant] {
         cleanup.track(other);
@@ -698,7 +710,11 @@ async fn queues_of_another_tenant_are_neither_discovered_nor_reported() {
             .iter()
             .any(|candidate| candidate.prefix == healthy.prefix)
     );
-    assert_eq!(theirs.corrupt_keys, vec![mismatched.keys()[4].clone()]);
+    let mut expected = vec![mismatched.keys()[4].clone(), no_tenant.keys()[4].clone()];
+    expected.sort();
+    let mut reported = theirs.corrupt_keys;
+    reported.sort();
+    assert_eq!(reported, expected);
 }
 
 #[tokio::test]

@@ -634,10 +634,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scanned every session queue in Valkey, so a server sharing Valkey with
   other tenants tried to deliver their queued responses through its own
   runtime, and warned about their corrupt queues. It now skips queues another
-  tenant owns, and corrupt owner metadata that names another tenant or no
-  tenant at all. A corrupt queue of its own is still reported, but the same
-  warning for the same queue now repeats at most once an hour instead of on
-  every scan pass; the passes in between log at debug.
+  tenant owns, and corrupt owner metadata it cannot trace to its own tenant.
+  A corrupt queue of its own is still reported, but the same warning for the
+  same queue now repeats at most once an hour instead of on every scan pass;
+  the passes in between log at debug.
 - **A Channel trigger whose workflow was deleted no longer takes over its
   bot's inbound messages.** Inbound calls were checked against, and routed
   to, the newest active Channel trigger on the connection, even when its
