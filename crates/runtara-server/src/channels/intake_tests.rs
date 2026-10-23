@@ -32,6 +32,8 @@ const TEAMS_APP_ID: &str = "99999999-2222-3333-4444-555555555555";
 const TEAMS_KID: &str = "intake-harness-kid";
 const TEAMS_SERVICE_URL: &str = "https://smba.trafficmanager.net/amer/";
 const SLACK_SECRET: &str = "intake-harness-signing-secret";
+/// The webhook secret the harness's Telegram triggers hold, and its calls carry.
+const TELEGRAM_SECRET: &str = "intake-harness-webhook-secret";
 
 #[derive(Clone, Copy, Debug)]
 enum Provider {
@@ -74,13 +76,7 @@ impl Provider {
     fn request(self, connection_id: &str, delivery: u32) -> Request<Body> {
         let path = |name: &str| format!("/api/runtime/events/webhook/{name}/{connection_id}");
         match self {
-            Self::Telegram => json_request(
-                &path("telegram"),
-                json!({
-                    "update_id": delivery,
-                    "message": {"chat": {"id": 42}, "from": {"id": 7}, "text": "hello"},
-                }),
-            ),
+            Self::Telegram => telegram_request(connection_id, delivery, Some(TELEGRAM_SECRET)),
             Self::Slack => {
                 let body = json!({
                     "type": "event_callback",
@@ -126,6 +122,24 @@ impl Provider {
                 .unwrap(),
         }
     }
+}
+
+/// One Telegram update, sent with `secret` as Telegram sends the webhook
+/// secret it was registered with.
+fn telegram_request(connection_id: &str, delivery: u32, secret: Option<&str>) -> Request<Body> {
+    let mut request = json_request(
+        &format!("/api/runtime/events/webhook/telegram/{connection_id}"),
+        json!({
+            "update_id": delivery,
+            "message": {"chat": {"id": 42}, "from": {"id": 7}, "text": "hello"},
+        }),
+    );
+    if let Some(secret) = secret {
+        request
+            .headers_mut()
+            .insert("x-telegram-bot-api-secret-token", secret.parse().unwrap());
+    }
+    request
 }
 
 fn json_request(path: &str, body: Value) -> Request<Body> {
@@ -297,19 +311,28 @@ impl Harness {
         .execute(&self.pool)
         .await
         .unwrap();
+        let mut configuration = json!({"connection_id": id});
+        if matches!(provider, Provider::Telegram) {
+            configuration["webhook_secret"] = json!(TELEGRAM_SECRET);
+        }
+        self.channel_trigger(&self.workflow_id, configuration).await;
+        self.connections.lock().unwrap().push(id.clone());
+        id
+    }
+
+    /// An active Channel trigger for `workflow_id` with `configuration`.
+    async fn channel_trigger(&self, workflow_id: &str, configuration: Value) {
         let request: CreateInvocationTriggerRequest = serde_json::from_value(json!({
-            "workflow_id": self.workflow_id,
+            "workflow_id": workflow_id,
             "trigger_type": TriggerType::Channel,
             "active": true,
-            "configuration": {"connection_id": id},
+            "configuration": configuration,
         }))
         .unwrap();
         TriggerRepository::new(self.pool.clone())
             .create(&request, Some(&self.tenant), None)
             .await
             .unwrap();
-        self.connections.lock().unwrap().push(id.clone());
-        id
     }
 
     /// Remove everything this harness created. The server database is shared
@@ -922,5 +945,104 @@ async fn a_reply_left_by_an_ended_session_is_delivered_not_relaunched() {
     }
     // None of them started a run.
     assert_eq!(harness.executions().await.len(), before);
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_telegram_call_is_rejected_when_the_trigger_holds_no_secret() {
+    let harness = Harness::new().await;
+    let router = harness.router().await;
+    let connection = harness.connection(Provider::Telegram).await;
+    sqlx::query(
+        "UPDATE invocation_trigger SET configuration = configuration - 'webhook_secret'
+         WHERE configuration->>'connection_id' = $1",
+    )
+    .bind(&connection)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    for secret in [None, Some(TELEGRAM_SECRET)] {
+        assert_eq!(
+            post(&router, telegram_request(&connection, 1, secret)).await,
+            StatusCode::UNAUTHORIZED,
+            "with secret {secret:?}"
+        );
+    }
+    assert!(harness.intake(&connection).await.is_empty());
+    harness.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_newer_trigger_of_a_deleted_workflow_does_not_take_the_bot() {
+    let harness = Harness::new().await;
+    let router = harness.router().await;
+    let connection = harness.connection(Provider::Telegram).await;
+    sqlx::query(
+        "UPDATE invocation_trigger SET created_at = NOW() - interval '10 minutes'
+         WHERE configuration->>'connection_id' = $1",
+    )
+    .bind(&connection)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+
+    // A newer trigger on the same bot whose workflow was deleted while the
+    // trigger stayed active, as before deletion switched triggers off.
+    let deleted_workflow = Uuid::new_v4().to_string();
+    let repo = WorkflowRepository::new(harness.pool.clone());
+    repo.create(
+        &harness.tenant,
+        &deleted_workflow,
+        None,
+        &deleted_workflow,
+        "",
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE workflows SET deleted_at = NOW() WHERE tenant_id = $1 AND workflow_id = $2",
+    )
+    .bind(&harness.tenant)
+    .bind(&deleted_workflow)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+    harness
+        .channel_trigger(
+            &deleted_workflow,
+            json!({"connection_id": connection, "webhook_secret": "deleted-workflow-secret"}),
+        )
+        .await;
+    let before = harness.executions().await.len();
+
+    // The live trigger's secret is the one accepted, and its workflow runs.
+    assert_eq!(
+        post(
+            &router,
+            telegram_request(&connection, 1, Some(TELEGRAM_SECRET))
+        )
+        .await,
+        StatusCode::OK
+    );
+    let (_, instance) = harness.processed(&connection).await;
+    let executions = harness.executions().await;
+    assert_eq!(executions.len(), before + 1);
+    assert!(executions.contains(&instance));
+
+    assert_eq!(
+        post(
+            &router,
+            telegram_request(&connection, 2, Some("deleted-workflow-secret"))
+        )
+        .await,
+        StatusCode::UNAUTHORIZED
+    );
+
+    sqlx::query("DELETE FROM invocation_trigger WHERE workflow_id = $1")
+        .bind(&deleted_workflow)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
     harness.cleanup().await;
 }

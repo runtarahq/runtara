@@ -502,7 +502,7 @@ pub async fn register_trigger_webhook(
 /// become active, by being created or switched on.
 ///
 /// A webhook is registered per connection, and inbound requests are
-/// validated against the secret of the newest active Channel trigger on it.
+/// validated against the secret of the newest live Channel trigger on it.
 /// So what to register depends on the other live triggers on the connection:
 /// - a newer one: its secret is the one validated, so register again for
 ///   that trigger, reusing its stored secret. That is idempotent, and
@@ -609,7 +609,7 @@ pub async fn update_channel_webhooks(
 /// already read inactive, so this cannot tell on its own.
 ///
 /// A webhook is registered per connection, and inbound requests are
-/// validated against the secret of the newest active Channel trigger on it.
+/// validated against the secret of the newest live Channel trigger on it.
 /// So for each connection:
 /// - no live trigger left: unregister;
 /// - a removed trigger was not older than the newest survivor: the platform

@@ -11,7 +11,6 @@ use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::api::dto::triggers::TriggerType;
 use crate::api::handlers::chat::{ChatEvent, chat_event_type, parse_debug_event};
 use crate::api::repositories::triggers::TriggerRepository;
 use crate::api::services::session_queue;
@@ -200,28 +199,17 @@ impl ChannelRouter {
     }
 
     /// Validate the webhook secret from the request header against the
-    /// secret stored in the trigger's configuration.
+    /// secret stored in the configuration of the connection's newest live
+    /// Channel trigger, the one webhook registration sends to the platform.
     pub async fn validate_webhook_secret(
         &self,
         connection_id: &str,
         secret_header: Option<&str>,
     ) -> anyhow::Result<()> {
-        let expected_tenant = crate::config::tenant_id();
-        let trigger_repo = TriggerRepository::new(self.pool.clone());
-        let triggers = trigger_repo
-            .list(Some(expected_tenant))
+        let trigger = TriggerRepository::new(self.pool.clone())
+            .newest_live_channel_trigger(connection_id, crate::config::tenant_id(), None)
             .await
             .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
-
-        let trigger = triggers.iter().find(|t| {
-            t.trigger_type == TriggerType::Channel
-                && t.active
-                && t.configuration
-                    .as_ref()
-                    .and_then(|c| c.get("connection_id"))
-                    .and_then(|v| v.as_str())
-                    == Some(connection_id)
-        });
 
         let Some(trigger) = trigger else {
             anyhow::bail!("No active Channel trigger for connection {}", connection_id);
@@ -234,12 +222,16 @@ impl ChannelRouter {
             (Some(stored), Some(header)) if stored == header => Ok(()),
             (Some(_), Some(_)) => anyhow::bail!("Invalid webhook secret"),
             (Some(_), None) => anyhow::bail!("Missing webhook secret header"),
-            // No secret stored (legacy trigger) — allow for backward compatibility.
-            (None, _) => Ok(()),
+            // Every webhook this runtime registers carries a secret, stored
+            // before the platform is contacted. A trigger without one was
+            // never registered, or lost its secret to a failed registration,
+            // so nothing can authenticate the call.
+            (None, _) => anyhow::bail!("No webhook secret stored for the Channel trigger"),
         }
     }
 
-    /// Look up the connection and its active Channel trigger.
+    /// Look up the connection and its newest live Channel trigger, the same
+    /// one webhook registration and Telegram's secret check use.
     async fn resolve_route(&self, connection_id: &str) -> Result<Route, RouteError> {
         let conn = self
             .connections
@@ -259,21 +251,10 @@ impl ChannelRouter {
             )));
         }
 
-        let triggers = TriggerRepository::new(self.pool.clone())
-            .list(Some(&tenant_id))
+        let trigger = TriggerRepository::new(self.pool.clone())
+            .newest_live_channel_trigger(connection_id, &tenant_id, None)
             .await
-            .map_err(|e| RouteError::Unavailable(anyhow::anyhow!("DB error: {}", e)))?;
-        let trigger = triggers
-            .into_iter()
-            .find(|t| {
-                t.trigger_type == TriggerType::Channel
-                    && t.active
-                    && t.configuration
-                        .as_ref()
-                        .and_then(|c| c.get("connection_id"))
-                        .and_then(|v| v.as_str())
-                        == Some(connection_id)
-            })
+            .map_err(|e| RouteError::Unavailable(anyhow::anyhow!("DB error: {}", e)))?
             .ok_or_else(|| {
                 RouteError::Unroutable(anyhow::anyhow!(
                     "No active Channel trigger found for connection {}",

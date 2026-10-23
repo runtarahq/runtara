@@ -309,6 +309,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A Telegram Channel trigger that holds no webhook secret rejects inbound
+  calls (401) instead of accepting them unauthenticated.** Every webhook
+  runtara registers carries a secret, stored before Telegram is called, so a
+  trigger without one was either never registered or lost its secret to a
+  failed registration racing another one, while Telegram kept the secret.
+  Only a Telegram webhook set up by hand, outside runtara, relied on this.
+  To keep one working, set `WEBHOOK_BASE_URL` and switch the trigger off and
+  on, so runtara registers the webhook with a secret.
 - **A finished EmbedWorkflow or workflow-agent call keeps its result, not
   its child's rows.** Recording a durable EmbedWorkflow's result, or the
   result of an Agent step calling a workflow published as an agent, now
@@ -606,6 +614,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A Channel trigger whose workflow was deleted no longer takes over its
+  bot's inbound messages.** Inbound calls were checked against, and routed
+  to, the newest active Channel trigger on the connection, even when its
+  workflow was deleted, while webhook registration skips such a trigger and
+  sends the secret of the newest live one. A bot whose newest trigger
+  belonged to a deleted workflow then rejected every Telegram update with
+  401, and on other platforms its messages went to the deleted workflow.
+  Validation and routing now use the same newest live trigger as
+  registration.
 - **A published workflow-agent that carries a built-in agent's id no longer
   lifts the allowlist for that built-in.** Saving (`/update`, MCP
   `deploy_workflow`), the graph patch (`PUT …/versions/{version}/graph`),
