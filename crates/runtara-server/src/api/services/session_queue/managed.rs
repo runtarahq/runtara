@@ -209,11 +209,15 @@ pub struct ScopeScan {
     pub corrupt_keys: Vec<String>,
 }
 
-/// Discover retained queues after a restart, including queues without an SSE
-/// subscriber. `count` is a SCAN work hint; never discard returned keys when a
-/// server page exceeds it. A worker must finish one scan cursor before restarting.
+/// Discover `tenant_id`'s retained queues after a restart, including queues
+/// without an SSE subscriber. Valkey can be shared by several tenants' servers,
+/// so queues owned by another tenant are skipped, and so is corrupt owner
+/// metadata that names another tenant or none. `count` is a SCAN work hint;
+/// never discard returned keys when a server page exceeds it. A worker must
+/// finish one scan cursor before restarting.
 pub async fn scan_scopes(
     conn: &mut ConnectionManager,
+    tenant_id: &str,
     cursor: u64,
     count: u32,
 ) -> QueueResult<ScopeScan> {
@@ -242,24 +246,18 @@ pub async fn scan_scopes(
             .await;
         let (tenant, session) = match owner {
             Ok(owner) => owner,
-            Err(error) if error.code() == Some("WRONGTYPE") => {
-                scan.corrupt_keys.push(key);
-                continue;
-            }
+            // Owner metadata that is not a hash names no tenant to report it to.
+            Err(error) if error.code() == Some("WRONGTYPE") => continue,
             Err(error) => return Err(error.into()),
         };
-        match (tenant, session) {
-            (None, None) => {
-                let exists: bool = redis::cmd("EXISTS").arg(&key).query_async(conn).await?;
-                if exists {
-                    scan.corrupt_keys.push(key);
-                }
-                // Otherwise concurrent completed-queue cleanup removed this key.
-            }
-            (Some(tenant), Some(session)) => match QueueScope::new(&tenant, &session) {
-                Ok(scope) if scope.keys()[4] == key => scan.scopes.push(scope),
-                _ => scan.corrupt_keys.push(key),
-            },
+        // Skip other tenants' queues. An owner without a tenant was either
+        // removed by concurrent completed-queue cleanup or is corrupt beyond
+        // attribution: the key is a digest, so it cannot name the tenant either.
+        let Some(tenant) = tenant.filter(|tenant| tenant == tenant_id) else {
+            continue;
+        };
+        match session.map(|session| QueueScope::new(&tenant, &session)) {
+            Some(Ok(scope)) if scope.keys()[4] == key => scan.scopes.push(scope),
             _ => scan.corrupt_keys.push(key),
         }
     }

@@ -742,6 +742,7 @@ async fn managed_actions_page_requests_and_replay_receipts_after_completion() {
             recovered.clone(),
             client.clone(),
             pool.clone(),
+            queued.0.tenant_id().to_string(),
             shutdown.clone(),
         ));
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {

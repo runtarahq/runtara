@@ -2,14 +2,60 @@ use super::*;
 use redis::AsyncCommands;
 use serde_json::json;
 
-async fn fixture() -> (ConnectionManager, QueueScope) {
+/// Deletes the keys of every tracked scope when a test ends, including when an
+/// assertion fails. Unresolved queues never expire, so a key left behind stays
+/// in that Valkey, where a server using it keeps rediscovering the queue.
+struct Cleanup {
+    url: String,
+    keys: Vec<String>,
+}
+impl Cleanup {
+    fn track(&mut self, scope: &QueueScope) {
+        self.keys.extend(scope.keys());
+    }
+}
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        // Drop cannot await, so this uses a blocking connection of its own.
+        let deleted = redis::Client::open(self.url.as_str())
+            .and_then(|client| client.get_connection())
+            .and_then(|mut conn| redis::cmd("DEL").arg(&self.keys).query::<()>(&mut conn));
+        if let Err(error) = deleted {
+            eprintln!("could not delete session queue test keys: {error}");
+        }
+    }
+}
+
+async fn fixture() -> (ConnectionManager, QueueScope, Cleanup) {
     let config = crate::valkey::ValkeyConfig::from_env().expect("isolated Valkey required");
-    let client = redis::Client::open(config.connection_url()).unwrap();
+    let url = config.connection_url();
+    let client = redis::Client::open(url.as_str()).unwrap();
     let conn = ConnectionManager::new(client).await.unwrap();
-    (
-        conn,
-        QueueScope::new("queue-test", &Uuid::new_v4().to_string()).unwrap(),
-    )
+    let scope = QueueScope::new("queue-test", &Uuid::new_v4().to_string()).unwrap();
+    let mut cleanup = Cleanup {
+        url,
+        keys: Vec::new(),
+    };
+    cleanup.track(&scope);
+    (conn, scope, cleanup)
+}
+/// Every queue `scan_scopes` returns for `tenant_id`, one key per SCAN call so
+/// that cursor progress is exercised too.
+async fn scan_all(conn: &mut ConnectionManager, tenant_id: &str) -> ScopeScan {
+    let mut all = ScopeScan {
+        cursor: 0,
+        scopes: Vec::new(),
+        corrupt_keys: Vec::new(),
+    };
+    loop {
+        let scan = scan_scopes(conn, tenant_id, all.cursor, 1).await.unwrap();
+        all.scopes.extend(scan.scopes);
+        all.corrupt_keys.extend(scan.corrupt_keys);
+        all.cursor = scan.cursor;
+        if all.cursor == 0 {
+            return all;
+        }
+    }
 }
 async fn leased(conn: &mut ConnectionManager, scope: &QueueScope) -> Envelope {
     match claim(conn, scope, 30_000).await.unwrap() {
@@ -43,7 +89,7 @@ fn target(id: &str) -> InputTarget {
 
 #[tokio::test]
 async fn unresolved_responses_keep_their_existing_session_route() {
-    let (mut conn, scope) = fixture().await;
+    let (mut conn, scope, _cleanup) = fixture().await;
     let route = SessionRoute {
         workflow_id: "workflow".into(),
         instance_id: "original".into(),
@@ -91,7 +137,7 @@ async fn unresolved_responses_keep_their_existing_session_route() {
 
 #[tokio::test]
 async fn enqueue_is_atomic_idempotent_and_preserves_large_json_numbers() {
-    let (mut conn, scope) = fixture().await;
+    let (mut conn, scope, _cleanup) = fixture().await;
     let payload = json!({"large":u64::MAX,"array":[2,1],"nested":{"b":false,"a":null}});
     let first = enqueue(&mut conn, &scope, "message", "operation", &payload)
         .await
@@ -123,7 +169,7 @@ async fn enqueue_is_atomic_idempotent_and_preserves_large_json_numbers() {
 
 #[tokio::test]
 async fn two_workers_preserve_fifo_and_expired_tokens_cannot_bind_renew_or_ack() {
-    let (mut conn, scope) = fixture().await;
+    let (mut conn, scope, _cleanup) = fixture().await;
     for id in ["one", "two"] {
         enqueue(&mut conn, &scope, id, id, &json!({"answer":true}))
             .await
@@ -179,7 +225,7 @@ async fn two_workers_preserve_fifo_and_expired_tokens_cannot_bind_renew_or_ack()
 
 #[tokio::test]
 async fn blocking_head_requires_explicit_resolution_and_never_changes_a_bound_target() {
-    let (mut conn, scope) = fixture().await;
+    let (mut conn, scope, _cleanup) = fixture().await;
     for id in ["one", "two"] {
         enqueue(&mut conn, &scope, id, id, &json!({}))
             .await
@@ -216,7 +262,7 @@ async fn blocking_head_requires_explicit_resolution_and_never_changes_a_bound_ta
 
 #[tokio::test]
 async fn retry_delays_use_backend_time_and_keep_original_target() {
-    let (mut conn, scope) = fixture().await;
+    let (mut conn, scope, _cleanup) = fixture().await;
     enqueue(&mut conn, &scope, "one", "one", &json!({}))
         .await
         .unwrap();
@@ -251,7 +297,7 @@ async fn retry_delays_use_backend_time_and_keep_original_target() {
 
 #[tokio::test]
 async fn corruption_is_visible_and_does_not_pop_the_message() {
-    let (mut conn, scope) = fixture().await;
+    let (mut conn, scope, _cleanup) = fixture().await;
     enqueue(&mut conn, &scope, "one", "one", &json!({}))
         .await
         .unwrap();
@@ -271,7 +317,7 @@ async fn corruption_is_visible_and_does_not_pop_the_message() {
 
 #[tokio::test]
 async fn retention_prunes_only_completed_identities_in_bounded_batches() {
-    let (mut conn, scope) = fixture().await;
+    let (mut conn, scope, _cleanup) = fixture().await;
     for id in ["one", "two", "unresolved"] {
         enqueue(&mut conn, &scope, id, id, &json!({}))
             .await
@@ -307,7 +353,7 @@ async fn retention_prunes_only_completed_identities_in_bounded_batches() {
 
 #[tokio::test]
 async fn tenant_and_session_identities_cannot_inject_a_hash_slot_or_collide() {
-    let (mut conn, _) = fixture().await;
+    let (mut conn, _, mut cleanup) = fixture().await;
     let unique = Uuid::new_v4().to_string();
     let scopes = [
         QueueScope::new(&format!("{unique}:a"), "b:{evil}").unwrap(),
@@ -315,6 +361,7 @@ async fn tenant_and_session_identities_cannot_inject_a_hash_slot_or_collide() {
     ];
     assert_ne!(scopes[0].prefix, scopes[1].prefix);
     for scope in &scopes {
+        cleanup.track(scope);
         assert!(!scope.prefix.contains("evil"));
         assert_eq!(scope.prefix.matches('{').count(), 1);
     }
@@ -374,7 +421,7 @@ async fn delivery_never_guesses_a_target_and_blocks_schema_failure_without_consu
         domain::InstanceStatus,
         persistence::{Persistence, memory::InMemoryPersistence},
     };
-    let (mut conn, scope) = fixture().await;
+    let (mut conn, scope, _cleanup) = fixture().await;
     let persistence = std::sync::Arc::new(InMemoryPersistence::new());
     persistence
         .register_instance("instance", "queue-test")
@@ -434,7 +481,7 @@ async fn delivery_after_lost_ack_replays_original_receipt_without_retargeting() 
         domain::InstanceStatus,
         persistence::{Persistence, memory::InMemoryPersistence},
     };
-    let (mut conn, scope) = fixture().await;
+    let (mut conn, scope, _cleanup) = fixture().await;
     let persistence = std::sync::Arc::new(InMemoryPersistence::new());
     persistence
         .register_instance("instance", "queue-test")
@@ -494,7 +541,7 @@ async fn delivery_after_lost_ack_replays_original_receipt_without_retargeting() 
 
 #[tokio::test]
 async fn session_metadata_does_not_expire_independently_of_unresolved_messages() {
-    let (mut conn, scope) = fixture().await;
+    let (mut conn, scope, _cleanup) = fixture().await;
     super::super::set_session_meta(
         &mut conn,
         scope.tenant_id(),
@@ -529,7 +576,7 @@ async fn session_metadata_does_not_expire_independently_of_unresolved_messages()
 
 #[tokio::test]
 async fn retained_queue_can_be_discovered_after_worker_restart() {
-    let (mut conn, scope) = fixture().await;
+    let (mut conn, scope, _cleanup) = fixture().await;
     enqueue(&mut conn, &scope, "message", "operation", &json!({}))
         .await
         .unwrap();
@@ -538,20 +585,15 @@ async fn retained_queue_can_be_discovered_after_worker_restart() {
         ConnectionManager::new(redis::Client::open(config.connection_url()).unwrap())
             .await
             .unwrap();
-    let mut cursor = 0;
-    let mut found = false;
-    loop {
-        let scan = scan_scopes(&mut recovered, cursor, 1).await.unwrap();
-        found |= scan.scopes.iter().any(|candidate| {
+    let found = scan_all(&mut recovered, scope.tenant_id())
+        .await
+        .scopes
+        .iter()
+        .any(|candidate| {
             candidate.prefix == scope.prefix
                 && candidate.tenant_id() == scope.tenant_id()
                 && candidate.session_id() == scope.session_id()
         });
-        cursor = scan.cursor;
-        if cursor == 0 {
-            break;
-        }
-    }
     assert!(
         found,
         "retained queue must be discoverable without in-memory session state"
@@ -561,36 +603,107 @@ async fn retained_queue_can_be_discovered_after_worker_restart() {
 
 #[tokio::test]
 async fn corrupt_owner_is_reported_without_blocking_discovery_of_other_queues() {
-    let (mut conn, scope) = fixture().await;
+    let (mut conn, scope, mut cleanup) = fixture().await;
     enqueue(&mut conn, &scope, "message", "operation", &json!({}))
         .await
         .unwrap();
-    let broken = QueueScope::new("broken", &Uuid::new_v4().to_string()).unwrap();
-    conn.set::<_, _, ()>(&broken.keys()[4], "invalid-owner-type")
+    // Owners that name this tenant but do not match their key's digest.
+    let mismatched = QueueScope::new(scope.tenant_id(), &Uuid::new_v4().to_string()).unwrap();
+    let missing_session = QueueScope::new(scope.tenant_id(), &Uuid::new_v4().to_string()).unwrap();
+    cleanup.track(&mismatched);
+    cleanup.track(&missing_session);
+    conn.hset_multiple::<_, _, _, ()>(
+        &mismatched.keys()[4],
+        &[
+            ("tenant_id", scope.tenant_id()),
+            ("session_id", "another-session"),
+        ],
+    )
+    .await
+    .unwrap();
+    conn.hset::<_, _, _, ()>(&missing_session.keys()[4], "tenant_id", scope.tenant_id())
         .await
         .unwrap();
-    let mut cursor = 0;
-    let mut found = false;
-    let mut reported = false;
-    loop {
-        let scan = scan_scopes(&mut conn, cursor, 1).await.unwrap();
-        found |= scan
+    let scan = scan_all(&mut conn, scope.tenant_id()).await;
+    assert!(
+        scan.scopes
+            .iter()
+            .any(|candidate| candidate.prefix == scope.prefix)
+    );
+    for corrupt in [&mismatched, &missing_session] {
+        assert!(scan.corrupt_keys.contains(&corrupt.keys()[4]));
+        assert!(
+            !scan
+                .scopes
+                .iter()
+                .any(|candidate| candidate.prefix == corrupt.prefix)
+        );
+    }
+}
+
+#[tokio::test]
+async fn queues_of_another_tenant_are_neither_discovered_nor_reported() {
+    let (mut conn, scope, mut cleanup) = fixture().await;
+    enqueue(&mut conn, &scope, "message", "operation", &json!({}))
+        .await
+        .unwrap();
+    let other_tenant = format!("other-{}", Uuid::new_v4());
+    let healthy = QueueScope::new(&other_tenant, &Uuid::new_v4().to_string()).unwrap();
+    let mismatched = QueueScope::new(&other_tenant, &Uuid::new_v4().to_string()).unwrap();
+    // Neither owner names a tenant, so no server can attribute them.
+    let not_a_hash = QueueScope::new(&other_tenant, &Uuid::new_v4().to_string()).unwrap();
+    let no_tenant = QueueScope::new(&other_tenant, &Uuid::new_v4().to_string()).unwrap();
+    for other in [&healthy, &mismatched, &not_a_hash, &no_tenant] {
+        cleanup.track(other);
+    }
+    enqueue(&mut conn, &healthy, "message", "operation", &json!({}))
+        .await
+        .unwrap();
+    conn.hset_multiple::<_, _, _, ()>(
+        &mismatched.keys()[4],
+        &[
+            ("tenant_id", other_tenant.as_str()),
+            ("session_id", "another-session"),
+        ],
+    )
+    .await
+    .unwrap();
+    conn.set::<_, _, ()>(&not_a_hash.keys()[4], "invalid-owner-type")
+        .await
+        .unwrap();
+    conn.hset::<_, _, _, ()>(&no_tenant.keys()[4], "session_id", no_tenant.session_id())
+        .await
+        .unwrap();
+
+    let ours = scan_all(&mut conn, scope.tenant_id()).await;
+    assert!(
+        ours.scopes
+            .iter()
+            .any(|candidate| candidate.prefix == scope.prefix)
+    );
+    assert!(
+        ours.scopes
+            .iter()
+            .all(|candidate| candidate.tenant_id() == scope.tenant_id())
+    );
+    for other in [&healthy, &mismatched, &not_a_hash, &no_tenant] {
+        assert!(!ours.corrupt_keys.contains(&other.keys()[4]));
+    }
+
+    // The other tenant's own server still sees its queues.
+    let theirs = scan_all(&mut conn, &other_tenant).await;
+    assert!(
+        theirs
             .scopes
             .iter()
-            .any(|candidate| candidate.prefix == scope.prefix);
-        reported |= scan.corrupt_keys.contains(&broken.keys()[4]);
-        cursor = scan.cursor;
-        if cursor == 0 {
-            break;
-        }
-    }
-    assert!(found);
-    assert!(reported);
+            .any(|candidate| candidate.prefix == healthy.prefix)
+    );
+    assert_eq!(theirs.corrupt_keys, vec![mismatched.keys()[4].clone()]);
 }
 
 #[tokio::test]
 async fn selected_response_is_bound_before_claim_and_replay_cannot_change_its_target() {
-    let (mut conn, scope) = fixture().await;
+    let (mut conn, scope, _cleanup) = fixture().await;
     let selected = target("chosen");
     let payload = json!({"answer":true});
     let retained = enqueue_targeted(
@@ -650,7 +763,7 @@ async fn selected_response_is_bound_before_claim_and_replay_cannot_change_its_ta
 
 #[tokio::test]
 async fn selected_enqueue_cannot_repurpose_an_existing_unbound_operation() {
-    let (mut conn, scope) = fixture().await;
+    let (mut conn, scope, _cleanup) = fixture().await;
     let payload = json!({"message":"original"});
     enqueue(&mut conn, &scope, "message", "operation", &payload)
         .await

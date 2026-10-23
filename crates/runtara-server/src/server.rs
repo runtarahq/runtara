@@ -1655,9 +1655,16 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     if let (Some(connection), Some(client)) = (valkey_conn.clone(), runtime_client.clone()) {
         let shutdown = shutdown_signal.clone();
         let delivery_pool = pool.clone();
+        let delivery_tenant_id = tenant_id.clone();
         shutdown_coordinator.spawn_intake(async move {
-            workers::session_delivery_worker::run(connection, client, delivery_pool, shutdown)
-                .await;
+            workers::session_delivery_worker::run(
+                connection,
+                client,
+                delivery_pool,
+                delivery_tenant_id,
+                shutdown,
+            )
+            .await;
         });
     }
 
