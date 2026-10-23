@@ -16,10 +16,16 @@ impl Cleanup {
 }
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        // Drop cannot await, so this uses a blocking connection of its own.
+        // Drop cannot await, so this uses a blocking connection of its own,
+        // bounded so that an unreachable Valkey cannot hang the test.
+        let timeout = std::time::Duration::from_secs(5);
         let deleted = redis::Client::open(self.url.as_str())
-            .and_then(|client| client.get_connection())
-            .and_then(|mut conn| redis::cmd("DEL").arg(&self.keys).query::<()>(&mut conn));
+            .and_then(|client| client.get_connection_with_timeout(timeout))
+            .and_then(|mut conn| {
+                conn.set_read_timeout(Some(timeout))?;
+                conn.set_write_timeout(Some(timeout))?;
+                redis::cmd("DEL").arg(&self.keys).query::<()>(&mut conn)
+            });
         if let Err(error) = deleted {
             eprintln!("could not delete session queue test keys: {error}");
         }
