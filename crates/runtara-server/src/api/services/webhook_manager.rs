@@ -502,17 +502,17 @@ pub async fn register_trigger_webhook(
 /// become active, by being created or switched on.
 ///
 /// A webhook is registered per connection, and inbound requests are
-/// validated against the secret of the newest active Channel trigger on it.
+/// validated against the secret of the newest live Channel trigger on it.
 /// So what to register depends on the other live triggers on the connection:
 /// - a newer one: its secret is the one validated, so register again for
 ///   that trigger, reusing its stored secret. That is idempotent, and
 ///   repairs a webhook that is missing or stale, e.g. one removed while that
 ///   trigger stayed active;
 /// - an older one (or one created at the same instant): this trigger is now
-///   the one validated. It adopts that trigger's secret rather than sending
-///   its own: the platform most likely holds it already, so even a failed
-///   call leaves the platform and this trigger in agreement, and on a
-///   `created_at` tie both triggers hold the same secret;
+///   the one validated, or on a `created_at` tie may be. It adopts that
+///   trigger's secret rather than sending its own: the platform most likely
+///   holds it already, so even a failed call leaves the platform and this
+///   trigger in agreement, and on a tie both triggers hold the same secret;
 /// - none: register with this trigger's own secret.
 ///
 /// When the other triggers cannot be looked up, the webhook is left as it
@@ -609,12 +609,13 @@ pub async fn update_channel_webhooks(
 /// already read inactive, so this cannot tell on its own.
 ///
 /// A webhook is registered per connection, and inbound requests are
-/// validated against the secret of the newest active Channel trigger on it.
+/// validated against the secret of the newest live Channel trigger on it.
 /// So for each connection:
 /// - no live trigger left: unregister;
 /// - a removed trigger was not older than the newest survivor: the platform
-///   may hold the removed trigger's secret (validation order is undefined on
-///   a `created_at` tie), so register again for the survivor. The survivor
+///   may hold the removed trigger's secret (on a `created_at` tie, the
+///   removed one may have been the one validated), so register again for the
+///   survivor. The survivor
 ///   adopts that secret rather than sending its own: the platform most
 ///   likely holds it already, so even a failed call leaves the platform and
 ///   the survivor in agreement;

@@ -278,11 +278,12 @@ impl TriggerRepository {
     /// to `connection_id` and whose workflow is still live, or `None`.
     ///
     /// Channel webhooks are registered per connection, and inbound requests
-    /// are validated against the newest active Channel trigger on it (by
-    /// `created_at`), so this is the trigger whose secret the platform must
-    /// hold. Triggers of a dead workflow are skipped: they are about to be
-    /// deactivated, so the webhook must not be kept alive for them. Liveness
-    /// follows the orphan rule of [`Self::deactivate_orphaned`].
+    /// are validated against, and routed to, this trigger, so it is the one
+    /// whose secret the platform must hold. Triggers of a dead workflow are
+    /// skipped: they are about to be deactivated, so the webhook must not be
+    /// kept alive for them, nor messages sent to them. Liveness follows the
+    /// orphan rule of [`Self::deactivate_orphaned`]. A `created_at` tie is
+    /// broken by id, so every caller picks the same trigger.
     ///
     /// `except_trigger_id` leaves one trigger out, to find the trigger whose
     /// secret was in use before that one became active.
@@ -308,7 +309,7 @@ impl TriggerRepository {
                     AND w.deleted_at IS NULL
                     AND (t.tenant_id IS NULL OR w.tenant_id = t.tenant_id)
               )
-            ORDER BY t.created_at DESC
+            ORDER BY t.created_at DESC, t.id DESC
             LIMIT 1
             "#,
         )

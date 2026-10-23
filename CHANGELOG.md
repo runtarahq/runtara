@@ -309,6 +309,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: a Telegram Channel trigger that holds no webhook secret
+  rejects inbound calls (401) instead of accepting them unauthenticated.**
+  Since 9.0.0 runtara stores a webhook's secret before it calls Telegram, so
+  a trigger it registers holds the secret Telegram was sent. **A bot that
+  worked only because such calls were accepted goes silent on upgrade:**
+  - a Telegram webhook set up by hand, outside runtara;
+  - a trigger that lost its secret to a failed registration racing another
+    one;
+  - from releases before 9.0.0, which stored the secret only after Telegram
+    answered, a trigger whose registration timed out, or whose follow-up
+    write failed, after Telegram had applied the secret.
+
+  Before upgrading, list the affected triggers on the server database:
+
+  ```sql
+  SELECT t.id FROM invocation_trigger t
+  JOIN connection_data_entity c ON c.id = t.configuration->>'connection_id'
+  WHERE t.trigger_type = 'CHANNEL' AND t.active
+    AND c.integration_id = 'telegram_bot'
+    AND COALESCE(t.configuration->>'webhook_secret', '') = '';
+  ```
+
+  To repair one, set `WEBHOOK_BASE_URL` and switch the trigger off and on, so
+  runtara registers its webhook with a new secret.
 - **A finished EmbedWorkflow or workflow-agent call keeps its result, not
   its child's rows.** Recording a durable EmbedWorkflow's result, or the
   result of an Agent step calling a workflow published as an agent, now
@@ -606,6 +630,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A Channel trigger whose workflow was deleted no longer takes over its
+  bot's inbound messages.** Inbound calls were checked against, and routed
+  to, the newest active Channel trigger on the connection, even when its
+  workflow was deleted, while webhook registration skips such a trigger and
+  sends the secret of the newest live one. A bot whose newest trigger
+  belonged to a deleted workflow then rejected every Telegram update with
+  401, and on other platforms its messages were acknowledged and dropped,
+  since the deleted workflow has no version to run. Validation and routing
+  now use the same newest live trigger as registration, so these messages
+  reach that trigger's workflow.
 - **A published workflow-agent that carries a built-in agent's id no longer
   lifts the allowlist for that built-in.** Saving (`/update`, MCP
   `deploy_workflow`), the graph patch (`PUT …/versions/{version}/graph`),
