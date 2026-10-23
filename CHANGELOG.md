@@ -637,7 +637,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tenant owns, and corrupt owner metadata it cannot trace to its own tenant.
   A corrupt queue of its own is still reported, but the same warning for the
   same queue now repeats at most once an hour instead of on every scan pass;
-  the passes in between log at debug.
+  the passes in between log at debug. A session that recovers warns again
+  the next time it fails.
 - **A Channel trigger whose workflow was deleted no longer takes over its
   bot's inbound messages.** Inbound calls were checked against, and routed
   to, the newest active Channel trigger on the connection, even when its

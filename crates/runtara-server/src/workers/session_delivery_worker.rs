@@ -61,6 +61,17 @@ impl WarningLimiter {
         self.warned.insert(problem, now);
         true
     }
+
+    /// A session that processed cleanly has recovered, so its next problem is
+    /// a new incident and warns again.
+    fn forget_session(&mut self, session_id: &str) {
+        self.warned.retain(|problem, _| match problem {
+            Problem::Deferred { session_id: id, .. } | Problem::TimedOut { session_id: id } => {
+                id != session_id
+            }
+            Problem::CorruptOwner { .. } => true,
+        });
+    }
 }
 
 /// Warn when the limiter says the problem is due, otherwise log at debug.
@@ -151,7 +162,10 @@ pub async fn run(
                     Ok::<bool, crate::api::services::session_queue::managed::QueueError>(true)
                 };
                 match tokio::time::timeout_at(deadline, delivery).await {
-                    Ok(Ok(delivered)) => deliveries += usize::from(delivered),
+                    Ok(Ok(delivered)) => {
+                        warnings.forget_session(scope.session_id());
+                        deliveries += usize::from(delivered)
+                    }
                     Ok(Err(error)) => warn_if_due!(
                         warnings,
                         Problem::Deferred {
@@ -211,6 +225,31 @@ mod tests {
             session_id: "session".into()
         }));
         assert!(!limiter.due(deferred("queue contains corrupt state")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_session_that_recovers_warns_again_on_its_next_problem() {
+        let mut limiter = WarningLimiter::new();
+        let deferred = |session: &str| Problem::Deferred {
+            session_id: session.into(),
+            error: "queue unavailable".into(),
+        };
+        let timed_out = |session: &str| Problem::TimedOut {
+            session_id: session.into(),
+        };
+        for problem in [
+            deferred("recovered"),
+            timed_out("recovered"),
+            deferred("other"),
+            corrupt("a"),
+        ] {
+            assert!(limiter.due(problem));
+        }
+        limiter.forget_session("recovered");
+        assert!(limiter.due(deferred("recovered")));
+        assert!(limiter.due(timed_out("recovered")));
+        assert!(!limiter.due(deferred("other")));
+        assert!(!limiter.due(corrupt("a")));
     }
 
     #[tokio::test(start_paused = true)]
