@@ -2,7 +2,7 @@
 use crate::{
     api::services::session_queue::{
         delivery::deliver_session,
-        managed::{has_unresolved, prune_completed, scan_scopes},
+        managed::{DeliveryOutcome, has_unresolved, prune_completed, scan_scopes},
     },
     runtime_client::RuntimeClient,
     shutdown::ShutdownSignal,
@@ -62,9 +62,21 @@ impl WarningLimiter {
         true
     }
 
-    /// A session that processed cleanly has recovered, so its next problem is
-    /// a new incident and warns again.
-    fn forget_session(&mut self, session_id: &str) {
+    /// Record a sweep of `session_id` that returned `outcome`, or `None` when
+    /// nothing was unresolved. A queue found idle or a response accepted shows
+    /// the session has recovered, so its next problem is a new incident and
+    /// warns again. Busy, deferred and blocked outcomes show nothing: a lease
+    /// that a timed-out attempt still holds reads as busy, and forgetting then
+    /// would rearm the warning for every lease the attempt leaves behind.
+    fn record_sweep(&mut self, session_id: &str, outcome: Option<&DeliveryOutcome>) {
+        if matches!(
+            outcome,
+            Some(
+                DeliveryOutcome::Busy | DeliveryOutcome::Deferred(_) | DeliveryOutcome::Blocked(_)
+            )
+        ) {
+            return;
+        }
         self.warned.retain(|problem, _| match problem {
             Problem::Deferred { session_id: id, .. } | Problem::TimedOut { session_id: id } => {
                 id != session_id
@@ -148,23 +160,21 @@ pub async fn run(
                 let delivery = async {
                     prune_completed(&mut conn, &scope, 100).await?;
                     if !has_unresolved(&mut conn, &scope).await? {
-                        return Ok(false);
+                        return Ok(None);
                     }
                     let outcome = deliver_session(&mut conn, &scope, &client).await?;
-                    if let crate::api::services::session_queue::managed::DeliveryOutcome::Accepted(
-                        envelope,
-                    ) = outcome
+                    if let DeliveryOutcome::Accepted(envelope) = &outcome
                         && let (Some(actor), Some(target), Some(receipt)) =
                             (&envelope.actor_id, &envelope.target, &envelope.receipt_id)
                     {
                         crate::audit::emit(&pool,scope.tenant_id(),Some(actor),crate::audit::AuditEvent::new("input.answer").resource("instance",&target.instance_id).payload(serde_json::json!({"requestId":target.request_id,"receiptId":receipt}))).await;
                     }
-                    Ok::<bool, crate::api::services::session_queue::managed::QueueError>(true)
+                    Ok::<_, crate::api::services::session_queue::managed::QueueError>(Some(outcome))
                 };
                 match tokio::time::timeout_at(deadline, delivery).await {
-                    Ok(Ok(delivered)) => {
-                        warnings.forget_session(scope.session_id());
-                        deliveries += usize::from(delivered)
+                    Ok(Ok(outcome)) => {
+                        warnings.record_sweep(scope.session_id(), outcome.as_ref());
+                        deliveries += usize::from(outcome.is_some())
                     }
                     Ok(Err(error)) => warn_if_due!(
                         warnings,
@@ -191,11 +201,23 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::services::session_queue::managed::Envelope;
 
     fn corrupt(key: &str) -> Problem {
         Problem::CorruptOwner {
             queue_key: key.into(),
         }
+    }
+    fn envelope() -> Envelope {
+        serde_json::from_value(serde_json::json!({
+            "message_id": "message",
+            "operation_id": "operation",
+            "payload_json": "{}",
+            "enqueued_at_ms": 0,
+            "state": "queued",
+            "attempts": 1,
+        }))
+        .unwrap()
     }
 
     #[tokio::test(start_paused = true)]
@@ -229,7 +251,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_session_that_recovers_warns_again_on_its_next_problem() {
-        let mut limiter = WarningLimiter::new();
         let deferred = |session: &str| Problem::Deferred {
             session_id: session.into(),
             error: "queue unavailable".into(),
@@ -237,19 +258,48 @@ mod tests {
         let timed_out = |session: &str| Problem::TimedOut {
             session_id: session.into(),
         };
-        for problem in [
-            deferred("recovered"),
-            timed_out("recovered"),
-            deferred("other"),
-            corrupt("a"),
+        // Nothing unresolved, an idle queue, and an accepted response.
+        for recovery in [
+            None,
+            Some(DeliveryOutcome::Idle),
+            Some(DeliveryOutcome::Accepted(envelope())),
         ] {
-            assert!(limiter.due(problem));
+            let mut limiter = WarningLimiter::new();
+            for problem in [
+                deferred("recovered"),
+                timed_out("recovered"),
+                deferred("other"),
+                corrupt("a"),
+            ] {
+                assert!(limiter.due(problem));
+            }
+            limiter.record_sweep("recovered", recovery.as_ref());
+            assert!(limiter.due(deferred("recovered")));
+            assert!(limiter.due(timed_out("recovered")));
+            assert!(!limiter.due(deferred("other")));
+            assert!(!limiter.due(corrupt("a")));
         }
-        limiter.forget_session("recovered");
-        assert!(limiter.due(deferred("recovered")));
-        assert!(limiter.due(timed_out("recovered")));
-        assert!(!limiter.due(deferred("other")));
-        assert!(!limiter.due(corrupt("a")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_lease_held_by_a_timed_out_attempt_does_not_rearm_its_warning() {
+        let timed_out = || Problem::TimedOut {
+            session_id: "session".into(),
+        };
+        for inconclusive in [
+            DeliveryOutcome::Busy,
+            DeliveryOutcome::Deferred(envelope()),
+            DeliveryOutcome::Blocked(envelope()),
+        ] {
+            let mut limiter = WarningLimiter::new();
+            assert!(limiter.due(timed_out()));
+            // The next sweep cannot tell whether the cause is gone; the
+            // timed-out attempt's lease, for one, still reads as busy.
+            limiter.record_sweep("session", Some(&inconclusive));
+            // The lease expires, and the next attempt times out as well.
+            tokio::time::advance(Duration::from_secs(30)).await;
+            assert!(!limiter.due(timed_out()));
+        }
     }
 
     #[tokio::test(start_paused = true)]
