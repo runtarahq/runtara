@@ -36,6 +36,8 @@ members = [
     "crates/runtara-control-contract",
     # Isolated child-component package and invocation-path contract
     "crates/runtara-invocation-contract",
+    # Workflow API v1 contract shared by the host and the guest SDK
+    "crates/runtara-workflow-api",
     "crates/runtara-component-host",
     # Every workflow agent component; scripts/build-agent-components.sh builds
     # each crate it finds here.

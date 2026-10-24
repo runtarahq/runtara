@@ -1,0 +1,17 @@
+[package]
+name = "runtara-workflow-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Workflow API v1 contract shared by the host and guest: binding, errors, headers, wakes and run lifecycle shapes"
+keywords = ["wasm", "workflow", "contract", "durable"]
+categories = ["development-tools"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

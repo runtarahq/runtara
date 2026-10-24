@@ -4884,6 +4884,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtara-workflow-api"
+version = "9.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "runtara-workflow-stdlib"
 version = "9.0.1"
 dependencies = [
