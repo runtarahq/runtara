@@ -12,6 +12,19 @@ categories = ["development-tools"]
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+# The host-side `/v1` router. Off for the guest SDK, which only needs the shapes.
+server = ["dep:axum", "dep:async-trait", "dep:bytes", "dep:sha2"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+axum = { version = "0.8", optional = true }
+async-trait = { version = "0.1", optional = true }
+bytes = { version = "1", optional = true }
+sha2 = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+tower = { version = "0.5", features = ["util"] }

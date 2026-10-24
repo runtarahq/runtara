@@ -4887,8 +4887,14 @@ dependencies = [
 name = "runtara-workflow-api"
 version = "9.0.1"
 dependencies = [
+ "async-trait",
+ "axum",
+ "bytes",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

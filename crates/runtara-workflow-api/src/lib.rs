@@ -17,6 +17,8 @@ mod error;
 pub mod headers;
 mod keys;
 mod run;
+#[cfg(feature = "server")]
+pub mod server;
 mod wake;
 
 pub use binding::Binding;
