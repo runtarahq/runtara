@@ -354,3 +354,31 @@ async fn retryable_failures_are_not_remembered() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(*flaky.0.lock().unwrap(), 2);
 }
+
+#[tokio::test]
+async fn wake_ids_are_checked() {
+    let app = app(Arc::default());
+    let long = "w".repeat(Caps::default().wait_id_bytes + 1);
+    let cases = [
+        (
+            r#"{"wakes":[{"instances":""}]}"#.to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            format!(r#"{{"wakes":[{{"instances":"{long}"}}]}}"#),
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+        (
+            r#"{"wakes":[{"onSignal":{"checkpointId":""}}]}"#.to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            r#"{"wakes":[{"at":1}],"extra":true}"#.to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+    ];
+    for (n, (body, status)) in cases.into_iter().enumerate() {
+        let (got, _, _) = send(&app, outcome("suspended", &format!("k{n}"), &body)).await;
+        assert_eq!(got, status, "{body}");
+    }
+}

@@ -78,7 +78,7 @@ pub struct ErrorInfo {
 
 /// A suspended outcome: re-invoke when any wake fires.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Suspension {
     pub wakes: Vec<Wake>,
 }

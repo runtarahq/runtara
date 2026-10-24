@@ -439,8 +439,31 @@ fn parse_outcome(
                     ),
                 ));
             }
+            for wake in &suspension.wakes {
+                check_wake(caps, wake)?;
+            }
             Ok(PostedOutcome::Suspended(suspension))
         }
+    }
+}
+
+/// Ids a wake names must be usable keys: instance-wait ids are bounded by the
+/// wait-id cap, signal checkpoint ids must at least be present.
+fn check_wake(caps: &Caps, wake: &crate::Wake) -> Result<(), ApiError> {
+    match wake {
+        crate::Wake::Instances(id) if id.is_empty() => Err(ApiError::new(
+            ErrorCode::Invalid,
+            "an instances wake needs a wait id",
+        )),
+        crate::Wake::Instances(id) if id.len() > caps.wait_id_bytes => Err(ApiError::new(
+            ErrorCode::TooLarge,
+            format!("a wait id is at most {} bytes", caps.wait_id_bytes),
+        )),
+        crate::Wake::OnSignal(wait) if wait.checkpoint_id.is_empty() => Err(ApiError::new(
+            ErrorCode::Invalid,
+            "an onSignal wake needs a checkpoint id",
+        )),
+        _ => Ok(()),
     }
 }
 
