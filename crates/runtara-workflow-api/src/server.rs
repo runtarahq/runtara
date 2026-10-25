@@ -137,6 +137,36 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
         Err(unsupported_service("events"))
     }
 
+    /// Register the managed input `descriptor` (JSON with its `signal_id`)
+    /// under the run, with its original deadline. A replay finds it again.
+    async fn register_input(
+        &self,
+        binding: &Binding,
+        descriptor: Vec<u8>,
+        deadline_ms: Option<u64>,
+    ) -> Result<(), ApiError> {
+        let _ = (binding, descriptor, deadline_ms);
+        Err(unsupported_service("managed inputs"))
+    }
+    /// Read the input, expiring it by persistence time.
+    async fn poll_input(
+        &self,
+        binding: &Binding,
+        signal_id: &str,
+    ) -> Result<crate::InputRead, ApiError> {
+        let _ = (binding, signal_id);
+        Err(unsupported_service("managed inputs"))
+    }
+    /// Abandon the input without replacing a response that already won.
+    async fn close_input(
+        &self,
+        binding: &Binding,
+        signal_id: &str,
+    ) -> Result<crate::InputRead, ApiError> {
+        let _ = (binding, signal_id);
+        Err(unsupported_service("managed inputs"))
+    }
+
     /// Merge `patch` into the run's published state, once per SetState `key`.
     async fn set_state(
         &self,
@@ -253,6 +283,12 @@ pub fn router(state: WorkflowApiState) -> Router {
         .route("/v1/time", get(runtime::get_time))
         .route("/v1/heartbeat", post(runtime::post_heartbeat))
         .route("/v1/events", post(runtime::post_events))
+        .route(
+            "/v1/inputs/{signal_id}",
+            put(runtime::put_input)
+                .get(runtime::get_input)
+                .delete(runtime::delete_input),
+        )
         .route(
             "/v1/state/{key}",
             get(runtime::get_state).patch(runtime::patch_state),

@@ -422,3 +422,40 @@ pub async fn get_state(key: &str) -> Result<serde_json::Map<String, serde_json::
     let response = call("GET", &key_path("/v1/state", key), &[], None).await?;
     serde_json::from_slice(&response.body).map_err(|e| Error::Transport(format!("state: {e}")))
 }
+
+/// `PUT /v1/inputs/{signalId}`: register a managed input. `descriptor` must
+/// carry `signal_id`; tenant and run come from the host, never from it.
+pub async fn register_input(
+    descriptor: &serde_json::Map<String, serde_json::Value>,
+    deadline_ms: Option<u64>,
+) -> Result<(), Error> {
+    let signal_id = descriptor
+        .get("signal_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| Error::Transport("an input descriptor needs a signal_id".into()))?;
+    let body = serde_json::json!({"descriptor": descriptor, "deadlineMs": deadline_ms});
+    call(
+        "PUT",
+        &key_path("/v1/inputs", signal_id),
+        &[("content-type", "application/json")],
+        Some(body.to_string().into_bytes()),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// `GET /v1/inputs/{signalId}`, waiting up to `wait_ms` while it is open.
+pub async fn poll_input(
+    signal_id: &str,
+    wait_ms: u64,
+) -> Result<runtara_workflow_api::InputRead, Error> {
+    let path = format!("{}?waitMs={wait_ms}", key_path("/v1/inputs", signal_id));
+    let response = call("GET", &path, &[], None).await?;
+    serde_json::from_slice(&response.body).map_err(|e| Error::Transport(format!("input: {e}")))
+}
+
+/// `DELETE /v1/inputs/{signalId}`: abandon the input; returns its final state.
+pub async fn close_input(signal_id: &str) -> Result<runtara_workflow_api::InputRead, Error> {
+    let response = call("DELETE", &key_path("/v1/inputs", signal_id), &[], None).await?;
+    serde_json::from_slice(&response.body).map_err(|e| Error::Transport(format!("input: {e}")))
+}

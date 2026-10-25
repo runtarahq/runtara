@@ -31,3 +31,15 @@ pub struct Event {
     #[serde(default)]
     pub payload: serde_json::Value,
 }
+
+/// A managed input as `GET` and `DELETE /v1/inputs/{signalId}` report it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum InputRead {
+    /// Awaiting a response before its deadline.
+    Open,
+    /// The response that won; immutable and retained for replay.
+    Accepted { value: serde_json::Value },
+    /// Closed without a response; `reason` is machine-readable.
+    Closed { reason: String },
+}

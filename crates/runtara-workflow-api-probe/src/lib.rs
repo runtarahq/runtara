@@ -76,6 +76,28 @@ mod probe {
                         .map_err(|_| ())?,
                     )
                 }
+                Some("input") => {
+                    let mut descriptor = serde_json::Map::new();
+                    descriptor.insert("signal_id".into(), json!("probe-input"));
+                    descriptor.insert("prompt".into(), json!("approve?"));
+                    runtara_workflow_sdk::register_input(&descriptor, None)
+                        .await
+                        .map_err(|_| ())?;
+                    // A replay of the same registration finds it again.
+                    runtara_workflow_sdk::register_input(&descriptor, None)
+                        .await
+                        .map_err(|_| ())?;
+                    let open = runtara_workflow_sdk::poll_input("probe-input", 0)
+                        .await
+                        .map_err(|_| ())?;
+                    let closed = runtara_workflow_sdk::close_input("probe-input")
+                        .await
+                        .map_err(|_| ())?;
+                    PostedOutcome::Completed(
+                        serde_json::to_vec(&json!({"open": open, "closed": closed}))
+                            .map_err(|_| ())?,
+                    )
+                }
                 Some("state") => {
                     let set_key = r#"runtara:v2:["state","probe",[],[],["set-1"]]"#;
                     let read_key = r#"runtara:v2:["state-read","probe",[],[],["get-1"]]"#;

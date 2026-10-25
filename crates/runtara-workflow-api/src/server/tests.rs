@@ -740,3 +740,54 @@ async fn a_state_patch_must_be_an_object() {
     let (status, _, _) = send(&app, write("PATCH", "/v1/state/k", "p-ok", r#"{"a":1}"#)).await;
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
 }
+
+#[tokio::test]
+async fn an_input_registration_names_its_own_input() {
+    let app = app(Arc::default());
+    let (status, _, body) = send(
+        &app,
+        write(
+            "PUT",
+            "/v1/inputs/approve",
+            "i1",
+            r#"{"descriptor":{"signal_id":"other"}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_code(&body), "invalid");
+    // A matching registration reaches the backend, which this fake does not serve.
+    let (status, _, _) = send(
+        &app,
+        write(
+            "PUT",
+            "/v1/inputs/approve",
+            "i2",
+            r#"{"descriptor":{"signal_id":"approve"},"deadlineMs":5}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+}
+
+#[test]
+fn input_reads_are_tagged_by_state() {
+    assert_eq!(
+        serde_json::to_value(crate::InputRead::Open).unwrap(),
+        serde_json::json!({"state": "open"})
+    );
+    assert_eq!(
+        serde_json::to_value(crate::InputRead::Accepted {
+            value: serde_json::json!({"ok": true})
+        })
+        .unwrap(),
+        serde_json::json!({"state": "accepted", "value": {"ok": true}})
+    );
+    assert_eq!(
+        serde_json::to_value(crate::InputRead::Closed {
+            reason: "expired".into()
+        })
+        .unwrap(),
+        serde_json::json!({"state": "closed", "reason": "expired"})
+    );
+}

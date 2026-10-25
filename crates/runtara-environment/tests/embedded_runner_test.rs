@@ -1165,3 +1165,48 @@ async fn workflow_api_published_state_reaches_persistence() {
         "{stored:?}"
     );
 }
+
+/// Managed inputs over the workflow API go through the run's runtime host: a
+/// registered input reads open, a replayed registration finds it again, and
+/// closing it reports it closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_api_managed_inputs_open_and_close() {
+    let h = harness().await;
+    let probe = workflow_api_probe();
+    let inst_id = unique("inst-workflow-api-input");
+    let input =
+        serde_json::to_vec(&serde_json::json!({"data": {"mode": "input"}, "variables": {}}))
+            .unwrap();
+    assert!(
+        h.persistence
+            .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+            .await
+            .expect("register instance")
+    );
+    let handle = h
+        .runner
+        .try_launch_detached(&options(inst_id.as_str(), &probe))
+        .await
+        .expect("launch");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+    )
+    .await
+    .expect("wait_for_exit hung");
+    let instance = h
+        .persistence
+        .get_instance(inst_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        instance.status,
+        runtara_core::domain::InstanceStatus::Completed,
+        "{instance:?}"
+    );
+    let output: serde_json::Value =
+        serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+    assert_eq!(output["open"], serde_json::json!({"state": "open"}));
+    assert_eq!(output["closed"]["state"], "closed", "{output}");
+}

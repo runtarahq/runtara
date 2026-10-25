@@ -335,3 +335,79 @@ pub(super) async fn get_state(
     let current = state.backend.get_state(&binding, &key).await?;
     Ok(json(&serde_json::Value::Object(current))?)
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InputRegistration {
+    descriptor: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    deadline_ms: Option<u64>,
+}
+
+pub(super) async fn put_input(
+    State(state): State<WorkflowApiState>,
+    Path(signal_id): Path<String>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    let body = to_bytes(request.into_body(), state.caps.request_body_bytes)
+        .await
+        .map_err(|_| ApiError::new(ErrorCode::TooLarge, "input registration is over the cap"))?;
+    let registration: InputRegistration = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("input registration: {e}")))?;
+    if registration
+        .descriptor
+        .get("signal_id")
+        .and_then(serde_json::Value::as_str)
+        != Some(signal_id.as_str())
+    {
+        return Err(ApiError::new(
+            ErrorCode::Invalid,
+            "the descriptor's signal_id must be the input in the path",
+        )
+        .into());
+    }
+    let descriptor = serde_json::to_vec(&registration.descriptor)
+        .map_err(|e| ApiError::new(ErrorCode::Invalid, e.to_string()))?;
+    state
+        .backend
+        .register_input(&binding, descriptor, registration.deadline_ms)
+        .await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+pub(super) async fn get_input(
+    State(state): State<WorkflowApiState>,
+    Path(signal_id): Path<String>,
+    Query(wait): Query<Wait>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    let wait_ms = wait.wait_ms.min(state.caps.long_poll_ms);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms);
+    loop {
+        let read = state.backend.poll_input(&binding, &signal_id).await?;
+        let now = tokio::time::Instant::now();
+        if read != crate::InputRead::Open || now >= deadline {
+            let status = if read == crate::InputRead::Open && wait_ms > 0 {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::OK
+            };
+            let mut response = json(&read)?;
+            *response.status_mut() = status;
+            return Ok(response);
+        }
+        tokio::time::sleep((deadline - now).min(LONG_POLL_STEP)).await;
+    }
+}
+
+pub(super) async fn delete_input(
+    State(state): State<WorkflowApiState>,
+    Path(signal_id): Path<String>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    let read = state.backend.close_input(&binding, &signal_id).await?;
+    Ok(json(&read)?)
+}

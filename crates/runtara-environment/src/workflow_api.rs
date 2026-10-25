@@ -26,7 +26,7 @@ use runtara_workflow_api::server::{
     CheckpointWrite, CustomSignalNotice, Event, LaunchState, LifecycleSignal, MemoryReceiptStore,
     WorkflowApiBackend, WorkflowApiState, router,
 };
-use runtara_workflow_api::{ApiError, Binding, Caps, ErrorCode, PostedOutcome, RunInfo};
+use runtara_workflow_api::{ApiError, Binding, Caps, ErrorCode, InputRead, PostedOutcome, RunInfo};
 use tower::ServiceExt;
 
 /// One launch serving the workflow API.
@@ -150,6 +150,25 @@ impl Backend {
 /// A runtime host refusal. The host's messages carry no payloads.
 fn host_error(error: String) -> ApiError {
     ApiError::new(ErrorCode::Unavailable, error)
+}
+
+/// Managed-input refusals are the guest's own mistakes more often than not
+/// (an unknown input, a malformed descriptor), so they are `invalid`.
+fn input_error(error: String) -> ApiError {
+    ApiError::new(ErrorCode::Invalid, error)
+}
+
+fn input_read(state: runtara_component_host::runtime_host::RuntimeInputState) -> InputRead {
+    use runtara_component_host::runtime_host::RuntimeInputState;
+    match state {
+        RuntimeInputState::Open => InputRead::Open,
+        RuntimeInputState::Accepted(value) => InputRead::Accepted {
+            value: serde_json::from_slice(&value).unwrap_or_else(|_| {
+                serde_json::Value::String(String::from_utf8_lossy(&value).into_owned())
+            }),
+        },
+        RuntimeInputState::Closed(reason) => InputRead::Closed { reason },
+    }
 }
 
 fn state_error(error: RunStateError) -> ApiError {
@@ -330,6 +349,34 @@ impl WorkflowApiBackend for Backend {
 
     async fn heartbeat(&self, binding: &Binding) -> Result<(), ApiError> {
         self.runtime(binding)?.heartbeat().await.map_err(host_error)
+    }
+
+    async fn register_input(
+        &self,
+        binding: &Binding,
+        descriptor: Vec<u8>,
+        deadline_ms: Option<u64>,
+    ) -> Result<(), ApiError> {
+        self.runtime(binding)?
+            .register_input(descriptor, deadline_ms)
+            .await
+            .map_err(input_error)
+    }
+
+    async fn poll_input(&self, binding: &Binding, signal_id: &str) -> Result<InputRead, ApiError> {
+        self.runtime(binding)?
+            .poll_input(signal_id.to_string())
+            .await
+            .map(input_read)
+            .map_err(input_error)
+    }
+
+    async fn close_input(&self, binding: &Binding, signal_id: &str) -> Result<InputRead, ApiError> {
+        self.runtime(binding)?
+            .close_input(signal_id.to_string())
+            .await
+            .map(input_read)
+            .map_err(input_error)
     }
 
     async fn set_state(
