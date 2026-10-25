@@ -674,7 +674,9 @@ impl EmbeddedWasmRunner {
         ));
         // Runs on the workflow API ABI reach the `/v1` router in process; their
         // runtime hosts register each launch with `workflow_api`.
-        let workflow_api = Arc::new(crate::workflow_api::ApiLaunches::default());
+        let workflow_api = Arc::new(crate::workflow_api::ApiLaunches::with_run_state(Arc::new(
+            run_state::PersistenceRunState(Arc::clone(&persistence)),
+        )));
         executor
             .set_workflow_api_transport(workflow_api.transport())
             .map_err(|e| RunnerError::Other(e.to_string()))?;

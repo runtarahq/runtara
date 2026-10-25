@@ -1106,3 +1106,62 @@ async fn workflow_api_run_services_reach_persistence() {
         Some(br#"{"step":1}"#.as_slice())
     );
 }
+
+/// Published state over the workflow API goes through the runner's state
+/// service: what the probe set is what persistence holds, and a malformed
+/// step key is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_api_published_state_reaches_persistence() {
+    let h = harness().await;
+    let probe = workflow_api_probe();
+    let inst_id = unique("inst-workflow-api-state");
+    let input =
+        serde_json::to_vec(&serde_json::json!({"data": {"mode": "state"}, "variables": {}}))
+            .unwrap();
+    assert!(
+        h.persistence
+            .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+            .await
+            .expect("register instance")
+    );
+    let handle = h
+        .runner
+        .try_launch_detached(&options(inst_id.as_str(), &probe))
+        .await
+        .expect("launch");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+    )
+    .await
+    .expect("wait_for_exit hung");
+    let instance = h
+        .persistence
+        .get_instance(inst_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        instance.status,
+        runtara_core::domain::InstanceStatus::Completed,
+        "{instance:?}"
+    );
+    let output: serde_json::Value =
+        serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+    assert_eq!(output["state"], serde_json::json!({"stage": "probed"}));
+    assert_eq!(output["refused"], "invalid");
+
+    let stored = h
+        .persistence
+        .run_state()
+        .expect("postgres persistence keeps run state")
+        .get_state("embedded-test", inst_id.as_str())
+        .await
+        .unwrap()
+        .expect("the probe published state");
+    assert_eq!(
+        stored.state.get("stage"),
+        Some(&serde_json::json!("probed")),
+        "{stored:?}"
+    );
+}

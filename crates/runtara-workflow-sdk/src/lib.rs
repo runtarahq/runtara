@@ -398,3 +398,27 @@ pub async fn emit_events(events: &[runtara_workflow_api::Event]) -> Result<(), E
     .await
     .map(|_| ())
 }
+
+/// `PATCH /v1/state/{key}`: merge `patch` into the run's published state, once
+/// per SetState step `key` (its canonical v2 `state` key).
+pub async fn set_state(
+    key: &str,
+    patch: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), Error> {
+    let body = serde_json::to_vec(patch).map_err(|e| Error::Transport(e.to_string()))?;
+    call(
+        "PATCH",
+        &key_path("/v1/state", key),
+        &[("content-type", "application/json")],
+        Some(body),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// `GET /v1/state/{key}`: the run's published state, read by GetState step
+/// `key` (its canonical v2 `state-read` key).
+pub async fn get_state(key: &str) -> Result<serde_json::Map<String, serde_json::Value>, Error> {
+    let response = call("GET", &key_path("/v1/state", key), &[], None).await?;
+    serde_json::from_slice(&response.body).map_err(|e| Error::Transport(format!("state: {e}")))
+}

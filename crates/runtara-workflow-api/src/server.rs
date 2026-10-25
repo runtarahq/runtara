@@ -136,6 +136,26 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
         let _ = (binding, events);
         Err(unsupported_service("events"))
     }
+
+    /// Merge `patch` into the run's published state, once per SetState `key`.
+    async fn set_state(
+        &self,
+        binding: &Binding,
+        key: &str,
+        patch: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), ApiError> {
+        let _ = (binding, key, patch);
+        Err(unsupported_service("published state"))
+    }
+    /// The run's published state, read by the GetState step `key`.
+    async fn get_state(
+        &self,
+        binding: &Binding,
+        key: &str,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, ApiError> {
+        let _ = (binding, key);
+        Err(unsupported_service("published state"))
+    }
 }
 
 fn unsupported_service(service: &str) -> ApiError {
@@ -233,6 +253,10 @@ pub fn router(state: WorkflowApiState) -> Router {
         .route("/v1/time", get(runtime::get_time))
         .route("/v1/heartbeat", post(runtime::post_heartbeat))
         .route("/v1/events", post(runtime::post_events))
+        .route(
+            "/v1/state/{key}",
+            get(runtime::get_state).patch(runtime::patch_state),
+        )
         .fallback(unsupported)
         .layer(middleware::from_fn_with_state(state.clone(), guard_launch))
         .layer(middleware::from_fn_with_state(state.clone(), idempotency))

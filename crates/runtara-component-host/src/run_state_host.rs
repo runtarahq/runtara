@@ -102,6 +102,12 @@ pub fn state_operation_id(key: &str) -> Result<String, String> {
     Ok(crate::operation_scope_host::operation_hash(key))
 }
 
+/// Check that `key` is a GetState step's canonical v2 `state-read` key of the
+/// outer run.
+pub fn check_state_read_key(key: &str) -> Result<(), String> {
+    check_state_key(key, STATE_READ_KEY_KIND)
+}
+
 /// Check a canonical v2 state key of `kind`. Only the outer run has state
 /// here: a key with namespace frames comes from a workflow running inside the
 /// run (an embedded child or a published workflow-agent), which keeps its

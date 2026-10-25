@@ -301,3 +301,37 @@ pub(super) async fn post_events(
     state.backend.append_events(&binding, events).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
+
+pub(super) async fn patch_state(
+    State(state): State<WorkflowApiState>,
+    Path(key): Path<String>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    let body = to_bytes(request.into_body(), state.caps.request_body_bytes)
+        .await
+        .map_err(|_| ApiError::new(ErrorCode::TooLarge, "state patch is over the cap"))?;
+    let patch = match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(serde_json::Value::Object(patch)) => patch,
+        Ok(_) => {
+            return Err(
+                ApiError::new(ErrorCode::Invalid, "a state patch must be a JSON object").into(),
+            );
+        }
+        Err(e) => {
+            return Err(ApiError::new(ErrorCode::Invalid, format!("state patch: {e}")).into());
+        }
+    };
+    state.backend.set_state(&binding, &key, patch).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+pub(super) async fn get_state(
+    State(state): State<WorkflowApiState>,
+    Path(key): Path<String>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    let current = state.backend.get_state(&binding, &key).await?;
+    Ok(json(&serde_json::Value::Object(current))?)
+}

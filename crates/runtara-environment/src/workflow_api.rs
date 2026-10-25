@@ -16,6 +16,10 @@ use std::sync::{Arc, Mutex, Weak};
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use bytes::Bytes;
+use runtara_component_host::run_state_host::{
+    RunStateAuthority, RunStateError, RunStateErrorCode, RunStateHost, check_state_read_key,
+    state_operation_id,
+};
 use runtara_component_host::runtime_host::RuntimeHost;
 use runtara_component_host::{WorkflowApiFuture, WorkflowApiTransport};
 use runtara_workflow_api::server::{
@@ -42,9 +46,19 @@ pub struct LaunchSlot {
 pub struct ApiLaunches {
     slots: Mutex<HashMap<String, Arc<LaunchSlot>>>,
     receipts: Arc<MemoryReceiptStore>,
+    /// The published-state service the runner gives the old ABI as well.
+    run_state: Option<Arc<dyn RunStateHost>>,
 }
 
 impl ApiLaunches {
+    /// Launches whose published state is served by `run_state`.
+    pub fn with_run_state(run_state: Arc<dyn RunStateHost>) -> Self {
+        Self {
+            run_state: Some(run_state),
+            ..Self::default()
+        }
+    }
+
     /// Start serving `binding`'s launch. A launch begins once.
     pub fn begin(
         &self,
@@ -136,6 +150,37 @@ impl Backend {
 /// A runtime host refusal. The host's messages carry no payloads.
 fn host_error(error: String) -> ApiError {
     ApiError::new(ErrorCode::Unavailable, error)
+}
+
+fn state_error(error: RunStateError) -> ApiError {
+    match error.code {
+        RunStateErrorCode::Invalid => ApiError::new(ErrorCode::Invalid, error.message),
+        RunStateErrorCode::TooLarge => ApiError::new(ErrorCode::TooLarge, error.message),
+        RunStateErrorCode::NotRunning => {
+            ApiError::domain("not-running", ErrorCode::Finished, error.message)
+        }
+        RunStateErrorCode::Unavailable => ApiError::new(ErrorCode::Unavailable, error.message),
+    }
+}
+
+impl Backend {
+    /// The state service and the binding's run, while the launch is served.
+    fn state_service(
+        &self,
+        binding: &Binding,
+    ) -> Result<(Arc<dyn RunStateHost>, RunStateAuthority), ApiError> {
+        self.0.slot(binding).ok_or_else(not_serving)?;
+        let host = self.0.run_state.clone().ok_or_else(|| {
+            ApiError::new(ErrorCode::Unavailable, "no run state service is configured")
+        })?;
+        Ok((
+            host,
+            RunStateAuthority {
+                tenant: binding.tenant_id.clone(),
+                instance: binding.instance_id.clone(),
+            },
+        ))
+    }
 }
 
 fn not_serving() -> ApiError {
@@ -285,6 +330,30 @@ impl WorkflowApiBackend for Backend {
 
     async fn heartbeat(&self, binding: &Binding) -> Result<(), ApiError> {
         self.runtime(binding)?.heartbeat().await.map_err(host_error)
+    }
+
+    async fn set_state(
+        &self,
+        binding: &Binding,
+        key: &str,
+        patch: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), ApiError> {
+        let operation_id =
+            state_operation_id(key).map_err(|e| ApiError::new(ErrorCode::Invalid, e))?;
+        let (host, authority) = self.state_service(binding)?;
+        host.set(&authority, &operation_id, patch)
+            .await
+            .map_err(state_error)
+    }
+
+    async fn get_state(
+        &self,
+        binding: &Binding,
+        key: &str,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, ApiError> {
+        check_state_read_key(key).map_err(|e| ApiError::new(ErrorCode::Invalid, e))?;
+        let (host, authority) = self.state_service(binding)?;
+        host.get(&authority).await.map_err(state_error)
     }
 
     async fn append_events(&self, binding: &Binding, events: Vec<Event>) -> Result<(), ApiError> {

@@ -5,7 +5,7 @@
 //! It reads its run and input over the API and posts an outcome chosen by
 //! `data.mode`: `complete` (default) echoes `data` with the run's identity,
 //! `fail` posts a failure, `suspend` posts a timed wake, `durable` exercises
-//! checkpoints, time, heartbeat and events, and `spin` and
+//! checkpoints, time, heartbeat and events, `state` published state, and `spin` and
 //! `trap` never post one (they loop forever or abort).
 
 #[cfg(target_arch = "wasm32")]
@@ -74,6 +74,26 @@ mod probe {
                             "nowMs": now_ms,
                         }))
                         .map_err(|_| ())?,
+                    )
+                }
+                Some("state") => {
+                    let set_key = r#"runtara:v2:["state","probe",[],[],["set-1"]]"#;
+                    let read_key = r#"runtara:v2:["state-read","probe",[],[],["get-1"]]"#;
+                    let mut patch = serde_json::Map::new();
+                    patch.insert("stage".into(), json!("probed"));
+                    runtara_workflow_sdk::set_state(set_key, &patch)
+                        .await
+                        .map_err(|_| ())?;
+                    let state = runtara_workflow_sdk::get_state(read_key)
+                        .await
+                        .map_err(|_| ())?;
+                    let refused = runtara_workflow_sdk::set_state("not-a-key", &patch)
+                        .await
+                        .err()
+                        .and_then(|error| error.code().map(|code| code.as_str().to_string()));
+                    PostedOutcome::Completed(
+                        serde_json::to_vec(&json!({"state": state, "refused": refused}))
+                            .map_err(|_| ())?,
                     )
                 }
                 Some("suspend") => PostedOutcome::Suspended(Suspension {

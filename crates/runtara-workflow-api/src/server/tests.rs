@@ -723,3 +723,20 @@ async fn services_a_backend_does_not_serve_are_unsupported() {
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
     assert_eq!(error_code(&body), "unsupported");
 }
+
+#[tokio::test]
+async fn a_state_patch_must_be_an_object() {
+    let app = app(Arc::default());
+    for body in ["[1,2]", "\"x\"", "not json"] {
+        let (status, _, response) = send(
+            &app,
+            write("PATCH", "/v1/state/k", &format!("p-{body}"), body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(error_code(&response), "invalid");
+    }
+    // An object reaches the backend, which this fake does not serve.
+    let (status, _, _) = send(&app, write("PATCH", "/v1/state/k", "p-ok", r#"{"a":1}"#)).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+}
