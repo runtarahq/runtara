@@ -277,6 +277,8 @@ pub mod runtime_host;
 
 /// The workflow API served to runs of the embedded runner.
 pub mod workflow_api;
+/// Workflow API idempotency receipts in the runtime database.
+pub mod workflow_api_receipts;
 
 /// Shared Postgres fixtures for this crate's database-backed unit tests.
 #[cfg(all(test, feature = "db-integration-tests"))]

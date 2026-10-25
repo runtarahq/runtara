@@ -29,7 +29,7 @@ use runtara_component_host::runtime_host::RuntimeHost;
 use runtara_component_host::{WorkflowApiFuture, WorkflowApiTransport};
 use runtara_workflow_api::server::{
     CheckpointWrite, CustomSignalNotice, Event, LaunchState, LifecycleSignal, MemoryReceiptStore,
-    WorkflowApiBackend, WorkflowApiState, router,
+    ReceiptStore, WorkflowApiBackend, WorkflowApiState, router,
 };
 use runtara_workflow_api::{ApiError, Binding, Caps, ErrorCode, InputRead, PostedOutcome, RunInfo};
 use tower::ServiceExt;
@@ -47,14 +47,25 @@ pub struct LaunchSlot {
 
 /// The launches of this process that currently serve the workflow API, by
 /// launch id, and their idempotency receipts.
-#[derive(Default)]
 pub struct ApiLaunches {
     slots: Mutex<HashMap<String, Arc<LaunchSlot>>>,
-    receipts: Arc<MemoryReceiptStore>,
+    /// In memory by default: an embedded launch lives in one process.
+    receipts: Arc<dyn ReceiptStore>,
     /// The published-state service the runner gives the old ABI as well.
     run_state: Option<Arc<dyn RunStateHost>>,
     /// The instance-wait service, once the runner is given one.
     instance_waits: std::sync::OnceLock<Arc<dyn InstanceWaitHost>>,
+}
+
+impl Default for ApiLaunches {
+    fn default() -> Self {
+        Self {
+            slots: Mutex::default(),
+            receipts: Arc::new(MemoryReceiptStore::default()),
+            run_state: None,
+            instance_waits: std::sync::OnceLock::new(),
+        }
+    }
 }
 
 impl ApiLaunches {
@@ -64,6 +75,13 @@ impl ApiLaunches {
             run_state: Some(run_state),
             ..Self::default()
         }
+    }
+
+    /// Keep idempotency receipts in `receipts` instead of in memory, for
+    /// launches that outlive the serving process.
+    pub fn with_receipts(mut self, receipts: Arc<dyn ReceiptStore>) -> Self {
+        self.receipts = receipts;
+        self
     }
 
     /// Start serving `binding`'s launch. A launch begins once.
@@ -102,7 +120,16 @@ impl ApiLaunches {
             .lock()
             .expect("workflow API launches poisoned")
             .remove(launch_id)?;
-        self.receipts.forget_launch(launch_id);
+        // Receipts go asynchronously: this runs from a host's drop, too.
+        let receipts = Arc::clone(&self.receipts);
+        let forgotten = launch_id.to_string();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Err(error) = receipts.forget_launch(&forgotten).await {
+                    tracing::warn!(%error, launch_id = %forgotten, "forgetting workflow API receipts");
+                }
+            });
+        }
         slot.outcome
             .lock()
             .expect("workflow API outcome poisoned")
@@ -142,7 +169,7 @@ impl ApiLaunches {
     pub fn transport(self: &Arc<Self>) -> Arc<dyn WorkflowApiTransport> {
         let state = WorkflowApiState {
             backend: Arc::new(Backend(Arc::clone(self))),
-            receipts: self.receipts.clone(),
+            receipts: Arc::clone(&self.receipts),
             caps: Caps::default(),
         };
         Arc::new(RouterTransport(router(state)))

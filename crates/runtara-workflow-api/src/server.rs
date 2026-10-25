@@ -231,7 +231,14 @@ pub struct Receipt {
 #[async_trait]
 pub trait ReceiptStore: Send + Sync + 'static {
     async fn get(&self, launch_id: &str, key: &str) -> Result<Option<Receipt>, ApiError>;
+    /// Store `receipt` unless one is already stored for the key; the first
+    /// stays.
     async fn put(&self, launch_id: &str, key: &str, receipt: Receipt) -> Result<(), ApiError>;
+    /// Drop every receipt of `launch_id` once the launch has ended.
+    async fn forget_launch(&self, launch_id: &str) -> Result<(), ApiError> {
+        let _ = launch_id;
+        Ok(())
+    }
 }
 
 /// In-memory receipts for one process. The embedded runner forgets a launch's
@@ -265,7 +272,13 @@ impl ReceiptStore for MemoryReceiptStore {
         self.receipts
             .lock()
             .expect("receipt store poisoned")
-            .insert((launch_id.to_string(), key.to_string()), receipt);
+            .entry((launch_id.to_string(), key.to_string()))
+            .or_insert(receipt);
+        Ok(())
+    }
+
+    async fn forget_launch(&self, launch_id: &str) -> Result<(), ApiError> {
+        MemoryReceiptStore::forget_launch(self, launch_id);
         Ok(())
     }
 }

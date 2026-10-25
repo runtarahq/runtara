@@ -20,6 +20,10 @@ scoped-workflow-integration-tests = ["db-integration-tests", "runtara-workflows/
 # Needs the real database: it pre-seeds what the SDK would have reported so
 # run()'s output/error mapping can be exercised against real persistence.
 [[test]]
+name = "workflow_api_receipts_test"
+required-features = ["db-integration-tests"]
+
+[[test]]
 name = "embedded_runner_test"
 required-features = ["db-integration-tests"]
 
