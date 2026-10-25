@@ -60,6 +60,12 @@ if [ ! -f "crates/runtara-wit/wit/deps.lock" ] || [ ! -d "crates/runtara-wit/wit
     ensure_tool wit-deps wit-deps-cli
     (cd crates/runtara-wit && wit-deps lock)
 fi
+# The WASI 0.3 pins of the workflow API guest world, kept apart from the 0.2.3
+# ones (crates/runtara-wit/wit-p3), committed the same way.
+if [ ! -f "crates/runtara-wit/wit-p3/deps.lock" ] || [ ! -d "crates/runtara-wit/wit-p3/deps" ]; then
+    ensure_tool wit-deps wit-deps-cli
+    (cd crates/runtara-wit && wit-deps -m wit-p3/deps.toml -l wit-p3/deps.lock -d wit-p3/deps lock)
+fi
 
 # Discover every crate under crates/agents/, the same set the workspace's
 # `crates/agents/*` member glob includes. Component agents live there as a
@@ -153,6 +159,12 @@ emit_workflow_component_meta \
     "runtara:workflow-stdlib/json@1.0.0" \
     "$out_dir/runtara_workflow_stdlib.wasm" \
     "$out_dir/runtara_workflow_stdlib.meta.json"
+
+# Test fixture for the workflow API entry (runtara-component-host's
+# workflow_api_entry tests). Built here so CI has it before the component
+# tests; never staged as an agent.
+echo "==> runtara-workflow-api-probe"
+cargo build --release --target wasm32-wasip2 -p runtara-workflow-api-probe
 
 if [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" != "1" ]; then
     # Single host-native pass: walks every agent crate's `agent_info()` and writes

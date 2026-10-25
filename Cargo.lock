@@ -4588,6 +4588,7 @@ dependencies = [
  "tempfile",
  "testcontainers",
  "tokio",
+ "tower",
  "tracing",
  "url",
  "uuid",
@@ -4898,6 +4899,25 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "runtara-workflow-api-probe"
+version = "9.0.1"
+dependencies = [
+ "runtara-workflow-api",
+ "runtara-workflow-sdk",
+ "serde_json",
+]
+
+[[package]]
+name = "runtara-workflow-sdk"
+version = "9.0.1"
+dependencies = [
+ "runtara-workflow-api",
+ "serde",
+ "serde_json",
+ "wit-bindgen 0.58.0",
 ]
 
 [[package]]
@@ -7865,6 +7885,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a43552cfa071f246cfd99e5dbb23710dfe7336b3259e09339818483359470749"
 dependencies = [
  "bitflags",
+ "futures",
  "wit-bindgen-rust-macro 0.58.0",
 ]
 
