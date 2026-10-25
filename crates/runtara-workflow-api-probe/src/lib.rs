@@ -6,8 +6,8 @@
 //! `data.mode`: `complete` (default) echoes `data` with the run's identity,
 //! `fail` posts a failure, `suspend` posts a timed wake, `durable` exercises
 //! checkpoints, time, heartbeat and events, `state` published state, `control`
-//! the control calls, and `spin` and `trap` never post one (they loop forever
-//! or abort).
+//! the control calls, `trusted` a refused trusted call, and `spin` and `trap`
+//! never post one (they loop forever or abort).
 
 #[cfg(target_arch = "wasm32")]
 mod probe {
@@ -273,6 +273,29 @@ mod probe {
                             "notChild": not_child,
                         }))
                         .map_err(|_| ())?,
+                    )
+                }
+                Some("trusted") => {
+                    // This probe pins no trusted artifact, so every call is
+                    // refused before any credential lookup.
+                    let refusal = match runtara_workflow_sdk::trusted(
+                        "s3-storage",
+                        "storage-generate-presigned-url",
+                        "s3",
+                        &json!({"bucket": "b", "key": "k"}),
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(answer) => json!({"unexpected": answer}),
+                        Err(runtara_workflow_sdk::Error::Api(error)) => json!({
+                            "code": error.code.as_str(),
+                            "envelope": error.details.and_then(|d| d.get("code").cloned()),
+                        }),
+                        Err(error) => json!({"transport": error.to_string()}),
+                    };
+                    PostedOutcome::Completed(
+                        serde_json::to_vec(&json!({"refusal": refusal})).map_err(|_| ())?,
                     )
                 }
                 Some("wait") => {

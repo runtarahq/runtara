@@ -194,6 +194,10 @@ pub struct WorkflowApiControls {
     /// Bring the run's deadline forward to the given time from now (never
     /// later); the run then ends as timed out.
     pub shorten_deadline: Arc<dyn Fn(Duration) + Send + Sync>,
+    /// The `runtara:trusted-artifacts/*` pins of the run's artifact, which
+    /// decide its trusted calls (`TrustedExecutor::admits`). Empty admits
+    /// none.
+    pub trusted_pins: Arc<std::collections::HashSet<String>>,
 }
 
 impl std::fmt::Debug for WorkflowApiControls {

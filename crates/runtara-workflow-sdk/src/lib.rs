@@ -755,3 +755,27 @@ async fn call_json(
         .map(|body| body.to_string().into_bytes());
     call(method, path, headers, body).await
 }
+
+/// `POST /v1/trusted/{agentId}/{capabilityId}`: run an approved built-in
+/// capability with the tenant's `connection_id`. Failures arrive as
+/// `trusted-error` with the agent error envelope in `details`.
+pub async fn trusted(
+    agent_id: &str,
+    capability_id: &str,
+    connection_id: &str,
+    input: &serde_json::Value,
+    operation: Option<&str>,
+) -> Result<serde_json::Value, Error> {
+    let path = format!(
+        "{}/{}",
+        key_path("/v1/trusted", agent_id),
+        runtara_workflow_api::encode_path_key(capability_id)
+    );
+    let mut headers = vec![("content-type", "application/json")];
+    if let Some(operation) = operation {
+        headers.push((runtara_workflow_api::headers::OPERATION, operation));
+    }
+    let body = serde_json::json!({"connectionId": connection_id, "input": input});
+    let response = call_json("POST", &path, &headers, Some(&body)).await?;
+    serde_json::from_slice(&response.body).map_err(|e| Error::Transport(format!("trusted: {e}")))
+}

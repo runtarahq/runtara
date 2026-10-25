@@ -77,6 +77,8 @@ async-trait = "0.1"
 [dev-dependencies]
 # Fake SQL hosts behind the workflow API connection tests.
 runtara-database-contract = { path = "../runtara-database-contract" }
+# Fake trusted credentials behind the workflow API trusted-call test.
+runtara-agent-trusted = { path = "../runtara-agent-trusted" }
 opentelemetry_sdk = { version = "0.32", features = ["metrics", "testing"] }
 base64 = { workspace = true }
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }

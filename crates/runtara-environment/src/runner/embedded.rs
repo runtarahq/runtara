@@ -809,11 +809,19 @@ impl EmbeddedWasmRunner {
         Ok(self)
     }
 
-    /// Attach the approved built-in trusted capability executor.
+    /// Attach the approved built-in trusted capability executor, on both ABIs.
     pub fn with_trusted_executor(
         self,
         executor: Arc<runtara_component_host::trusted::TrustedExecutor>,
     ) -> Result<Self> {
+        self.workflow_api
+            .trusted
+            .set(Arc::clone(&executor))
+            .map_err(|_| {
+                RunnerError::Other(
+                    "trusted executor already configured for the workflow API".into(),
+                )
+            })?;
         self.executor
             .set_trusted_executor(executor)
             .map_err(|e| RunnerError::Other(e.to_string()))?;

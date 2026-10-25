@@ -1075,3 +1075,32 @@ async fn control_calls_route_to_their_names_with_the_operation() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(error_code(&body), "invalid");
 }
+
+#[tokio::test]
+async fn trusted_calls_need_a_connection_and_an_input() {
+    let app = outbound_app();
+    for body in [
+        r#"{"input":{}}"#,
+        r#"{"connectionId":"c","input":{},"extra":1}"#,
+    ] {
+        let (status, _, answer) = send(&app, write("POST", "/v1/trusted/a/b", body, body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(error_code(&answer), "invalid");
+    }
+    let (status, _, answer) = send(
+        &app,
+        write(
+            "POST",
+            "/v1/trusted/a/b",
+            "ok",
+            r#"{"connectionId":"c","input":{}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_IMPLEMENTED,
+        "this backend serves none"
+    );
+    assert_eq!(error_code(&answer), "unsupported");
+}

@@ -311,6 +311,29 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
         let _ = (binding, operation, call);
         Err(unsupported_service("control calls"))
     }
+
+    /// Run the approved built-in `capability_id` of `agent_id` with the
+    /// tenant's `connection_id`; `input` and the answer are JSON bytes. The
+    /// host checks the run's artifact pins before any credential lookup.
+    async fn trusted(
+        &self,
+        binding: &Binding,
+        operation: Option<&str>,
+        call: TrustedCall,
+    ) -> Result<Vec<u8>, ApiError> {
+        let _ = (binding, operation, call);
+        Err(unsupported_service("trusted calls"))
+    }
+}
+
+/// One `POST /v1/trusted/{agentId}/{capabilityId}`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrustedCall {
+    pub agent_id: String,
+    pub capability_id: String,
+    pub connection_id: String,
+    /// The capability input, as JSON bytes.
+    pub input: Vec<u8>,
 }
 
 fn unsupported_service(service: &str) -> ApiError {
@@ -474,6 +497,10 @@ pub fn router(state: WorkflowApiState) -> Router {
         .route("/v1/instances/{id}/cancel", post(control::post_cancel))
         .route("/v1/instances/{id}/pause", post(control::post_pause))
         .route("/v1/instances/{id}/resume", post(control::post_resume))
+        .route(
+            "/v1/trusted/{agent_id}/{capability_id}",
+            post(control::post_trusted),
+        )
         .route(
             "/v1/state/{key}",
             get(runtime::get_state).patch(runtime::patch_state),

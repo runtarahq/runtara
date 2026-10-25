@@ -1741,3 +1741,104 @@ mod workflow_api_control {
         assert_eq!(calls[4].1.operation.as_ref(), Some(&operation));
     }
 }
+
+mod workflow_api_trusted {
+    use super::*;
+    use runtara_agent_trusted::{TrustedContext, error};
+    use runtara_component_host::ComponentDispatcherService;
+    use runtara_component_host::trusted::TrustedCredentials;
+
+    #[derive(Default)]
+    struct Credentials(AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl TrustedCredentials for Credentials {
+        async fn resolve(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[String],
+        ) -> Result<TrustedContext, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(error("DENIED", "not in this test"))
+        }
+    }
+
+    /// A trusted call over the workflow API is decided by the run's artifact
+    /// pins like on the old ABI: a run that pins no trusted artifact is
+    /// refused before any credential lookup. (The probe cannot pin one; a
+    /// pinned success lands with the emitter's move to the new ABI.)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_api_trusted_calls_fail_closed_without_a_pin() {
+        let h = harness().await;
+        let release =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/wasm32-wasip2/release");
+        let bundle = tempfile::tempdir().unwrap();
+        for suffix in ["wasm", "meta.json"] {
+            let file = format!("runtara_agent_s3_storage.{suffix}");
+            std::fs::copy(release.join(&file), bundle.path().join(&file)).unwrap_or_else(|e| {
+                panic!("missing {file}: run scripts/build-agent-components.sh ({e})")
+            });
+        }
+        let dispatcher = ComponentDispatcherService::from_dir(bundle.path())
+            .await
+            .unwrap();
+        let credentials = Arc::new(Credentials::default());
+        dispatcher
+            .trusted_executor()
+            .set_credentials(credentials.clone())
+            .unwrap();
+        let runner = EmbeddedWasmRunner::new(
+            WorkflowRunnerConfig {
+                data_dir: h.dir.path().join("trusted"),
+                default_timeout: Duration::from_secs(30),
+                skip_cert_verification: false,
+            },
+            Arc::clone(&h.persistence),
+        )
+        .unwrap()
+        .with_in_process_precompiler_for_tests()
+        .with_trusted_executor(dispatcher.trusted_executor())
+        .unwrap();
+        let probe = workflow_api_probe();
+        let inst_id = unique("inst-workflow-api-trusted");
+        let input =
+            serde_json::to_vec(&serde_json::json!({"data": {"mode": "trusted"}, "variables": {}}))
+                .unwrap();
+        assert!(
+            h.persistence
+                .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+                .await
+                .expect("register instance")
+        );
+        let handle = runner
+            .try_launch_detached(&options(inst_id.as_str(), &probe))
+            .await
+            .expect("launch");
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            runner.wait_for_exit(&handle, Duration::from_millis(50)),
+        )
+        .await
+        .expect("wait_for_exit hung");
+        let instance = h
+            .persistence
+            .get_instance(inst_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            instance.status,
+            runtara_core::domain::InstanceStatus::Completed,
+            "{instance:?}"
+        );
+        let output: serde_json::Value =
+            serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            output["refusal"],
+            serde_json::json!({"code": "trusted-error", "envelope": "TRUSTED_VERSION_REQUIRED"})
+        );
+        assert_eq!(credentials.0.load(Ordering::SeqCst), 0);
+    }
+}

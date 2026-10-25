@@ -1254,6 +1254,12 @@ impl WorkflowExecutor {
                         let deadline = store.data().api_deadline.clone();
                         let controls = crate::runtime_host::WorkflowApiControls {
                             shorten_deadline: Arc::new(move |after| deadline.shorten(after)),
+                            trusted_pins: store
+                                .data()
+                                .trusted
+                                .as_ref()
+                                .and_then(|call| call.pins.clone())
+                                .unwrap_or_default(),
                         };
                         Arc::clone(&runtime)
                             .workflow_api_begin(input, controls)

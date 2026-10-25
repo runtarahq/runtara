@@ -20,7 +20,8 @@ use crate::host_state::HostState;
 const MAX_INPUT: usize = 1024 * 1024;
 const MAX_OUTPUT: usize = 1024 * 1024;
 const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
-const TIME_LIMIT: Duration = Duration::from_secs(30);
+/// The longest a trusted call runs, whatever deadline its caller passes.
+pub const TIME_LIMIT: Duration = Duration::from_secs(30);
 
 /// Implementations must check tenant ownership, entitlement and the exact type
 /// before decrypting; returned credentials must come from that same record.
@@ -326,7 +327,7 @@ impl TrustedExecutor {
     /// a refused call fails with `TRUSTED_VERSION_REQUIRED` before any
     /// credential lookup.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn invoke_pinned(
+    pub async fn invoke_pinned(
         &self,
         pins: Option<&HashSet<String>>,
         launch: TrustedLaunch,

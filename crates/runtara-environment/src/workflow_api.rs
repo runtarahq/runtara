@@ -34,12 +34,13 @@ use runtara_component_host::run_state_host::{
     state_operation_id,
 };
 use runtara_component_host::runtime_host::{RuntimeHost, WorkflowApiControls};
+use runtara_component_host::trusted::TrustedExecutor;
 use runtara_component_host::{DatabaseHost, InstanceWaitHost, OutboundHttpHost};
 use runtara_component_host::{WorkflowApiFuture, WorkflowApiTransport};
 use runtara_workflow_api::server::OutboundReply;
 use runtara_workflow_api::server::{
     CheckpointWrite, CustomSignalNotice, Event, LaunchState, LifecycleSignal, MemoryReceiptStore,
-    ReceiptStore, WorkflowApiBackend, WorkflowApiState, router,
+    ReceiptStore, TrustedCall, WorkflowApiBackend, WorkflowApiState, router,
 };
 use runtara_workflow_api::{
     ApiError, Binding, Caps, ControlCall, ErrorCode, InputRead, OutboundDestination,
@@ -79,6 +80,8 @@ pub struct ApiLaunches {
     pub(crate) connection_resolver: std::sync::OnceLock<Arc<dyn ConnectionResolverHost>>,
     /// The control service the runner gives the old ABI as well.
     pub(crate) control: std::sync::OnceLock<Arc<dyn ControlHost>>,
+    /// The approved built-in trusted executor the old ABI uses as well.
+    pub(crate) trusted: std::sync::OnceLock<Arc<TrustedExecutor>>,
 }
 
 impl Default for ApiLaunches {
@@ -92,6 +95,7 @@ impl Default for ApiLaunches {
             database: std::sync::OnceLock::new(),
             connection_resolver: std::sync::OnceLock::new(),
             control: std::sync::OnceLock::new(),
+            trusted: std::sync::OnceLock::new(),
         }
     }
 }
@@ -870,6 +874,81 @@ impl WorkflowApiBackend for Backend {
             .await
             .map_err(|error| control_host::json::api_error(&error))
     }
+
+    /// The run's artifact pins and launch kind decide the call before any
+    /// credential lookup, as on the old ABI; the tenant is the binding's.
+    async fn trusted(
+        &self,
+        binding: &Binding,
+        operation: Option<&str>,
+        call: TrustedCall,
+    ) -> Result<Vec<u8>, ApiError> {
+        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
+        if let Some(id) = operation
+            && !slot
+                .operations
+                .lock()
+                .expect("operations poisoned")
+                .contains_key(id)
+        {
+            return Err(ApiError::new(
+                ErrorCode::NotFound,
+                "no such entered operation",
+            ));
+        }
+        let executor = self.0.trusted.get().cloned().ok_or_else(|| {
+            ApiError::new(ErrorCode::Unavailable, "no trusted executor is configured")
+        })?;
+        let launch = self.runtime(binding)?.trusted_launch();
+        executor
+            .invoke_pinned(
+                Some(&slot.controls.trusted_pins),
+                launch,
+                &binding.tenant_id,
+                &call.agent_id,
+                &call.capability_id,
+                &call.connection_id,
+                call.input,
+                tokio::time::Instant::now() + runtara_component_host::trusted::TIME_LIMIT,
+            )
+            .await
+            .map_err(|envelope| trusted_error(&envelope))
+    }
+}
+
+/// A trusted call's agent error envelope as the API's `trusted-error`, with
+/// the envelope in `details` and the closest generic status.
+fn trusted_error(envelope: &str) -> ApiError {
+    let Ok(details) = serde_json::from_str::<serde_json::Value>(envelope) else {
+        return ApiError::new(ErrorCode::Unavailable, "the trusted call failed");
+    };
+    let code = details
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let like = if details
+        .get("retryable")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        ErrorCode::Unavailable
+    } else if code.ends_with("_DENIED") || code == "TRUSTED_VERSION_REQUIRED" {
+        ErrorCode::Denied
+    } else if code == "TRUSTED_TIMEOUT" {
+        ErrorCode::Timeout
+    } else if code == "TRUSTED_UNAVAILABLE" {
+        ErrorCode::Unavailable
+    } else if code.ends_with("_LIMIT") {
+        ErrorCode::TooLarge
+    } else {
+        ErrorCode::Invalid
+    };
+    let message = details
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("the trusted call failed")
+        .to_string();
+    ApiError::domain("trusted-error", like, message).with_details(details)
 }
 
 fn lifecycle_signal(
@@ -925,6 +1004,7 @@ mod tests {
     fn controls() -> WorkflowApiControls {
         WorkflowApiControls {
             shorten_deadline: Arc::new(|_| {}),
+            trusted_pins: Arc::default(),
         }
     }
 
