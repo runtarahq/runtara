@@ -1842,3 +1842,108 @@ mod workflow_api_trusted {
         assert_eq!(credentials.0.load(Ordering::SeqCst), 0);
     }
 }
+
+/// A real workflow compiled for the workflow API ABI: its logic sits between
+/// the services adapter and the run shim, and the artifact imports only WASI.
+/// The embedded runner runs it to the same output as the same graph composed
+/// for the WIT ABI, with the agent step's result checkpointed over the API.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflow_compiled_for_the_workflow_api_matches_the_wit_abi() {
+    use runtara_workflows::direct_wasm::{
+        DirectCompilationInput, GuestAbi, compile_direct_workflow, compose_direct_workflow,
+    };
+    let h = harness().await;
+    let components =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/wasm32-wasip2/release");
+    let graph = serde_json::json!({
+        "durable": true,
+        "steps": {
+            "agent": {
+                "stepType": "Agent", "id": "agent", "name": "Echo",
+                "agentId": "utils", "capabilityId": "return-input", "maxRetries": 0,
+                "inputMapping": {"value": {"valueType": "reference", "value": "data.value"}}
+            },
+            "finish": {
+                "stepType": "Finish", "id": "finish",
+                "inputMapping": {"result": {"valueType": "reference", "value": "steps.agent.outputs"}}
+            }
+        },
+        "entryPoint": "agent",
+        "executionPlan": [{"fromStep": "agent", "toStep": "finish"}],
+        "variables": {},
+        "inputSchema": {"value": {"type": "string"}},
+        "outputSchema": {}
+    });
+    let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![
+        serde_json::from_slice(
+            &std::fs::read(components.join("runtara_agent_utils.meta.json")).unwrap(),
+        )
+        .unwrap(),
+    ]));
+    let mut outputs = Vec::new();
+    for abi in [GuestAbi::Wit, GuestAbi::Http] {
+        let mut compiled = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "workflow-api-e2e".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(graph.clone()).unwrap(),
+            child_workflows: vec![],
+            output_dir: h.dir.path().join(format!("workflow-api-e2e-{abi:?}")),
+            track_events: false,
+            agent_catalog: Some(Arc::clone(&catalog)),
+            agent_slug: None,
+        })
+        .unwrap();
+        compiled.guest_abi = abi;
+        let wasm = compose_direct_workflow(&mut compiled, &components).unwrap();
+
+        let inst_id = unique("inst-workflow-api-e2e");
+        let input =
+            serde_json::to_vec(&serde_json::json!({"data": {"value": "hello"}, "variables": {}}))
+                .unwrap();
+        assert!(
+            h.persistence
+                .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+                .await
+                .expect("register instance")
+        );
+        let handle = h
+            .runner
+            .try_launch_detached(&options(inst_id.as_str(), &wasm))
+            .await
+            .expect("launch");
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+        )
+        .await
+        .expect("wait_for_exit hung");
+        let instance = h
+            .persistence
+            .get_instance(inst_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            instance.status,
+            runtara_core::domain::InstanceStatus::Completed,
+            "{abi:?}: {instance:?}"
+        );
+        let checkpoints = h
+            .persistence
+            .list_checkpoints(inst_id.as_str(), None, 50, 0, None, None)
+            .await
+            .unwrap();
+        assert!(
+            !checkpoints.is_empty(),
+            "{abi:?}: the agent step checkpoints"
+        );
+        outputs.push(
+            serde_json::from_slice::<serde_json::Value>(instance.output.as_deref().unwrap())
+                .unwrap(),
+        );
+    }
+    assert_eq!(outputs[0], serde_json::json!({"result": "hello"}));
+    assert_eq!(outputs[0], outputs[1], "both ABIs give the same output");
+    assert_eq!(h.runner.workflow_api_launches().serving(), 0);
+}

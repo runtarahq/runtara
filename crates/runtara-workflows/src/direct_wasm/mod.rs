@@ -60,7 +60,8 @@ pub use compile::{
 pub use component::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DIRECT_WORKFLOW_LOGIC_PACKAGE,
     DirectAgentComponentRequirement, DirectComponentArtifacts, DirectSharedComponentRequirement,
-    WorkflowRole, emit_direct_component_artifacts, emit_direct_component_artifacts_configured,
+    GuestAbi, WORKFLOW_API_ADAPTER_REQUIREMENTS, WorkflowRole, emit_direct_component_artifacts,
+    emit_direct_component_artifacts_configured,
 };
 #[cfg(feature = "compiler")]
 pub use error::DirectCompileError;

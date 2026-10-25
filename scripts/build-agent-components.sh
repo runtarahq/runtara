@@ -166,6 +166,25 @@ emit_workflow_component_meta \
 echo "==> runtara-workflow-api-probe"
 cargo build --release --target wasm32-wasip2 -p runtara-workflow-api-probe
 
+# The workflow API adapters the compiler composes around a workflow's logic
+# when it builds for the workflow API ABI (RUNTARA_GUEST_ABI=http).
+echo "==> workflow API adapters"
+cargo build --release --target wasm32-wasip2 -p runtara-workflow-api-services -p runtara-workflow-api-run
+emit_workflow_component_meta \
+    "runtara-workflow-api-services" \
+    "runtara:workflow-api-services" \
+    "services" \
+    "runtara:workflow/runtime@1.0.0" \
+    "$out_dir/runtara_workflow_api_services.wasm" \
+    "$out_dir/runtara_workflow_api_services.meta.json"
+emit_workflow_component_meta \
+    "runtara-workflow-api-run" \
+    "runtara:workflow-api-run" \
+    "run-shim" \
+    "wasi:cli/run@0.3.0" \
+    "$out_dir/runtara_workflow_api_run.wasm" \
+    "$out_dir/runtara_workflow_api_run.meta.json"
+
 if [ "${RUNTARA_ONLY_WORKFLOW_COMPONENTS:-}" != "1" ]; then
     # Single host-native pass: walks every agent crate's `agent_info()` and writes
     # the JSON siblings into out_dir. Source-of-truth is each agent's Rust code

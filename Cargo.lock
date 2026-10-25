@@ -4698,6 +4698,7 @@ dependencies = [
  "opentelemetry_sdk",
  "reqwest 0.12.28",
  "runtara-agent-suspension",
+ "runtara-agent-trusted",
  "runtara-component-host",
  "runtara-core",
  "runtara-database-contract",
@@ -4915,6 +4916,27 @@ dependencies = [
  "runtara-workflow-api",
  "runtara-workflow-sdk",
  "serde_json",
+ "wit-bindgen 0.58.0",
+]
+
+[[package]]
+name = "runtara-workflow-api-run"
+version = "9.0.1"
+dependencies = [
+ "runtara-workflow-api",
+ "runtara-workflow-sdk",
+ "serde_json",
+ "wit-bindgen 0.58.0",
+]
+
+[[package]]
+name = "runtara-workflow-api-services"
+version = "9.0.1"
+dependencies = [
+ "runtara-workflow-api",
+ "runtara-workflow-sdk",
+ "serde_json",
+ "wit-bindgen 0.58.0",
 ]
 
 [[package]]

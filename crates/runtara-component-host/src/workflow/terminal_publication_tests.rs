@@ -179,7 +179,7 @@ async fn expired_cleanup_alarm_rejects_new_runtime_calls() {
                     r#"(component
                   (import "expire" (func $expire))
                   (import "runtara:workflow/runtime@{version}" (instance $runtime
-                    (export "custom-event" (func (param "kind" string) (param "payload" (list u8)) (result (result (error string)))))))
+                    (export "custom-event" (func async (param "kind" string) (param "payload" (list u8)) (result (result (error string)))))))
                   (core module $mem
                     (memory (export "memory") 1)
                     (data (i32.const 128) "42")

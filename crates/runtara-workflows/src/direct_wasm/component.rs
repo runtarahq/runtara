@@ -88,6 +88,72 @@ pub const DIRECT_SHARED_COMPONENT_REQUIREMENTS: &[DirectSharedComponentRequireme
         cas_wasm_filename: "runtara-workflow-stdlib.wasm",
     }];
 
+/// The guest ABI a launched workflow artifact is composed for. A development
+/// switch until the cutover makes the workflow API the only ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GuestAbi {
+    /// The artifact imports `runtara:workflow/*`, served by host linkers.
+    #[default]
+    Wit,
+    /// The artifact imports only WASI: the logic is composed between the
+    /// workflow API adapters (`runtara-workflow-api-services` in front,
+    /// `runtara-workflow-api-run` behind) and exports `wasi:cli/run`.
+    Http,
+}
+
+impl GuestAbi {
+    /// `RUNTARA_GUEST_ABI` (`wit`, the default, or `http`).
+    pub fn from_env() -> Result<Self, String> {
+        match std::env::var("RUNTARA_GUEST_ABI").as_deref() {
+            Err(_) | Ok("") | Ok("wit") => Ok(Self::Wit),
+            Ok("http") => Ok(Self::Http),
+            Ok(other) => Err(format!(
+                "RUNTARA_GUEST_ABI must be `wit` or `http`, not `{other}`"
+            )),
+        }
+    }
+}
+
+/// The components composed around a workflow's logic on [`GuestAbi::Http`].
+pub const WORKFLOW_API_ADAPTER_REQUIREMENTS: &[DirectSharedComponentRequirement] = &[
+    DirectSharedComponentRequirement {
+        package: "runtara:workflow-api-services",
+        package_with_version: "runtara:workflow/runtime@1.0.0",
+        bundle_wasm_filename: "runtara_workflow_api_services.wasm",
+        bundle_meta_filename: "runtara_workflow_api_services.meta.json",
+        cas_wasm_filename: "runtara-workflow-api-services.wasm",
+    },
+    DirectSharedComponentRequirement {
+        package: "runtara:workflow-api-run",
+        package_with_version: "wasi:cli/run@0.3.0",
+        bundle_wasm_filename: "runtara_workflow_api_run.wasm",
+        bundle_meta_filename: "runtara_workflow_api_run.meta.json",
+        cas_wasm_filename: "runtara-workflow-api-run.wasm",
+    },
+];
+
+/// `wac` composed for [`GuestAbi::Http`]: the services adapter satisfies the
+/// logic's `runtara:workflow` imports and the run shim re-exports its entry
+/// as `wasi:cli/run`, the only export left.
+pub(crate) fn http_guest_wac(wac: &str) -> Result<String, String> {
+    const LOGIC: &str = "let wf = new runtara:workflow-logic {";
+    const EXPORT: &str = "export wf...;\n";
+    if wac.matches(LOGIC).count() != 1 || !wac.ends_with(EXPORT) {
+        return Err("the workflow composition has no single logic instance to wrap".into());
+    }
+    let wac = wac.replacen(
+        LOGIC,
+        "let workflow-api-services = new runtara:workflow-api-services { ... };\n\n\
+         let wf = new runtara:workflow-logic { ...workflow-api-services,",
+        1,
+    );
+    Ok(format!(
+        "{}let workflow-api-run = new runtara:workflow-api-run {{ ...wf, ... }};\n\n\
+         export workflow-api-run...;\n",
+        &wac[..wac.len() - EXPORT.len()]
+    ))
+}
+
 /// Direct component composition scaffolding emitted beside direct artifacts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectComponentArtifacts {

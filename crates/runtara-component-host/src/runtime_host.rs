@@ -7,7 +7,11 @@
 //! host is its only implementation. This module provides it: a
 //! [`RuntimeHost`] trait carrying the interface's guest-visible semantics, and
 //! [`add_runtime_to_linker`] which binds every interface function to the trait
-//! via `func_wrap_async`.
+//! via `func_wrap_concurrent` (the interface's functions are `async`).
+//!
+//! On the workflow API ABI the same interface is served inside the guest by
+//! the services adapter instead, over the workflow API; this host binding is
+//! for artifacts that still import it.
 //!
 //! Layering: this crate stays persistence-agnostic. The trait is DEFINED here;
 //! the production implementation lives in `runtara-environment`, delegating to
@@ -23,7 +27,6 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use wasmtime::StoreContextMut;
 use wasmtime::component::Linker;
 
 use crate::host_io::HostIoContext;
@@ -384,22 +387,16 @@ fn wall_clock_now_ms() -> Result<u64, String> {
 /// configured host is a wiring bug (e.g. a HostImport artifact executed
 /// through a spec that never set [`crate::workflow::WorkflowRunSpec::runtime`])
 /// — trap loudly instead of surfacing a confusing guest-level error.
-fn require_host(
-    store: &mut StoreContextMut<'_, WorkflowState>,
-) -> wasmtime::Result<Arc<dyn RuntimeHost>> {
+fn require_host(state: &WorkflowState) -> wasmtime::Result<Arc<dyn RuntimeHost>> {
     // An already selected emergency abort must also stop runtime calls between
     // epoch checks, especially terminal publication and signal acknowledgement.
     // This does not roll back a host operation that began before expiry.
-    if store
-        .data()
-        .cleanup_alarm()
-        .is_some_and(|alarm| alarm.expired())
-    {
+    if state.cleanup_alarm().is_some_and(|alarm| alarm.expired()) {
         return Err(wasmtime::Error::new(
             crate::cleanup_alarm::CleanupGraceExpired,
         ));
     }
-    store.data().runtime_host().cloned().ok_or_else(|| {
+    state.runtime_host().cloned().ok_or_else(|| {
         wasmtime::format_err!(
             "workflow imports {RUNTIME_INTERFACE_NAME} but the run was not configured \
              with a RuntimeHost (WorkflowRunSpec.runtime is None)"
@@ -416,171 +413,126 @@ fn require_host(
 /// coexists with minimal components).
 pub fn add_runtime_to_linker(linker: &mut Linker<WorkflowState>) -> anyhow::Result<()> {
     let mut inst = linker.instance(RUNTIME_INTERFACE_NAME)?;
-    inst.func_wrap_async(
-        "poll-signal",
-        |mut store: StoreContextMut<'_, WorkflowState>, (): ()| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.poll_signal().await,)) })
-        },
-    )?;
+    inst.func_wrap_concurrent("poll-signal", |accessor, (): ()| {
+        let host = accessor.with(|mut access| require_host(access.get()));
+        Box::pin(async move { Ok((host?.poll_signal().await,)) })
+    })?;
 
-    inst.func_wrap_async(
-        "instance-id",
-        |mut store: StoreContextMut<'_, WorkflowState>, (): ()| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.instance_id(),)) })
-        },
-    )?;
+    inst.func_wrap_concurrent("instance-id", |accessor, (): ()| {
+        let host = accessor.with(|mut access| require_host(access.get()));
+        Box::pin(async move { Ok((host?.instance_id(),)) })
+    })?;
 
-    inst.func_wrap_async(
+    inst.func_wrap_concurrent(
         "custom-event",
-        |mut store: StoreContextMut<'_, WorkflowState>, (kind, payload): (String, Vec<u8>)| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.custom_event(kind, payload).await,)) })
+        |accessor, (kind, payload): (String, Vec<u8>)| {
+            let host = accessor.with(|mut access| require_host(access.get()));
+            Box::pin(async move { Ok((host?.custom_event(kind, payload).await,)) })
         },
     )?;
 
-    inst.func_wrap_async(
-        "debug-mode-enabled",
-        |mut store: StoreContextMut<'_, WorkflowState>, (): ()| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.debug_mode_enabled(),)) })
-        },
-    )?;
+    inst.func_wrap_concurrent("debug-mode-enabled", |accessor, (): ()| {
+        let host = accessor.with(|mut access| require_host(access.get()));
+        Box::pin(async move { Ok((host?.debug_mode_enabled(),)) })
+    })?;
 
-    inst.func_wrap_async(
-        "breakpoint-pause",
-        |mut store: StoreContextMut<'_, WorkflowState>, (): ()| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.breakpoint_pause().await,)) })
-        },
-    )?;
+    inst.func_wrap_concurrent("breakpoint-pause", |accessor, (): ()| {
+        let host = accessor.with(|mut access| require_host(access.get()));
+        Box::pin(async move { Ok((host?.breakpoint_pause().await,)) })
+    })?;
 
-    inst.func_wrap_async(
-        "heartbeat",
-        |mut store: StoreContextMut<'_, WorkflowState>, (): ()| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.heartbeat().await,)) })
-        },
-    )?;
+    inst.func_wrap_concurrent("heartbeat", |accessor, (): ()| {
+        let host = accessor.with(|mut access| require_host(access.get()));
+        Box::pin(async move { Ok((host?.heartbeat().await,)) })
+    })?;
 
-    inst.func_wrap_async(
-        "is-cancelled",
-        |mut store: StoreContextMut<'_, WorkflowState>, (): ()| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.is_cancelled().await,)) })
-        },
-    )?;
+    inst.func_wrap_concurrent("is-cancelled", |accessor, (): ()| {
+        let host = accessor.with(|mut access| require_host(access.get()));
+        Box::pin(async move { Ok((host?.is_cancelled().await,)) })
+    })?;
 
-    inst.func_wrap_async(
-        "check-signals",
-        |mut store: StoreContextMut<'_, WorkflowState>, (): ()| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.check_signals().await,)) })
-        },
-    )?;
+    inst.func_wrap_concurrent("check-signals", |accessor, (): ()| {
+        let host = accessor.with(|mut access| require_host(access.get()));
+        Box::pin(async move { Ok((host?.check_signals().await,)) })
+    })?;
 
-    inst.func_wrap_async(
+    inst.func_wrap_concurrent(
         "poll-custom-signal",
-        |mut store: StoreContextMut<'_, WorkflowState>, (checkpoint_id,): (String,)| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.poll_custom_signal(checkpoint_id).await,)) })
+        |accessor, (checkpoint_id,): (String,)| {
+            let host = accessor.with(|mut access| require_host(access.get()));
+            Box::pin(async move { Ok((host?.poll_custom_signal(checkpoint_id).await,)) })
         },
     )?;
 
-    inst.func_wrap_async(
+    inst.func_wrap_concurrent(
         "register-input",
-        |mut store: StoreContextMut<'_, WorkflowState>,
-         (descriptor, deadline): (Vec<u8>, Option<u64>)| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.register_input(descriptor, deadline).await,)) })
+        |accessor, (descriptor, deadline): (Vec<u8>, Option<u64>)| {
+            let host = accessor.with(|mut access| require_host(access.get()));
+            Box::pin(async move { Ok((host?.register_input(descriptor, deadline).await,)) })
         },
     )?;
-    inst.func_wrap_async(
-        "poll-input",
-        |mut store: StoreContextMut<'_, WorkflowState>, (signal_id,): (String,)| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.poll_input(signal_id).await,)) })
-        },
-    )?;
-    inst.func_wrap_async(
-        "close-input",
-        |mut store: StoreContextMut<'_, WorkflowState>, (signal_id,): (String,)| {
-            let host = require_host(&mut store);
-            Box::new(async move {
-                let state = host?.close_input(signal_id).await.map_err(|_| {
-                    wasmtime::format_err!("managed input abandonment could not be confirmed")
-                })?;
-                Ok((Ok::<RuntimeInputState, String>(state),))
-            })
-        },
-    )?;
+    inst.func_wrap_concurrent("poll-input", |accessor, (signal_id,): (String,)| {
+        let host = accessor.with(|mut access| require_host(access.get()));
+        Box::pin(async move { Ok((host?.poll_input(signal_id).await,)) })
+    })?;
+    inst.func_wrap_concurrent("close-input", |accessor, (signal_id,): (String,)| {
+        let host = accessor.with(|mut access| require_host(access.get()));
+        Box::pin(async move {
+            let state = host?.close_input(signal_id).await.map_err(|_| {
+                wasmtime::format_err!("managed input abandonment could not be confirmed")
+            })?;
+            Ok((Ok::<RuntimeInputState, String>(state),))
+        })
+    })?;
 
-    inst.func_wrap_async(
-        "now-ms",
-        |mut store: StoreContextMut<'_, WorkflowState>, (): ()| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.now_ms(),)) })
-        },
-    )?;
+    inst.func_wrap_concurrent("now-ms", |accessor, (): ()| {
+        let host = accessor.with(|mut access| require_host(access.get()));
+        Box::pin(async move { Ok((host?.now_ms(),)) })
+    })?;
 
-    inst.func_wrap_async(
-        "durable-sleep",
-        |mut store: StoreContextMut<'_, WorkflowState>, (ms,): (u64,)| {
-            let host = require_host(&mut store);
-            Box::new(async move {
-                // Alias to durable-sleep-checkpoint under the fixed key.
-                let result = host?
-                    .durable_sleep_checkpoint(
-                        DURABLE_SLEEP_CHECKPOINT_ID.to_string(),
-                        Vec::new(),
-                        ms,
-                    )
-                    .await;
-                Ok((result,))
-            })
-        },
-    )?;
+    inst.func_wrap_concurrent("durable-sleep", |accessor, (ms,): (u64,)| {
+        let host = accessor.with(|mut access| require_host(access.get()));
+        Box::pin(async move {
+            // Alias to durable-sleep-checkpoint under the fixed key.
+            let result = host?
+                .durable_sleep_checkpoint(DURABLE_SLEEP_CHECKPOINT_ID.to_string(), Vec::new(), ms)
+                .await;
+            Ok((result,))
+        })
+    })?;
 
-    inst.func_wrap_async(
-        "blocking-sleep",
-        |store: StoreContextMut<'_, WorkflowState>, (ms,): (u64,)| {
-            // The run keeps its Store while it sleeps here: say so for as long
-            // as the sleep lasts.
-            let waiting = crate::host_io::HostIoContext::in_process_wait(store.data());
-            Box::new(async move {
-                let _waiting = waiting;
-                // An async sleep returns after `ms`, like a blocking sleep,
-                // without pinning an executor thread.
-                tokio::time::sleep(Duration::from_millis(ms)).await;
-                Ok((Ok::<(), String>(()),))
-            })
-        },
-    )?;
+    inst.func_wrap_concurrent("blocking-sleep", |accessor, (ms,): (u64,)| {
+        // The run keeps its Store while it sleeps here: say so for as long
+        // as the sleep lasts.
+        let waiting = accessor
+            .with(|mut access| crate::host_io::HostIoContext::in_process_wait(&*access.get()));
+        Box::pin(async move {
+            let _waiting = waiting;
+            // An async sleep returns after `ms`, like a blocking sleep,
+            // without pinning an executor thread.
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            Ok((Ok::<(), String>(()),))
+        })
+    })?;
 
-    inst.func_wrap_async(
-        "get-checkpoint",
-        |mut store: StoreContextMut<'_, WorkflowState>, (checkpoint_id,): (String,)| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.get_checkpoint(checkpoint_id).await,)) })
-        },
-    )?;
+    inst.func_wrap_concurrent("get-checkpoint", |accessor, (checkpoint_id,): (String,)| {
+        let host = accessor.with(|mut access| require_host(access.get()));
+        Box::pin(async move { Ok((host?.get_checkpoint(checkpoint_id).await,)) })
+    })?;
 
-    inst.func_wrap_async(
+    inst.func_wrap_concurrent(
         "checkpoint",
-        |mut store: StoreContextMut<'_, WorkflowState>,
-         (checkpoint_id, state): (String, Vec<u8>)| {
-            let host = require_host(&mut store);
-            Box::new(async move { Ok((host?.checkpoint(checkpoint_id, state).await,)) })
+        |accessor, (checkpoint_id, state): (String, Vec<u8>)| {
+            let host = accessor.with(|mut access| require_host(access.get()));
+            Box::pin(async move { Ok((host?.checkpoint(checkpoint_id, state).await,)) })
         },
     )?;
 
-    inst.func_wrap_async(
+    inst.func_wrap_concurrent(
         "handle-checkpoint-signal",
-        |mut store: StoreContextMut<'_, WorkflowState>,
-         (signal_type, command_id): (String, String)| {
-            let host = require_host(&mut store);
-            Box::new(async move {
+        |accessor, (signal_type, command_id): (String, String)| {
+            let host = accessor.with(|mut access| require_host(access.get()));
+            Box::pin(async move {
                 Ok((host?
                     .handle_checkpoint_signal(signal_type, command_id)
                     .await,))
@@ -588,12 +540,12 @@ pub fn add_runtime_to_linker(linker: &mut Linker<WorkflowState>) -> anyhow::Resu
         },
     )?;
 
-    inst.func_wrap_async(
+    inst.func_wrap_concurrent(
         "record-retry-attempt",
-        |mut store: StoreContextMut<'_, WorkflowState>,
+        |accessor,
          (checkpoint_id, attempt_number, error_message): (String, u32, Option<String>)| {
-            let host = require_host(&mut store);
-            Box::new(async move {
+            let host = accessor.with(|mut access| require_host(access.get()));
+            Box::pin(async move {
                 Ok((host?
                     .record_retry_attempt(checkpoint_id, attempt_number, error_message)
                     .await,))
@@ -601,12 +553,11 @@ pub fn add_runtime_to_linker(linker: &mut Linker<WorkflowState>) -> anyhow::Resu
         },
     )?;
 
-    inst.func_wrap_async(
+    inst.func_wrap_concurrent(
         "durable-sleep-checkpoint",
-        |mut store: StoreContextMut<'_, WorkflowState>,
-         (checkpoint_id, state, ms): (String, Vec<u8>, u64)| {
-            let host = require_host(&mut store);
-            Box::new(async move {
+        |accessor, (checkpoint_id, state, ms): (String, Vec<u8>, u64)| {
+            let host = accessor.with(|mut access| require_host(access.get()));
+            Box::pin(async move {
                 Ok((host?
                     .durable_sleep_checkpoint(checkpoint_id, state, ms)
                     .await,))
@@ -637,7 +588,7 @@ mod tests {
                 (field "payload" (list u8))
                 (field "checkpoint-id" (option string))))
             (export "signal-info" (type $exported-signal (eq $signal)))
-            (export "poll-signal" (func (result (result (option $exported-signal) (error string)))))
+            (export "poll-signal" (func async (result (result (option $exported-signal) (error string)))))
         "#;
         for (version, poll, expected) in [
             (RUNTIME_INTERFACE_NAME, observation, true),
@@ -649,8 +600,8 @@ mod tests {
                     r#"
                 (component (import "{version}" (instance
                     {poll}
-                    (export "is-cancelled" (func (result (result bool (error string)))))
-                    (export "handle-checkpoint-signal" (func
+                    (export "is-cancelled" (func async (result (result bool (error string)))))
+                    (export "handle-checkpoint-signal" (func async
                         (param "signal-type" string) (param "command-id" string)
                         (result (result bool (error string)))))
                 )))

@@ -529,6 +529,9 @@ pub struct DirectCompilationInput {
 /// Result of opt-in direct workflow compilation.
 #[derive(Debug, Clone)]
 pub struct DirectCompilationResult {
+    /// The ABI composition builds the launched artifact for. Starts from
+    /// `RUNTARA_GUEST_ABI`; a caller may set it before composing.
+    pub guest_abi: super::component::GuestAbi,
     /// Call-site inventory generated from the same normalized manifest as code.
     /// Included in package v2 when logical Agent isolation is selected.
     pub invocation_manifest: Option<runtara_invocation_contract::InvocationManifest>,
@@ -727,6 +730,29 @@ fn compose_direct_workflow_selected(
         "compose: resolved + read component dependencies from disk",
     );
 
+    // On the workflow API ABI only a run's own entry is wrapped; a published
+    // workflow-agent stays a component its parent composes.
+    let http_guest = result.guest_abi == super::component::GuestAbi::Http
+        && result
+            .component_artifacts
+            .world_wit
+            .contains(&format!("export {};", runtara_wit::workflow::ENTRY));
+    let mut shared_components = shared_components;
+    let mut wac_source = result.component_artifacts.wac_source.clone();
+    if http_guest {
+        if selection.is_some() {
+            return Err(component_error(
+                "isolated Agents are not composed on the workflow API ABI yet",
+            ));
+        }
+        shared_components.extend(resolve_shared_component_dependencies(
+            components_dir,
+            super::component::WORKFLOW_API_ADAPTER_REQUIREMENTS,
+        )?);
+        wac_source = super::component::http_guest_wac(&wac_source).map_err(component_error)?;
+        fs::write(result.build_dir.join("workflow.wac"), &wac_source)?;
+    }
+
     let mut overrides: HashMap<String, PathBuf> = HashMap::new();
     overrides.insert(
         "runtara:workflow-logic".to_string(),
@@ -781,11 +807,8 @@ fn compose_direct_workflow_selected(
     }
 
     let compose_start = Instant::now();
-    let mut composed_wasm = compose_workflow_component_in_process(
-        &result.component_artifacts.wac_source,
-        &result.build_dir,
-        overrides,
-    )?;
+    let mut composed_wasm =
+        compose_workflow_component_in_process(&wac_source, &result.build_dir, overrides)?;
     tracing::debug!(
         target: "runtara::direct_compile::profile",
         elapsed_ms = compose_start.elapsed().as_secs_f64() * 1000.0,
@@ -1349,6 +1372,7 @@ fn compile_direct_workflow_inner(
     fs::write(&wac_path, &component_artifacts.wac_source)?;
 
     Ok(DirectCompilationResult {
+        guest_abi: super::component::GuestAbi::from_env().map_err(component_error)?,
         invocation_manifest: if scoped_agents.is_empty() {
             None
         } else {

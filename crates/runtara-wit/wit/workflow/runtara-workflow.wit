@@ -10,6 +10,10 @@ package runtara:workflow@1.0.0;
 
 // Run services: events, cancellation, heartbeat, checkpoints and durable
 // sleep. A run finishes through its entry's return value, not a call here.
+//
+// Every function is `async` so that a guest component serving them (the
+// workflow API's services adapter) may wait inside one; workflow logic still
+// calls them with a synchronous lowering.
 interface runtime {
     record signal-info {
         signal-type: string,
@@ -31,32 +35,32 @@ interface runtime {
         custom-signal: option<custom-signal-info>,
     }
 
-    instance-id: func() -> result<string, string>;
+    instance-id: async func() -> result<string, string>;
 
-    custom-event: func(
+    custom-event: async func(
         kind: string,
         payload: list<u8>,
     ) -> result<_, string>;
 
-    debug-mode-enabled: func() -> result<bool, string>;
+    debug-mode-enabled: async func() -> result<bool, string>;
 
-    breakpoint-pause: func() -> result<_, string>;
+    breakpoint-pause: async func() -> result<_, string>;
 
-    heartbeat: func() -> result<_, string>;
+    heartbeat: async func() -> result<_, string>;
 
     /// Read the pending lifecycle command without acknowledging it or publishing
     /// terminal/suspended status. Rate limiting may return none between polls.
     /// The guest retains an observed command while cleaning up active subtasks,
     /// then calls handle-checkpoint-signal with its type and command-id.
     /// Custom WaitForSignal payloads are not consumed by this operation.
-    poll-signal: func() -> result<option<signal-info>, string>;
+    poll-signal: async func() -> result<option<signal-info>, string>;
 
     /// Legacy consuming helper; do not use while subtasks still need cleanup.
-    is-cancelled: func() -> result<bool, string>;
+    is-cancelled: async func() -> result<bool, string>;
 
-    check-signals: func() -> result<bool, string>;
+    check-signals: async func() -> result<bool, string>;
 
-    poll-custom-signal: func(
+    poll-custom-signal: async func(
         checkpoint-id: string,
     ) -> result<option<list<u8>>, string>;
 
@@ -69,25 +73,25 @@ interface runtime {
 
     /// Register the immutable wait descriptor (JSON), with its original deadline.
     /// Tenant and invocation authority come from the host, never the descriptor.
-    register-input: func(
+    register-input: async func(
         descriptor: list<u8>,
         deadline-ms: option<u64>,
     ) -> result<_, string>;
 
     /// Read accepted bytes or expire an unanswered wait using persistence time.
-    poll-input: func(signal-id: string) -> result<input-state, string>;
+    poll-input: async func(signal-id: string) -> result<input-state, string>;
 
     /// Abandon this wait without replacing a response that already won.
-    close-input: func(signal-id: string) -> result<input-state, string>;
+    close-input: async func(signal-id: string) -> result<input-state, string>;
 
-    now-ms: func() -> result<u64, string>;
+    now-ms: async func() -> result<u64, string>;
 
-    durable-sleep: func(ms: u64) -> result<_, string>;
+    durable-sleep: async func(ms: u64) -> result<_, string>;
 
-    blocking-sleep: func(ms: u64) -> result<_, string>;
+    blocking-sleep: async func(ms: u64) -> result<_, string>;
 
     /// Read a result checkpoint without writing anything.
-    get-checkpoint: func(
+    get-checkpoint: async func(
         checkpoint-id: string,
     ) -> result<option<list<u8>>, string>;
 
@@ -95,23 +99,23 @@ interface runtime {
     /// and a later call gets that state back as `found`. Empty `state` is
     /// accepted only for compatibility, as a read probe; use `get-checkpoint`
     /// to read.
-    checkpoint: func(
+    checkpoint: async func(
         checkpoint-id: string,
         state: list<u8>,
     ) -> result<checkpoint-result, string>;
 
-    handle-checkpoint-signal: func(
+    handle-checkpoint-signal: async func(
         signal-type: string,
         command-id: string,
     ) -> result<bool, string>;
 
-    record-retry-attempt: func(
+    record-retry-attempt: async func(
         checkpoint-id: string,
         attempt-number: u32,
         error-message: option<string>,
     ) -> result<_, string>;
 
-    durable-sleep-checkpoint: func(
+    durable-sleep-checkpoint: async func(
         checkpoint-id: string,
         state: list<u8>,
         ms: u64,

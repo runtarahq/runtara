@@ -26,7 +26,12 @@ def component_names(workspace: Path) -> list[str]:
     ]
     if not agents:
         raise ValueError("workspace declares no agent components")
-    return agents + ["runtara_workflow_stdlib"]
+    return agents + [
+        "runtara_workflow_stdlib",
+        # Composed around workflow logic for the workflow API ABI.
+        "runtara_workflow_api_services",
+        "runtara_workflow_api_run",
+    ]
 
 
 def stage(workspace: Path, source: Path, destination: Path) -> None:

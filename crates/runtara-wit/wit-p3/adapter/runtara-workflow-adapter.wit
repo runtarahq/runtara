@@ -1,0 +1,17 @@
+// The components the compiler composes around a workflow's logic on the
+// workflow API ABI, so the launched artifact imports only WASI.
+//
+// `services` serves the logic's `runtara:workflow` imports over the workflow
+// API; `run-shim` turns the logic's entry into `wasi:cli/run`, reading the
+// input and posting the outcome over the API. Both reach the API through the
+// guest SDK, which imports `wasi:http/client@0.3.0` on their behalf.
+package runtara:workflow-adapter@1.0.0;
+
+world services {
+    export runtara:workflow/runtime@1.0.0;
+}
+
+world run-shim {
+    import runtara:agent-workflow-agent/capabilities@1.0.0;
+    export wasi:cli/run@0.3.0;
+}

@@ -9,16 +9,12 @@
 //! and decodes the error envelope. It never names the run; the host attaches
 //! the binding.
 //!
-//! This first slice covers the run lifecycle: [`run_info`], [`input`] and
-//! [`post_outcome`]. Export a workflow with [`export_workflow!`]:
-//!
-//! ```ignore
-//! struct Workflow;
-//! impl runtara_workflow_sdk::bindings::exports::wasi::cli::run::Guest for Workflow {
-//!     async fn run() -> Result<(), ()> { /* ... */ Ok(()) }
-//! }
-//! runtara_workflow_sdk::export_workflow!(Workflow);
-//! ```
+//! The SDK only imports (world `runtara:workflow-guest/client`), so any
+//! component can use it: a workflow exports `wasi:cli/run` from its own
+//! bindings (world `runtara:workflow-guest/run`), and the adapters the
+//! compiler composes around workflow logic export the old `runtara:*`
+//! interfaces over it. Calls are async; a synchronous export drives one with
+//! `wit_bindgen::block_on`.
 
 use runtara_workflow_api::{ApiError, ErrorCode};
 
@@ -28,16 +24,10 @@ pub use runtara_workflow_api::{ErrorInfo, PostedOutcome, RunInfo, Suspension, Wa
 pub mod bindings {
     wit_bindgen::generate!({
         path: "../runtara-wit/wit-p3",
-        world: "runtara:workflow-guest/workflow",
-        pub_export_macro: true,
-        export_macro_name: "export_workflow",
-        default_bindings_module: "runtara_workflow_sdk::bindings",
+        world: "runtara:workflow-guest/client",
         generate_all,
     });
 }
-
-#[cfg(target_arch = "wasm32")]
-pub use bindings::export_workflow;
 
 /// Why an SDK call failed.
 #[derive(Debug)]
@@ -101,12 +91,27 @@ impl Response {
     }
 }
 
-/// The idempotency key of the next write: unique per launch, since every
-/// launch is a fresh instance of the component.
+/// The idempotency key of the next write: unique per launch. Every launch is
+/// a fresh instance of the component, and several components of one launch
+/// (a workflow's adapters) each count their own writes, so the count is
+/// prefixed with a nonce drawn once per instance.
 fn next_idempotency_key() -> String {
+    use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU64, Ordering};
+    static NONCE: OnceLock<u64> = OnceLock::new();
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    format!("sdk-{}", NEXT.fetch_add(1, Ordering::Relaxed))
+    let nonce = *NONCE.get_or_init(instance_nonce);
+    format!("sdk-{nonce:016x}-{}", NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn instance_nonce() -> u64 {
+    bindings::wasi::random::random::get_random_u64()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn instance_nonce() -> u64 {
+    0
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -778,4 +783,10 @@ pub async fn trusted(
     let body = serde_json::json!({"connectionId": connection_id, "input": input});
     let response = call_json("POST", &path, &headers, Some(&body)).await?;
     serde_json::from_slice(&response.body).map_err(|e| Error::Transport(format!("trusted: {e}")))
+}
+
+/// Sleep `ms` inside the guest (`wasi:clocks`), keeping the run's resources.
+#[cfg(target_arch = "wasm32")]
+pub async fn sleep(ms: u64) {
+    bindings::wasi::clocks::monotonic_clock::wait_for(ms.saturating_mul(1_000_000)).await;
 }

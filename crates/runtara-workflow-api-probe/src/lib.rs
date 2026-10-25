@@ -10,9 +10,18 @@
 //! never post one (they loop forever or abort).
 
 #[cfg(target_arch = "wasm32")]
+mod bindings {
+    wit_bindgen::generate!({
+        path: "../runtara-wit/wit-p3",
+        world: "runtara:workflow-guest/run",
+        generate_all,
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
 mod probe {
+    use crate::bindings::exports::wasi::cli::run::Guest;
     use runtara_workflow_api::{ErrorInfo, PostedOutcome, Suspension, Wake};
-    use runtara_workflow_sdk::bindings::exports::wasi::cli::run::Guest;
     use serde_json::{Value, json};
 
     struct Probe;
@@ -390,5 +399,5 @@ mod probe {
         }
     }
 
-    runtara_workflow_sdk::export_workflow!(Probe);
+    crate::bindings::export!(Probe with_types_in crate::bindings);
 }
