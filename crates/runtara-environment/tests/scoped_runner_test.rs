@@ -14,9 +14,8 @@ use runtara_store_postgres::PostgresPersistence;
 use runtara_workflows::ChildWorkflowInput;
 use runtara_workflows::direct_wasm::{
     AgentIsolationPolicy, AgentIsolationReason, AgentIsolationReview, DirectCompilationInput,
-    DirectCompilationResult, WorkflowRole, compile_direct_workflow,
-    compile_direct_workflow_composed_with_isolation_policy, compose_direct_workflow,
-    compose_direct_workflow_with_isolated_agents,
+    DirectCompilationResult, WorkflowRole, compile_direct_workflow_composed_with_isolation_policy,
+    compose_direct_workflow, compose_direct_workflow_with_isolated_agents,
 };
 use serde_json::{Value, json};
 use std::{
@@ -167,7 +166,12 @@ fn compile_with_children(
         .unwrap();
     }
     assert!(matches!(backend, "legacy" | "live"));
-    let mut result = compile_direct_workflow(input).unwrap();
+    // Isolated packages exist only on the WIT guest ABI.
+    let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_for_guest_abi(
+        input,
+        runtara_workflows::direct_wasm::GuestAbi::Wit,
+    )
+    .unwrap();
     if backend == "legacy" {
         compose_direct_workflow(&mut result, components()).unwrap();
     } else {

@@ -8,11 +8,11 @@
 //! returned as the run's outcome. A workflow keeps its state in checkpoints,
 //! so a suspension posts only its wakes.
 
-/// The JSON a WIT `option<string>` field of `error-info` carries, as a value
-/// (a string when it is not JSON).
+/// A WIT `option<string>` field of `error-info` as posted: the producer's
+/// text as a JSON string, which the host persists verbatim.
 #[cfg(any(target_arch = "wasm32", test))]
 fn json_field(field: Option<String>) -> Option<serde_json::Value> {
-    field.map(|text| serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text)))
+    field.map(serde_json::Value::String)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -85,10 +85,10 @@ mod run {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn error_fields_are_json_when_they_hold_json() {
+    fn error_fields_travel_as_the_producers_text() {
         assert_eq!(
             super::json_field(Some(r#"{"x":1}"#.into())),
-            Some(serde_json::json!({"x": 1}))
+            Some(serde_json::json!(r#"{"x":1}"#))
         );
         assert_eq!(
             super::json_field(Some("text".into())),

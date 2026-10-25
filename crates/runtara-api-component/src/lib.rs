@@ -31,10 +31,11 @@ fn json(bytes: &[u8], what: &str) -> Result<serde_json::Value, String> {
     serde_json::from_slice(bytes).map_err(|e| format!("{what} is not JSON: {e}"))
 }
 
-/// An optional JSON text field as a value (a string when it is not JSON).
+/// An optional JSON text field of `error-info` as posted: the producer's text
+/// as a JSON string, which the host persists verbatim.
 #[cfg(any(target_arch = "wasm32", test))]
 fn json_text(text: Option<String>) -> Option<serde_json::Value> {
-    text.map(|text| serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text)))
+    text.map(serde_json::Value::String)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -198,6 +199,14 @@ mod api {
             sdk::ack_lifecycle_signal(&command_id, &signal_type)
                 .await
                 .map_err(api_error)
+        }
+
+        async fn check_lifecycle() -> Result<bool, ApiError> {
+            sdk::check_lifecycle_signals().await.map_err(api_error)
+        }
+
+        async fn cancelled() -> Result<bool, ApiError> {
+            sdk::lifecycle_cancelled().await.map_err(api_error)
         }
 
         async fn poll_custom(

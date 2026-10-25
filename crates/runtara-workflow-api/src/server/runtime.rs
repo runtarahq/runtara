@@ -201,6 +201,24 @@ pub(super) async fn ack_lifecycle_signal(
     Ok(json(&Acked { applied })?)
 }
 
+pub(super) async fn check_lifecycle_signals(
+    State(state): State<WorkflowApiState>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    let stopped = state.backend.check_lifecycle_signals(&binding).await?;
+    Ok(json(&serde_json::json!({"stopped": stopped}))?)
+}
+
+pub(super) async fn lifecycle_cancelled(
+    State(state): State<WorkflowApiState>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    let cancelled = state.backend.lifecycle_cancelled(&binding).await?;
+    Ok(json(&serde_json::json!({"cancelled": cancelled}))?)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Wait {

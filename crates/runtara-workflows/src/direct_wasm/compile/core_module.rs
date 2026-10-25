@@ -600,17 +600,6 @@ pub(super) fn emit_direct_core_module(
         },
         &ConstExpr::i32_const(heap_base),
     );
-    if config.api_runtime {
-        // `api_shims::STOPPED_GLOBAL`: an acknowledged stop.
-        globals.global(
-            GlobalType {
-                val_type: ValType::I32,
-                mutable: true,
-                shared: false,
-            },
-            &ConstExpr::i32_const(0),
-        );
-    }
 
     if !early_realloc {
         export_realloc(

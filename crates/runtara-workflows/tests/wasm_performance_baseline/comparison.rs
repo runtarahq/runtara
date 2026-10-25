@@ -223,17 +223,26 @@ fn measure(
                 }]
             })
             .unwrap_or_default();
-        let mut compiled = compile_direct_workflow(DirectCompilationInput {
-            workflow_id: case.name.into(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: serde_json::from_slice(&graph_bytes).unwrap(),
-            child_workflows: children,
-            output_dir: dir.path().to_owned(),
-            track_events: case.events,
-            agent_catalog: None,
-            agent_slug: None,
-        })
+        // Isolated packages exist only on the WIT guest ABI.
+        let guest_abi = if isolated {
+            runtara_workflows::direct_wasm::GuestAbi::Wit
+        } else {
+            runtara_workflows::direct_wasm::GuestAbi::Http
+        };
+        let mut compiled = runtara_workflows::direct_wasm::compile_direct_workflow_for_guest_abi(
+            DirectCompilationInput {
+                workflow_id: case.name.into(),
+                version: 1,
+                source_checksum: None,
+                execution_graph: serde_json::from_slice(&graph_bytes).unwrap(),
+                child_workflows: children,
+                output_dir: dir.path().to_owned(),
+                track_events: case.events,
+                agent_catalog: None,
+                agent_slug: None,
+            },
+            guest_abi,
+        )
         .unwrap();
         emit_times.push(micros(start));
         let start = Instant::now();

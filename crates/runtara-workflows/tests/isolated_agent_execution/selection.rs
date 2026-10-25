@@ -384,7 +384,7 @@ fn policy_rejects_grants_overlapping_inline_embed_checkpoints_without_agent_call
             assert!(compiled.invocation_manifest.is_none());
             assert!(compiled.artifact_metadata.isolation.is_none());
             compilation_input.output_dir = dir.path().join("inline-legacy");
-            let mut legacy = compile_direct_workflow(compilation_input).unwrap();
+            let mut legacy = compile_wit(compilation_input).unwrap();
             runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
                 &mut legacy,
                 &components,
@@ -514,6 +514,7 @@ fn production_compile_wrapper_uses_standard_composition_while_legacy_fixture_sta
     let components = direct_e2e_components_dir();
     let dir = tempfile::tempdir().unwrap();
     let graph = super::super::wasm_performance_baseline::random_chain(1, false);
+    // The production wrapper builds for the default (workflow API) ABI.
     let mut reference =
         compile_direct_workflow(input(graph.clone(), &dir.path().join("direct"))).unwrap();
     compose_direct_workflow(&mut reference, &components).unwrap();

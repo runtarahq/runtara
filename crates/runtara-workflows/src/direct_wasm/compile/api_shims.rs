@@ -10,10 +10,9 @@
 //! matching `runtara:api` function with a scratch area of its own as the
 //! result pointer (an `api-error` is far larger than the old `string`, so
 //! the caller's result area would not hold it), then writes the old layout
-//! into the caller's result area. The few old functions that are
-//! composites of several endpoints (`is-cancelled`, `check-signals`) are the
-//! same composites here; `is-cancelled` remembers an acknowledged stop in a
-//! module global, as the old host did.
+//! into the caller's result area. `is-cancelled` and `check-signals` call
+//! the host's own composites (`/v1/signals/lifecycle/cancelled` and
+//! `/check`), which keep the host's cancel flag.
 //!
 //! Every offset comes from the WIT through `SizeAlign`, and every shim checks
 //! that the import has the flat signature it pushes for, so a WIT change that
@@ -37,9 +36,6 @@ use super::abi::push_core_type;
 use super::core_imports::DirectCoreImportIndices;
 use super::{DirectCompileError, component_error};
 
-/// The module global (after the heap pointer) that remembers an
-/// acknowledged stop.
-pub(super) const STOPPED_GLOBAL: u32 = 1;
 /// Bytes reserved for the shims' results, below the heap.
 pub(super) const API_SCRATCH_BYTES: i32 = 128;
 
@@ -308,39 +304,6 @@ impl Shim<'_> {
             .i(Instruction::End);
     }
 
-    /// Push whether the string in locals `ptr`/`len` equals `literal`.
-    fn push_str_eq(&mut self, ptr: u32, len: u32, literal: &str) {
-        self.i(Instruction::LocalGet(len))
-            .i(Instruction::I32Const(literal.len() as i32))
-            .i(Instruction::I32Eq)
-            .i(Instruction::If(BlockType::Result(ValType::I32)))
-            .i(Instruction::I32Const(1));
-        for (n, byte) in literal.bytes().enumerate() {
-            self.i(Instruction::LocalGet(ptr))
-                .i(Instruction::I32Load8U(mem(n as u64, 0)))
-                .i(Instruction::I32Const(i32::from(byte)))
-                .i(Instruction::I32Eq)
-                .i(Instruction::I32And);
-        }
-        self.i(Instruction::Else)
-            .i(Instruction::I32Const(0))
-            .i(Instruction::End);
-    }
-
-    /// When `applied` and the signal in `ty_ptr`/`ty_len` is a stop, remember
-    /// it in [`STOPPED_GLOBAL`].
-    fn remember_stop(&mut self, applied: u32, ty_ptr: u32, ty_len: u32) {
-        self.i(Instruction::LocalGet(applied));
-        self.push_str_eq(ty_ptr, ty_len, "cancel");
-        self.push_str_eq(ty_ptr, ty_len, "shutdown");
-        self.i(Instruction::I32Or)
-            .i(Instruction::I32And)
-            .i(Instruction::If(BlockType::Empty))
-            .i(Instruction::I32Const(1))
-            .i(Instruction::GlobalSet(STOPPED_GLOBAL))
-            .i(Instruction::End);
-    }
-
     /// After a call into `new` (a `result<_, api-error>`): when it failed,
     /// write the old `result<_, string>` error as the `{code, message,
     /// retryAfterMs}` JSON the wait and state errors read (built by the
@@ -563,61 +526,19 @@ pub(super) fn emit_runtime_shims(
                 write_polled_signal(&mut shim, &poll, &old)?;
             }
             "is-cancelled" | "check-signals" => {
-                let poll = api_result("signals", "poll-lifecycle")?;
-                let ack = api_result("signals", "ack-lifecycle")?;
-                let ok = layouts.offset(&old, &[Step::Ok])?;
-                let applied = shim.local(6);
-                if name == "is-cancelled" {
-                    shim.i(Instruction::GlobalGet(STOPPED_GLOBAL))
-                        .i(Instruction::If(BlockType::Empty));
-                    shim.store_const_u8(0, 0);
-                    shim.store_const_u8(ok, 1);
-                    shim.i(Instruction::Return).i(Instruction::End);
-                }
-                shim.call(import("signals.poll-lifecycle", &[P])?, &[], true);
-                shim.on_error_return(&poll, &old)?;
-                let some = layouts.offset(&poll, &[Step::Ok])?;
-                let notice = [Step::Ok, Step::Some, Step::Field("notice")];
-                let signal_type = layouts.offset(
-                    &poll,
-                    &[notice[0], notice[1], notice[2], Step::Field("signal-type")],
-                )?;
-                let command = layouts.offset(
-                    &poll,
-                    &[notice[0], notice[1], notice[2], Step::Field("command-id")],
-                )?;
-                let (tag, ty_ptr, ty_len, cmd_ptr, cmd_len) = (
-                    shim.local(2),
-                    shim.local(3),
-                    shim.local(4),
-                    shim.local(5),
-                    shim.local(7),
-                );
-                shim.load_u8(some, tag);
-                shim.load_i32(signal_type, ty_ptr);
-                shim.load_i32(signal_type + 4, ty_len);
-                shim.load_i32(command, cmd_ptr);
-                shim.load_i32(command + 4, cmd_len);
-                // Nothing pending (or, for `is-cancelled`, not a cancel):
-                // not stopped.
-                shim.i(Instruction::LocalGet(tag)).i(Instruction::I32Eqz);
-                if name == "is-cancelled" {
-                    shim.push_str_eq(ty_ptr, ty_len, "cancel");
-                    shim.i(Instruction::I32Eqz).i(Instruction::I32Or);
-                }
-                shim.i(Instruction::If(BlockType::Empty));
-                shim.store_const_u8(0, 0);
-                shim.store_const_u8(ok, 0);
-                shim.i(Instruction::Return).i(Instruction::End);
-                shim.call(
-                    import("signals.ack-lifecycle", &[P, L, P, L, P])?,
-                    &[cmd_ptr, cmd_len, ty_ptr, ty_len],
-                    true,
-                );
-                shim.on_error_return(&ack, &old)?;
-                shim.load_u8(layouts.offset(&ack, &[Step::Ok])?, applied);
-                shim.remember_stop(applied, ty_ptr, ty_len);
-                shim.store_u8(ok, applied);
+                // The host's own composites: it keeps the cancel flag and
+                // escalates an ignored cancel.
+                let (key, function) = if name == "is-cancelled" {
+                    ("signals.cancelled", "cancelled")
+                } else {
+                    ("signals.check-lifecycle", "check-lifecycle")
+                };
+                let checked = api_result("signals", function)?;
+                shim.call(import(key, &[P])?, &[], true);
+                shim.on_error_return(&checked, &old)?;
+                let value = shim.local(2);
+                shim.load_u8(layouts.offset(&checked, &[Step::Ok])?, value);
+                shim.store_u8(layouts.offset(&old, &[Step::Ok])?, value);
             }
             "handle-checkpoint-signal" => {
                 let ack = api_result("signals", "ack-lifecycle")?;
@@ -630,7 +551,6 @@ pub(super) fn emit_runtime_shims(
                 );
                 shim.on_error_return(&ack, &old)?;
                 shim.load_u8(layouts.offset(&ack, &[Step::Ok])?, applied);
-                shim.remember_stop(applied, param(0), param(1));
                 shim.store_u8(layouts.offset(&old, &[Step::Ok])?, applied);
             }
             "register-input" => {

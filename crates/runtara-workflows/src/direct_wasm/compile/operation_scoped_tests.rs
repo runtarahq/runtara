@@ -418,7 +418,8 @@ fn unscoped_workflows_carry_nothing_of_the_operation_scope() {
         false,
         result.component_artifacts.has_timers,
         result.component_artifacts.needs_monotonic_clock,
-    );
+    )
+    .with_api_runtime(result.guest_abi == crate::direct_wasm::GuestAbi::Http);
     assert_eq!(artifacts.world_wit, result.component_artifacts.world_wit);
 }
 

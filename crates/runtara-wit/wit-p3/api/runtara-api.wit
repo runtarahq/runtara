@@ -139,6 +139,12 @@ interface signals {
     poll-lifecycle: async func() -> result<option<lifecycle-signal>, api-error>;
     /// `POST /v1/signals/lifecycle/{commandId}/ack`: whether it applied.
     ack-lifecycle: async func(command-id: string, signal-type: string) -> result<bool, api-error>;
+    /// `POST /v1/signals/lifecycle/check`: handle the pending command; true
+    /// when a stop-like command was handled and the run should return.
+    check-lifecycle: async func() -> result<bool, api-error>;
+    /// `POST /v1/signals/lifecycle/cancelled`: whether a cancel is pending
+    /// (acknowledging it) or was already handled.
+    cancelled: async func() -> result<bool, api-error>;
     /// `GET /v1/signals/custom/{checkpointId}`, waiting up to `wait-ms`.
     poll-custom: async func(checkpoint-id: string, wait-ms: u64) -> result<option<list<u8>>, api-error>;
 }

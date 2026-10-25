@@ -60,6 +60,9 @@ pub struct LaunchSlot {
     resolver: std::sync::OnceLock<Arc<RunConnectionResolver>>,
     /// Operations this launch entered and has not left, by operation id.
     operations: Mutex<HashMap<String, OperationIdentity>>,
+    /// A failure the run may not recover from, which ends it as trapped
+    /// whatever it does next.
+    fault: Mutex<Option<String>>,
     /// Instance waits this launch registered whose last read was pending.
     /// A suspension it posts wakes on them too, as the old ABI's host
     /// attached them to the run's result.
@@ -155,6 +158,7 @@ impl ApiLaunches {
                 controls,
                 resolver: std::sync::OnceLock::new(),
                 operations: Mutex::default(),
+                fault: Mutex::default(),
                 pending_waits: Mutex::default(),
             }),
         );
@@ -233,6 +237,17 @@ impl ApiLaunches {
     /// Stop serving `launch_id`, dropping any outcome it posted. Idempotent.
     pub fn release(&self, launch_id: &str) {
         let _ = self.finish(launch_id);
+    }
+
+    /// The fault that ends `launch_id` as trapped, if one was recorded.
+    pub fn fault(&self, launch_id: &str) -> Option<String> {
+        let slots = self.slots.lock().expect("workflow API launches poisoned");
+        slots
+            .get(launch_id)?
+            .fault
+            .lock()
+            .expect("launch fault poisoned")
+            .clone()
     }
 
     /// How many launches currently serve the API.
@@ -441,9 +456,13 @@ impl WorkflowApiBackend for Backend {
     async fn run_info(&self, binding: &Binding) -> Result<RunInfo, ApiError> {
         let slot = self.0.slot(binding).ok_or_else(not_serving)?;
         let mut info = slot.info.clone();
-        // Debug mode is the run host's to say, asked when the guest asks.
+        // Debug mode, and the instance of a run its host did not bind, are the
+        // run host's to say, asked when the guest asks.
         if let Some(runtime) = slot.runtime.upgrade() {
             info.debug = runtime.debug_mode_enabled().map_err(host_error)?;
+            if info.instance_id.is_empty() {
+                info.instance_id = runtime.instance_id().map_err(host_error)?;
+            }
         }
         Ok(info)
     }
@@ -560,6 +579,20 @@ impl WorkflowApiBackend for Backend {
             .map_err(host_error)
     }
 
+    async fn check_lifecycle_signals(&self, binding: &Binding) -> Result<bool, ApiError> {
+        self.runtime(binding)?
+            .check_signals()
+            .await
+            .map_err(host_error)
+    }
+
+    async fn lifecycle_cancelled(&self, binding: &Binding) -> Result<bool, ApiError> {
+        self.runtime(binding)?
+            .is_cancelled()
+            .await
+            .map_err(host_error)
+    }
+
     async fn poll_custom_signal(
         &self,
         binding: &Binding,
@@ -600,11 +633,20 @@ impl WorkflowApiBackend for Backend {
     }
 
     async fn close_input(&self, binding: &Binding, signal_id: &str) -> Result<InputRead, ApiError> {
-        self.runtime(binding)?
+        let closed = self
+            .runtime(binding)?
             .close_input(signal_id.to_string())
-            .await
-            .map(input_read)
-            .map_err(input_error)
+            .await;
+        // An abandonment the host cannot confirm ends the run, so guest error
+        // handling never continues with an orphaned request (the old ABI's
+        // import trapped).
+        if closed.is_err()
+            && let Some(slot) = self.0.slot(binding)
+        {
+            *slot.fault.lock().expect("launch fault poisoned") =
+                Some("managed input abandonment could not be confirmed".into());
+        }
+        closed.map(input_read).map_err(input_error)
     }
 
     async fn register_wait(

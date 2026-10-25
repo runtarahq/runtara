@@ -19,7 +19,7 @@ use runtara_workflows::direct_wasm::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DirectArtifactMetadata, DirectCompilationInput,
     DirectCompileError, WorkflowRole, analyze_direct_wasm_support, compile_direct_workflow,
     compile_direct_workflow_composed, compile_direct_workflow_composed_configured,
-    compose_direct_workflow, emit_direct_component_artifacts,
+    compose_direct_workflow,
 };
 use runtara_workflows::{
     CompilationInput, DirectWorkflowCompileOptions, ExecutionGraph, WorkflowCompilerMode,
@@ -1829,20 +1829,18 @@ fn top_level_component_imports(bytes: &[u8]) -> Vec<String> {
     imports
 }
 
-/// Spike B of the agent/workflow unification: wac-graph must compose a
-/// workflow whose directly-declared `runtara:workflow/runtime` import
-/// is left unsatisfied (no runtime component instantiated), surfacing it as a
-/// component-level import — the same path WASI interfaces already ride. This
-/// is the load-bearing assumption of the host-import migration: proven here
-/// for a DIRECT workflow-logic import, not just transitive WASI ones.
+/// On the workflow API ABI (the default) a composed workflow imports no
+/// runtara interface from its host: its logic's `runtara:api` imports are
+/// satisfied inside the artifact, WASI is all that surfaces, and its one
+/// export is `wasi:cli/run`.
 #[test]
-fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
+fn direct_compose_leaves_only_wasi_for_the_host() {
     let components_dir = direct_e2e_components_dir();
     let graph: ExecutionGraph = serde_json::from_str(SIMPLE_PASSTHROUGH).expect("fixture parses");
     let temp = tempfile::tempdir().expect("tempdir");
 
     let mut result = compile_direct_workflow(DirectCompilationInput {
-        workflow_id: "spike-b-host-import-runtime".to_string(),
+        workflow_id: "composed-imports".to_string(),
         version: 1,
         source_checksum: None,
         execution_graph: graph,
@@ -1853,31 +1851,21 @@ fn direct_compose_host_import_binding_surfaces_runtime_as_component_import() {
         agent_slug: None,
     })
     .expect("direct emit succeeds");
+    compose_direct_workflow(&mut result, &components_dir).expect("compose");
 
-    let agent_ids: Vec<String> = result
-        .component_artifacts
-        .agent_components
-        .iter()
-        .map(|component| component.agent_id.clone())
-        .collect();
-
-    // Spike: re-emit the scaffolding and recompose. wac must type-check + encode (validate: true inside compose)
-    // with the runtime interface unbound, and the interface must surface as a
-    // top-level import.
-    result.component_artifacts = emit_direct_component_artifacts(&agent_ids);
-    compose_direct_workflow(&mut result, &components_dir).expect("host-import-binding compose");
-
-    let host_import_bytes = fs::read(&result.wasm_path).expect("read host-import artifact");
-    let host_imports = top_level_component_imports(&host_import_bytes);
+    let bytes = fs::read(&result.wasm_path).expect("read artifact");
+    let imports = top_level_component_imports(&bytes);
     assert!(
-        host_imports
+        imports
             .iter()
-            .any(|name| name == "runtara:workflow/runtime@1.0.0"),
-        "host-import binding must surface the runtime interface; imports: {host_imports:?}"
+            .all(|name| name.starts_with("wasi:") || name == "runtara:agent/types@1.0.0"),
+        "only WASI (and the type-only agent types) reach the host; imports: {imports:?}"
     );
     assert!(
-        host_imports.iter().any(|name| name.starts_with("wasi:")),
-        "WASI imports must survive the binding change; imports: {host_imports:?}"
+        imports
+            .iter()
+            .any(|name| name.starts_with("wasi:http/client@0.3")),
+        "the workflow API transport is imported; imports: {imports:?}"
     );
 }
 
@@ -7099,8 +7087,8 @@ fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_ho
     assert!(
         kept.component_artifacts
             .world_wit
-            .contains("runtara:workflow/runtime"),
-        "control artifact must keep the runtime import"
+            .contains(runtara_wit::api::CHECKPOINTS),
+        "control artifact must keep the run services (through runtara:api)"
     );
 
     // Soundness: a workflow that WOULD call runtime keeps the import even when
@@ -7119,7 +7107,7 @@ fn direct_wasm_execute_invoke_omit_runtime_pure_workflow_runs_with_no_runtime_ho
         agentful
             .component_artifacts
             .world_wit
-            .contains("runtara:workflow/runtime")
+            .contains(runtara_wit::api::CHECKPOINTS)
     );
 }
 
@@ -14037,7 +14025,8 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
 
     // Packaging a separately instantiated child must keep its approval pin on
     // the root before the package section, where precompilation can validate it.
-    let mut scoped = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
+    // Isolated packages exist only on the WIT guest ABI.
+    let mut scoped = runtara_workflows::direct_wasm::compile_direct_workflow_for_guest_abi(
         DirectCompilationInput {
             workflow_id: "trusted-scoped".into(),
             version: 1,
@@ -14049,8 +14038,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             agent_catalog: Some(dispatcher.catalog()),
             agent_slug: None,
         },
-        WorkflowRole::Root,
-        false,
+        runtara_workflows::direct_wasm::GuestAbi::Wit,
     )
     .unwrap();
     use sha2::Digest;

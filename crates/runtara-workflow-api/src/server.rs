@@ -116,6 +116,17 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
         let _ = (binding, command_id, signal_type);
         Err(unsupported_service("lifecycle signals"))
     }
+    /// Poll the pending lifecycle command and handle it: true when a
+    /// stop-like command was handled and the run should return.
+    async fn check_lifecycle_signals(&self, binding: &Binding) -> Result<bool, ApiError> {
+        let _ = binding;
+        Err(unsupported_service("lifecycle signals"))
+    }
+    /// Whether a cancel is pending (acknowledging it) or was already handled.
+    async fn lifecycle_cancelled(&self, binding: &Binding) -> Result<bool, ApiError> {
+        let _ = binding;
+        Err(unsupported_service("lifecycle signals"))
+    }
     /// The custom signal payload waiting at `checkpoint_id`, if any.
     async fn poll_custom_signal(
         &self,
@@ -439,6 +450,14 @@ pub fn router(state: WorkflowApiState) -> Router {
         .route(
             "/v1/signals/lifecycle/{command_id}/ack",
             post(runtime::ack_lifecycle_signal),
+        )
+        .route(
+            "/v1/signals/lifecycle/check",
+            post(runtime::check_lifecycle_signals),
+        )
+        .route(
+            "/v1/signals/lifecycle/cancelled",
+            post(runtime::lifecycle_cancelled),
         )
         .route(
             "/v1/signals/custom/{checkpoint_id}",

@@ -124,6 +124,11 @@ struct ApiLaunch {
 }
 
 impl ApiLaunch {
+    /// The fault recorded against the launch, which ends it as trapped.
+    fn fault(&self) -> Option<String> {
+        self.launches.fault(&self.launch_id)
+    }
+
     /// Stop serving the launch and take the outcome it posted.
     fn finish(&self) -> Option<runtara_workflow_api::PostedOutcome> {
         self.launches.finish(&self.launch_id)
@@ -133,6 +138,15 @@ impl ApiLaunch {
 impl Drop for ApiLaunch {
     fn drop(&mut self) {
         self.launches.release(&self.launch_id);
+    }
+}
+
+/// A posted error field as persisted: a JSON string is the producer's own
+/// text, kept as it was; any other value is its JSON.
+fn verbatim(value: serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text,
+        other => other.to_string(),
     }
 }
 
@@ -174,8 +188,8 @@ fn posted_outcome(
             severity: error.severity,
             retryable: error.retryable,
             retry_after_ms: error.retry_after_ms,
-            attributes: error.attributes.map(|value| value.to_string()),
-            details: error.details.map(|value| value.to_string()),
+            attributes: error.attributes.map(verbatim),
+            details: error.details.map(verbatim),
         }),
     }
 }
@@ -1413,7 +1427,11 @@ impl WorkflowExecutor {
                         // or cancel drops this future, and the launch guard
                         // with it.)
                         let ran = run.call_async(&mut store, ()).await;
+                        let fault = launch.fault();
                         let posted = launch.finish();
+                        if let Some(fault) = fault {
+                            anyhow::bail!(fault);
+                        }
                         let (ran,) = ran?;
                         return match posted {
                             Some(outcome) => Ok(posted_outcome(outcome)),
@@ -1528,11 +1546,28 @@ impl WorkflowExecutor {
             let _ = writeln!(file, "workflow trapped: {reason}");
         }
 
+        let mut exit = exit;
+        let mut instance_waits = parked_waits(store.data());
+        // A run on the workflow API ABI names the waits it parks on as
+        // `instances` wakes; report them where the old ABI's host attached
+        // them, so callers see one shape on either ABI.
+        if let InvokeExit::Suspended(wakes) = &mut exit {
+            wakes.retain(|wake| match wake {
+                crate::lifecycle::WorkflowWake::Instances(id) => {
+                    if !instance_waits.contains(id) {
+                        instance_waits.push(id.clone());
+                    }
+                    false
+                }
+                _ => true,
+            });
+        }
+
         InvokeRunResult {
             exit,
             memory_peak_bytes: store.data().limiter.memory_peak_bytes,
             duration: overall_started.elapsed(),
-            instance_waits: parked_waits(store.data()),
+            instance_waits,
         }
     }
 

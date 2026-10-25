@@ -1289,7 +1289,8 @@ fn direct_compile_exports_the_workflow_entry_and_imports_components() {
                     let import = import.expect("component import");
                     saw_stdlib_import |=
                         import.name.0.contains("runtara:workflow-stdlib/json@1.0.0");
-                    saw_runtime_import |= import.name.0.contains("runtara:workflow/runtime@1.0.0");
+                    // The workflow API ABI's run services.
+                    saw_runtime_import |= import.name.0.contains(runtara_wit::api::CHECKPOINTS);
                 }
             }
             Payload::ComponentExportSection(reader) => {
@@ -10590,7 +10591,8 @@ fn direct_compile_writes_component_scaffold_sidecars() {
     assert_eq!(world_wit, result.component_artifacts.world_wit);
     assert_eq!(wac, result.component_artifacts.wac_source);
     assert!(world_wit.contains("import runtara:workflow-stdlib/json@1.0.0;"));
-    assert!(world_wit.contains("import runtara:workflow/runtime@1.0.0;"));
+    assert!(world_wit.contains(&format!("import {};", runtara_wit::api::CHECKPOINTS)));
+    assert!(!world_wit.contains("import runtara:workflow/runtime@1.0.0;"));
     assert!(world_wit.contains("export runtara:agent-workflow-agent/capabilities@1.0.0;"));
     assert!(wac.contains("new runtara:workflow-stdlib"));
     // HostImport default: the runtime component is neither instantiated nor
@@ -11282,12 +11284,13 @@ fn split_timeout_keeps_required_runtime_import_in_both_invoke_abis() {
             )
             .unwrap();
             assert!(!compiled.omit_runtime, "{abi:?}, timeout={timeout}");
-            assert!(
-                compiled
-                    .component_artifacts
-                    .world_wit
-                    .contains("runtara:workflow/runtime")
-            );
+            // A run's own entry reaches the runtime through `runtara:api`; a
+            // published workflow-agent still imports the runtime itself.
+            let runtime = match abi {
+                WorkflowRole::Root => runtara_wit::api::CHECKPOINTS,
+                WorkflowRole::PublishedAgent => "runtara:workflow/runtime",
+            };
+            assert!(compiled.component_artifacts.world_wit.contains(runtime));
             Validator::new_with_features(wasmparser::WasmFeatures::all())
                 .validate_all(&fs::read(compiled.wasm_path).unwrap())
                 .unwrap();

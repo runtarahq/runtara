@@ -88,25 +88,25 @@ pub const DIRECT_SHARED_COMPONENT_REQUIREMENTS: &[DirectSharedComponentRequireme
         cas_wasm_filename: "runtara-workflow-stdlib.wasm",
     }];
 
-/// The guest ABI a launched workflow artifact is composed for. A development
-/// switch until the cutover makes the workflow API the only ABI.
+/// The guest ABI a launched workflow artifact is composed for. `Http` is the
+/// default; `Wit` remains selectable until the old ABI is deleted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GuestAbi {
     /// The artifact imports `runtara:workflow/*`, served by host linkers.
-    #[default]
     Wit,
     /// The artifact imports only WASI: the logic imports `runtara:api`,
     /// served by `runtara-api-component`, and `runtara-workflow-api-run`
     /// turns its entry into `wasi:cli/run`.
+    #[default]
     Http,
 }
 
 impl GuestAbi {
-    /// `RUNTARA_GUEST_ABI` (`wit`, the default, or `http`).
+    /// `RUNTARA_GUEST_ABI` (`http`, the default, or `wit`).
     pub fn from_env() -> Result<Self, String> {
         match std::env::var("RUNTARA_GUEST_ABI").as_deref() {
-            Err(_) | Ok("") | Ok("wit") => Ok(Self::Wit),
-            Ok("http") => Ok(Self::Http),
+            Err(_) | Ok("") | Ok("http") => Ok(Self::Http),
+            Ok("wit") => Ok(Self::Wit),
             Ok(other) => Err(format!(
                 "RUNTARA_GUEST_ABI must be `wit` or `http`, not `{other}`"
             )),

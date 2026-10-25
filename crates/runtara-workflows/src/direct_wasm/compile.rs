@@ -732,8 +732,10 @@ fn compose_direct_workflow_selected(
     );
 
     // On the workflow API ABI only a run's own entry is wrapped; a published
-    // workflow-agent stays a component its parent composes.
+    // workflow-agent stays a component its parent composes. A runtime-free
+    // root keeps its `invoke` entry: it runs without a host to post to.
     let http_guest = result.guest_abi == super::component::GuestAbi::Http
+        && !result.omit_runtime
         && result
             .component_artifacts
             .world_wit

@@ -43,7 +43,8 @@ fn stalled_agent_components(source: &Path, output: &Path, url: &str) -> anyhow::
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         if name_str == "runtara_agent_http.meta.json"
-            || (name_str.starts_with("runtara_workflow_")
+            || ((name_str.starts_with("runtara_workflow_")
+                || name_str.starts_with("runtara_api_component."))
                 && (name_str.ends_with(".wasm") || name_str.ends_with(".meta.json")))
         {
             std::fs::copy(entry.path(), output.join(name))?;

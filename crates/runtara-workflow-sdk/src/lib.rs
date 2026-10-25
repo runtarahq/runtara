@@ -376,6 +376,24 @@ pub async fn ack_lifecycle_signal(command_id: &str, signal_type: &str) -> Result
     Ok(applied["applied"].as_bool().unwrap_or(false))
 }
 
+/// `POST /v1/signals/lifecycle/check`: handle the pending lifecycle command;
+/// true when a stop-like command was handled and the run should return.
+pub async fn check_lifecycle_signals() -> Result<bool, Error> {
+    let response = call("POST", "/v1/signals/lifecycle/check", &[], None).await?;
+    let answer: serde_json::Value = serde_json::from_slice(&response.body)
+        .map_err(|e| Error::Transport(format!("signal check: {e}")))?;
+    Ok(answer["stopped"].as_bool().unwrap_or(false))
+}
+
+/// `POST /v1/signals/lifecycle/cancelled`: whether a cancel is pending
+/// (acknowledging it) or was already handled.
+pub async fn lifecycle_cancelled() -> Result<bool, Error> {
+    let response = call("POST", "/v1/signals/lifecycle/cancelled", &[], None).await?;
+    let answer: serde_json::Value = serde_json::from_slice(&response.body)
+        .map_err(|e| Error::Transport(format!("cancel check: {e}")))?;
+    Ok(answer["cancelled"].as_bool().unwrap_or(false))
+}
+
 /// `GET /v1/signals/custom/{checkpointId}`, waiting up to `wait_ms`.
 pub async fn poll_custom_signal(
     checkpoint_id: &str,
