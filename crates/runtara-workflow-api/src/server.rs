@@ -141,6 +141,19 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
         let _ = binding;
         Err(unsupported_service("time"))
     }
+    /// Wait `ms`, the run waiting in process meanwhile. The request is held
+    /// for the wait; dropping it ends the wait.
+    async fn sleep(&self, binding: &Binding, ms: u64) -> Result<(), ApiError> {
+        let _ = (binding, ms);
+        Err(unsupported_service("sleeps"))
+    }
+    /// Arm the run's cleanup alarm: `ms` from now the host aborts the whole
+    /// execution. The request is held while the alarm is armed and never
+    /// succeeds; dropping it disarms the alarm.
+    async fn alarm(&self, binding: &Binding, ms: u64) -> Result<(), ApiError> {
+        let _ = (binding, ms);
+        Err(unsupported_service("alarms"))
+    }
     async fn heartbeat(&self, binding: &Binding) -> Result<(), ApiError> {
         let _ = binding;
         Err(unsupported_service("heartbeat"))
@@ -438,6 +451,7 @@ pub fn router(state: WorkflowApiState) -> Router {
         .route("/v1/run/input", get(get_run_input))
         .route("/v1/run/outcome", post(post_run_outcome))
         .route("/v1/run/deadline", put(put_run_deadline))
+        .route("/v1/run/alarm", post(post_run_alarm))
         .route(
             "/v1/checkpoints/{id}",
             get(runtime::get_checkpoint).put(runtime::put_checkpoint),
@@ -464,6 +478,7 @@ pub fn router(state: WorkflowApiState) -> Router {
             get(runtime::get_custom_signal),
         )
         .route("/v1/time", get(runtime::get_time))
+        .route("/v1/time/sleep", get(runtime::get_sleep))
         .route("/v1/heartbeat", post(runtime::post_heartbeat))
         .route("/v1/events", post(runtime::post_events))
         .route(
@@ -886,6 +901,27 @@ async fn post_run_outcome(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct DeadlineRequest {
     abort_after_ms: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AlarmRequest {
+    after_ms: u64,
+}
+
+/// Held while the alarm is armed; it only ever answers with an error.
+async fn post_run_alarm(
+    State(state): State<WorkflowApiState>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    let body = to_bytes(request.into_body(), state.caps.request_body_bytes)
+        .await
+        .map_err(|_| ApiError::new(ErrorCode::TooLarge, "alarm body is over the cap"))?;
+    let alarm: AlarmRequest = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("alarm: {e}")))?;
+    state.backend.alarm(&binding, alarm.after_ms).await?;
+    Err(ApiError::new(ErrorCode::Finished, "the alarm expired; the run is aborted").into())
 }
 
 async fn put_run_deadline(

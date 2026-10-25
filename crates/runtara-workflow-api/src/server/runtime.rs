@@ -269,6 +269,23 @@ pub(super) async fn get_time(
     Ok(json(&Now { now_ms })?)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct Sleep {
+    ms: u64,
+}
+
+/// Held for the whole wait.
+pub(super) async fn get_sleep(
+    State(state): State<WorkflowApiState>,
+    Query(sleep): Query<Sleep>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    state.backend.sleep(&binding, sleep.ms).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 pub(super) async fn post_heartbeat(
     State(state): State<WorkflowApiState>,
     request: Request,

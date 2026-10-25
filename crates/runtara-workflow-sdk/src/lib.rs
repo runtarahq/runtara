@@ -869,10 +869,37 @@ pub async fn trusted(
     serde_json::from_slice(&response.body).map_err(|e| Error::Transport(format!("trusted: {e}")))
 }
 
-/// Sleep `ms` inside the guest (`wasi:clocks`), keeping the run's resources.
+/// `GET /v1/time/sleep`: wait `ms`, keeping the run's resources; the host
+/// shows the run waiting in process meanwhile. Dropping the call ends the
+/// wait. When the host cannot hold it, the wait runs on the guest's own
+/// clock, so it is never cut short.
 #[cfg(target_arch = "wasm32")]
 pub async fn sleep(ms: u64) {
-    bindings::wasi::clocks::monotonic_clock::wait_for(ms.saturating_mul(1_000_000)).await;
+    if call("GET", &format!("/v1/time/sleep?ms={ms}"), &[], None)
+        .await
+        .is_err()
+    {
+        bindings::wasi::clocks::monotonic_clock::wait_for(ms.saturating_mul(1_000_000)).await;
+    }
+}
+
+/// `POST /v1/run/alarm`: arm the run's cleanup alarm. `after_ms` from now the
+/// host aborts the whole execution; dropping the call first disarms it. It
+/// never succeeds: it answers only when the alarm cannot be armed or has
+/// expired.
+pub async fn alarm(after_ms: u64) -> Error {
+    let body = serde_json::json!({"afterMs": after_ms});
+    match call(
+        "POST",
+        "/v1/run/alarm",
+        &[("content-type", "application/json")],
+        Some(body.to_string().into_bytes()),
+    )
+    .await
+    {
+        Ok(_) => Error::Transport("the cleanup alarm answered without expiring".into()),
+        Err(error) => error,
+    }
 }
 
 /// `POST /v1/debug/breakpoint`: wait at a breakpoint for up to `wait_ms`.

@@ -1872,10 +1872,11 @@ fn direct_compose_leaves_only_wasi_for_the_host() {
     );
 }
 
-/// A connection lookup in the workflow logic goes through `runtara:api` too:
-/// no composed artifact imports the host's connections interface.
+/// Everything the workflow logic and its agents use goes through the
+/// workflow API: an artifact with agents (which need the timers) and a
+/// connection lookup imports nothing under `runtara:host`.
 #[test]
-fn direct_compose_resolves_connections_through_the_workflow_api() {
+fn direct_compose_reaches_the_host_only_through_the_workflow_api() {
     let components_dir = direct_e2e_components_dir();
     let temp = tempfile::tempdir().expect("tempdir");
     let compiled = compile_direct_workflow_composed_configured(
@@ -1898,9 +1899,7 @@ fn direct_compose_resolves_connections_through_the_workflow_api() {
     .expect("direct composed compile");
     let imports = top_level_component_imports(&fs::read(&compiled.wasm_path).expect("read"));
     assert!(
-        !imports
-            .iter()
-            .any(|name| name.starts_with("runtara:host/connections")),
+        !imports.iter().any(|name| name.starts_with("runtara:host/")),
         "imports: {imports:?}"
     );
 }

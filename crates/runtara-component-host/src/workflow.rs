@@ -790,6 +790,7 @@ impl WorkflowExecutor {
                 .as_ref()
                 .and_then(|call| call.pins.clone())
                 .unwrap_or_default(),
+            cleanup_alarm: Some(store.data().cleanup_alarm.clone()),
         };
         let launches = Arc::clone(self.workflow_api());
         if let Err(error) = launches.begin(

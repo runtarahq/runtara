@@ -201,6 +201,9 @@ pub struct WorkflowApiControls {
     /// decide its trusted calls (`TrustedExecutor::admits`). Empty admits
     /// none.
     pub trusted_pins: Arc<std::collections::HashSet<String>>,
+    /// The run's whole-execution cleanup alarm (`POST /v1/run/alarm`);
+    /// none outside a run.
+    pub(crate) cleanup_alarm: Option<crate::cleanup_alarm::CleanupAlarmState>,
 }
 
 impl std::fmt::Debug for WorkflowApiControls {

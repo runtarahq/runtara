@@ -99,7 +99,7 @@ interface run {
     set-deadline: async func(abort-after-ms: u64) -> result<_, api-error>;
 }
 
-/// `/v1/time` and `/v1/heartbeat`.
+/// `/v1/time`, `/v1/heartbeat` and the run's cleanup alarm.
 interface time {
     use types.{api-error};
 
@@ -107,10 +107,14 @@ interface time {
     now-ms: async func() -> result<u64, api-error>;
     /// `POST /v1/heartbeat`.
     heartbeat: async func() -> result<_, api-error>;
-    /// Wait `ms` inside the guest (`wasi:clocks`), keeping the run's
-    /// resources. The one function that is not an endpoint: a non-durable
-    /// delay needs no host.
+    /// `GET /v1/time/sleep`: wait `ms`, keeping the run's resources, while
+    /// the host shows the run waiting in process. Cancelling the call ends
+    /// the wait. Where the host cannot hold it, the guest's own clock waits.
     sleep: async func(ms: u64);
+    /// `POST /v1/run/alarm`: the whole-execution cleanup alarm. `ms` from now
+    /// the host aborts the execution; cancelling the call first disarms it.
+    /// It has no normal result.
+    abort-after: async func(ms: u64);
 }
 
 /// `/v1/signals`: lifecycle commands (cancel, pause, shutdown) and custom

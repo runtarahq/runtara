@@ -1521,7 +1521,7 @@ fn emit_direct_component(
     scoped_agents: &std::collections::BTreeSet<String>,
     api_runtime: bool,
 ) -> Result<(Vec<u8>, std::collections::BTreeMap<String, u32>), DirectCompileError> {
-    let core_config =
+    let mut core_config =
         DirectCoreConfig::new_with_workflow_id(manifest, manifest_json, track_events, workflow_id)?
             .with_abi(abi)
             .with_omit_runtime(omit_runtime)
@@ -1532,6 +1532,10 @@ fn emit_direct_component(
     let parallel_pools =
         split_parallel::parallel_agent_pools(&core_config.static_data, &core_config.run_plan);
     let has_connections = core_config.static_data.has_connections();
+    // The same condition the world uses to import the timers.
+    core_config.timers = super::plan::needs_cooperative_timers(manifest)
+        || !parallel_pools.is_empty()
+        || !manifest.feature_summary.agent_ids.is_empty();
     let (resolve, world) = build_direct_component_resolve_with_waits(
         &manifest.feature_summary.agent_ids,
         abi,
@@ -1742,7 +1746,9 @@ fn build_direct_component_resolve_with_waits(
         };
         workflow_wit.push_str(&format!("    import {connections};\n"));
     }
-    if needs_timers || !parallel_pools.is_empty() || !agents.is_empty() {
+    // On the workflow API ABI the timers are `runtara:api/time`'s, already
+    // imported with the runtime.
+    if (needs_timers || !parallel_pools.is_empty() || !agents.is_empty()) && !api_runtime {
         workflow_wit.push_str(&format!("    import {};\n", runtara_wit::host::TIMERS));
     }
     if needs_monotonic_clock {

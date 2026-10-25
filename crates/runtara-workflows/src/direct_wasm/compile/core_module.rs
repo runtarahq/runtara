@@ -54,6 +54,9 @@ pub(super) struct DirectCoreConfig {
     ///
     /// [`GuestAbi::Http`]: crate::direct_wasm::component::GuestAbi::Http
     pub(super) api_runtime: bool,
+    /// The logic needs the concurrent timers (`sleep`, `abort-after`); on the
+    /// workflow API ABI they come from `runtara:api/time`.
+    pub(super) timers: bool,
 }
 
 impl DirectCoreConfig {
@@ -107,6 +110,7 @@ impl DirectCoreConfig {
             abi: crate::direct_wasm::component::WorkflowRole::default(),
             omit_runtime: false,
             api_runtime: false,
+            timers: false,
             run_plan: direct_run_plan(manifest)?,
             static_data: DirectCoreStaticData::new_with_child_workflows(
                 &manifest.graph,
@@ -207,11 +211,18 @@ pub(super) fn emit_direct_core_module(
         .imports
         .keys()
         .any(|name| agent_import_for(resolve, Some(name)).is_some());
-    let has_async_calls = has_agents
-        || world
-            .imports
-            .keys()
-            .any(|name| resolve.name_world_key(name) == "runtara:host/timers@1.0.0");
+    let host_timers = world
+        .imports
+        .keys()
+        .any(|name| resolve.name_world_key(name) == "runtara:host/timers@1.0.0");
+    let timers_module = if host_timers {
+        Some("runtara:host/timers@1.0.0")
+    } else if config.api_runtime && config.timers {
+        Some(runtara_wit::api::TIME)
+    } else {
+        None
+    };
+    let has_async_calls = has_agents || timers_module.is_some();
     if has_async_calls {
         let builtin = |field: &str,
                        params: &[ValType],
@@ -312,11 +323,7 @@ pub(super) fn emit_direct_core_module(
         // Concurrent polling/backoff timer: async-lowered `sleep` from the
         // host-io timers interface. Params ≤4 flats, empty result → no retptr;
         // returns the packed subtask status.
-        if world
-            .imports
-            .keys()
-            .any(|name| resolve.name_world_key(name) == "runtara:host/timers@1.0.0")
-        {
+        if let Some(timers_module) = timers_module {
             let type_index = {
                 let index = type_count;
                 types.ty().function([ValType::I64], [ValType::I32]);
@@ -324,14 +331,14 @@ pub(super) fn emit_direct_core_module(
                 index
             };
             imports.import(
-                "runtara:host/timers@1.0.0",
+                timers_module,
                 "[async-lower]sleep",
                 wasm_encoder::EntityType::Function(type_index),
             );
             import_indices.timer_sleep_async = Some(imported_function_count);
             imported_function_count += 1;
             imports.import(
-                "runtara:host/timers@1.0.0",
+                timers_module,
                 "[async-lower]abort-after",
                 wasm_encoder::EntityType::Function(type_index),
             );

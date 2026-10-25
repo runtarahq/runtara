@@ -211,6 +211,12 @@ impl DirectComponentArtifacts {
                 .collect();
             self.world_wit = self.world_wit.replacen(&runtime, &api, 1);
         }
+        // Its timers are `runtara:api/time`'s, imported with the runtime.
+        self.world_wit = self.world_wit.replacen(
+            &format!("    import {};\n", runtara_wit::host::TIMERS),
+            "",
+            1,
+        );
         for (old, new) in [
             (runtara_wit::workflow::WAITS, runtara_wit::api::WAITS),
             (runtara_wit::workflow::STATE, runtara_wit::api::STATE),

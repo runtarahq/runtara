@@ -182,6 +182,18 @@ mod api {
         async fn sleep(ms: u64) {
             sdk::sleep(ms).await;
         }
+
+        async fn abort_after(ms: u64) {
+            match sdk::alarm(ms).await {
+                // Expired: the host aborts the execution; never return,
+                // which the caller would read as the alarm firing.
+                sdk::Error::Api(error) if error.code.as_str() == "finished" => {
+                    std::future::pending::<()>().await
+                }
+                // Unarmable: fail the execution, as the old host alarm did.
+                error => panic!("the cleanup alarm could not be armed: {error:?}"),
+            }
+        }
     }
 
     impl signals::Guest for Api {

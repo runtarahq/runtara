@@ -210,6 +210,7 @@ impl ApiLaunches {
                 controls: WorkflowApiControls {
                     shorten_deadline: Arc::new(|_| {}),
                     trusted_pins: Arc::default(),
+                    cleanup_alarm: None,
                 },
                 resolver: std::sync::OnceLock::new(),
                 operations: Mutex::default(),
@@ -555,6 +556,31 @@ impl WorkflowApiBackend for Backend {
             ));
         }
         *posted = Some(outcome);
+        Ok(())
+    }
+
+    async fn sleep(&self, binding: &Binding, ms: u64) -> Result<(), ApiError> {
+        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
+        // The run waits in process meanwhile; a standalone launch has none.
+        let _waiting = slot
+            .runtime
+            .upgrade()
+            .and_then(|runtime| runtime.in_process_wait());
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        Ok(())
+    }
+
+    async fn alarm(&self, binding: &Binding, ms: u64) -> Result<(), ApiError> {
+        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
+        let alarm = slot.controls.cleanup_alarm.clone().ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::Denied,
+                "cleanup alarms are not available for this execution",
+            )
+        })?;
+        // The alarm never resolves on its own except by expiring, which
+        // latched the abort; dropping this call disarms it.
+        let _ = alarm.arm(ms).await;
         Ok(())
     }
 
@@ -1306,6 +1332,7 @@ mod tests {
         WorkflowApiControls {
             shorten_deadline: Arc::new(|_| {}),
             trusted_pins: Arc::default(),
+            cleanup_alarm: None,
         }
     }
 
@@ -1424,5 +1451,53 @@ mod tests {
             !error.message.contains("approved trusted dependency"),
             "{error:?}"
         );
+    }
+
+    /// The cleanup alarm is held by its call: dropping the call before it
+    /// expires disarms it, and letting it run latches the run's abort.
+    #[tokio::test]
+    async fn a_dropped_alarm_call_disarms_and_an_expired_one_aborts() {
+        let launches = Arc::new(ApiLaunches::default());
+        let backend = Backend(launches.clone());
+        let alarm = crate::cleanup_alarm::CleanupAlarmState::default();
+        let mut armed = controls();
+        armed.cleanup_alarm = Some(alarm.clone());
+        launches
+            .begin(binding(1), info(), Vec::new(), no_runtime(), armed)
+            .unwrap();
+
+        let dropped = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            backend.alarm(&binding(1), 200),
+        )
+        .await;
+        assert!(dropped.is_err(), "the alarm call is held until it expires");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!alarm.expired(), "dropping the call disarmed the alarm");
+
+        backend.alarm(&binding(1), 20).await.unwrap();
+        assert!(alarm.expired(), "an alarm left armed aborts the run");
+
+        // A sleep is held for its duration.
+        let started = std::time::Instant::now();
+        backend.sleep(&binding(1), 30).await.unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(30));
+    }
+
+    /// Outside a run there is no alarm to arm.
+    #[tokio::test]
+    async fn a_standalone_launch_cannot_arm_an_alarm() {
+        let launches = Arc::new(ApiLaunches::default());
+        let backend = Backend(launches.clone());
+        let binding = binding(0);
+        launches
+            .begin_standalone(
+                binding.clone(),
+                StandaloneTrust::Denied,
+                StandaloneControl::Denied,
+            )
+            .unwrap();
+        let error = backend.alarm(&binding, 10).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Denied);
     }
 }
