@@ -76,6 +76,35 @@ mod probe {
                         .map_err(|_| ())?,
                     )
                 }
+                Some("wait") => {
+                    // Wait for `data.children`; park until they finish, then
+                    // complete with the settled read.
+                    let key = r#"runtara:v2:["wait-instances","probe",[],[],["wait-1"]]"#;
+                    let children: Vec<String> = data
+                        .get("children")
+                        .and_then(|children| serde_json::from_value(children.clone()).ok())
+                        .unwrap_or_default();
+                    let read = runtara_workflow_sdk::register_wait(key, &children, "all", None)
+                        .await
+                        .map_err(|_| ())?;
+                    if read.get("resolution").is_none_or(Value::is_null) {
+                        let wait_id = read
+                            .get("waitId")
+                            .and_then(Value::as_str)
+                            .ok_or(())?
+                            .to_string();
+                        PostedOutcome::Suspended(Suspension {
+                            wakes: vec![Wake::Instances(wait_id)],
+                        })
+                    } else {
+                        runtara_workflow_sdk::release_wait(key)
+                            .await
+                            .map_err(|_| ())?;
+                        PostedOutcome::Completed(
+                            serde_json::to_vec(&json!({"result": read})).map_err(|_| ())?,
+                        )
+                    }
+                }
                 Some("input") => {
                     let mut descriptor = serde_json::Map::new();
                     descriptor.insert("signal_id".into(), json!("probe-input"));

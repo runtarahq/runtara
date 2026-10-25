@@ -16,6 +16,11 @@ use std::sync::{Arc, Mutex, Weak};
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use bytes::Bytes;
+use runtara_component_host::InstanceWaitHost;
+use runtara_component_host::instance_wait_host::{
+    InstanceWaitAuthority, InstanceWaitError, InstanceWaitPoll, InstanceWaitRequest,
+    InstanceWaitResolution, wait_instances_id,
+};
 use runtara_component_host::run_state_host::{
     RunStateAuthority, RunStateError, RunStateErrorCode, RunStateHost, check_state_read_key,
     state_operation_id,
@@ -48,6 +53,8 @@ pub struct ApiLaunches {
     receipts: Arc<MemoryReceiptStore>,
     /// The published-state service the runner gives the old ABI as well.
     run_state: Option<Arc<dyn RunStateHost>>,
+    /// The instance-wait service, once the runner is given one.
+    instance_waits: std::sync::OnceLock<Arc<dyn InstanceWaitHost>>,
 }
 
 impl ApiLaunches {
@@ -100,6 +107,13 @@ impl ApiLaunches {
             .lock()
             .expect("workflow API outcome poisoned")
             .take()
+    }
+
+    /// Serve instance waits with `host`, the one the runner gives the old ABI.
+    pub fn set_instance_wait_host(&self, host: Arc<dyn InstanceWaitHost>) -> Result<(), String> {
+        self.instance_waits
+            .set(host)
+            .map_err(|_| "instance wait host already configured".to_string())
     }
 
     /// Stop serving `launch_id`, dropping any outcome it posted. Idempotent.
@@ -171,6 +185,34 @@ fn input_read(state: runtara_component_host::runtime_host::RuntimeInputState) ->
     }
 }
 
+fn wait_error(error: InstanceWaitError) -> ApiError {
+    let message = error.message.clone();
+    let mut api = match error.code.as_str() {
+        "invalid" => ApiError::new(ErrorCode::Invalid, message),
+        "denied" => ApiError::new(ErrorCode::Denied, message),
+        "not-found" => ApiError::new(ErrorCode::NotFound, message),
+        "too-large" => ApiError::new(ErrorCode::TooLarge, message),
+        "replay-conflict" => ApiError::new(ErrorCode::ReplayConflict, message),
+        "unavailable" => ApiError::new(ErrorCode::Unavailable, message),
+        // `not-child`, `closed`: the request was refused as given.
+        other => ApiError::domain(other, ErrorCode::Invalid, message),
+    };
+    api.retry_after_ms = error.retry_after_ms;
+    api
+}
+
+/// A wait read as the API returns it: the old ABI's read plus its `waitId`.
+fn wait_read(wait_id: &str, poll: &InstanceWaitPoll) -> Result<serde_json::Value, ApiError> {
+    let mut read = serde_json::to_value(poll).map_err(|_| {
+        ApiError::new(
+            ErrorCode::Unavailable,
+            "a finished run's result could not be read",
+        )
+    })?;
+    read["waitId"] = serde_json::Value::String(wait_id.to_string());
+    Ok(read)
+}
+
 fn state_error(error: RunStateError) -> ApiError {
     match error.code {
         RunStateErrorCode::Invalid => ApiError::new(ErrorCode::Invalid, error.message),
@@ -183,6 +225,28 @@ fn state_error(error: RunStateError) -> ApiError {
 }
 
 impl Backend {
+    /// The wait service and the binding's run as the waiter, while the launch
+    /// is served.
+    fn wait_service(
+        &self,
+        binding: &Binding,
+    ) -> Result<(Arc<dyn InstanceWaitHost>, InstanceWaitAuthority), ApiError> {
+        self.0.slot(binding).ok_or_else(not_serving)?;
+        let host = self.0.instance_waits.get().cloned().ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::Unavailable,
+                "no instance wait service is configured",
+            )
+        })?;
+        Ok((
+            host,
+            InstanceWaitAuthority {
+                tenant: binding.tenant_id.clone(),
+                caller: binding.instance_id.clone(),
+            },
+        ))
+    }
+
     /// The state service and the binding's run, while the launch is served.
     fn state_service(
         &self,
@@ -377,6 +441,55 @@ impl WorkflowApiBackend for Backend {
             .await
             .map(input_read)
             .map_err(input_error)
+    }
+
+    async fn register_wait(
+        &self,
+        binding: &Binding,
+        key: &str,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ApiError> {
+        let wait_id = wait_instances_id(key).map_err(|e| ApiError::new(ErrorCode::Invalid, e))?;
+        let request: InstanceWaitRequest = serde_json::from_value(request)
+            .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("wait request: {e}")))?;
+        // No targets settle at once, without a registration.
+        if request.instance_ids.is_empty() {
+            let poll = InstanceWaitPoll {
+                mode: request.mode,
+                resolution: Some(InstanceWaitResolution::Empty),
+                finished: Vec::new(),
+                remaining: Vec::new(),
+                deadline_ms: None,
+            };
+            return wait_read(&wait_id, &poll);
+        }
+        let (host, authority) = self.wait_service(binding)?;
+        match host.register(&authority, &wait_id, request).await {
+            Ok(poll) => wait_read(&wait_id, &poll),
+            Err(error) => {
+                // A failed registration is not kept: a retry registers afresh.
+                self.runtime(binding)?
+                    .operation_wait_close(wait_id)
+                    .await
+                    .map_err(host_error)?;
+                Err(wait_error(error))
+            }
+        }
+    }
+
+    async fn poll_wait(&self, binding: &Binding, key: &str) -> Result<serde_json::Value, ApiError> {
+        let wait_id = wait_instances_id(key).map_err(|e| ApiError::new(ErrorCode::Invalid, e))?;
+        let (host, authority) = self.wait_service(binding)?;
+        let poll = host.poll(&authority, &wait_id).await.map_err(wait_error)?;
+        wait_read(&wait_id, &poll)
+    }
+
+    async fn release_wait(&self, binding: &Binding, key: &str) -> Result<(), ApiError> {
+        let wait_id = wait_instances_id(key).map_err(|e| ApiError::new(ErrorCode::Invalid, e))?;
+        self.runtime(binding)?
+            .operation_release(wait_id)
+            .await
+            .map_err(host_error)
     }
 
     async fn set_state(

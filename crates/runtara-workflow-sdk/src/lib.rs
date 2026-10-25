@@ -459,3 +459,38 @@ pub async fn close_input(signal_id: &str) -> Result<runtara_workflow_api::InputR
     let response = call("DELETE", &key_path("/v1/inputs", signal_id), &[], None).await?;
     serde_json::from_slice(&response.body).map_err(|e| Error::Transport(format!("input: {e}")))
 }
+
+/// `PUT /v1/waits/{key}`: register the WaitForInstances step `key`'s wait on
+/// `instance_ids` (its direct child runs), or find it on replay, and read it.
+/// A pending read (`resolution` null) carries the `waitId` to suspend on.
+pub async fn register_wait(
+    key: &str,
+    instance_ids: &[String],
+    mode: &str,
+    deadline_ms: Option<u64>,
+) -> Result<serde_json::Value, Error> {
+    let body =
+        serde_json::json!({"instanceIds": instance_ids, "mode": mode, "deadlineMs": deadline_ms});
+    let response = call(
+        "PUT",
+        &key_path("/v1/waits", key),
+        &[("content-type", "application/json")],
+        Some(body.to_string().into_bytes()),
+    )
+    .await?;
+    serde_json::from_slice(&response.body).map_err(|e| Error::Transport(format!("wait: {e}")))
+}
+
+/// `GET /v1/waits/{key}`, waiting up to `wait_ms` while it is pending.
+pub async fn poll_wait(key: &str, wait_ms: u64) -> Result<serde_json::Value, Error> {
+    let path = format!("{}?waitMs={wait_ms}", key_path("/v1/waits", key));
+    let response = call("GET", &path, &[], None).await?;
+    serde_json::from_slice(&response.body).map_err(|e| Error::Transport(format!("wait: {e}")))
+}
+
+/// `DELETE /v1/waits/{key}`: drop the settled wait once its result is kept.
+pub async fn release_wait(key: &str) -> Result<(), Error> {
+    call("DELETE", &key_path("/v1/waits", key), &[], None)
+        .await
+        .map(|_| ())
+}

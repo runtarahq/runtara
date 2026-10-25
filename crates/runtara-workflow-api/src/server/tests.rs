@@ -791,3 +791,26 @@ fn input_reads_are_tagged_by_state() {
         serde_json::json!({"state": "closed", "reason": "expired"})
     );
 }
+
+#[tokio::test]
+async fn a_wait_request_must_be_an_object() {
+    let app = app(Arc::default());
+    let (status, _, body) = send(&app, write("PUT", "/v1/waits/k", "w1", "[1]")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_code(&body), "invalid");
+    let (status, _, _) = send(
+        &app,
+        write(
+            "PUT",
+            "/v1/waits/k",
+            "w2",
+            r#"{"instanceIds":[],"mode":"all"}"#,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_IMPLEMENTED,
+        "served by backends only"
+    );
+}

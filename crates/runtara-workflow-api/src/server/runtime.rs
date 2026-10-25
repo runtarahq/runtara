@@ -411,3 +411,62 @@ pub(super) async fn delete_input(
     let read = state.backend.close_input(&binding, &signal_id).await?;
     Ok(json(&read)?)
 }
+
+pub(super) async fn put_wait(
+    State(state): State<WorkflowApiState>,
+    Path(key): Path<String>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    let body = to_bytes(request.into_body(), state.caps.request_body_bytes)
+        .await
+        .map_err(|_| ApiError::new(ErrorCode::TooLarge, "wait request is over the cap"))?;
+    let wait: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("wait request: {e}")))?;
+    if !wait.is_object() {
+        return Err(
+            ApiError::new(ErrorCode::Invalid, "a wait request must be a JSON object").into(),
+        );
+    }
+    let read = state.backend.register_wait(&binding, &key, wait).await?;
+    Ok(json(&read)?)
+}
+
+/// Whether a wait read is still pending (its `resolution` is null).
+fn wait_pending(read: &serde_json::Value) -> bool {
+    read.get("resolution")
+        .is_none_or(serde_json::Value::is_null)
+}
+
+pub(super) async fn get_wait(
+    State(state): State<WorkflowApiState>,
+    Path(key): Path<String>,
+    Query(wait): Query<Wait>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    let wait_ms = wait.wait_ms.min(state.caps.long_poll_ms);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms);
+    loop {
+        let read = state.backend.poll_wait(&binding, &key).await?;
+        let now = tokio::time::Instant::now();
+        if !wait_pending(&read) || now >= deadline {
+            let mut response = json(&read)?;
+            if wait_pending(&read) && wait_ms > 0 {
+                *response.status_mut() = StatusCode::ACCEPTED;
+            }
+            return Ok(response);
+        }
+        tokio::time::sleep((deadline - now).min(LONG_POLL_STEP)).await;
+    }
+}
+
+pub(super) async fn delete_wait(
+    State(state): State<WorkflowApiState>,
+    Path(key): Path<String>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    state.backend.release_wait(&binding, &key).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}

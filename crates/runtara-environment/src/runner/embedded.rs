@@ -767,11 +767,15 @@ impl EmbeddedWasmRunner {
         Ok(self)
     }
 
-    /// Attach the durable instance wait service shared by all runs.
+    /// Attach the durable instance wait service shared by all runs, on both
+    /// ABIs.
     pub fn with_instance_wait_host(
         self,
         host: Arc<dyn runtara_component_host::InstanceWaitHost>,
     ) -> Result<Self> {
+        self.workflow_api
+            .set_instance_wait_host(Arc::clone(&host))
+            .map_err(RunnerError::Other)?;
         self.executor
             .set_instance_wait_host(host)
             .map_err(|e| RunnerError::Other(e.to_string()))?;

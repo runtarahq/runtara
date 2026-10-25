@@ -657,3 +657,87 @@ async fn a_woken_parent_calls_control_with_its_own_composed_bytes() {
         "the control call after the wake ran: {output}"
     );
 }
+
+/// A run on the workflow API ABI waits for its children over the API: it
+/// registers the wait, suspends on the read's `waitId`, parks runner-free,
+/// and, woken when the children finish, finds the same wait settled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_workflow_api_run_parks_on_its_wait_and_resumes_when_children_finish() {
+    let h = Harness::new().await;
+    let probe = std::env::var_os("RUNTARA_WORKFLOW_API_PROBE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/wasm32-wasip2/release/runtara_workflow_api_probe.wasm")
+        });
+    assert!(
+        probe.exists(),
+        "missing {}: run scripts/build-agent-components.sh",
+        probe.display()
+    );
+    // The probe reads `data.mode`; the harness puts the children in `data`.
+    let wasm = h.dir.path().join("probe.wasm");
+    std::fs::copy(&probe, &wasm).unwrap();
+    let runner = h.runner();
+    let parent = format!("{}-api", h.tenant);
+    let children = [format!("{parent}-a"), format!("{parent}-b")];
+    let input = serde_json::to_vec(
+        &json!({"data": {"mode": "wait", "children": children}, "variables": {}}),
+    )
+    .unwrap();
+    assert!(
+        h.persistence
+            .try_register_instance(&parent, &h.tenant, Some(&input))
+            .await
+            .unwrap()
+    );
+    for child in &children {
+        let link = ParentLink {
+            parent_instance_id: parent.clone(),
+            parent_close_policy: "cancel".into(),
+            admitted_at: chrono::Utc::now(),
+        };
+        assert!(
+            h.persistence
+                .try_register_child_instance(child, &h.tenant, None, None, &link)
+                .await
+                .unwrap()
+        );
+        h.persistence
+            .update_instance_status(child, InstanceStatus::Running, None)
+            .await
+            .unwrap();
+    }
+    h.run_to_exit(&runner, &h.options(&wasm, &parent, Some(input)))
+        .await;
+    let parked = h.persistence.get_instance(&parent).await.unwrap().unwrap();
+    assert_eq!(
+        parked.status,
+        InstanceStatus::Suspended,
+        "{:?}",
+        parked.error
+    );
+    assert_eq!(
+        parked.termination_reason.as_deref(),
+        Some("waiting_instances")
+    );
+    assert_eq!(h.waits_of(&parent).await, 1, "one wait, kept while parked");
+
+    h.finish(&children).await;
+    let woken = h.persistence.get_instance(&parent).await.unwrap().unwrap();
+    assert_eq!(woken.wake_reason, Some(WakeReason::InstancesTerminal));
+
+    drop(runner);
+    h.run_to_exit(&h.runner(), &h.options(&wasm, &parent, None))
+        .await;
+    let done = h.persistence.get_instance(&parent).await.unwrap().unwrap();
+    assert_eq!(done.status, InstanceStatus::Completed, "{:?}", done.error);
+    let output: Value = serde_json::from_slice(done.output.as_deref().unwrap()).unwrap();
+    assert_eq!(output["result"]["resolution"], "satisfied", "{output}");
+    assert_eq!(output["result"]["finished"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        h.waits_of(&parent).await,
+        0,
+        "the probe released the settled wait"
+    );
+}

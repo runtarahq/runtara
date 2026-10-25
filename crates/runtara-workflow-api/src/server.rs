@@ -167,6 +167,29 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
         Err(unsupported_service("managed inputs"))
     }
 
+    /// Register the WaitForInstances step `key`'s wait on `request`
+    /// (`{instanceIds, mode, deadlineMs}`), or find it on replay, and read it
+    /// without blocking. The read carries `waitId`, which a suspension wakes on.
+    async fn register_wait(
+        &self,
+        binding: &Binding,
+        key: &str,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ApiError> {
+        let _ = (binding, key, request);
+        Err(unsupported_service("instance waits"))
+    }
+    /// Read the step `key`'s registered wait without blocking.
+    async fn poll_wait(&self, binding: &Binding, key: &str) -> Result<serde_json::Value, ApiError> {
+        let _ = (binding, key);
+        Err(unsupported_service("instance waits"))
+    }
+    /// Drop the step `key`'s settled wait. Idempotent.
+    async fn release_wait(&self, binding: &Binding, key: &str) -> Result<(), ApiError> {
+        let _ = (binding, key);
+        Err(unsupported_service("instance waits"))
+    }
+
     /// Merge `patch` into the run's published state, once per SetState `key`.
     async fn set_state(
         &self,
@@ -288,6 +311,12 @@ pub fn router(state: WorkflowApiState) -> Router {
             put(runtime::put_input)
                 .get(runtime::get_input)
                 .delete(runtime::delete_input),
+        )
+        .route(
+            "/v1/waits/{key}",
+            put(runtime::put_wait)
+                .get(runtime::get_wait)
+                .delete(runtime::delete_wait),
         )
         .route(
             "/v1/state/{key}",
