@@ -468,11 +468,12 @@ interface json {
     ) -> list<u8>;
 
     // An operation-scoped Agent's input with its entered operation under
-    // `_operation` (workflow API ABI): the id, and the continuation `enter`
-    // loaded, hex-encoded. Replaces whatever the step mapped there.
+    // `_operation`: the id (a control site) or the continuation `enter`
+    // loaded, hex-encoded (a suspending site). Replaces whatever the step
+    // mapped there; with neither, removes it.
     agent-operation-input: func(
         input: list<u8>,
-        operation-id: string,
+        operation-id: option<string>,
         continuation: option<list<u8>>,
     ) -> result<list<u8>, string>;
 

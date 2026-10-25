@@ -409,21 +409,24 @@ pub(super) fn emit_enter(
         crate::direct_wasm::static_data::AGENT_OPERATION_SCOPE_FIELDS,
     );
     body.instruction(&Instruction::Else);
-    emit_operation_input(body, indices, static_data, agent_id, input);
+    emit_operation_input(body, indices, static_data, agent_id, input, load);
 }
 
-/// On the workflow API ABI, hand the entered operation to the Agent in its
-/// input (`_operation`): the id its control mutations name, and the
-/// continuation `enter` loaded. A workflow-agent target keeps its envelope.
+/// Hand the entered operation to the Agent in its input (`_operation`),
+/// only what it needs: the id to a control site, which names it on its
+/// mutations, and the continuation `enter` loaded to a suspending one.
+/// Where no operation was entered through `runtara:api` (the `wit` ABI),
+/// `_operation` is removed, so a mapped one never reaches the Agent. A
+/// workflow-agent target keeps its envelope.
 fn emit_operation_input(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
     static_data: &DirectCoreStaticData,
     agent_id: u32,
     input: (u32, u32),
+    suspends: bool,
 ) {
-    let (Some(cell), Some(helper)) = (indices.operation_cell, indices.stdlib_agent_operation_input)
-    else {
+    let Some(helper) = indices.stdlib_agent_operation_input else {
         return;
     };
     if static_data.agent_is_workflow_agent(agent_id) {
@@ -433,21 +436,37 @@ fn emit_operation_input(
         OPERATION_CONTINUATION_LEN, OPERATION_CONTINUATION_PTR, OPERATION_CONTINUATION_TAG,
         OPERATION_ID, OPERATION_ID_LEN,
     };
+    let none = |body: &mut WasmFunction| {
+        for _ in 0..3 {
+            body.instruction(&Instruction::I32Const(0));
+        }
+    };
     body.instruction(&Instruction::LocalGet(input.0));
     body.instruction(&Instruction::LocalGet(input.1));
-    body.instruction(&Instruction::I32Const(cell + OPERATION_ID as i32));
-    body.instruction(&Instruction::I32Const(OPERATION_ID_LEN));
-    for offset in [
-        OPERATION_CONTINUATION_TAG,
-        OPERATION_CONTINUATION_PTR,
-        OPERATION_CONTINUATION_LEN,
-    ] {
-        body.instruction(&Instruction::I32Const(cell));
-        body.instruction(&Instruction::I32Load(MemArg {
-            offset,
-            align: 2,
-            memory_index: 0,
-        }));
+    match indices.operation_cell {
+        Some(cell) if !suspends => {
+            body.instruction(&Instruction::I32Const(1));
+            body.instruction(&Instruction::I32Const(cell + OPERATION_ID as i32));
+            body.instruction(&Instruction::I32Const(OPERATION_ID_LEN));
+        }
+        _ => none(body),
+    }
+    match indices.operation_cell {
+        Some(cell) if suspends => {
+            for offset in [
+                OPERATION_CONTINUATION_TAG,
+                OPERATION_CONTINUATION_PTR,
+                OPERATION_CONTINUATION_LEN,
+            ] {
+                body.instruction(&Instruction::I32Const(cell));
+                body.instruction(&Instruction::I32Load(MemArg {
+                    offset,
+                    align: 2,
+                    memory_index: 0,
+                }));
+            }
+        }
+        _ => none(body),
     }
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(helper));

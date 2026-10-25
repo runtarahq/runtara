@@ -390,10 +390,17 @@ impl ComponentDispatcherService {
             launches
                 .begin_standalone(
                     binding.clone(),
-                    // Unpinned, and acting for the tenant with no calling
-                    // run, as the host-linked test path did.
+                    // Unpinned, as the host-linked test path was. Only the
+                    // control agent acts for the tenant (with no calling
+                    // run), as only it had the control linker.
                     crate::api_launches::StandaloneTrust::Unpinned,
-                    crate::api_launches::StandaloneControl::Tenant,
+                    if canonical_agent_id(&req.agent_id)
+                        == runtara_dsl::agent_meta::CONTROL_AGENT_ID
+                    {
+                        crate::api_launches::StandaloneControl::Tenant
+                    } else {
+                        crate::api_launches::StandaloneControl::Denied
+                    },
                 )
                 .map_err(|error| anyhow::anyhow!(error))?;
             let launch = TestLaunch {

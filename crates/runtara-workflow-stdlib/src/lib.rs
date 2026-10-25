@@ -875,12 +875,12 @@ mod component {
 
         fn agent_operation_input(
             input: Vec<u8>,
-            operation_id: String,
+            operation_id: Option<String>,
             continuation: Option<Vec<u8>>,
         ) -> Result<Vec<u8>, String> {
             crate::direct_json::agent_operation_input(
                 &input,
-                &operation_id,
+                operation_id.as_deref(),
                 continuation.as_deref(),
             )
         }
