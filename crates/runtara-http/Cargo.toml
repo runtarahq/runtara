@@ -19,12 +19,15 @@ default = []
 # Native blocking HTTP via ureq (any non-wasm target).
 native = ["dep:ureq"]
 
-# WASM HTTP via the typed Runtara outbound host import.
-wasi = ["dep:wit-bindgen"]
+# WASM HTTP over the workflow API (`POST /v1/http`), through the guest SDK.
+wasi = ["dep:wit-bindgen", "dep:runtara-workflow-sdk", "dep:runtara-workflow-api"]
 
 [dependencies]
-# Typed outbound host transport bindings.
-wit-bindgen = { workspace = true, optional = true }
+# The guest SDK and its contract; `block_on` drives an async call from
+# synchronous capability code.
+wit-bindgen = { workspace = true, optional = true, features = ["async-spawn"] }
+runtara-workflow-sdk = { path = "../runtara-workflow-sdk", optional = true }
+runtara-workflow-api = { path = "../runtara-workflow-api", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "2"

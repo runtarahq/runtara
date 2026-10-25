@@ -139,21 +139,23 @@ mod transport {
         let fields = Fields::from_list(&all)
             .map_err(|error| Error::Transport(format!("headers: {error:?}")))?;
 
-        // Dropping the writer delivers its default, no trailers. It must go
-        // before `send`: the host reads the whole body, trailers included,
-        // before it answers.
+        // No trailers. Both future writers below are written in this call's
+        // own future: a dropped writer delivers its default from a detached
+        // task, which outlives the call, and work after an agent's return
+        // lets wasmtime 46 delete the task under its caller's subtask handle.
         let (trailers_tx, trailers_rx) =
             wit_future::new::<Result<Option<Fields>, ErrorCode>>(|| Ok(None));
-        drop(trailers_tx);
-        let contents = body.map(|body| {
-            let (mut tx, rx) = wit_stream::new::<u8>();
-            // The host buffers the whole body before it answers, so the body
-            // is written while `send` waits.
-            wit_bindgen::spawn_local(async move {
-                tx.write_all(body).await;
-            });
-            rx
-        });
+        // The host buffers the whole body before it answers, so the body is
+        // written while `send` waits: in the same future, so it progresses
+        // under whatever drives this call (an async task or `block_on`) and is
+        // dropped with it.
+        let (contents, writer) = match body {
+            Some(body) => {
+                let (tx, rx) = wit_stream::new::<u8>();
+                (Some(rx), Some((tx, body)))
+            }
+            None => (None, None),
+        };
         let (request, _transmitted) = Request::new(fields, contents, trailers_rx, None);
         let method = match method {
             "GET" => Method::Get,
@@ -173,9 +175,15 @@ mod transport {
             return Err(Error::Transport("invalid request line".into()));
         }
 
-        let response = client::send(request)
-            .await
-            .map_err(|error| Error::Transport(format!("{error:?}")))?;
+        // The host reads the whole body, trailers included, before it answers.
+        let write = async move {
+            if let Some((mut tx, body)) = writer {
+                tx.write_all(body).await;
+            }
+            let _ = trailers_tx.write(Ok(None)).await;
+        };
+        let (response, ()) = join(client::send(request), write).await;
+        let response = response.map_err(|error| Error::Transport(format!("{error:?}")))?;
         let status = response.get_status_code();
         let headers = response
             .get_headers()
@@ -184,10 +192,10 @@ mod transport {
             .map(|(name, value)| (name, String::from_utf8_lossy(&value).into_owned()))
             .collect();
         let (done_tx, done_rx) = wit_future::new::<Result<(), ErrorCode>>(|| Ok(()));
-        drop(done_tx);
         let (body, _trailers) =
             crate::bindings::wasi::http::types::Response::consume_body(response, done_rx);
         let body = body.collect().await;
+        let _ = done_tx.write(Ok(())).await;
         Ok(Response {
             status,
             headers,
@@ -202,6 +210,35 @@ mod transport {
         body: Option<Vec<u8>>,
     ) -> Result<Response, Error> {
         raw(method, path, headers, body).await?.into_result()
+    }
+
+    /// Poll `a` and `b` together until both are done.
+    async fn join<A: std::future::Future, B: std::future::Future>(
+        a: A,
+        b: B,
+    ) -> (A::Output, B::Output) {
+        use std::task::Poll;
+        let (mut a, mut b) = (std::pin::pin!(a), std::pin::pin!(b));
+        let (mut ra, mut rb) = (None, None);
+        std::future::poll_fn(|cx| {
+            if ra.is_none()
+                && let Poll::Ready(value) = a.as_mut().poll(cx)
+            {
+                ra = Some(value);
+            }
+            if rb.is_none()
+                && let Poll::Ready(value) = b.as_mut().poll(cx)
+            {
+                rb = Some(value);
+            }
+            if ra.is_some() && rb.is_some() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        (ra.expect("ready"), rb.expect("ready"))
     }
 }
 
@@ -623,7 +660,10 @@ pub async fn http(
     meta: &runtara_workflow_api::OutboundMeta,
     body: Option<Vec<u8>>,
 ) -> Result<Outbound, Error> {
-    let meta_json = serde_json::to_string(meta).map_err(|e| Error::Transport(e.to_string()))?;
+    // Body presence is the SDK's to say: an empty body is still a body.
+    let mut meta = meta.clone();
+    meta.has_body = body.is_some();
+    let meta_json = serde_json::to_string(&meta).map_err(|e| Error::Transport(e.to_string()))?;
     let raw = call_raw(
         "POST",
         "/v1/http",

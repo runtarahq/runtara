@@ -63,6 +63,10 @@ pub struct LaunchSlot {
     /// A failure the run may not recover from, which ends it as trapped
     /// whatever it does next.
     fault: Mutex<Option<String>>,
+    /// A launch outside any run (an agent test call): it is served the
+    /// connection, HTTP, SQL and trusted endpoints, unpinned, and nothing that
+    /// needs a run.
+    standalone: bool,
     /// Instance waits this launch registered whose last read was pending.
     /// A suspension it posts wakes on them too, as the old ABI's host
     /// attached them to the run's result.
@@ -159,6 +163,52 @@ impl ApiLaunches {
                 resolver: std::sync::OnceLock::new(),
                 operations: Mutex::default(),
                 fault: Mutex::default(),
+                standalone: false,
+                pending_waits: Mutex::default(),
+            }),
+        );
+        Ok(())
+    }
+
+    /// Start serving `binding` as a standalone launch: a call outside any run,
+    /// such as an agent's test invocation, which reaches only the endpoints
+    /// that need no run.
+    pub fn begin_standalone(&self, binding: Binding) -> Result<(), String> {
+        let mut slots = self.slots.lock().expect("workflow API launches poisoned");
+        if slots.contains_key(&binding.launch_id) {
+            return Err(format!(
+                "launch {} already serves the workflow API",
+                binding.launch_id
+            ));
+        }
+        let info = RunInfo {
+            instance_id: binding.instance_id.clone(),
+            tenant_id: binding.tenant_id.clone(),
+            workflow_id: None,
+            version: None,
+            attempt: None,
+            launch_kind: "standalone".into(),
+            debug: false,
+            deadline_ms: None,
+            api_version: runtara_workflow_api::api_version(),
+            capability_id: None,
+        };
+        slots.insert(
+            binding.launch_id.clone(),
+            Arc::new(LaunchSlot {
+                binding,
+                info,
+                input: Vec::new(),
+                outcome: Mutex::new(None),
+                runtime: Weak::<NoRun>::new(),
+                controls: WorkflowApiControls {
+                    shorten_deadline: Arc::new(|_| {}),
+                    trusted_pins: Arc::default(),
+                },
+                resolver: std::sync::OnceLock::new(),
+                operations: Mutex::default(),
+                fault: Mutex::default(),
+                standalone: true,
                 pending_waits: Mutex::default(),
             }),
         );
@@ -885,10 +935,11 @@ impl WorkflowApiBackend for Backend {
         body: Option<Vec<u8>>,
     ) -> Result<Result<OutboundReply, (OutboundFailure, Vec<u8>)>, ApiError> {
         self.0.slot(binding).ok_or_else(not_serving)?;
+        // A launch outside any run has no instance.
         let host = crate::outbound_http::for_run(
             self.0.outbound_http.get(),
             Some(&binding.tenant_id),
-            Some(&binding.instance_id),
+            Some(binding.instance_id.as_str()).filter(|instance| !instance.is_empty()),
         )
         .map_err(|e| ApiError::new(ErrorCode::Unavailable, e))?;
         let destination = match meta.destination {
@@ -1026,10 +1077,19 @@ impl WorkflowApiBackend for Backend {
         let executor = self.0.trusted.get().cloned().ok_or_else(|| {
             ApiError::new(ErrorCode::Unavailable, "no trusted executor is configured")
         })?;
-        let launch = self.runtime(binding)?.trusted_launch();
+        // A standalone call is a direct agent call, not version-bound by any
+        // artifact; a run's calls are bound by its artifact's pins.
+        let (pins, launch) = if slot.standalone {
+            (None, crate::trusted::TrustedLaunch::Start)
+        } else {
+            (
+                Some(slot.controls.trusted_pins.as_ref()),
+                self.runtime(binding)?.trusted_launch(),
+            )
+        };
         executor
             .invoke_pinned(
-                Some(&slot.controls.trusted_pins),
+                pins,
                 launch,
                 &binding.tenant_id,
                 &call.agent_id,
@@ -1040,6 +1100,65 @@ impl WorkflowApiBackend for Backend {
             )
             .await
             .map_err(|envelope| trusted_error(&envelope))
+    }
+}
+
+/// The runtime of a standalone launch, which has none: only ever behind a
+/// dangling `Weak`, never called.
+struct NoRun;
+
+#[async_trait]
+impl RuntimeHost for NoRun {
+    fn instance_id(&self) -> Result<String, String> {
+        unreachable!()
+    }
+    async fn custom_event(&self, _: String, _: Vec<u8>) -> Result<(), String> {
+        unreachable!()
+    }
+    fn debug_mode_enabled(&self) -> Result<bool, String> {
+        unreachable!()
+    }
+    async fn breakpoint_pause(&self) -> Result<(), String> {
+        unreachable!()
+    }
+    async fn heartbeat(&self) -> Result<(), String> {
+        unreachable!()
+    }
+    async fn poll_signal(&self) -> Result<Option<crate::runtime_host::RuntimeSignalInfo>, String> {
+        unreachable!()
+    }
+    async fn is_cancelled(&self) -> Result<bool, String> {
+        unreachable!()
+    }
+    async fn check_signals(&self) -> Result<bool, String> {
+        unreachable!()
+    }
+    async fn poll_custom_signal(&self, _: String) -> Result<Option<Vec<u8>>, String> {
+        unreachable!()
+    }
+    async fn get_checkpoint(&self, _: String) -> Result<Option<Vec<u8>>, String> {
+        unreachable!()
+    }
+    async fn checkpoint(
+        &self,
+        _: String,
+        _: Vec<u8>,
+    ) -> Result<crate::runtime_host::RuntimeCheckpointResult, String> {
+        unreachable!()
+    }
+    async fn handle_checkpoint_signal(&self, _: String, _: String) -> Result<bool, String> {
+        unreachable!()
+    }
+    async fn record_retry_attempt(
+        &self,
+        _: String,
+        _: u32,
+        _: Option<String>,
+    ) -> Result<(), String> {
+        unreachable!()
+    }
+    async fn durable_sleep_checkpoint(&self, _: String, _: Vec<u8>, _: u64) -> Result<(), String> {
+        unreachable!()
     }
 }
 
@@ -1123,72 +1242,7 @@ mod tests {
 
     /// A launch whose host is already gone: its run services are fenced.
     fn no_runtime() -> Weak<dyn RuntimeHost> {
-        Weak::<Gone>::new()
-    }
-
-    /// Only ever behind a dangling `Weak`: never called.
-    struct Gone;
-
-    #[async_trait]
-    impl RuntimeHost for Gone {
-        fn instance_id(&self) -> Result<String, String> {
-            unreachable!()
-        }
-        async fn custom_event(&self, _: String, _: Vec<u8>) -> Result<(), String> {
-            unreachable!()
-        }
-        fn debug_mode_enabled(&self) -> Result<bool, String> {
-            unreachable!()
-        }
-        async fn breakpoint_pause(&self) -> Result<(), String> {
-            unreachable!()
-        }
-        async fn heartbeat(&self) -> Result<(), String> {
-            unreachable!()
-        }
-        async fn poll_signal(
-            &self,
-        ) -> Result<Option<crate::runtime_host::RuntimeSignalInfo>, String> {
-            unreachable!()
-        }
-        async fn is_cancelled(&self) -> Result<bool, String> {
-            unreachable!()
-        }
-        async fn check_signals(&self) -> Result<bool, String> {
-            unreachable!()
-        }
-        async fn poll_custom_signal(&self, _: String) -> Result<Option<Vec<u8>>, String> {
-            unreachable!()
-        }
-        async fn get_checkpoint(&self, _: String) -> Result<Option<Vec<u8>>, String> {
-            unreachable!()
-        }
-        async fn checkpoint(
-            &self,
-            _: String,
-            _: Vec<u8>,
-        ) -> Result<crate::runtime_host::RuntimeCheckpointResult, String> {
-            unreachable!()
-        }
-        async fn handle_checkpoint_signal(&self, _: String, _: String) -> Result<bool, String> {
-            unreachable!()
-        }
-        async fn record_retry_attempt(
-            &self,
-            _: String,
-            _: u32,
-            _: Option<String>,
-        ) -> Result<(), String> {
-            unreachable!()
-        }
-        async fn durable_sleep_checkpoint(
-            &self,
-            _: String,
-            _: Vec<u8>,
-            _: u64,
-        ) -> Result<(), String> {
-            unreachable!()
-        }
+        Weak::<NoRun>::new()
     }
 
     fn controls() -> WorkflowApiControls {

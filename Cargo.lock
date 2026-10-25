@@ -4737,6 +4737,8 @@ dependencies = [
 name = "runtara-http"
 version = "9.0.1"
 dependencies = [
+ "runtara-workflow-api",
+ "runtara-workflow-sdk",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

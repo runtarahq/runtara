@@ -144,6 +144,13 @@ pub struct HostState {
     pub http: WasiHttpCtx,
     pub table: ResourceTable,
     pub hooks: HostHooks,
+    /// wasi:http@0.3 hooks: the workflow API route when the store is served
+    /// one (an agent test call), denied otherwise.
+    pub(crate) api_hooks: crate::workflow_api::WorkflowApiHooks,
+    /// The store's own standalone workflow API launch, created when it is
+    /// given a connection service: agents on the guest SDK reach that
+    /// service over it.
+    api: Option<StoreApi>,
     pub ctx: Arc<CallContext>,
     /// Memory/table caps for this call, enforced once the store installs it via
     /// `store.limiter(|s| &mut s.limiter)` (see `registry::instantiate`).
@@ -164,12 +171,14 @@ impl HostState {
             Some(&self.ctx.tenant_id),
             self.ctx.instance_id.as_deref(),
         );
+        let _ = self.store_api().set_outbound_http(service);
         self
     }
 
     pub fn with_database(mut self, database: Arc<dyn crate::DatabaseHost>) -> Self {
         self.database =
             crate::database_host::database_for_run(Some(&database), Some(&self.ctx.tenant_id));
+        let _ = self.store_api().set_database(database);
         self
     }
 
@@ -182,7 +191,41 @@ impl HostState {
             Some(&resolver),
             Some(&self.ctx.tenant_id),
         );
+        let _ = self.store_api().set_connection_resolver(resolver);
         self
+    }
+
+    /// The store's standalone workflow API, created on first use as a launch
+    /// of the call's tenant and routed by the store's wasi:http@0.3 hooks.
+    fn store_api(&mut self) -> &Arc<crate::api_launches::ApiLaunches> {
+        if self.api.is_none() {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let launches = Arc::new(crate::api_launches::ApiLaunches::default());
+            let binding = runtara_workflow_api::Binding {
+                tenant_id: self.ctx.tenant_id.clone(),
+                instance_id: self.ctx.instance_id.clone().unwrap_or_default(),
+                launch_id: format!(
+                    "agent-store-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ),
+                root_lease_epoch: 0,
+            };
+            // A fresh registry cannot already hold this launch.
+            let _ = launches.begin_standalone(binding.clone());
+            self.api_hooks = crate::workflow_api::WorkflowApiHooks::for_run(
+                Some(launches.transport()),
+                Some({
+                    let binding = binding.clone();
+                    Arc::new(move || Some(binding.clone()))
+                }),
+            );
+            self.api = Some(StoreApi {
+                launches,
+                launch_id: binding.launch_id,
+            });
+        }
+        &self.api.as_ref().expect("created above").launches
     }
 
     pub(crate) fn restricted() -> Self {
@@ -218,6 +261,8 @@ impl HostState {
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
             hooks: HostHooks,
+            api_hooks: crate::workflow_api::WorkflowApiHooks::denied(),
+            api: None,
             ctx,
             limiter: GuestLimiter::new(
                 DEFAULT_GUEST_MEMORY_MAX_BYTES,
@@ -246,6 +291,18 @@ impl HostState {
     }
 }
 
+/// A store's standalone launch, released with the store.
+struct StoreApi {
+    launches: Arc<crate::api_launches::ApiLaunches>,
+    launch_id: String,
+}
+
+impl Drop for StoreApi {
+    fn drop(&mut self) {
+        self.launches.release(&self.launch_id);
+    }
+}
+
 impl HostIoContext for HostState {
     fn cleanup_alarm(&self) -> Option<&crate::cleanup_alarm::CleanupAlarmState> {
         (!self.restricted).then_some(&self.cleanup_alarm)
@@ -260,6 +317,16 @@ impl WasiView for HostState {
         WasiCtxView {
             ctx: &mut self.wasi,
             table: &mut self.table,
+        }
+    }
+}
+
+impl wasmtime_wasi_http::p3::WasiHttpView for HostState {
+    fn http(&mut self) -> wasmtime_wasi_http::p3::WasiHttpCtxView<'_> {
+        wasmtime_wasi_http::p3::WasiHttpCtxView {
+            ctx: &mut self.http,
+            table: &mut self.table,
+            hooks: &mut self.api_hooks,
         }
     }
 }

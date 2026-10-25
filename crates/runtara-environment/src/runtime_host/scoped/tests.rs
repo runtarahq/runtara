@@ -509,8 +509,8 @@ async fn scoped_runtime_wasm_imports_keep_child_completion_and_pause_off_root() 
         .unwrap();
     let wasm = wat::parse_str(format!(r#"(component
       (import "runtara:workflow/runtime@1.0.0" (instance $runtime
-        (export "get-checkpoint" (func (param "checkpoint-id" string) (result (result (option (list u8)) (error string)))))
-        (export "check-signals" (func (result (result bool (error string)))))))
+        (export "get-checkpoint" (func async (param "checkpoint-id" string) (result (result (option (list u8)) (error string)))))
+        (export "check-signals" (func async (result (result bool (error string)))))))
       (alias export $runtime "get-checkpoint" (func $get))
       (alias export $runtime "check-signals" (func $signals))
       (core module $memory

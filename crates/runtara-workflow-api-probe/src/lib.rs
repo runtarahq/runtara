@@ -125,6 +125,7 @@ mod probe {
                         headers: vec![("authorization".into(), "Bearer guest".into())],
                         timeout_ms: Some(5000),
                         max_response_bytes: None,
+                        has_body: false,
                     };
                     let reply = match runtara_workflow_sdk::http(
                         &call(OutboundDestination::Connection(ConnectionTarget {

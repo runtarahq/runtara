@@ -203,8 +203,8 @@ fn child_wat() -> String {
     format!(
         r#"(component
       (import "runtara:workflow/runtime@1.0.0" (instance $runtime
-        (export "heartbeat" (func (result (result (error string)))))
-        (export "check-signals" (func (result (result bool (error string)))))))
+        (export "heartbeat" (func async (result (result (error string)))))
+        (export "check-signals" (func async (result (result bool (error string)))))))
       (alias export $runtime "heartbeat" (func $heartbeat))
       (alias export $runtime "check-signals" (func $signals))
       (core module $memory (memory (export "memory") 1)
@@ -219,9 +219,11 @@ fn child_wat() -> String {
         (import "memory" "memory" (memory 1))
         (import "host" "heartbeat" (func $heartbeat (param i32)))
         (import "host" "signals" (func $signals (param i32)))
-        (func $start (call $heartbeat (i32.const 64))) (start $start)
-        ;; Echo the input as the child's result; `trap` traps instead.
+        ;; Echo the input as the child's result; `trap` traps instead. The
+        ;; runtime is async-typed, so its first IO runs in the async invoke
+        ;; rather than a start function, which may not block.
         (func (export "invoke") (param $cap i32) (param i32) (param $in i32) (param $len i32) (result i32)
+          (call $heartbeat (i32.const 64))
           (call $signals (i32.const 64))
           (if (i32.eq (i32.load8_u (local.get $cap)) (i32.const 116)) (then unreachable))
           (i32.store (i32.const 2048) (i32.const 0))

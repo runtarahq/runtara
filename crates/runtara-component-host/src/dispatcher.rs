@@ -103,6 +103,24 @@ pub struct ComponentDispatcherService {
     test_timeout: Duration,
     /// Per-call guest linear-memory cap for `test_capability`, in bytes.
     memory_max_bytes: usize,
+    /// The workflow API test calls are served (standalone launches), built
+    /// from this dispatcher's services on first use, and its transport.
+    workflow_api: std::sync::OnceLock<(
+        Arc<crate::api_launches::ApiLaunches>,
+        Arc<dyn crate::workflow_api::WorkflowApiTransport>,
+    )>,
+}
+
+/// A test call's standalone launch, released when dropped.
+struct TestLaunch {
+    launches: Arc<crate::api_launches::ApiLaunches>,
+    launch_id: String,
+}
+
+impl Drop for TestLaunch {
+    fn drop(&mut self) {
+        self.launches.release(&self.launch_id);
+    }
 }
 
 impl ComponentDispatcherService {
@@ -241,6 +259,37 @@ impl ComponentDispatcherService {
             memory_max_bytes: parse_memory_max(
                 std::env::var("RUNTARA_TEST_CAPABILITY_MEMORY_MAX_BYTES").ok(),
             ),
+            workflow_api: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// The workflow API test calls are served, built from this dispatcher's
+    /// services on first use (so after they are configured).
+    fn workflow_api(
+        &self,
+    ) -> &(
+        Arc<crate::api_launches::ApiLaunches>,
+        Arc<dyn crate::workflow_api::WorkflowApiTransport>,
+    ) {
+        self.workflow_api.get_or_init(|| {
+            let launches = crate::api_launches::ApiLaunches::default();
+            // Each is set once on a fresh value, so none can fail.
+            if let Some(service) = self.outbound_http.get() {
+                let _ = launches.set_outbound_http(Arc::clone(service));
+            }
+            if let Some(database) = self.database.get() {
+                let _ = launches.set_database(Arc::clone(database));
+            }
+            if let Some(resolver) = self.connection_resolver.get() {
+                let _ = launches.set_connection_resolver(Arc::clone(resolver));
+            }
+            if let Some(host) = self.control_host.get() {
+                let _ = launches.set_control_host(Arc::clone(host));
+            }
+            let _ = launches.set_trusted_executor(Arc::clone(&self.trusted));
+            let launches = Arc::new(launches);
+            let transport = launches.transport();
+            (launches, transport)
         })
     }
 
@@ -323,6 +372,34 @@ impl ComponentDispatcherService {
         // invocation's shorter watchdog expires.
         let deadline = tokio::time::Instant::now() + self.test_timeout;
         let mut state = HostState::new(ctx).with_http_deadline(deadline);
+        // An agent on the guest SDK reaches its connections over the
+        // workflow API: a standalone launch of the call's tenant.
+        let _launch = {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let (launches, transport) = self.workflow_api();
+            let binding = runtara_workflow_api::Binding {
+                tenant_id: req.tenant_id.clone(),
+                instance_id: String::new(),
+                launch_id: format!(
+                    "agent-test-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ),
+                root_lease_epoch: 0,
+            };
+            launches
+                .begin_standalone(binding.clone())
+                .map_err(|error| anyhow::anyhow!(error))?;
+            let launch = TestLaunch {
+                launches: Arc::clone(launches),
+                launch_id: binding.launch_id.clone(),
+            };
+            state.api_hooks = crate::workflow_api::WorkflowApiHooks::for_run(
+                Some(Arc::clone(transport)),
+                Some(Arc::new(move || Some(binding.clone()))),
+            );
+            launch
+        };
         state.trusted = Some(Arc::clone(&self.trusted));
         state.outbound_http =
             crate::outbound_http::for_run(self.outbound_http.get(), Some(&req.tenant_id), None);

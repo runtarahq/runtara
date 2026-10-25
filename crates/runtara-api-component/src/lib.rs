@@ -441,6 +441,7 @@ mod api {
                 headers: request.headers,
                 timeout_ms: request.timeout_ms,
                 max_response_bytes: request.max_response_bytes,
+                has_body: body.is_some(),
             };
             Ok(match sdk::http(&meta, body).await.map_err(api_error)? {
                 sdk::Outbound::Reply {

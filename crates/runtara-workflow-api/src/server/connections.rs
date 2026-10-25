@@ -101,7 +101,7 @@ pub(super) async fn post_http(
     let body = to_bytes(request.into_body(), state.caps.request_body_bytes)
         .await
         .map_err(|_| ApiError::new(ErrorCode::TooLarge, "outbound body is over the cap"))?;
-    let body = (!body.is_empty()).then(|| body.to_vec());
+    let body = (meta.has_body || !body.is_empty()).then(|| body.to_vec());
     match state.backend.http(&binding, meta, body).await? {
         Ok(reply) => {
             let mut response = with_type(reply.body, "application/octet-stream", StatusCode::OK);

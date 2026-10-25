@@ -121,6 +121,8 @@ pub struct WorkflowRunSpec {
 struct ApiLaunch {
     launches: Arc<crate::api_launches::ApiLaunches>,
     launch_id: String,
+    /// Served without a run: no input, no outcome.
+    standalone: bool,
 }
 
 impl ApiLaunch {
@@ -711,8 +713,9 @@ impl WorkflowExecutor {
 
     /// Register the run of `store` with the workflow API, under its runtime
     /// host's binding, or a local one for a host without a root lease (a
-    /// test host): such a run is still served, but never fenced. `None`
-    /// without a runtime host.
+    /// test host): such a run is still served, but never fenced. A store
+    /// without a runtime host (an isolated child) gets a standalone launch:
+    /// its agents reach connections, and nothing that needs a run.
     fn begin_workflow_api(
         &self,
         store: &mut Store<WorkflowState>,
@@ -721,20 +724,32 @@ impl WorkflowExecutor {
         instance: Option<&str>,
         input: &[u8],
     ) -> Option<ApiLaunch> {
-        let runtime = runtime?;
-        let binding = runtime.workflow_api_binding().unwrap_or_else(|| {
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            runtara_workflow_api::Binding {
-                tenant_id: tenant.unwrap_or_default().to_string(),
-                instance_id: instance.unwrap_or_default().to_string(),
-                launch_id: format!(
-                    "local-{}-{}",
-                    std::process::id(),
-                    NEXT.fetch_add(1, Ordering::Relaxed)
-                ),
-                root_lease_epoch: 0,
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let local = || runtara_workflow_api::Binding {
+            tenant_id: tenant.unwrap_or_default().to_string(),
+            instance_id: instance.unwrap_or_default().to_string(),
+            launch_id: format!(
+                "local-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ),
+            root_lease_epoch: 0,
+        };
+        let Some(runtime) = runtime else {
+            let binding = local();
+            let launches = Arc::clone(self.workflow_api());
+            if let Err(error) = launches.begin_standalone(binding.clone()) {
+                tracing::warn!(%error, "the store is not served the workflow API");
+                return None;
             }
-        });
+            let _ = store.data().api_binding.set(binding.clone());
+            return Some(ApiLaunch {
+                launches,
+                launch_id: binding.launch_id,
+                standalone: true,
+            });
+        };
+        let binding = runtime.workflow_api_binding().unwrap_or_else(local);
         use crate::trusted::TrustedLaunch;
         let info = runtara_workflow_api::RunInfo {
             instance_id: binding.instance_id.clone(),
@@ -779,6 +794,7 @@ impl WorkflowExecutor {
         Some(ApiLaunch {
             launches,
             launch_id: binding.launch_id,
+            standalone: false,
         })
     }
 
@@ -1410,9 +1426,12 @@ impl WorkflowExecutor {
                             crate::lifecycle::CLI_RUN_EXPORT,
                         )
                     {
-                        let launch = launch.as_ref().ok_or_else(|| {
-                            anyhow::anyhow!("a wasi:cli/run workflow needs a runtime host")
-                        })?;
+                        let launch = launch
+                            .as_ref()
+                            .filter(|launch| !launch.standalone)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("a wasi:cli/run workflow needs a runtime host")
+                            })?;
                         let run_idx = instance
                             .get_export_index(&mut store, Some(&cli_idx), "run")
                             .ok_or_else(|| {

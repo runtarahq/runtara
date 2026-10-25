@@ -16,6 +16,10 @@ pub struct OutboundMeta {
     pub timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_response_bytes: Option<u64>,
+    /// The request carries a body, possibly empty. HTTP alone cannot tell an
+    /// empty body from none; providers can (a signed upload of zero bytes).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_body: bool,
 }
 
 /// Where an outbound call goes: through a connection's credentials, or to a
@@ -96,6 +100,7 @@ mod tests {
             headers: vec![("content-type".into(), "application/json".into())],
             timeout_ms: Some(1000),
             max_response_bytes: None,
+            has_body: false,
         };
         assert_eq!(
             serde_json::to_value(&meta).unwrap(),

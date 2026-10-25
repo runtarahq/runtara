@@ -174,7 +174,7 @@ fn root_wat(exit: &str) -> String {
     format!(
         r#"(component
       (import "runtara:workflow/runtime@1.0.0" (instance $runtime
-        (export "check-signals" (func (result (result bool (error string)))))))
+        (export "check-signals" (func async (result (result bool (error string)))))))
       (alias export $runtime "check-signals" (func $signals))
       (core module $memory (memory (export "memory") 1)
         (global $heap (mut i32) (i32.const 8192))
