@@ -16520,3 +16520,28 @@ mod audit04_tests;
 #[cfg(test)]
 #[path = "direct_json_audit05_tests.rs"]
 mod audit05_tests;
+
+/// A `runtara:api` error as the `{code, message, retryAfterMs}` JSON that
+/// [`DirectJsonManifest::wait_instances_error`] and
+/// [`DirectJsonManifest::state_error`] read.
+pub fn api_error_json(code: &str, message: &str, retry_after_ms: Option<u64>) -> Vec<u8> {
+    let mut error = serde_json::json!({"code": code, "message": message});
+    if let Some(retry_after_ms) = retry_after_ms {
+        error["retryAfterMs"] = retry_after_ms.into();
+    }
+    serde_json::to_vec(&error).expect("a JSON object always serializes")
+}
+
+#[cfg(test)]
+mod api_error_json_tests {
+    #[test]
+    fn api_errors_render_as_the_wait_and_state_error_json() {
+        let json: serde_json::Value =
+            serde_json::from_slice(&super::api_error_json("not-child", "say \"no\"", Some(5)))
+                .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"code": "not-child", "message": "say \"no\"", "retryAfterMs": 5})
+        );
+    }
+}

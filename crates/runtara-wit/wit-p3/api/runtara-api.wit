@@ -210,18 +210,10 @@ interface inputs {
 interface waits {
     use types.{api-error};
 
-    enum wait-mode {
-        all,
-        any,
-    }
-
-    /// `PUT /v1/waits/{key}`; the answer is the wait's read (JSON).
-    register: async func(
-        key: string,
-        instance-ids: list<string>,
-        mode: wait-mode,
-        deadline-ms: option<u64>,
-    ) -> result<list<u8>, api-error>;
+    /// `PUT /v1/waits/{key}` with the request JSON
+    /// `{instanceIds, mode: "all" | "any", deadlineMs?}`; the answer is the
+    /// wait's read (JSON). On replay the first registration stands.
+    register: async func(key: string, request: list<u8>) -> result<list<u8>, api-error>;
     /// `GET /v1/waits/{key}`, waiting up to `wait-ms` while it is pending.
     poll: async func(key: string, wait-ms: u64) -> result<list<u8>, api-error>;
     /// `DELETE /v1/waits/{key}`.

@@ -62,6 +62,20 @@ pub struct LaunchSlot {
     resolver: std::sync::OnceLock<Arc<RunConnectionResolver>>,
     /// Operations this launch entered and has not left, by operation id.
     operations: Mutex<HashMap<String, OperationIdentity>>,
+    /// Instance waits this launch registered whose last read was pending.
+    /// A suspension it posts wakes on them too, as the old ABI's host
+    /// attached them to the run's result.
+    pending_waits: Mutex<Vec<String>>,
+}
+
+impl LaunchSlot {
+    fn track_wait(&self, wait_id: &str, poll: &InstanceWaitPoll) {
+        let mut pending = self.pending_waits.lock().expect("pending waits poisoned");
+        pending.retain(|id| id != wait_id);
+        if poll.resolution.is_none() {
+            pending.push(wait_id.to_string());
+        }
+    }
 }
 
 /// The launches of this process that currently serve the workflow API, by
@@ -143,6 +157,7 @@ impl ApiLaunches {
                 controls,
                 resolver: std::sync::OnceLock::new(),
                 operations: Mutex::default(),
+                pending_waits: Mutex::default(),
             }),
         );
         Ok(())
@@ -401,6 +416,20 @@ impl WorkflowApiBackend for Backend {
         outcome: PostedOutcome,
     ) -> Result<(), ApiError> {
         let slot = self.0.slot(binding).ok_or_else(not_serving)?;
+        let mut outcome = outcome;
+        if let PostedOutcome::Suspended(suspension) = &mut outcome {
+            for wait_id in slot
+                .pending_waits
+                .lock()
+                .expect("pending waits poisoned")
+                .iter()
+            {
+                let wake = runtara_workflow_api::Wake::Instances(wait_id.clone());
+                if !suspension.wakes.contains(&wake) {
+                    suspension.wakes.push(wake);
+                }
+            }
+        }
         let mut posted = slot.outcome.lock().expect("workflow API outcome poisoned");
         if posted.is_some() {
             return Err(ApiError::new(
@@ -558,7 +587,12 @@ impl WorkflowApiBackend for Backend {
         }
         let (host, authority) = self.wait_service(binding)?;
         match host.register(&authority, &wait_id, request).await {
-            Ok(poll) => wait_read(&wait_id, &poll),
+            Ok(poll) => {
+                if let Some(slot) = self.0.slot(binding) {
+                    slot.track_wait(&wait_id, &poll);
+                }
+                wait_read(&wait_id, &poll)
+            }
             Err(error) => {
                 // A failed registration is not kept: a retry registers afresh.
                 self.runtime(binding)?
@@ -574,11 +608,20 @@ impl WorkflowApiBackend for Backend {
         let wait_id = wait_instances_id(key).map_err(|e| ApiError::new(ErrorCode::Invalid, e))?;
         let (host, authority) = self.wait_service(binding)?;
         let poll = host.poll(&authority, &wait_id).await.map_err(wait_error)?;
+        if let Some(slot) = self.0.slot(binding) {
+            slot.track_wait(&wait_id, &poll);
+        }
         wait_read(&wait_id, &poll)
     }
 
     async fn release_wait(&self, binding: &Binding, key: &str) -> Result<(), ApiError> {
         let wait_id = wait_instances_id(key).map_err(|e| ApiError::new(ErrorCode::Invalid, e))?;
+        if let Some(slot) = self.0.slot(binding) {
+            slot.pending_waits
+                .lock()
+                .expect("pending waits poisoned")
+                .retain(|id| id != &wait_id);
+        }
         self.runtime(binding)?
             .operation_release(wait_id)
             .await

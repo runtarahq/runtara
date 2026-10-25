@@ -109,6 +109,8 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_state_local_restore: Option<u32>,
     stdlib_state_output: Option<u32>,
     stdlib_state_error: Option<u32>,
+    /// `stdlib.api-error-json`, which the waits and state shims call.
+    pub(super) stdlib_api_error_json: Option<u32>,
     stdlib_ai_wait_tool_signal_id: Option<u32>,
     stdlib_ai_wait_tool_result: Option<u32>,
     stdlib_embed_workflow_cache_key: Option<u32>,
@@ -1431,6 +1433,8 @@ pub(super) fn import_core_function(
         import_indices.stdlib_state_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "state-error") {
         import_indices.stdlib_state_error = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "api-error-json") {
+        import_indices.stdlib_api_error_json = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-wait-tool-signal-id") {
         import_indices.stdlib_ai_wait_tool_signal_id = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-wait-tool-result") {

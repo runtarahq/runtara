@@ -4561,6 +4561,7 @@ version = "9.0.1"
 dependencies = [
  "runtara-workflow-api",
  "runtara-workflow-sdk",
+ "serde",
  "serde_json",
  "wit-bindgen 0.58.0",
 ]

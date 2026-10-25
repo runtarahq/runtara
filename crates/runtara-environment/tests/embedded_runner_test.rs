@@ -1848,8 +1848,9 @@ mod workflow_api_trusted {
 /// and the artifact imports only WASI. Each case runs on both ABIs and must
 /// end with the same status and output and the same events by type and
 /// subtype: an agent step's checkpoint with debug events on, a While loop
-/// with Log steps (signal checks at loop boundaries), and a durable Delay
-/// that parks the run (a suspended outcome with its wake).
+/// with Log steps (signal checks at loop boundaries), a durable Delay that
+/// parks the run (a suspended outcome with its wake), and published state
+/// written by SetState and read back by GetState.
 #[tokio::test(flavor = "multi_thread")]
 async fn workflows_compiled_for_the_workflow_api_match_the_wit_abi() {
     use runtara_workflows::direct_wasm::{
@@ -1907,6 +1908,29 @@ async fn workflows_compiled_for_the_workflow_api_match_the_wit_abi() {
         "inputSchema": {},
         "outputSchema": {}
     });
+    let state = serde_json::json!({
+        "durable": true,
+        "stateSchema": {"stage": {"type": "string"}, "n": {"type": "integer"}},
+        "steps": {
+            "s1": {"id": "s1", "stepType": "SetState", "values": {
+                "stage": {"valueType": "immediate", "value": "before"},
+                "n": {"valueType": "reference", "value": "data.n"}}},
+            "s2": {"id": "s2", "stepType": "SetState", "values": {
+                "stage": {"valueType": "immediate", "value": "after"}}},
+            "g": {"id": "g", "stepType": "GetState"},
+            "done": {"id": "done", "stepType": "Finish", "inputMapping": {
+                "value": {"valueType": "reference", "value": "steps.g.outputs"}}}
+        },
+        "entryPoint": "s1",
+        "executionPlan": [
+            {"fromStep": "s1", "toStep": "s2"},
+            {"fromStep": "s2", "toStep": "g"},
+            {"fromStep": "g", "toStep": "done"}
+        ],
+        "variables": {},
+        "inputSchema": {"n": {"type": "integer"}},
+        "outputSchema": {}
+    });
     use runtara_core::domain::InstanceStatus::{Completed, Suspended};
     let cases = [
         (
@@ -1924,6 +1948,13 @@ async fn workflows_compiled_for_the_workflow_api_match_the_wit_abi() {
             Completed,
         ),
         ("delay", delay, serde_json::json!({}), false, Suspended),
+        (
+            "state",
+            state,
+            serde_json::json!({"n": 7}),
+            false,
+            Completed,
+        ),
     ];
     let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
         ["utils", "transform"]
@@ -2015,6 +2046,13 @@ async fn workflows_compiled_for_the_workflow_api_match_the_wit_abi() {
         );
         if case == "echo" {
             assert_eq!(runs[0].0, Some(serde_json::json!({"result": "hello"})));
+        }
+        if case == "state" {
+            assert_eq!(
+                runs[0].0.as_ref().map(|output| output["value"].clone()),
+                Some(serde_json::json!({"stage": "after", "n": 7})),
+                "the published state"
+            );
         }
     }
     assert_eq!(h.runner.workflow_api_launches().serving(), 0);

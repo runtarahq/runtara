@@ -285,20 +285,26 @@ mod api {
     }
 
     impl waits::Guest for Api {
-        async fn register(
-            key: String,
-            instance_ids: Vec<String>,
-            mode: waits::WaitMode,
-            deadline_ms: Option<u64>,
-        ) -> Result<Vec<u8>, ApiError> {
-            let mode = match mode {
-                waits::WaitMode::All => "all",
-                waits::WaitMode::Any => "any",
-            };
-            sdk::register_wait(&key, &instance_ids, mode, deadline_ms)
-                .await
-                .map(|read| json_bytes(&read))
-                .map_err(api_error)
+        async fn register(key: String, request: Vec<u8>) -> Result<Vec<u8>, ApiError> {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct Request {
+                instance_ids: Vec<String>,
+                mode: String,
+                #[serde(default)]
+                deadline_ms: Option<u64>,
+            }
+            let request: Request = serde_json::from_slice(&request)
+                .map_err(|e| invalid(format!("a wait request: {e}")))?;
+            sdk::register_wait(
+                &key,
+                &request.instance_ids,
+                &request.mode,
+                request.deadline_ms,
+            )
+            .await
+            .map(|read| json_bytes(&read))
+            .map_err(api_error)
         }
 
         async fn poll(key: String, wait_ms: u64) -> Result<Vec<u8>, ApiError> {

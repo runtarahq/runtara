@@ -341,9 +341,68 @@ impl Shim<'_> {
             .i(Instruction::End);
     }
 
+    /// After a call into `new` (a `result<_, api-error>`): when it failed,
+    /// write the old `result<_, string>` error as the `{code, message,
+    /// retryAfterMs}` JSON the wait and state errors read (built by the
+    /// stdlib's `api-error-json`, at `stdlib`), and return.
+    fn on_error_return_json(
+        &mut self,
+        new: &Type,
+        old: &Type,
+        stdlib: u32,
+    ) -> Result<(), DirectCompileError> {
+        let layouts = self.layouts;
+        let code = layouts.offset(new, &[Step::Err, Step::Field("code")])?;
+        let message = layouts.offset(new, &[Step::Err, Step::Field("message")])?;
+        let retry = layouts.offset(new, &[Step::Err, Step::Field("retry-after-ms")])?;
+        let retry_value =
+            layouts.offset(new, &[Step::Err, Step::Field("retry-after-ms"), Step::Some])?;
+        let old_err = layouts.offset(old, &[Step::Err])?;
+        let [
+            code_ptr,
+            code_len,
+            msg_ptr,
+            msg_len,
+            retry_tag,
+            json_ptr,
+            json_len,
+        ] = [0, 1, 2, 3, 4, 5, 6].map(|n| self.local(n));
+        let retry_ms = self.tmp_i64;
+        let scratch = self.scratch;
+        self.i(Instruction::I32Const(scratch))
+            .i(Instruction::I32Load8U(mem(0, 0)))
+            .i(Instruction::If(BlockType::Empty));
+        self.load_i32(code, code_ptr);
+        self.load_i32(code + 4, code_len);
+        self.load_i32(message, msg_ptr);
+        self.load_i32(message + 4, msg_len);
+        self.load_u8(retry, retry_tag);
+        self.i(Instruction::I32Const(scratch))
+            .i(Instruction::I64Load(mem(retry_value, 3)))
+            .i(Instruction::LocalSet(retry_ms));
+        for local in [code_ptr, code_len, msg_ptr, msg_len, retry_tag, retry_ms] {
+            self.i(Instruction::LocalGet(local));
+        }
+        self.i(Instruction::I32Const(scratch))
+            .i(Instruction::Call(stdlib));
+        self.load_i32(0, json_ptr);
+        self.load_i32(4, json_len);
+        self.store_const_u8(0, 1);
+        self.store_i32(old_err, json_ptr);
+        self.store_i32(old_err + 4, json_len);
+        self.i(Instruction::Return).i(Instruction::End);
+        Ok(())
+    }
+
     /// End the body; falling off the end is success.
     fn finish(mut self) -> WasmFunction {
         self.store_const_u8(0, 0);
+        self.i(Instruction::End);
+        self.body
+    }
+
+    /// End the body of a shim whose old function returns nothing.
+    fn finish_void(mut self) -> WasmFunction {
         self.i(Instruction::End);
         self.body
     }
@@ -669,6 +728,106 @@ pub(super) fn emit_runtime_shims(
         code.function(&shim.finish());
         indices.set_runtime_shim(name, index);
     }
+
+    // Waits and state, when the logic uses them.
+    let waits = api.contains_key("waits.register");
+    let state = api.contains_key("state.set");
+    if !waits && !state {
+        return Ok(());
+    }
+    let stdlib = indices
+        .stdlib_api_error_json
+        .ok_or_else(|| component_error("api shim: stdlib.api-error-json not imported"))?;
+    let stdlib_fn = function(resolve, "runtara:workflow-stdlib", "json", "api-error-json")?;
+    let stdlib_sig = resolve.wasm_signature(mangling.import_variant(), stdlib_fn);
+    if stdlib_sig.params != [P, L, P, L, I32, I64, P] {
+        return Err(component_error(format!(
+            "api shim: stdlib.api-error-json has flat params {:?}",
+            stdlib_sig.params
+        )));
+    }
+    let mut define = |interface: &str,
+                      name: &str,
+                      body: &mut dyn FnMut(&mut Shim, &Type) -> Result<(), DirectCompileError>|
+     -> Result<u32, DirectCompileError> {
+        let old_fn = function(resolve, "runtara:workflow", interface, name)?;
+        let old_sig = resolve.wasm_signature(mangling.import_variant(), old_fn);
+        let returns = old_fn.result.is_some();
+        let mut shim = Shim::new(old_sig.params.len(), scratch, &layouts);
+        if !returns {
+            // No result pointer: nothing may write one.
+            shim.retptr = u32::MAX;
+        }
+        let old = old_fn.result.unwrap_or(Type::Bool);
+        body(&mut shim, &old)?;
+        let index = imported_function_count + *next_defined_function;
+        *next_defined_function += 1;
+        functions.function(push_core_type(
+            types,
+            type_count,
+            &old_sig.params,
+            &old_sig.results,
+        ));
+        code.function(&if returns {
+            shim.finish()
+        } else {
+            shim.finish_void()
+        });
+        Ok(index)
+    };
+    if waits {
+        let register_ty = api_result("waits", "register")?;
+        let register = import("waits.register", &[P, L, P, L, P])?;
+        let release = import("waits.release", &[P, L, P])?;
+        let register_index = define("waits", "register", &mut |shim, old| {
+            shim.call(register, &[0, 1, 2, 3], true);
+            shim.on_error_return_json(&register_ty, old, stdlib)?;
+            copy_list(shim, &register_ty, old)
+        })?;
+        // The old `release` cannot fail: the result is already checkpointed,
+        // and a settled wait left behind goes with the instance.
+        let release_index = define("waits", "release", &mut |shim, _| {
+            shim.call(release, &[0, 1], true);
+            Ok(())
+        })?;
+        indices.wait_instances = Some(super::core_imports::DirectWaitInstancesImports {
+            register: register_index,
+            release: release_index,
+        });
+    }
+    if state {
+        let (set_ty, get_ty) = (api_result("state", "set")?, api_result("state", "get")?);
+        let set = import("state.set", &[P, L, P, L, P])?;
+        let get = import("state.get", &[P, L, P])?;
+        let set_index = define("state", "set", &mut |shim, old| {
+            shim.call(set, &[0, 1, 2, 3], true);
+            shim.on_error_return_json(&set_ty, old, stdlib)
+        })?;
+        let get_index = define("state", "get", &mut |shim, old| {
+            shim.call(get, &[0, 1], true);
+            shim.on_error_return_json(&get_ty, old, stdlib)?;
+            copy_list(shim, &get_ty, old)
+        })?;
+        indices.run_state = Some(super::core_imports::DirectRunStateImports {
+            set: set_index,
+            get: get_index,
+        });
+    }
+    Ok(())
+}
+
+/// The `list<u8>` ok payload of `new` into `old`'s.
+fn copy_list(shim: &mut Shim, new: &Type, old: &Type) -> Result<(), DirectCompileError> {
+    let layouts = shim.layouts;
+    let (from, to) = (
+        layouts.offset(new, &[Step::Ok])?,
+        layouts.offset(old, &[Step::Ok])?,
+    );
+    let (ptr, len) = (shim.local(7), shim.local(8));
+    shim.load_i32(from, ptr);
+    shim.load_i32(from + 4, len);
+    shim.store_i32(to, ptr);
+    shim.store_i32(to + 4, len);
     Ok(())
 }
 

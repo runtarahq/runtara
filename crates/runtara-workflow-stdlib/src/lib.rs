@@ -869,6 +869,10 @@ mod component {
             with_manifest(|manifest| manifest.state_error(&step_id, &error))
         }
 
+        fn api_error_json(code: String, message: String, retry_after_ms: Option<u64>) -> Vec<u8> {
+            crate::direct_json::api_error_json(&code, &message, retry_after_ms)
+        }
+
         fn ai_wait_tool_signal_id(
             step_id: String,
             instance_id: String,

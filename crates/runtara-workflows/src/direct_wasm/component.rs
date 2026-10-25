@@ -193,15 +193,29 @@ pub struct DirectComponentArtifacts {
 
 impl DirectComponentArtifacts {
     /// Import `runtara:api` in the world in place of
-    /// `runtara:workflow/runtime`, on the workflow API ABI.
+    /// `runtara:workflow/runtime`, `waits` and `state`, on the workflow API
+    /// ABI.
     pub(super) fn with_api_runtime(mut self, api_runtime: bool) -> Self {
+        if !api_runtime {
+            return self;
+        }
         let runtime = format!("    import {};\n", runtara_wit::workflow::RUNTIME);
-        if api_runtime && self.world_wit.contains(&runtime) {
+        if self.world_wit.contains(&runtime) {
             let api: String = runtara_wit::api::RUNTIME_REPLACEMENTS
                 .iter()
                 .map(|interface| format!("    import {interface};\n"))
                 .collect();
             self.world_wit = self.world_wit.replacen(&runtime, &api, 1);
+        }
+        for (old, new) in [
+            (runtara_wit::workflow::WAITS, runtara_wit::api::WAITS),
+            (runtara_wit::workflow::STATE, runtara_wit::api::STATE),
+        ] {
+            self.world_wit = self.world_wit.replacen(
+                &format!("    import {old};\n"),
+                &format!("    import {new};\n"),
+                1,
+            );
         }
         self
     }

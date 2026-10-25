@@ -1750,11 +1750,18 @@ fn build_direct_component_resolve_with_waits(
             runtara_wit::workflow::OPERATION
         ));
     }
+    // On the workflow API ABI the logic reaches waits and state through
+    // `runtara:api`, like the runtime.
+    let (waits, state) = if api_runtime {
+        (runtara_wit::api::WAITS, runtara_wit::api::STATE)
+    } else {
+        (runtara_wit::workflow::WAITS, runtara_wit::workflow::STATE)
+    };
     if wait_instances {
-        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::workflow::WAITS));
+        workflow_wit.push_str(&format!("    import {waits};\n"));
     }
     if run_state {
-        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::workflow::STATE));
+        workflow_wit.push_str(&format!("    import {state};\n"));
     }
     for agent in agents {
         let interface = if scoped_agents.contains(agent) {
