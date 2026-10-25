@@ -1754,10 +1754,13 @@ fn build_direct_component_resolve_with_waits(
         ));
     }
     if operation_scope {
-        workflow_wit.push_str(&format!(
-            "    import {};\n",
+        // On the workflow API ABI operations carry explicit ids.
+        let operation = if api_runtime {
+            runtara_wit::api::OPERATIONS
+        } else {
             runtara_wit::workflow::OPERATION
-        ));
+        };
+        workflow_wit.push_str(&format!("    import {operation};\n"));
     }
     // On the workflow API ABI the logic reaches waits and state through
     // `runtara:api`, like the runtime.

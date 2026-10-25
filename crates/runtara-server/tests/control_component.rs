@@ -1,6 +1,6 @@
 //! A compiled workflow calls control on other runs end to end: DSL -> composed
-//! WASM -> environment runner -> the composed control agent calling
-//! `runtara:control/api` in the run's own store -> native control service ->
+//! WASM -> environment runner -> the composed control agent calling the
+//! workflow API's `/v1/instances` in the run's own store -> native control service ->
 //! runtime persistence. The artifact carries no control pin and needs no
 //! approval (decision D2, revised 2026-09-29).
 //!
@@ -260,10 +260,11 @@ async fn a_composed_control_get_reads_another_run() -> anyhow::Result<()> {
         wasm.windows(name.len())
             .any(|bytes| bytes == name.as_bytes())
     };
-    assert!(names("runtara:control/api@1.0.0"));
+    // The composed control agent calls the workflow API's `/v1/instances`
+    // over HTTP: no control interface is linked from the host.
     assert!(
-        !names("runtara:control/executor"),
-        "the composed control agent calls the API itself"
+        !names("runtara:control/"),
+        "the composed control agent imports no control interface"
     );
 
     let run = harness

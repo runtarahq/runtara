@@ -377,6 +377,7 @@ fn check_wait_for_instances(
 /// runs without an invoke. This opens an `if … else`: the caller emits the
 /// invoke into the `else` arm and closes it with [`emit_entered_end`], then
 /// leaves with [`emit_after_invoke`] or [`emit_exit`].
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_enter(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
@@ -384,6 +385,8 @@ pub(super) fn emit_enter(
     key: (u32, u32),
     attempt_local: Option<u32>,
     load: bool,
+    agent_id: u32,
+    input: (u32, u32),
 ) {
     body.instruction(&Instruction::LocalGet(key.0));
     body.instruction(&Instruction::LocalGet(key.1));
@@ -406,6 +409,50 @@ pub(super) fn emit_enter(
         crate::direct_wasm::static_data::AGENT_OPERATION_SCOPE_FIELDS,
     );
     body.instruction(&Instruction::Else);
+    emit_operation_input(body, indices, static_data, agent_id, input);
+}
+
+/// On the workflow API ABI, hand the entered operation to the Agent in its
+/// input (`_operation`): the id its control mutations name, and the
+/// continuation `enter` loaded. A workflow-agent target keeps its envelope.
+fn emit_operation_input(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    agent_id: u32,
+    input: (u32, u32),
+) {
+    let (Some(cell), Some(helper)) = (indices.operation_cell, indices.stdlib_agent_operation_input)
+    else {
+        return;
+    };
+    if static_data.agent_is_workflow_agent(agent_id) {
+        return;
+    }
+    use super::api_shims::{
+        OPERATION_CONTINUATION_LEN, OPERATION_CONTINUATION_PTR, OPERATION_CONTINUATION_TAG,
+        OPERATION_ID, OPERATION_ID_LEN,
+    };
+    body.instruction(&Instruction::LocalGet(input.0));
+    body.instruction(&Instruction::LocalGet(input.1));
+    body.instruction(&Instruction::I32Const(cell + OPERATION_ID as i32));
+    body.instruction(&Instruction::I32Const(OPERATION_ID_LEN));
+    for offset in [
+        OPERATION_CONTINUATION_TAG,
+        OPERATION_CONTINUATION_PTR,
+        OPERATION_CONTINUATION_LEN,
+    ] {
+        body.instruction(&Instruction::I32Const(cell));
+        body.instruction(&Instruction::I32Load(MemArg {
+            offset,
+            align: 2,
+            memory_index: 0,
+        }));
+    }
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(helper));
+    super::abi::emit_fail_if_retptr_error_inplace(body, indices);
+    super::abi::load_retptr_list(body, input.0, input.1);
 }
 
 /// Close the `if … else` [`emit_enter`] opened, after the invoke.

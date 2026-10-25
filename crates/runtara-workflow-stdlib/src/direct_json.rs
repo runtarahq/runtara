@@ -16532,6 +16532,48 @@ pub fn api_error_json(code: &str, message: &str, retry_after_ms: Option<u64>) ->
     serde_json::to_vec(&error).expect("a JSON object always serializes")
 }
 
+/// An operation-scoped Agent's input with its entered operation under
+/// [`runtara_agent_suspension::OPERATION_INPUT_KEY`], replacing anything the
+/// step mapped there.
+pub fn agent_operation_input(
+    input: &[u8],
+    operation_id: &str,
+    continuation: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    let mut input: Value = serde_json::from_slice(input)
+        .map_err(|err| format!("failed to parse Agent input for its operation: {err}"))?;
+    let fields = input
+        .as_object_mut()
+        .ok_or_else(|| "an operation-scoped Agent's input must be a JSON object".to_string())?;
+    fields.insert(
+        runtara_agent_suspension::OPERATION_INPUT_KEY.to_string(),
+        serde_json::json!({
+            "id": operation_id,
+            "continuation": continuation.map(runtara_agent_suspension::encode_continuation),
+        }),
+    );
+    serde_json::to_vec(&input).map_err(|err| format!("failed to encode Agent input: {err}"))
+}
+
+#[cfg(test)]
+mod agent_operation_input_tests {
+    #[test]
+    fn the_entered_operation_replaces_a_mapped_one() {
+        let input = super::agent_operation_input(
+            br#"{"value":1,"_operation":{"id":"forged","continuation":"00"}}"#,
+            "ab",
+            Some(b"\"paused\""),
+        )
+        .unwrap();
+        let input: serde_json::Value = serde_json::from_slice(&input).unwrap();
+        assert_eq!(
+            input,
+            serde_json::json!({"value": 1,
+                "_operation": {"id": "ab", "continuation": "2270617573656422"}})
+        );
+    }
+}
+
 #[cfg(test)]
 mod api_error_json_tests {
     #[test]

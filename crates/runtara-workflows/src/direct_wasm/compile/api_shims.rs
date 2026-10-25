@@ -39,6 +39,23 @@ use super::{DirectCompileError, component_error};
 /// Bytes reserved for the shims' results, below the heap.
 pub(super) const API_SCRATCH_BYTES: i32 = 128;
 
+/// The entered operation, right after the scratch area. Operation-scoped
+/// sites run one at a time in a store, so one cell holds the operation the
+/// old implicit `runtara:workflow/operation` named:
+/// `state` (0 none, 1 entered, 2 left but not yet released), the
+/// continuation `enter` loaded (`option<list<u8>>` as tag, pointer, length)
+/// and the 64-byte hex operation id.
+pub(super) const OPERATION_CELL_BYTES: i32 = 80;
+pub(super) const OPERATION_STATE: u64 = 0;
+pub(super) const OPERATION_CONTINUATION_TAG: u64 = 4;
+pub(super) const OPERATION_CONTINUATION_PTR: u64 = 8;
+pub(super) const OPERATION_CONTINUATION_LEN: u64 = 12;
+pub(super) const OPERATION_ID: u64 = 16;
+/// A `runtara:api` operation id is a sha256 hex digest.
+pub(super) const OPERATION_ID_LEN: i32 = 64;
+const ENTERED: i32 = 1;
+const LEFT: i32 = 2;
+
 /// One step into a type when computing a byte offset.
 #[derive(Clone, Copy)]
 enum Step {
@@ -649,22 +666,12 @@ pub(super) fn emit_runtime_shims(
         indices.set_runtime_shim(name, index);
     }
 
-    // Waits and state, when the logic uses them.
+    // Waits, state and operations, when the logic uses them.
     let waits = api.contains_key("waits.register");
     let state = api.contains_key("state.set");
-    if !waits && !state {
+    let operations = api.contains_key("operations.enter");
+    if !waits && !state && !operations {
         return Ok(());
-    }
-    let stdlib = indices
-        .stdlib_api_error_json
-        .ok_or_else(|| component_error("api shim: stdlib.api-error-json not imported"))?;
-    let stdlib_fn = function(resolve, "runtara:workflow-stdlib", "json", "api-error-json")?;
-    let stdlib_sig = resolve.wasm_signature(mangling.import_variant(), stdlib_fn);
-    if stdlib_sig.params != [P, L, P, L, I32, I64, P] {
-        return Err(component_error(format!(
-            "api shim: stdlib.api-error-json has flat params {:?}",
-            stdlib_sig.params
-        )));
     }
     let mut define = |interface: &str,
                       name: &str,
@@ -695,6 +702,158 @@ pub(super) fn emit_runtime_shims(
         });
         Ok(index)
     };
+    if operations {
+        let cell = scratch + API_SCRATCH_BYTES;
+        let id = cell + OPERATION_ID as i32;
+        let enter_ty = api_result("operations", "enter")?;
+        let suspend_ty = api_result("operations", "suspend")?;
+        let enter = import("operations.enter", &[P, L, I32, I32, P])?;
+        let suspend = import("operations.suspend", &[P, L, P, L, P, L, P])?;
+        let exit = import("operations.exit", &[P, L, I32, P])?;
+        let release = import("operations.release", &[P, L, P])?;
+        let id_at = layouts.offset(&enter_ty, &[Step::Ok, Step::Field("operation-id")])?;
+        let continuation = layouts.offset(&enter_ty, &[Step::Ok, Step::Field("continuation")])?;
+        let continuation_list = layouts.offset(
+            &enter_ty,
+            &[Step::Ok, Step::Field("continuation"), Step::Some],
+        )?;
+        let code = layouts.offset(&suspend_ty, &[Step::Err, Step::Field("code")])?;
+        // A refused enter, or one whose operation cannot be entered, is the
+        // step error the emitter lays out: no operation is entered.
+        let enter_index = define("operation", "enter", &mut |shim, old| {
+            set_cell(shim, cell, OPERATION_STATE, 0);
+            shim.call(enter, &[0, 1, 2, 3], true);
+            shim.on_error_return(&enter_ty, old)?;
+            let (ptr, len, tag) = (shim.local(2), shim.local(3), shim.local(4));
+            shim.load_i32(id_at, ptr);
+            shim.load_i32(id_at + 4, len);
+            shim.i(Instruction::LocalGet(len))
+                .i(Instruction::I32Const(OPERATION_ID_LEN))
+                .i(Instruction::I32Ne)
+                .i(Instruction::If(BlockType::Empty))
+                .i(Instruction::Unreachable)
+                .i(Instruction::End)
+                .i(Instruction::I32Const(id))
+                .i(Instruction::LocalGet(ptr))
+                .i(Instruction::I32Const(OPERATION_ID_LEN))
+                .i(Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
+            shim.load_u8(continuation, tag);
+            shim.load_i32(continuation_list, ptr);
+            shim.load_i32(continuation_list + 4, len);
+            for (offset, local) in [
+                (OPERATION_CONTINUATION_TAG, tag),
+                (OPERATION_CONTINUATION_PTR, ptr),
+                (OPERATION_CONTINUATION_LEN, len),
+            ] {
+                shim.i(Instruction::I32Const(cell))
+                    .i(Instruction::LocalGet(local))
+                    .i(Instruction::I32Store(mem(offset, 2)));
+            }
+            set_cell(shim, cell, OPERATION_STATE, ENTERED);
+            Ok(())
+        })?;
+        // A suspension the host refuses (its caps, or no entered operation)
+        // is the step error; failing to keep the continuation fails the run,
+        // since a lost one would re-run the operation from scratch.
+        let suspend_index = define("operation", "suspend", &mut |shim, old| {
+            let old_err = shim.layouts.offset(old, &[Step::Err])?;
+            let refuse = |shim: &mut Shim| {
+                shim.store_const_u8(0, 1);
+                shim.store_const_i32(old_err, 0);
+                shim.store_const_i32(old_err + 4, 0);
+                shim.i(Instruction::Return);
+            };
+            cell_state(shim, cell);
+            shim.i(Instruction::I32Const(ENTERED))
+                .i(Instruction::I32Ne)
+                .i(Instruction::If(BlockType::Empty));
+            refuse(shim);
+            shim.i(Instruction::End);
+            shim.i(Instruction::I32Const(id))
+                .i(Instruction::I32Const(OPERATION_ID_LEN));
+            for local in [0, 1, 2, 3] {
+                shim.i(Instruction::LocalGet(local));
+            }
+            shim.i(Instruction::I32Const(shim.scratch))
+                .i(Instruction::Call(suspend.index));
+            let (ptr, len) = (shim.local(0), shim.local(1));
+            let scratch = shim.scratch;
+            shim.i(Instruction::I32Const(scratch))
+                .i(Instruction::I32Load8U(mem(0, 0)))
+                .i(Instruction::If(BlockType::Empty));
+            shim.load_i32(code, ptr);
+            shim.load_i32(code + 4, len);
+            code_is(shim, ptr, len, "agent-invalid-suspension");
+            code_is(shim, ptr, len, "not-found");
+            shim.i(Instruction::I32Or)
+                .i(Instruction::I32Eqz)
+                .i(Instruction::If(BlockType::Empty))
+                .i(Instruction::Unreachable)
+                .i(Instruction::End);
+            refuse(shim);
+            shim.i(Instruction::End);
+            Ok(())
+        })?;
+        // The old `exit` trapped when it could not confirm closing the
+        // operation's wait and discarding its continuation. It keeps the id
+        // for `release`; a refused enter left nothing to leave.
+        let exit_index = define("operation", "exit", &mut |shim, _| {
+            cell_state(shim, cell);
+            shim.i(Instruction::I32Const(ENTERED))
+                .i(Instruction::I32Eq)
+                .i(Instruction::If(BlockType::Empty))
+                .i(Instruction::I32Const(id))
+                .i(Instruction::I32Const(OPERATION_ID_LEN))
+                .i(Instruction::LocalGet(0));
+            let scratch = shim.scratch;
+            shim.i(Instruction::I32Const(scratch))
+                .i(Instruction::Call(exit.index));
+            shim.on_error_trap();
+            set_cell(shim, cell, OPERATION_STATE, LEFT);
+            shim.i(Instruction::End);
+            Ok(())
+        })?;
+        // `release` follows its own site's enter (after the result
+        // checkpoint), so the cell names the operation its key does. Like
+        // the old one it cannot fail: a continuation left behind goes with
+        // the instance.
+        let release_index = define("operation", "release", &mut |shim, _| {
+            cell_state(shim, cell);
+            shim.i(Instruction::If(BlockType::Empty))
+                .i(Instruction::I32Const(id))
+                .i(Instruction::I32Const(OPERATION_ID_LEN));
+            let scratch = shim.scratch;
+            shim.i(Instruction::I32Const(scratch))
+                .i(Instruction::Call(release.index));
+            set_cell(shim, cell, OPERATION_STATE, 0);
+            shim.i(Instruction::End);
+            Ok(())
+        })?;
+        indices.operation_scope = Some(super::core_imports::DirectOperationScopeImports {
+            enter: enter_index,
+            suspend: suspend_index,
+            exit: exit_index,
+            release: release_index,
+        });
+        indices.operation_cell = Some(cell);
+    }
+    if !waits && !state {
+        return Ok(());
+    }
+    let stdlib = indices
+        .stdlib_api_error_json
+        .ok_or_else(|| component_error("api shim: stdlib.api-error-json not imported"))?;
+    let stdlib_fn = function(resolve, "runtara:workflow-stdlib", "json", "api-error-json")?;
+    let stdlib_sig = resolve.wasm_signature(mangling.import_variant(), stdlib_fn);
+    if stdlib_sig.params != [P, L, P, L, I32, I64, P] {
+        return Err(component_error(format!(
+            "api shim: stdlib.api-error-json has flat params {:?}",
+            stdlib_sig.params
+        )));
+    }
     if waits {
         let register_ty = api_result("waits", "register")?;
         let register = import("waits.register", &[P, L, P, L, P])?;
@@ -734,6 +893,38 @@ pub(super) fn emit_runtime_shims(
         });
     }
     Ok(())
+}
+
+fn set_cell(shim: &mut Shim, cell: i32, offset: u64, value: i32) {
+    shim.i(Instruction::I32Const(cell))
+        .i(Instruction::I32Const(value))
+        .i(Instruction::I32Store(mem(offset, 2)));
+}
+
+/// Push the operation cell's state.
+fn cell_state(shim: &mut Shim, cell: i32) {
+    shim.i(Instruction::I32Const(cell))
+        .i(Instruction::I32Load(mem(OPERATION_STATE, 2)));
+}
+
+/// Push whether the string at `ptr`/`len` is `text`; its bytes are read only
+/// when the length matches.
+fn code_is(shim: &mut Shim, ptr: u32, len: u32, text: &str) {
+    shim.i(Instruction::LocalGet(len))
+        .i(Instruction::I32Const(text.len() as i32))
+        .i(Instruction::I32Eq)
+        .i(Instruction::If(BlockType::Result(ValType::I32)))
+        .i(Instruction::I32Const(1));
+    for (n, byte) in text.bytes().enumerate() {
+        shim.i(Instruction::LocalGet(ptr))
+            .i(Instruction::I32Load8U(mem(n as u64, 0)))
+            .i(Instruction::I32Const(i32::from(byte)))
+            .i(Instruction::I32Eq)
+            .i(Instruction::I32And);
+    }
+    shim.i(Instruction::Else)
+        .i(Instruction::I32Const(0))
+        .i(Instruction::End);
 }
 
 /// The `list<u8>` ok payload of `new` into `old`'s.

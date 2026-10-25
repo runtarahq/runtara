@@ -214,6 +214,10 @@ impl DirectComponentArtifacts {
                 runtara_wit::host::CONNECTIONS,
                 runtara_wit::api::CONNECTIONS,
             ),
+            (
+                runtara_wit::workflow::OPERATION,
+                runtara_wit::api::OPERATIONS,
+            ),
         ] {
             self.world_wit = self.world_wit.replacen(
                 &format!("    import {old};\n"),

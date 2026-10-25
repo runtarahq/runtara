@@ -417,7 +417,7 @@ pub(super) fn emit_direct_core_module(
             &mut next_defined_function,
             api_scratch,
         )?;
-        api_scratch + super::api_shims::API_SCRATCH_BYTES
+        api_scratch + super::api_shims::API_SCRATCH_BYTES + super::api_shims::OPERATION_CELL_BYTES
     } else {
         config.static_data.heap_base
     };

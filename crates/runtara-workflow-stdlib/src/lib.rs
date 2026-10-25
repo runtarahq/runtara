@@ -873,6 +873,18 @@ mod component {
             crate::direct_json::api_error_json(&code, &message, retry_after_ms)
         }
 
+        fn agent_operation_input(
+            input: Vec<u8>,
+            operation_id: String,
+            continuation: Option<Vec<u8>>,
+        ) -> Result<Vec<u8>, String> {
+            crate::direct_json::agent_operation_input(
+                &input,
+                &operation_id,
+                continuation.as_deref(),
+            )
+        }
+
         fn ai_wait_tool_signal_id(
             step_id: String,
             instance_id: String,

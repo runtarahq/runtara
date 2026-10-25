@@ -4175,6 +4175,8 @@ dependencies = [
  "runtara-agent-macro",
  "runtara-control-contract",
  "runtara-dsl",
+ "runtara-workflow-api",
+ "runtara-workflow-sdk",
  "serde",
  "serde_json",
  "wit-bindgen 0.58.0",
@@ -4961,6 +4963,7 @@ name = "runtara-workflow-stdlib"
 version = "9.0.1"
 dependencies = [
  "minijinja",
+ "runtara-agent-suspension",
  "runtara-dsl",
  "serde",
  "serde_json",

@@ -216,6 +216,7 @@ impl HostState {
             let _ = launches.begin_standalone(
                 binding.clone(),
                 crate::api_launches::StandaloneTrust::Denied,
+                crate::api_launches::StandaloneControl::Denied,
             );
             self.api_hooks = crate::workflow_api::WorkflowApiHooks::for_run(
                 Some(launches.transport()),

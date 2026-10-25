@@ -467,6 +467,15 @@ interface json {
         retry-after-ms: option<u64>,
     ) -> list<u8>;
 
+    // An operation-scoped Agent's input with its entered operation under
+    // `_operation` (workflow API ABI): the id, and the continuation `enter`
+    // loaded, hex-encoded. Replaces whatever the step mapped there.
+    agent-operation-input: func(
+        input: list<u8>,
+        operation-id: string,
+        continuation: option<list<u8>>,
+    ) -> result<list<u8>, string>;
+
     // SetState / GetState: a state error JSON as the step's structured error.
     state-error: func(
         step-id: string,

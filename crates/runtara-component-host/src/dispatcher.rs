@@ -390,8 +390,10 @@ impl ComponentDispatcherService {
             launches
                 .begin_standalone(
                     binding.clone(),
-                    // Unpinned, as the host-linked test path was.
+                    // Unpinned, and acting for the tenant with no calling
+                    // run, as the host-linked test path did.
                     crate::api_launches::StandaloneTrust::Unpinned,
+                    crate::api_launches::StandaloneControl::Tenant,
                 )
                 .map_err(|error| anyhow::anyhow!(error))?;
             let launch = TestLaunch {

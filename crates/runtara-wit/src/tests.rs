@@ -93,7 +93,8 @@ fn every_name_constant_names_a_real_interface() {
 }
 
 /// The generated per-agent package resolves for every shape, and declares
-/// exactly the interfaces and world items the shape asks for.
+/// exactly the interfaces and exports the shape asks for, importing no host
+/// interface.
 #[test]
 fn agent_package_resolves_for_every_shape() {
     for scoped in [false, true] {
@@ -131,8 +132,10 @@ fn agent_package_resolves_for_every_shape() {
                         .map(|key| resolve.name_world_key(key))
                         .collect();
                     let has = |names: &[String], name: &str| names.iter().any(|n| n == name);
-                    assert_eq!(has(&imports, crate::agent::CONTINUATION), suspendable);
-                    assert_eq!(has(&imports, crate::control::API), control);
+                    // Suspending and control agents read their operation
+                    // from their input and reach the host over HTTP.
+                    assert!(!has(&imports, crate::agent::CONTINUATION), "{imports:?}");
+                    assert!(!has(&imports, crate::control::API), "{imports:?}");
                     assert_eq!(has(&exports, crate::trusted::EXECUTION), trusted);
                     assert_eq!(exports.len(), 1 + usize::from(trusted), "{exports:?}");
                 }

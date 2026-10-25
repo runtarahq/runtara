@@ -362,6 +362,8 @@ pub(super) fn emit_agent_plan(
                     (route_ptr_local, route_len_local),
                     Some(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL),
                     suspends,
+                    agent_id,
+                    (output_ptr_local, output_len_local),
                 );
             }
             emit_agent_invoke(
@@ -509,6 +511,8 @@ pub(super) fn emit_agent_plan(
                     (route_ptr_local, route_len_local),
                     Some(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL),
                     false,
+                    agent_id,
+                    (output_ptr_local, output_len_local),
                 );
             }
             emit_agent_invoke(
@@ -726,6 +730,8 @@ pub(super) fn emit_agent_plan(
                     (route_ptr_local, route_len_local),
                     None,
                     suspends,
+                    agent_id,
+                    (output_ptr_local, output_len_local),
                 );
             }
             emit_agent_invoke(

@@ -153,6 +153,7 @@ pub mod api {
     pub const WAITS: &str = "runtara:api/waits@1.0.0";
     pub const STATE: &str = "runtara:api/state@1.0.0";
     pub const CONNECTIONS: &str = "runtara:api/connections@1.0.0";
+    pub const OPERATIONS: &str = "runtara:api/operations@1.0.0";
     /// The interfaces workflow logic imports in place of
     /// `runtara:workflow/runtime`.
     pub const RUNTIME_REPLACEMENTS: [&str; 7] =
@@ -246,13 +247,9 @@ pub fn agent_package(id: &str, shape: AgentShape) -> String {
              ) -> result<{result}, error-info>;\n\
          }}\n"
     );
+    // Suspending and control agents read their operation from their input
+    // and reach the host over the workflow API: neither imports anything.
     wit.push_str("\nworld agent {\n");
-    if shape.suspendable {
-        wit.push_str(&format!("    import {};\n", agent::CONTINUATION));
-    }
-    if shape.control {
-        wit.push_str(&format!("    import {};\n", control::API));
-    }
     wit.push_str(&format!("    export {interface};\n"));
     if shape.trusted {
         wit.push_str(&format!("    export {};\n", trusted::EXECUTION));

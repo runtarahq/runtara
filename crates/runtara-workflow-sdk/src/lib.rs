@@ -190,7 +190,15 @@ mod transport {
             let _ = trailers_tx.write(Ok(None)).await;
         };
         let (response, ()) = join(client::send(request), write).await;
-        let response = response.map_err(|error| Error::Transport(format!("{error:?}")))?;
+        let response = response.map_err(|error| match error {
+            // The host does not serve this store the workflow API: the call
+            // is refused, as an import the store was not linked would be.
+            ErrorCode::HttpRequestDenied => Error::Api(runtara_workflow_api::ApiError::new(
+                runtara_workflow_api::ErrorCode::Denied,
+                "the workflow API is not available in this context",
+            )),
+            error => Error::Transport(format!("{error:?}")),
+        })?;
         let status = response.get_status_code();
         let headers = response
             .get_headers()

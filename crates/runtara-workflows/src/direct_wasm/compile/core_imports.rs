@@ -46,6 +46,8 @@ pub(super) struct DirectCoreImportIndices {
     pub(super) connection_resolver_describe_async: Option<u32>,
     /// Set when the lookup is `runtara:api/connections.describe`.
     pub(super) connection_describe_moves: Option<super::api_shims::DescribeMoves>,
+    /// Where the operation shims keep the entered operation.
+    pub(super) operation_cell: Option<i32>,
     stdlib_init_manifest: Option<u32>,
     stdlib_value_store_retain_scoped: Option<u32>,
     stdlib_value_store_scope: Option<u32>,
@@ -113,6 +115,7 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_state_error: Option<u32>,
     /// `stdlib.api-error-json`, which the waits and state shims call.
     pub(super) stdlib_api_error_json: Option<u32>,
+    stdlib_agent_operation_input: Option<u32>,
     stdlib_ai_wait_tool_signal_id: Option<u32>,
     stdlib_ai_wait_tool_result: Option<u32>,
     stdlib_embed_workflow_cache_key: Option<u32>,
@@ -239,6 +242,8 @@ impl DirectCoreImportIndices {
                 has_connections,
             )?,
             connection_describe_moves: self.connection_describe_moves,
+            operation_cell: self.operation_cell,
+            stdlib_agent_operation_input: self.stdlib_agent_operation_input,
             runtime_custom_event: require_runtime(
                 self.runtime_custom_event,
                 "runtime.custom-event",
@@ -804,6 +809,10 @@ pub(super) struct DirectCoreFunctionIndices {
     pub(super) connection_resolver_describe_async: u32,
     /// Moves the lookup's `runtara:api` answer into the old layout.
     pub(super) connection_describe_moves: Option<super::api_shims::DescribeMoves>,
+    /// The entered operation's cell, on the workflow API ABI.
+    pub(super) operation_cell: Option<i32>,
+    /// `stdlib.agent-operation-input`, which hands it to the Agent.
+    pub(super) stdlib_agent_operation_input: Option<u32>,
     pub(super) runtime_custom_event: u32,
     pub(super) runtime_debug_mode_enabled: u32,
     pub(super) runtime_breakpoint_pause: u32,
@@ -1443,6 +1452,8 @@ pub(super) fn import_core_function(
         import_indices.stdlib_state_error = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "api-error-json") {
         import_indices.stdlib_api_error_json = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "agent-operation-input") {
+        import_indices.stdlib_agent_operation_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-wait-tool-signal-id") {
         import_indices.stdlib_ai_wait_tool_signal_id = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-wait-tool-result") {

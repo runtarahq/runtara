@@ -748,7 +748,9 @@ impl WorkflowExecutor {
                     .map_or(StandaloneTrust::Unpinned, StandaloneTrust::Pinned),
                 None => StandaloneTrust::Denied,
             };
-            if let Err(error) = launches.begin_standalone(binding.clone(), trust) {
+            // A run without a host was never granted control.
+            let control = crate::api_launches::StandaloneControl::Denied;
+            if let Err(error) = launches.begin_standalone(binding.clone(), trust, control) {
                 tracing::warn!(%error, "the store is not served the workflow API");
                 return None;
             }

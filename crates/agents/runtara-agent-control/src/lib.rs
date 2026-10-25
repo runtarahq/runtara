@@ -29,6 +29,14 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// A control failure as the `#[capability]` JSON error envelope.
+/// The operation a mutation runs in, which the compiler puts in its input
+/// (`_operation`) from the step's entered operation. The host refuses a
+/// mutation that names none, or one the run has not entered.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OperationRef {
+    pub id: String,
+}
+
 fn control_error(code: ErrorCode, message: &str, retry_after_ms: Option<u64>) -> String {
     runtara_control_contract::agent_error(code, message, retry_after_ms).to_string()
 }
@@ -564,6 +572,11 @@ pub async fn list_pending_signals(
 #[serde(rename_all = "camelCase")]
 #[capability_input(display_name = "Send Signal Input")]
 pub struct SendSignalInput {
+    /// The operation this mutation runs in, filled by the compiler; never
+    /// part of the capability's inputs.
+    #[field(skip)]
+    #[serde(default, rename = "_operation")]
+    pub _operation: Option<OperationRef>,
     #[field(
         display_name = "Instance ID",
         description = "The waiting run: a child or ancestor of this run, or any run whose request opted in with action.key"
@@ -611,6 +624,11 @@ pub struct SendSignalOutput {
 #[serde(rename_all = "camelCase")]
 #[capability_input(display_name = "Cancel Run Input")]
 pub struct CancelInput {
+    /// The operation this mutation runs in, filled by the compiler; never
+    /// part of the capability's inputs.
+    #[field(skip)]
+    #[serde(default, rename = "_operation")]
+    pub _operation: Option<OperationRef>,
     #[field(
         display_name = "Instance ID",
         description = "A direct child of this run"
@@ -635,6 +653,11 @@ pub struct CancelInput {
 #[serde(rename_all = "camelCase")]
 #[capability_input(display_name = "Run Input")]
 pub struct RunInput {
+    /// The operation this mutation runs in, filled by the compiler; never
+    /// part of the capability's inputs.
+    #[field(skip)]
+    #[serde(default, rename = "_operation")]
+    pub _operation: Option<OperationRef>,
     #[field(
         display_name = "Instance ID",
         description = "A direct child of this run"
@@ -684,6 +707,11 @@ impl runtara_dsl::agent_meta::EnumVariants for ParentClosePolicyNames {
 #[serde(rename_all = "camelCase")]
 #[capability_input(display_name = "Start Child Run Input")]
 pub struct StartInput {
+    /// The operation this mutation runs in, filled by the compiler; never
+    /// part of the capability's inputs.
+    #[field(skip)]
+    #[serde(default, rename = "_operation")]
+    pub _operation: Option<OperationRef>,
     #[field(
         display_name = "Workflow ID",
         description = "Id of the workflow to start (not its slug)"
@@ -886,7 +914,7 @@ pub async fn cancel(input: CancelInput) -> Result<CommandOutput, String> {
 )]
 pub async fn pause(input: RunInput) -> Result<CommandOutput, String> {
     require_id("instanceId", &input.instance_id)?;
-    host::pause(input.instance_id).await
+    host::pause(input).await
 }
 
 #[capability(
@@ -917,7 +945,7 @@ pub async fn pause(input: RunInput) -> Result<CommandOutput, String> {
 )]
 pub async fn resume(input: RunInput) -> Result<CommandOutput, String> {
     require_id("instanceId", &input.instance_id)?;
-    host::resume(input.instance_id).await
+    host::resume(input).await
 }
 
 #[capability(
@@ -968,109 +996,229 @@ pub async fn start(input: StartInput) -> Result<StartOutput, String> {
     host::start(input, args).await
 }
 
-/// Host control calls. Real only for a run's own entry.
+/// Host control calls over the workflow API's `/v1/instances`. Real only for
+/// a run's own entry; a mutation names the operation it runs in.
 #[cfg(target_arch = "wasm32")]
 mod host {
     use super::ErrorCode;
-    use crate::bindings::runtara::control::{api, types};
+    use runtara_workflow_api::ControlCall;
+    use serde::Deserialize;
+    use serde_json::{Value, json};
 
-    fn control_error(error: types::ControlError) -> String {
-        let code = match error.code {
-            types::ErrorCode::Denied => ErrorCode::Denied,
-            types::ErrorCode::Invalid => ErrorCode::Invalid,
-            types::ErrorCode::NotFound => ErrorCode::NotFound,
-            types::ErrorCode::NotRunnable => ErrorCode::NotRunnable,
-            types::ErrorCode::NotChild => ErrorCode::NotChild,
-            types::ErrorCode::RequiresInstance => ErrorCode::RequiresInstance,
-            types::ErrorCode::RequiresOperation => ErrorCode::RequiresOperation,
-            types::ErrorCode::Capacity => ErrorCode::Capacity,
-            types::ErrorCode::ReplayConflict => ErrorCode::ReplayConflict,
-            types::ErrorCode::LabelConflict => ErrorCode::LabelConflict,
-            types::ErrorCode::TooLarge => ErrorCode::TooLarge,
-            types::ErrorCode::Unavailable => ErrorCode::Unavailable,
-            types::ErrorCode::Unsupported => ErrorCode::Unsupported,
-            types::ErrorCode::NotWaiting => ErrorCode::NotWaiting,
-            types::ErrorCode::Ambiguous => ErrorCode::Ambiguous,
-            types::ErrorCode::AlreadyAnswered => ErrorCode::AlreadyAnswered,
-            types::ErrorCode::NotPausable => ErrorCode::NotPausable,
-            types::ErrorCode::NotPaused => ErrorCode::NotPaused,
-            types::ErrorCode::Timeout => ErrorCode::Timeout,
-        };
-        super::control_error(code, &error.message, error.retry_after_ms)
-    }
-
-    fn json(bytes: Option<Vec<u8>>) -> Option<serde_json::Value> {
-        bytes.and_then(|bytes| serde_json::from_slice(&bytes).ok())
-    }
-
-    fn status_name(status: types::InstanceStatus) -> &'static str {
-        match status {
-            types::InstanceStatus::Queued => "queued",
-            types::InstanceStatus::Pending => "pending",
-            types::InstanceStatus::Running => "running",
-            types::InstanceStatus::Suspended => "suspended",
-            types::InstanceStatus::Completed => "completed",
-            types::InstanceStatus::Failed => "failed",
-            types::InstanceStatus::Cancelled => "cancelled",
-            types::InstanceStatus::NotStarted => "not_started",
+    /// The one `/v1/instances` call each capability makes.
+    mod api {
+        pub async fn call(
+            call: runtara_workflow_api::ControlCall,
+            operation: Option<&str>,
+        ) -> Result<serde_json::Value, String> {
+            runtara_workflow_sdk::control(&call, operation)
+                .await
+                .map_err(super::control_error)
         }
     }
 
-    /// In [`super::STATUSES`] order.
-    const WIT_STATUSES: [types::InstanceStatus; 8] = [
-        types::InstanceStatus::Queued,
-        types::InstanceStatus::Pending,
-        types::InstanceStatus::Running,
-        types::InstanceStatus::Suspended,
-        types::InstanceStatus::Completed,
-        types::InstanceStatus::Failed,
-        types::InstanceStatus::Cancelled,
-        types::InstanceStatus::NotStarted,
-    ];
-
-    fn summary(instance: types::InstanceSummary) -> super::RunSummary {
-        super::RunSummary {
-            instance_id: instance.instance_id,
-            workflow_id: instance.workflow_id,
-            version: instance.version,
-            run_label: instance.run_label,
-            parent_instance_id: instance.parent_instance_id,
-            status: status_name(instance.status).into(),
-            suspension_reason: instance.suspension_reason.map(|reason| {
-                match reason {
-                    types::SuspensionReason::Paused => "paused",
-                    types::SuspensionReason::WaitingSignal => "waiting_signal",
-                    types::SuspensionReason::WaitingInstances => "waiting_instances",
-                    types::SuspensionReason::Sleeping => "sleeping",
-                    types::SuspensionReason::Shutdown => "shutdown",
-                }
-                .into()
-            }),
-            termination_reason: instance.termination_reason,
-            created_at_ms: instance.created_at_ms,
-            started_at_ms: instance.started_at_ms,
-            finished_at_ms: instance.finished_at_ms,
+    /// A control failure keeps its WIT code; anything else (the run lost its
+    /// lease, the API is unreachable) is `unavailable`.
+    fn control_error(error: runtara_workflow_sdk::Error) -> String {
+        match error {
+            runtara_workflow_sdk::Error::Api(error) => {
+                let code = ErrorCode::ALL
+                    .into_iter()
+                    .find(|code| code.wit_name() == error.code.as_str())
+                    .unwrap_or(ErrorCode::Unavailable);
+                super::control_error(code, &error.message, error.retry_after_ms)
+            }
+            runtara_workflow_sdk::Error::Transport(message) => {
+                super::control_error(ErrorCode::Unavailable, &message, None)
+            }
         }
+    }
+
+    fn answer<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
+        serde_json::from_value(value).map_err(|error| {
+            super::control_error(
+                ErrorCode::Unavailable,
+                &format!("unexpected control answer: {error}"),
+                None,
+            )
+        })
+    }
+
+    /// A JSON field that carries a value, or nothing.
+    fn present(value: Value) -> Option<Value> {
+        (!value.is_null()).then_some(value)
+    }
+
+    /// The API spells cases in camelCase, the agent in snake case.
+    fn snake(name: String) -> String {
+        let mut out = String::with_capacity(name.len() + 2);
+        for c in name.chars() {
+            if c.is_ascii_uppercase() {
+                out.push('_');
+                out.push(c.to_ascii_lowercase());
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    fn camel(name: &str) -> String {
+        let mut parts = name.split('_');
+        let mut out = parts.next().unwrap_or_default().to_string();
+        for part in parts {
+            let mut chars = part.chars();
+            if let Some(first) = chars.next() {
+                out.push(first.to_ascii_uppercase());
+                out.extend(chars);
+            }
+        }
+        out
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Summary {
+        instance_id: String,
+        workflow_id: String,
+        version: Option<u32>,
+        run_label: Option<String>,
+        parent_instance_id: Option<String>,
+        status: String,
+        suspension_reason: Option<String>,
+        termination_reason: Option<String>,
+        created_at_ms: u64,
+        started_at_ms: Option<u64>,
+        finished_at_ms: Option<u64>,
+    }
+
+    impl From<Summary> for super::RunSummary {
+        fn from(summary: Summary) -> Self {
+            Self {
+                instance_id: summary.instance_id,
+                workflow_id: summary.workflow_id,
+                version: summary.version,
+                run_label: summary.run_label,
+                parent_instance_id: summary.parent_instance_id,
+                status: snake(summary.status),
+                suspension_reason: summary.suspension_reason.map(snake),
+                termination_reason: summary.termination_reason,
+                created_at_ms: summary.created_at_ms,
+                started_at_ms: summary.started_at_ms,
+                finished_at_ms: summary.finished_at_ms,
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Terminal {
+        output: Value,
+        output_bytes: Option<u64>,
+        output_omitted: bool,
+        error: Value,
+        error_omitted: bool,
+    }
+
+    #[derive(Deserialize)]
+    struct Detail {
+        instance: Summary,
+        terminal: Terminal,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StateRead {
+        instance: Summary,
+        state: Value,
+        state_updated_at_ms: Option<u64>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Page {
+        items: Vec<Summary>,
+        total: u64,
+        next_page_token: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Pending {
+        instance_id: String,
+        workflow_id: String,
+        signal_id: String,
+        request_id: String,
+        action_key: Option<String>,
+        response_schema: Value,
+        context: Value,
+        requested_at_ms: u64,
+        deadline_ms: Option<u64>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct PendingPage {
+        items: Vec<Pending>,
+        next_page_token: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Command {
+        instance_id: String,
+        outcome: String,
+        replayed: bool,
+    }
+
+    fn command(value: Value) -> Result<super::CommandOutput, String> {
+        let command: Command = answer(value)?;
+        Ok(super::CommandOutput {
+            instance_id: command.instance_id,
+            outcome: snake(command.outcome),
+            replayed: command.replayed,
+        })
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Signalled {
+        request_id: String,
+        replayed: bool,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Started {
+        instance_id: String,
+        workflow_id: String,
+        version: u32,
+        run_label: Option<String>,
+        replayed: bool,
+    }
+
+    fn operation(operation: &Option<super::OperationRef>) -> Option<&str> {
+        operation.as_ref().map(|operation| operation.id.as_str())
     }
 
     pub(super) async fn get(instance_id: String) -> Result<super::GetOutput, String> {
-        let detail = api::get(instance_id).await.map_err(control_error)?;
+        let detail: Detail = answer(api::call(ControlCall::Get(instance_id), None).await?)?;
         let terminal = detail.terminal;
         Ok(super::GetOutput {
-            instance: summary(detail.instance),
-            output: json(terminal.output),
+            instance: detail.instance.into(),
+            output: present(terminal.output),
             output_bytes: terminal.output_bytes,
             output_omitted: terminal.output_omitted,
-            error: json(terminal.error),
+            error: present(terminal.error),
             error_omitted: terminal.error_omitted,
         })
     }
 
     pub(super) async fn get_state(instance_id: String) -> Result<super::GetStateOutput, String> {
-        let read = api::get_state(instance_id).await.map_err(control_error)?;
+        let read: StateRead = answer(api::call(ControlCall::GetState(instance_id), None).await?)?;
         Ok(super::GetStateOutput {
-            instance: summary(read.instance),
-            state: json(read.state),
+            instance: read.instance.into(),
+            state: present(read.state),
             state_updated_at_ms: read.state_updated_at_ms,
         })
     }
@@ -1080,39 +1228,35 @@ mod host {
         args: super::QueryArgs,
     ) -> Result<super::QueryOutput, String> {
         let parent = if input.caller_children {
-            Some(types::ParentFilter::Caller)
+            json!("caller")
         } else {
-            input.parent_instance_id.map(types::ParentFilter::Instance)
+            input
+                .parent_instance_id
+                .map_or(Value::Null, |id| json!({"instance": id}))
         };
-        let page = api::query(types::QueryRequest {
-            workflow_id: input.workflow_id,
-            run_label: input.run_label,
-            statuses: args.statuses.into_iter().map(|i| WIT_STATUSES[i]).collect(),
-            parent,
-            created_after_ms: input.created_after_ms,
-            created_before_ms: input.created_before_ms,
-            finished_after_ms: input.finished_after_ms,
-            finished_before_ms: input.finished_before_ms,
-            state: input
-                .state
-                .map(|filters| serde_json::to_vec(&filters).expect("JSON values serialize")),
-            sort_by: if args.by_finished {
-                types::SortField::FinishedAt
-            } else {
-                types::SortField::CreatedAt
-            },
-            order: if args.ascending {
-                types::SortOrder::Ascending
-            } else {
-                types::SortOrder::Descending
-            },
-            page_size: super::page_size(input.page_size),
-            page_token: input.page_token,
-        })
-        .await
-        .map_err(control_error)?;
+        let statuses: Vec<String> = args
+            .statuses
+            .into_iter()
+            .map(|i| camel(super::STATUSES[i]))
+            .collect();
+        let request = json!({
+            "workflowId": input.workflow_id,
+            "runLabel": input.run_label,
+            "statuses": statuses,
+            "parent": parent,
+            "createdAfterMs": input.created_after_ms,
+            "createdBeforeMs": input.created_before_ms,
+            "finishedAfterMs": input.finished_after_ms,
+            "finishedBeforeMs": input.finished_before_ms,
+            "state": input.state,
+            "sortBy": if args.by_finished { "finishedAt" } else { "createdAt" },
+            "order": if args.ascending { "ascending" } else { "descending" },
+            "pageSize": super::page_size(input.page_size),
+            "pageToken": input.page_token,
+        });
+        let page: Page = answer(api::call(ControlCall::Query(request), None).await?)?;
         Ok(super::QueryOutput {
-            items: page.items.into_iter().map(summary).collect(),
+            items: page.items.into_iter().map(Into::into).collect(),
             total: page.total,
             next_page_token: page.next_page_token,
         })
@@ -1122,19 +1266,20 @@ mod host {
         input: super::ListPendingSignalsInput,
         scope: super::SignalScope,
     ) -> Result<super::ListPendingSignalsOutput, String> {
-        let page = api::list_pending_signals(types::PendingSignalsRequest {
-            scope: match scope {
-                super::SignalScope::Instance(id) => types::SignalScope::Instance(id),
-                super::SignalScope::Workflow(id) => types::SignalScope::Workflow(id),
-                super::SignalScope::Children => types::SignalScope::Children,
-            },
-            signal_id: input.signal_id,
-            action_key: input.action_key,
-            page_size: super::page_size(input.page_size),
-            page_token: input.page_token,
-        })
-        .await
-        .map_err(control_error)?;
+        let scope = match scope {
+            super::SignalScope::Instance(id) => json!({"instance": id}),
+            super::SignalScope::Workflow(id) => json!({"workflow": id}),
+            super::SignalScope::Children => json!("children"),
+        };
+        let request = json!({
+            "scope": scope,
+            "signalId": input.signal_id,
+            "actionKey": input.action_key,
+            "pageSize": super::page_size(input.page_size),
+            "pageToken": input.page_token,
+        });
+        let page: PendingPage =
+            answer(api::call(ControlCall::PendingSignals(request), None).await?)?;
         Ok(super::ListPendingSignalsOutput {
             items: page
                 .items
@@ -1145,8 +1290,8 @@ mod host {
                     signal_id: signal.signal_id,
                     request_id: signal.request_id,
                     action_key: signal.action_key,
-                    response_schema: json(signal.response_schema),
-                    context: json(signal.context),
+                    response_schema: present(signal.response_schema),
+                    context: present(signal.context),
                     requested_at_ms: signal.requested_at_ms,
                     deadline_ms: signal.deadline_ms,
                 })
@@ -1155,34 +1300,17 @@ mod host {
         })
     }
 
-    fn command(result: types::CommandResult) -> super::CommandOutput {
-        super::CommandOutput {
-            instance_id: result.instance_id,
-            outcome: match result.outcome {
-                types::CommandOutcome::Requested => "requested",
-                types::CommandOutcome::Applied => "applied",
-                types::CommandOutcome::Unchanged => "unchanged",
-                types::CommandOutcome::AlreadyTerminal => "already_terminal",
-            }
-            .into(),
-            replayed: result.replayed,
-        }
-    }
-
     pub(super) async fn send_signal(
         input: super::SendSignalInput,
     ) -> Result<super::SendSignalOutput, String> {
-        let payload = serde_json::to_vec(&input.payload)
-            .map_err(|_| super::invalid("payload must be JSON".into()))?;
-        let result = api::send_signal(types::SendSignalRequest {
-            instance_id: input.instance_id,
-            signal_id: input.signal_id,
-            action_key: input.action_key,
-            request_id: input.request_id,
-            payload,
-        })
-        .await
-        .map_err(control_error)?;
+        let request = json!({
+            "signalId": input.signal_id,
+            "actionKey": input.action_key,
+            "requestId": input.request_id,
+            "payload": input.payload,
+        });
+        let call = ControlCall::SendSignal(input.instance_id, request);
+        let result: Signalled = answer(api::call(call, operation(&input._operation)).await?)?;
         Ok(super::SendSignalOutput {
             request_id: result.request_id,
             replayed: result.replayed,
@@ -1190,28 +1318,19 @@ mod host {
     }
 
     pub(super) async fn cancel(input: super::CancelInput) -> Result<super::CommandOutput, String> {
-        api::cancel(types::CancelRequest {
-            instance_id: input.instance_id,
-            reason: input.reason,
-            grace_ms: input.grace_ms,
-        })
-        .await
-        .map(command)
-        .map_err(control_error)
+        let request = json!({"reason": input.reason, "graceMs": input.grace_ms});
+        let call = ControlCall::Cancel(input.instance_id, request);
+        command(api::call(call, operation(&input._operation)).await?)
     }
 
-    pub(super) async fn pause(instance_id: String) -> Result<super::CommandOutput, String> {
-        api::pause(instance_id)
-            .await
-            .map(command)
-            .map_err(control_error)
+    pub(super) async fn pause(input: super::RunInput) -> Result<super::CommandOutput, String> {
+        let call = ControlCall::Pause(input.instance_id);
+        command(api::call(call, operation(&input._operation)).await?)
     }
 
-    pub(super) async fn resume(instance_id: String) -> Result<super::CommandOutput, String> {
-        api::resume(instance_id)
-            .await
-            .map(command)
-            .map_err(control_error)
+    pub(super) async fn resume(input: super::RunInput) -> Result<super::CommandOutput, String> {
+        let call = ControlCall::Resume(input.instance_id);
+        command(api::call(call, operation(&input._operation)).await?)
     }
 
     pub(super) async fn start(
@@ -1219,18 +1338,20 @@ mod host {
         args: super::StartArgs,
     ) -> Result<super::StartOutput, String> {
         use runtara_control_contract::ParentClosePolicy;
-        let result = api::start(types::StartRequest {
-            workflow_id: input.workflow_id,
-            version: input.version,
-            input: args.input,
-            run_label: input.run_label,
-            parent_close_policy: match args.policy {
-                ParentClosePolicy::Cancel => types::ParentClosePolicy::Cancel,
-                ParentClosePolicy::LeaveRunning => types::ParentClosePolicy::LeaveRunning,
+        let start_input: Value = serde_json::from_slice(&args.input)
+            .map_err(|_| super::invalid("input must be JSON".into()))?;
+        let request = json!({
+            "workflowId": input.workflow_id,
+            "version": input.version,
+            "input": start_input,
+            "runLabel": input.run_label,
+            "parentClosePolicy": match args.policy {
+                ParentClosePolicy::Cancel => "cancel",
+                ParentClosePolicy::LeaveRunning => "leaveRunning",
             },
-        })
-        .await
-        .map_err(control_error)?;
+        });
+        let call = ControlCall::Start(request);
+        let result: Started = answer(api::call(call, operation(&input._operation)).await?)?;
         Ok(super::StartOutput {
             instance_id: result.instance_id,
             workflow_id: result.workflow_id,
@@ -1285,11 +1406,11 @@ mod host {
         Err(unavailable())
     }
 
-    pub(super) async fn pause(_instance_id: String) -> Result<super::CommandOutput, String> {
+    pub(super) async fn pause(_input: super::RunInput) -> Result<super::CommandOutput, String> {
         Err(unavailable())
     }
 
-    pub(super) async fn resume(_instance_id: String) -> Result<super::CommandOutput, String> {
+    pub(super) async fn resume(_input: super::RunInput) -> Result<super::CommandOutput, String> {
         Err(unavailable())
     }
 
@@ -1669,6 +1790,7 @@ mod tests {
                 instance_id: "child".into(),
                 reason: None,
                 grace_ms: Some(grace),
+                _operation: None,
             }))
         };
         assert!(
@@ -1680,6 +1802,7 @@ mod tests {
         assert!(cancel_with(0).unwrap_err().contains("CONTROL_UNAVAILABLE"));
         let empty = || RunInput {
             instance_id: String::new(),
+            _operation: None,
         };
         for error in [
             futures_lite_block_on(pause(empty())).unwrap_err(),

@@ -375,7 +375,8 @@ fn control_sites_import_the_operation_scope_even_when_not_durable() {
         let result = compile(graph, WorkflowRole::Root).expect("compiles");
         let (world, logic) = world_and_logic(&result);
         assert!(
-            world.contains(&format!("import {};", runtara_wit::workflow::OPERATION)),
+            // The default (workflow API) ABI names operations explicitly.
+            world.contains(&format!("import {};", runtara_wit::api::OPERATIONS)),
             "durable={durable}: {world}"
         );
         assert!(
@@ -386,10 +387,7 @@ fn control_sites_import_the_operation_scope_even_when_not_durable() {
             contains(&logic, b"AGENT_OPERATION_SCOPE"),
             "durable={durable}"
         );
-        assert!(contains(
-            &logic,
-            runtara_wit::workflow::OPERATION.as_bytes()
-        ));
+        assert!(contains(&logic, runtara_wit::api::OPERATIONS.as_bytes()));
     }
 }
 

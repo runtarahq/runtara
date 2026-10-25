@@ -66,7 +66,7 @@ pub struct LaunchSlot {
     /// A launch outside any run (an agent test call, an isolated child): it
     /// is served the connection, HTTP, SQL and trusted endpoints, and nothing
     /// that needs a run. `None` for a run's launch.
-    standalone: Option<StandaloneTrust>,
+    standalone: Option<(StandaloneTrust, StandaloneControl)>,
     /// Instance waits this launch registered whose last read was pending.
     /// A suspension it posts wakes on them too, as the old ABI's host
     /// attached them to the run's result.
@@ -174,7 +174,12 @@ impl ApiLaunches {
     /// such as an agent's test invocation, which reaches only the endpoints
     /// that need no run. `trust` decides its trusted calls, as the caller's
     /// own store would have.
-    pub fn begin_standalone(&self, binding: Binding, trust: StandaloneTrust) -> Result<(), String> {
+    pub fn begin_standalone(
+        &self,
+        binding: Binding,
+        trust: StandaloneTrust,
+        control: StandaloneControl,
+    ) -> Result<(), String> {
         let mut slots = self.slots.lock().expect("workflow API launches poisoned");
         if slots.contains_key(&binding.launch_id) {
             return Err(format!(
@@ -209,7 +214,7 @@ impl ApiLaunches {
                 resolver: std::sync::OnceLock::new(),
                 operations: Mutex::default(),
                 fault: Mutex::default(),
-                standalone: Some(trust),
+                standalone: Some((trust, control)),
                 pending_waits: Mutex::default(),
             }),
         );
@@ -1041,12 +1046,28 @@ impl WorkflowApiBackend for Backend {
             ),
             None => None,
         };
+        // Control acts as the binding's run; a standalone launch has none,
+        // and only an agent test call acts for its tenant without one.
+        let caller = match slot.standalone.as_ref().map(|(_, control)| control) {
+            None => Some(binding.instance_id.clone()),
+            Some(StandaloneControl::Tenant) => None,
+            Some(StandaloneControl::Denied) => {
+                return Err(ApiError::new(
+                    ErrorCode::Denied,
+                    "control is not available in this context",
+                ));
+            }
+        };
+        // A host without control refuses, as its host-linked calls did.
         let host = self.0.control.get().cloned().ok_or_else(|| {
-            ApiError::new(ErrorCode::Unavailable, "no control service is configured")
+            ApiError::new(
+                ErrorCode::Denied,
+                "control is not available in this context",
+            )
         })?;
         let authority = ControlAuthority {
             tenant: binding.tenant_id.clone(),
-            caller: Some(binding.instance_id.clone()),
+            caller,
             operation,
         };
         control_host::json::dispatch(host.as_ref(), &authority, call)
@@ -1085,7 +1106,7 @@ impl WorkflowApiBackend for Backend {
         })?;
         // A run's calls are bound by its artifact's pins; a standalone
         // launch's by the trust its store had.
-        let (pins, launch) = match &slot.standalone {
+        let (pins, launch) = match slot.standalone.as_ref().map(|(trust, _)| trust) {
             None => (
                 Some(slot.controls.trusted_pins.as_ref()),
                 self.runtime(binding)?.trusted_launch(),
@@ -1126,6 +1147,16 @@ pub enum StandaloneTrust {
     /// Bound by the calling artifact's trusted pins (an isolated child).
     Pinned(Arc<std::collections::HashSet<String>>),
     /// No trusted execution, as for a store given no trusted executor.
+    Denied,
+}
+
+/// What a standalone launch may do through `/v1/instances`.
+#[derive(Clone, Copy, Debug)]
+pub enum StandaloneControl {
+    /// Act for the tenant with no calling run (agent test calls, as their
+    /// host-linked path did): reads, and mutations the service refuses.
+    Tenant,
+    /// No control, as for a run that was not granted it.
     Denied,
 }
 
@@ -1365,7 +1396,9 @@ mod tests {
                 launch_id: id.into(),
                 ..binding(0)
             };
-            launches.begin_standalone(binding.clone(), trust).unwrap();
+            launches
+                .begin_standalone(binding.clone(), trust, StandaloneControl::Denied)
+                .unwrap();
             binding
         };
         let pinned = standalone("pinned", StandaloneTrust::Pinned(Arc::default()));
