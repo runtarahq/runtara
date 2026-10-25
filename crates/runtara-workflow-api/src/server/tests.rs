@@ -949,3 +949,129 @@ async fn an_answer_too_large_to_keep_is_not_replayed() {
     let (status, _, body) = send(&app, http_call("small", Some(meta), "ok")).await;
     assert_eq!((status, &body[..]), (StatusCode::OK, &b"ok"[..]));
 }
+
+/// Answers every control call with what it was asked, so routing is visible.
+struct Control;
+
+#[async_trait]
+impl WorkflowApiBackend for Control {
+    async fn launch_state(&self, _: &Binding) -> Result<LaunchState, ApiError> {
+        Ok(LaunchState::Active)
+    }
+    async fn run_info(&self, _: &Binding) -> Result<RunInfo, ApiError> {
+        unreachable!()
+    }
+    async fn run_input(&self, _: &Binding) -> Result<Vec<u8>, ApiError> {
+        unreachable!()
+    }
+    async fn post_outcome(&self, _: &Binding, _: PostedOutcome) -> Result<(), ApiError> {
+        unreachable!()
+    }
+    async fn set_deadline(&self, _: &Binding, _: u64) -> Result<(), ApiError> {
+        unreachable!()
+    }
+    async fn control(
+        &self,
+        _: &Binding,
+        operation: Option<&str>,
+        call: crate::ControlCall,
+    ) -> Result<serde_json::Value, ApiError> {
+        let (target, body) = match &call {
+            crate::ControlCall::Get(id)
+            | crate::ControlCall::GetState(id)
+            | crate::ControlCall::Pause(id)
+            | crate::ControlCall::Resume(id) => (Some(id.clone()), serde_json::Value::Null),
+            crate::ControlCall::SendSignal(id, body) | crate::ControlCall::Cancel(id, body) => {
+                (Some(id.clone()), body.clone())
+            }
+            crate::ControlCall::Start(body)
+            | crate::ControlCall::Query(body)
+            | crate::ControlCall::PendingSignals(body) => (None, body.clone()),
+        };
+        Ok(serde_json::json!({
+            "call": call.name(),
+            "mutation": call.is_mutation(),
+            "target": target,
+            "operation": operation,
+            "body": body,
+        }))
+    }
+}
+
+#[tokio::test]
+async fn control_calls_route_to_their_names_with_the_operation() {
+    let app = router(WorkflowApiState {
+        backend: Arc::new(Control),
+        receipts: Arc::new(MemoryReceiptStore::default()),
+        caps: Caps::default(),
+    });
+    let answer = |body: &Bytes| serde_json::from_slice::<serde_json::Value>(body).unwrap();
+
+    let (status, _, body) = send(
+        &app,
+        request("GET", "/v1/instances/i-1")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(answer(&body)["call"], "get");
+    assert_eq!(answer(&body)["target"], "i-1");
+
+    let (_, _, body) = send(
+        &app,
+        request("GET", "/v1/instances/i-1/state")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(answer(&body)["call"], "get-state");
+
+    for (path, name) in [
+        ("/v1/instances/query", "query"),
+        ("/v1/instances/signals/pending", "list-pending-signals"),
+        ("/v1/instances", "start"),
+    ] {
+        let (status, _, body) = send(&app, write("POST", path, name, r#"{"x":1}"#)).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_eq!(answer(&body)["call"], name);
+        assert_eq!(answer(&body)["body"], serde_json::json!({"x": 1}));
+    }
+
+    let signal = request("POST", "/v1/instances/i-2/signals")
+        .header(headers::IDEMPOTENCY_KEY, "sig")
+        .header(headers::OPERATION, "op-1")
+        .body(Body::from(r#"{"signalId":"s"}"#))
+        .unwrap();
+    let (_, _, body) = send(&app, signal).await;
+    let body = answer(&body);
+    assert_eq!(
+        (
+            body["call"].as_str(),
+            body["target"].as_str(),
+            body["operation"].as_str()
+        ),
+        (Some("send-signal"), Some("i-2"), Some("op-1"))
+    );
+
+    // An empty cancel body is allowed; pause and resume take none.
+    for (path, name) in [
+        ("/v1/instances/i-3/cancel", "cancel"),
+        ("/v1/instances/i-3/pause", "pause"),
+        ("/v1/instances/i-3/resume", "resume"),
+    ] {
+        let (status, _, body) = send(&app, write("POST", path, name, "")).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_eq!(answer(&body)["call"], name);
+        assert_eq!(answer(&body)["mutation"], true);
+        assert_eq!(answer(&body)["operation"], serde_json::Value::Null);
+    }
+
+    let (status, _, body) = send(
+        &app,
+        write("POST", "/v1/instances/query", "bad", "{not json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_code(&body), "invalid");
+}

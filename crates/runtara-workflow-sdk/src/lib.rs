@@ -710,3 +710,48 @@ pub async fn release_operation(operation_id: &str) -> Result<(), Error> {
     .await
     .map(|_| ())
 }
+
+/// `/v1/instances`: run a control call, inside the entered `operation` when
+/// it changes another run. The answer is the call's JSON result.
+pub async fn control(
+    call: &runtara_workflow_api::ControlCall,
+    operation: Option<&str>,
+) -> Result<serde_json::Value, Error> {
+    use runtara_workflow_api::ControlCall;
+    let instance = |id: &str| key_path("/v1/instances", id);
+    let (method, path, body) = match call {
+        ControlCall::Start(body) => ("POST", "/v1/instances".to_string(), Some(body)),
+        ControlCall::Get(id) => ("GET", instance(id), None),
+        ControlCall::GetState(id) => ("GET", format!("{}/state", instance(id)), None),
+        ControlCall::Query(body) => ("POST", "/v1/instances/query".to_string(), Some(body)),
+        ControlCall::PendingSignals(body) => (
+            "POST",
+            "/v1/instances/signals/pending".to_string(),
+            Some(body),
+        ),
+        ControlCall::SendSignal(id, body) => {
+            ("POST", format!("{}/signals", instance(id)), Some(body))
+        }
+        ControlCall::Cancel(id, body) => ("POST", format!("{}/cancel", instance(id)), Some(body)),
+        ControlCall::Pause(id) => ("POST", format!("{}/pause", instance(id)), None),
+        ControlCall::Resume(id) => ("POST", format!("{}/resume", instance(id)), None),
+    };
+    let mut headers = vec![("content-type", "application/json")];
+    if let Some(operation) = operation {
+        headers.push((runtara_workflow_api::headers::OPERATION, operation));
+    }
+    let response = call_json(method, &path, &headers, body).await?;
+    serde_json::from_slice(&response.body).map_err(|e| Error::Transport(format!("control: {e}")))
+}
+
+async fn call_json(
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<&serde_json::Value>,
+) -> Result<Response, Error> {
+    let body = body
+        .filter(|body| !body.is_null())
+        .map(|body| body.to_string().into_bytes());
+    call(method, path, headers, body).await
+}

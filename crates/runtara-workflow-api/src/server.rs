@@ -46,6 +46,7 @@ pub enum LaunchState {
 pub use crate::PostedOutcome;
 
 mod connections;
+mod control;
 mod runtime;
 pub use crate::{CustomSignalNotice, Event, LifecycleNotice};
 pub use connections::OutboundReply;
@@ -298,6 +299,18 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
         let _ = (binding, key);
         Err(unsupported_service("published state"))
     }
+
+    /// Run a control call for the run, inside the entered `operation` the
+    /// request names, if any. The result is the call's JSON answer.
+    async fn control(
+        &self,
+        binding: &Binding,
+        operation: Option<&str>,
+        call: crate::ControlCall,
+    ) -> Result<serde_json::Value, ApiError> {
+        let _ = (binding, operation, call);
+        Err(unsupported_service("control calls"))
+    }
 }
 
 fn unsupported_service(service: &str) -> ApiError {
@@ -449,6 +462,18 @@ pub fn router(state: WorkflowApiState) -> Router {
             post(connections::post_sql),
         )
         .route("/v1/http", post(connections::post_http))
+        .route("/v1/instances", post(control::post_start))
+        .route("/v1/instances/query", post(control::post_query))
+        .route(
+            "/v1/instances/signals/pending",
+            post(control::post_pending_signals),
+        )
+        .route("/v1/instances/{id}", get(control::get_instance))
+        .route("/v1/instances/{id}/state", get(control::get_instance_state))
+        .route("/v1/instances/{id}/signals", post(control::post_signal))
+        .route("/v1/instances/{id}/cancel", post(control::post_cancel))
+        .route("/v1/instances/{id}/pause", post(control::post_pause))
+        .route("/v1/instances/{id}/resume", post(control::post_resume))
         .route(
             "/v1/state/{key}",
             get(runtime::get_state).patch(runtime::patch_state),

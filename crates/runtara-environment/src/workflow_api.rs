@@ -19,6 +19,7 @@ use bytes::Bytes;
 use runtara_component_host::connection_resolver_host::{
     ConnectionResolverHost, RunConnectionResolver, resolver_for_run,
 };
+use runtara_component_host::control_host::{self, ControlAuthority, ControlHost};
 use runtara_component_host::database_host::{Operation, database_for_run};
 use runtara_component_host::instance_wait_host::{
     InstanceWaitAuthority, InstanceWaitError, InstanceWaitPoll, InstanceWaitRequest,
@@ -41,8 +42,8 @@ use runtara_workflow_api::server::{
     ReceiptStore, WorkflowApiBackend, WorkflowApiState, router,
 };
 use runtara_workflow_api::{
-    ApiError, Binding, Caps, ErrorCode, InputRead, OutboundDestination, OutboundFailure,
-    OutboundMeta, PostedOutcome, RunInfo, SqlOperation,
+    ApiError, Binding, Caps, ControlCall, ErrorCode, InputRead, OutboundDestination,
+    OutboundFailure, OutboundMeta, PostedOutcome, RunInfo, SqlOperation,
 };
 use tower::ServiceExt;
 
@@ -76,6 +77,8 @@ pub struct ApiLaunches {
     pub(crate) outbound_http: std::sync::OnceLock<Arc<dyn OutboundHttpHost>>,
     pub(crate) database: std::sync::OnceLock<Arc<dyn DatabaseHost>>,
     pub(crate) connection_resolver: std::sync::OnceLock<Arc<dyn ConnectionResolverHost>>,
+    /// The control service the runner gives the old ABI as well.
+    pub(crate) control: std::sync::OnceLock<Arc<dyn ControlHost>>,
 }
 
 impl Default for ApiLaunches {
@@ -88,6 +91,7 @@ impl Default for ApiLaunches {
             outbound_http: std::sync::OnceLock::new(),
             database: std::sync::OnceLock::new(),
             connection_resolver: std::sync::OnceLock::new(),
+            control: std::sync::OnceLock::new(),
         }
     }
 }
@@ -830,6 +834,41 @@ impl WorkflowApiBackend for Backend {
                 .map_err(host_error)?;
         }
         Ok(())
+    }
+
+    /// The run acts as itself: the binding's tenant and instance, and an
+    /// operation only when this launch entered it and has not left it.
+    async fn control(
+        &self,
+        binding: &Binding,
+        operation: Option<&str>,
+        call: ControlCall,
+    ) -> Result<serde_json::Value, ApiError> {
+        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
+        let operation = match operation {
+            Some(id) => Some(
+                slot.operations
+                    .lock()
+                    .expect("operations poisoned")
+                    .get(id)
+                    .map(|identity| identity.op_hash.clone())
+                    .ok_or_else(|| {
+                        ApiError::new(ErrorCode::NotFound, "no such entered operation")
+                    })?,
+            ),
+            None => None,
+        };
+        let host = self.0.control.get().cloned().ok_or_else(|| {
+            ApiError::new(ErrorCode::Unavailable, "no control service is configured")
+        })?;
+        let authority = ControlAuthority {
+            tenant: binding.tenant_id.clone(),
+            caller: Some(binding.instance_id.clone()),
+            operation,
+        };
+        control_host::json::dispatch(host.as_ref(), &authority, call)
+            .await
+            .map_err(|error| control_host::json::api_error(&error))
     }
 }
 

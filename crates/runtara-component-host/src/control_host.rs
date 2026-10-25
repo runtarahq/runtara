@@ -63,6 +63,9 @@ impl ControlError {
     }
 }
 
+/// JSON forms of these records for the workflow API.
+pub mod json;
+
 /// Who a control call acts for. Only the host fills it in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlAuthority {

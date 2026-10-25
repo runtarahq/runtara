@@ -776,11 +776,18 @@ impl EmbeddedWasmRunner {
         Ok(self)
     }
 
-    /// Attach the control service behind every run's `runtara:control/api`.
+    /// Attach the control service behind every run's `runtara:control/api`
+    /// and the workflow API's `/v1/instances`.
     pub fn with_control_host(
         self,
         host: Arc<dyn runtara_component_host::control_host::ControlHost>,
     ) -> Result<Self> {
+        self.workflow_api
+            .control
+            .set(Arc::clone(&host))
+            .map_err(|_| {
+                RunnerError::Other("control host already configured for the workflow API".into())
+            })?;
         self.executor
             .set_control_host(host)
             .map_err(|e| RunnerError::Other(e.to_string()))?;

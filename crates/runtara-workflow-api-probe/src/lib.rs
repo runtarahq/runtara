@@ -5,8 +5,9 @@
 //! It reads its run and input over the API and posts an outcome chosen by
 //! `data.mode`: `complete` (default) echoes `data` with the run's identity,
 //! `fail` posts a failure, `suspend` posts a timed wake, `durable` exercises
-//! checkpoints, time, heartbeat and events, `state` published state, and `spin` and
-//! `trap` never post one (they loop forever or abort).
+//! checkpoints, time, heartbeat and events, `state` published state, `control`
+//! the control calls, and `spin` and `trap` never post one (they loop forever
+//! or abort).
 
 #[cfg(target_arch = "wasm32")]
 mod probe {
@@ -205,6 +206,71 @@ mod probe {
                             "first": first.map(|state| String::from_utf8_lossy(&state).into_owned()),
                             "loaded": loaded.map(|state| String::from_utf8_lossy(&state).into_owned()),
                             "refused": refused,
+                        }))
+                        .map_err(|_| ())?,
+                    )
+                }
+                Some("control") => {
+                    use runtara_workflow_api::ControlCall;
+                    let code = |error: runtara_workflow_sdk::Error| {
+                        error.code().map(|code| code.as_str().to_string())
+                    };
+                    let key =
+                        r#"runtara:v2:["agent","probe",[],[],["probe-agent","start","step-1"]]"#;
+                    let (op, _) = runtara_workflow_sdk::enter_operation(key, 1, false)
+                        .await
+                        .map_err(|_| ())?;
+                    let started = runtara_workflow_sdk::control(
+                        &ControlCall::Start(json!({
+                            "workflowId": "child-wf",
+                            "input": {"data": {"n": 1}, "variables": {}},
+                            "parentClosePolicy": "cancel",
+                        })),
+                        Some(&op),
+                    )
+                    .await
+                    .map_err(|_| ())?;
+                    let child = started["instanceId"].as_str().ok_or(())?.to_string();
+                    let detail =
+                        runtara_workflow_sdk::control(&ControlCall::Get(child.clone()), None)
+                            .await
+                            .map_err(|_| ())?;
+                    let page = runtara_workflow_sdk::control(
+                        &ControlCall::Query(json!({"parent": "caller", "statuses": ["running"]})),
+                        None,
+                    )
+                    .await
+                    .map_err(|_| ())?;
+                    let outside =
+                        runtara_workflow_sdk::control(&ControlCall::Pause(child.clone()), None)
+                            .await
+                            .err()
+                            .and_then(code);
+                    let stranger = runtara_workflow_sdk::control(
+                        &ControlCall::Pause(child.clone()),
+                        Some(&"0".repeat(64)),
+                    )
+                    .await
+                    .err()
+                    .and_then(code);
+                    let not_child = runtara_workflow_sdk::control(
+                        &ControlCall::Cancel("someone-else".into(), Value::Null),
+                        Some(&op),
+                    )
+                    .await
+                    .err()
+                    .and_then(code);
+                    runtara_workflow_sdk::exit_operation(&op, false)
+                        .await
+                        .map_err(|_| ())?;
+                    PostedOutcome::Completed(
+                        serde_json::to_vec(&json!({
+                            "started": started,
+                            "detail": detail,
+                            "page": page,
+                            "outside": outside,
+                            "stranger": stranger,
+                            "notChild": not_child,
                         }))
                         .map_err(|_| ())?,
                     )

@@ -1524,3 +1524,220 @@ async fn workflow_api_operations_keep_their_continuation() {
     assert_eq!(output["loaded"], "saved");
     assert_eq!(output["refused"], "agent-invalid-suspension");
 }
+
+mod workflow_api_control {
+    use super::*;
+    use runtara_component_host::control_host::{
+        CancelRequest, CommandOutcome, CommandResult, ControlAuthority, ControlError,
+        ControlErrorCode, ControlHost, InstanceDetail, InstancePage, InstanceStatus,
+        InstanceSummary, QueryRequest, StartRequest, StartResult, TerminalResult,
+    };
+    use std::sync::Mutex;
+
+    /// A control service with today's mutation rules (a mutation needs an
+    /// operation; only `child-1` is a child), recording who each call was for.
+    #[derive(Default)]
+    struct Control {
+        calls: Mutex<Vec<(&'static str, ControlAuthority)>>,
+        started: Mutex<Option<StartRequest>>,
+    }
+
+    fn summary(id: &str) -> InstanceSummary {
+        InstanceSummary {
+            instance_id: id.into(),
+            workflow_id: "child-wf".into(),
+            version: Some(1),
+            run_label: None,
+            parent_instance_id: Some("parent".into()),
+            status: InstanceStatus::Running,
+            suspension_reason: None,
+            termination_reason: None,
+            created_at_ms: 1,
+            started_at_ms: Some(2),
+            finished_at_ms: None,
+        }
+    }
+
+    impl Control {
+        fn record(&self, call: &'static str, authority: &ControlAuthority) {
+            self.calls.lock().unwrap().push((call, authority.clone()));
+        }
+        fn mutation(&self, authority: &ControlAuthority, target: &str) -> Result<(), ControlError> {
+            if authority.operation.is_none() {
+                return Err(ControlError::new(
+                    ControlErrorCode::RequiresOperation,
+                    "needs an operation",
+                ));
+            }
+            if target != "child-1" {
+                return Err(ControlError::new(ControlErrorCode::NotChild, "not a child"));
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ControlHost for Control {
+        async fn start(
+            &self,
+            authority: &ControlAuthority,
+            request: StartRequest,
+        ) -> Result<StartResult, ControlError> {
+            self.record("start", authority);
+            self.mutation(authority, "child-1")?;
+            *self.started.lock().unwrap() = Some(request);
+            Ok(StartResult {
+                instance_id: "child-1".into(),
+                workflow_id: "child-wf".into(),
+                version: 1,
+                run_label: None,
+                replayed: false,
+            })
+        }
+        async fn get(
+            &self,
+            authority: &ControlAuthority,
+            instance_id: String,
+        ) -> Result<InstanceDetail, ControlError> {
+            self.record("get", authority);
+            Ok(InstanceDetail {
+                instance: summary(&instance_id),
+                terminal: TerminalResult {
+                    output: None,
+                    output_bytes: None,
+                    output_omitted: false,
+                    error: None,
+                    error_omitted: false,
+                },
+            })
+        }
+        async fn query(
+            &self,
+            authority: &ControlAuthority,
+            request: QueryRequest,
+        ) -> Result<InstancePage, ControlError> {
+            self.record("query", authority);
+            assert_eq!(request.statuses, vec![InstanceStatus::Running]);
+            Ok(InstancePage {
+                items: vec![summary("child-1")],
+                total: 1,
+                next_page_token: None,
+            })
+        }
+        async fn cancel(
+            &self,
+            authority: &ControlAuthority,
+            request: CancelRequest,
+        ) -> Result<CommandResult, ControlError> {
+            self.record("cancel", authority);
+            self.mutation(authority, &request.instance_id)?;
+            Ok(CommandResult {
+                instance_id: request.instance_id,
+                outcome: CommandOutcome::Requested,
+                replayed: false,
+            })
+        }
+        async fn pause(
+            &self,
+            authority: &ControlAuthority,
+            instance_id: String,
+        ) -> Result<CommandResult, ControlError> {
+            self.record("pause", authority);
+            self.mutation(authority, &instance_id)?;
+            Ok(CommandResult {
+                instance_id,
+                outcome: CommandOutcome::Applied,
+                replayed: false,
+            })
+        }
+    }
+
+    /// Control calls over the workflow API reach the runner's control service
+    /// as the run itself: the binding's tenant and instance, and the operation
+    /// only when the run entered it. Control refusals keep their codes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_api_control_calls_act_as_the_run() {
+        let h = harness().await;
+        let control = Arc::new(Control::default());
+        let runner = EmbeddedWasmRunner::new(
+            WorkflowRunnerConfig {
+                data_dir: h.dir.path().join("control"),
+                default_timeout: Duration::from_secs(30),
+                skip_cert_verification: false,
+            },
+            Arc::clone(&h.persistence),
+        )
+        .unwrap()
+        .with_in_process_precompiler_for_tests()
+        .with_control_host(control.clone())
+        .unwrap();
+        let probe = workflow_api_probe();
+        let inst_id = unique("inst-workflow-api-control");
+        let input =
+            serde_json::to_vec(&serde_json::json!({"data": {"mode": "control"}, "variables": {}}))
+                .unwrap();
+        assert!(
+            h.persistence
+                .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+                .await
+                .expect("register instance")
+        );
+        let handle = runner
+            .try_launch_detached(&options(inst_id.as_str(), &probe))
+            .await
+            .expect("launch");
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            runner.wait_for_exit(&handle, Duration::from_millis(50)),
+        )
+        .await
+        .expect("wait_for_exit hung");
+        let instance = h
+            .persistence
+            .get_instance(inst_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            instance.status,
+            runtara_core::domain::InstanceStatus::Completed,
+            "{instance:?}"
+        );
+        let output: serde_json::Value =
+            serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+        assert_eq!(output["started"]["instanceId"], "child-1");
+        assert_eq!(output["detail"]["instance"]["status"], "running");
+        assert_eq!(output["page"]["items"][0]["instanceId"], "child-1");
+        assert_eq!(output["page"]["total"], 1);
+        assert_eq!(output["outside"], "requires-operation");
+        assert_eq!(output["stranger"], "not-found");
+        assert_eq!(output["notChild"], "not-child");
+
+        let started = control.started.lock().unwrap().clone().expect("start");
+        assert_eq!(started.workflow_id, "child-wf");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&started.input).unwrap(),
+            serde_json::json!({"data": {"n": 1}, "variables": {}})
+        );
+        let calls = control.calls.lock().unwrap();
+        let names: Vec<_> = calls.iter().map(|(name, _)| *name).collect();
+        // The stranger operation never reaches the service.
+        assert_eq!(names, ["start", "get", "query", "pause", "cancel"]);
+        let operation = calls[0]
+            .1
+            .operation
+            .clone()
+            .expect("start runs in the operation");
+        for (name, authority) in calls.iter() {
+            assert_eq!(authority.tenant, "embedded-test", "{name}");
+            assert_eq!(
+                authority.caller.as_deref(),
+                Some(inst_id.as_str()),
+                "{name}"
+            );
+        }
+        assert_eq!(calls[1].1.operation, None);
+        assert_eq!(calls[3].1.operation, None, "pause went without one");
+        assert_eq!(calls[4].1.operation.as_ref(), Some(&operation));
+    }
+}

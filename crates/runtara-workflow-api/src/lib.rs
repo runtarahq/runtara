@@ -14,6 +14,7 @@
 
 mod binding;
 mod connections;
+mod control;
 mod error;
 pub mod headers;
 mod keys;
@@ -27,6 +28,7 @@ pub use binding::Binding;
 pub use connections::{
     ConnectionTarget, OutboundDestination, OutboundFailure, OutboundMeta, SqlOperation,
 };
+pub use control::ControlCall;
 pub use error::{ApiError, ErrorCode};
 pub use keys::{IdempotencyKeyError, decode_path_key, encode_path_key, validate_idempotency_key};
 pub use run::{ErrorInfo, OutcomeKind, PostedOutcome, RunInfo, Suspension};
