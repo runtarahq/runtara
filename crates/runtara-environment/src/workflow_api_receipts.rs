@@ -49,8 +49,8 @@ fn unavailable(error: sqlx::Error) -> ApiError {
 #[async_trait]
 impl ReceiptStore for PostgresReceiptStore {
     async fn get(&self, launch_id: &str, key: &str) -> Result<Option<Receipt>, ApiError> {
-        let row: Option<(Vec<u8>, i16, serde_json::Value, Vec<u8>)> = sqlx::query_as(
-            "SELECT request_hash, status, headers, body FROM workflow_api_receipts \
+        let row: Option<(Vec<u8>, i16, serde_json::Value, Vec<u8>, bool)> = sqlx::query_as(
+            "SELECT request_hash, status, headers, body, body_omitted FROM workflow_api_receipts \
              WHERE launch_id = $1 AND idempotency_key = $2",
         )
         .bind(launch_id)
@@ -58,7 +58,7 @@ impl ReceiptStore for PostgresReceiptStore {
         .fetch_optional(&self.pool)
         .await
         .map_err(unavailable)?;
-        let Some((hash, status, headers, body)) = row else {
+        let Some((hash, status, headers, body, body_omitted)) = row else {
             return Ok(None);
         };
         let request_hash: [u8; 32] = hash
@@ -71,6 +71,7 @@ impl ReceiptStore for PostgresReceiptStore {
             status: u16::try_from(status).unwrap_or(500),
             headers,
             body,
+            body_omitted,
         }))
     }
 
@@ -79,8 +80,8 @@ impl ReceiptStore for PostgresReceiptStore {
             .map_err(|e| ApiError::new(ErrorCode::Unavailable, e.to_string()))?;
         sqlx::query(
             "INSERT INTO workflow_api_receipts \
-             (launch_id, idempotency_key, request_hash, status, headers, body) \
-             VALUES ($1, $2, $3, $4, $5, $6) \
+             (launch_id, idempotency_key, request_hash, status, headers, body, body_omitted) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) \
              ON CONFLICT (launch_id, idempotency_key) DO NOTHING",
         )
         .bind(launch_id)
@@ -89,6 +90,7 @@ impl ReceiptStore for PostgresReceiptStore {
         .bind(i16::try_from(receipt.status).unwrap_or(500))
         .bind(headers)
         .bind(&receipt.body)
+        .bind(receipt.body_omitted)
         .execute(&self.pool)
         .await
         .map(|_| ())

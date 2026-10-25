@@ -35,6 +35,7 @@ fn receipt(byte: u8, body: &[u8]) -> Receipt {
         status: 204,
         headers: vec![("content-type".into(), "application/json".into())],
         body: body.to_vec(),
+        body_omitted: false,
     }
 }
 
@@ -155,4 +156,14 @@ async fn a_retry_after_a_restart_gets_the_stored_answer() {
     assert_eq!(response.status(), 409);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     assert!(String::from_utf8_lossy(&body).contains("replay-conflict"));
+}
+
+#[tokio::test]
+async fn an_omitted_body_is_stored_as_omitted() {
+    let (store, _) = store().await;
+    let launch = fresh_launch();
+    let mut omitted = receipt(3, b"");
+    omitted.body_omitted = true;
+    store.put(&launch, "big", omitted.clone()).await.unwrap();
+    assert_eq!(store.get(&launch, "big").await.unwrap(), Some(omitted));
 }

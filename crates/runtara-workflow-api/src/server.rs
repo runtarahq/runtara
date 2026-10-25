@@ -314,6 +314,9 @@ pub struct Receipt {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    /// The answer's body was over [`Caps::receipt_body_bytes`] and was not
+    /// kept; the call ran, but its answer cannot be replayed.
+    pub body_omitted: bool,
 }
 
 /// Idempotency receipts, kept for the life of a launch.
@@ -611,6 +614,13 @@ async fn idempotency(
     let hash = request_hash(&parts.method, &uri, &parts.headers, &body);
 
     match state.receipts.get(&binding.launch_id, &key).await {
+        Ok(Some(receipt)) if receipt.request_hash == hash && receipt.body_omitted => {
+            return error_response(&ApiError::domain(
+                "not-replayable",
+                ErrorCode::ReplayConflict,
+                "this request already ran; its answer was too large to keep for a replay",
+            ));
+        }
         Ok(Some(receipt)) if receipt.request_hash == hash => return receipt_response(&receipt),
         Ok(Some(_)) => {
             return error_response(&ApiError::new(
@@ -634,6 +644,7 @@ async fn idempotency(
         }
     };
     if keep_receipt(parts.status) {
+        let body_omitted = body.len() > state.caps.receipt_body_bytes;
         let receipt = Receipt {
             request_hash: hash,
             status: parts.status.as_u16(),
@@ -644,7 +655,12 @@ async fn idempotency(
                     Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
                 })
                 .collect(),
-            body: body.to_vec(),
+            body: if body_omitted {
+                Vec::new()
+            } else {
+                body.to_vec()
+            },
+            body_omitted,
         };
         if let Err(error) = state.receipts.put(&binding.launch_id, &key, receipt).await {
             return error_response(&error);

@@ -924,3 +924,28 @@ async fn sql_operations_are_query_execute_and_batch() {
     );
     assert_eq!(error_code(&body), "unsupported");
 }
+
+#[tokio::test]
+async fn an_answer_too_large_to_keep_is_not_replayed() {
+    let app = router(WorkflowApiState {
+        backend: Arc::new(Outbound),
+        receipts: Arc::new(MemoryReceiptStore::default()),
+        caps: Caps {
+            receipt_body_bytes: 4,
+            ..Caps::default()
+        },
+    });
+    let meta =
+        r#"{"method":"POST","destination":{"connection":{"connectionId":"c","url":"https://x"}}}"#;
+    let (status, _, body) = send(&app, http_call("big", Some(meta), "a large body")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body[..], b"a large body", "the first answer is whole");
+    let (status, _, body) = send(&app, http_call("big", Some(meta), "a large body")).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&body), "not-replayable");
+    // A small answer is still replayed.
+    let (status, _, body) = send(&app, http_call("small", Some(meta), "ok")).await;
+    assert_eq!((status, &body[..]), (StatusCode::OK, &b"ok"[..]));
+    let (status, _, body) = send(&app, http_call("small", Some(meta), "ok")).await;
+    assert_eq!((status, &body[..]), (StatusCode::OK, &b"ok"[..]));
+}

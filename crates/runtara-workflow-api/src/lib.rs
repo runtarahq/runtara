@@ -81,6 +81,10 @@ pub struct Caps {
     pub event_batch_lines: usize,
     pub metadata_header_bytes: usize,
     pub long_poll_ms: u64,
+    /// Largest response body an idempotency receipt keeps. A retry of a call
+    /// whose answer was larger is refused as `not-replayable` instead of
+    /// running again, so receipts stay small however large the answers.
+    pub receipt_body_bytes: usize,
 }
 
 impl Default for Caps {
@@ -96,6 +100,7 @@ impl Default for Caps {
             event_batch_lines: 1000,
             metadata_header_bytes: 32 * 1024,
             long_poll_ms: 30_000,
+            receipt_body_bytes: 256 * 1024,
         }
     }
 }
