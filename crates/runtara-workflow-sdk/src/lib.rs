@@ -15,6 +15,13 @@
 //! compiler composes around workflow logic export the old `runtara:*`
 //! interfaces over it. Calls are async; a synchronous export drives one with
 //! `wit_bindgen::block_on`.
+//!
+//! A call finishes all of its work before it returns: every `wit_future`
+//! writer is written inside the call's own future, and nothing is spawned.
+//! A dropped, unwritten writer delivers its default from a detached task
+//! that outlives the call, and wasmtime 46 deletes an export's task that is
+//! still working after it returned while its caller holds the subtask
+//! handle, so the caller's `subtask-drop` traps.
 
 use runtara_workflow_api::{ApiError, ErrorCode};
 
