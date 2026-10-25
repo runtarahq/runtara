@@ -106,9 +106,13 @@ wasmtime = { version = "46", default-features = false, features = [
 # workflow_api.rs). Its send hook is the one interception point.
 wasmtime-wasi = { version = "46", features = ["p3"] }
 wasmtime-wasi-http = { version = "46", features = ["p3"] }
-runtara-workflow-api = { path = "../runtara-workflow-api" }
+# `server`: the `/v1` router this host serves its runs in process
+# (api_launches.rs).
+runtara-workflow-api = { path = "../runtara-workflow-api", features = ["server"] }
 bytes = "1"
 http-body-util = "0.1"
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
 
 # Plumbing
 zeroize = "1"
@@ -136,10 +140,6 @@ testcontainers = "0.27"
 runtara-connections = { path = "../runtara-connections" }
 chrono.workspace = true
 url = "2"
-axum = "0.8"
-tower = { version = "0.5", features = ["util"] }
-# The real `/v1` router behind the workflow API entry tests.
-runtara-workflow-api = { path = "../runtara-workflow-api", features = ["server"] }
 # Standard composition in cancellation integration fixtures.
 wac-graph = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "test-util"] }

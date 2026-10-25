@@ -10,6 +10,7 @@ extern crate self as runtara_component_host;
 #[path = "../tests/common/outbound.rs"]
 mod outbound_test_fixture;
 
+pub mod api_launches;
 pub mod bindings;
 mod cleanup_alarm;
 pub mod connection_resolver_host;

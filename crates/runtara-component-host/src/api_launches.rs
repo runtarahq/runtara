@@ -1,10 +1,10 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The workflow API for runs of the embedded runner.
+//! The workflow API served in process, for runs of this host's executor.
 //!
 //! A run on the workflow API ABI (`wasi:cli/run`) reaches its host over
 //! `wasi:http`; the component host routes those requests to the `/v1` router
-//! with the run's binding (see `runtara_component_host::workflow_api`). This
+//! with the run's binding (see `crate::workflow_api`). This
 //! module is what the router serves them from: [`ApiLaunches`] holds every
 //! launch currently serving the API in this process, registered by its
 //! runtime host when the entry starts and removed when the host takes the
@@ -13,30 +13,28 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
-use async_trait::async_trait;
-use axum::body::{Body, to_bytes};
-use bytes::Bytes;
-use runtara_component_host::connection_resolver_host::{
+use crate::connection_resolver_host::{
     ConnectionResolverHost, RunConnectionResolver, resolver_for_run,
 };
-use runtara_component_host::control_host::{self, ControlAuthority, ControlHost};
-use runtara_component_host::database_host::{Operation, database_for_run};
-use runtara_component_host::instance_wait_host::{
+use crate::control_host::{self, ControlAuthority, ControlHost};
+use crate::database_host::{Operation, database_for_run};
+use crate::instance_wait_host::{
     InstanceWaitAuthority, InstanceWaitError, InstanceWaitPoll, InstanceWaitRequest,
     InstanceWaitResolution, wait_instances_id,
 };
-use runtara_component_host::operation_scope_host::{OperationIdentity, parse_agent_operation_key};
-use runtara_component_host::outbound_http::{
-    ConnectionDestination, Destination, RequestOptions, send_bounded,
-};
-use runtara_component_host::run_state_host::{
+use crate::operation_scope_host::{OperationIdentity, parse_agent_operation_key};
+use crate::outbound_http::{ConnectionDestination, Destination, RequestOptions, send_bounded};
+use crate::run_state_host::{
     RunStateAuthority, RunStateError, RunStateErrorCode, RunStateHost, check_state_read_key,
     state_operation_id,
 };
-use runtara_component_host::runtime_host::{RuntimeHost, WorkflowApiControls};
-use runtara_component_host::trusted::TrustedExecutor;
-use runtara_component_host::{DatabaseHost, InstanceWaitHost, OutboundHttpHost};
-use runtara_component_host::{WorkflowApiFuture, WorkflowApiTransport};
+use crate::runtime_host::{RuntimeHost, WorkflowApiControls};
+use crate::trusted::TrustedExecutor;
+use crate::{DatabaseHost, InstanceWaitHost, OutboundHttpHost};
+use crate::{WorkflowApiFuture, WorkflowApiTransport};
+use async_trait::async_trait;
+use axum::body::{Body, to_bytes};
+use bytes::Bytes;
 use runtara_workflow_api::server::OutboundReply;
 use runtara_workflow_api::server::{
     CheckpointWrite, CustomSignalNotice, Event, LaunchState, LifecycleSignal, MemoryReceiptStore,
@@ -187,6 +185,44 @@ impl ApiLaunches {
             .take()
     }
 
+    /// Serve outbound HTTP with `service`, the one the old ABI uses.
+    pub fn set_outbound_http(&self, service: Arc<dyn OutboundHttpHost>) -> Result<(), String> {
+        self.outbound_http
+            .set(service)
+            .map_err(|_| "outbound HTTP already configured for the workflow API".to_string())
+    }
+
+    /// Serve SQL with `database`, the one the old ABI uses.
+    pub fn set_database(&self, database: Arc<dyn DatabaseHost>) -> Result<(), String> {
+        self.database
+            .set(database)
+            .map_err(|_| "database already configured for the workflow API".to_string())
+    }
+
+    /// Serve connection descriptors and resources with `resolver`.
+    pub fn set_connection_resolver(
+        &self,
+        resolver: Arc<dyn ConnectionResolverHost>,
+    ) -> Result<(), String> {
+        self.connection_resolver
+            .set(resolver)
+            .map_err(|_| "connection resolver already configured for the workflow API".to_string())
+    }
+
+    /// Serve `/v1/instances` with `host`, the control service of the old ABI.
+    pub fn set_control_host(&self, host: Arc<dyn ControlHost>) -> Result<(), String> {
+        self.control
+            .set(host)
+            .map_err(|_| "control host already configured for the workflow API".to_string())
+    }
+
+    /// Serve `/v1/trusted` with `executor`, the approved built-in executor.
+    pub fn set_trusted_executor(&self, executor: Arc<TrustedExecutor>) -> Result<(), String> {
+        self.trusted
+            .set(executor)
+            .map_err(|_| "trusted executor already configured for the workflow API".to_string())
+    }
+
     /// Serve instance waits with `host`, the one the runner gives the old ABI.
     pub fn set_instance_wait_host(&self, host: Arc<dyn InstanceWaitHost>) -> Result<(), String> {
         self.instance_waits
@@ -250,8 +286,8 @@ fn input_error(error: String) -> ApiError {
     ApiError::new(ErrorCode::Invalid, error)
 }
 
-fn input_read(state: runtara_component_host::runtime_host::RuntimeInputState) -> InputRead {
-    use runtara_component_host::runtime_host::RuntimeInputState;
+fn input_read(state: crate::runtime_host::RuntimeInputState) -> InputRead {
+    use crate::runtime_host::RuntimeInputState;
     match state {
         RuntimeInputState::Open => InputRead::Open,
         RuntimeInputState::Accepted(value) => InputRead::Accepted {
@@ -801,7 +837,7 @@ impl WorkflowApiBackend for Backend {
         body: Option<Vec<u8>>,
     ) -> Result<Result<OutboundReply, (OutboundFailure, Vec<u8>)>, ApiError> {
         self.0.slot(binding).ok_or_else(not_serving)?;
-        let host = runtara_component_host::outbound_http::for_run(
+        let host = crate::outbound_http::for_run(
             self.0.outbound_http.get(),
             Some(&binding.tenant_id),
             Some(&binding.instance_id),
@@ -952,7 +988,7 @@ impl WorkflowApiBackend for Backend {
                 &call.capability_id,
                 &call.connection_id,
                 call.input,
-                tokio::time::Instant::now() + runtara_component_host::trusted::TIME_LIMIT,
+                tokio::time::Instant::now() + crate::trusted::TIME_LIMIT,
             )
             .await
             .map_err(|envelope| trusted_error(&envelope))
@@ -994,9 +1030,7 @@ fn trusted_error(envelope: &str) -> ApiError {
     ApiError::domain("trusted-error", like, message).with_details(details)
 }
 
-fn lifecycle_signal(
-    signal: runtara_component_host::runtime_host::RuntimeSignalInfo,
-) -> LifecycleSignal {
+fn lifecycle_signal(signal: crate::runtime_host::RuntimeSignalInfo) -> LifecycleSignal {
     LifecycleSignal {
         signal_type: signal.signal_type,
         command_id: signal.command_id,
@@ -1041,7 +1075,72 @@ mod tests {
 
     /// A launch whose host is already gone: its run services are fenced.
     fn no_runtime() -> Weak<dyn RuntimeHost> {
-        Weak::<crate::runtime_host::PersistenceRuntimeHost>::new()
+        Weak::<Gone>::new()
+    }
+
+    /// Only ever behind a dangling `Weak`: never called.
+    struct Gone;
+
+    #[async_trait]
+    impl RuntimeHost for Gone {
+        fn instance_id(&self) -> Result<String, String> {
+            unreachable!()
+        }
+        async fn custom_event(&self, _: String, _: Vec<u8>) -> Result<(), String> {
+            unreachable!()
+        }
+        fn debug_mode_enabled(&self) -> Result<bool, String> {
+            unreachable!()
+        }
+        async fn breakpoint_pause(&self) -> Result<(), String> {
+            unreachable!()
+        }
+        async fn heartbeat(&self) -> Result<(), String> {
+            unreachable!()
+        }
+        async fn poll_signal(
+            &self,
+        ) -> Result<Option<crate::runtime_host::RuntimeSignalInfo>, String> {
+            unreachable!()
+        }
+        async fn is_cancelled(&self) -> Result<bool, String> {
+            unreachable!()
+        }
+        async fn check_signals(&self) -> Result<bool, String> {
+            unreachable!()
+        }
+        async fn poll_custom_signal(&self, _: String) -> Result<Option<Vec<u8>>, String> {
+            unreachable!()
+        }
+        async fn get_checkpoint(&self, _: String) -> Result<Option<Vec<u8>>, String> {
+            unreachable!()
+        }
+        async fn checkpoint(
+            &self,
+            _: String,
+            _: Vec<u8>,
+        ) -> Result<crate::runtime_host::RuntimeCheckpointResult, String> {
+            unreachable!()
+        }
+        async fn handle_checkpoint_signal(&self, _: String, _: String) -> Result<bool, String> {
+            unreachable!()
+        }
+        async fn record_retry_attempt(
+            &self,
+            _: String,
+            _: u32,
+            _: Option<String>,
+        ) -> Result<(), String> {
+            unreachable!()
+        }
+        async fn durable_sleep_checkpoint(
+            &self,
+            _: String,
+            _: Vec<u8>,
+            _: u64,
+        ) -> Result<(), String> {
+            unreachable!()
+        }
     }
 
     fn controls() -> WorkflowApiControls {

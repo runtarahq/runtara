@@ -218,7 +218,7 @@ impl Drop for TaskCompletionGuard {
 pub struct EmbeddedWasmRunner {
     config: WorkflowRunnerConfig,
     /// Launches serving the workflow API (runs on the `wasi:cli/run` ABI).
-    workflow_api: Arc<crate::workflow_api::ApiLaunches>,
+    workflow_api: Arc<runtara_component_host::api_launches::ApiLaunches>,
     scoped_agents: Option<Arc<ScopedAgentRunnerConfig>>,
     limits: WorkflowLimits,
     persistence: Arc<dyn Persistence>,
@@ -674,9 +674,11 @@ impl EmbeddedWasmRunner {
         ));
         // Runs on the workflow API ABI reach the `/v1` router in process; their
         // runtime hosts register each launch with `workflow_api`.
-        let workflow_api = Arc::new(crate::workflow_api::ApiLaunches::with_run_state(Arc::new(
-            run_state::PersistenceRunState(Arc::clone(&persistence)),
-        )));
+        let workflow_api = Arc::new(
+            runtara_component_host::api_launches::ApiLaunches::with_run_state(Arc::new(
+                run_state::PersistenceRunState(Arc::clone(&persistence)),
+            )),
+        );
         executor
             .set_workflow_api_transport(workflow_api.transport())
             .map_err(|e| RunnerError::Other(e.to_string()))?;
@@ -711,7 +713,7 @@ impl EmbeddedWasmRunner {
     }
 
     /// Launches currently serving the workflow API.
-    pub fn workflow_api_launches(&self) -> &Arc<crate::workflow_api::ApiLaunches> {
+    pub fn workflow_api_launches(&self) -> &Arc<runtara_component_host::api_launches::ApiLaunches> {
         &self.workflow_api
     }
 
@@ -729,8 +731,7 @@ impl EmbeddedWasmRunner {
         service: Arc<dyn runtara_component_host::OutboundHttpHost>,
     ) -> Result<Self> {
         self.workflow_api
-            .outbound_http
-            .set(Arc::clone(&service))
+            .set_outbound_http(Arc::clone(&service))
             .map_err(|_| {
                 RunnerError::Other("outbound_http already configured for the workflow API".into())
             })?;
@@ -746,8 +747,7 @@ impl EmbeddedWasmRunner {
         database: Arc<dyn runtara_component_host::DatabaseHost>,
     ) -> Result<Self> {
         self.workflow_api
-            .database
-            .set(Arc::clone(&database))
+            .set_database(Arc::clone(&database))
             .map_err(|_| {
                 RunnerError::Other("database already configured for the workflow API".into())
             })?;
@@ -763,8 +763,7 @@ impl EmbeddedWasmRunner {
         resolver: Arc<dyn runtara_component_host::ConnectionResolverHost>,
     ) -> Result<Self> {
         self.workflow_api
-            .connection_resolver
-            .set(Arc::clone(&resolver))
+            .set_connection_resolver(Arc::clone(&resolver))
             .map_err(|_| {
                 RunnerError::Other(
                     "connection_resolver already configured for the workflow API".into(),
@@ -783,8 +782,7 @@ impl EmbeddedWasmRunner {
         host: Arc<dyn runtara_component_host::control_host::ControlHost>,
     ) -> Result<Self> {
         self.workflow_api
-            .control
-            .set(Arc::clone(&host))
+            .set_control_host(Arc::clone(&host))
             .map_err(|_| {
                 RunnerError::Other("control host already configured for the workflow API".into())
             })?;
@@ -815,8 +813,7 @@ impl EmbeddedWasmRunner {
         executor: Arc<runtara_component_host::trusted::TrustedExecutor>,
     ) -> Result<Self> {
         self.workflow_api
-            .trusted
-            .set(Arc::clone(&executor))
+            .set_trusted_executor(Arc::clone(&executor))
             .map_err(|_| {
                 RunnerError::Other(
                     "trusted executor already configured for the workflow API".into(),

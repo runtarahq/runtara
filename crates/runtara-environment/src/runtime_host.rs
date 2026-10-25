@@ -81,7 +81,7 @@ pub struct PersistenceRuntimeHost {
     trusted_launch: runtara_component_host::trusted::TrustedLaunch,
     /// Where a run on the workflow API ABI is served from; `None` keeps the
     /// workflow API unreachable for this run.
-    workflow_api: Option<Arc<crate::workflow_api::ApiLaunches>>,
+    workflow_api: Option<Arc<runtara_component_host::api_launches::ApiLaunches>>,
 }
 
 impl Drop for PersistenceRuntimeHost {
@@ -117,7 +117,10 @@ impl PersistenceRuntimeHost {
     }
 
     /// Serve this run's workflow API requests from `launches`.
-    pub fn with_workflow_api(mut self, launches: Arc<crate::workflow_api::ApiLaunches>) -> Self {
+    pub fn with_workflow_api(
+        mut self,
+        launches: Arc<runtara_component_host::api_launches::ApiLaunches>,
+    ) -> Self {
         self.workflow_api = Some(launches);
         self
     }

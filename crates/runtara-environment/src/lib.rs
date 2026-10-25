@@ -276,7 +276,8 @@ pub mod runtime;
 pub mod runtime_host;
 
 /// The workflow API served to runs of the embedded runner.
-pub mod workflow_api;
+/// The in-process workflow API now lives in the component host.
+pub use runtara_component_host::api_launches as workflow_api;
 /// Workflow API idempotency receipts in the runtime database.
 pub mod workflow_api_receipts;
 
