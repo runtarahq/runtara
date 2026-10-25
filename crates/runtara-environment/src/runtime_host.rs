@@ -79,6 +79,9 @@ pub struct PersistenceRuntimeHost {
     tenant: tokio::sync::OnceCell<String>,
     /// The durable launch's kind, which trusted calls are judged by.
     trusted_launch: runtara_component_host::trusted::TrustedLaunch,
+    /// Where a run on the workflow API ABI is served from; `None` keeps the
+    /// workflow API unreachable for this run.
+    workflow_api: Option<Arc<crate::workflow_api::ApiLaunches>>,
 }
 
 impl PersistenceRuntimeHost {
@@ -98,7 +101,14 @@ impl PersistenceRuntimeHost {
             interrupt_guest: None,
             tenant: tokio::sync::OnceCell::new(),
             trusted_launch: Default::default(),
+            workflow_api: None,
         }
+    }
+
+    /// Serve this run's workflow API requests from `launches`.
+    pub fn with_workflow_api(mut self, launches: Arc<crate::workflow_api::ApiLaunches>) -> Self {
+        self.workflow_api = Some(launches);
+        self
     }
 
     /// Bind the root execution lease. A running host cannot be rebound to a
@@ -474,6 +484,53 @@ impl RuntimeHost for PersistenceRuntimeHost {
 
     fn instance_id(&self) -> Result<String, String> {
         Ok(self.instance_id.clone())
+    }
+
+    /// The binding comes from the root lease the launch holds: its tenant and
+    /// instance, its owner as the launch, its epoch. No lease, no API.
+    fn workflow_api_binding(&self) -> Option<runtara_workflow_api::Binding> {
+        self.workflow_api.as_ref()?;
+        let lease = self.root_lease.get()?;
+        Some(runtara_workflow_api::Binding {
+            tenant_id: lease.tenant_id.clone(),
+            instance_id: lease.instance_id.clone(),
+            launch_id: lease.owner.clone(),
+            root_lease_epoch: u64::try_from(lease.epoch).ok()?,
+        })
+    }
+
+    async fn workflow_api_begin(&self, input: Vec<u8>) -> Result<(), String> {
+        let launches = self
+            .workflow_api
+            .as_ref()
+            .ok_or("this runner does not serve the workflow API")?;
+        let binding = self
+            .workflow_api_binding()
+            .ok_or("the run holds no root lease, so it has no workflow API binding")?;
+        use runtara_component_host::trusted::TrustedLaunch;
+        let launch_kind = match self.trusted_launch {
+            TrustedLaunch::Start => "start",
+            TrustedLaunch::Wake => "wake",
+            TrustedLaunch::Resume => "resume",
+        };
+        let info = runtara_workflow_api::RunInfo {
+            instance_id: binding.instance_id.clone(),
+            tenant_id: binding.tenant_id.clone(),
+            workflow_id: None,
+            version: None,
+            attempt: None,
+            launch_kind: launch_kind.into(),
+            debug: self.debug_mode,
+            deadline_ms: None,
+            api_version: runtara_workflow_api::api_version(),
+            capability_id: None,
+        };
+        launches.begin(binding, info, input)
+    }
+
+    async fn take_workflow_api_outcome(&self) -> Option<runtara_workflow_api::PostedOutcome> {
+        let launches = self.workflow_api.as_ref()?;
+        launches.finish(&self.root_lease.get()?.owner)
     }
 
     /// Persist the terminal result through the same guarded event path the

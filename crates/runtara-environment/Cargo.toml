@@ -39,6 +39,12 @@ runtara-store-postgres = { path = "../runtara-store-postgres" }
 
 # Embedded wasmtime workflow execution (EmbeddedWasmRunner)
 runtara-component-host = { path = "../runtara-component-host", version = "9.0" }
+# The `/v1` router the embedded runner serves runs on the workflow API ABI from.
+runtara-workflow-api = { path = "../runtara-workflow-api", features = ["server"] }
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+bytes = "1"
+http = "1"
 runtara-invocation-contract = { path = "../runtara-invocation-contract", version = "9.0" }
 
 # Serialization

@@ -914,3 +914,79 @@ async fn a_supervised_run_adopts_the_lease_bound_into_its_gate() {
     assert_eq!(epoch, 4);
     assert!(!active, "the run releases the adopted lease when it ends");
 }
+
+/// The probe workflow on the workflow API ABI (`wasi:cli/run` over
+/// `wasi:http@0.3`), built by `scripts/build-agent-components.sh`.
+fn workflow_api_probe() -> PathBuf {
+    std::env::var_os("RUNTARA_WORKFLOW_API_PROBE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/wasm32-wasip2/release/runtara_workflow_api_probe.wasm")
+        })
+}
+
+/// A run on the workflow API ABI reads its input from the instance and its
+/// identity from its root lease over the API, and the outcome it posts is the
+/// persisted terminal.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflow_api_run_persists_the_outcome_it_posted() {
+    let h = harness().await;
+    let probe = workflow_api_probe();
+    assert!(
+        probe.exists(),
+        "missing {}: run scripts/build-agent-components.sh",
+        probe.display()
+    );
+    for mode in ["complete", "fail"] {
+        let inst_id = unique(&format!("inst-workflow-api-{mode}"));
+        let input = serde_json::to_vec(&serde_json::json!({
+            "data": {"mode": mode, "greeting": "hello"},
+            "variables": {}
+        }))
+        .unwrap();
+        assert!(
+            h.persistence
+                .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+                .await
+                .expect("register instance")
+        );
+        let handle = h
+            .runner
+            .try_launch_detached(&options(inst_id.as_str(), &probe))
+            .await
+            .expect("launch");
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+        )
+        .await
+        .expect("wait_for_exit hung");
+        let instance = h
+            .persistence
+            .get_instance(inst_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        if mode == "complete" {
+            assert_eq!(
+                instance.status,
+                runtara_core::domain::InstanceStatus::Completed,
+                "{instance:?}"
+            );
+            let output: serde_json::Value =
+                serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+            assert_eq!(output["instanceId"], inst_id.as_str());
+            assert_eq!(output["tenantId"], "embedded-test");
+            assert_eq!(output["echo"]["greeting"], "hello");
+        } else {
+            assert_eq!(
+                instance.status,
+                runtara_core::domain::InstanceStatus::Failed,
+                "{instance:?}"
+            );
+            let error = instance.error.as_deref().unwrap_or_default();
+            assert!(error.contains(inst_id.as_str()), "{error}");
+        }
+    }
+}

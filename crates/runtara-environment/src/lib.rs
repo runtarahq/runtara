@@ -275,6 +275,9 @@ pub mod runtime;
 /// the native replacement for the composed guest runtime's HTTP loopback.
 pub mod runtime_host;
 
+/// The workflow API served to runs of the embedded runner.
+pub mod workflow_api;
+
 /// Shared Postgres fixtures for this crate's database-backed unit tests.
 #[cfg(all(test, feature = "db-integration-tests"))]
 pub(crate) mod test_support;

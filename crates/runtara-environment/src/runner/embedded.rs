@@ -217,6 +217,8 @@ impl Drop for TaskCompletionGuard {
 /// In-process workflow runner backed by an embedded wasmtime engine.
 pub struct EmbeddedWasmRunner {
     config: WorkflowRunnerConfig,
+    /// Launches serving the workflow API (runs on the `wasi:cli/run` ABI).
+    workflow_api: Arc<crate::workflow_api::ApiLaunches>,
     scoped_agents: Option<Arc<ScopedAgentRunnerConfig>>,
     limits: WorkflowLimits,
     persistence: Arc<dyn Persistence>,
@@ -670,6 +672,12 @@ impl EmbeddedWasmRunner {
         let handler_state = Arc::new(runtara_core::instance_handlers::InstanceHandlerState::new(
             Arc::clone(&persistence),
         ));
+        // Runs on the workflow API ABI reach the `/v1` router in process; their
+        // runtime hosts register each launch with `workflow_api`.
+        let workflow_api = Arc::new(crate::workflow_api::ApiLaunches::default());
+        executor
+            .set_workflow_api_transport(workflow_api.transport())
+            .map_err(|e| RunnerError::Other(e.to_string()))?;
         let run_limit = max_concurrent_runs();
         warn_if_run_bound_exceeds_memory(run_limit);
         let preparation_limit = max_concurrent_preparations();
@@ -683,6 +691,7 @@ impl EmbeddedWasmRunner {
         }
         Ok(Self {
             config,
+            workflow_api,
             scoped_agents: None,
             limits: limits_from_env(),
             preparation_permits,
@@ -841,7 +850,8 @@ impl EmbeddedWasmRunner {
         )
         // Host authority for trusted calls under an earlier approved pin:
         // only a wake or resume of a parked run may make them.
-        .with_trusted_launch(trusted_launch(options.launch_kind));
+        .with_trusted_launch(trusted_launch(options.launch_kind))
+        .with_workflow_api(Arc::clone(&self.workflow_api));
         // Share the run's cancel flag: it is how the host stops a guest that
         // woke from an interrupted sleep and ignored the cancel, without
         // routing the cancel through the guest's catchable error channel.
