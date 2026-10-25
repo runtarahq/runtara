@@ -166,9 +166,8 @@ emit_workflow_component_meta \
 echo "==> runtara-workflow-api-probe"
 cargo build --release --target wasm32-wasip2 -p runtara-workflow-api-probe
 
-# The components the compiler composes around a workflow's logic when it
-# builds for the workflow API ABI (RUNTARA_GUEST_ABI=http): runtara:api and
-# the run shim.
+# The components the compiler composes around a workflow's logic:
+# runtara:api and the run shim.
 echo "==> workflow API adapters"
 cargo build --release --target wasm32-wasip2 -p runtara-workflow-api-run -p runtara-api-component
 emit_workflow_component_meta \

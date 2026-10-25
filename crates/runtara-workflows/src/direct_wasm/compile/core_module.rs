@@ -49,13 +49,11 @@ pub(super) struct DirectCoreConfig {
     /// so the emitter must NOT lower any `runtime.*` call. Only valid for a
     /// pure workflow (see [`Self::with_omit_runtime`]).
     pub(super) omit_runtime: bool,
-    /// On [`GuestAbi::Http`] the runtime functions are shims over
-    /// `runtara:api` imports (see `api_shims`).
-    ///
-    /// [`GuestAbi::Http`]: crate::direct_wasm::component::GuestAbi::Http
+    /// The runtime functions are shims over `runtara:api` imports (see
+    /// `api_shims`); false for a runtime-free workflow.
     pub(super) api_runtime: bool,
-    /// The logic needs the concurrent timers (`sleep`, `abort-after`); on the
-    /// workflow API ABI they come from `runtara:api/time`.
+    /// The logic needs the concurrent timers (`sleep`, `abort-after`), from
+    /// `runtara:api/time`.
     pub(super) timers: bool,
 }
 
@@ -106,19 +104,25 @@ impl DirectCoreConfig {
     ) -> Result<Self, DirectCompileError> {
         let variables_json =
             direct_core_variables_json(&manifest.graph.variables, workflow_id, manifest.version)?;
+        let run_plan = direct_run_plan(manifest)?;
+        let static_data = DirectCoreStaticData::new_with_child_workflows(
+            &manifest.graph,
+            &manifest.child_workflows,
+            manifest_json,
+            &variables_json,
+            DIRECT_EMPTY_STEPS_CONTEXT,
+        )?;
+        // The same condition the world uses to import the timers.
+        let timers = crate::direct_wasm::plan::needs_cooperative_timers(manifest)
+            || !manifest.feature_summary.agent_ids.is_empty()
+            || !super::split_parallel::parallel_agent_pools(&static_data, &run_plan).is_empty();
         Ok(Self {
             abi: crate::direct_wasm::component::WorkflowRole::default(),
             omit_runtime: false,
             api_runtime: false,
-            timers: false,
-            run_plan: direct_run_plan(manifest)?,
-            static_data: DirectCoreStaticData::new_with_child_workflows(
-                &manifest.graph,
-                &manifest.child_workflows,
-                manifest_json,
-                &variables_json,
-                DIRECT_EMPTY_STEPS_CONTEXT,
-            )?,
+            timers,
+            run_plan,
+            static_data,
             track_events,
         })
     }
@@ -211,16 +215,16 @@ pub(super) fn emit_direct_core_module(
         .imports
         .keys()
         .any(|name| agent_import_for(resolve, Some(name)).is_some());
+    // The concurrent timers are `runtara:api/time`'s; only the core-module
+    // unit tests still build the old host import.
     let host_timers = world
         .imports
         .keys()
-        .any(|name| resolve.name_world_key(name) == "runtara:host/timers@1.0.0");
+        .any(|name| resolve.name_world_key(name) == runtara_wit::host::TIMERS);
     let timers_module = if host_timers {
-        Some("runtara:host/timers@1.0.0")
-    } else if config.api_runtime && config.timers {
-        Some(runtara_wit::api::TIME)
+        Some(runtara_wit::host::TIMERS)
     } else {
-        None
+        config.timers.then_some(runtara_wit::api::TIME)
     };
     let has_async_calls = has_agents || timers_module.is_some();
     if has_async_calls {

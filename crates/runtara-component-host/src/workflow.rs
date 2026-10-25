@@ -761,7 +761,10 @@ impl WorkflowExecutor {
             };
             // A run without a host was never granted control.
             let control = crate::api_launches::StandaloneControl::Denied;
-            if let Err(error) = launches.begin_standalone(binding.clone(), trust, control) {
+            let alarm = Some(store.data().cleanup_alarm.clone());
+            if let Err(error) =
+                launches.begin_standalone_with_alarm(binding.clone(), trust, control, alarm)
+            {
                 tracing::warn!(%error, "the store is not served the workflow API");
                 return None;
             }

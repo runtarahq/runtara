@@ -166,11 +166,7 @@ fn compile_with_children(
         .unwrap();
     }
     assert!(matches!(backend, "legacy" | "live"));
-    let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_for_guest_abi(
-        input,
-        runtara_workflows::direct_wasm::GuestAbi::Http,
-    )
-    .unwrap();
+    let mut result = runtara_workflows::direct_wasm::compile_direct_workflow(input).unwrap();
     if backend == "legacy" {
         compose_direct_workflow(&mut result, components()).unwrap();
     } else {

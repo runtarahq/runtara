@@ -223,14 +223,8 @@ fn measure(
                 }]
             })
             .unwrap_or_default();
-        // Isolated packages exist only on the WIT guest ABI.
-        let guest_abi = if isolated {
-            runtara_workflows::direct_wasm::GuestAbi::Wit
-        } else {
-            runtara_workflows::direct_wasm::GuestAbi::Http
-        };
-        let mut compiled = runtara_workflows::direct_wasm::compile_direct_workflow_for_guest_abi(
-            DirectCompilationInput {
+        let mut compiled =
+            runtara_workflows::direct_wasm::compile_direct_workflow(DirectCompilationInput {
                 workflow_id: case.name.into(),
                 version: 1,
                 source_checksum: None,
@@ -240,10 +234,8 @@ fn measure(
                 track_events: case.events,
                 agent_catalog: None,
                 agent_slug: None,
-            },
-            guest_abi,
-        )
-        .unwrap();
+            })
+            .unwrap();
         emit_times.push(micros(start));
         let start = Instant::now();
         if isolated {

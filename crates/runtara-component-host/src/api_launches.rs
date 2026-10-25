@@ -180,6 +180,18 @@ impl ApiLaunches {
         trust: StandaloneTrust,
         control: StandaloneControl,
     ) -> Result<(), String> {
+        self.begin_standalone_with_alarm(binding, trust, control, None)
+    }
+
+    /// [`Self::begin_standalone`] for a workflow store without a run, which
+    /// still owns its cleanup alarm (`POST /v1/run/alarm`).
+    pub(crate) fn begin_standalone_with_alarm(
+        &self,
+        binding: Binding,
+        trust: StandaloneTrust,
+        control: StandaloneControl,
+        cleanup_alarm: Option<crate::cleanup_alarm::CleanupAlarmState>,
+    ) -> Result<(), String> {
         let mut slots = self.slots.lock().expect("workflow API launches poisoned");
         if slots.contains_key(&binding.launch_id) {
             return Err(format!(
@@ -210,7 +222,7 @@ impl ApiLaunches {
                 controls: WorkflowApiControls {
                     shorten_deadline: Arc::new(|_| {}),
                     trusted_pins: Arc::default(),
-                    cleanup_alarm: None,
+                    cleanup_alarm,
                 },
                 resolver: std::sync::OnceLock::new(),
                 operations: Mutex::default(),

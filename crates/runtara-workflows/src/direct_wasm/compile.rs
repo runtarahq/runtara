@@ -79,7 +79,6 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use runtara_dsl::ExecutionGraph;
-use runtara_wit::workflow::RUNTIME as RUNTIME_INTERFACE_NAME;
 use sha2::{Digest, Sha256};
 use wasm_encoder::{CustomSection, Encode, Function as WasmFunction, Instruction, Section};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -530,9 +529,6 @@ pub struct DirectCompilationInput {
 /// Result of opt-in direct workflow compilation.
 #[derive(Debug, Clone)]
 pub struct DirectCompilationResult {
-    /// The ABI composition builds the launched artifact for. Starts from
-    /// `RUNTARA_GUEST_ABI`; a caller may set it before composing.
-    pub guest_abi: super::component::GuestAbi,
     /// Call-site inventory generated from the same normalized manifest as code.
     /// Included in package v2 when logical Agent isolation is selected.
     pub invocation_manifest: Option<runtara_invocation_contract::InvocationManifest>,
@@ -731,21 +727,23 @@ fn compose_direct_workflow_selected(
         "compose: resolved + read component dependencies from disk",
     );
 
-    // On the workflow API ABI the logic gets its api component; a run's own
+    // Logic that imports `runtara:api` gets its api component; a run's own
     // entry is also wrapped by the run shim, while a published workflow-agent
     // keeps exporting its capabilities for its parent to compose. A
     // runtime-free root keeps its `invoke` entry: it runs without a host to
     // post to.
-    let entry = result
+    let entry = !result.omit_runtime
+        && result
+            .component_artifacts
+            .world_wit
+            .contains(&format!("export {};", runtara_wit::workflow::ENTRY));
+    let with_api = result
         .component_artifacts
         .world_wit
-        .contains(&format!("export {};", runtara_wit::workflow::ENTRY));
-    // The logic was compiled against `runtara:api` exactly when this holds.
-    let http_guest = result.guest_abi == super::component::GuestAbi::Http && !result.omit_runtime;
-    let with_api = http_guest;
+        .contains(runtara_wit::api::PREFIX);
     let mut shared_components = shared_components;
     let mut wac_source = result.component_artifacts.wac_source.clone();
-    if http_guest {
+    if entry || with_api {
         let mut adapters = if entry {
             super::component::WORKFLOW_API_ADAPTER_REQUIREMENTS.to_vec()
         } else {
@@ -1044,22 +1042,11 @@ pub fn compile_direct_workflow(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     ensure_supported_production_workflow_abi()?;
-    let guest_abi = super::component::GuestAbi::from_env().map_err(component_error)?;
-    compile_direct_workflow_for_guest_abi(input, guest_abi)
-}
-
-/// [`compile_direct_workflow`] for an explicit guest ABI instead of
-/// `RUNTARA_GUEST_ABI`.
-pub fn compile_direct_workflow_for_guest_abi(
-    input: DirectCompilationInput,
-    guest_abi: super::component::GuestAbi,
-) -> Result<DirectCompilationResult, DirectCompileError> {
     compile_direct_workflow_selected(
         input,
         super::component::WorkflowRole::Root,
         omit_runtime_from_env(),
         AgentLoweringSelection::Exact(Default::default()),
-        guest_abi,
     )
 }
 
@@ -1166,7 +1153,6 @@ pub fn compile_direct_workflow_with_abi(
         abi,
         omit_runtime,
         AgentLoweringSelection::Exact(Default::default()),
-        super::component::GuestAbi::from_env().map_err(component_error)?,
     )
 }
 
@@ -1185,7 +1171,6 @@ pub fn compile_direct_workflow_with_scoped_agents(
         abi,
         omit_runtime,
         AgentLoweringSelection::Exact(scoped_agents),
-        super::component::GuestAbi::from_env().map_err(component_error)?,
     )
 }
 
@@ -1194,7 +1179,6 @@ fn compile_direct_workflow_selected(
     abi: super::component::WorkflowRole,
     omit_runtime: bool,
     selection: AgentLoweringSelection,
-    guest_abi: super::component::GuestAbi,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     let span = tracing::Span::current();
     let handle = std::thread::Builder::new()
@@ -1202,7 +1186,7 @@ fn compile_direct_workflow_selected(
         .stack_size(DIRECT_COMPILE_STACK_SIZE)
         .spawn(move || {
             let _span = span.entered();
-            compile_direct_workflow_inner(input, abi, omit_runtime, selection, guest_abi)
+            compile_direct_workflow_inner(input, abi, omit_runtime, selection)
         })
         .map_err(DirectCompileError::Io)?;
     match handle.join() {
@@ -1216,7 +1200,6 @@ fn compile_direct_workflow_inner(
     abi: super::component::WorkflowRole,
     omit_runtime_requested: bool,
     selection: AgentLoweringSelection,
-    guest_abi: super::component::GuestAbi,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
     // The agent catalog is supplied by the caller (the server passes the
     // runtime catalog loaded from component `meta.json`). When absent, the
@@ -1322,10 +1305,11 @@ fn compile_direct_workflow_inner(
     // runs inside its caller's instance and keeps local state, like an
     // embedded child.
     manifest.configure_run_state(abi == super::component::WorkflowRole::Root, !omit_runtime);
-    // Both a run's own entry and a published workflow-agent are built for
-    // the workflow API ABI: the agent composes its own (stateless) api
-    // component and runs in its caller's launch.
-    let api_runtime = guest_abi == super::component::GuestAbi::Http && !omit_runtime;
+    // The runtime is `runtara:api`'s, for a run's own entry and a published
+    // workflow-agent alike: the agent composes its own (stateless) api
+    // component and runs in its caller's launch. A runtime-free workflow
+    // imports no runtime; its timers and connections are `runtara:api`'s too.
+    let api_runtime = !omit_runtime;
     let manifest_json = manifest.to_canonical_json()?;
     let support_json = serde_json::to_vec(&support_report)?;
     let (wasm, parallel_pools) = emit_direct_artifact(
@@ -1404,7 +1388,6 @@ fn compile_direct_workflow_inner(
     fs::write(&wac_path, &component_artifacts.wac_source)?;
 
     Ok(DirectCompilationResult {
-        guest_abi,
         invocation_manifest: if scoped_agents.is_empty() {
             None
         } else {
@@ -1516,7 +1499,7 @@ fn emit_direct_component(
     scoped_agents: &std::collections::BTreeSet<String>,
     api_runtime: bool,
 ) -> Result<(Vec<u8>, std::collections::BTreeMap<String, u32>), DirectCompileError> {
-    let mut core_config =
+    let core_config =
         DirectCoreConfig::new_with_workflow_id(manifest, manifest_json, track_events, workflow_id)?
             .with_abi(abi)
             .with_omit_runtime(omit_runtime)
@@ -1527,10 +1510,6 @@ fn emit_direct_component(
     let parallel_pools =
         split_parallel::parallel_agent_pools(&core_config.static_data, &core_config.run_plan);
     let has_connections = core_config.static_data.has_connections();
-    // The same condition the world uses to import the timers.
-    core_config.timers = super::plan::needs_cooperative_timers(manifest)
-        || !parallel_pools.is_empty()
-        || !manifest.feature_summary.agent_ids.is_empty();
     let (resolve, world) = build_direct_component_resolve_with_waits(
         &manifest.feature_summary.agent_ids,
         abi,
@@ -1670,11 +1649,9 @@ fn build_direct_component_resolve_with_waits(
     let operation_scope = operation_scope || !suspending_agents.is_empty();
     // Every runtara package, once; the world below imports only what it names.
     let mut resolve = runtara_wit::resolve().map_err(component_error)?;
-    if api_runtime {
-        resolve
-            .push_str("runtara-api.wit", runtara_wit::api::WIT)
-            .map_err(component_error)?;
-    }
+    resolve
+        .push_str("runtara-api.wit", runtara_wit::api::WIT)
+        .map_err(component_error)?;
     // Every workflow exports its entry as an agent package: a published
     // workflow-agent under its slug, a top-level run under the reserved entry
     // id. The reserved-slug check at save time guarantees the export package
@@ -1724,27 +1701,34 @@ fn build_direct_component_resolve_with_waits(
              import {};\n",
         runtara_wit::stdlib::JSON
     );
+    // Everything the logic reaches is `runtara:api`'s: the runtime (unless
+    // the workflow is runtime-free), connections, timers, operations, waits
+    // and state. Only the core-module unit tests still build the old host
+    // imports (`legacy`), until they are ported.
+    let legacy = !api_runtime && !omit_runtime;
     if api_runtime {
         for interface in runtara_wit::api::RUNTIME_REPLACEMENTS {
             workflow_wit.push_str(&format!("    import {interface};\n"));
         }
-    } else if !omit_runtime {
-        workflow_wit.push_str(&format!("    import {RUNTIME_INTERFACE_NAME};\n"));
+    } else if legacy {
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::workflow::RUNTIME));
     }
     if has_connections {
-        // On the workflow API ABI the logic's connection lookup is
-        // `runtara:api`'s too.
-        let connections = if api_runtime {
-            runtara_wit::api::CONNECTIONS
-        } else {
+        let connections = if legacy {
             runtara_wit::host::CONNECTIONS
+        } else {
+            runtara_wit::api::CONNECTIONS
         };
         workflow_wit.push_str(&format!("    import {connections};\n"));
     }
-    // On the workflow API ABI the timers are `runtara:api/time`'s, already
-    // imported with the runtime.
+    // The timers are `runtara:api/time`'s, which the runtime already imports.
     if (needs_timers || !parallel_pools.is_empty() || !agents.is_empty()) && !api_runtime {
-        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::host::TIMERS));
+        let timers = if legacy {
+            runtara_wit::host::TIMERS
+        } else {
+            runtara_wit::api::TIME
+        };
+        workflow_wit.push_str(&format!("    import {timers};\n"));
     }
     if needs_monotonic_clock {
         workflow_wit.push_str(&format!(
@@ -1753,20 +1737,17 @@ fn build_direct_component_resolve_with_waits(
         ));
     }
     if operation_scope {
-        // On the workflow API ABI operations carry explicit ids.
-        let operation = if api_runtime {
-            runtara_wit::api::OPERATIONS
-        } else {
+        let operation = if legacy {
             runtara_wit::workflow::OPERATION
+        } else {
+            runtara_wit::api::OPERATIONS
         };
         workflow_wit.push_str(&format!("    import {operation};\n"));
     }
-    // On the workflow API ABI the logic reaches waits and state through
-    // `runtara:api`, like the runtime.
-    let (waits, state) = if api_runtime {
-        (runtara_wit::api::WAITS, runtara_wit::api::STATE)
-    } else {
+    let (waits, state) = if legacy {
         (runtara_wit::workflow::WAITS, runtara_wit::workflow::STATE)
+    } else {
+        (runtara_wit::api::WAITS, runtara_wit::api::STATE)
     };
     if wait_instances {
         workflow_wit.push_str(&format!("    import {waits};\n"));

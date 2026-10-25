@@ -1843,19 +1843,18 @@ mod workflow_api_trusted {
     }
 }
 
-/// Real workflows compiled for the workflow API ABI: the logic imports
+/// Real workflows compiled for the workflow API: the logic imports
 /// `runtara:api`, composed with the `runtara:api` component and the run shim,
-/// and the artifact imports only WASI. Each case runs on both ABIs and must
-/// end with the same status and output and the same events by type and
-/// subtype: an agent step's checkpoint with debug events on, a While loop
+/// and the artifact imports only WASI. Each case must end with its expected
+/// status and output: an agent step's checkpoint with
+/// debug events on, a While loop
 /// with Log steps (signal checks at loop boundaries), a durable Delay that
 /// parks the run (a suspended outcome with its wake), and published state
 /// written by SetState and read back by GetState.
 #[tokio::test(flavor = "multi_thread")]
-async fn workflows_compiled_for_the_workflow_api_match_the_wit_abi() {
+async fn workflows_compiled_for_the_workflow_api_end_as_expected() {
     use runtara_workflows::direct_wasm::{
-        DirectCompilationInput, GuestAbi, compile_direct_workflow_for_guest_abi,
-        compose_direct_workflow,
+        DirectCompilationInput, compile_direct_workflow, compose_direct_workflow,
     };
     let h = harness().await;
     let components =
@@ -1971,21 +1970,18 @@ async fn workflows_compiled_for_the_workflow_api_match_the_wit_abi() {
 
     for (case, graph, data, track_events, status) in cases {
         let mut runs = Vec::new();
-        for abi in [GuestAbi::Wit, GuestAbi::Http] {
-            let mut compiled = compile_direct_workflow_for_guest_abi(
-                DirectCompilationInput {
-                    workflow_id: format!("workflow-api-{case}"),
-                    version: 1,
-                    source_checksum: None,
-                    execution_graph: serde_json::from_value(graph.clone()).unwrap(),
-                    child_workflows: vec![],
-                    output_dir: h.dir.path().join(format!("workflow-api-{case}-{abi:?}")),
-                    track_events,
-                    agent_catalog: Some(Arc::clone(&catalog)),
-                    agent_slug: None,
-                },
-                abi,
-            )
+        for abi in ["workflow-api"] {
+            let mut compiled = compile_direct_workflow(DirectCompilationInput {
+                workflow_id: format!("workflow-api-{case}"),
+                version: 1,
+                source_checksum: None,
+                execution_graph: serde_json::from_value(graph.clone()).unwrap(),
+                child_workflows: vec![],
+                output_dir: h.dir.path().join(format!("workflow-api-{case}-{abi}")),
+                track_events,
+                agent_catalog: Some(Arc::clone(&catalog)),
+                agent_slug: None,
+            })
             .unwrap();
             let wasm = compose_direct_workflow(&mut compiled, &components).unwrap();
 
@@ -2015,7 +2011,7 @@ async fn workflows_compiled_for_the_workflow_api_match_the_wit_abi() {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(instance.status, status, "{case} {abi:?}: {instance:?}");
+            assert_eq!(instance.status, status, "{case} {abi}: {instance:?}");
             let output: Option<serde_json::Value> = instance
                 .output
                 .as_deref()
@@ -2036,14 +2032,6 @@ async fn workflows_compiled_for_the_workflow_api_match_the_wit_abi() {
             events.sort();
             runs.push((output, events));
         }
-        assert_eq!(
-            runs[0].0, runs[1].0,
-            "{case}: both ABIs give the same output"
-        );
-        assert_eq!(
-            runs[0].1, runs[1].1,
-            "{case}: both ABIs record the same events"
-        );
         if case == "echo" {
             assert_eq!(runs[0].0, Some(serde_json::json!({"result": "hello"})));
         }

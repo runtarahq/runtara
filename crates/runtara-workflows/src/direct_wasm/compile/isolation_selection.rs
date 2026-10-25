@@ -111,7 +111,6 @@ pub fn compile_direct_workflow_composed_with_isolation_policy(
             extra_component_dirs: extra_component_dirs.to_vec(),
             policy,
         },
-        super::super::component::GuestAbi::from_env().map_err(component_error)?,
     )?;
     let reviewed = result
         .artifact_metadata

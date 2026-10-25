@@ -189,10 +189,7 @@ fn compile_children(
 fn compile_isolated(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, runtara_workflows::direct_wasm::DirectCompileError> {
-    runtara_workflows::direct_wasm::compile_direct_workflow_for_guest_abi(
-        input,
-        runtara_workflows::direct_wasm::GuestAbi::Http,
-    )
+    runtara_workflows::direct_wasm::compile_direct_workflow(input)
 }
 fn selected(components: &Path) -> BTreeMap<String, String> {
     BTreeMap::from([(

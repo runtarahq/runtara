@@ -30,8 +30,7 @@ use runtara_environment::runner::{
 };
 use runtara_store_postgres::PostgresPersistence;
 use runtara_workflows::direct_wasm::{
-    DirectCompilationInput, GuestAbi, compile_direct_workflow_for_guest_abi,
-    compose_direct_workflow,
+    DirectCompilationInput, compile_direct_workflow, compose_direct_workflow,
 };
 use serde_json::{Value, json};
 
@@ -214,8 +213,6 @@ struct Harness {
     dir: tempfile::TempDir,
     persistence: Arc<PostgresPersistence>,
     tenant: String,
-    /// The ABI workflows are compiled for.
-    guest_abi: GuestAbi,
 }
 
 impl Harness {
@@ -230,15 +227,6 @@ impl Harness {
             dir: tempfile::tempdir().unwrap(),
             persistence,
             tenant: format!("wait-for-instances-{}", uuid::Uuid::new_v4()),
-            guest_abi: GuestAbi::Wit,
-        }
-    }
-
-    /// [`Self::new`], compiling workflows for `guest_abi`.
-    async fn for_abi(guest_abi: GuestAbi) -> Self {
-        Self {
-            guest_abi,
-            ..Self::new().await
         }
     }
 
@@ -277,20 +265,17 @@ impl Harness {
             )
             .unwrap(),
         ]);
-        let mut compiled = compile_direct_workflow_for_guest_abi(
-            DirectCompilationInput {
-                workflow_id: "wait-for-instances-runner".into(),
-                version: 1,
-                source_checksum: None,
-                execution_graph: serde_json::from_value(graph).unwrap(),
-                child_workflows: vec![],
-                output_dir: self.dir.path().join(out),
-                track_events: false,
-                agent_catalog: Some(Arc::new(catalog)),
-                agent_slug: None,
-            },
-            self.guest_abi,
-        )
+        let mut compiled = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "wait-for-instances-runner".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(graph).unwrap(),
+            child_workflows: vec![],
+            output_dir: self.dir.path().join(out),
+            track_events: false,
+            agent_catalog: Some(Arc::new(catalog)),
+            agent_slug: None,
+        })
         .unwrap();
         compose_direct_workflow(&mut compiled, components()).unwrap()
     }
@@ -429,17 +414,11 @@ impl Harness {
     }
 }
 
-/// On both ABIs: on the workflow API ABI the logic registers the wait over
-/// `runtara:api` and the backend attaches it to the run's suspension.
+/// The logic registers the wait over `runtara:api` and the backend attaches
+/// it to the run's suspension.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_wait_for_instances_step_parks_runner_free_and_a_restarted_runner_resumes_it() {
-    for abi in [GuestAbi::Wit, GuestAbi::Http] {
-        parks_runner_free_and_resumes(abi).await;
-    }
-}
-
-async fn parks_runner_free_and_resumes(abi: GuestAbi) {
-    let h = Harness::for_abi(abi).await;
+    let h = Harness::new().await;
     let wasm = h.compile("all", "all", None);
     let runner = h.runner();
     let (parent, children) = h.park(&runner, &wasm, "all").await;

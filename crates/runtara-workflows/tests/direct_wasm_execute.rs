@@ -14088,8 +14088,8 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
     // Packaging a separately instantiated child must keep its approval pin on
     // the root before the package section, where precompilation can validate it.
     // Isolated packages exist only on the WIT guest ABI.
-    let mut scoped = runtara_workflows::direct_wasm::compile_direct_workflow_for_guest_abi(
-        DirectCompilationInput {
+    let mut scoped =
+        runtara_workflows::direct_wasm::compile_direct_workflow(DirectCompilationInput {
             workflow_id: "trusted-scoped".into(),
             version: 1,
             source_checksum: None,
@@ -14099,10 +14099,8 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             track_events: false,
             agent_catalog: Some(dispatcher.catalog()),
             agent_slug: None,
-        },
-        runtara_workflows::direct_wasm::GuestAbi::Http,
-    )
-    .unwrap();
+        })
+        .unwrap();
     use sha2::Digest;
     let digest = format!(
         "{:x}",

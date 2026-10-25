@@ -88,32 +88,6 @@ pub const DIRECT_SHARED_COMPONENT_REQUIREMENTS: &[DirectSharedComponentRequireme
         cas_wasm_filename: "runtara-workflow-stdlib.wasm",
     }];
 
-/// The guest ABI a launched workflow artifact is composed for. `Http` is the
-/// default; `Wit` remains selectable until the old ABI is deleted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum GuestAbi {
-    /// The artifact imports `runtara:workflow/*`, served by host linkers.
-    Wit,
-    /// The artifact imports only WASI: the logic imports `runtara:api`,
-    /// served by `runtara-api-component`, and `runtara-workflow-api-run`
-    /// turns its entry into `wasi:cli/run`.
-    #[default]
-    Http,
-}
-
-impl GuestAbi {
-    /// `RUNTARA_GUEST_ABI` (`http`, the default, or `wit`).
-    pub fn from_env() -> Result<Self, String> {
-        match std::env::var("RUNTARA_GUEST_ABI").as_deref() {
-            Err(_) | Ok("") | Ok("http") => Ok(Self::Http),
-            Ok("wit") => Ok(Self::Wit),
-            Ok(other) => Err(format!(
-                "RUNTARA_GUEST_ABI must be `wit` or `http`, not `{other}`"
-            )),
-        }
-    }
-}
-
 /// The `runtara:api` component, composed in front of logic that imports it.
 pub const RUNTARA_API_COMPONENT_REQUIREMENT: DirectSharedComponentRequirement =
     DirectSharedComponentRequirement {
@@ -124,7 +98,7 @@ pub const RUNTARA_API_COMPONENT_REQUIREMENT: DirectSharedComponentRequirement =
         cas_wasm_filename: "runtara-api-component.wasm",
     };
 
-/// The run shim, composed behind every root workflow on [`GuestAbi::Http`].
+/// The run shim, composed behind every root workflow with a runtime.
 pub const WORKFLOW_API_ADAPTER_REQUIREMENTS: &[DirectSharedComponentRequirement] =
     &[DirectSharedComponentRequirement {
         package: "runtara:workflow-api-run",
@@ -134,7 +108,7 @@ pub const WORKFLOW_API_ADAPTER_REQUIREMENTS: &[DirectSharedComponentRequirement]
         cas_wasm_filename: "runtara-workflow-api-run.wasm",
     }];
 
-/// `wac` composed for [`GuestAbi::Http`]: the `runtara:api` component (when
+/// `wac` composed for the workflow API: the `runtara:api` component (when
 /// `with_api`) satisfies the logic's `runtara:api` imports, and the run shim
 /// re-exports its entry as `wasi:cli/run`, the only export left.
 pub(crate) fn http_guest_wac(wac: &str, with_api: bool, entry: bool) -> Result<String, String> {
@@ -196,25 +170,28 @@ pub struct DirectComponentArtifacts {
 }
 
 impl DirectComponentArtifacts {
-    /// Import `runtara:api` in the world in place of
-    /// `runtara:workflow/runtime`, `waits` and `state`, on the workflow API
-    /// ABI.
+    /// Import `runtara:api` in the world in place of the host interfaces:
+    /// the runtime (when the workflow has one), connections, timers,
+    /// operations, waits and state.
     pub(super) fn with_api_runtime(mut self, api_runtime: bool) -> Self {
-        if !api_runtime {
-            return self;
-        }
         let runtime = format!("    import {};\n", runtara_wit::workflow::RUNTIME);
-        if self.world_wit.contains(&runtime) {
+        if api_runtime && self.world_wit.contains(&runtime) {
             let api: String = runtara_wit::api::RUNTIME_REPLACEMENTS
                 .iter()
                 .map(|interface| format!("    import {interface};\n"))
                 .collect();
             self.world_wit = self.world_wit.replacen(&runtime, &api, 1);
         }
-        // Its timers are `runtara:api/time`'s, imported with the runtime.
+        // The timers are `runtara:api/time`'s, which a runtime already
+        // imports.
+        let timers = if api_runtime {
+            String::new()
+        } else {
+            format!("    import {};\n", runtara_wit::api::TIME)
+        };
         self.world_wit = self.world_wit.replacen(
             &format!("    import {};\n", runtara_wit::host::TIMERS),
-            "",
+            &timers,
             1,
         );
         for (old, new) in [
