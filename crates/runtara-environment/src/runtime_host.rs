@@ -513,46 +513,6 @@ impl RuntimeHost for PersistenceRuntimeHost {
         })
     }
 
-    async fn workflow_api_begin(
-        self: Arc<Self>,
-        input: Vec<u8>,
-        controls: runtara_component_host::runtime_host::WorkflowApiControls,
-    ) -> Result<(), String> {
-        let launches = self
-            .workflow_api
-            .as_ref()
-            .ok_or("this runner does not serve the workflow API")?;
-        let binding = self
-            .workflow_api_binding()
-            .ok_or("the run holds no root lease, so it has no workflow API binding")?;
-        use runtara_component_host::trusted::TrustedLaunch;
-        let launch_kind = match self.trusted_launch {
-            TrustedLaunch::Start => "start",
-            TrustedLaunch::Wake => "wake",
-            TrustedLaunch::Resume => "resume",
-        };
-        let info = runtara_workflow_api::RunInfo {
-            instance_id: binding.instance_id.clone(),
-            tenant_id: binding.tenant_id.clone(),
-            workflow_id: None,
-            version: None,
-            attempt: None,
-            launch_kind: launch_kind.into(),
-            debug: self.debug_mode,
-            deadline_ms: None,
-            api_version: runtara_workflow_api::api_version(),
-            capability_id: None,
-        };
-        // Held weakly: the host's drop is what releases the launch.
-        let runtime: Arc<dyn RuntimeHost> = self.clone();
-        launches.begin(binding, info, input, Arc::downgrade(&runtime), controls)
-    }
-
-    async fn take_workflow_api_outcome(&self) -> Option<runtara_workflow_api::PostedOutcome> {
-        let launches = self.workflow_api.as_ref()?;
-        launches.finish(&self.root_lease.get()?.owner)
-    }
-
     /// Persist the terminal result through the same guarded event path the
     /// guest's calls used: dropped once the run is being cancelled, written
     /// only while the instance is running. A store error is retried, because

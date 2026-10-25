@@ -117,6 +117,25 @@ pub struct WorkflowRunSpec {
     pub runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
 }
 
+/// A run's registration with the workflow API, released when dropped.
+struct ApiLaunch {
+    launches: Arc<crate::api_launches::ApiLaunches>,
+    launch_id: String,
+}
+
+impl ApiLaunch {
+    /// Stop serving the launch and take the outcome it posted.
+    fn finish(&self) -> Option<runtara_workflow_api::PostedOutcome> {
+        self.launches.finish(&self.launch_id)
+    }
+}
+
+impl Drop for ApiLaunch {
+    fn drop(&mut self) {
+        self.launches.release(&self.launch_id);
+    }
+}
+
 /// The lifecycle result of an outcome posted through the workflow API.
 // Same shape as the lifted WIT result of the lifecycle entry it stands in for.
 #[allow(clippy::result_large_err)]
@@ -297,6 +316,9 @@ pub struct WorkflowState {
     hooks: WorkflowHooks,
     /// wasi:http@0.3 hooks: the workflow API route, denied for everything else.
     api_hooks: crate::workflow_api::WorkflowApiHooks,
+    /// The binding the run's launch was registered under; the API hooks
+    /// attach it to every request once the entry starts.
+    api_binding: Arc<std::sync::OnceLock<runtara_workflow_api::Binding>>,
     /// A deadline the workflow API can bring forward.
     api_deadline: crate::workflow_api::ApiDeadline,
     /// The active execution deadline. It is reset only after the durable
@@ -471,7 +493,9 @@ pub struct WorkflowExecutor {
     control_host: std::sync::OnceLock<Arc<dyn crate::control_host::ControlHost>>,
     instance_waits: std::sync::OnceLock<Arc<dyn crate::InstanceWaitHost>>,
     run_state: std::sync::OnceLock<Arc<dyn crate::RunStateHost>>,
-    workflow_api: std::sync::OnceLock<Arc<dyn crate::workflow_api::WorkflowApiTransport>>,
+    /// The workflow API this executor serves its runs, and its transport.
+    workflow_api: std::sync::OnceLock<Arc<crate::api_launches::ApiLaunches>>,
+    workflow_api_transport: std::sync::OnceLock<Arc<dyn crate::workflow_api::WorkflowApiTransport>>,
     engine: Arc<Engine>,
     linker: Linker<WorkflowState>,
     cache: tokio::sync::Mutex<HashMap<PathBuf, CachedComponent>>,
@@ -556,15 +580,53 @@ impl WorkflowExecutor {
             .map_err(|_| anyhow::anyhow!("control host already configured"))
     }
 
-    /// Serve every run's workflow API requests with `transport`. A run reaches
-    /// it only when its runtime host also supplies a binding.
-    pub fn set_workflow_api_transport(
-        &self,
-        transport: Arc<dyn crate::workflow_api::WorkflowApiTransport>,
-    ) -> Result<()> {
+    /// Serve every run's workflow API with `launches` instead of one this
+    /// executor builds from its own services. Set before the first run.
+    pub fn set_workflow_api(&self, launches: Arc<crate::api_launches::ApiLaunches>) -> Result<()> {
         self.workflow_api
-            .set(transport)
-            .map_err(|_| anyhow::anyhow!("workflow API transport already configured"))
+            .set(launches)
+            .map_err(|_| anyhow::anyhow!("workflow API already configured"))
+    }
+
+    /// The workflow API every run is served: the one set with
+    /// [`Self::set_workflow_api`], else one built on first use from the
+    /// services this executor was given.
+    pub fn workflow_api(&self) -> &Arc<crate::api_launches::ApiLaunches> {
+        self.workflow_api.get_or_init(|| {
+            let launches = match self.run_state.get() {
+                Some(run_state) => {
+                    crate::api_launches::ApiLaunches::with_run_state(Arc::clone(run_state))
+                }
+                None => crate::api_launches::ApiLaunches::default(),
+            };
+            // Each is set once on a fresh value, so none can fail.
+            if let Some(service) = self.outbound_http.get() {
+                let _ = launches.set_outbound_http(Arc::clone(service));
+            }
+            if let Some(database) = self.database.get() {
+                let _ = launches.set_database(Arc::clone(database));
+            }
+            if let Some(resolver) = self.connection_resolver.get() {
+                let _ = launches.set_connection_resolver(Arc::clone(resolver));
+            }
+            if let Some(host) = self.control_host.get() {
+                let _ = launches.set_control_host(Arc::clone(host));
+            }
+            if let Some(executor) = self.trusted.get() {
+                let _ = launches.set_trusted_executor(Arc::clone(executor));
+            }
+            if let Some(host) = self.instance_waits.get() {
+                let _ = launches.set_instance_wait_host(Arc::clone(host));
+            }
+            Arc::new(launches)
+        })
+    }
+
+    fn workflow_api_transport(&self) -> Arc<dyn crate::workflow_api::WorkflowApiTransport> {
+        Arc::clone(
+            self.workflow_api_transport
+                .get_or_init(|| self.workflow_api().transport()),
+        )
     }
 
     /// Serve every run's durable instance waits with `host`.
@@ -622,6 +684,7 @@ impl WorkflowExecutor {
             database: std::sync::OnceLock::new(),
             connection_resolver: std::sync::OnceLock::new(),
             workflow_api: std::sync::OnceLock::new(),
+            workflow_api_transport: std::sync::OnceLock::new(),
             engine,
             linker,
             cache: tokio::sync::Mutex::new(HashMap::new()),
@@ -630,6 +693,79 @@ impl WorkflowExecutor {
 
     pub fn engine(&self) -> &Arc<Engine> {
         &self.engine
+    }
+
+    /// Register the run of `store` with the workflow API, under its runtime
+    /// host's binding, or a local one for a host without a root lease (a
+    /// test host): such a run is still served, but never fenced. `None`
+    /// without a runtime host.
+    fn begin_workflow_api(
+        &self,
+        store: &mut Store<WorkflowState>,
+        runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
+        tenant: Option<&str>,
+        instance: Option<&str>,
+        input: &[u8],
+    ) -> Option<ApiLaunch> {
+        let runtime = runtime?;
+        let binding = runtime.workflow_api_binding().unwrap_or_else(|| {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            runtara_workflow_api::Binding {
+                tenant_id: tenant.unwrap_or_default().to_string(),
+                instance_id: instance.unwrap_or_default().to_string(),
+                launch_id: format!(
+                    "local-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ),
+                root_lease_epoch: 0,
+            }
+        });
+        use crate::trusted::TrustedLaunch;
+        let info = runtara_workflow_api::RunInfo {
+            instance_id: binding.instance_id.clone(),
+            tenant_id: binding.tenant_id.clone(),
+            workflow_id: None,
+            version: None,
+            attempt: None,
+            launch_kind: match runtime.trusted_launch() {
+                TrustedLaunch::Start => "start",
+                TrustedLaunch::Wake => "wake",
+                TrustedLaunch::Resume => "resume",
+            }
+            .into(),
+            // Read from the run's host when the guest asks (`GET /v1/run`).
+            debug: false,
+            deadline_ms: None,
+            api_version: runtara_workflow_api::api_version(),
+            capability_id: None,
+        };
+        let deadline = store.data().api_deadline.clone();
+        let controls = crate::runtime_host::WorkflowApiControls {
+            shorten_deadline: Arc::new(move |after| deadline.shorten(after)),
+            trusted_pins: store
+                .data()
+                .trusted
+                .as_ref()
+                .and_then(|call| call.pins.clone())
+                .unwrap_or_default(),
+        };
+        let launches = Arc::clone(self.workflow_api());
+        if let Err(error) = launches.begin(
+            binding.clone(),
+            info,
+            input.to_vec(),
+            Arc::downgrade(&runtime),
+            controls,
+        ) {
+            tracing::warn!(%error, "the run is not served the workflow API");
+            return None;
+        }
+        let _ = store.data().api_binding.set(binding.clone());
+        Some(ApiLaunch {
+            launches,
+            launch_id: binding.launch_id,
+        })
     }
 
     /// Load (or fetch from cache) the linked component at `wasm_path`,
@@ -1051,6 +1187,7 @@ impl WorkflowExecutor {
         let initial_deadline = tokio::time::Instant::now() + spec.timeout;
         let initial_deadline =
             inherited_deadline.map_or(initial_deadline, |deadline| deadline.min(initial_deadline));
+        let api_binding = Arc::new(std::sync::OnceLock::new());
         let state = WorkflowState {
             trusted: self
                 .trusted
@@ -1090,12 +1227,13 @@ impl WorkflowExecutor {
             table: ResourceTable::new(),
             hooks: WorkflowHooks,
             api_hooks: crate::workflow_api::WorkflowApiHooks::for_run(
-                self.workflow_api.get().cloned(),
-                spec.runtime.clone().map(|runtime| {
-                    Arc::new(move || runtime.workflow_api_binding())
-                        as crate::workflow_api::BindingSource
+                Some(self.workflow_api_transport()),
+                Some({
+                    let binding = Arc::clone(&api_binding);
+                    Arc::new(move || binding.get().cloned()) as crate::workflow_api::BindingSource
                 }),
             ),
+            api_binding: Arc::clone(&api_binding),
             http_deadline: initial_deadline,
             active_deadline: initial_deadline,
             limiter: WorkflowLimiter {
@@ -1208,6 +1346,16 @@ impl WorkflowExecutor {
                         anyhow::bail!("execution deadline elapsed before instantiation");
                     }
                     let instance = pre.instantiate_async(&mut store).await?;
+                    // Every run is served the workflow API: its agents reach
+                    // connections over it on either ABI. Released when this
+                    // future ends, however it ends.
+                    let launch = self.begin_workflow_api(
+                        &mut store,
+                        spec.runtime.clone(),
+                        spec.trusted_tenant.as_deref(),
+                        spec.trusted_instance.as_deref(),
+                        &input,
+                    );
                     if let InvocationEntry::Capability {
                         interface,
                         capability,
@@ -1248,23 +1396,9 @@ impl WorkflowExecutor {
                             crate::lifecycle::CLI_RUN_EXPORT,
                         )
                     {
-                        let runtime = spec.runtime.clone().ok_or_else(|| {
+                        let launch = launch.as_ref().ok_or_else(|| {
                             anyhow::anyhow!("a wasi:cli/run workflow needs a runtime host")
                         })?;
-                        let deadline = store.data().api_deadline.clone();
-                        let controls = crate::runtime_host::WorkflowApiControls {
-                            shorten_deadline: Arc::new(move |after| deadline.shorten(after)),
-                            trusted_pins: store
-                                .data()
-                                .trusted
-                                .as_ref()
-                                .and_then(|call| call.pins.clone())
-                                .unwrap_or_default(),
-                        };
-                        Arc::clone(&runtime)
-                            .workflow_api_begin(input, controls)
-                            .await
-                            .map_err(|error| anyhow::anyhow!(error))?;
                         let run_idx = instance
                             .get_export_index(&mut store, Some(&cli_idx), "run")
                             .ok_or_else(|| {
@@ -1275,12 +1409,11 @@ impl WorkflowExecutor {
                             })?;
                         let run: wasmtime::component::TypedFunc<(), (Result<(), ()>,)> =
                             instance.get_typed_func(&mut store, run_idx)?;
-                        // Take the outcome back whatever `run` did, so a trap
-                        // does not leave the launch serving the API. (A timeout
-                        // or cancel drops this future; the runtime host frees
-                        // the launch when it is dropped.)
+                        // Take the outcome back whatever `run` did. (A timeout
+                        // or cancel drops this future, and the launch guard
+                        // with it.)
                         let ran = run.call_async(&mut store, ()).await;
-                        let posted = runtime.take_workflow_api_outcome().await;
+                        let posted = launch.finish();
                         let (ran,) = ran?;
                         return match posted {
                             Some(outcome) => Ok(posted_outcome(outcome)),
@@ -1435,6 +1568,7 @@ impl WorkflowExecutor {
             table: ResourceTable::new(),
             hooks: WorkflowHooks,
             api_hooks: crate::workflow_api::WorkflowApiHooks::denied(),
+            api_binding: Default::default(),
             http_deadline: deadline,
             active_deadline: deadline,
             limiter: WorkflowLimiter {

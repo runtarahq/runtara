@@ -439,7 +439,13 @@ impl WorkflowApiBackend for Backend {
     }
 
     async fn run_info(&self, binding: &Binding) -> Result<RunInfo, ApiError> {
-        Ok(self.0.slot(binding).ok_or_else(not_serving)?.info.clone())
+        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
+        let mut info = slot.info.clone();
+        // Debug mode is the run host's to say, asked when the guest asks.
+        if let Some(runtime) = slot.runtime.upgrade() {
+            info.debug = runtime.debug_mode_enabled().map_err(host_error)?;
+        }
+        Ok(info)
     }
 
     async fn run_input(&self, binding: &Binding) -> Result<Vec<u8>, ApiError> {

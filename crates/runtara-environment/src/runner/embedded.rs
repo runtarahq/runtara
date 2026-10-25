@@ -672,15 +672,15 @@ impl EmbeddedWasmRunner {
         let handler_state = Arc::new(runtara_core::instance_handlers::InstanceHandlerState::new(
             Arc::clone(&persistence),
         ));
-        // Runs on the workflow API ABI reach the `/v1` router in process; their
-        // runtime hosts register each launch with `workflow_api`.
+        // Every run reaches the `/v1` router in process; the executor registers
+        // each launch with `workflow_api`.
         let workflow_api = Arc::new(
             runtara_component_host::api_launches::ApiLaunches::with_run_state(Arc::new(
                 run_state::PersistenceRunState(Arc::clone(&persistence)),
             )),
         );
         executor
-            .set_workflow_api_transport(workflow_api.transport())
+            .set_workflow_api(Arc::clone(&workflow_api))
             .map_err(|e| RunnerError::Other(e.to_string()))?;
         let run_limit = max_concurrent_runs();
         warn_if_run_bound_exceeds_memory(run_limit);
