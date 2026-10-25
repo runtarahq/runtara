@@ -192,9 +192,20 @@ pub fn error_payload(error: &crate::lifecycle::WorkflowErrorInfo) -> Vec<u8> {
 pub trait RuntimeHost: Send + Sync {
     /// This run's instance id.
     fn instance_id(&self) -> Result<String, String>;
-    /// The binding the workflow API attaches to this run's requests. `None`
-    /// keeps the workflow API unreachable for the run.
+    /// The binding the workflow API attaches to this run's requests, asked for
+    /// at each request (a launch binds its root lease after the Store is
+    /// built). `None` keeps the workflow API unreachable for the run.
     fn workflow_api_binding(&self) -> Option<runtara_workflow_api::Binding> {
+        None
+    }
+    /// Hand the run's input to the workflow API before a `wasi:cli/run` entry
+    /// starts. A runtime that doesn't serve the workflow API refuses.
+    async fn workflow_api_begin(&self, input: Vec<u8>) -> Result<(), String> {
+        let _ = input;
+        Err("this runtime does not serve the workflow API".into())
+    }
+    /// Take the outcome a `wasi:cli/run` entry posted through the workflow API.
+    async fn take_workflow_api_outcome(&self) -> Option<runtara_workflow_api::PostedOutcome> {
         None
     }
     /// Persist the run's terminal result. The embedding calls it once, after

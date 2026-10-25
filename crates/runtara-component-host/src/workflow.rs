@@ -117,6 +117,50 @@ pub struct WorkflowRunSpec {
     pub runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
 }
 
+/// The lifecycle result of an outcome posted through the workflow API.
+// Same shape as the lifted WIT result of the lifecycle entry it stands in for.
+#[allow(clippy::result_large_err)]
+fn posted_outcome(
+    outcome: runtara_workflow_api::PostedOutcome,
+) -> Result<crate::lifecycle::WorkflowOutcome, crate::lifecycle::WorkflowErrorInfo> {
+    use crate::lifecycle::{
+        SignalWait, WorkflowErrorInfo, WorkflowOutcome, WorkflowSuspension, WorkflowWake,
+    };
+    use runtara_workflow_api::{PostedOutcome, Wake};
+    match outcome {
+        PostedOutcome::Completed(output) => Ok(WorkflowOutcome::Completed(output)),
+        PostedOutcome::Suspended(suspension) => {
+            Ok(WorkflowOutcome::Suspended(WorkflowSuspension {
+                wakes: suspension
+                    .wakes
+                    .into_iter()
+                    .map(|wake| match wake {
+                        Wake::At(ms) => WorkflowWake::At(ms),
+                        Wake::OnSignal(wait) => WorkflowWake::OnSignal(SignalWait {
+                            checkpoint_id: wait.checkpoint_id,
+                            deadline_ms: wait.deadline_ms,
+                        }),
+                        Wake::OnResume => WorkflowWake::OnResume,
+                        Wake::Instances(id) => WorkflowWake::Instances(id),
+                    })
+                    .collect(),
+                // A workflow keeps its state in checkpoints.
+                state: Vec::new(),
+            }))
+        }
+        PostedOutcome::Failed(error) => Err(WorkflowErrorInfo {
+            code: error.code,
+            message: error.message,
+            category: error.category,
+            severity: error.severity,
+            retryable: error.retryable,
+            retry_after_ms: error.retry_after_ms,
+            attributes: error.attributes.map(|value| value.to_string()),
+            details: error.details.map(|value| value.to_string()),
+        }),
+    }
+}
+
 /// One isolated Agent invocation. Connection identity and materialized input
 /// belong to the caller's scope and must already be encoded in `input`.
 pub struct CapabilityInvocation<'a> {
@@ -1045,9 +1089,10 @@ impl WorkflowExecutor {
             hooks: WorkflowHooks,
             api_hooks: crate::workflow_api::WorkflowApiHooks::for_run(
                 self.workflow_api.get().cloned(),
-                spec.runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.workflow_api_binding()),
+                spec.runtime.clone().map(|runtime| {
+                    Arc::new(move || runtime.workflow_api_binding())
+                        as crate::workflow_api::BindingSource
+                }),
             ),
             http_deadline: initial_deadline,
             active_deadline: initial_deadline,
@@ -1179,6 +1224,49 @@ impl WorkflowExecutor {
                             .call_async(&mut store, ((*capability).to_owned(), input))
                             .await?;
                         return Ok(result);
+                    }
+                    // A workflow on the workflow API ABI exports `wasi:cli/run`
+                    // instead of the lifecycle entry: its input and outcome
+                    // travel over the API, through the run's runtime host.
+                    if matches!(entry, InvocationEntry::Lifecycle { interface: None })
+                        && instance
+                            .get_export_index(
+                                &mut store,
+                                None,
+                                crate::lifecycle::ENTRY_INTERFACE_NAME,
+                            )
+                            .is_none()
+                        && let Some(cli_idx) = instance.get_export_index(
+                            &mut store,
+                            None,
+                            crate::lifecycle::CLI_RUN_EXPORT,
+                        )
+                    {
+                        let runtime = spec.runtime.clone().ok_or_else(|| {
+                            anyhow::anyhow!("a wasi:cli/run workflow needs a runtime host")
+                        })?;
+                        runtime
+                            .workflow_api_begin(input)
+                            .await
+                            .map_err(|error| anyhow::anyhow!(error))?;
+                        let run_idx = instance
+                            .get_export_index(&mut store, Some(&cli_idx), "run")
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "`{}` has no `run` export",
+                                    crate::lifecycle::CLI_RUN_EXPORT
+                                )
+                            })?;
+                        let run: wasmtime::component::TypedFunc<(), (Result<(), ()>,)> =
+                            instance.get_typed_func(&mut store, run_idx)?;
+                        let (ran,) = run.call_async(&mut store, ()).await?;
+                        return match runtime.take_workflow_api_outcome().await {
+                            Some(outcome) => Ok(posted_outcome(outcome)),
+                            None => Err(anyhow::anyhow!(
+                                "workflow run returned {} without posting an outcome",
+                                if ran.is_ok() { "ok" } else { "an error" }
+                            )),
+                        };
                     }
                     let iface_idx = if let InvocationEntry::Lifecycle {
                         interface: Some(interface),

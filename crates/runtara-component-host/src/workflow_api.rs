@@ -37,18 +37,23 @@ type SendFuture = Box<
         + Send,
 >;
 
+/// Where a run's binding comes from. Asked at every request: a launch binds
+/// its root lease after the Store is built, so the binding can't be captured
+/// up front.
+pub(crate) type BindingSource = Arc<dyn Fn() -> Option<Binding> + Send + Sync>;
+
 /// The p3 HTTP hooks of one run.
 pub(crate) struct WorkflowApiHooks {
-    route: Option<(Arc<dyn WorkflowApiTransport>, Binding)>,
+    route: Option<(Arc<dyn WorkflowApiTransport>, BindingSource)>,
     caps: Caps,
 }
 
 impl WorkflowApiHooks {
-    /// Hooks for a run. The workflow API is reachable only with both a
-    /// transport and a binding.
+    /// Hooks for a run. The workflow API is reachable only with a transport
+    /// and a source that currently yields a binding.
     pub(crate) fn for_run(
         transport: Option<Arc<dyn WorkflowApiTransport>>,
-        binding: Option<Binding>,
+        binding: Option<BindingSource>,
     ) -> Self {
         Self {
             route: transport.zip(binding),
@@ -121,12 +126,15 @@ impl WasiHttpHooks for WorkflowApiHooks {
         _options: Option<RequestOptions>,
         _fut: IoFuture,
     ) -> SendFuture {
-        let Some((transport, binding)) = self.route.clone() else {
+        let Some((transport, source)) = self.route.clone() else {
             return denied();
         };
         if !is_workflow_api(request.uri()) {
             return denied();
         }
+        let Some(binding) = source() else {
+            return denied();
+        };
         let limit = self.caps.request_body_bytes;
         Box::new(async move {
             let (parts, body) = request.into_parts();
@@ -194,8 +202,12 @@ mod tests {
             .unwrap()
     }
 
+    fn source(binding: Option<Binding>) -> Option<BindingSource> {
+        Some(Arc::new(move || binding.clone()))
+    }
+
     fn hooks(recorder: &Arc<Recorder>) -> WorkflowApiHooks {
-        WorkflowApiHooks::for_run(Some(recorder.clone()), Some(binding()))
+        WorkflowApiHooks::for_run(Some(recorder.clone()), source(Some(binding())))
     }
 
     async fn send(
@@ -282,7 +294,8 @@ mod tests {
         let recorder = Arc::new(Recorder::default());
         for mut hooks in [
             WorkflowApiHooks::for_run(Some(recorder.clone()), None),
-            WorkflowApiHooks::for_run(None, Some(binding())),
+            WorkflowApiHooks::for_run(Some(recorder.clone()), source(None)),
+            WorkflowApiHooks::for_run(None, source(Some(binding()))),
             WorkflowApiHooks::denied(),
         ] {
             let result = send(
