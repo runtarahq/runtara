@@ -4316,6 +4316,8 @@ dependencies = [
  "runtara-dsl",
  "runtara-object-model-core",
  "runtara-object-store",
+ "runtara-workflow-api",
+ "runtara-workflow-sdk",
  "serde",
  "serde_json",
  "tokio",

@@ -1,23 +1,7 @@
-//! Typed agent client for native SQL. There is no native HTTP fallback.
+//! Typed agent client for native SQL, over the workflow API's connection
+//! endpoints. There is no native HTTP fallback.
 use runtara_database_contract::*;
 use runtara_object_model_core::config::ObjectModelLayout;
-
-#[cfg(target_family = "wasm")]
-mod sql_bindings {
-    wit_bindgen::generate!({
-        path: "../../runtara-wit/wit/host",
-        world: "sql-client",
-        async: true,
-    });
-}
-#[cfg(target_family = "wasm")]
-mod connection_bindings {
-    wit_bindgen::generate!({
-        path: "../../runtara-wit/wit/host",
-        world: "connections-client",
-        async: true,
-    });
-}
 
 /// Separates agent orchestration from the component ABI for native parity tests.
 /// Futures need not be Send: guest execution uses the component async runtime.
@@ -52,9 +36,11 @@ fn request_bytes<T: serde::Serialize>(request: &T) -> Result<Vec<u8>, DatabaseEr
     Ok(bytes)
 }
 
+/// A database failure arrives as `database-error` carrying the service's
+/// `DatabaseError`; any other failure is an invalid response.
 #[cfg(target_family = "wasm")]
 fn response<T: serde::de::DeserializeOwned>(
-    result: Result<Vec<u8>, String>,
+    result: Result<Vec<u8>, runtara_workflow_sdk::Error>,
     read_only: bool,
 ) -> Result<T, DatabaseError> {
     let invalid = || DatabaseError {
@@ -69,8 +55,13 @@ fn response<T: serde::de::DeserializeOwned>(
         sqlstate: None,
         statement_index: None,
     };
-    let bytes =
-        result.map_err(|error| serde_json::from_str(&error).unwrap_or_else(|_| invalid()))?;
+    let bytes = result.map_err(|error| match error {
+        runtara_workflow_sdk::Error::Api(error) if error.code.as_str() == "database-error" => error
+            .details
+            .and_then(|details| serde_json::from_value(details).ok())
+            .unwrap_or_else(invalid),
+        _ => invalid(),
+    })?;
     if bytes.len() > MAX_RESPONSE_BYTES {
         return Err(invalid());
     }
@@ -81,14 +72,11 @@ impl SqlClient for HostSqlClient {
     async fn layout(&self, connection: &str) -> Result<ObjectModelLayout, DatabaseError> {
         #[cfg(target_family = "wasm")]
         {
-            let bytes =
-                connection_bindings::runtara::host::connections::describe(connection.to_owned())
-                    .await
-                    .map_err(|_| {
-                        DatabaseError::invalid("Cannot resolve Object Model connection metadata")
-                    })?;
-            let descriptor: serde_json::Value = serde_json::from_slice(&bytes)
-                .map_err(|_| DatabaseError::invalid("Invalid connection descriptor"))?;
+            let descriptor = runtara_workflow_sdk::describe_connection(connection)
+                .await
+                .map_err(|_| {
+                    DatabaseError::invalid("Cannot resolve Object Model connection metadata")
+                })?;
             if descriptor["integrationId"] != "postgres" {
                 return Err(DatabaseError::invalid(
                     "Object Model requires a PostgreSQL connection",
@@ -102,7 +90,7 @@ impl SqlClient for HostSqlClient {
         {
             let _ = connection;
             Err(DatabaseError::invalid(
-                "Native SQL imports require a WASM execution host",
+                "Native SQL requires the workflow API",
             ))
         }
     }
@@ -114,8 +102,9 @@ impl SqlClient for HostSqlClient {
         #[cfg(target_family = "wasm")]
         {
             response(
-                sql_bindings::runtara::host::sql::query(
-                    connection.to_owned(),
+                runtara_workflow_sdk::sql_bytes(
+                    connection,
+                    runtara_workflow_api::SqlOperation::Query,
                     request_bytes(&request)?,
                 )
                 .await,
@@ -126,7 +115,7 @@ impl SqlClient for HostSqlClient {
         {
             let _ = (connection, request);
             Err(DatabaseError::invalid(
-                "Native SQL imports require a WASM execution host",
+                "Native SQL requires the workflow API",
             ))
         }
     }
@@ -138,8 +127,9 @@ impl SqlClient for HostSqlClient {
         #[cfg(target_family = "wasm")]
         {
             response(
-                sql_bindings::runtara::host::sql::execute(
-                    connection.to_owned(),
+                runtara_workflow_sdk::sql_bytes(
+                    connection,
+                    runtara_workflow_api::SqlOperation::Execute,
                     request_bytes(&request)?,
                 )
                 .await,
@@ -150,7 +140,7 @@ impl SqlClient for HostSqlClient {
         {
             let _ = (connection, request);
             Err(DatabaseError::invalid(
-                "Native SQL imports require a WASM execution host",
+                "Native SQL requires the workflow API",
             ))
         }
     }
@@ -162,8 +152,9 @@ impl SqlClient for HostSqlClient {
         #[cfg(target_family = "wasm")]
         {
             response(
-                sql_bindings::runtara::host::sql::execute_batch(
-                    connection.to_owned(),
+                runtara_workflow_sdk::sql_bytes(
+                    connection,
+                    runtara_workflow_api::SqlOperation::Batch,
                     request_bytes(&request)?,
                 )
                 .await,
@@ -174,7 +165,7 @@ impl SqlClient for HostSqlClient {
         {
             let _ = (connection, request);
             Err(DatabaseError::invalid(
-                "Native SQL imports require a WASM execution host",
+                "Native SQL requires the workflow API",
             ))
         }
     }

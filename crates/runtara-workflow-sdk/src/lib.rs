@@ -628,6 +628,17 @@ pub async fn sql(
     operation: runtara_workflow_api::SqlOperation,
     request: &serde_json::Value,
 ) -> Result<serde_json::Value, Error> {
+    let body = sql_bytes(connection_id, operation, request.to_string().into_bytes()).await?;
+    serde_json::from_slice(&body).map_err(|e| Error::Transport(format!("sql: {e}")))
+}
+
+/// [`sql`] over an already encoded request, answering the response bytes:
+/// for callers that bound or decode them themselves.
+pub async fn sql_bytes(
+    connection_id: &str,
+    operation: runtara_workflow_api::SqlOperation,
+    request: Vec<u8>,
+) -> Result<Vec<u8>, Error> {
     let operation = match operation {
         runtara_workflow_api::SqlOperation::Query => "query",
         runtara_workflow_api::SqlOperation::Execute => "execute",
@@ -640,10 +651,10 @@ pub async fn sql(
             key_path("/v1/connections", connection_id)
         ),
         &[("content-type", "application/json")],
-        Some(request.to_string().into_bytes()),
+        Some(request),
     )
     .await?;
-    serde_json::from_slice(&response.body).map_err(|e| Error::Transport(format!("sql: {e}")))
+    Ok(response.body)
 }
 
 /// The result of [`http`]: the upstream answer, or the call's failure with
