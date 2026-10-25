@@ -192,6 +192,11 @@ pub fn error_payload(error: &crate::lifecycle::WorkflowErrorInfo) -> Vec<u8> {
 pub trait RuntimeHost: Send + Sync {
     /// This run's instance id.
     fn instance_id(&self) -> Result<String, String>;
+    /// The binding the workflow API attaches to this run's requests. `None`
+    /// keeps the workflow API unreachable for the run.
+    fn workflow_api_binding(&self) -> Option<runtara_workflow_api::Binding> {
+        None
+    }
     /// Persist the run's terminal result. The embedding calls it once, after
     /// the entry returned and cleanup finished; it is never bound for the
     /// guest. A host that does not own the instance's terminal state (a

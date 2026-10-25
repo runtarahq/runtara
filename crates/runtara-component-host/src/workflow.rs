@@ -251,6 +251,8 @@ pub struct WorkflowState {
     http: WasiHttpCtx,
     table: ResourceTable,
     hooks: WorkflowHooks,
+    /// wasi:http@0.3 hooks: the workflow API route, denied for everything else.
+    api_hooks: crate::workflow_api::WorkflowApiHooks,
     /// The active execution deadline. It is reset only after the durable
     /// runner handoff has been confirmed, so Store/WASI construction does not
     /// consume the guest's execution budget.
@@ -350,6 +352,16 @@ impl WasiHttpView for WorkflowState {
     }
 }
 
+impl wasmtime_wasi_http::p3::WasiHttpView for WorkflowState {
+    fn http(&mut self) -> wasmtime_wasi_http::p3::WasiHttpCtxView<'_> {
+        wasmtime_wasi_http::p3::WasiHttpCtxView {
+            ctx: &mut self.http,
+            table: &mut self.table,
+            hooks: &mut self.api_hooks,
+        }
+    }
+}
+
 struct CachedComponent {
     mtime: Option<SystemTime>,
     len: u64,
@@ -413,6 +425,7 @@ pub struct WorkflowExecutor {
     control_host: std::sync::OnceLock<Arc<dyn crate::control_host::ControlHost>>,
     instance_waits: std::sync::OnceLock<Arc<dyn crate::InstanceWaitHost>>,
     run_state: std::sync::OnceLock<Arc<dyn crate::RunStateHost>>,
+    workflow_api: std::sync::OnceLock<Arc<dyn crate::workflow_api::WorkflowApiTransport>>,
     engine: Arc<Engine>,
     linker: Linker<WorkflowState>,
     cache: tokio::sync::Mutex<HashMap<PathBuf, CachedComponent>>,
@@ -497,6 +510,17 @@ impl WorkflowExecutor {
             .map_err(|_| anyhow::anyhow!("control host already configured"))
     }
 
+    /// Serve every run's workflow API requests with `transport`. A run reaches
+    /// it only when its runtime host also supplies a binding.
+    pub fn set_workflow_api_transport(
+        &self,
+        transport: Arc<dyn crate::workflow_api::WorkflowApiTransport>,
+    ) -> Result<()> {
+        self.workflow_api
+            .set(transport)
+            .map_err(|_| anyhow::anyhow!("workflow API transport already configured"))
+    }
+
     /// Serve every run's durable instance waits with `host`.
     pub fn set_instance_wait_host(&self, host: Arc<dyn crate::InstanceWaitHost>) -> Result<()> {
         self.instance_waits
@@ -517,6 +541,10 @@ impl WorkflowExecutor {
         let mut linker = Linker::<WorkflowState>::new(&engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
+        // wasi@0.3 and wasi:http@0.3: the transport of the workflow API. Its
+        // send hook routes only the workflow API origin (workflow_api.rs).
+        wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+        wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
         // Native runtime interface of composed workflows. Extra definitions
         // are invisible to components that don't import them (the WASI surface
         // above works the same way), so agents linked here are unaffected.
@@ -547,6 +575,7 @@ impl WorkflowExecutor {
             outbound_http: std::sync::OnceLock::new(),
             database: std::sync::OnceLock::new(),
             connection_resolver: std::sync::OnceLock::new(),
+            workflow_api: std::sync::OnceLock::new(),
             engine,
             linker,
             cache: tokio::sync::Mutex::new(HashMap::new()),
@@ -949,6 +978,13 @@ impl WorkflowExecutor {
         let overall_started = Instant::now();
 
         let mut builder = WasiCtxBuilder::new();
+        // No socket of any kind: outbound traffic goes through the workflow
+        // API, so the send hook is never the only guard (wasi:sockets of both
+        // p2 and p3 read this context).
+        builder
+            .allow_tcp(false)
+            .allow_udp(false)
+            .allow_ip_name_lookup(false);
         let mut env: Vec<(&String, &String)> = spec.env.iter().collect();
         env.sort();
         for (k, v) in env {
@@ -1007,6 +1043,12 @@ impl WorkflowExecutor {
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
             hooks: WorkflowHooks,
+            api_hooks: crate::workflow_api::WorkflowApiHooks::for_run(
+                self.workflow_api.get().cloned(),
+                spec.runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.workflow_api_binding()),
+            ),
             http_deadline: initial_deadline,
             active_deadline: initial_deadline,
             limiter: WorkflowLimiter {
@@ -1272,10 +1314,15 @@ impl WorkflowExecutor {
             operation: Default::default(),
             instance_waits: Default::default(),
             run_state: Default::default(),
-            wasi: WasiCtxBuilder::new().build(),
+            wasi: WasiCtxBuilder::new()
+                .allow_tcp(false)
+                .allow_udp(false)
+                .allow_ip_name_lookup(false)
+                .build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
             hooks: WorkflowHooks,
+            api_hooks: crate::workflow_api::WorkflowApiHooks::denied(),
             http_deadline: deadline,
             active_deadline: deadline,
             limiter: WorkflowLimiter {

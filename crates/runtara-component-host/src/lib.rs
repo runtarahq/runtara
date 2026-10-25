@@ -35,6 +35,8 @@ pub mod registry;
 pub mod runtime_host;
 pub mod trusted;
 pub mod workflow;
+pub mod workflow_api;
+pub use workflow_api::{WorkflowApiFuture, WorkflowApiTransport};
 pub mod workflow_manifest;
 
 pub use bindings::exports::runtara::agent::capabilities::ErrorInfo;

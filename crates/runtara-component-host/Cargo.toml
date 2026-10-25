@@ -97,8 +97,13 @@ wasmtime = { version = "46", default-features = false, features = [
     # Cranelift compile for every deployed image (see build_engine).
     "cache",
 ] }
-wasmtime-wasi = "46"
-wasmtime-wasi-http = "46"
+# `p3` links wasi:http@0.3, the transport of the workflow API (see
+# workflow_api.rs). Its send hook is the one interception point.
+wasmtime-wasi = { version = "46", features = ["p3"] }
+wasmtime-wasi-http = { version = "46", features = ["p3"] }
+runtara-workflow-api = { path = "../runtara-workflow-api" }
+bytes = "1"
+http-body-util = "0.1"
 
 # Plumbing
 zeroize = "1"
