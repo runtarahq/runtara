@@ -116,7 +116,7 @@ mod transport {
     use crate::bindings::wasi::http::types::{ErrorCode, Fields, Method, Request, Scheme};
     use crate::bindings::{wit_future, wit_stream};
 
-    pub(crate) async fn call(
+    pub(crate) async fn raw(
         method: &str,
         path: &str,
         headers: &[(&str, &str)],
@@ -183,12 +183,20 @@ mod transport {
         let (body, _trailers) =
             crate::bindings::wasi::http::types::Response::consume_body(response, done_rx);
         let body = body.collect().await;
-        Response {
+        Ok(Response {
             status,
             headers,
             body,
-        }
-        .into_result()
+        })
+    }
+
+    pub(crate) async fn call(
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: Option<Vec<u8>>,
+    ) -> Result<Response, Error> {
+        raw(method, path, headers, body).await?.into_result()
     }
 }
 
@@ -196,7 +204,7 @@ mod transport {
 mod transport {
     use super::{Error, Response};
 
-    pub(crate) async fn call(
+    pub(crate) async fn raw(
         _method: &str,
         _path: &str,
         _headers: &[(&str, &str)],
@@ -205,6 +213,15 @@ mod transport {
         Err(Error::Transport(
             "the workflow API is only reachable from a wasm32 guest".into(),
         ))
+    }
+
+    pub(crate) async fn call(
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: Option<Vec<u8>>,
+    ) -> Result<Response, Error> {
+        raw(method, path, headers, body).await
     }
 }
 
@@ -507,4 +524,121 @@ pub async fn set_deadline(abort_after_ms: u64) -> Result<(), Error> {
     )
     .await
     .map(|_| ())
+}
+
+/// `GET /v1/connections/{id}`: the safe descriptor of a connection (JSON).
+pub async fn describe_connection(connection_id: &str) -> Result<serde_json::Value, Error> {
+    let response = call(
+        "GET",
+        &key_path("/v1/connections", connection_id),
+        &[],
+        None,
+    )
+    .await?;
+    serde_json::from_slice(&response.body).map_err(|e| Error::Transport(format!("connection: {e}")))
+}
+
+/// `POST /v1/connections/{id}/resources`: resolve a resource request.
+pub async fn resolve_resource(
+    connection_id: &str,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, Error> {
+    let response = call(
+        "POST",
+        &format!("{}/resources", key_path("/v1/connections", connection_id)),
+        &[("content-type", "application/json")],
+        Some(request.to_string().into_bytes()),
+    )
+    .await?;
+    serde_json::from_slice(&response.body).map_err(|e| Error::Transport(format!("resource: {e}")))
+}
+
+/// `POST /v1/connections/{id}/sql/{operation}` with a
+/// `runtara-database-contract` request; database failures arrive as
+/// `database-error` with the `DatabaseError` in `details`.
+pub async fn sql(
+    connection_id: &str,
+    operation: runtara_workflow_api::SqlOperation,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, Error> {
+    let operation = match operation {
+        runtara_workflow_api::SqlOperation::Query => "query",
+        runtara_workflow_api::SqlOperation::Execute => "execute",
+        runtara_workflow_api::SqlOperation::Batch => "batch",
+    };
+    let response = call(
+        "POST",
+        &format!(
+            "{}/sql/{operation}",
+            key_path("/v1/connections", connection_id)
+        ),
+        &[("content-type", "application/json")],
+        Some(request.to_string().into_bytes()),
+    )
+    .await?;
+    serde_json::from_slice(&response.body).map_err(|e| Error::Transport(format!("sql: {e}")))
+}
+
+/// The result of [`http`]: the upstream answer, or the call's failure with
+/// whatever upstream body was received.
+#[derive(Debug, Clone)]
+pub enum Outbound {
+    Reply {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    },
+    Failed {
+        failure: runtara_workflow_api::OutboundFailure,
+        body: Vec<u8>,
+    },
+}
+
+/// `POST /v1/http`: an outbound call through a connection or the outbound
+/// guard. Outbound headers travel in the metadata, never as request headers.
+pub async fn http(
+    meta: &runtara_workflow_api::OutboundMeta,
+    body: Option<Vec<u8>>,
+) -> Result<Outbound, Error> {
+    let meta_json = serde_json::to_string(meta).map_err(|e| Error::Transport(e.to_string()))?;
+    let raw = call_raw(
+        "POST",
+        "/v1/http",
+        &[(runtara_workflow_api::headers::OUTBOUND, meta_json.as_str())],
+        body,
+    )
+    .await?;
+    if raw.status == 502
+        && let Some(failure) = header_json(&raw, runtara_workflow_api::headers::ERROR)
+    {
+        return Ok(Outbound::Failed {
+            failure,
+            body: raw.body,
+        });
+    }
+    let raw = raw.into_result()?;
+    let status = raw
+        .header(runtara_workflow_api::headers::UPSTREAM_STATUS)
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| Error::Transport("reply without an upstream status".into()))?;
+    let headers =
+        header_json(&raw, runtara_workflow_api::headers::UPSTREAM_HEADERS).unwrap_or_default();
+    Ok(Outbound::Reply {
+        status,
+        headers,
+        body: raw.body,
+    })
+}
+
+/// Like [`call`], but hands back non-2xx answers instead of decoding them.
+async fn call_raw(
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<Vec<u8>>,
+) -> Result<Response, Error> {
+    let key = next_idempotency_key();
+    let mut all = vec![(runtara_workflow_api::headers::IDEMPOTENCY_KEY, key.as_str())];
+    all.extend_from_slice(headers);
+    transport::raw(method, path, &all, body).await
 }

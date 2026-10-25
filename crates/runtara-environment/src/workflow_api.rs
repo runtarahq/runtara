@@ -16,22 +16,33 @@ use std::sync::{Arc, Mutex, Weak};
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use bytes::Bytes;
-use runtara_component_host::InstanceWaitHost;
+use runtara_component_host::connection_resolver_host::{
+    ConnectionResolverHost, RunConnectionResolver, resolver_for_run,
+};
+use runtara_component_host::database_host::{Operation, database_for_run};
 use runtara_component_host::instance_wait_host::{
     InstanceWaitAuthority, InstanceWaitError, InstanceWaitPoll, InstanceWaitRequest,
     InstanceWaitResolution, wait_instances_id,
+};
+use runtara_component_host::outbound_http::{
+    ConnectionDestination, Destination, RequestOptions, send_bounded,
 };
 use runtara_component_host::run_state_host::{
     RunStateAuthority, RunStateError, RunStateErrorCode, RunStateHost, check_state_read_key,
     state_operation_id,
 };
 use runtara_component_host::runtime_host::{RuntimeHost, WorkflowApiControls};
+use runtara_component_host::{DatabaseHost, InstanceWaitHost, OutboundHttpHost};
 use runtara_component_host::{WorkflowApiFuture, WorkflowApiTransport};
+use runtara_workflow_api::server::OutboundReply;
 use runtara_workflow_api::server::{
     CheckpointWrite, CustomSignalNotice, Event, LaunchState, LifecycleSignal, MemoryReceiptStore,
     ReceiptStore, WorkflowApiBackend, WorkflowApiState, router,
 };
-use runtara_workflow_api::{ApiError, Binding, Caps, ErrorCode, InputRead, PostedOutcome, RunInfo};
+use runtara_workflow_api::{
+    ApiError, Binding, Caps, ErrorCode, InputRead, OutboundDestination, OutboundFailure,
+    OutboundMeta, PostedOutcome, RunInfo, SqlOperation,
+};
 use tower::ServiceExt;
 
 /// One launch serving the workflow API.
@@ -44,6 +55,8 @@ pub struct LaunchSlot {
     /// fencing it already applies. Weak: the host's drop releases the slot.
     runtime: Weak<dyn RuntimeHost>,
     controls: WorkflowApiControls,
+    /// Connection resolution of this launch, with its per-run cache.
+    resolver: std::sync::OnceLock<Arc<RunConnectionResolver>>,
 }
 
 /// The launches of this process that currently serve the workflow API, by
@@ -56,6 +69,10 @@ pub struct ApiLaunches {
     run_state: Option<Arc<dyn RunStateHost>>,
     /// The instance-wait service, once the runner is given one.
     instance_waits: std::sync::OnceLock<Arc<dyn InstanceWaitHost>>,
+    /// The connection services the runner gives the old ABI as well.
+    pub(crate) outbound_http: std::sync::OnceLock<Arc<dyn OutboundHttpHost>>,
+    pub(crate) database: std::sync::OnceLock<Arc<dyn DatabaseHost>>,
+    pub(crate) connection_resolver: std::sync::OnceLock<Arc<dyn ConnectionResolverHost>>,
 }
 
 impl Default for ApiLaunches {
@@ -65,6 +82,9 @@ impl Default for ApiLaunches {
             receipts: Arc::new(MemoryReceiptStore::default()),
             run_state: None,
             instance_waits: std::sync::OnceLock::new(),
+            outbound_http: std::sync::OnceLock::new(),
+            database: std::sync::OnceLock::new(),
+            connection_resolver: std::sync::OnceLock::new(),
         }
     }
 }
@@ -110,6 +130,7 @@ impl ApiLaunches {
                 outcome: Mutex::new(None),
                 runtime,
                 controls,
+                resolver: std::sync::OnceLock::new(),
             }),
         );
         Ok(())
@@ -215,6 +236,26 @@ fn input_read(state: runtara_component_host::runtime_host::RuntimeInputState) ->
     }
 }
 
+/// A connection service refusal; its messages carry no secrets.
+fn connection_error(error: String) -> ApiError {
+    ApiError::domain("connection-error", ErrorCode::Invalid, error)
+}
+
+/// A database failure: the serialized `DatabaseError` goes in `details`.
+fn database_error(error: String) -> ApiError {
+    match serde_json::from_str::<serde_json::Value>(&error) {
+        Ok(details) => {
+            let message = details
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("database error")
+                .to_string();
+            ApiError::domain("database-error", ErrorCode::Invalid, message).with_details(details)
+        }
+        Err(_) => ApiError::domain("database-error", ErrorCode::Invalid, error),
+    }
+}
+
 fn wait_error(error: InstanceWaitError) -> ApiError {
     let message = error.message.clone();
     let mut api = match error.code.as_str() {
@@ -255,6 +296,17 @@ fn state_error(error: RunStateError) -> ApiError {
 }
 
 impl Backend {
+    /// The launch's connection resolver, created on first use.
+    fn resolver(&self, binding: &Binding) -> Result<Arc<RunConnectionResolver>, ApiError> {
+        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
+        if let Some(resolver) = slot.resolver.get() {
+            return Ok(Arc::clone(resolver));
+        }
+        let resolver = resolver_for_run(self.0.connection_resolver.get(), Some(&binding.tenant_id))
+            .map_err(|e| ApiError::new(ErrorCode::Unavailable, e))?;
+        Ok(Arc::clone(slot.resolver.get_or_init(|| resolver)))
+    }
+
     /// The wait service and the binding's run as the waiter, while the launch
     /// is served.
     fn wait_service(
@@ -519,6 +571,102 @@ impl WorkflowApiBackend for Backend {
             .operation_release(wait_id)
             .await
             .map_err(host_error)
+    }
+
+    async fn describe_connection(
+        &self,
+        binding: &Binding,
+        connection_id: &str,
+    ) -> Result<Vec<u8>, ApiError> {
+        self.resolver(binding)?
+            .describe(connection_id.to_string())
+            .await
+            .map_err(connection_error)
+    }
+
+    async fn resolve_resource(
+        &self,
+        binding: &Binding,
+        connection_id: &str,
+        request: Vec<u8>,
+    ) -> Result<Vec<u8>, ApiError> {
+        self.resolver(binding)?
+            .resolve_resource(connection_id.to_string(), request)
+            .await
+            .map_err(connection_error)
+    }
+
+    async fn sql(
+        &self,
+        binding: &Binding,
+        connection_id: &str,
+        operation: SqlOperation,
+        request: Vec<u8>,
+    ) -> Result<Vec<u8>, ApiError> {
+        self.0.slot(binding).ok_or_else(not_serving)?;
+        let database = database_for_run(self.0.database.get(), Some(&binding.tenant_id))
+            .map_err(|e| ApiError::new(ErrorCode::Unavailable, e))?;
+        let operation = match operation {
+            SqlOperation::Query => Operation::Query,
+            SqlOperation::Execute => Operation::Execute,
+            SqlOperation::Batch => Operation::Batch,
+        };
+        database
+            .call(operation, connection_id.to_string(), request)
+            .await
+            .map_err(database_error)
+    }
+
+    async fn http(
+        &self,
+        binding: &Binding,
+        meta: OutboundMeta,
+        body: Option<Vec<u8>>,
+    ) -> Result<Result<OutboundReply, (OutboundFailure, Vec<u8>)>, ApiError> {
+        self.0.slot(binding).ok_or_else(not_serving)?;
+        let host = runtara_component_host::outbound_http::for_run(
+            self.0.outbound_http.get(),
+            Some(&binding.tenant_id),
+            Some(&binding.instance_id),
+        )
+        .map_err(|e| ApiError::new(ErrorCode::Unavailable, e))?;
+        let destination = match meta.destination {
+            OutboundDestination::Connection(target) => {
+                Destination::Connection(ConnectionDestination {
+                    connection_id: target.connection_id,
+                    url: target.url,
+                    endpoint: target.endpoint,
+                    endpoint_ref: target.endpoint_ref,
+                    ai_provider: target.ai_provider,
+                    aws_service: target.aws_service,
+                })
+            }
+            OutboundDestination::Public(url) => Destination::Public(url),
+        };
+        let request = RequestOptions {
+            destination,
+            method: meta.method,
+            headers: meta.headers,
+            body,
+            timeout_ms: meta.timeout_ms,
+            max_response_bytes: meta.max_response_bytes,
+        };
+        Ok(match send_bounded(&host, request, None).await {
+            Ok(response) => Ok(OutboundReply {
+                status: response.status,
+                headers: response.headers,
+                body: response.body,
+            }),
+            Err(error) => Err((
+                OutboundFailure {
+                    code: error.code,
+                    message: error.message,
+                    status: error.status,
+                    retry_after_ms: error.retry_after_ms,
+                },
+                error.body,
+            )),
+        })
     }
 
     async fn set_state(

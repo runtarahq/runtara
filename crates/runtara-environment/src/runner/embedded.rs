@@ -728,6 +728,12 @@ impl EmbeddedWasmRunner {
         self,
         service: Arc<dyn runtara_component_host::OutboundHttpHost>,
     ) -> Result<Self> {
+        self.workflow_api
+            .outbound_http
+            .set(Arc::clone(&service))
+            .map_err(|_| {
+                RunnerError::Other("outbound_http already configured for the workflow API".into())
+            })?;
         self.executor
             .set_outbound_http(service)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
@@ -739,6 +745,12 @@ impl EmbeddedWasmRunner {
         self,
         database: Arc<dyn runtara_component_host::DatabaseHost>,
     ) -> Result<Self> {
+        self.workflow_api
+            .database
+            .set(Arc::clone(&database))
+            .map_err(|_| {
+                RunnerError::Other("database already configured for the workflow API".into())
+            })?;
         self.executor
             .set_database(database)
             .map_err(|e| RunnerError::Other(e.to_string()))?;
@@ -750,6 +762,14 @@ impl EmbeddedWasmRunner {
         self,
         resolver: Arc<dyn runtara_component_host::ConnectionResolverHost>,
     ) -> Result<Self> {
+        self.workflow_api
+            .connection_resolver
+            .set(Arc::clone(&resolver))
+            .map_err(|_| {
+                RunnerError::Other(
+                    "connection_resolver already configured for the workflow API".into(),
+                )
+            })?;
         self.executor
             .set_connection_resolver(resolver)
             .map_err(|e| RunnerError::Other(e.to_string()))?;

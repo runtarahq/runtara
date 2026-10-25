@@ -1257,3 +1257,222 @@ async fn a_workflow_api_run_can_shorten_its_deadline() {
     );
     assert_eq!(h.runner.workflow_api_launches().serving(), 0);
 }
+
+mod workflow_api_connections {
+    use super::*;
+    use runtara_component_host::outbound_http::{
+        Destination, OutboundContext, OutboundError, RequestOptions, Response,
+    };
+    use runtara_database_contract::{
+        BatchRequest, BatchResult, DatabaseError, ExecutionResult, QueryRequest, RowSet, Statement,
+    };
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Seen {
+        http: Mutex<Vec<(String, RequestOptions)>>,
+        sql: Mutex<Vec<(String, String, String)>>,
+        resolved: Mutex<Vec<(String, String)>>,
+    }
+
+    struct Http(Arc<Seen>);
+
+    #[async_trait::async_trait]
+    impl runtara_component_host::OutboundHttpHost for Http {
+        async fn request(
+            &self,
+            context: &OutboundContext,
+            request: RequestOptions,
+        ) -> Result<Response, OutboundError> {
+            let public = matches!(request.destination, Destination::Public(_));
+            self.0
+                .http
+                .lock()
+                .unwrap()
+                .push((context.tenant_id.clone(), request));
+            if public {
+                Err(OutboundError {
+                    code: "HTTP_DESTINATION_DENIED".into(),
+                    message: "blocked".into(),
+                    status: Some(403),
+                    body: b"nope".to_vec(),
+                    retry_after_ms: None,
+                })
+            } else {
+                Ok(Response {
+                    status: 201,
+                    headers: vec![("x-upstream".into(), "1".into())],
+                    body: b"pong".to_vec(),
+                })
+            }
+        }
+    }
+
+    struct Database(Arc<Seen>);
+
+    #[async_trait::async_trait]
+    impl runtara_component_host::DatabaseHost for Database {
+        async fn query(
+            &self,
+            tenant: &str,
+            connection_id: &str,
+            request: QueryRequest,
+        ) -> Result<RowSet, DatabaseError> {
+            self.0.sql.lock().unwrap().push((
+                tenant.to_string(),
+                connection_id.to_string(),
+                request.sql,
+            ));
+            Ok(RowSet {
+                columns: Vec::new(),
+                rows: Vec::new(),
+            })
+        }
+        async fn execute(
+            &self,
+            _: &str,
+            _: &str,
+            _: Statement,
+        ) -> Result<ExecutionResult, DatabaseError> {
+            Err(DatabaseError::invalid("not in this test"))
+        }
+        async fn execute_batch(
+            &self,
+            _: &str,
+            _: &str,
+            _: BatchRequest,
+        ) -> Result<BatchResult, DatabaseError> {
+            Err(DatabaseError::invalid("not in this test"))
+        }
+    }
+
+    struct Resolver(Arc<Seen>);
+
+    #[async_trait::async_trait]
+    impl runtara_component_host::ConnectionResolverHost for Resolver {
+        async fn describe(&self, tenant: &str, connection_id: String) -> Result<Vec<u8>, String> {
+            self.0
+                .resolved
+                .lock()
+                .unwrap()
+                .push((tenant.to_string(), connection_id.clone()));
+            Ok(
+                serde_json::to_vec(&serde_json::json!({"id": connection_id, "tenant": tenant}))
+                    .unwrap(),
+            )
+        }
+        async fn resolve_resource(
+            &self,
+            tenant: &str,
+            connection_id: String,
+            _request: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            self.0
+                .resolved
+                .lock()
+                .unwrap()
+                .push((tenant.to_string(), connection_id));
+            Ok(br#"{"items":[1,2]}"#.to_vec())
+        }
+    }
+
+    /// Connection metadata, resources, SQL and outbound HTTP over the workflow
+    /// API reach the runner's connection services with the binding's tenant,
+    /// and their failures come back in the API's shapes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_api_connections_reach_the_connection_services() {
+        let h = harness().await;
+        let seen = Arc::new(Seen::default());
+        let runner = EmbeddedWasmRunner::new(
+            WorkflowRunnerConfig {
+                data_dir: h.dir.path().join("connections"),
+                default_timeout: Duration::from_secs(30),
+                skip_cert_verification: false,
+            },
+            Arc::clone(&h.persistence),
+        )
+        .unwrap()
+        .with_in_process_precompiler_for_tests()
+        .with_outbound_http(Arc::new(Http(seen.clone())))
+        .unwrap()
+        .with_database(Arc::new(Database(seen.clone())))
+        .unwrap()
+        .with_connection_resolver(Arc::new(Resolver(seen.clone())))
+        .unwrap();
+        let probe = workflow_api_probe();
+        let inst_id = unique("inst-workflow-api-connections");
+        let input = serde_json::to_vec(
+            &serde_json::json!({"data": {"mode": "connections"}, "variables": {}}),
+        )
+        .unwrap();
+        assert!(
+            h.persistence
+                .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+                .await
+                .expect("register instance")
+        );
+        let handle = runner
+            .try_launch_detached(&options(inst_id.as_str(), &probe))
+            .await
+            .expect("launch");
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            runner.wait_for_exit(&handle, Duration::from_millis(50)),
+        )
+        .await
+        .expect("wait_for_exit hung");
+        let instance = h
+            .persistence
+            .get_instance(inst_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            instance.status,
+            runtara_core::domain::InstanceStatus::Completed,
+            "{instance:?}"
+        );
+        let output: serde_json::Value =
+            serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            output["describe"],
+            serde_json::json!({"id": "conn-1", "tenant": "embedded-test"})
+        );
+        assert_eq!(output["resource"], serde_json::json!({"items": [1, 2]}));
+        assert_eq!(
+            output["rows"],
+            serde_json::json!({"columns": [], "rows": []})
+        );
+        assert_eq!(output["refused"], "database-error");
+        assert_eq!(output["reply"]["status"], 201);
+        assert_eq!(output["reply"]["body"], "pong");
+        assert_eq!(
+            output["reply"]["headers"],
+            serde_json::json!([["x-upstream", "1"]])
+        );
+        assert_eq!(output["failed"]["code"], "HTTP_DESTINATION_DENIED");
+        assert_eq!(output["failed"]["status"], 403);
+        assert_eq!(output["failed"]["body"], "nope");
+
+        let http = seen.http.lock().unwrap();
+        assert_eq!(http.len(), 2);
+        assert!(http.iter().all(|(tenant, _)| tenant == "embedded-test"));
+        assert_eq!(http[0].1.method, "POST");
+        assert_eq!(http[0].1.body.as_deref(), Some(b"ping".as_slice()));
+        assert_eq!(
+            seen.sql.lock().unwrap().as_slice(),
+            &[(
+                "embedded-test".to_string(),
+                "conn-1".to_string(),
+                "select 1".to_string()
+            )]
+        );
+        assert!(
+            seen.resolved
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(tenant, connection)| tenant == "embedded-test" && connection == "conn-1")
+        );
+    }
+}

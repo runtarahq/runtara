@@ -13,6 +13,7 @@
 //! definition of every header, error code and body.
 
 mod binding;
+mod connections;
 mod error;
 pub mod headers;
 mod keys;
@@ -23,6 +24,9 @@ mod signals;
 mod wake;
 
 pub use binding::Binding;
+pub use connections::{
+    ConnectionTarget, OutboundDestination, OutboundFailure, OutboundMeta, SqlOperation,
+};
 pub use error::{ApiError, ErrorCode};
 pub use keys::{IdempotencyKeyError, decode_path_key, encode_path_key, validate_idempotency_key};
 pub use run::{ErrorInfo, OutcomeKind, PostedOutcome, RunInfo, Suspension};

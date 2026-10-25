@@ -37,7 +37,7 @@ pub trait ConnectionResolverHost: Send + Sync {
 }
 
 /// Cache and tenant authority belong to one invocation, never to guest env vars.
-pub(crate) struct RunConnectionResolver {
+pub struct RunConnectionResolver {
     backend: Arc<dyn ConnectionResolverHost>,
     tenant: String,
     descriptions: Mutex<HashMap<String, Vec<u8>>>,
@@ -45,7 +45,8 @@ pub(crate) struct RunConnectionResolver {
 }
 
 impl RunConnectionResolver {
-    async fn describe(&self, connection_id: String) -> Result<Vec<u8>, String> {
+    /// The safe descriptor of `connection_id`, cached for the run.
+    pub async fn describe(&self, connection_id: String) -> Result<Vec<u8>, String> {
         if let Some(cached) = self.descriptions.lock().await.get(&connection_id).cloned() {
             return Ok(cached);
         }
@@ -62,7 +63,8 @@ impl RunConnectionResolver {
         Ok(bytes)
     }
 
-    async fn resolve_resource(
+    /// Resolve a resource request against `connection_id`, cached for the run.
+    pub async fn resolve_resource(
         &self,
         connection_id: String,
         request: Vec<u8>,
@@ -83,7 +85,8 @@ impl RunConnectionResolver {
     }
 }
 
-pub(crate) fn resolver_for_run(
+/// Connection resolution for a run of `tenant`, both host-supplied.
+pub fn resolver_for_run(
     backend: Option<&Arc<dyn ConnectionResolverHost>>,
     tenant: Option<&str>,
 ) -> Result<Arc<RunConnectionResolver>, String> {

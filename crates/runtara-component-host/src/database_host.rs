@@ -30,12 +30,14 @@ pub trait DatabaseHost: Send + Sync {
     ) -> Result<BatchResult, DatabaseError>;
 }
 
-pub(crate) struct RunDatabase {
+/// One run's database access: the service and the run's tenant.
+pub struct RunDatabase {
     backend: Arc<dyn DatabaseHost>,
     tenant: String,
 }
 
-pub(crate) fn database_for_run(
+/// Database access for a run of `tenant`, both host-supplied.
+pub fn database_for_run(
     backend: Option<&Arc<dyn DatabaseHost>>,
     tenant: Option<&str>,
 ) -> Result<Arc<RunDatabase>, String> {
@@ -102,15 +104,18 @@ fn encode<T: serde::Serialize>(result: Result<T, DatabaseError>) -> Result<Vec<u
     Ok(bytes)
 }
 
-#[derive(Clone, Copy)]
-enum Operation {
+/// A SQL call of `runtara:host/sql` or `POST /v1/connections/{id}/sql/{op}`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Operation {
     Query,
     Execute,
     Batch,
 }
 
 impl RunDatabase {
-    async fn call(
+    /// Run `operation` on `connection` with the JSON `request`, returning the
+    /// JSON result, or the serialized `DatabaseError` as the error.
+    pub async fn call(
         &self,
         operation: Operation,
         connection: String,

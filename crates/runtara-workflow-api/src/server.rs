@@ -45,8 +45,10 @@ pub enum LaunchState {
 
 pub use crate::PostedOutcome;
 
+mod connections;
 mod runtime;
 pub use crate::{CustomSignalNotice, Event, LifecycleNotice};
+pub use connections::OutboundReply;
 pub use runtime::{CheckpointWrite, LifecycleSignal};
 
 /// The effects behind the router. Implemented by the runtime that owns runs
@@ -190,6 +192,49 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
         Err(unsupported_service("instance waits"))
     }
 
+    /// The safe descriptor of `connection_id` in the run's tenant (JSON).
+    async fn describe_connection(
+        &self,
+        binding: &Binding,
+        connection_id: &str,
+    ) -> Result<Vec<u8>, ApiError> {
+        let _ = (binding, connection_id);
+        Err(unsupported_service("connections"))
+    }
+    /// Resolve a resource request (JSON) against `connection_id`.
+    async fn resolve_resource(
+        &self,
+        binding: &Binding,
+        connection_id: &str,
+        request: Vec<u8>,
+    ) -> Result<Vec<u8>, ApiError> {
+        let _ = (binding, connection_id, request);
+        Err(unsupported_service("connections"))
+    }
+    /// Run a SQL `operation` (JSON request) on `connection_id`; the result is
+    /// JSON.
+    async fn sql(
+        &self,
+        binding: &Binding,
+        connection_id: &str,
+        operation: crate::SqlOperation,
+        request: Vec<u8>,
+    ) -> Result<Vec<u8>, ApiError> {
+        let _ = (binding, connection_id, operation, request);
+        Err(unsupported_service("SQL"))
+    }
+    /// Send an outbound HTTP call. The outer error is the API's own; the inner
+    /// one is the call's failure, with whatever upstream body was received.
+    async fn http(
+        &self,
+        binding: &Binding,
+        meta: crate::OutboundMeta,
+        body: Option<Vec<u8>>,
+    ) -> Result<Result<OutboundReply, (crate::OutboundFailure, Vec<u8>)>, ApiError> {
+        let _ = (binding, meta, body);
+        Err(unsupported_service("outbound HTTP"))
+    }
+
     /// Merge `patch` into the run's published state, once per SetState `key`.
     async fn set_state(
         &self,
@@ -331,6 +376,19 @@ pub fn router(state: WorkflowApiState) -> Router {
                 .get(runtime::get_wait)
                 .delete(runtime::delete_wait),
         )
+        .route(
+            "/v1/connections/{connection_id}",
+            get(connections::get_connection),
+        )
+        .route(
+            "/v1/connections/{connection_id}/resources",
+            post(connections::post_resources),
+        )
+        .route(
+            "/v1/connections/{connection_id}/sql/{operation}",
+            post(connections::post_sql),
+        )
+        .route("/v1/http", post(connections::post_http))
         .route(
             "/v1/state/{key}",
             get(runtime::get_state).patch(runtime::patch_state),

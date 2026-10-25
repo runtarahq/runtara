@@ -85,6 +85,90 @@ mod probe {
                         .map_err(|_| ())?,
                     )
                 }
+                Some("connections") => {
+                    use runtara_workflow_api::{
+                        ConnectionTarget, OutboundDestination, OutboundMeta, SqlOperation,
+                    };
+                    use runtara_workflow_sdk::Outbound;
+                    let describe = runtara_workflow_sdk::describe_connection("conn-1")
+                        .await
+                        .map_err(|_| ())?;
+                    let resource =
+                        runtara_workflow_sdk::resolve_resource("conn-1", &json!({"kind": "list"}))
+                            .await
+                            .map_err(|_| ())?;
+                    let rows = runtara_workflow_sdk::sql(
+                        "conn-1",
+                        SqlOperation::Query,
+                        &json!({"sql": "select 1"}),
+                    )
+                    .await
+                    .map_err(|_| ())?;
+                    let refused =
+                        runtara_workflow_sdk::sql("conn-1", SqlOperation::Query, &json!({}))
+                            .await
+                            .err()
+                            .and_then(|error| error.code().map(|code| code.as_str().to_string()));
+                    let call = |destination| OutboundMeta {
+                        method: "POST".into(),
+                        destination,
+                        headers: vec![("authorization".into(), "Bearer guest".into())],
+                        timeout_ms: Some(5000),
+                        max_response_bytes: None,
+                    };
+                    let reply = match runtara_workflow_sdk::http(
+                        &call(OutboundDestination::Connection(ConnectionTarget {
+                            connection_id: "conn-1".into(),
+                            url: "https://api.example.com/items".into(),
+                            endpoint: None,
+                            endpoint_ref: None,
+                            ai_provider: None,
+                            aws_service: None,
+                        })),
+                        Some(b"ping".to_vec()),
+                    )
+                    .await
+                    .map_err(|_| ())?
+                    {
+                        Outbound::Reply {
+                            status,
+                            headers,
+                            body,
+                        } => json!({
+                            "status": status,
+                            "headers": headers,
+                            "body": String::from_utf8_lossy(&body),
+                        }),
+                        Outbound::Failed { failure, .. } => json!({"unexpected": failure}),
+                    };
+                    let failed = match runtara_workflow_sdk::http(
+                        &call(OutboundDestination::Public(
+                            "https://blocked.example".into(),
+                        )),
+                        None,
+                    )
+                    .await
+                    .map_err(|_| ())?
+                    {
+                        Outbound::Failed { failure, body } => json!({
+                            "code": failure.code,
+                            "status": failure.status,
+                            "body": String::from_utf8_lossy(&body),
+                        }),
+                        Outbound::Reply { .. } => json!({"unexpected": "reply"}),
+                    };
+                    PostedOutcome::Completed(
+                        serde_json::to_vec(&json!({
+                            "describe": describe,
+                            "resource": resource,
+                            "rows": rows,
+                            "refused": refused,
+                            "reply": reply,
+                            "failed": failed,
+                        }))
+                        .map_err(|_| ())?,
+                    )
+                }
                 Some("wait") => {
                     // Wait for `data.children`; park until they finish, then
                     // complete with the settled read.

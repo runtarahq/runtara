@@ -39,12 +39,14 @@ pub trait OutboundHttpHost: Send + Sync {
     ) -> Result<Response, OutboundError>;
 }
 
-pub(crate) struct RunOutboundHttp {
+/// One run's outbound HTTP: the service and the run's identity.
+pub struct RunOutboundHttp {
     pub backend: Arc<dyn OutboundHttpHost>,
     pub context: OutboundContext,
 }
 
-pub(crate) fn for_run(
+/// Outbound HTTP for a run of `tenant`, both host-supplied.
+pub fn for_run(
     backend: Option<&Arc<dyn OutboundHttpHost>>,
     tenant: Option<&str>,
     instance: Option<&str>,
@@ -266,6 +268,55 @@ fn check_response(response: &Response, limit: usize) -> Result<(), OutboundError
     Ok(())
 }
 
+/// Send `request` through `host` the way `runtara:host/http.request` does:
+/// within the request's own timeout (capped) and the run's active deadline,
+/// with the response checked against its byte limit.
+pub async fn send_bounded(
+    host: &RunOutboundHttp,
+    request: RequestOptions,
+    run_deadline: Option<tokio::time::Instant>,
+) -> Result<Response, OutboundError> {
+    let started = tokio::time::Instant::now();
+    let requested_deadline = started + timeout(request.timeout_ms)?;
+    let deadline = run_deadline.map_or(requested_deadline, |active| active.min(requested_deadline));
+    let limit = response_limit(request.max_response_bytes)?;
+    bounded(host, request, deadline, limit).await
+}
+
+async fn bounded(
+    host: &RunOutboundHttp,
+    request: RequestOptions,
+    deadline: tokio::time::Instant,
+    limit: usize,
+) -> Result<Response, OutboundError> {
+    if deadline <= tokio::time::Instant::now() {
+        return Err(error(
+            "HTTP_DEADLINE_EXCEEDED",
+            "HTTP request timeout: deadline elapsed",
+        ));
+    }
+    match tokio::time::timeout_at(deadline, host.backend.request(&host.context, request)).await {
+        Err(_) => Err(error(
+            "HTTP_DEADLINE_EXCEEDED",
+            "HTTP request timeout: deadline elapsed",
+        )),
+        Ok(Ok(response)) => check_response(&response, limit).map(|()| response),
+        Ok(Err(err)) => {
+            if err
+                .body
+                .len()
+                .saturating_add(err.message.len())
+                .saturating_add(err.code.len())
+                > limit
+            {
+                Err(too_large())
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
 pub(crate) fn add_to_linker<T: OutboundHttpContext + Send + 'static>(
     linker: &mut Linker<T>,
 ) -> anyhow::Result<()> {
@@ -290,40 +341,7 @@ pub(crate) fn add_to_linker<T: OutboundHttpContext + Send + 'static>(
                 let result = match ready {
                     Err(error) => Err(error),
                     Ok((host, request, deadline, limit)) => {
-                        if deadline <= tokio::time::Instant::now() {
-                            Err(error(
-                                "HTTP_DEADLINE_EXCEEDED",
-                                "HTTP request timeout: deadline elapsed",
-                            ))
-                        } else {
-                            match tokio::time::timeout_at(
-                                deadline,
-                                host.backend.request(&host.context, request),
-                            )
-                            .await
-                            {
-                                Err(_) => Err(error(
-                                    "HTTP_DEADLINE_EXCEEDED",
-                                    "HTTP request timeout: deadline elapsed",
-                                )),
-                                Ok(Ok(response)) => {
-                                    check_response(&response, limit).map(|()| response)
-                                }
-                                Ok(Err(err)) => {
-                                    if err
-                                        .body
-                                        .len()
-                                        .saturating_add(err.message.len())
-                                        .saturating_add(err.code.len())
-                                        > limit
-                                    {
-                                        Err(too_large())
-                                    } else {
-                                        Err(err)
-                                    }
-                                }
-                            }
-                        }
+                        bounded(&host, request, deadline, limit).await
                     }
                 };
                 Ok((result,))

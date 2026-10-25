@@ -814,3 +814,113 @@ async fn a_wait_request_must_be_an_object() {
         "served by backends only"
     );
 }
+
+struct Outbound;
+
+#[async_trait]
+impl WorkflowApiBackend for Outbound {
+    async fn launch_state(&self, _: &Binding) -> Result<LaunchState, ApiError> {
+        Ok(LaunchState::Active)
+    }
+    async fn run_info(&self, _: &Binding) -> Result<RunInfo, ApiError> {
+        unreachable!()
+    }
+    async fn run_input(&self, _: &Binding) -> Result<Vec<u8>, ApiError> {
+        unreachable!()
+    }
+    async fn post_outcome(&self, _: &Binding, _: PostedOutcome) -> Result<(), ApiError> {
+        unreachable!()
+    }
+    async fn set_deadline(&self, _: &Binding, _: u64) -> Result<(), ApiError> {
+        unreachable!()
+    }
+    async fn http(
+        &self,
+        _: &Binding,
+        meta: crate::OutboundMeta,
+        body: Option<Vec<u8>>,
+    ) -> Result<Result<OutboundReply, (crate::OutboundFailure, Vec<u8>)>, ApiError> {
+        Ok(match meta.destination {
+            crate::OutboundDestination::Public(_) => Err((
+                crate::OutboundFailure {
+                    code: "HTTP_DESTINATION_DENIED".into(),
+                    message: "blocked".into(),
+                    status: Some(403),
+                    retry_after_ms: None,
+                },
+                b"upstream said no".to_vec(),
+            )),
+            crate::OutboundDestination::Connection(_) => Ok(OutboundReply {
+                status: 201,
+                headers: vec![("x-upstream".into(), "1".into())],
+                body: body.unwrap_or_default(),
+            }),
+        })
+    }
+}
+
+fn outbound_app() -> Router {
+    router(WorkflowApiState {
+        backend: Arc::new(Outbound),
+        receipts: Arc::new(MemoryReceiptStore::default()),
+        caps: Caps::default(),
+    })
+}
+
+fn http_call(key: &str, meta: Option<&str>, body: &str) -> HttpRequest<Body> {
+    let mut request = request("POST", "/v1/http").header(headers::IDEMPOTENCY_KEY, key);
+    if let Some(meta) = meta {
+        request = request.header(headers::OUTBOUND, meta);
+    }
+    request.body(Body::from(body.to_string())).unwrap()
+}
+
+#[tokio::test]
+async fn outbound_calls_carry_metadata_in_headers_and_bodies_raw() {
+    let app = outbound_app();
+    let (status, _, body) = send(&app, http_call("h0", None, "")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_code(&body), "invalid");
+
+    let meta =
+        r#"{"method":"POST","destination":{"connection":{"connectionId":"c","url":"https://x"}}}"#;
+    let (status, headers, body) = send(&app, http_call("h1", Some(meta), "ping")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body[..], b"ping");
+    assert_eq!(headers[headers::UPSTREAM_STATUS], "201");
+    assert_eq!(
+        headers[headers::UPSTREAM_HEADERS],
+        r#"[["x-upstream","1"]]"#
+    );
+
+    let meta = r#"{"method":"GET","destination":{"public":"https://blocked"}}"#;
+    let (status, headers, body) = send(&app, http_call("h2", Some(meta), "")).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(&body[..], b"upstream said no");
+    let failure: serde_json::Value =
+        serde_json::from_str(headers[headers::ERROR].to_str().unwrap()).unwrap();
+    assert_eq!(failure["code"], "HTTP_DESTINATION_DENIED");
+    assert_eq!(failure["status"], 403);
+}
+
+#[tokio::test]
+async fn sql_operations_are_query_execute_and_batch() {
+    let app = outbound_app();
+    let (status, _, _) = send(
+        &app,
+        write("POST", "/v1/connections/c/sql/drop", "s1", "{}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, body) = send(
+        &app,
+        write("POST", "/v1/connections/c/sql/query", "s2", "{}"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_IMPLEMENTED,
+        "this backend serves no SQL"
+    );
+    assert_eq!(error_code(&body), "unsupported");
+}
