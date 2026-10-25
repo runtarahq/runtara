@@ -936,6 +936,23 @@ impl WorkflowExecutor {
         // longer installed, the child still links and its trusted calls fail
         // with TRUSTED_VERSION_REQUIRED, as they do for the root.
         let root_pins = self.trusted_pins(&package.root);
+        // A trusted caller is a child bound as a trusted built-in this host
+        // runs (it calls `/v1/trusted`), or one importing the old executor.
+        let trusted_callers: std::collections::HashSet<&str> = match self.trusted.get() {
+            Some(executor) => package
+                .bindings
+                .iter()
+                .filter(|binding| {
+                    binding
+                        .interface
+                        .strip_prefix("runtara:agent-")
+                        .and_then(|rest| rest.split_once('/'))
+                        .is_some_and(|(agent, _)| executor.runs_agent(agent))
+                })
+                .map(|binding| binding.artifact.as_str())
+                .collect(),
+            None => Default::default(),
+        };
         let mut child_pins = std::collections::BTreeMap::new();
         let linker = self.linker_with_trusted_pins(&package.root)?;
         for (digest, component) in &package.artifacts {
@@ -955,10 +972,11 @@ impl WorkflowExecutor {
                     "isolated trusted dependency is not pinned by root"
                 );
             }
-            if component
-                .component_type()
-                .imports(&self.engine)
-                .any(|(name, _)| name == runtara_wit::trusted::EXECUTOR)
+            if trusted_callers.contains(digest.as_str())
+                || component
+                    .component_type()
+                    .imports(&self.engine)
+                    .any(|(name, _)| name == runtara_wit::trusted::EXECUTOR)
             {
                 anyhow::ensure!(
                     !pins.is_empty(),

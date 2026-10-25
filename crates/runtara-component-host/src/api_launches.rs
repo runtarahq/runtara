@@ -1075,8 +1075,13 @@ impl WorkflowApiBackend for Backend {
                 "no such entered operation",
             ));
         }
+        // A host without trusted execution refuses, as its host-linked
+        // calls did; retrying cannot help.
         let executor = self.0.trusted.get().cloned().ok_or_else(|| {
-            ApiError::new(ErrorCode::Unavailable, "no trusted executor is configured")
+            ApiError::new(
+                ErrorCode::Denied,
+                "trusted execution is not available in this context",
+            )
         })?;
         // A run's calls are bound by its artifact's pins; a standalone
         // launch's by the trust its store had.

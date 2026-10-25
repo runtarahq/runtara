@@ -4487,11 +4487,12 @@ dependencies = [
 name = "runtara-agent-trusted"
 version = "9.0.1"
 dependencies = [
+ "runtara-workflow-api",
+ "runtara-workflow-sdk",
  "serde",
  "serde_json",
  "url",
  "urlencoding",
- "wit-bindgen 0.58.0",
  "zeroize",
 ]
 

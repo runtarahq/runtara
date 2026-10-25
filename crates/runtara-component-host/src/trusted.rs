@@ -220,6 +220,11 @@ impl TrustedExecutor {
         Ok(())
     }
 
+    /// Whether `agent` is a trusted built-in this executor runs.
+    pub fn runs_agent(&self, agent: &str) -> bool {
+        self.agents.contains_key(&canonical_agent_id(agent))
+    }
+
     /// Content-bound import names of every installed trusted built-in. The
     /// server's compilation readiness requires an artifact's recorded pins to
     /// be among these.
