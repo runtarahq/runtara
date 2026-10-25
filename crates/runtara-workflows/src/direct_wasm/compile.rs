@@ -1322,7 +1322,6 @@ fn compile_direct_workflow_inner(
         omit_runtime,
         export_agent_id.as_deref(),
         &scoped_agents,
-        api_runtime,
     )?;
     let wasm_checksum = sha256_hex(&wasm);
     let support_report_checksum = sha256_hex(&support_json);
@@ -1443,7 +1442,6 @@ fn emit_direct_artifact(
     omit_runtime: bool,
     export_agent_id: Option<&str>,
     scoped_agents: &std::collections::BTreeSet<String>,
-    api_runtime: bool,
 ) -> Result<(Vec<u8>, std::collections::BTreeMap<String, u32>), DirectCompileError> {
     let entry_id = super::component::entry_agent_id(abi, export_agent_id);
     let abi_json = serde_json::to_vec(&serde_json::json!({
@@ -1470,7 +1468,6 @@ fn emit_direct_artifact(
         omit_runtime,
         export_agent_id,
         scoped_agents,
-        api_runtime,
     )?;
     append_component_custom_section(&mut component, DIRECT_WORKFLOW_ABI_SECTION, &abi_json);
     append_component_custom_section(
@@ -1497,13 +1494,11 @@ fn emit_direct_component(
     omit_runtime: bool,
     export_agent_id: Option<&str>,
     scoped_agents: &std::collections::BTreeSet<String>,
-    api_runtime: bool,
 ) -> Result<(Vec<u8>, std::collections::BTreeMap<String, u32>), DirectCompileError> {
     let core_config =
         DirectCoreConfig::new_with_workflow_id(manifest, manifest_json, track_events, workflow_id)?
             .with_abi(abi)
-            .with_omit_runtime(omit_runtime)
-            .with_api_runtime(api_runtime);
+            .with_omit_runtime(omit_runtime);
     // Parallel-split instance pools: each
     // pooled agent contributes phantom world imports (`…-par<n>`) that the wac
     // composition satisfies with extra instantiations of the SAME package.
@@ -1524,7 +1519,6 @@ fn emit_direct_component(
         core_config.static_data.needs_monotonic_clock(),
         manifest.has_wait_for_instances(),
         manifest.publishes_state(),
-        api_runtime,
     )?;
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
@@ -1622,12 +1616,12 @@ fn build_direct_component_resolve_scoped(
         needs_monotonic_clock,
         false,
         false,
-        false,
     )
 }
 
 /// [`build_direct_component_resolve_scoped`], also importing
-/// `runtara:workflow/waits` when a WaitForInstances step needs it.
+/// `runtara:api/waits` when a WaitForInstances step needs it and
+/// `runtara:api/state` when the run publishes its state.
 #[allow(clippy::too_many_arguments)]
 fn build_direct_component_resolve_with_waits(
     agents: &[String],
@@ -1643,7 +1637,6 @@ fn build_direct_component_resolve_with_waits(
     needs_monotonic_clock: bool,
     wait_instances: bool,
     run_state: bool,
-    api_runtime: bool,
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
     // Control sites need the scope without any suspending agent.
     let operation_scope = operation_scope || !suspending_agents.is_empty();
@@ -1703,32 +1696,18 @@ fn build_direct_component_resolve_with_waits(
     );
     // Everything the logic reaches is `runtara:api`'s: the runtime (unless
     // the workflow is runtime-free), connections, timers, operations, waits
-    // and state. Only the core-module unit tests still build the old host
-    // imports (`legacy`), until they are ported.
-    let legacy = !api_runtime && !omit_runtime;
-    if api_runtime {
+    // and state.
+    if !omit_runtime {
         for interface in runtara_wit::api::RUNTIME_REPLACEMENTS {
             workflow_wit.push_str(&format!("    import {interface};\n"));
         }
-    } else if legacy {
-        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::workflow::RUNTIME));
     }
     if has_connections {
-        let connections = if legacy {
-            runtara_wit::host::CONNECTIONS
-        } else {
-            runtara_wit::api::CONNECTIONS
-        };
-        workflow_wit.push_str(&format!("    import {connections};\n"));
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::api::CONNECTIONS));
     }
     // The timers are `runtara:api/time`'s, which the runtime already imports.
-    if (needs_timers || !parallel_pools.is_empty() || !agents.is_empty()) && !api_runtime {
-        let timers = if legacy {
-            runtara_wit::host::TIMERS
-        } else {
-            runtara_wit::api::TIME
-        };
-        workflow_wit.push_str(&format!("    import {timers};\n"));
+    if (needs_timers || !parallel_pools.is_empty() || !agents.is_empty()) && omit_runtime {
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::api::TIME));
     }
     if needs_monotonic_clock {
         workflow_wit.push_str(&format!(
@@ -1737,23 +1716,13 @@ fn build_direct_component_resolve_with_waits(
         ));
     }
     if operation_scope {
-        let operation = if legacy {
-            runtara_wit::workflow::OPERATION
-        } else {
-            runtara_wit::api::OPERATIONS
-        };
-        workflow_wit.push_str(&format!("    import {operation};\n"));
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::api::OPERATIONS));
     }
-    let (waits, state) = if legacy {
-        (runtara_wit::workflow::WAITS, runtara_wit::workflow::STATE)
-    } else {
-        (runtara_wit::api::WAITS, runtara_wit::api::STATE)
-    };
     if wait_instances {
-        workflow_wit.push_str(&format!("    import {waits};\n"));
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::api::WAITS));
     }
     if run_state {
-        workflow_wit.push_str(&format!("    import {state};\n"));
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::api::STATE));
     }
     for agent in agents {
         let interface = if scoped_agents.contains(agent) {

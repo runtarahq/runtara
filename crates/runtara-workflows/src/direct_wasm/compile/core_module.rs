@@ -45,13 +45,11 @@ pub(super) struct DirectCoreConfig {
     /// Top-level export shape (see `component::WorkflowRole`). Defaults to
     /// the workflow entry; set via [`Self::with_abi`].
     pub(super) abi: crate::direct_wasm::component::WorkflowRole,
-    /// When true, the component imports no `runtara:workflow/runtime`,
-    /// so the emitter must NOT lower any `runtime.*` call. Only valid for a
-    /// pure workflow (see [`Self::with_omit_runtime`]).
+    /// When true, the component imports no runtime, so the emitter must NOT
+    /// lower any `runtime.*` call. Only valid for a pure workflow (see
+    /// [`Self::with_omit_runtime`]). Otherwise the runtime functions are
+    /// shims over `runtara:api` imports (see `api_shims`).
     pub(super) omit_runtime: bool,
-    /// The runtime functions are shims over `runtara:api` imports (see
-    /// `api_shims`); false for a runtime-free workflow.
-    pub(super) api_runtime: bool,
     /// The logic needs the concurrent timers (`sleep`, `abort-after`), from
     /// `runtara:api/time`.
     pub(super) timers: bool,
@@ -90,12 +88,6 @@ impl DirectCoreConfig {
         self
     }
 
-    /// Lower the runtime onto `runtara:api` imports.
-    pub(super) fn with_api_runtime(mut self, enabled: bool) -> Self {
-        self.api_runtime = enabled;
-        self
-    }
-
     fn new_inner(
         manifest: &DirectWorkflowManifest,
         manifest_json: &[u8],
@@ -119,7 +111,6 @@ impl DirectCoreConfig {
         Ok(Self {
             abi: crate::direct_wasm::component::WorkflowRole::default(),
             omit_runtime: false,
-            api_runtime: false,
             timers,
             run_plan,
             static_data,
@@ -215,17 +206,8 @@ pub(super) fn emit_direct_core_module(
         .imports
         .keys()
         .any(|name| agent_import_for(resolve, Some(name)).is_some());
-    // The concurrent timers are `runtara:api/time`'s; only the core-module
-    // unit tests still build the old host import.
-    let host_timers = world
-        .imports
-        .keys()
-        .any(|name| resolve.name_world_key(name) == runtara_wit::host::TIMERS);
-    let timers_module = if host_timers {
-        Some(runtara_wit::host::TIMERS)
-    } else {
-        config.timers.then_some(runtara_wit::api::TIME)
-    };
+    // The concurrent timers are `runtara:api/time`'s.
+    let timers_module = config.timers.then_some(runtara_wit::api::TIME);
     let has_async_calls = has_agents || timers_module.is_some();
     if has_async_calls {
         let builtin = |field: &str,
@@ -414,7 +396,7 @@ pub(super) fn emit_direct_core_module(
     // The scratch area of the runtime shims sits where the heap would start;
     // the heap starts after it.
     let api_scratch = config.static_data.heap_base;
-    let heap_base = if config.api_runtime {
+    let heap_base = if !config.omit_runtime {
         let api_functions = std::mem::take(&mut import_indices.api_functions);
         super::api_shims::emit_runtime_shims(
             resolve,

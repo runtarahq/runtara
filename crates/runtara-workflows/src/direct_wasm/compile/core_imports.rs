@@ -1133,18 +1133,6 @@ fn require_runtime(
     }
 }
 
-fn is_runtime_import(
-    resolve: &Resolve,
-    interface: Option<&WorldKey>,
-    function: &WitFunction,
-    function_name: &str,
-) -> bool {
-    function.name == function_name
-        && interface
-            .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name.starts_with("runtara:workflow/runtime"))
-}
-
 fn is_stdlib_import(
     resolve: &Resolve,
     interface: Option<&WorldKey>,
@@ -1166,10 +1154,7 @@ pub(super) fn is_connection_resolver_import(
     function.name == function_name
         && interface
             .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| {
-                name.starts_with("runtara:host/connections")
-                    || name.starts_with("runtara:api/connections")
-            })
+            .is_some_and(|name| name.starts_with("runtara:api/connections"))
 }
 
 /// The `(agent, interface)` of a per-agent import such as
@@ -1185,42 +1170,6 @@ pub(super) fn agent_import_for(
         agent_id.to_string(),
         AgentInterface::from_wit_name(interface_name)?,
     ))
-}
-
-fn is_operation_scope_import(
-    resolve: &Resolve,
-    interface: Option<&WorldKey>,
-    function: &WitFunction,
-    function_name: &str,
-) -> bool {
-    function.name == function_name
-        && interface
-            .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name == runtara_wit::workflow::OPERATION)
-}
-
-fn is_run_state_import(
-    resolve: &Resolve,
-    interface: Option<&WorldKey>,
-    function: &WitFunction,
-    function_name: &str,
-) -> bool {
-    function.name == function_name
-        && interface
-            .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name == runtara_wit::workflow::STATE)
-}
-
-fn is_wait_instances_import(
-    resolve: &Resolve,
-    interface: Option<&WorldKey>,
-    function: &WitFunction,
-    function_name: &str,
-) -> bool {
-    function.name == function_name
-        && interface
-            .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name == runtara_wit::workflow::WAITS)
 }
 
 /// True for the workflow-as-agent capability export: an `invoke` in a
@@ -1284,42 +1233,8 @@ pub(super) fn import_core_function(
             .is_some_and(|key| resolve.name_world_key(key) == runtara_wit::wasi::MONOTONIC_CLOCK)
     {
         import_indices.monotonic_now = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "custom-event") {
-        import_indices.runtime_custom_event = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "debug-mode-enabled") {
-        import_indices.runtime_debug_mode_enabled = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "breakpoint-pause") {
-        import_indices.runtime_breakpoint_pause = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "heartbeat") {
-        import_indices.runtime_heartbeat = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "instance-id") {
-        import_indices.runtime_instance_id = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "poll-signal") {
-        import_indices.runtime_poll_signal = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "is-cancelled") {
-        import_indices.runtime_is_cancelled = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "check-signals") {
-        import_indices.runtime_check_signals = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "register-input") {
-        import_indices.runtime_register_input = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "poll-input") {
-        import_indices.runtime_poll_input = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "close-input") {
-        import_indices.runtime_close_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-closed-error") {
         import_indices.stdlib_wait_closed_error = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "now-ms") {
-        import_indices.runtime_now_ms = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "get-checkpoint") {
-        import_indices.runtime_get_checkpoint = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "checkpoint") {
-        import_indices.runtime_checkpoint = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "handle-checkpoint-signal") {
-        import_indices.runtime_handle_checkpoint_signal = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "record-retry-attempt") {
-        import_indices.runtime_record_retry_attempt = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "blocking-sleep") {
-        import_indices.runtime_blocking_sleep = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "init-manifest") {
         import_indices.stdlib_init_manifest = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "value-store-scope") {
@@ -1590,46 +1505,6 @@ pub(super) fn import_core_function(
         import_indices.stdlib_step_debug_end = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "step-debug-error") {
         import_indices.stdlib_step_debug_error = Some(function_index);
-    } else if is_operation_scope_import(resolve, interface, function, "enter") {
-        import_indices
-            .operation_scope
-            .get_or_insert_with(Default::default)
-            .enter = function_index;
-    } else if is_operation_scope_import(resolve, interface, function, "suspend") {
-        import_indices
-            .operation_scope
-            .get_or_insert_with(Default::default)
-            .suspend = function_index;
-    } else if is_operation_scope_import(resolve, interface, function, "exit") {
-        import_indices
-            .operation_scope
-            .get_or_insert_with(Default::default)
-            .exit = function_index;
-    } else if is_operation_scope_import(resolve, interface, function, "release") {
-        import_indices
-            .operation_scope
-            .get_or_insert_with(Default::default)
-            .release = function_index;
-    } else if is_run_state_import(resolve, interface, function, "set") {
-        import_indices
-            .run_state
-            .get_or_insert_with(Default::default)
-            .set = function_index;
-    } else if is_run_state_import(resolve, interface, function, "get") {
-        import_indices
-            .run_state
-            .get_or_insert_with(Default::default)
-            .get = function_index;
-    } else if is_wait_instances_import(resolve, interface, function, "register") {
-        import_indices
-            .wait_instances
-            .get_or_insert_with(Default::default)
-            .register = function_index;
-    } else if is_wait_instances_import(resolve, interface, function, "release") {
-        import_indices
-            .wait_instances
-            .get_or_insert_with(Default::default)
-            .release = function_index;
     } else if function.name == "invoke"
         && let Some(key) = agent_import_for(resolve, interface)
     {

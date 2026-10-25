@@ -58,7 +58,7 @@ const LEFT: i32 = 2;
 
 /// One step into a type when computing a byte offset.
 #[derive(Clone, Copy)]
-enum Step {
+pub(super) enum Step {
     Ok,
     Err,
     Some,
@@ -395,8 +395,9 @@ pub(super) struct ApiImport {
     pub(super) params: Vec<WasmType>,
 }
 
-/// Every old runtime function the emitter calls, by name.
-const SHIMMED: [&str; 17] = [
+/// Every old runtime function the emitter calls, by name, in the order their
+/// shims are defined.
+pub(super) const SHIMMED: [&str; 17] = [
     "custom-event",
     "debug-mode-enabled",
     "breakpoint-pause",
@@ -1139,6 +1140,19 @@ pub(super) fn describe_moves(resolve: &Resolve) -> Result<DescribeMoves, DirectC
         ));
     }
     Ok(moves)
+}
+
+/// Byte offset of `path` in the result of `runtara:api` `interface.name`,
+/// for the tests that answer the shims' imports.
+#[cfg(test)]
+pub(super) fn api_result_offset(
+    resolve: &Resolve,
+    interface: &str,
+    name: &str,
+    path: &[Step],
+) -> u64 {
+    let ty = result_type(function(resolve, "runtara:api", interface, name).unwrap()).unwrap();
+    Layouts::new(resolve).offset(&ty, path).unwrap()
 }
 
 #[cfg(test)]
