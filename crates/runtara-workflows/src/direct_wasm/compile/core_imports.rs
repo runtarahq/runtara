@@ -44,6 +44,8 @@ pub(super) struct DirectCoreImportIndices {
     runtime_record_retry_attempt: Option<u32>,
     runtime_blocking_sleep: Option<u32>,
     pub(super) connection_resolver_describe_async: Option<u32>,
+    /// Set when the lookup is `runtara:api/connections.describe`.
+    pub(super) connection_describe_moves: Option<super::api_shims::DescribeMoves>,
     stdlib_init_manifest: Option<u32>,
     stdlib_value_store_retain_scoped: Option<u32>,
     stdlib_value_store_scope: Option<u32>,
@@ -236,6 +238,7 @@ impl DirectCoreImportIndices {
                 self.connection_resolver_describe_async,
                 has_connections,
             )?,
+            connection_describe_moves: self.connection_describe_moves,
             runtime_custom_event: require_runtime(
                 self.runtime_custom_event,
                 "runtime.custom-event",
@@ -799,6 +802,8 @@ pub(super) struct DirectCoreFunctionIndices {
     /// [`RUNTIME_OMITTED_POISON`]).
     pub(super) omit_runtime: bool,
     pub(super) connection_resolver_describe_async: u32,
+    /// Moves the lookup's `runtara:api` answer into the old layout.
+    pub(super) connection_describe_moves: Option<super::api_shims::DescribeMoves>,
     pub(super) runtime_custom_event: u32,
     pub(super) runtime_debug_mode_enabled: u32,
     pub(super) runtime_breakpoint_pause: u32,
@@ -1152,7 +1157,10 @@ pub(super) fn is_connection_resolver_import(
     function.name == function_name
         && interface
             .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name.starts_with("runtara:host/connections"))
+            .is_some_and(|name| {
+                name.starts_with("runtara:host/connections")
+                    || name.starts_with("runtara:api/connections")
+            })
 }
 
 /// The `(agent, interface)` of a per-agent import such as

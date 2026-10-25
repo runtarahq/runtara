@@ -1735,7 +1735,14 @@ fn build_direct_component_resolve_with_waits(
         workflow_wit.push_str(&format!("    import {RUNTIME_INTERFACE_NAME};\n"));
     }
     if has_connections {
-        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::host::CONNECTIONS));
+        // On the workflow API ABI the logic's connection lookup is
+        // `runtara:api`'s too.
+        let connections = if api_runtime {
+            runtara_wit::api::CONNECTIONS
+        } else {
+            runtara_wit::host::CONNECTIONS
+        };
+        workflow_wit.push_str(&format!("    import {connections};\n"));
     }
     if needs_timers || !parallel_pools.is_empty() || !agents.is_empty() {
         workflow_wit.push_str(&format!("    import {};\n", runtara_wit::host::TIMERS));

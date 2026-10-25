@@ -655,6 +655,9 @@ impl runtara_component_host::ConnectionResolverHost for FixtureConnectionResolve
         if connection_id == "om-conn" {
             return Ok(sql_fixture::descriptor(&connection_id));
         }
+        if connection_id == "missing-conn" {
+            return Err("Connection missing-conn was not found".into());
+        }
         let (integration_id, resources) = if connection_id == "conn-bedrock" {
             (
                 "aws_credentials",
@@ -1866,6 +1869,39 @@ fn direct_compose_leaves_only_wasi_for_the_host() {
             .iter()
             .any(|name| name.starts_with("wasi:http/client@0.3")),
         "the workflow API transport is imported; imports: {imports:?}"
+    );
+}
+
+/// A connection lookup in the workflow logic goes through `runtara:api` too:
+/// no composed artifact imports the host's connections interface.
+#[test]
+fn direct_compose_resolves_connections_through_the_workflow_api() {
+    let components_dir = direct_e2e_components_dir();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let compiled = compile_direct_workflow_composed_configured(
+        DirectCompilationInput {
+            workflow_id: "composed-connection-imports".to_string(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_str(dynamic_single_shot_ai_agent_graph_json())
+                .expect("fixture parses"),
+            child_workflows: vec![],
+            output_dir: temp.path().to_path_buf(),
+            track_events: false,
+            agent_catalog: None,
+            agent_slug: None,
+        },
+        &components_dir,
+        WorkflowRole::Root,
+        false,
+    )
+    .expect("direct composed compile");
+    let imports = top_level_component_imports(&fs::read(&compiled.wasm_path).expect("read"));
+    assert!(
+        !imports
+            .iter()
+            .any(|name| name.starts_with("runtara:host/connections")),
+        "imports: {imports:?}"
     );
 }
 
@@ -3354,6 +3390,33 @@ fn direct_wasm_execute_ai_agent_resolves_connection_ref_and_runtime_model_parame
 /// envelope (`timeout_ms`). With `turnTimeout` set it carries the configured
 /// value; unset, it defaults to DEFAULT_STEP_TIMEOUT_MS (180000) rather than the
 /// old 30s no-timeout proxy floor. This is the core "30s floor is gone" check.
+/// A failed connection lookup fails the step with the host's own message,
+/// and the Agent is never called.
+#[test]
+fn direct_wasm_execute_failed_connection_lookup_keeps_the_hosts_message() {
+    let components_dir = direct_e2e_components_dir();
+    let result = run_direct_workflow_with_llm_script(
+        &components_dir,
+        "ai-missing-connection",
+        dynamic_single_shot_ai_agent_graph_json(),
+        br#"{"connection":"missing-conn","prompt":"Say hello","provider":"bedrock","model":"gpt-4.1-mini","temperature":0.25,"maxTokens":321}"#,
+        vec![],
+    );
+
+    assert!(!result.status_success, "the run must fail");
+    assert_eq!(result.connection_metadata_requests, ["missing-conn"]);
+    assert!(result.llm_requests.is_empty(), "no model call");
+    let error = result
+        .error_json
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+    assert!(
+        format!("{error} {}", result.stderr).contains("Connection missing-conn was not found"),
+        "error: {error}; stderr: {}",
+        result.stderr
+    );
+}
+
 #[test]
 fn direct_wasm_execute_ai_agent_turn_timeout_reaches_proxy() {
     let components_dir = direct_e2e_components_dir();

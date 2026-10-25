@@ -387,6 +387,13 @@ pub(super) fn emit_direct_core_module(
                 } else {
                     import_indices.connection_resolver_describe_async =
                         Some(imported_function_count);
+                    if resolve
+                        .name_world_key(name)
+                        .starts_with(runtara_wit::api::PREFIX)
+                    {
+                        import_indices.connection_describe_moves =
+                            Some(super::api_shims::describe_moves(resolve)?);
+                    }
                 }
                 imported_function_count += 1;
             }

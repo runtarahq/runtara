@@ -152,6 +152,7 @@ pub mod api {
     pub const DEBUG: &str = "runtara:api/debug@1.0.0";
     pub const WAITS: &str = "runtara:api/waits@1.0.0";
     pub const STATE: &str = "runtara:api/state@1.0.0";
+    pub const CONNECTIONS: &str = "runtara:api/connections@1.0.0";
     /// The interfaces workflow logic imports in place of
     /// `runtara:workflow/runtime`.
     pub const RUNTIME_REPLACEMENTS: [&str; 7] =

@@ -210,6 +210,10 @@ impl DirectComponentArtifacts {
         for (old, new) in [
             (runtara_wit::workflow::WAITS, runtara_wit::api::WAITS),
             (runtara_wit::workflow::STATE, runtara_wit::api::STATE),
+            (
+                runtara_wit::host::CONNECTIONS,
+                runtara_wit::api::CONNECTIONS,
+            ),
         ] {
             self.world_wit = self.world_wit.replacen(
                 &format!("    import {old};\n"),
