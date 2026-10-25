@@ -482,16 +482,27 @@ impl PreparedWorkflow {
         self.child_catalog.as_ref()
     }
 
-    /// Whether lifecycle persistence can be supervised through the native host.
-    /// Internally composed HTTP runtimes cannot defer their terminal writes.
+    /// Whether lifecycle persistence can be supervised through the native host:
+    /// the old runtime import, or the workflow API, which reaches the same host
+    /// in process. Internally composed HTTP runtimes cannot defer their
+    /// terminal writes.
     pub fn supports_scoped_runtime(&self, engine: &Arc<Engine>) -> bool {
         if !Engine::same(self.instance_pre.component().engine(), engine) {
             return false;
         }
         let ty = self.instance_pre.component().component_type();
         let imports: Vec<_> = ty.imports(engine).map(|(name, _)| name).collect();
-        imports.contains(&runtara_wit::workflow::RUNTIME)
-            && !imports.iter().any(|name| name.starts_with("wasi:http/"))
+        // The workflow API (`wasi:http@0.3`) reaches the run's own runtime
+        // host in process, fenced like a native import; an older internally
+        // composed HTTP runtime (`wasi:http@0.2`) would bypass it.
+        let workflow_api = imports
+            .iter()
+            .any(|name| name.starts_with("wasi:http/client@0.3"));
+        let embedded_http_runtime = imports
+            .iter()
+            .any(|name| name.starts_with("wasi:http/") && !name.contains("@0.3"));
+        (imports.contains(&runtara_wit::workflow::RUNTIME) || workflow_api)
+            && !embedded_http_runtime
     }
 
     /// The linked component; it exports the workflow entry.

@@ -14100,7 +14100,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
             agent_catalog: Some(dispatcher.catalog()),
             agent_slug: None,
         },
-        runtara_workflows::direct_wasm::GuestAbi::Wit,
+        runtara_workflows::direct_wasm::GuestAbi::Http,
     )
     .unwrap();
     use sha2::Digest;

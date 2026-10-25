@@ -746,11 +746,6 @@ fn compose_direct_workflow_selected(
     let mut shared_components = shared_components;
     let mut wac_source = result.component_artifacts.wac_source.clone();
     if http_guest {
-        if selection.is_some() {
-            return Err(component_error(
-                "isolated Agents are not composed on the workflow API ABI yet",
-            ));
-        }
         let mut adapters = if entry {
             super::component::WORKFLOW_API_ADAPTER_REQUIREMENTS.to_vec()
         } else {
@@ -1190,7 +1185,7 @@ pub fn compile_direct_workflow_with_scoped_agents(
         abi,
         omit_runtime,
         AgentLoweringSelection::Exact(scoped_agents),
-        super::component::GuestAbi::Wit,
+        super::component::GuestAbi::from_env().map_err(component_error)?,
     )
 }
 

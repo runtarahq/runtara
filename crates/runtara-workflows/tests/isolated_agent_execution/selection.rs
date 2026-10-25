@@ -142,6 +142,7 @@ fn policy_rechecks_selected_bytes_and_does_not_hide_invalid_artifacts() {
             fs::copy(meta, dir.path().join(&dep.meta_filename)).unwrap();
         }
     }
+    copy_workflow_api_adapters(&components, dir.path());
     let reviewed = selected(dir.path());
     let mut compiled = compile_direct_workflow_composed_with_isolation_policy(
         input(graph.clone(), &dir.path().join("selected")),
@@ -384,7 +385,7 @@ fn policy_rejects_grants_overlapping_inline_embed_checkpoints_without_agent_call
             assert!(compiled.invocation_manifest.is_none());
             assert!(compiled.artifact_metadata.isolation.is_none());
             compilation_input.output_dir = dir.path().join("inline-legacy");
-            let mut legacy = compile_wit(compilation_input).unwrap();
+            let mut legacy = compile_isolated(compilation_input).unwrap();
             runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
                 &mut legacy,
                 &components,
@@ -456,6 +457,7 @@ fn policy_rechecks_shared_bytes_before_replacing_a_composed_artifact() {
             fs::copy(meta, dir.path().join(&dep.meta_filename)).unwrap();
         }
     }
+    copy_workflow_api_adapters(&components, dir.path());
     let mut compiled = compile_direct_workflow_composed_with_isolation_policy(
         input(graph, &dir.path().join("selected")),
         WorkflowRole::Root,
@@ -570,6 +572,19 @@ fn production_compile_wrapper_uses_standard_composition_while_legacy_fixture_sta
                 resolve.id_of(*id).as_deref(),
                 Some(runtara_wit::workflow::TASKS)
             );
+        }
+    }
+}
+
+/// The components composition adds on the workflow API ABI, which the
+/// uncomposed artifact's metadata does not list.
+fn copy_workflow_api_adapters(components: &std::path::Path, dir: &std::path::Path) {
+    for stem in ["runtara_workflow_api_run", "runtara_api_component"] {
+        for extension in ["wasm", "meta.json"] {
+            let name = format!("{stem}.{extension}");
+            if components.join(&name).exists() {
+                fs::copy(components.join(&name), dir.join(&name)).unwrap();
+            }
         }
     }
 }

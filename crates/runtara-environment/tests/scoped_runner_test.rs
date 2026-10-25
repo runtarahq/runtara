@@ -166,10 +166,9 @@ fn compile_with_children(
         .unwrap();
     }
     assert!(matches!(backend, "legacy" | "live"));
-    // Isolated packages exist only on the WIT guest ABI.
     let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_for_guest_abi(
         input,
-        runtara_workflows::direct_wasm::GuestAbi::Wit,
+        runtara_workflows::direct_wasm::GuestAbi::Http,
     )
     .unwrap();
     if backend == "legacy" {

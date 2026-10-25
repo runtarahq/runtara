@@ -181,18 +181,17 @@ fn compile_children(
             ["utils".into()].into(),
         )
     } else {
-        compile_wit(input)
+        compile_isolated(input)
     }
     .unwrap()
 }
-/// These fixtures exercise the old isolated-agent packages, which exist only
-/// on the WIT guest ABI.
-fn compile_wit(
+/// Isolated-agent packages on the workflow API ABI, the default.
+fn compile_isolated(
     input: DirectCompilationInput,
 ) -> Result<DirectCompilationResult, runtara_workflows::direct_wasm::DirectCompileError> {
     runtara_workflows::direct_wasm::compile_direct_workflow_for_guest_abi(
         input,
-        runtara_workflows::direct_wasm::GuestAbi::Wit,
+        runtara_workflows::direct_wasm::GuestAbi::Http,
     )
 }
 fn selected(components: &Path) -> BTreeMap<String, String> {
