@@ -11,7 +11,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use super::{Failure, WorkflowApiState, binding_of};
-use crate::{ApiError, ErrorCode, headers};
+use crate::{ApiError, CustomSignalNotice, ErrorCode, Event, LifecycleNotice, headers};
 
 /// A pending lifecycle command (cancel, pause, resume, shutdown).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,14 +22,6 @@ pub struct LifecycleSignal {
     pub checkpoint_id: Option<String>,
 }
 
-/// A custom signal waiting at a checkpoint, announced without its payload.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CustomSignalNotice {
-    pub signal_id: String,
-    pub checkpoint_id: String,
-}
-
 /// The result of writing a checkpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckpointWrite {
@@ -38,25 +30,6 @@ pub struct CheckpointWrite {
     pub state: Vec<u8>,
     pub pending_signal: Option<LifecycleSignal>,
     pub custom_signal: Option<CustomSignalNotice>,
-}
-
-/// One line of `POST /v1/events`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Event {
-    pub kind: String,
-    #[serde(default)]
-    pub payload: serde_json::Value,
-}
-
-/// The JSON announcement of a lifecycle signal: everything but the payload.
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LifecycleNotice {
-    pub signal_type: String,
-    pub command_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkpoint_id: Option<String>,
 }
 
 impl From<&LifecycleSignal> for LifecycleNotice {

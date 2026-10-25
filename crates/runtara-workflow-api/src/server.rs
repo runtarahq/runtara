@@ -46,7 +46,8 @@ pub enum LaunchState {
 pub use crate::PostedOutcome;
 
 mod runtime;
-pub use runtime::{CheckpointWrite, CustomSignalNotice, Event, LifecycleNotice, LifecycleSignal};
+pub use crate::{CustomSignalNotice, Event, LifecycleNotice};
+pub use runtime::{CheckpointWrite, LifecycleSignal};
 
 /// The effects behind the router. Implemented by the runtime that owns runs
 /// (runtara-environment for the embedded runner). Every method receives the

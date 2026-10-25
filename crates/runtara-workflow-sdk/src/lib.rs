@@ -258,3 +258,143 @@ pub async fn post_outcome(outcome: PostedOutcome) -> Result<(), Error> {
     .await
     .map(|_| ())
 }
+
+/// The result of [`checkpoint`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckpointWritten {
+    /// False when the checkpoint already existed; `state` is the one that won.
+    pub stored: bool,
+    pub state: Vec<u8>,
+    /// A lifecycle command waiting for the run; read it with
+    /// [`poll_lifecycle_signal`].
+    pub pending_signal: Option<runtara_workflow_api::LifecycleNotice>,
+    /// A custom signal waiting at this checkpoint; read it with
+    /// [`poll_custom_signal`].
+    pub custom_signal: Option<runtara_workflow_api::CustomSignalNotice>,
+}
+
+/// A lifecycle command delivered by [`poll_lifecycle_signal`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct LifecycleSignal {
+    pub notice: runtara_workflow_api::LifecycleNotice,
+    pub payload: Vec<u8>,
+}
+
+fn key_path(prefix: &str, key: &str) -> String {
+    format!("{prefix}/{}", runtara_workflow_api::encode_path_key(key))
+}
+
+fn header_json<T: serde::de::DeserializeOwned>(response: &Response, name: &str) -> Option<T> {
+    serde_json::from_str(response.header(name)?).ok()
+}
+
+/// `GET /v1/checkpoints/{id}`: the committed state, if any.
+pub async fn get_checkpoint(id: &str) -> Result<Option<Vec<u8>>, Error> {
+    match call("GET", &key_path("/v1/checkpoints", id), &[], None).await {
+        Ok(response) => Ok(Some(response.body)),
+        Err(Error::Api(error)) if error.code == ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// `PUT /v1/checkpoints/{id}`: commit `state`; the first committed state wins.
+pub async fn checkpoint(id: &str, state: Vec<u8>) -> Result<CheckpointWritten, Error> {
+    let response = call("PUT", &key_path("/v1/checkpoints", id), &[], Some(state)).await?;
+    Ok(CheckpointWritten {
+        stored: response.status == 201,
+        pending_signal: header_json(&response, runtara_workflow_api::headers::PENDING_SIGNAL),
+        custom_signal: header_json(&response, runtara_workflow_api::headers::CUSTOM_SIGNAL),
+        state: response.body,
+    })
+}
+
+/// `POST /v1/checkpoints/{id}/retry-attempts`.
+pub async fn record_retry_attempt(
+    id: &str,
+    attempt_number: u32,
+    error_message: Option<&str>,
+) -> Result<(), Error> {
+    let body = serde_json::json!({"attemptNumber": attempt_number, "errorMessage": error_message});
+    call(
+        "POST",
+        &format!("{}/retry-attempts", key_path("/v1/checkpoints", id)),
+        &[("content-type", "application/json")],
+        Some(body.to_string().into_bytes()),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// `GET /v1/signals/lifecycle`: the pending lifecycle command, unacknowledged.
+pub async fn poll_lifecycle_signal() -> Result<Option<LifecycleSignal>, Error> {
+    let response = call("GET", "/v1/signals/lifecycle", &[], None).await?;
+    if response.status == 204 {
+        return Ok(None);
+    }
+    let notice = header_json(&response, runtara_workflow_api::headers::SIGNAL)
+        .ok_or_else(|| Error::Transport("lifecycle signal without its notice".into()))?;
+    Ok(Some(LifecycleSignal {
+        notice,
+        payload: response.body,
+    }))
+}
+
+/// `POST /v1/signals/lifecycle/{commandId}/ack`: whether it applied.
+pub async fn ack_lifecycle_signal(command_id: &str, signal_type: &str) -> Result<bool, Error> {
+    let body = serde_json::json!({"signalType": signal_type});
+    let response = call(
+        "POST",
+        &format!("{}/ack", key_path("/v1/signals/lifecycle", command_id)),
+        &[("content-type", "application/json")],
+        Some(body.to_string().into_bytes()),
+    )
+    .await?;
+    let applied: serde_json::Value = serde_json::from_slice(&response.body)
+        .map_err(|e| Error::Transport(format!("acknowledgement: {e}")))?;
+    Ok(applied["applied"].as_bool().unwrap_or(false))
+}
+
+/// `GET /v1/signals/custom/{checkpointId}`, waiting up to `wait_ms`.
+pub async fn poll_custom_signal(
+    checkpoint_id: &str,
+    wait_ms: u64,
+) -> Result<Option<Vec<u8>>, Error> {
+    let path = format!(
+        "{}?waitMs={wait_ms}",
+        key_path("/v1/signals/custom", checkpoint_id)
+    );
+    let response = call("GET", &path, &[], None).await?;
+    Ok((response.status == 200).then_some(response.body))
+}
+
+/// `GET /v1/time`: persistence time in ms since the Unix epoch.
+pub async fn now_ms() -> Result<u64, Error> {
+    let response = call("GET", "/v1/time", &[], None).await?;
+    let now: serde_json::Value = serde_json::from_slice(&response.body)
+        .map_err(|e| Error::Transport(format!("time: {e}")))?;
+    now["nowMs"]
+        .as_u64()
+        .ok_or_else(|| Error::Transport("time without nowMs".into()))
+}
+
+/// `POST /v1/heartbeat`.
+pub async fn heartbeat() -> Result<(), Error> {
+    call("POST", "/v1/heartbeat", &[], None).await.map(|_| ())
+}
+
+/// `POST /v1/events`: append `events` in order, as one NDJSON batch.
+pub async fn emit_events(events: &[runtara_workflow_api::Event]) -> Result<(), Error> {
+    let mut body = Vec::new();
+    for event in events {
+        serde_json::to_writer(&mut body, event).map_err(|e| Error::Transport(e.to_string()))?;
+        body.push(b'\n');
+    }
+    call(
+        "POST",
+        "/v1/events",
+        &[("content-type", "application/x-ndjson")],
+        Some(body),
+    )
+    .await
+    .map(|_| ())
+}

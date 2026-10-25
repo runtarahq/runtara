@@ -1031,3 +1031,78 @@ async fn a_workflow_api_run_that_never_posts_is_released() {
         assert_eq!(h.runner.workflow_api_launches().serving(), 0, "{mode}");
     }
 }
+
+/// Run services over the workflow API go through the run's own runtime host:
+/// the checkpoint and the event the probe wrote are in persistence.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_api_run_services_reach_persistence() {
+    let h = harness().await;
+    let probe = workflow_api_probe();
+    let inst_id = unique("inst-workflow-api-durable");
+    let input =
+        serde_json::to_vec(&serde_json::json!({"data": {"mode": "durable"}, "variables": {}}))
+            .unwrap();
+    assert!(
+        h.persistence
+            .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+            .await
+            .expect("register instance")
+    );
+    let handle = h
+        .runner
+        .try_launch_detached(&options(inst_id.as_str(), &probe))
+        .await
+        .expect("launch");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+    )
+    .await
+    .expect("wait_for_exit hung");
+    let instance = h
+        .persistence
+        .get_instance(inst_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        instance.status,
+        runtara_core::domain::InstanceStatus::Completed,
+        "{instance:?}"
+    );
+    let output: serde_json::Value =
+        serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+    assert_eq!(output["firstStored"], true);
+    assert_eq!(output["secondStored"], false);
+    assert_eq!(output["secondState"], "first");
+    assert_eq!(output["read"], "first");
+    assert_eq!(output["missing"], true);
+    assert!(output["nowMs"].as_u64().unwrap() > 1_700_000_000_000);
+
+    let checkpoint = h
+        .persistence
+        .load_checkpoint(inst_id.as_str(), "probe/step:1")
+        .await
+        .unwrap()
+        .expect("the probe's checkpoint is persisted");
+    assert_eq!(checkpoint.state, b"first");
+
+    let events = h
+        .persistence
+        .list_events(
+            inst_id.as_str(),
+            &runtara_core::persistence::ListEventsFilter {
+                subtype: Some("probe".into()),
+                ..Default::default()
+            },
+            10,
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        events[0].payload.as_deref(),
+        Some(br#"{"step":1}"#.as_slice())
+    );
+}

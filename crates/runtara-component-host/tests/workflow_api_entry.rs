@@ -124,7 +124,7 @@ impl RuntimeHost for Host {
     fn workflow_api_binding(&self) -> Option<Binding> {
         self.bound.then(binding)
     }
-    async fn workflow_api_begin(&self, input: Vec<u8>) -> Result<(), String> {
+    async fn workflow_api_begin(self: Arc<Self>, input: Vec<u8>) -> Result<(), String> {
         *self.run.input.lock().unwrap() = Some(input);
         Ok(())
     }

@@ -11,14 +11,16 @@
 //! posted outcome back.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use bytes::Bytes;
+use runtara_component_host::runtime_host::RuntimeHost;
 use runtara_component_host::{WorkflowApiFuture, WorkflowApiTransport};
 use runtara_workflow_api::server::{
-    LaunchState, MemoryReceiptStore, WorkflowApiBackend, WorkflowApiState, router,
+    CheckpointWrite, CustomSignalNotice, Event, LaunchState, LifecycleSignal, MemoryReceiptStore,
+    WorkflowApiBackend, WorkflowApiState, router,
 };
 use runtara_workflow_api::{ApiError, Binding, Caps, ErrorCode, PostedOutcome, RunInfo};
 use tower::ServiceExt;
@@ -29,6 +31,9 @@ pub struct LaunchSlot {
     info: RunInfo,
     input: Vec<u8>,
     outcome: Mutex<Option<PostedOutcome>>,
+    /// The run's runtime host, which serves its run services with the lease
+    /// fencing it already applies. Weak: the host's drop releases the slot.
+    runtime: Weak<dyn RuntimeHost>,
 }
 
 /// The launches of this process that currently serve the workflow API, by
@@ -41,7 +46,13 @@ pub struct ApiLaunches {
 
 impl ApiLaunches {
     /// Start serving `binding`'s launch. A launch begins once.
-    pub fn begin(&self, binding: Binding, info: RunInfo, input: Vec<u8>) -> Result<(), String> {
+    pub fn begin(
+        &self,
+        binding: Binding,
+        info: RunInfo,
+        input: Vec<u8>,
+        runtime: Weak<dyn RuntimeHost>,
+    ) -> Result<(), String> {
         let mut slots = self.slots.lock().expect("workflow API launches poisoned");
         if slots.contains_key(&binding.launch_id) {
             return Err(format!(
@@ -56,6 +67,7 @@ impl ApiLaunches {
                 info,
                 input,
                 outcome: Mutex::new(None),
+                runtime,
             }),
         );
         Ok(())
@@ -110,6 +122,21 @@ impl ApiLaunches {
 }
 
 struct Backend(Arc<ApiLaunches>);
+
+impl Backend {
+    /// The runtime host of `binding`'s launch, while the launch is served.
+    fn runtime(&self, binding: &Binding) -> Result<Arc<dyn RuntimeHost>, ApiError> {
+        self.0
+            .slot(binding)
+            .and_then(|slot| slot.runtime.upgrade())
+            .ok_or_else(not_serving)
+    }
+}
+
+/// A runtime host refusal. The host's messages carry no payloads.
+fn host_error(error: String) -> ApiError {
+    ApiError::new(ErrorCode::Unavailable, error)
+}
 
 fn not_serving() -> ApiError {
     ApiError::new(
@@ -169,6 +196,120 @@ impl WorkflowApiBackend for Backend {
             "the embedded runner does not shorten launch deadlines yet",
         ))
     }
+
+    async fn get_checkpoint(
+        &self,
+        binding: &Binding,
+        id: &str,
+    ) -> Result<Option<Vec<u8>>, ApiError> {
+        self.runtime(binding)?
+            .get_checkpoint(id.to_string())
+            .await
+            .map_err(host_error)
+    }
+
+    async fn put_checkpoint(
+        &self,
+        binding: &Binding,
+        id: &str,
+        state: Vec<u8>,
+    ) -> Result<CheckpointWrite, ApiError> {
+        let result = self
+            .runtime(binding)?
+            .checkpoint(id.to_string(), state.clone())
+            .await
+            .map_err(host_error)?;
+        Ok(CheckpointWrite {
+            stored: !result.found,
+            // The host returns the stored state only on a hit.
+            state: if result.found { result.state } else { state },
+            pending_signal: result.pending_signal.map(lifecycle_signal),
+            custom_signal: result.custom_signal.map(|signal| CustomSignalNotice {
+                signal_id: signal.signal_id,
+                checkpoint_id: signal.checkpoint_id,
+            }),
+        })
+    }
+
+    async fn record_retry_attempt(
+        &self,
+        binding: &Binding,
+        id: &str,
+        attempt: u32,
+        error: Option<String>,
+    ) -> Result<(), ApiError> {
+        self.runtime(binding)?
+            .record_retry_attempt(id.to_string(), attempt, error)
+            .await
+            .map_err(host_error)
+    }
+
+    async fn poll_lifecycle_signal(
+        &self,
+        binding: &Binding,
+    ) -> Result<Option<LifecycleSignal>, ApiError> {
+        Ok(self
+            .runtime(binding)?
+            .poll_signal()
+            .await
+            .map_err(host_error)?
+            .map(lifecycle_signal))
+    }
+
+    async fn ack_lifecycle_signal(
+        &self,
+        binding: &Binding,
+        command_id: &str,
+        signal_type: &str,
+    ) -> Result<bool, ApiError> {
+        self.runtime(binding)?
+            .handle_checkpoint_signal(signal_type.to_string(), command_id.to_string())
+            .await
+            .map_err(host_error)
+    }
+
+    async fn poll_custom_signal(
+        &self,
+        binding: &Binding,
+        checkpoint_id: &str,
+    ) -> Result<Option<Vec<u8>>, ApiError> {
+        self.runtime(binding)?
+            .poll_custom_signal(checkpoint_id.to_string())
+            .await
+            .map_err(host_error)
+    }
+
+    async fn now_ms(&self, binding: &Binding) -> Result<u64, ApiError> {
+        self.runtime(binding)?.now_ms().map_err(host_error)
+    }
+
+    async fn heartbeat(&self, binding: &Binding) -> Result<(), ApiError> {
+        self.runtime(binding)?.heartbeat().await.map_err(host_error)
+    }
+
+    async fn append_events(&self, binding: &Binding, events: Vec<Event>) -> Result<(), ApiError> {
+        let runtime = self.runtime(binding)?;
+        for event in events {
+            let payload = serde_json::to_vec(&event.payload)
+                .map_err(|e| ApiError::new(ErrorCode::Invalid, e.to_string()))?;
+            runtime
+                .custom_event(event.kind, payload)
+                .await
+                .map_err(host_error)?;
+        }
+        Ok(())
+    }
+}
+
+fn lifecycle_signal(
+    signal: runtara_component_host::runtime_host::RuntimeSignalInfo,
+) -> LifecycleSignal {
+    LifecycleSignal {
+        signal_type: signal.signal_type,
+        command_id: signal.command_id,
+        payload: signal.payload,
+        checkpoint_id: signal.checkpoint_id,
+    }
 }
 
 /// Serves a request through the router in process.
@@ -205,6 +346,11 @@ mod tests {
         }
     }
 
+    /// A launch whose host is already gone: its run services are fenced.
+    fn no_runtime() -> Weak<dyn RuntimeHost> {
+        Weak::<crate::runtime_host::PersistenceRuntimeHost>::new()
+    }
+
     fn info() -> RunInfo {
         RunInfo {
             instance_id: "instance-1".into(),
@@ -224,8 +370,14 @@ mod tests {
     async fn a_launch_serves_until_it_finishes() {
         let launches = Arc::new(ApiLaunches::default());
         let backend = Backend(launches.clone());
-        launches.begin(binding(1), info(), b"in".to_vec()).unwrap();
-        assert!(launches.begin(binding(1), info(), Vec::new()).is_err());
+        launches
+            .begin(binding(1), info(), b"in".to_vec(), no_runtime())
+            .unwrap();
+        assert!(
+            launches
+                .begin(binding(1), info(), Vec::new(), no_runtime())
+                .is_err()
+        );
 
         assert_eq!(
             backend.launch_state(&binding(1)).await.unwrap(),

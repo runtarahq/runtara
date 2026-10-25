@@ -199,8 +199,9 @@ pub trait RuntimeHost: Send + Sync {
         None
     }
     /// Hand the run's input to the workflow API before a `wasi:cli/run` entry
-    /// starts. A runtime that doesn't serve the workflow API refuses.
-    async fn workflow_api_begin(&self, input: Vec<u8>) -> Result<(), String> {
+    /// starts. It receives the host itself, which the workflow API serves the
+    /// run's services through. A runtime that doesn't serve it refuses.
+    async fn workflow_api_begin(self: Arc<Self>, input: Vec<u8>) -> Result<(), String> {
         let _ = input;
         Err("this runtime does not serve the workflow API".into())
     }

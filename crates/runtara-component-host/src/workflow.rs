@@ -1245,7 +1245,7 @@ impl WorkflowExecutor {
                         let runtime = spec.runtime.clone().ok_or_else(|| {
                             anyhow::anyhow!("a wasi:cli/run workflow needs a runtime host")
                         })?;
-                        runtime
+                        Arc::clone(&runtime)
                             .workflow_api_begin(input)
                             .await
                             .map_err(|error| anyhow::anyhow!(error))?;

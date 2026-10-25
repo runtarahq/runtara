@@ -4,7 +4,8 @@
 //!
 //! It reads its run and input over the API and posts an outcome chosen by
 //! `data.mode`: `complete` (default) echoes `data` with the run's identity,
-//! `fail` posts a failure, `suspend` posts a timed wake, and `spin` and
+//! `fail` posts a failure, `suspend` posts a timed wake, `durable` exercises
+//! checkpoints, time, heartbeat and events, and `spin` and
 //! `trap` never post one (they loop forever or abort).
 
 #[cfg(target_arch = "wasm32")]
@@ -39,6 +40,42 @@ mod probe {
                     attributes: None,
                     details: Some(json!({"instanceId": info.instance_id})),
                 }),
+                Some("durable") => {
+                    // Checkpoints keep the first committed state, time and
+                    // heartbeat answer, and events are appended.
+                    let first = runtara_workflow_sdk::checkpoint("probe/step:1", b"first".to_vec())
+                        .await
+                        .map_err(|_| ())?;
+                    let second =
+                        runtara_workflow_sdk::checkpoint("probe/step:1", b"second".to_vec())
+                            .await
+                            .map_err(|_| ())?;
+                    let read = runtara_workflow_sdk::get_checkpoint("probe/step:1")
+                        .await
+                        .map_err(|_| ())?;
+                    let missing = runtara_workflow_sdk::get_checkpoint("probe/never")
+                        .await
+                        .map_err(|_| ())?;
+                    let now_ms = runtara_workflow_sdk::now_ms().await.map_err(|_| ())?;
+                    runtara_workflow_sdk::heartbeat().await.map_err(|_| ())?;
+                    runtara_workflow_sdk::emit_events(&[runtara_workflow_api::Event {
+                        kind: "probe".into(),
+                        payload: json!({"step": 1}),
+                    }])
+                    .await
+                    .map_err(|_| ())?;
+                    PostedOutcome::Completed(
+                        serde_json::to_vec(&json!({
+                            "firstStored": first.stored,
+                            "secondStored": second.stored,
+                            "secondState": String::from_utf8_lossy(&second.state),
+                            "read": read.map(|state| String::from_utf8_lossy(&state).into_owned()),
+                            "missing": missing.is_none(),
+                            "nowMs": now_ms,
+                        }))
+                        .map_err(|_| ())?,
+                    )
+                }
                 Some("suspend") => PostedOutcome::Suspended(Suspension {
                     wakes: vec![Wake::At(
                         data.get("wakeAt").and_then(Value::as_u64).unwrap_or(0),
