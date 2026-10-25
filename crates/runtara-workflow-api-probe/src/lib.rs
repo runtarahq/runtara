@@ -4,7 +4,8 @@
 //!
 //! It reads its run and input over the API and posts an outcome chosen by
 //! `data.mode`: `complete` (default) echoes `data` with the run's identity,
-//! `fail` posts a failure, and `suspend` posts a timed wake.
+//! `fail` posts a failure, `suspend` posts a timed wake, and `spin` and
+//! `trap` never post one (they loop forever or abort).
 
 #[cfg(target_arch = "wasm32")]
 mod probe {
@@ -20,6 +21,13 @@ mod probe {
             let input = runtara_workflow_sdk::input().await.map_err(|_| ())?;
             let input: Value = serde_json::from_slice(&input).unwrap_or(Value::Null);
             let data = input.get("data").cloned().unwrap_or(Value::Null);
+            match data.get("mode").and_then(Value::as_str) {
+                Some("spin") => loop {
+                    std::hint::spin_loop();
+                },
+                Some("trap") => std::process::abort(),
+                _ => {}
+            }
             let outcome = match data.get("mode").and_then(Value::as_str) {
                 Some("fail") => PostedOutcome::Failed(ErrorInfo {
                     code: "PROBE_FAILED".into(),

@@ -708,6 +708,11 @@ impl EmbeddedWasmRunner {
         })
     }
 
+    /// Launches currently serving the workflow API.
+    pub fn workflow_api_launches(&self) -> &Arc<crate::workflow_api::ApiLaunches> {
+        &self.workflow_api
+    }
+
     /// Opt into reviewed scoped Agent packages. Legacy artifacts retain their
     /// existing path. Package reviews must come from trusted operator policy.
     pub fn with_scoped_agents(mut self, config: ScopedAgentRunnerConfig) -> Result<Self> {

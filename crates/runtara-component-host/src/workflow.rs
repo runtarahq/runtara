@@ -1259,8 +1259,14 @@ impl WorkflowExecutor {
                             })?;
                         let run: wasmtime::component::TypedFunc<(), (Result<(), ()>,)> =
                             instance.get_typed_func(&mut store, run_idx)?;
-                        let (ran,) = run.call_async(&mut store, ()).await?;
-                        return match runtime.take_workflow_api_outcome().await {
+                        // Take the outcome back whatever `run` did, so a trap
+                        // does not leave the launch serving the API. (A timeout
+                        // or cancel drops this future; the runtime host frees
+                        // the launch when it is dropped.)
+                        let ran = run.call_async(&mut store, ()).await;
+                        let posted = runtime.take_workflow_api_outcome().await;
+                        let (ran,) = ran?;
+                        return match posted {
                             Some(outcome) => Ok(posted_outcome(outcome)),
                             None => Err(anyhow::anyhow!(
                                 "workflow run returned {} without posting an outcome",

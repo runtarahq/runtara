@@ -84,6 +84,17 @@ pub struct PersistenceRuntimeHost {
     workflow_api: Option<Arc<crate::workflow_api::ApiLaunches>>,
 }
 
+impl Drop for PersistenceRuntimeHost {
+    /// The host lives as long as its launch, so dropping it is the one exit
+    /// every path takes (completion, trap, timeout, cancel): stop serving the
+    /// launch's workflow API there.
+    fn drop(&mut self) {
+        if let (Some(launches), Some(lease)) = (&self.workflow_api, self.root_lease.get()) {
+            launches.release(&lease.owner);
+        }
+    }
+}
+
 impl PersistenceRuntimeHost {
     /// Host for `instance_id` over the environment's shared handler state.
     pub fn new(state: Arc<InstanceHandlerState>, instance_id: String, debug_mode: bool) -> Self {

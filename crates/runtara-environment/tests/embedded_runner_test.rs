@@ -990,3 +990,44 @@ async fn a_workflow_api_run_persists_the_outcome_it_posted() {
         }
     }
 }
+
+/// A run that never posts an outcome, because it traps or runs out its
+/// timeout, stops being served by the workflow API all the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflow_api_run_that_never_posts_is_released() {
+    let h = harness().await;
+    let probe = workflow_api_probe();
+    for mode in ["trap", "spin"] {
+        let inst_id = unique(&format!("inst-workflow-api-{mode}"));
+        let input =
+            serde_json::to_vec(&serde_json::json!({"data": {"mode": mode}, "variables": {}}))
+                .unwrap();
+        assert!(
+            h.persistence
+                .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+                .await
+                .expect("register instance")
+        );
+        let mut launch = options(inst_id.as_str(), &probe);
+        launch.timeout = Duration::from_secs(2);
+        let handle = h.runner.try_launch_detached(&launch).await.expect("launch");
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+        )
+        .await
+        .expect("wait_for_exit hung");
+        let instance = h
+            .persistence
+            .get_instance(inst_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            instance.status,
+            runtara_core::domain::InstanceStatus::Completed,
+            "{mode}: {instance:?}"
+        );
+        assert_eq!(h.runner.workflow_api_launches().serving(), 0, "{mode}");
+    }
+}

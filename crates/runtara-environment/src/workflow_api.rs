@@ -76,6 +76,19 @@ impl ApiLaunches {
             .take()
     }
 
+    /// Stop serving `launch_id`, dropping any outcome it posted. Idempotent.
+    pub fn release(&self, launch_id: &str) {
+        let _ = self.finish(launch_id);
+    }
+
+    /// How many launches currently serve the API.
+    pub fn serving(&self) -> usize {
+        self.slots
+            .lock()
+            .expect("workflow API launches poisoned")
+            .len()
+    }
+
     fn slot(&self, binding: &Binding) -> Option<Arc<LaunchSlot>> {
         self.slots
             .lock()
