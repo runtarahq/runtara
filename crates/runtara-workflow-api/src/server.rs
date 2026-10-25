@@ -45,6 +45,9 @@ pub enum LaunchState {
 
 pub use crate::PostedOutcome;
 
+mod runtime;
+pub use runtime::{CheckpointWrite, CustomSignalNotice, Event, LifecycleNotice, LifecycleSignal};
+
 /// The effects behind the router. Implemented by the runtime that owns runs
 /// (runtara-environment for the embedded runner). Every method receives the
 /// request's binding and must scope everything it touches to it.
@@ -59,6 +62,86 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
     -> Result<(), ApiError>;
     /// Shorten the launch deadline to `abort_after_ms` from now. Never extends.
     async fn set_deadline(&self, binding: &Binding, abort_after_ms: u64) -> Result<(), ApiError>;
+
+    // Run services. Each answers `unsupported` until a backend serves it.
+
+    /// The checkpoint `id`, if one was committed.
+    async fn get_checkpoint(
+        &self,
+        binding: &Binding,
+        id: &str,
+    ) -> Result<Option<Vec<u8>>, ApiError> {
+        let _ = (binding, id);
+        Err(unsupported_service("checkpoints"))
+    }
+    /// Commit `state` as checkpoint `id`; the first committed state wins.
+    async fn put_checkpoint(
+        &self,
+        binding: &Binding,
+        id: &str,
+        state: Vec<u8>,
+    ) -> Result<CheckpointWrite, ApiError> {
+        let _ = (binding, id, state);
+        Err(unsupported_service("checkpoints"))
+    }
+    async fn record_retry_attempt(
+        &self,
+        binding: &Binding,
+        id: &str,
+        attempt: u32,
+        error: Option<String>,
+    ) -> Result<(), ApiError> {
+        let _ = (binding, id, attempt, error);
+        Err(unsupported_service("retry attempts"))
+    }
+    /// The pending lifecycle command, without acknowledging it.
+    async fn poll_lifecycle_signal(
+        &self,
+        binding: &Binding,
+    ) -> Result<Option<LifecycleSignal>, ApiError> {
+        let _ = binding;
+        Err(unsupported_service("lifecycle signals"))
+    }
+    /// Acknowledge a lifecycle command the run observed.
+    async fn ack_lifecycle_signal(
+        &self,
+        binding: &Binding,
+        command_id: &str,
+        signal_type: &str,
+    ) -> Result<bool, ApiError> {
+        let _ = (binding, command_id, signal_type);
+        Err(unsupported_service("lifecycle signals"))
+    }
+    /// The custom signal payload waiting at `checkpoint_id`, if any.
+    async fn poll_custom_signal(
+        &self,
+        binding: &Binding,
+        checkpoint_id: &str,
+    ) -> Result<Option<Vec<u8>>, ApiError> {
+        let _ = (binding, checkpoint_id);
+        Err(unsupported_service("custom signals"))
+    }
+    /// Persistence time, so deadlines agree with the host.
+    async fn now_ms(&self, binding: &Binding) -> Result<u64, ApiError> {
+        let _ = binding;
+        Err(unsupported_service("time"))
+    }
+    async fn heartbeat(&self, binding: &Binding) -> Result<(), ApiError> {
+        let _ = binding;
+        Err(unsupported_service("heartbeat"))
+    }
+    /// Append events, in order.
+    async fn append_events(&self, binding: &Binding, events: Vec<Event>) -> Result<(), ApiError> {
+        let _ = (binding, events);
+        Err(unsupported_service("events"))
+    }
+}
+
+fn unsupported_service(service: &str) -> ApiError {
+    ApiError::new(
+        ErrorCode::Unsupported,
+        format!("{service} are not served by this host"),
+    )
 }
 
 /// A stored response for one `(launch, Idempotency-Key)`.
@@ -129,6 +212,26 @@ pub fn router(state: WorkflowApiState) -> Router {
         .route("/v1/run/input", get(get_run_input))
         .route("/v1/run/outcome", post(post_run_outcome))
         .route("/v1/run/deadline", put(put_run_deadline))
+        .route(
+            "/v1/checkpoints/{id}",
+            get(runtime::get_checkpoint).put(runtime::put_checkpoint),
+        )
+        .route(
+            "/v1/checkpoints/{id}/retry-attempts",
+            post(runtime::post_retry_attempt),
+        )
+        .route("/v1/signals/lifecycle", get(runtime::get_lifecycle_signal))
+        .route(
+            "/v1/signals/lifecycle/{command_id}/ack",
+            post(runtime::ack_lifecycle_signal),
+        )
+        .route(
+            "/v1/signals/custom/{checkpoint_id}",
+            get(runtime::get_custom_signal),
+        )
+        .route("/v1/time", get(runtime::get_time))
+        .route("/v1/heartbeat", post(runtime::post_heartbeat))
+        .route("/v1/events", post(runtime::post_events))
         .fallback(unsupported)
         .layer(middleware::from_fn_with_state(state.clone(), guard_launch))
         .layer(middleware::from_fn_with_state(state.clone(), idempotency))

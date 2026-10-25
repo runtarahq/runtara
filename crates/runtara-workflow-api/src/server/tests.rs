@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use axum::body::to_bytes;
@@ -13,6 +14,15 @@ struct FakeRun {
     fenced: bool,
     outcomes: Vec<PostedOutcome>,
     deadline: Option<u64>,
+    checkpoints: HashMap<String, Vec<u8>>,
+    retries: Vec<(String, u32, Option<String>)>,
+    signal: Option<LifecycleSignal>,
+    acked: Vec<(String, String)>,
+    custom: Option<Vec<u8>>,
+    /// Polls of the custom signal left before it shows up.
+    custom_after: u32,
+    events: Vec<Event>,
+    heartbeats: u32,
 }
 
 #[derive(Default)]
@@ -68,6 +78,91 @@ impl WorkflowApiBackend for FakeBackend {
 
     async fn set_deadline(&self, _binding: &Binding, abort_after_ms: u64) -> Result<(), ApiError> {
         self.run.lock().unwrap().deadline = Some(abort_after_ms);
+        Ok(())
+    }
+
+    async fn get_checkpoint(&self, _: &Binding, id: &str) -> Result<Option<Vec<u8>>, ApiError> {
+        Ok(self.run.lock().unwrap().checkpoints.get(id).cloned())
+    }
+
+    async fn put_checkpoint(
+        &self,
+        _: &Binding,
+        id: &str,
+        state: Vec<u8>,
+    ) -> Result<CheckpointWrite, ApiError> {
+        let mut run = self.run.lock().unwrap();
+        let stored = !run.checkpoints.contains_key(id);
+        let state = run
+            .checkpoints
+            .entry(id.to_string())
+            .or_insert(state)
+            .clone();
+        Ok(CheckpointWrite {
+            stored,
+            state,
+            pending_signal: run.signal.clone(),
+            custom_signal: run.custom.as_ref().map(|_| CustomSignalNotice {
+                signal_id: "sig-1".into(),
+                checkpoint_id: id.to_string(),
+            }),
+        })
+    }
+
+    async fn record_retry_attempt(
+        &self,
+        _: &Binding,
+        id: &str,
+        attempt: u32,
+        error: Option<String>,
+    ) -> Result<(), ApiError> {
+        self.run
+            .lock()
+            .unwrap()
+            .retries
+            .push((id.to_string(), attempt, error));
+        Ok(())
+    }
+
+    async fn poll_lifecycle_signal(
+        &self,
+        _: &Binding,
+    ) -> Result<Option<LifecycleSignal>, ApiError> {
+        Ok(self.run.lock().unwrap().signal.clone())
+    }
+
+    async fn ack_lifecycle_signal(
+        &self,
+        _: &Binding,
+        command_id: &str,
+        signal_type: &str,
+    ) -> Result<bool, ApiError> {
+        let mut run = self.run.lock().unwrap();
+        run.acked
+            .push((command_id.to_string(), signal_type.to_string()));
+        Ok(run.signal.take().is_some())
+    }
+
+    async fn poll_custom_signal(&self, _: &Binding, _: &str) -> Result<Option<Vec<u8>>, ApiError> {
+        let mut run = self.run.lock().unwrap();
+        if run.custom_after > 0 {
+            run.custom_after -= 1;
+            return Ok(None);
+        }
+        Ok(run.custom.clone())
+    }
+
+    async fn now_ms(&self, _: &Binding) -> Result<u64, ApiError> {
+        Ok(1_730_000_000_000)
+    }
+
+    async fn heartbeat(&self, _: &Binding) -> Result<(), ApiError> {
+        self.run.lock().unwrap().heartbeats += 1;
+        Ok(())
+    }
+
+    async fn append_events(&self, _: &Binding, events: Vec<Event>) -> Result<(), ApiError> {
+        self.run.lock().unwrap().events.extend(events);
         Ok(())
     }
 }
@@ -305,9 +400,7 @@ async fn endpoints_not_served_yet_are_unsupported() {
     let app = app(Arc::default());
     let (status, _, body) = send(
         &app,
-        request("GET", "/v1/checkpoints/x")
-            .body(Body::empty())
-            .unwrap(),
+        request("GET", "/v1/state/x").body(Body::empty()).unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
@@ -380,4 +473,253 @@ async fn wake_ids_are_checked() {
         let (got, _, _) = send(&app, outcome("suspended", &format!("k{n}"), &body)).await;
         assert_eq!(got, status, "{body}");
     }
+}
+
+fn write(method: &str, path: &str, key: &str, body: &str) -> HttpRequest<Body> {
+    request(method, path)
+        .header(headers::IDEMPOTENCY_KEY, key)
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn checkpoints_keep_the_first_committed_state() {
+    let backend = Arc::new(FakeBackend::default());
+    let app = app(backend.clone());
+    let key = crate::encode_path_key("step/1:agent");
+    let path = format!("/v1/checkpoints/{key}");
+
+    let (status, _, body) = send(&app, request("GET", &path).body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&body), "not-found");
+
+    let (status, headers, body) = send(&app, write("PUT", &path, "c1", "first")).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(&body[..], b"first");
+    assert!(!headers.contains_key(headers::PENDING_SIGNAL));
+
+    let (status, _, body) = send(&app, write("PUT", &path, "c2", "second")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body[..], b"first", "the first committed state wins");
+
+    let (status, _, body) = send(&app, request("GET", &path).body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body[..], b"first");
+    assert!(
+        backend
+            .run
+            .lock()
+            .unwrap()
+            .checkpoints
+            .contains_key("step/1:agent")
+    );
+
+    let (status, _, _) = send(&app, write("PUT", &path, "c3", "")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_checkpoint_announces_pending_signals_without_payloads() {
+    let backend = Arc::new(FakeBackend::default());
+    {
+        let mut run = backend.run.lock().unwrap();
+        run.signal = Some(LifecycleSignal {
+            signal_type: "cancel".into(),
+            command_id: "cmd-1".into(),
+            payload: b"secret-ish payload".to_vec(),
+            checkpoint_id: None,
+        });
+        run.custom = Some(b"answer".to_vec());
+    }
+    let app = app(backend);
+    let (_, headers, _) = send(&app, write("PUT", "/v1/checkpoints/c", "k1", "s")).await;
+    let pending: serde_json::Value =
+        serde_json::from_str(headers[headers::PENDING_SIGNAL].to_str().unwrap()).unwrap();
+    assert_eq!(
+        pending,
+        serde_json::json!({"signalType": "cancel", "commandId": "cmd-1"})
+    );
+    let custom: serde_json::Value =
+        serde_json::from_str(headers[headers::CUSTOM_SIGNAL].to_str().unwrap()).unwrap();
+    assert_eq!(
+        custom,
+        serde_json::json!({"signalId": "sig-1", "checkpointId": "c"})
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_signals_are_polled_then_acknowledged() {
+    let backend = Arc::new(FakeBackend::default());
+    let app = app(backend.clone());
+    let (status, _, _) = send(
+        &app,
+        request("GET", "/v1/signals/lifecycle")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    backend.run.lock().unwrap().signal = Some(LifecycleSignal {
+        signal_type: "pause".into(),
+        command_id: "cmd-7".into(),
+        payload: b"{}".to_vec(),
+        checkpoint_id: Some("c".into()),
+    });
+    let (status, headers, body) = send(
+        &app,
+        request("GET", "/v1/signals/lifecycle")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body[..], b"{}");
+    let notice: serde_json::Value =
+        serde_json::from_str(headers[headers::SIGNAL].to_str().unwrap()).unwrap();
+    assert_eq!(notice["commandId"], "cmd-7");
+    assert_eq!(notice["checkpointId"], "c");
+
+    let (status, _, body) = send(
+        &app,
+        write(
+            "POST",
+            "/v1/signals/lifecycle/cmd-7/ack",
+            "a1",
+            r#"{"signalType":"pause"}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body[..], br#"{"applied":true}"#);
+    assert_eq!(
+        backend.run.lock().unwrap().acked,
+        vec![("cmd-7".to_string(), "pause".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn a_custom_signal_long_poll_waits_for_it() {
+    let backend = Arc::new(FakeBackend::default());
+    {
+        let mut run = backend.run.lock().unwrap();
+        run.custom = Some(b"approved".to_vec());
+        run.custom_after = 2;
+    }
+    let app = app(backend.clone());
+    let (status, _, _) = send(
+        &app,
+        request("GET", "/v1/signals/custom/c")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "no wait, not there yet");
+
+    let (status, _, body) = send(
+        &app,
+        request("GET", "/v1/signals/custom/c?waitMs=5000")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body[..], b"approved");
+}
+
+#[tokio::test]
+async fn time_heartbeat_and_retry_attempts() {
+    let backend = Arc::new(FakeBackend::default());
+    let app = app(backend.clone());
+    let (status, _, body) = send(
+        &app,
+        request("GET", "/v1/time").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body[..], br#"{"nowMs":1730000000000}"#);
+
+    let (status, _, _) = send(&app, write("POST", "/v1/heartbeat", "h1", "")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(backend.run.lock().unwrap().heartbeats, 1);
+
+    let (status, _, _) = send(
+        &app,
+        write(
+            "POST",
+            "/v1/checkpoints/c/retry-attempts",
+            "r1",
+            r#"{"attemptNumber":2,"errorMessage":"boom"}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        backend.run.lock().unwrap().retries,
+        vec![("c".to_string(), 2, Some("boom".to_string()))]
+    );
+}
+
+#[tokio::test]
+async fn events_are_ndjson_within_the_caps() {
+    let backend = Arc::new(FakeBackend::default());
+    let app = app(backend.clone());
+    let batch =
+        "{\"kind\":\"step_debug_start\",\"payload\":{\"stepId\":\"a\"}}\n\n{\"kind\":\"custom\"}\n";
+    let (status, _, _) = send(&app, write("POST", "/v1/events", "e1", batch)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let events = backend.run.lock().unwrap().events.clone();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].kind, "step_debug_start");
+    assert_eq!(events[0].payload["stepId"], "a");
+    assert_eq!(events[1].payload, serde_json::Value::Null);
+
+    let (status, _, _) = send(&app, write("POST", "/v1/events", "e2", "not json\n")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let small = router(WorkflowApiState {
+        backend: backend.clone(),
+        receipts: Arc::new(MemoryReceiptStore::default()),
+        caps: Caps {
+            event_batch_lines: 1,
+            ..Caps::default()
+        },
+    });
+    let (status, _, _) = send(&small, write("POST", "/v1/events", "e3", batch)).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn services_a_backend_does_not_serve_are_unsupported() {
+    struct Minimal;
+    #[async_trait]
+    impl WorkflowApiBackend for Minimal {
+        async fn launch_state(&self, _: &Binding) -> Result<LaunchState, ApiError> {
+            Ok(LaunchState::Active)
+        }
+        async fn run_info(&self, _: &Binding) -> Result<RunInfo, ApiError> {
+            unreachable!()
+        }
+        async fn run_input(&self, _: &Binding) -> Result<Vec<u8>, ApiError> {
+            unreachable!()
+        }
+        async fn post_outcome(&self, _: &Binding, _: PostedOutcome) -> Result<(), ApiError> {
+            unreachable!()
+        }
+        async fn set_deadline(&self, _: &Binding, _: u64) -> Result<(), ApiError> {
+            unreachable!()
+        }
+    }
+    let app = router(WorkflowApiState {
+        backend: Arc::new(Minimal),
+        receipts: Arc::new(MemoryReceiptStore::default()),
+        caps: Caps::default(),
+    });
+    let (status, _, body) = send(
+        &app,
+        request("GET", "/v1/time").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(error_code(&body), "unsupported");
 }

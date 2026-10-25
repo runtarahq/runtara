@@ -15,6 +15,8 @@ pub const WAKES: &str = "runtara-wakes";
 pub const PENDING_SIGNAL: &str = "runtara-pending-signal";
 /// JSON announcement of a pending custom signal, piggybacked on checkpoints.
 pub const CUSTOM_SIGNAL: &str = "runtara-custom-signal";
+/// JSON metadata of a delivered lifecycle signal, whose body is its payload.
+pub const SIGNAL: &str = "runtara-signal";
 /// JSON metadata of an outbound HTTP request.
 pub const OUTBOUND: &str = "runtara-outbound";
 /// Upstream status of a proxied HTTP response.
