@@ -510,7 +510,11 @@ impl RuntimeHost for PersistenceRuntimeHost {
         })
     }
 
-    async fn workflow_api_begin(self: Arc<Self>, input: Vec<u8>) -> Result<(), String> {
+    async fn workflow_api_begin(
+        self: Arc<Self>,
+        input: Vec<u8>,
+        controls: runtara_component_host::runtime_host::WorkflowApiControls,
+    ) -> Result<(), String> {
         let launches = self
             .workflow_api
             .as_ref()
@@ -538,7 +542,7 @@ impl RuntimeHost for PersistenceRuntimeHost {
         };
         // Held weakly: the host's drop is what releases the launch.
         let runtime: Arc<dyn RuntimeHost> = self.clone();
-        launches.begin(binding, info, input, Arc::downgrade(&runtime))
+        launches.begin(binding, info, input, Arc::downgrade(&runtime), controls)
     }
 
     async fn take_workflow_api_outcome(&self) -> Option<runtara_workflow_api::PostedOutcome> {

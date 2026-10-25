@@ -37,6 +37,41 @@ type SendFuture = Box<
         + Send,
 >;
 
+/// A deadline the workflow API can bring forward (`PUT /v1/run/deadline`),
+/// checked by the executor's epoch callback and watchdog next to the launch
+/// deadline. It only ever moves earlier.
+#[derive(Clone)]
+pub(crate) struct ApiDeadline {
+    base: tokio::time::Instant,
+    /// Milliseconds after `base`; `u64::MAX` is no deadline.
+    at_ms: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl ApiDeadline {
+    pub(crate) fn new() -> Self {
+        Self {
+            base: tokio::time::Instant::now(),
+            at_ms: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+        }
+    }
+
+    /// Bring the deadline forward to `after` from now.
+    pub(crate) fn shorten(&self, after: std::time::Duration) {
+        let target = (tokio::time::Instant::now() + after)
+            .saturating_duration_since(self.base)
+            .as_millis();
+        let target = u64::try_from(target).unwrap_or(u64::MAX - 1);
+        self.at_ms
+            .fetch_min(target, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    pub(crate) fn passed(&self) -> bool {
+        let at = self.at_ms.load(std::sync::atomic::Ordering::Acquire);
+        at != u64::MAX
+            && tokio::time::Instant::now() >= self.base + std::time::Duration::from_millis(at)
+    }
+}
+
 /// Where a run's binding comes from. Asked at every request: a launch binds
 /// its root lease after the Store is built, so the binding can't be captured
 /// up front.
@@ -320,5 +355,23 @@ mod tests {
         .await;
         assert!(matches!(result, Err(ErrorCode::HttpRequestBodySize(_))));
         assert!(recorder.seen.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::ApiDeadline;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn a_deadline_only_moves_earlier() {
+        let deadline = ApiDeadline::new();
+        assert!(!deadline.passed());
+        deadline.shorten(Duration::from_secs(3600));
+        deadline.shorten(Duration::from_millis(20));
+        deadline.shorten(Duration::from_secs(3600));
+        assert!(!deadline.passed());
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(deadline.passed());
     }
 }

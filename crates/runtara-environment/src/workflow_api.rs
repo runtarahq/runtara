@@ -25,7 +25,7 @@ use runtara_component_host::run_state_host::{
     RunStateAuthority, RunStateError, RunStateErrorCode, RunStateHost, check_state_read_key,
     state_operation_id,
 };
-use runtara_component_host::runtime_host::RuntimeHost;
+use runtara_component_host::runtime_host::{RuntimeHost, WorkflowApiControls};
 use runtara_component_host::{WorkflowApiFuture, WorkflowApiTransport};
 use runtara_workflow_api::server::{
     CheckpointWrite, CustomSignalNotice, Event, LaunchState, LifecycleSignal, MemoryReceiptStore,
@@ -43,6 +43,7 @@ pub struct LaunchSlot {
     /// The run's runtime host, which serves its run services with the lease
     /// fencing it already applies. Weak: the host's drop releases the slot.
     runtime: Weak<dyn RuntimeHost>,
+    controls: WorkflowApiControls,
 }
 
 /// The launches of this process that currently serve the workflow API, by
@@ -91,6 +92,7 @@ impl ApiLaunches {
         info: RunInfo,
         input: Vec<u8>,
         runtime: Weak<dyn RuntimeHost>,
+        controls: WorkflowApiControls,
     ) -> Result<(), String> {
         let mut slots = self.slots.lock().expect("workflow API launches poisoned");
         if slots.contains_key(&binding.launch_id) {
@@ -107,6 +109,7 @@ impl ApiLaunches {
                 input,
                 outcome: Mutex::new(None),
                 runtime,
+                controls,
             }),
         );
         Ok(())
@@ -345,11 +348,10 @@ impl WorkflowApiBackend for Backend {
         Ok(())
     }
 
-    async fn set_deadline(&self, _binding: &Binding, _abort_after_ms: u64) -> Result<(), ApiError> {
-        Err(ApiError::new(
-            ErrorCode::Unsupported,
-            "the embedded runner does not shorten launch deadlines yet",
-        ))
+    async fn set_deadline(&self, binding: &Binding, abort_after_ms: u64) -> Result<(), ApiError> {
+        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
+        (slot.controls.shorten_deadline)(std::time::Duration::from_millis(abort_after_ms));
+        Ok(())
     }
 
     async fn get_checkpoint(
@@ -607,6 +609,12 @@ mod tests {
         Weak::<crate::runtime_host::PersistenceRuntimeHost>::new()
     }
 
+    fn controls() -> WorkflowApiControls {
+        WorkflowApiControls {
+            shorten_deadline: Arc::new(|_| {}),
+        }
+    }
+
     fn info() -> RunInfo {
         RunInfo {
             instance_id: "instance-1".into(),
@@ -627,11 +635,11 @@ mod tests {
         let launches = Arc::new(ApiLaunches::default());
         let backend = Backend(launches.clone());
         launches
-            .begin(binding(1), info(), b"in".to_vec(), no_runtime())
+            .begin(binding(1), info(), b"in".to_vec(), no_runtime(), controls())
             .unwrap();
         assert!(
             launches
-                .begin(binding(1), info(), Vec::new(), no_runtime())
+                .begin(binding(1), info(), Vec::new(), no_runtime(), controls())
                 .is_err()
         );
 

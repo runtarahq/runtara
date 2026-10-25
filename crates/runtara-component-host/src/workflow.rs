@@ -297,6 +297,8 @@ pub struct WorkflowState {
     hooks: WorkflowHooks,
     /// wasi:http@0.3 hooks: the workflow API route, denied for everything else.
     api_hooks: crate::workflow_api::WorkflowApiHooks,
+    /// A deadline the workflow API can bring forward.
+    api_deadline: crate::workflow_api::ApiDeadline,
     /// The active execution deadline. It is reset only after the durable
     /// runner handoff has been confirmed, so Store/WASI construction does not
     /// consume the guest's execution budget.
@@ -1104,6 +1106,7 @@ impl WorkflowExecutor {
             },
             termination: None,
             cleanup_alarm: Default::default(),
+            api_deadline: crate::workflow_api::ApiDeadline::new(),
             runtime: spec.runtime.clone(),
             execution: control.execution,
             outbound_http: crate::outbound_http::for_run(
@@ -1148,7 +1151,9 @@ impl WorkflowExecutor {
                 ctx.data_mut().termination = Some(Termination::Cancelled);
                 return Ok(UpdateDeadline::Interrupt);
             }
-            if tokio::time::Instant::now() >= ctx.data().active_deadline {
+            if tokio::time::Instant::now() >= ctx.data().active_deadline
+                || ctx.data().api_deadline.passed()
+            {
                 ctx.data_mut().termination = Some(Termination::Timeout);
                 return Ok(UpdateDeadline::Interrupt);
             }
@@ -1157,6 +1162,7 @@ impl WorkflowExecutor {
         store.set_epoch_deadline(1);
 
         let cleanup_alarm = store.data().cleanup_alarm.clone();
+        let watchdog_api_deadline = store.data().api_deadline.clone();
         let watchdog_cancel = spec.cancel.clone();
         let run_ended = {
             // Store/WASI setup is host work before guest execution. A closed
@@ -1245,8 +1251,12 @@ impl WorkflowExecutor {
                         let runtime = spec.runtime.clone().ok_or_else(|| {
                             anyhow::anyhow!("a wasi:cli/run workflow needs a runtime host")
                         })?;
+                        let deadline = store.data().api_deadline.clone();
+                        let controls = crate::runtime_host::WorkflowApiControls {
+                            shorten_deadline: Arc::new(move |after| deadline.shorten(after)),
+                        };
                         Arc::clone(&runtime)
-                            .workflow_api_begin(input)
+                            .workflow_api_begin(input, controls)
                             .await
                             .map_err(|error| anyhow::anyhow!(error))?;
                         let run_idx = instance
@@ -1329,7 +1339,9 @@ impl WorkflowExecutor {
                         {
                             return Termination::Cancelled;
                         }
-                        if tokio::time::Instant::now() >= active_deadline {
+                        if tokio::time::Instant::now() >= active_deadline
+                            || watchdog_api_deadline.passed()
+                        {
                             return Termination::Timeout;
                         }
                     }
@@ -1427,6 +1439,7 @@ impl WorkflowExecutor {
             },
             termination: None,
             cleanup_alarm: Default::default(),
+            api_deadline: crate::workflow_api::ApiDeadline::new(),
             runtime: None,
             execution: None,
             outbound_http: Err("outbound HTTP is not configured in test state".into()),

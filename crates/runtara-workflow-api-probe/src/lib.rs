@@ -23,6 +23,15 @@ mod probe {
             let input: Value = serde_json::from_slice(&input).unwrap_or(Value::Null);
             let data = input.get("data").cloned().unwrap_or(Value::Null);
             match data.get("mode").and_then(Value::as_str) {
+                Some("deadline") => {
+                    // Shorten the deadline, then spin past it.
+                    runtara_workflow_sdk::set_deadline(200)
+                        .await
+                        .map_err(|_| ())?;
+                    loop {
+                        std::hint::spin_loop();
+                    }
+                }
                 Some("spin") => loop {
                     std::hint::spin_loop();
                 },

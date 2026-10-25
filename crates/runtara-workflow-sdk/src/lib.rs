@@ -494,3 +494,17 @@ pub async fn release_wait(key: &str) -> Result<(), Error> {
         .await
         .map(|_| ())
 }
+
+/// `PUT /v1/run/deadline`: end the run `abort_after_ms` from now at the
+/// latest. It can only shorten the launch deadline.
+pub async fn set_deadline(abort_after_ms: u64) -> Result<(), Error> {
+    let body = serde_json::json!({"abortAfterMs": abort_after_ms});
+    call(
+        "PUT",
+        "/v1/run/deadline",
+        &[("content-type", "application/json")],
+        Some(body.to_string().into_bytes()),
+    )
+    .await
+    .map(|_| ())
+}

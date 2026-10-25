@@ -188,6 +188,20 @@ pub fn error_payload(error: &crate::lifecycle::WorkflowErrorInfo) -> Vec<u8> {
     serde_json::Value::Object(object).to_string().into_bytes()
 }
 
+/// What the workflow API may do to a running `wasi:cli/run` entry.
+#[derive(Clone)]
+pub struct WorkflowApiControls {
+    /// Bring the run's deadline forward to the given time from now (never
+    /// later); the run then ends as timed out.
+    pub shorten_deadline: Arc<dyn Fn(Duration) + Send + Sync>,
+}
+
+impl std::fmt::Debug for WorkflowApiControls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WorkflowApiControls")
+    }
+}
+
 #[async_trait::async_trait]
 pub trait RuntimeHost: Send + Sync {
     /// This run's instance id.
@@ -200,9 +214,14 @@ pub trait RuntimeHost: Send + Sync {
     }
     /// Hand the run's input to the workflow API before a `wasi:cli/run` entry
     /// starts. It receives the host itself, which the workflow API serves the
-    /// run's services through. A runtime that doesn't serve it refuses.
-    async fn workflow_api_begin(self: Arc<Self>, input: Vec<u8>) -> Result<(), String> {
-        let _ = input;
+    /// run's services through, and the run's controls. A runtime that doesn't
+    /// serve it refuses.
+    async fn workflow_api_begin(
+        self: Arc<Self>,
+        input: Vec<u8>,
+        controls: WorkflowApiControls,
+    ) -> Result<(), String> {
+        let _ = (input, controls);
         Err("this runtime does not serve the workflow API".into())
     }
     /// Take the outcome a `wasi:cli/run` entry posted through the workflow API.

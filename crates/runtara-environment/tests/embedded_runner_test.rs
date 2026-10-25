@@ -1210,3 +1210,50 @@ async fn workflow_api_managed_inputs_open_and_close() {
     assert_eq!(output["open"], serde_json::json!({"state": "open"}));
     assert_eq!(output["closed"]["state"], "closed", "{output}");
 }
+
+/// `PUT /v1/run/deadline` brings the run's deadline forward: a probe that
+/// sets 200ms and then spins ends long before its 30s launch timeout.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflow_api_run_can_shorten_its_deadline() {
+    let h = harness().await;
+    let probe = workflow_api_probe();
+    let inst_id = unique("inst-workflow-api-deadline");
+    let input =
+        serde_json::to_vec(&serde_json::json!({"data": {"mode": "deadline"}, "variables": {}}))
+            .unwrap();
+    assert!(
+        h.persistence
+            .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+            .await
+            .expect("register instance")
+    );
+    let started = std::time::Instant::now();
+    let handle = h
+        .runner
+        .try_launch_detached(&options(inst_id.as_str(), &probe))
+        .await
+        .expect("launch");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+    )
+    .await
+    .expect("wait_for_exit hung");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "ended after {:?}",
+        started.elapsed()
+    );
+    let instance = h
+        .persistence
+        .get_instance(inst_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        instance.status,
+        runtara_core::domain::InstanceStatus::Completed,
+        "{instance:?}"
+    );
+    assert_eq!(h.runner.workflow_api_launches().serving(), 0);
+}
