@@ -790,3 +790,17 @@ pub async fn trusted(
 pub async fn sleep(ms: u64) {
     bindings::wasi::clocks::monotonic_clock::wait_for(ms.saturating_mul(1_000_000)).await;
 }
+
+/// `POST /v1/debug/breakpoint`: wait at a breakpoint for up to `wait_ms`.
+/// True when the run was resumed, false when the wait ran out.
+pub async fn breakpoint(wait_ms: u64) -> Result<bool, Error> {
+    let body = serde_json::json!({"waitMs": wait_ms});
+    let response = call(
+        "POST",
+        "/v1/debug/breakpoint",
+        &[("content-type", "application/json")],
+        Some(body.to_string().into_bytes()),
+    )
+    .await?;
+    Ok(response.status == 200)
+}

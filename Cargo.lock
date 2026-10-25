@@ -4556,6 +4556,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtara-api-component"
+version = "9.0.1"
+dependencies = [
+ "runtara-workflow-api",
+ "runtara-workflow-sdk",
+ "serde_json",
+ "wit-bindgen 0.58.0",
+]
+
+[[package]]
 name = "runtara-component-host"
 version = "9.0.1"
 dependencies = [

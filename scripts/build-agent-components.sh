@@ -169,7 +169,14 @@ cargo build --release --target wasm32-wasip2 -p runtara-workflow-api-probe
 # The workflow API adapters the compiler composes around a workflow's logic
 # when it builds for the workflow API ABI (RUNTARA_GUEST_ABI=http).
 echo "==> workflow API adapters"
-cargo build --release --target wasm32-wasip2 -p runtara-workflow-api-services -p runtara-workflow-api-run
+cargo build --release --target wasm32-wasip2 -p runtara-workflow-api-services -p runtara-workflow-api-run -p runtara-api-component
+emit_workflow_component_meta \
+    "runtara-api-component" \
+    "runtara:api-component" \
+    "api" \
+    "runtara:api/run@1.0.0" \
+    "$out_dir/runtara_api_component.wasm" \
+    "$out_dir/runtara_api_component.meta.json"
 emit_workflow_component_meta \
     "runtara-workflow-api-services" \
     "runtara:workflow-api-services" \
