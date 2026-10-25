@@ -137,7 +137,7 @@ pub const WORKFLOW_API_ADAPTER_REQUIREMENTS: &[DirectSharedComponentRequirement]
 /// `wac` composed for [`GuestAbi::Http`]: the `runtara:api` component (when
 /// `with_api`) satisfies the logic's `runtara:api` imports, and the run shim
 /// re-exports its entry as `wasi:cli/run`, the only export left.
-pub(crate) fn http_guest_wac(wac: &str, with_api: bool) -> Result<String, String> {
+pub(crate) fn http_guest_wac(wac: &str, with_api: bool, entry: bool) -> Result<String, String> {
     const LOGIC: &str = "let wf = new runtara:workflow-logic {";
     const EXPORT: &str = "export wf...;\n";
     if wac.matches(LOGIC).count() != 1 || !wac.ends_with(EXPORT) {
@@ -153,6 +153,10 @@ pub(crate) fn http_guest_wac(wac: &str, with_api: bool) -> Result<String, String
     } else {
         wac.to_string()
     };
+    // A published workflow-agent keeps its capabilities export.
+    if !entry {
+        return Ok(wac);
+    }
     Ok(format!(
         "{}let workflow-api-run = new runtara:workflow-api-run {{ ...wf, ... }};\n\n\
          export workflow-api-run...;\n",

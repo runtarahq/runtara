@@ -111,7 +111,7 @@ fn the_backstops_refuse_what_validation_reports() {
         .expect("a workflow-agent may call control");
     assert!(!result.omit_runtime);
     let world = fs::read_to_string(&result.world_wit_path).unwrap();
-    assert!(world.contains(runtara_wit::workflow::OPERATION), "{world}");
+    assert!(world.contains(runtara_wit::api::OPERATIONS), "{world}");
 
     let dir = tempfile::tempdir().unwrap();
     let text = refusal(compile_direct_workflow_with_abi(

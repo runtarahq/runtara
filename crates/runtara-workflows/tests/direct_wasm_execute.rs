@@ -7255,8 +7255,8 @@ fn direct_wasm_execute_agent_capabilities_workflow_invocable_as_agent() {
 }
 
 /// P6: ANY workflow can compile as an agent. A runtime-needing workflow (here
-/// a durable Delay) is no longer rejected — it keeps the runtime import
-/// (satisfied by the composing parent's runtime host / the embedding host),
+/// a durable Delay) is no longer rejected — it keeps its runtime (on the
+/// default ABI `runtara:api`, served by the api component it composes),
 /// while a pure workflow still omits it. The graph-level `durable: false`
 /// off-switch turns a durability-only runtime need back into the pure shape.
 #[test]
@@ -7287,8 +7287,8 @@ fn direct_wasm_execute_agent_capabilities_keeps_runtime_for_durable_workflow() {
         compiled
             .component_artifacts
             .world_wit
-            .contains("import runtara:workflow/runtime@1.0.0;"),
-        "durable agent must keep the runtime import:\n{}",
+            .contains(&format!("import {};", runtara_wit::api::CHECKPOINTS)),
+        "durable agent must keep its runtime (`runtara:api` on the default ABI):\n{}",
         compiled.component_artifacts.world_wit
     );
     assert!(

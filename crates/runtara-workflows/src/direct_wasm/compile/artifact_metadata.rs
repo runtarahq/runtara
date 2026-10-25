@@ -644,8 +644,32 @@ fn workflow_agent_import_kind(
 /// parent's instance host. Imports of nested (already-linked) components
 /// don't count: only what the composed child still asks the outside world
 /// for matters.
+/// Whether `wasm` is composed workflow logic: it imports the old runtime at
+/// its root, or (on the workflow API ABI, where it carries its own api
+/// component) contains a component importing `runtara:api`. An agent built
+/// on the guest SDK imports neither, at any depth.
 fn component_imports_workflow_runtime(wasm: &[u8]) -> Result<bool, DirectCompileError> {
-    component_imports_prefix(wasm, "runtara:workflow/runtime")
+    if component_imports_prefix(wasm, "runtara:workflow/runtime")? {
+        return Ok(true);
+    }
+    let parse_error = |err: wasmparser::BinaryReaderError| {
+        DirectCompileError::Component(format!("failed to parse agent component: {err}"))
+    };
+    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+        if let wasmparser::Payload::ComponentImportSection(reader) = payload.map_err(parse_error)? {
+            for import in reader {
+                if import
+                    .map_err(parse_error)?
+                    .name
+                    .0
+                    .starts_with(runtara_wit::api::PREFIX)
+                {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 pub(super) fn component_imports_prefix(

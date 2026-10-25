@@ -11284,13 +11284,15 @@ fn split_timeout_keeps_required_runtime_import_in_both_invoke_abis() {
             )
             .unwrap();
             assert!(!compiled.omit_runtime, "{abi:?}, timeout={timeout}");
-            // A run's own entry reaches the runtime through `runtara:api`; a
-            // published workflow-agent still imports the runtime itself.
-            let runtime = match abi {
-                WorkflowRole::Root => runtara_wit::api::CHECKPOINTS,
-                WorkflowRole::PublishedAgent => "runtara:workflow/runtime",
-            };
-            assert!(compiled.component_artifacts.world_wit.contains(runtime));
+            // Both a run's own entry and a published workflow-agent reach the
+            // runtime through `runtara:api` (the default ABI).
+            assert!(
+                compiled
+                    .component_artifacts
+                    .world_wit
+                    .contains(runtara_wit::api::CHECKPOINTS),
+                "{abi:?}"
+            );
             Validator::new_with_features(wasmparser::WasmFeatures::all())
                 .validate_all(&fs::read(compiled.wasm_path).unwrap())
                 .unwrap();
@@ -11397,7 +11399,7 @@ fn callable_embed_omits_runtime_only_for_a_complete_runtime_free_child() {
                 compiled
                     .component_artifacts
                     .world_wit
-                    .contains("runtara:workflow/runtime"),
+                    .contains(runtara_wit::api::RUN),
                 !runtime_free,
                 "{case}/{retries}"
             );

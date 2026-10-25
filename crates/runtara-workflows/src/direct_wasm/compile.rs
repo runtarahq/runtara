@@ -731,15 +731,18 @@ fn compose_direct_workflow_selected(
         "compose: resolved + read component dependencies from disk",
     );
 
-    // On the workflow API ABI only a run's own entry is wrapped; a published
-    // workflow-agent stays a component its parent composes. A runtime-free
-    // root keeps its `invoke` entry: it runs without a host to post to.
-    let http_guest = result.guest_abi == super::component::GuestAbi::Http
-        && !result.omit_runtime
-        && result
-            .component_artifacts
-            .world_wit
-            .contains(&format!("export {};", runtara_wit::workflow::ENTRY));
+    // On the workflow API ABI the logic gets its api component; a run's own
+    // entry is also wrapped by the run shim, while a published workflow-agent
+    // keeps exporting its capabilities for its parent to compose. A
+    // runtime-free root keeps its `invoke` entry: it runs without a host to
+    // post to.
+    let entry = result
+        .component_artifacts
+        .world_wit
+        .contains(&format!("export {};", runtara_wit::workflow::ENTRY));
+    // The logic was compiled against `runtara:api` exactly when this holds.
+    let http_guest = result.guest_abi == super::component::GuestAbi::Http && !result.omit_runtime;
+    let with_api = http_guest;
     let mut shared_components = shared_components;
     let mut wac_source = result.component_artifacts.wac_source.clone();
     if http_guest {
@@ -748,11 +751,11 @@ fn compose_direct_workflow_selected(
                 "isolated Agents are not composed on the workflow API ABI yet",
             ));
         }
-        let with_api = result
-            .component_artifacts
-            .world_wit
-            .contains(runtara_wit::api::PREFIX);
-        let mut adapters = super::component::WORKFLOW_API_ADAPTER_REQUIREMENTS.to_vec();
+        let mut adapters = if entry {
+            super::component::WORKFLOW_API_ADAPTER_REQUIREMENTS.to_vec()
+        } else {
+            Vec::new()
+        };
         if with_api {
             adapters.push(super::component::RUNTARA_API_COMPONENT_REQUIREMENT);
         }
@@ -760,8 +763,8 @@ fn compose_direct_workflow_selected(
             components_dir,
             &adapters,
         )?);
-        wac_source =
-            super::component::http_guest_wac(&wac_source, with_api).map_err(component_error)?;
+        wac_source = super::component::http_guest_wac(&wac_source, with_api, entry)
+            .map_err(component_error)?;
         fs::write(result.build_dir.join("workflow.wac"), &wac_source)?;
     }
 
@@ -1324,11 +1327,10 @@ fn compile_direct_workflow_inner(
     // runs inside its caller's instance and keeps local state, like an
     // embedded child.
     manifest.configure_run_state(abi == super::component::WorkflowRole::Root, !omit_runtime);
-    // Only a run's own entry is built for the workflow API ABI; a published
-    // workflow-agent stays a component its caller composes.
-    let api_runtime = guest_abi == super::component::GuestAbi::Http
-        && abi == super::component::WorkflowRole::Root
-        && !omit_runtime;
+    // Both a run's own entry and a published workflow-agent are built for
+    // the workflow API ABI: the agent composes its own (stateless) api
+    // component and runs in its caller's launch.
+    let api_runtime = guest_abi == super::component::GuestAbi::Http && !omit_runtime;
     let manifest_json = manifest.to_canonical_json()?;
     let support_json = serde_json::to_vec(&support_report)?;
     let (wasm, parallel_pools) = emit_direct_artifact(
@@ -1407,11 +1409,7 @@ fn compile_direct_workflow_inner(
     fs::write(&wac_path, &component_artifacts.wac_source)?;
 
     Ok(DirectCompilationResult {
-        guest_abi: if abi == super::component::WorkflowRole::Root {
-            guest_abi
-        } else {
-            super::component::GuestAbi::Wit
-        },
+        guest_abi,
         invocation_manifest: if scoped_agents.is_empty() {
             None
         } else {
