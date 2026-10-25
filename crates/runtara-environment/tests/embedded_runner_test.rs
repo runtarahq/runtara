@@ -1476,3 +1476,51 @@ mod workflow_api_connections {
         );
     }
 }
+
+/// An operation-scoped call site over the workflow API: entering yields a
+/// stable id, a suspension keeps its continuation in persistence, re-entering
+/// with `load` reads it back, and a suspension an agent may not make is
+/// refused with the suspension caps' error.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_api_operations_keep_their_continuation() {
+    let h = harness().await;
+    let probe = workflow_api_probe();
+    let inst_id = unique("inst-workflow-api-operation");
+    let input =
+        serde_json::to_vec(&serde_json::json!({"data": {"mode": "operation"}, "variables": {}}))
+            .unwrap();
+    assert!(
+        h.persistence
+            .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+            .await
+            .expect("register instance")
+    );
+    let handle = h
+        .runner
+        .try_launch_detached(&options(inst_id.as_str(), &probe))
+        .await
+        .expect("launch");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+    )
+    .await
+    .expect("wait_for_exit hung");
+    let instance = h
+        .persistence
+        .get_instance(inst_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        instance.status,
+        runtara_core::domain::InstanceStatus::Completed,
+        "{instance:?}"
+    );
+    let output: serde_json::Value =
+        serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+    assert_eq!(output["sameId"], true);
+    assert_eq!(output["first"], serde_json::Value::Null);
+    assert_eq!(output["loaded"], "saved");
+    assert_eq!(output["refused"], "agent-invalid-suspension");
+}

@@ -4697,6 +4697,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "reqwest 0.12.28",
+ "runtara-agent-suspension",
  "runtara-component-host",
  "runtara-core",
  "runtara-database-contract",

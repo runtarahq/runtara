@@ -45,6 +45,8 @@ runtara-store-postgres = { path = "../runtara-store-postgres" }
 runtara-component-host = { path = "../runtara-component-host", version = "9.0" }
 # The `/v1` router the embedded runner serves runs on the workflow API ABI from.
 runtara-workflow-api = { path = "../runtara-workflow-api", features = ["server"] }
+# The suspension caps operation-scoped agents are held to.
+runtara-agent-suspension = { path = "../runtara-agent-suspension" }
 axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
 bytes = "1"

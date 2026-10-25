@@ -24,6 +24,7 @@ use runtara_component_host::instance_wait_host::{
     InstanceWaitAuthority, InstanceWaitError, InstanceWaitPoll, InstanceWaitRequest,
     InstanceWaitResolution, wait_instances_id,
 };
+use runtara_component_host::operation_scope_host::{OperationIdentity, parse_agent_operation_key};
 use runtara_component_host::outbound_http::{
     ConnectionDestination, Destination, RequestOptions, send_bounded,
 };
@@ -57,6 +58,8 @@ pub struct LaunchSlot {
     controls: WorkflowApiControls,
     /// Connection resolution of this launch, with its per-run cache.
     resolver: std::sync::OnceLock<Arc<RunConnectionResolver>>,
+    /// Operations this launch entered and has not left, by operation id.
+    operations: Mutex<HashMap<String, OperationIdentity>>,
 }
 
 /// The launches of this process that currently serve the workflow API, by
@@ -131,6 +134,7 @@ impl ApiLaunches {
                 runtime,
                 controls,
                 resolver: std::sync::OnceLock::new(),
+                operations: Mutex::default(),
             }),
         );
         Ok(())
@@ -569,6 +573,128 @@ impl WorkflowApiBackend for Backend {
         let wait_id = wait_instances_id(key).map_err(|e| ApiError::new(ErrorCode::Invalid, e))?;
         self.runtime(binding)?
             .operation_release(wait_id)
+            .await
+            .map_err(host_error)
+    }
+
+    async fn enter_operation(
+        &self,
+        binding: &Binding,
+        checkpoint_key: &str,
+        attempt: u32,
+        load: bool,
+    ) -> Result<(String, Option<Vec<u8>>), ApiError> {
+        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
+        let identity = parse_agent_operation_key(checkpoint_key, attempt)
+            .map_err(|e| ApiError::new(ErrorCode::Invalid, e))?;
+        let operation_id = identity.op_hash.clone();
+        let continuation = if load {
+            self.runtime(binding)?
+                .operation_continuation_load(operation_id.clone(), attempt)
+                .await
+                .map_err(host_error)?
+        } else {
+            None
+        };
+        let mut entered = slot.operations.lock().expect("operations poisoned");
+        if entered.contains_key(&operation_id) {
+            return Err(ApiError::domain(
+                "already-entered",
+                ErrorCode::ReplayConflict,
+                "this call site's operation is already entered",
+            ));
+        }
+        entered.insert(operation_id.clone(), identity);
+        Ok((operation_id, continuation))
+    }
+
+    async fn suspend_operation(
+        &self,
+        binding: &Binding,
+        operation_id: &str,
+        state: Vec<u8>,
+        wakes: Vec<runtara_workflow_api::Wake>,
+    ) -> Result<(), ApiError> {
+        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
+        let identity = slot
+            .operations
+            .lock()
+            .expect("operations poisoned")
+            .get(operation_id)
+            .cloned()
+            .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "no such entered operation"))?;
+        // An agent may wake only `at`; it registers no instance wait of its own.
+        let invalid = |message: String| {
+            ApiError::domain(
+                "agent-invalid-suspension",
+                ErrorCode::Invalid,
+                format!(
+                    "{}: {message}",
+                    runtara_agent_suspension::AGENT_INVALID_SUSPENSION
+                ),
+            )
+        };
+        let contract = wakes
+            .iter()
+            .map(|wake| match wake {
+                runtara_workflow_api::Wake::At(at) => Some(runtara_agent_suspension::Wake::At(*at)),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| invalid("an agent may wake only `at`".into()))?;
+        runtara_agent_suspension::validate_suspension(&contract, &state).map_err(invalid)?;
+        self.runtime(binding)?
+            .operation_continuation_store(identity.op_hash, identity.attempt, state)
+            .await
+            .map_err(host_error)?;
+        slot.operations
+            .lock()
+            .expect("operations poisoned")
+            .remove(operation_id);
+        Ok(())
+    }
+
+    async fn exit_operation(
+        &self,
+        binding: &Binding,
+        operation_id: &str,
+        failed: bool,
+    ) -> Result<(), ApiError> {
+        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
+        let left = slot
+            .operations
+            .lock()
+            .expect("operations poisoned")
+            .remove(operation_id);
+        // A failure is not checkpointed, so a replay or retry starts the
+        // operation afresh: its wait and its continuation go.
+        if failed && left.is_some() {
+            let runtime = self.runtime(binding)?;
+            runtime
+                .operation_wait_close(operation_id.to_string())
+                .await
+                .map_err(host_error)?;
+            runtime
+                .operation_release(operation_id.to_string())
+                .await
+                .map_err(host_error)?;
+        }
+        Ok(())
+    }
+
+    async fn release_operation(
+        &self,
+        binding: &Binding,
+        operation_id: &str,
+    ) -> Result<(), ApiError> {
+        if operation_id.len() != 64 || !operation_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(ApiError::new(
+                ErrorCode::Invalid,
+                "an operation id is a sha256 hex digest",
+            ));
+        }
+        self.runtime(binding)?
+            .operation_release(operation_id.to_string())
             .await
             .map_err(host_error)
     }

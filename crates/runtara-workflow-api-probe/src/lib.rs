@@ -169,6 +169,46 @@ mod probe {
                         .map_err(|_| ())?,
                     )
                 }
+                Some("operation") => {
+                    let key =
+                        r#"runtara:v2:["agent","probe",[],[],["probe-agent","wait","step-1"]]"#;
+                    let (id, first) = runtara_workflow_sdk::enter_operation(key, 1, true)
+                        .await
+                        .map_err(|_| ())?;
+                    runtara_workflow_sdk::suspend_operation(
+                        &id,
+                        b"saved".to_vec(),
+                        &[Wake::At(1_900_000_000_000)],
+                    )
+                    .await
+                    .map_err(|_| ())?;
+                    let (again, loaded) = runtara_workflow_sdk::enter_operation(key, 1, true)
+                        .await
+                        .map_err(|_| ())?;
+                    let refused = runtara_workflow_sdk::suspend_operation(
+                        &again,
+                        b"x".to_vec(),
+                        &[Wake::OnResume],
+                    )
+                    .await
+                    .err()
+                    .and_then(|error| error.code().map(|code| code.as_str().to_string()));
+                    runtara_workflow_sdk::exit_operation(&again, false)
+                        .await
+                        .map_err(|_| ())?;
+                    runtara_workflow_sdk::release_operation(&again)
+                        .await
+                        .map_err(|_| ())?;
+                    PostedOutcome::Completed(
+                        serde_json::to_vec(&json!({
+                            "sameId": id == again,
+                            "first": first.map(|state| String::from_utf8_lossy(&state).into_owned()),
+                            "loaded": loaded.map(|state| String::from_utf8_lossy(&state).into_owned()),
+                            "refused": refused,
+                        }))
+                        .map_err(|_| ())?,
+                    )
+                }
                 Some("wait") => {
                     // Wait for `data.children`; park until they finish, then
                     // complete with the settled read.

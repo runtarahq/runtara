@@ -642,3 +642,71 @@ async fn call_raw(
     all.extend_from_slice(headers);
     transport::raw(method, path, &all, body).await
 }
+
+/// `POST /v1/operations`: enter the operation of the call site
+/// `checkpoint_key` at `attempt`. Returns its id, and with `load` the
+/// continuation saved for it.
+pub async fn enter_operation(
+    checkpoint_key: &str,
+    attempt: u32,
+    load: bool,
+) -> Result<(String, Option<Vec<u8>>), Error> {
+    let body =
+        serde_json::json!({"checkpointKey": checkpoint_key, "attempt": attempt, "load": load});
+    let response = call(
+        "POST",
+        "/v1/operations",
+        &[("content-type", "application/json")],
+        Some(body.to_string().into_bytes()),
+    )
+    .await?;
+    let id = response
+        .header(runtara_workflow_api::headers::OPERATION)
+        .ok_or_else(|| Error::Transport("operation without an id".into()))?
+        .to_string();
+    Ok((id, (response.status == 200).then_some(response.body)))
+}
+
+/// `POST /v1/operations/{id}/suspend`: keep `state` as the continuation and
+/// leave the operation suspended on `wakes`.
+pub async fn suspend_operation(
+    operation_id: &str,
+    state: Vec<u8>,
+    wakes: &[runtara_workflow_api::Wake],
+) -> Result<(), Error> {
+    let wakes = serde_json::to_string(wakes).map_err(|e| Error::Transport(e.to_string()))?;
+    call(
+        "POST",
+        &format!("{}/suspend", key_path("/v1/operations", operation_id)),
+        &[(runtara_workflow_api::headers::WAKES, wakes.as_str())],
+        Some(state),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// `POST /v1/operations/{id}/exit`: leave the operation; a failure discards
+/// what it kept.
+pub async fn exit_operation(operation_id: &str, failed: bool) -> Result<(), Error> {
+    let body = serde_json::json!({"failed": failed});
+    call(
+        "POST",
+        &format!("{}/exit", key_path("/v1/operations", operation_id)),
+        &[("content-type", "application/json")],
+        Some(body.to_string().into_bytes()),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// `DELETE /v1/operations/{id}`: drop everything kept for the operation.
+pub async fn release_operation(operation_id: &str) -> Result<(), Error> {
+    call(
+        "DELETE",
+        &key_path("/v1/operations", operation_id),
+        &[],
+        None,
+    )
+    .await
+    .map(|_| ())
+}

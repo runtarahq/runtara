@@ -470,3 +470,107 @@ pub(super) async fn delete_wait(
     state.backend.release_wait(&binding, &key).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EnterOperation {
+    checkpoint_key: String,
+    attempt: u32,
+    #[serde(default)]
+    load: bool,
+}
+
+pub(super) async fn post_operation(
+    State(state): State<WorkflowApiState>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    let body = to_bytes(request.into_body(), state.caps.request_body_bytes)
+        .await
+        .map_err(|_| ApiError::new(ErrorCode::TooLarge, "operation request is over the cap"))?;
+    let enter: EnterOperation = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("operation request: {e}")))?;
+    let (operation_id, continuation) = state
+        .backend
+        .enter_operation(&binding, &enter.checkpoint_key, enter.attempt, enter.load)
+        .await?;
+    let mut response = match continuation {
+        Some(continuation) => octets(continuation, StatusCode::OK),
+        None => StatusCode::NO_CONTENT.into_response(),
+    };
+    response.headers_mut().insert(
+        headers::OPERATION,
+        HeaderValue::from_str(&operation_id)
+            .map_err(|_| ApiError::new(ErrorCode::Unavailable, "bad operation id"))?,
+    );
+    Ok(response)
+}
+
+pub(super) async fn post_operation_suspend(
+    State(state): State<WorkflowApiState>,
+    Path(operation_id): Path<String>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    let wakes: Vec<crate::Wake> = request
+        .headers()
+        .get(headers::WAKES)
+        .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "Runtara-Wakes is required"))
+        .and_then(|value| {
+            serde_json::from_slice(value.as_bytes())
+                .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("Runtara-Wakes: {e}")))
+        })?;
+    let body = to_bytes(request.into_body(), state.caps.continuation_bytes)
+        .await
+        .map_err(|_| {
+            ApiError::new(
+                ErrorCode::TooLarge,
+                format!(
+                    "a continuation is at most {} bytes",
+                    state.caps.continuation_bytes
+                ),
+            )
+        })?;
+    state
+        .backend
+        .suspend_operation(&binding, &operation_id, body.to_vec(), wakes)
+        .await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExitOperation {
+    failed: bool,
+}
+
+pub(super) async fn post_operation_exit(
+    State(state): State<WorkflowApiState>,
+    Path(operation_id): Path<String>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    let body = to_bytes(request.into_body(), state.caps.request_body_bytes)
+        .await
+        .map_err(|_| ApiError::new(ErrorCode::TooLarge, "exit request is over the cap"))?;
+    let exit: ExitOperation = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("exit request: {e}")))?;
+    state
+        .backend
+        .exit_operation(&binding, &operation_id, exit.failed)
+        .await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+pub(super) async fn delete_operation(
+    State(state): State<WorkflowApiState>,
+    Path(operation_id): Path<String>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    state
+        .backend
+        .release_operation(&binding, &operation_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}

@@ -192,6 +192,50 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
         Err(unsupported_service("instance waits"))
     }
 
+    /// Enter the operation of the call site `checkpoint_key` at `attempt`,
+    /// returning its id and, with `load`, the continuation saved for it.
+    async fn enter_operation(
+        &self,
+        binding: &Binding,
+        checkpoint_key: &str,
+        attempt: u32,
+        load: bool,
+    ) -> Result<(String, Option<Vec<u8>>), ApiError> {
+        let _ = (binding, checkpoint_key, attempt, load);
+        Err(unsupported_service("operations"))
+    }
+    /// Persist `state` as the entered operation's continuation and leave it
+    /// suspended on `wakes`.
+    async fn suspend_operation(
+        &self,
+        binding: &Binding,
+        operation_id: &str,
+        state: Vec<u8>,
+        wakes: Vec<crate::Wake>,
+    ) -> Result<(), ApiError> {
+        let _ = (binding, operation_id, state, wakes);
+        Err(unsupported_service("operations"))
+    }
+    /// Leave the entered operation; a failure discards what it kept.
+    async fn exit_operation(
+        &self,
+        binding: &Binding,
+        operation_id: &str,
+        failed: bool,
+    ) -> Result<(), ApiError> {
+        let _ = (binding, operation_id, failed);
+        Err(unsupported_service("operations"))
+    }
+    /// Drop everything kept for the operation. Idempotent.
+    async fn release_operation(
+        &self,
+        binding: &Binding,
+        operation_id: &str,
+    ) -> Result<(), ApiError> {
+        let _ = (binding, operation_id);
+        Err(unsupported_service("operations"))
+    }
+
     /// The safe descriptor of `connection_id` in the run's tenant (JSON).
     async fn describe_connection(
         &self,
@@ -375,6 +419,19 @@ pub fn router(state: WorkflowApiState) -> Router {
             put(runtime::put_wait)
                 .get(runtime::get_wait)
                 .delete(runtime::delete_wait),
+        )
+        .route("/v1/operations", post(runtime::post_operation))
+        .route(
+            "/v1/operations/{operation_id}",
+            axum::routing::delete(runtime::delete_operation),
+        )
+        .route(
+            "/v1/operations/{operation_id}/suspend",
+            post(runtime::post_operation_suspend),
+        )
+        .route(
+            "/v1/operations/{operation_id}/exit",
+            post(runtime::post_operation_exit),
         )
         .route(
             "/v1/connections/{connection_id}",
