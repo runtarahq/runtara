@@ -388,7 +388,11 @@ impl ComponentDispatcherService {
                 root_lease_epoch: 0,
             };
             launches
-                .begin_standalone(binding.clone())
+                .begin_standalone(
+                    binding.clone(),
+                    // Unpinned, as the host-linked test path was.
+                    crate::api_launches::StandaloneTrust::Unpinned,
+                )
                 .map_err(|error| anyhow::anyhow!(error))?;
             let launch = TestLaunch {
                 launches: Arc::clone(launches),

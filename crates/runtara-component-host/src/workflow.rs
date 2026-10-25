@@ -738,7 +738,17 @@ impl WorkflowExecutor {
         let Some(runtime) = runtime else {
             let binding = local();
             let launches = Arc::clone(self.workflow_api());
-            if let Err(error) = launches.begin_standalone(binding.clone()) {
+            // The store's own trusted pins bind its trusted calls, as its
+            // host-linked calls were bound.
+            use crate::api_launches::StandaloneTrust;
+            let trust = match &store.data().trusted {
+                Some(call) => call
+                    .pins
+                    .clone()
+                    .map_or(StandaloneTrust::Unpinned, StandaloneTrust::Pinned),
+                None => StandaloneTrust::Denied,
+            };
+            if let Err(error) = launches.begin_standalone(binding.clone(), trust) {
                 tracing::warn!(%error, "the store is not served the workflow API");
                 return None;
             }

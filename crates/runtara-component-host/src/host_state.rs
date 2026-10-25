@@ -212,7 +212,11 @@ impl HostState {
                 root_lease_epoch: 0,
             };
             // A fresh registry cannot already hold this launch.
-            let _ = launches.begin_standalone(binding.clone());
+            // Its registry is given no trusted executor.
+            let _ = launches.begin_standalone(
+                binding.clone(),
+                crate::api_launches::StandaloneTrust::Denied,
+            );
             self.api_hooks = crate::workflow_api::WorkflowApiHooks::for_run(
                 Some(launches.transport()),
                 Some({

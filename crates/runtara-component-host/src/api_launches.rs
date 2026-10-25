@@ -63,10 +63,10 @@ pub struct LaunchSlot {
     /// A failure the run may not recover from, which ends it as trapped
     /// whatever it does next.
     fault: Mutex<Option<String>>,
-    /// A launch outside any run (an agent test call): it is served the
-    /// connection, HTTP, SQL and trusted endpoints, unpinned, and nothing that
-    /// needs a run.
-    standalone: bool,
+    /// A launch outside any run (an agent test call, an isolated child): it
+    /// is served the connection, HTTP, SQL and trusted endpoints, and nothing
+    /// that needs a run. `None` for a run's launch.
+    standalone: Option<StandaloneTrust>,
     /// Instance waits this launch registered whose last read was pending.
     /// A suspension it posts wakes on them too, as the old ABI's host
     /// attached them to the run's result.
@@ -163,7 +163,7 @@ impl ApiLaunches {
                 resolver: std::sync::OnceLock::new(),
                 operations: Mutex::default(),
                 fault: Mutex::default(),
-                standalone: false,
+                standalone: None,
                 pending_waits: Mutex::default(),
             }),
         );
@@ -172,8 +172,9 @@ impl ApiLaunches {
 
     /// Start serving `binding` as a standalone launch: a call outside any run,
     /// such as an agent's test invocation, which reaches only the endpoints
-    /// that need no run.
-    pub fn begin_standalone(&self, binding: Binding) -> Result<(), String> {
+    /// that need no run. `trust` decides its trusted calls, as the caller's
+    /// own store would have.
+    pub fn begin_standalone(&self, binding: Binding, trust: StandaloneTrust) -> Result<(), String> {
         let mut slots = self.slots.lock().expect("workflow API launches poisoned");
         if slots.contains_key(&binding.launch_id) {
             return Err(format!(
@@ -208,7 +209,7 @@ impl ApiLaunches {
                 resolver: std::sync::OnceLock::new(),
                 operations: Mutex::default(),
                 fault: Mutex::default(),
-                standalone: true,
+                standalone: Some(trust),
                 pending_waits: Mutex::default(),
             }),
         );
@@ -1077,15 +1078,23 @@ impl WorkflowApiBackend for Backend {
         let executor = self.0.trusted.get().cloned().ok_or_else(|| {
             ApiError::new(ErrorCode::Unavailable, "no trusted executor is configured")
         })?;
-        // A standalone call is a direct agent call, not version-bound by any
-        // artifact; a run's calls are bound by its artifact's pins.
-        let (pins, launch) = if slot.standalone {
-            (None, crate::trusted::TrustedLaunch::Start)
-        } else {
-            (
+        // A run's calls are bound by its artifact's pins; a standalone
+        // launch's by the trust its store had.
+        let (pins, launch) = match &slot.standalone {
+            None => (
                 Some(slot.controls.trusted_pins.as_ref()),
                 self.runtime(binding)?.trusted_launch(),
-            )
+            ),
+            Some(StandaloneTrust::Denied) => {
+                return Err(ApiError::new(
+                    ErrorCode::Denied,
+                    "trusted execution is not available in this context",
+                ));
+            }
+            Some(StandaloneTrust::Pinned(pins)) => {
+                (Some(pins.as_ref()), crate::trusted::TrustedLaunch::Start)
+            }
+            Some(StandaloneTrust::Unpinned) => (None, crate::trusted::TrustedLaunch::Start),
         };
         executor
             .invoke_pinned(
@@ -1101,6 +1110,18 @@ impl WorkflowApiBackend for Backend {
             .await
             .map_err(|envelope| trusted_error(&envelope))
     }
+}
+
+/// What a standalone launch may do through `/v1/trusted`.
+#[derive(Clone, Debug)]
+pub enum StandaloneTrust {
+    /// A direct agent call, not version-bound by any artifact (agent test
+    /// calls, as their host-linked path was).
+    Unpinned,
+    /// Bound by the calling artifact's trusted pins (an isolated child).
+    Pinned(Arc<std::collections::HashSet<String>>),
+    /// No trusted execution, as for a store given no trusted executor.
+    Denied,
 }
 
 /// The runtime of a standalone launch, which has none: only ever behind a
@@ -1315,5 +1336,55 @@ mod tests {
             LaunchState::Fenced
         );
         assert_eq!(launches.finish("launch-1"), None);
+    }
+
+    /// A standalone launch's trusted calls follow the trust its store had:
+    /// an isolated child stays bound by its artifact's pins, a store with no
+    /// trusted executor is refused, and only an agent test call is unpinned.
+    #[tokio::test]
+    async fn a_standalone_launch_keeps_its_stores_trusted_pins() {
+        let engine = crate::engine::build_engine(&crate::engine::EngineConfig::default()).unwrap();
+        let launches = Arc::new(ApiLaunches::default());
+        launches
+            .set_trusted_executor(Arc::new(TrustedExecutor::new(engine)))
+            .unwrap();
+        let backend = Backend(launches.clone());
+        let call = || runtara_workflow_api::server::TrustedCall {
+            agent_id: "crypto".into(),
+            capability_id: "hash".into(),
+            connection_id: "connection".into(),
+            input: b"{}".to_vec(),
+        };
+        let standalone = |id: &str, trust| {
+            let binding = Binding {
+                launch_id: id.into(),
+                ..binding(0)
+            };
+            launches.begin_standalone(binding.clone(), trust).unwrap();
+            binding
+        };
+        let pinned = standalone("pinned", StandaloneTrust::Pinned(Arc::default()));
+        let error = backend.trusted(&pinned, None, call()).await.unwrap_err();
+        assert!(
+            matches!(&error.code, ErrorCode::Domain { like, .. } if **like == ErrorCode::Denied),
+            "{error:?}"
+        );
+        assert!(
+            error.message.contains("approved trusted dependency"),
+            "{error:?}"
+        );
+
+        let denied = standalone("denied", StandaloneTrust::Denied);
+        let error = backend.trusted(&denied, None, call()).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Denied);
+        assert!(error.message.contains("not available"), "{error:?}");
+
+        // Unpinned passes the version check and reaches the executor.
+        let unpinned = standalone("unpinned", StandaloneTrust::Unpinned);
+        let error = backend.trusted(&unpinned, None, call()).await.unwrap_err();
+        assert!(
+            !error.message.contains("approved trusted dependency"),
+            "{error:?}"
+        );
     }
 }
