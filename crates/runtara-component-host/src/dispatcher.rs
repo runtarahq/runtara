@@ -162,8 +162,6 @@ impl ComponentDispatcherService {
         let linker = build_linker(&engine)?;
 
         let mut trusted = crate::trusted::TrustedExecutor::new(Arc::clone(&engine));
-        // The control agent alone links the real control API.
-        let control_linker = crate::registry::build_control_linker(&engine)?;
         let mut agents = HashMap::new();
         let mut agent_info: HashMap<String, AgentInfo> = HashMap::new();
 
@@ -221,12 +219,7 @@ impl ComponentDispatcherService {
 
             let bytes = std::fs::read(&path)?;
             trusted.register(&info, &bytes, &meta_bytes)?;
-            let agent_linker = if agent_id == runtara_dsl::agent_meta::CONTROL_AGENT_ID {
-                &control_linker
-            } else {
-                &linker
-            };
-            let loaded = load_agent_bytes(&engine, agent_linker, &bytes, &agent_id)?;
+            let loaded = load_agent_bytes(&engine, &linker, &bytes, &agent_id)?;
 
             agent_info.insert(agent_id.clone(), info);
             agents.insert(agent_id, loaded);
@@ -236,7 +229,6 @@ impl ComponentDispatcherService {
         // is pre-instantiated we drop it — InstancePre carries everything we
         // need for repeated per-call instantiation.
         drop(linker);
-        drop(control_linker);
 
         // Build the public catalog from the parsed `AgentInfo`s. Sorted by
         // id so API output + tests are deterministic.
@@ -422,23 +414,6 @@ impl ComponentDispatcherService {
             self.connection_resolver.get(),
             Some(&req.tenant_id),
         );
-        // A test call of the control agent has the tenant but no calling
-        // instance or operation: reads work tenant-wide, identity calls and
-        // caller-relative filters answer `requires-instance`.
-        if canonical_agent_id(&req.agent_id) == runtara_dsl::agent_meta::CONTROL_AGENT_ID {
-            state.control_api =
-                self.control_host
-                    .get()
-                    .map(|host| crate::control_host::ControlApiCall {
-                        host: Arc::clone(host),
-                        authority: crate::control_host::ControlAuthority {
-                            tenant: req.tenant_id.clone(),
-                            caller: None,
-                            operation: None,
-                        },
-                        deadline: Some(deadline),
-                    });
-        }
         state.set_limits(self.memory_max_bytes, DEFAULT_GUEST_TABLE_MAX_ELEMENTS);
         let (mut store, instance) = instantiate(&self.engine, &agent.pre, state).await?;
 

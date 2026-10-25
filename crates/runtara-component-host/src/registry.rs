@@ -36,23 +36,6 @@ pub struct LoadedAgent {
 /// (env, stdio, clocks, random, filesystem, sockets) and `wasi:http/proxy`
 /// for compatibility. Raw WASI HTTP is denied by HostHooks.
 pub fn build_linker(engine: &Engine) -> Result<Linker<HostState>> {
-    let mut linker = build_base_linker(engine)?;
-    // Only the control agent's test stores bind the real control API.
-    crate::control_host::add_denied_control_api_to_linker(&mut linker)?;
-    Ok(linker)
-}
-
-/// [`build_linker`] with the real control API, for the dispatcher's own
-/// control agent: a store answers control calls only when it carries a
-/// [`crate::control_host::ControlApiCall`].
-pub(crate) fn build_control_linker(engine: &Engine) -> Result<Linker<HostState>> {
-    let mut linker = build_base_linker(engine)?;
-    crate::control_host::add_control_api_to_linker(&mut linker)?;
-    Ok(linker)
-}
-
-/// [`build_linker`] without the `runtara:control` binding.
-fn build_base_linker(engine: &Engine) -> Result<Linker<HostState>> {
     let mut linker = Linker::<HostState>::new(engine);
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
     // `add_only_http_to_linker_async` is the slim version that skips

@@ -224,10 +224,6 @@ enum InvocationEntry<'a> {
 #[derive(Default)]
 struct InvocationControl {
     trusted_pins: Option<Arc<std::collections::HashSet<String>>>,
-    /// Whether `runtara:control/api` is real for this entry: only the run's
-    /// own prepared entry. Isolated capabilities, isolated child workflows
-    /// and unprepared loads are `denied`.
-    control: bool,
     deadline: Option<Instant>,
     task_cancel: Option<crate::isolated_tasks::TaskCancellation>,
     abandoned: Option<Arc<AtomicBool>>,
@@ -317,9 +313,6 @@ impl WasiHttpHooks for WorkflowHooks {
 /// Store data for a workflow run.
 pub struct WorkflowState {
     trusted: Option<crate::trusted::TrustedCall>,
-    /// The run's control service behind `runtara:control/api`; `None` is
-    /// `denied`.
-    control_api: Option<crate::control_host::RunControl>,
     /// The operation a suspending call site entered.
     pub(crate) operation: crate::operation_scope_host::OperationScopeState,
     /// Durable instance waits of WaitForInstances steps.
@@ -365,19 +358,6 @@ impl ExecutionView for WorkflowState {
 
     fn execution_context(&self) -> Option<&Arc<ExecutionContext>> {
         self.execution.as_ref()
-    }
-}
-
-impl crate::control_host::ControlApiView for WorkflowState {
-    /// The authority is the run's host-supplied tenant and instance plus the
-    /// operation entered at call time, never anything the guest passes.
-    fn control_api(&self) -> Option<crate::control_host::ControlApiCall> {
-        let control = self.control_api.as_ref()?;
-        let operation = self
-            .operation
-            .current()
-            .map(|op| op.identity.op_hash.clone());
-        Some(control.call(operation, self.database_deadline()))
     }
 }
 
@@ -697,7 +677,6 @@ impl WorkflowExecutor {
         // API, real only for a run's own prepared entry.
         crate::operation_scope_host::add_operation_scope_to_linker(&mut linker)?;
         crate::operation_scope_host::add_suspension_context_to_linker(&mut linker)?;
-        crate::control_host::add_control_api_to_linker(&mut linker)?;
         // Durable instance waits of compiled WaitForInstances steps.
         crate::instance_wait_host::add_instance_waits_to_linker(&mut linker)?;
         // Queryable run state of compiled SetState / GetState steps.
@@ -1120,10 +1099,7 @@ impl WorkflowExecutor {
             input,
             start_confirmation,
             InvocationEntry::Lifecycle { interface: None },
-            InvocationControl {
-                control: true,
-                ..Default::default()
-            },
+            InvocationControl::default(),
         )
         .await
     }
@@ -1280,12 +1256,6 @@ impl WorkflowExecutor {
                     ),
                     launch: trusted_launch(spec.runtime.as_ref()),
                 }),
-            control_api: crate::control_host::RunControl::for_run(
-                control.control,
-                self.control_host.get().cloned(),
-                spec.trusted_tenant.as_deref(),
-                spec.trusted_instance.as_deref(),
-            ),
             operation: Default::default(),
             instance_waits: crate::instance_wait_host::RunInstanceWaits::for_run(
                 self.instance_waits.get().cloned(),
@@ -1654,7 +1624,6 @@ impl WorkflowExecutor {
         let deadline = tokio::time::Instant::now() + crate::outbound_http::MAX_TIMEOUT;
         let state = WorkflowState {
             trusted: None,
-            control_api: None,
             operation: Default::default(),
             instance_waits: Default::default(),
             run_state: Default::default(),
@@ -1999,13 +1968,5 @@ mod cleanup_alarm_tests;
 mod database_tests;
 
 #[cfg(test)]
-#[path = "workflow/control_tests.rs"]
-mod control_tests;
-
-#[cfg(test)]
 #[path = "workflow/raw_http_tests.rs"]
 mod raw_http_tests;
-
-#[cfg(test)]
-#[path = "workflow/frozen_abi_tests.rs"]
-mod frozen_abi_tests;

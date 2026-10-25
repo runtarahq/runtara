@@ -138,8 +138,6 @@ pub struct HostState {
         Result<Arc<crate::connection_resolver_host::RunConnectionResolver>, String>,
     pub(crate) restricted: bool,
     pub(crate) trusted: Option<Arc<crate::trusted::TrustedExecutor>>,
-    /// The real control service; set only in control executor stores.
-    pub(crate) control_api: Option<crate::control_host::ControlApiCall>,
     pub wasi: WasiCtx,
     pub http: WasiHttpCtx,
     pub table: ResourceTable,
@@ -261,7 +259,6 @@ impl HostState {
             database: Err("native database service is not configured".into()),
             connection_resolver: Err("native connection resolver is not configured".into()),
             trusted: None,
-            control_api: None,
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
