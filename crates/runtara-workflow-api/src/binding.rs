@@ -13,7 +13,6 @@ pub struct Binding {
     /// One launch of the instance; idempotency receipts and the outcome are
     /// scoped to it.
     pub launch_id: String,
-    pub attempt: u32,
     /// Root lease epoch the launch holds. A write presenting an older epoch
     /// than the run's current lease is `fenced`.
     pub root_lease_epoch: u64,

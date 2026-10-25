@@ -12,7 +12,9 @@ pub struct RunInfo {
     pub workflow_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
-    pub attempt: u32,
+    /// Launch attempt of the instance, when the runtime tracks it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
     /// How this launch started (`fresh`, `resume`, `recovery`, ...).
     pub launch_kind: String,
     pub debug: bool,
@@ -76,6 +78,15 @@ pub struct ErrorInfo {
     pub details: Option<serde_json::Value>,
 }
 
+/// A run outcome posted to `POST /v1/run/outcome`, parsed and checked against
+/// the caps. The runtime hands it back to the executor as the run's result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PostedOutcome {
+    Completed(Vec<u8>),
+    Failed(ErrorInfo),
+    Suspended(Suspension),
+}
+
 /// A suspended outcome: re-invoke when any wake fires.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -107,7 +118,7 @@ mod tests {
             tenant_id: "t-1".into(),
             workflow_id: None,
             version: None,
-            attempt: 1,
+            attempt: Some(1),
             launch_kind: "fresh".into(),
             debug: false,
             deadline_ms: None,

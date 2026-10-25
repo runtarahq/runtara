@@ -43,14 +43,7 @@ pub enum LaunchState {
     Fenced,
 }
 
-/// A run outcome posted to `POST /v1/run/outcome`, already parsed and
-/// checked against the caps.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PostedOutcome {
-    Completed(Vec<u8>),
-    Failed(ErrorInfo),
-    Suspended(Suspension),
-}
+pub use crate::PostedOutcome;
 
 /// The effects behind the router. Implemented by the runtime that owns runs
 /// (runtara-environment for the embedded runner). Every method receives the

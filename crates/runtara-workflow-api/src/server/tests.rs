@@ -39,7 +39,7 @@ impl WorkflowApiBackend for FakeBackend {
             tenant_id: binding.tenant_id.clone(),
             workflow_id: Some("wf-1".into()),
             version: Some(3),
-            attempt: binding.attempt,
+            attempt: None,
             launch_kind: "fresh".into(),
             debug: false,
             deadline_ms: None,
@@ -77,7 +77,6 @@ fn binding() -> Binding {
         tenant_id: "tenant-a".into(),
         instance_id: "instance-1".into(),
         launch_id: "launch-1".into(),
-        attempt: 1,
         root_lease_epoch: 7,
     }
 }

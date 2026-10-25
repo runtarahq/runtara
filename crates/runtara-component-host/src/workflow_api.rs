@@ -172,7 +172,6 @@ mod tests {
             tenant_id: "tenant-a".into(),
             instance_id: "instance-1".into(),
             launch_id: "launch-1".into(),
-            attempt: 2,
             root_lease_epoch: 9,
         }
     }
