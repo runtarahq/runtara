@@ -107,6 +107,10 @@ interface time {
     now-ms: async func() -> result<u64, api-error>;
     /// `POST /v1/heartbeat`.
     heartbeat: async func() -> result<_, api-error>;
+    /// Wait `ms` inside the guest (`wasi:clocks`), keeping the run's
+    /// resources. The one function that is not an endpoint: a non-durable
+    /// delay needs no host.
+    sleep: async func(ms: u64);
 }
 
 /// `/v1/signals`: lifecycle commands (cancel, pause, shutdown) and custom

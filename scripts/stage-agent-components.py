@@ -29,7 +29,6 @@ def component_names(workspace: Path) -> list[str]:
     return agents + [
         "runtara_workflow_stdlib",
         # Composed around workflow logic for the workflow API ABI.
-        "runtara_workflow_api_services",
         "runtara_workflow_api_run",
         "runtara_api_component",
     ]

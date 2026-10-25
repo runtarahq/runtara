@@ -41,7 +41,6 @@ members = [
     # Guest side of the workflow API, and a probe workflow built on it
     "crates/runtara-workflow-sdk",
     "crates/runtara-workflow-api-probe",
-    "crates/runtara-workflow-api-services",
     "crates/runtara-workflow-api-run",
     "crates/runtara-api-component",
     "crates/runtara-component-host",

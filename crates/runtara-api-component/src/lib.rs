@@ -177,6 +177,10 @@ mod api {
         async fn heartbeat() -> Result<(), ApiError> {
             sdk::heartbeat().await.map_err(api_error)
         }
+
+        async fn sleep(ms: u64) {
+            sdk::sleep(ms).await;
+        }
     }
 
     impl signals::Guest for Api {

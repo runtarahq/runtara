@@ -135,6 +135,28 @@ pub mod control {
     pub const WIT: &str = include_str!("../wit/control/runtara-control.wit");
 }
 
+/// `runtara:api`: the workflow API as a component interface, versioned on its
+/// own (a public contract, see the WIT). The compiler imports it into workflow
+/// logic built for the workflow API ABI.
+pub mod api {
+    pub const VERSION: &str = "1.0.0";
+    pub const PACKAGE: &str = "runtara:api@1.0.0";
+    /// Interface-name prefix of every `runtara:api` interface.
+    pub const PREFIX: &str = "runtara:api/";
+    pub const TIME: &str = "runtara:api/time@1.0.0";
+    pub const SIGNALS: &str = "runtara:api/signals@1.0.0";
+    pub const CHECKPOINTS: &str = "runtara:api/checkpoints@1.0.0";
+    pub const EVENTS: &str = "runtara:api/events@1.0.0";
+    pub const INPUTS: &str = "runtara:api/inputs@1.0.0";
+    pub const RUN: &str = "runtara:api/run@1.0.0";
+    pub const DEBUG: &str = "runtara:api/debug@1.0.0";
+    /// The interfaces workflow logic imports in place of
+    /// `runtara:workflow/runtime`.
+    pub const RUNTIME_REPLACEMENTS: [&str; 7] =
+        [RUN, TIME, SIGNALS, CHECKPOINTS, EVENTS, INPUTS, DEBUG];
+    pub const WIT: &str = include_str!("../wit-p3/api/runtara-api.wit");
+}
+
 /// The resolved WASI inputs the workflow compiler imports (managed by
 /// `wit-deps` under `wit/deps`).
 pub mod wasi {

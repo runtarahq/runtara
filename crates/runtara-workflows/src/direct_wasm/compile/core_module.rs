@@ -49,6 +49,11 @@ pub(super) struct DirectCoreConfig {
     /// so the emitter must NOT lower any `runtime.*` call. Only valid for a
     /// pure workflow (see [`Self::with_omit_runtime`]).
     pub(super) omit_runtime: bool,
+    /// On [`GuestAbi::Http`] the runtime functions are shims over
+    /// `runtara:api` imports (see `api_shims`).
+    ///
+    /// [`GuestAbi::Http`]: crate::direct_wasm::component::GuestAbi::Http
+    pub(super) api_runtime: bool,
 }
 
 impl DirectCoreConfig {
@@ -84,6 +89,12 @@ impl DirectCoreConfig {
         self
     }
 
+    /// Lower the runtime onto `runtara:api` imports.
+    pub(super) fn with_api_runtime(mut self, enabled: bool) -> Self {
+        self.api_runtime = enabled;
+        self
+    }
+
     fn new_inner(
         manifest: &DirectWorkflowManifest,
         manifest_json: &[u8],
@@ -95,6 +106,7 @@ impl DirectCoreConfig {
         Ok(Self {
             abi: crate::direct_wasm::component::WorkflowRole::default(),
             omit_runtime: false,
+            api_runtime: false,
             run_plan: direct_run_plan(manifest)?,
             static_data: DirectCoreStaticData::new_with_child_workflows(
                 &manifest.graph,
@@ -381,6 +393,28 @@ pub(super) fn emit_direct_core_module(
         }
     }
 
+    // The scratch area of the runtime shims sits where the heap would start;
+    // the heap starts after it.
+    let api_scratch = config.static_data.heap_base;
+    let heap_base = if config.api_runtime {
+        let api_functions = std::mem::take(&mut import_indices.api_functions);
+        super::api_shims::emit_runtime_shims(
+            resolve,
+            &api_functions,
+            &mut import_indices,
+            &mut types,
+            &mut type_count,
+            &mut functions,
+            &mut code,
+            imported_function_count,
+            &mut next_defined_function,
+            api_scratch,
+        )?;
+        api_scratch + super::api_shims::API_SCRATCH_BYTES
+    } else {
+        config.static_data.heap_base
+    };
+
     let mut import_indices = import_indices.require_all(
         config.abi,
         config.omit_runtime,
@@ -545,7 +579,10 @@ pub(super) fn emit_direct_core_module(
 
     let mut memories = MemorySection::new();
     memories.memory(MemoryType {
-        minimum: config.static_data.memory_min_pages,
+        minimum: config
+            .static_data
+            .memory_min_pages
+            .max((heap_base as u64).div_ceil(WASM_PAGE_SIZE as u64)),
         maximum: None,
         memory64: false,
         shared: false,
@@ -561,8 +598,19 @@ pub(super) fn emit_direct_core_module(
             mutable: true,
             shared: false,
         },
-        &ConstExpr::i32_const(config.static_data.heap_base),
+        &ConstExpr::i32_const(heap_base),
     );
+    if config.api_runtime {
+        // `api_shims::STOPPED_GLOBAL`: an acknowledged stop.
+        globals.global(
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::i32_const(0),
+        );
+    }
 
     if !early_realloc {
         export_realloc(

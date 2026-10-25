@@ -22,6 +22,9 @@ use super::abi::push_core_type;
 
 #[derive(Debug, Default)]
 pub(super) struct DirectCoreImportIndices {
+    /// `runtara:api` functions by `interface.function`, on the workflow API
+    /// ABI, where shims stand in for the runtime imports.
+    pub(super) api_functions: BTreeMap<String, super::api_shims::ApiImport>,
     runtime_custom_event: Option<u32>,
     runtime_debug_mode_enabled: Option<u32>,
     runtime_breakpoint_pause: Option<u32>,
@@ -191,6 +194,31 @@ pub(super) struct DirectCoreImportIndices {
 }
 
 impl DirectCoreImportIndices {
+    /// Point the runtime function `name`'s slot at its shim.
+    pub(super) fn set_runtime_shim(&mut self, name: &str, index: u32) {
+        let slot = match name {
+            "custom-event" => &mut self.runtime_custom_event,
+            "debug-mode-enabled" => &mut self.runtime_debug_mode_enabled,
+            "breakpoint-pause" => &mut self.runtime_breakpoint_pause,
+            "heartbeat" => &mut self.runtime_heartbeat,
+            "instance-id" => &mut self.runtime_instance_id,
+            "poll-signal" => &mut self.runtime_poll_signal,
+            "is-cancelled" => &mut self.runtime_is_cancelled,
+            "check-signals" => &mut self.runtime_check_signals,
+            "register-input" => &mut self.runtime_register_input,
+            "poll-input" => &mut self.runtime_poll_input,
+            "close-input" => &mut self.runtime_close_input,
+            "now-ms" => &mut self.runtime_now_ms,
+            "get-checkpoint" => &mut self.runtime_get_checkpoint,
+            "checkpoint" => &mut self.runtime_checkpoint,
+            "handle-checkpoint-signal" => &mut self.runtime_handle_checkpoint_signal,
+            "record-retry-attempt" => &mut self.runtime_record_retry_attempt,
+            "blocking-sleep" => &mut self.runtime_blocking_sleep,
+            other => unreachable!("no runtime slot for {other}"),
+        };
+        *slot = Some(index);
+    }
+
     pub(super) fn require_all(
         self,
         abi: crate::direct_wasm::component::WorkflowRole,
@@ -1214,6 +1242,23 @@ pub(super) fn import_core_function(
         },
     );
     imports.import(&module, &name, EntityType::Function(type_index));
+
+    if let Some(api_interface) = interface
+        .map(|key| resolve.name_world_key(key))
+        .and_then(|name| {
+            name.strip_prefix(runtara_wit::api::PREFIX)
+                .and_then(|rest| rest.split('@').next().map(str::to_string))
+        })
+    {
+        import_indices.api_functions.insert(
+            format!("{api_interface}.{}", function.name),
+            super::api_shims::ApiImport {
+                index: function_index,
+                params: signature.params.clone(),
+            },
+        );
+        return;
+    }
 
     if function.name == "now"
         && interface

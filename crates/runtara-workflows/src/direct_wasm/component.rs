@@ -95,9 +95,9 @@ pub enum GuestAbi {
     /// The artifact imports `runtara:workflow/*`, served by host linkers.
     #[default]
     Wit,
-    /// The artifact imports only WASI: the logic is composed between the
-    /// workflow API adapters (`runtara-workflow-api-services` in front,
-    /// `runtara-workflow-api-run` behind) and exports `wasi:cli/run`.
+    /// The artifact imports only WASI: the logic imports `runtara:api`,
+    /// served by `runtara-api-component`, and `runtara-workflow-api-run`
+    /// turns its entry into `wasi:cli/run`.
     Http,
 }
 
@@ -114,39 +114,45 @@ impl GuestAbi {
     }
 }
 
-/// The components composed around a workflow's logic on [`GuestAbi::Http`].
-pub const WORKFLOW_API_ADAPTER_REQUIREMENTS: &[DirectSharedComponentRequirement] = &[
+/// The `runtara:api` component, composed in front of logic that imports it.
+pub const RUNTARA_API_COMPONENT_REQUIREMENT: DirectSharedComponentRequirement =
     DirectSharedComponentRequirement {
-        package: "runtara:workflow-api-services",
-        package_with_version: "runtara:workflow/runtime@1.0.0",
-        bundle_wasm_filename: "runtara_workflow_api_services.wasm",
-        bundle_meta_filename: "runtara_workflow_api_services.meta.json",
-        cas_wasm_filename: "runtara-workflow-api-services.wasm",
-    },
-    DirectSharedComponentRequirement {
+        package: "runtara:api-component",
+        package_with_version: runtara_wit::api::PACKAGE,
+        bundle_wasm_filename: "runtara_api_component.wasm",
+        bundle_meta_filename: "runtara_api_component.meta.json",
+        cas_wasm_filename: "runtara-api-component.wasm",
+    };
+
+/// The run shim, composed behind every root workflow on [`GuestAbi::Http`].
+pub const WORKFLOW_API_ADAPTER_REQUIREMENTS: &[DirectSharedComponentRequirement] =
+    &[DirectSharedComponentRequirement {
         package: "runtara:workflow-api-run",
         package_with_version: "wasi:cli/run@0.3.0",
         bundle_wasm_filename: "runtara_workflow_api_run.wasm",
         bundle_meta_filename: "runtara_workflow_api_run.meta.json",
         cas_wasm_filename: "runtara-workflow-api-run.wasm",
-    },
-];
+    }];
 
-/// `wac` composed for [`GuestAbi::Http`]: the services adapter satisfies the
-/// logic's `runtara:workflow` imports and the run shim re-exports its entry
-/// as `wasi:cli/run`, the only export left.
-pub(crate) fn http_guest_wac(wac: &str) -> Result<String, String> {
+/// `wac` composed for [`GuestAbi::Http`]: the `runtara:api` component (when
+/// `with_api`) satisfies the logic's `runtara:api` imports, and the run shim
+/// re-exports its entry as `wasi:cli/run`, the only export left.
+pub(crate) fn http_guest_wac(wac: &str, with_api: bool) -> Result<String, String> {
     const LOGIC: &str = "let wf = new runtara:workflow-logic {";
     const EXPORT: &str = "export wf...;\n";
     if wac.matches(LOGIC).count() != 1 || !wac.ends_with(EXPORT) {
         return Err("the workflow composition has no single logic instance to wrap".into());
     }
-    let wac = wac.replacen(
-        LOGIC,
-        "let workflow-api-services = new runtara:workflow-api-services { ... };\n\n\
-         let wf = new runtara:workflow-logic { ...workflow-api-services,",
-        1,
-    );
+    let wac = if with_api {
+        wac.replacen(
+            LOGIC,
+            "let workflow-api = new runtara:api-component { ... };\n\n\
+             let wf = new runtara:workflow-logic { ...workflow-api,",
+            1,
+        )
+    } else {
+        wac.to_string()
+    };
     Ok(format!(
         "{}let workflow-api-run = new runtara:workflow-api-run {{ ...wf, ... }};\n\n\
          export workflow-api-run...;\n",
@@ -186,6 +192,20 @@ pub struct DirectComponentArtifacts {
 }
 
 impl DirectComponentArtifacts {
+    /// Import `runtara:api` in the world in place of
+    /// `runtara:workflow/runtime`, on the workflow API ABI.
+    pub(super) fn with_api_runtime(mut self, api_runtime: bool) -> Self {
+        let runtime = format!("    import {};\n", runtara_wit::workflow::RUNTIME);
+        if api_runtime && self.world_wit.contains(&runtime) {
+            let api: String = runtara_wit::api::RUNTIME_REPLACEMENTS
+                .iter()
+                .map(|interface| format!("    import {interface};\n"))
+                .collect();
+            self.world_wit = self.world_wit.replacen(&runtime, &api, 1);
+        }
+        self
+    }
+
     /// Import `runtara:workflow/waits` in the world when a
     /// WaitForInstances step needs it.
     pub(super) fn with_wait_instances(mut self, wait_instances: bool) -> Self {
