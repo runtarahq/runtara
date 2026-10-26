@@ -8,7 +8,6 @@
 //! - `runtara:agent`: the shared vocabulary and the agent export shape;
 //! - `runtara:workflow`: the host-served `tasks` of compiled workflow logic,
 //!   and its lowering vocabulary;
-//! - `runtara:host`: lowering vocabulary of compiled workflow logic;
 //! - `runtara:workflow-stdlib`: the compiler-private JSON stdlib component;
 //! - `runtara:trusted`: the execution export of approved trusted agents.
 //!
@@ -60,16 +59,6 @@ pub mod agent {
     /// The reference capabilities shape the host binds against.
     pub const CAPABILITIES: &str = concat!("runtara:agent/capabilities@", v!());
     pub const WIT: &str = include_str!("../wit/agent/runtara-agent.wit");
-}
-
-/// `runtara:host`: lowering vocabulary of compiled workflow logic, served
-/// inside the artifact from `runtara:api`.
-pub mod host {
-    pub const PACKAGE: &str = concat!("runtara:host@", v!());
-    /// Interface-name prefix of every host interface.
-    pub const PREFIX: &str = "runtara:host/";
-    pub const TIMERS: &str = concat!("runtara:host/timers@", v!());
-    pub const WIT: &str = include_str!("../wit/host/runtara-host.wit");
 }
 
 /// `runtara:workflow`: compiled workflow logic's host-served `tasks`, its
@@ -154,7 +143,6 @@ pub mod wasi {
 /// order.
 pub const PACKAGES: &[(&str, &str)] = &[
     ("runtara-agent.wit", agent::WIT),
-    ("runtara-host.wit", host::WIT),
     ("runtara-workflow.wit", workflow::WIT),
     ("runtara-workflow-stdlib.wit", stdlib::WIT),
     ("runtara-trusted.wit", trusted::WIT),

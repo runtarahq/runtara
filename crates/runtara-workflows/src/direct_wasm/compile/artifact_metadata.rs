@@ -1367,11 +1367,18 @@ mod tests {
     #[test]
     fn every_allowlisted_import_links_against_the_agent_linker() {
         let mut resolve = runtara_wit::resolve().expect("runtara WIT resolves");
-        // A next major of the host package, which the linker does not define.
-        let bumped_host = runtara_wit::host::WIT.replace("@1.0.0", "@2.0.0");
-        resolve
-            .push_str("host-bumped.wit", &bumped_host)
-            .expect("bumped host WIT parses");
+        // The removed host timers, and a next major the linker never defined.
+        for version in ["1.0.0", "2.0.0"] {
+            resolve
+                .push_str(
+                    format!("host-{version}.wit"),
+                    &format!(
+                        "package runtara:host@{version};\n\
+                         interface timers {{ sleep: async func(ms: u64); }}\n"
+                    ),
+                )
+                .expect("host timers WIT parses");
+        }
         let engine = runtara_component_host::build_engine(&Default::default()).expect("engine");
         let linker = runtara_component_host::build_linker(&engine).expect("agent linker");
         let links = |interface: &str| {
@@ -1395,7 +1402,7 @@ mod tests {
             "an undefined interface version must not link"
         );
         assert!(
-            links(runtara_wit::host::TIMERS).is_err(),
+            links("runtara:host/timers@1.0.0").is_err(),
             "the host timers are no longer linked"
         );
     }

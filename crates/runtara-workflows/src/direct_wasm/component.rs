@@ -169,9 +169,8 @@ pub struct DirectComponentArtifacts {
 }
 
 impl DirectComponentArtifacts {
-    /// Import `runtara:api` in the world in place of the host interfaces:
-    /// the runtime (when the workflow has one), connections, timers,
-    /// operations, waits and state.
+    /// Import `runtara:api` in the world in place of the runtime, when the
+    /// workflow has one.
     pub(super) fn with_api_runtime(mut self, api_runtime: bool) -> Self {
         let runtime = format!("    import {};\n", runtara_wit::workflow::RUNTIME);
         if api_runtime && self.world_wit.contains(&runtime) {
@@ -181,18 +180,6 @@ impl DirectComponentArtifacts {
                 .collect();
             self.world_wit = self.world_wit.replacen(&runtime, &api, 1);
         }
-        // The timers are `runtara:api/time`'s, which a runtime already
-        // imports.
-        let timers = if api_runtime {
-            String::new()
-        } else {
-            format!("    import {};\n", runtara_wit::api::TIME)
-        };
-        self.world_wit = self.world_wit.replacen(
-            &format!("    import {};\n", runtara_wit::host::TIMERS),
-            &timers,
-            1,
-        );
         self
     }
 
@@ -400,8 +387,9 @@ fn emit_world_wit(
     if has_connections {
         out.push_str(&format!("    import {};\n", runtara_wit::api::CONNECTIONS));
     }
-    if needs_timers || !parallel_pools.is_empty() || !agents.is_empty() {
-        out.push_str(&format!("    import {};\n", runtara_wit::host::TIMERS));
+    // The timers are `runtara:api/time`'s, which a runtime already imports.
+    if omit_runtime && (needs_timers || !parallel_pools.is_empty() || !agents.is_empty()) {
+        out.push_str(&format!("    import {};\n", runtara_wit::api::TIME));
     }
     if needs_monotonic_clock {
         out.push_str(&format!(
@@ -617,7 +605,6 @@ package runtara:workflow-logic@1.0.0;
 world workflow {
     import runtara:workflow-stdlib/json@1.0.0;
     import runtara:workflow/runtime@1.0.0;
-    import runtara:host/timers@1.0.0;
     import runtara:agent-crypto/capabilities@1.0.0;
     import runtara:agent-object-model/capabilities@1.0.0;
     export runtara:agent-workflow-agent/capabilities@1.0.0;
