@@ -216,18 +216,32 @@ describe('stepDetailRows', () => {
             value:
               '{"type": "operation", "op": "NE", "arguments": [{"valueType": "reference", "value": "name"}, {"valueType": "reference", "value": "data.body.supplier"}]}',
             valueType: 'immediate',
-            typeHint: 'json',
+            typeHint: 'json-literal',
           },
           {
             type: 'filters',
             value: '{"city": "Lviv"}',
             valueType: 'immediate',
-            typeHint: 'json',
+            typeHint: 'json-literal',
           },
           // Not JSON yet: shown as typed, as the save keeps it.
           {
             type: 'order_by',
             value: '{"field":',
+            valueType: 'immediate',
+            typeHint: 'json-literal',
+          },
+          // JSON in the box even with `{{`: a string, without its quotes.
+          {
+            type: 'greeting',
+            value: '"hello {{name}}"',
+            valueType: 'immediate',
+            typeHint: 'json-literal',
+          },
+          // Under the other JSON hints, `{{` text is template text.
+          {
+            type: 'tags',
+            value: '["{{data.tag}}"]',
             valueType: 'immediate',
             typeHint: 'json',
           },
@@ -239,6 +253,8 @@ describe('stepDetailRows', () => {
       ['Condition', 'name is not Input · body.supplier'],
       ['Filters', 'City'],
       ['Order by', '{"field":'],
+      ['Greeting', 'hello {{name}}'],
+      ['Tags', '["{{data.tag}}"]'],
       ['Note', '[1, 2]'],
     ]);
   });

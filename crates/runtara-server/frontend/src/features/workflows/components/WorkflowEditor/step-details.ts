@@ -366,7 +366,7 @@ function buildRow(
  */
 function literalValue({ value, typeHint }: MappingEntry): unknown {
   return typeof value === 'string' && isJsonTextHint(typeHint)
-    ? parseJsonText(value)
+    ? parseJsonText(value, typeHint)
     : value;
 }
 

@@ -60,7 +60,7 @@ import {
   describeObjectValue,
 } from './value-display';
 import { TOGGLE_GUTTER_CLASS, VALUE_CELL_CLASS } from './value-cell-layout';
-import { JSON_TYPE_HINT } from './json-literal';
+import { JSON_LITERAL_HINT } from '@/features/workflows/utils/mapping-serialization';
 
 /** Check if a field type is an array type */
 function isArrayType(type: string | undefined): boolean {
@@ -753,7 +753,7 @@ export function SimpleInputMappingEditor({
       if (
         value === '' &&
         entry?.valueType === 'immediate' &&
-        entry.typeHint === JSON_TYPE_HINT
+        entry.typeHint === JSON_LITERAL_HINT
       ) {
         setFieldAutoSeeded(nodeId, fieldName, true);
       }
@@ -808,8 +808,8 @@ export function SimpleInputMappingEditor({
     [nodeId, setFieldValueType, syncToParent]
   );
 
-  // A JSON literal edited as text carries the `json` hint so the save path
-  // parses it back; `undefined` returns the field to its own hint.
+  // Text from the JSON box carries its own hint (JSON_LITERAL_HINT), so the
+  // save path parses it back; `undefined` returns the field to its own hint.
   const handleTypeHintChange = useCallback(
     (field: CapabilityField, typeHint: string | undefined) => {
       setFieldTypeHint(

@@ -8,38 +8,39 @@ import {
 
 describe('isJsonLiteral', () => {
   it('is true for an immediate holding an object or an array', () => {
-    expect(
-      isJsonLiteral({ type: 'operation' }, 'immediate', 'auto', true)
-    ).toBe(true);
-    expect(isJsonLiteral(['sku'], 'immediate', 'json', false)).toBe(true);
+    expect(isJsonLiteral({ type: 'operation' }, 'immediate', 'auto')).toBe(
+      true
+    );
+    expect(isJsonLiteral(['sku'], 'immediate', 'json')).toBe(true);
     // The field's own hint does not matter once the value is a structure.
-    expect(isJsonLiteral({ a: 1 }, 'immediate', undefined, false)).toBe(true);
+    expect(isJsonLiteral({ a: 1 }, 'immediate', undefined)).toBe(true);
   });
 
   it('is false for a build or a reference, whatever the value', () => {
-    expect(isJsonLiteral({ a: 1 }, 'composite', 'json', true)).toBe(false);
-    expect(isJsonLiteral('data.x', 'reference', 'json', true)).toBe(false);
-    expect(isJsonLiteral('{"a":1}', 'template', 'json', true)).toBe(false);
+    expect(isJsonLiteral({ a: 1 }, 'composite', 'json-literal')).toBe(false);
+    expect(isJsonLiteral('data.x', 'reference', 'json-literal')).toBe(false);
+    expect(isJsonLiteral('{"a":1}', 'template', 'json-literal')).toBe(false);
   });
 
-  it('is false for a plain scalar without the json hint', () => {
-    expect(isJsonLiteral('hello', 'immediate', 'auto', true)).toBe(false);
-    expect(isJsonLiteral(5, 'immediate', 'integer', true)).toBe(false);
-    expect(isJsonLiteral(null, 'immediate', undefined, true)).toBe(false);
+  it('is false for a plain scalar', () => {
+    expect(isJsonLiteral('hello', 'immediate', 'auto')).toBe(false);
+    expect(isJsonLiteral(5, 'immediate', 'integer')).toBe(false);
+    expect(isJsonLiteral(null, 'immediate', undefined)).toBe(false);
   });
 
-  it('reads the text of a literal being edited as a literal', () => {
-    expect(isJsonLiteral('{"a": 1', 'immediate', 'json', true)).toBe(true);
-    expect(isJsonLiteral('{"a": 1', 'immediate', 'json', false)).toBe(true);
+  it('reads any text from the JSON box as a literal, empty included', () => {
+    expect(isJsonLiteral('{"a": 1', 'immediate', 'json-literal')).toBe(true);
+    expect(isJsonLiteral('"hello {{name}}"', 'immediate', 'json-literal')).toBe(
+      true
+    );
+    expect(isJsonLiteral('', 'immediate', 'json-literal')).toBe(true);
   });
 
-  it('keeps an untyped field in JSON once cleared, but not a typed seed', () => {
-    // On an `any` field only an edit sets the json hint, so the cleared text
-    // is still the literal being written.
-    expect(isJsonLiteral('', 'immediate', 'json', true)).toBe(true);
-    // A typed object/array field is seeded with the json hint and an empty
-    // string — that is the untouched field, which opens in Build.
-    expect(isJsonLiteral('', 'immediate', 'json', false)).toBe(false);
+  it('leaves a typed object field seed under `json` to Build', () => {
+    // Typed object/array fields are seeded with the json hint and an empty
+    // string; only the JSON box's own hint marks a literal.
+    expect(isJsonLiteral('', 'immediate', 'json')).toBe(false);
+    expect(isJsonLiteral('{"a": 1}', 'immediate', 'json')).toBe(false);
   });
 });
 

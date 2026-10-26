@@ -78,10 +78,10 @@ interface ObjectMappingEditorProps {
    * fields keep the narrower reference-or-build choice.
    */
   untyped?: boolean;
-  /** The entry's type hint; `json` marks the text of a JSON literal. */
+  /** The entry's type hint; JSON_LITERAL_HINT marks text from the JSON box. */
   typeHint?: string;
   /**
-   * Set the entry's type hint: `json` when a JSON literal is edited as text,
+   * Set the entry's type hint: JSON_LITERAL_HINT for text from the JSON box,
    * `undefined` to return to the field's own hint on a mode switch.
    */
   onTypeHintChange?: (typeHint: string | undefined) => void;
@@ -102,7 +102,6 @@ export function ObjectMappingEditor({
     value,
     valueType,
     typeHint,
-    untyped,
     onChange,
     onTypeHintChange,
   });

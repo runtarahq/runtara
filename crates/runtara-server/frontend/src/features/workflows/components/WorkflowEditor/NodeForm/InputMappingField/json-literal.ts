@@ -12,18 +12,18 @@
  * column.
  *
  * So the editors keep it an immediate and edit it as JSON text. Text that
- * parses to an object or array is stored as that structure, so it saves as
- * one even when it holds `{{` (the save path leaves such text unparsed).
- * Anything else — text that does not parse yet, or a JSON scalar — is held as
- * the raw text with the `json` type hint, which the save path
+ * parses to an object or array is stored as that structure. Anything else —
+ * text that does not parse yet, or a JSON scalar — is held as the raw text
+ * under the JSON box's own type hint (JSON_LITERAL_HINT), which the save path
  * (processMappingEntry) parses and the node form's resolver checks, showing a
- * parse error under the row. Emptied, the input is unset and the save leaves
- * it out. A literal that is never edited is saved exactly as it was loaded.
+ * parse error under the row. Under that hint the text is JSON even when it
+ * holds `{{`: `"Hello {{name}}"` saves as a string, not as quoted text.
+ * Emptied, the input is unset and the save leaves it out. A literal that is
+ * never edited is saved exactly as it was loaded.
  */
 
 import { useRef, useState } from 'react';
-
-export const JSON_TYPE_HINT = 'json';
+import { JSON_LITERAL_HINT } from '@/features/workflows/utils/mapping-serialization';
 
 export function isStructuredValue(value: unknown): value is object {
   return typeof value === 'object' && value !== null;
@@ -31,21 +31,18 @@ export function isStructuredValue(value: unknown): value is object {
 
 /**
  * Whether an entry is a JSON literal the editor should show as JSON text: an
- * immediate holding a structure, or the text of one being edited. `untyped`
- * fields only get the `json` hint from such an edit; typed object and array
- * fields carry it from the start, so for them an empty string is still the
- * untouched seed and opens in Build.
+ * immediate holding a structure, or text from the JSON box. Only the JSON box
+ * sets its hint, so an empty string under it is a literal being written,
+ * while a typed object field's untouched seed ('' under `json`) opens in
+ * Build.
  */
 export function isJsonLiteral(
   value: unknown,
   valueType: string,
-  typeHint: string | undefined,
-  untyped: boolean
+  typeHint: string | undefined
 ): boolean {
   if (valueType !== 'immediate') return false;
-  if (isStructuredValue(value)) return true;
-  if (typeHint !== JSON_TYPE_HINT) return false;
-  return untyped || (typeof value === 'string' && value !== '');
+  return isStructuredValue(value) || typeHint === JSON_LITERAL_HINT;
 }
 
 /** The text a JSON literal is edited as. */
@@ -68,7 +65,6 @@ interface JsonLiteralOptions {
   value: unknown;
   valueType: string;
   typeHint: string | undefined;
-  untyped: boolean;
   onChange: (value: string | object) => void;
   onTypeHintChange?: (typeHint: string | undefined) => void;
 }
@@ -81,7 +77,6 @@ export function useJsonLiteral({
   value,
   valueType,
   typeHint,
-  untyped,
   onChange,
   onTypeHintChange,
 }: JsonLiteralOptions) {
@@ -96,7 +91,7 @@ export function useJsonLiteral({
   const held = useRef(false);
 
   const active =
-    isJsonLiteral(value, valueType, typeHint, untyped) ||
+    isJsonLiteral(value, valueType, typeHint) ||
     (editing && valueType === 'immediate');
   if (active) held.current = true;
 
@@ -111,24 +106,24 @@ export function useJsonLiteral({
     const structure = parseJsonStructure(next);
     const stored = structure ?? next;
     setDraft({ text: next, stored });
-    if (structure === undefined && typeHint !== JSON_TYPE_HINT) {
-      onTypeHintChange?.(JSON_TYPE_HINT);
+    if (structure === undefined && typeHint !== JSON_LITERAL_HINT) {
+      onTypeHintChange?.(JSON_LITERAL_HINT);
     }
     onChange(stored);
   };
 
   /**
    * Call before a mode switch. Returning to Value brings the JSON box back for
-   * a field that held a literal; leaving drops a `json` hint this editor set,
-   * so an `any` field's plain value is not read as JSON.
+   * a field that held a literal; leaving drops the JSON box's hint, so the
+   * field's own hint applies to what comes next.
    */
   const switchMode = (toValue: boolean) => {
     const keepJson = toValue && held.current;
     setDraft(undefined);
     setEditing(keepJson);
     if (keepJson) {
-      if (typeHint !== JSON_TYPE_HINT) onTypeHintChange?.(JSON_TYPE_HINT);
-    } else if (typeHint === JSON_TYPE_HINT) {
+      if (typeHint !== JSON_LITERAL_HINT) onTypeHintChange?.(JSON_LITERAL_HINT);
+    } else if (typeHint === JSON_LITERAL_HINT) {
       onTypeHintChange?.(undefined);
     }
   };

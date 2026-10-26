@@ -39,26 +39,71 @@ export function coerceValueToType(value: any, typeHint?: string): any {
 }
 
 /**
+ * The type hint of text in the step panel's JSON box, a JSON literal being
+ * edited (see json-literal.ts). That text is always JSON, so unlike under
+ * the other JSON hints it is parsed and checked whole, `{{` included: there,
+ * `"Hello {{name}}"` is a string value, not template text.
+ */
+export const JSON_LITERAL_HINT = 'json-literal';
+
+/**
  * Type hints under which an immediate's text is JSON, parsed on save.
  * 'object'/'array' keep the editors' object-vs-array distinction and parse
- * like 'json'; none of the three is written as a backend hint
- * (isValidValueType).
+ * like 'json'. None of them is written as a backend hint (isValidValueType).
  */
 export function isJsonTextHint(typeHint?: string): boolean {
-  return typeHint === 'json' || typeHint === 'object' || typeHint === 'array';
+  return (
+    typeHint === 'json' ||
+    typeHint === 'object' ||
+    typeHint === 'array' ||
+    typeHint === JSON_LITERAL_HINT
+  );
+}
+
+/** Text under a JSON hint that is template text rather than JSON. */
+function isTemplateText(text: string, typeHint?: string): boolean {
+  return typeHint !== JSON_LITERAL_HINT && text.includes('{{');
 }
 
 /**
  * What an immediate's text under a JSON hint saves as: the parsed value, or
- * the text itself when it holds `{{` (template variables, resolved at
- * runtime) or does not parse.
+ * the text itself when it does not parse or, outside the JSON box, holds
+ * `{{` (template variables, resolved at runtime).
  */
-export function parseJsonText(text: string): unknown {
-  if (text.includes('{{')) return text;
+export function parseJsonText(text: string, typeHint?: string): unknown {
+  if (isTemplateText(text, typeHint)) return text;
   try {
     return JSON.parse(text);
   } catch {
     return text;
+  }
+}
+
+/**
+ * Why an entry whose text should be JSON does not parse, or undefined.
+ * References are paths, and template text is resolved at run time, so
+ * neither is checked. The parser's own message is kept: it carries a
+ * position the author can act on (MappingObjectField does the same).
+ */
+export function jsonTextError(item: {
+  value?: unknown;
+  typeHint?: string;
+  valueType?: string;
+}): string | undefined {
+  const { value, typeHint, valueType } = item;
+  if (!isJsonTextHint(typeHint) || typeof value !== 'string' || !value) {
+    return undefined;
+  }
+  if (valueType === 'reference' || isTemplateText(value, typeHint)) {
+    return undefined;
+  }
+  try {
+    JSON.parse(value);
+    return undefined;
+  } catch (error) {
+    return error instanceof SyntaxError
+      ? `Invalid JSON — ${error.message}`
+      : 'Invalid JSON format';
   }
 }
 
@@ -198,16 +243,17 @@ export const processMappingEntry = ({
   let finalValue = value;
 
   if (typeof value === 'string' && value) {
+    // Only parse as JSON if the typeHint is explicitly JSON-shaped. No
+    // auto-detection - explicit typeHint required. parseJsonText leaves
+    // template text alone.
+    if (isJsonTextHint(typeHint)) {
+      finalValue = parseJsonText(value, typeHint);
+    }
+
     // Skip parsing for template variables (they're resolved at runtime)
     const isTemplate = value.includes('{{');
 
     if (!isTemplate) {
-      // For non-template strings, only parse as JSON if the typeHint is
-      // explicitly JSON-shaped. No auto-detection - explicit typeHint required.
-      if (isJsonTextHint(typeHint)) {
-        finalValue = parseJsonText(value);
-      }
-
       // Convert numeric strings to actual numbers for integer/number type hints
       if (typeHint === 'integer' || typeHint === 'number') {
         const numValue = Number(value);

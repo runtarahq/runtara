@@ -171,7 +171,7 @@ describe('ObjectMappingEditor — immediate structure', () => {
     expect(onValueTypeChange).not.toHaveBeenCalled();
   });
 
-  it('holds text that does not parse under the json hint', () => {
+  it("holds text that does not parse under the JSON box's hint", () => {
     const onChange = vi.fn();
     const onTypeHintChange = vi.fn();
     renderEditor({
@@ -185,7 +185,7 @@ describe('ObjectMappingEditor — immediate structure', () => {
     fireEvent.change(screen.getByPlaceholderText('Enter a JSON value...'), {
       target: { value: '{"type":' },
     });
-    expect(onTypeHintChange).toHaveBeenCalledWith('json');
+    expect(onTypeHintChange).toHaveBeenCalledWith('json-literal');
     expect(onChange).toHaveBeenCalledWith('{"type":');
   });
 
@@ -222,13 +222,13 @@ describe('ObjectMappingEditor — immediate structure', () => {
     expect(onValueTypeChange).not.toHaveBeenCalled();
   });
 
-  it('drops the json hint it set when the mode changes', () => {
+  it("drops the JSON box's hint when the mode changes", () => {
     const onTypeHintChange = vi.fn();
     renderEditor({
       untyped: true,
       value: '{"type":',
       valueType: 'immediate',
-      typeHint: 'json',
+      typeHint: 'json-literal',
       onTypeHintChange,
     });
     fireEvent.click(screen.getByText('Reference'));

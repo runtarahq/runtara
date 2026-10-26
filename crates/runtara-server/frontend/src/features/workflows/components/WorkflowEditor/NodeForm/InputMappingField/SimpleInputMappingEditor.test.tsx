@@ -11,6 +11,7 @@ import {
 import { NodeFormContext } from '../NodeFormContext';
 import { SimpleInputMappingEditor } from './SimpleInputMappingEditor';
 import { toEditorInitialData, toFormMappingEntries } from './mapping-entries';
+import { jsonTextError } from '@/features/workflows/utils/mapping-serialization';
 
 /**
  * An Agent input stored as an immediate whose value is a structure — authored
@@ -198,7 +199,7 @@ describe('SimpleInputMappingEditor — immediate condition on an `any` input', (
     expect(save().condition).toEqual({ valueType: 'immediate', value: edited });
   });
 
-  it('holds text that does not parse yet under the json hint', () => {
+  it("holds text that does not parse yet under the JSON box's hint", () => {
     const { save, entry } = openStep(STORED);
     expand('name is Input · body.supplier');
 
@@ -207,7 +208,7 @@ describe('SimpleInputMappingEditor — immediate condition on an `any` input', (
     expect(entry('condition')).toMatchObject({
       valueType: 'immediate',
       value: '{"type": "operation",',
-      typeHint: 'json',
+      typeHint: 'json-literal',
     });
 
     fireEvent.change(jsonBox(), {
@@ -244,6 +245,38 @@ describe('SimpleInputMappingEditor — immediate condition on an `any` input', (
     expect(save()).toEqual(STORED);
   });
 
+  it('saves a JSON string holding {{ as that string, without its quotes', () => {
+    // Outside the JSON box, text holding `{{` is template text and is saved
+    // as typed; in the box it is JSON like any other.
+    const { save } = openStep(STORED);
+    expand('name is Input · body.supplier');
+
+    fireEvent.change(jsonBox(), { target: { value: '"hello {{name}}"' } });
+
+    expect(save().condition).toEqual({
+      valueType: 'immediate',
+      value: 'hello {{name}}',
+    });
+  });
+
+  it('reports JSON holding {{ that does not parse', () => {
+    const { save, entry } = openStep(STORED);
+    expand('name is Input · body.supplier');
+
+    fireEvent.change(jsonBox(), { target: { value: '{"a":"{{name}}",' } });
+
+    // jsonTextError is the check the node form runs on each row.
+    expect(jsonTextError(entry('condition')!)).toMatch(/^Invalid JSON — /);
+    // The same text without the JSON box's hint is template text, unchecked.
+    expect(
+      jsonTextError({ ...entry('condition')!, typeHint: 'json' })
+    ).toBeUndefined();
+    expect(save().condition).toEqual({
+      valueType: 'immediate',
+      value: '{"a":"{{name}}",',
+    });
+  });
+
   it('leaves an emptied condition out of the save', () => {
     const { save } = openStep(STORED);
     expand('name is Input · body.supplier');
@@ -266,7 +299,7 @@ describe('SimpleInputMappingEditor — immediate condition on an `any` input', (
 
     expect(jsonBox().value).toBe('');
     expect(screen.queryByPlaceholderText('Enter a value...')).toBeNull();
-    expect(entry('condition')?.typeHint).toBe('json');
+    expect(entry('condition')?.typeHint).toBe('json-literal');
 
     fireEvent.change(jsonBox(), {
       target: { value: JSON.stringify(CONDITION) },
@@ -299,7 +332,7 @@ describe('SimpleInputMappingEditor — plain values on an `any` input', () => {
     });
 
     expect(screen.queryByPlaceholderText('Enter a JSON value...')).toBeNull();
-    expect(entry('order_by')?.typeHint).not.toBe('json');
+    expect(entry('order_by')?.typeHint).not.toBe('json-literal');
     expect(save().order_by).toEqual({ valueType: 'immediate', value: 'city' });
   });
 
