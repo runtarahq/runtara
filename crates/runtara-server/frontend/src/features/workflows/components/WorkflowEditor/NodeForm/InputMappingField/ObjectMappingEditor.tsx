@@ -9,7 +9,7 @@
  * and writes changes directly via onChange (which updates the Zustand store).
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo } from 'react';
 import { Link, Layers, Type, X } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { MappingValueInput } from './MappingValueInput';
@@ -24,12 +24,8 @@ import type {
   InputMappingEntry,
   InputMappingValueType,
 } from '@/features/workflows/stores/nodeFormStore';
-import {
-  JSON_TYPE_HINT,
-  isJsonLiteral,
-  isStructuredValue,
-  jsonLiteralText,
-} from './json-literal';
+import { JsonLiteralInput } from './JsonLiteralInput';
+import { isStructuredValue, useJsonLiteral } from './json-literal';
 
 type ObjectMode = 'value' | 'reference' | 'build';
 
@@ -58,10 +54,11 @@ interface ObjectMappingEditorProps {
   value: InputMappingEntry['value'];
   /** Current value type */
   valueType: InputMappingValueType;
-  /** Called when value changes */
-  onChange: (
-    value: string | CompositeObjectValue | CompositeArrayValue
-  ) => void;
+  /**
+   * Called when value changes: a path, a composite structure, or an
+   * immediate — text, or a literal structure parsed from the JSON box.
+   */
+  onChange: (value: InputMappingEntry['value']) => void;
   /** Called when value type changes */
   onValueTypeChange: (type: InputMappingValueType) => void;
   /** Schema for typed objects (from field.items) - used for hints */
@@ -101,12 +98,14 @@ export function ObjectMappingEditor({
   typeHint,
   onTypeHintChange,
 }: ObjectMappingEditorProps) {
-  // Set once the author edits a JSON literal, so clearing the text to retype
-  // it does not drop a typed field back to an empty Build.
-  const [editingJson, setEditingJson] = useState(false);
-  const jsonLiteral =
-    isJsonLiteral(value, valueType, typeHint, untyped) ||
-    (editingJson && valueType === 'immediate');
+  const jsonLiteral = useJsonLiteral({
+    value,
+    valueType,
+    typeHint,
+    untyped,
+    onChange,
+    onTypeHintChange,
+  });
 
   // Mode is derived from the stored entry. Only a composite is a build: an
   // immediate holding a structure is one literal value (see json-literal.ts).
@@ -117,7 +116,7 @@ export function ObjectMappingEditor({
       ? 'reference'
       : valueType === 'composite'
         ? 'build'
-        : untyped || jsonLiteral
+        : untyped || jsonLiteral.active
           ? 'value'
           : 'build';
 
@@ -145,8 +144,7 @@ export function ObjectMappingEditor({
     // Clicking the lit segment is not a request to start over: every branch
     // below resets the value.
     if (newMode === mode) return;
-    setEditingJson(false);
-    if (typeHint === JSON_TYPE_HINT) onTypeHintChange?.(undefined);
+    jsonLiteral.switchMode(newMode === 'value');
     if (newMode === 'reference') {
       onValueTypeChange('reference');
       onChange('');
@@ -159,12 +157,14 @@ export function ObjectMappingEditor({
     }
   };
 
-  // Handle composite value changes
+  // An edit in Build makes the field a composite. Only here: an object from
+  // the JSON box is a literal and stays an immediate.
   const handleCompositeChange = useCallback(
     (newValue: CompositeObjectValue | CompositeArrayValue) => {
+      if (valueType !== 'composite') onValueTypeChange('composite');
       onChange(newValue);
     },
-    [onChange]
+    [onChange, onValueTypeChange, valueType]
   );
 
   const handleClose = useCallback(() => {
@@ -177,10 +177,11 @@ export function ObjectMappingEditor({
       <div className="flex shrink-0 items-center gap-2 px-4 py-3">
         <MappingModeToggle
           className="flex-1"
-          // A typed object field shows Value only while it holds a literal,
-          // so that literal has somewhere to be seen.
+          // A typed object field shows Value once it has held a literal while
+          // the editor is open, so the literal has somewhere to be seen and to
+          // return to after another mode is picked.
           options={
-            untyped || mode === 'value' ? UNTYPED_MODE_OPTIONS : MODE_OPTIONS
+            untyped || jsonLiteral.held ? UNTYPED_MODE_OPTIONS : MODE_OPTIONS
           }
           value={mode}
           onChange={handleModeChange}
@@ -198,27 +199,12 @@ export function ObjectMappingEditor({
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4">
-        {mode === 'value' && jsonLiteral ? (
-          <div className="space-y-2">
-            <p className="text-sm text-muted-foreground">
-              A JSON value, sent as written.
-            </p>
-            <MappingValueInput
-              value={jsonLiteralText(value)}
-              onChange={(v) => {
-                setEditingJson(true);
-                if (typeHint !== JSON_TYPE_HINT) {
-                  onTypeHintChange?.(JSON_TYPE_HINT);
-                }
-                onChange(v ?? '');
-              }}
-              valueType="immediate"
-              onValueTypeChange={onValueTypeChange}
-              fieldType="json"
-              hideReferenceToggle
-              placeholder="Enter a JSON value..."
-            />
-          </div>
+        {mode === 'value' && jsonLiteral.active ? (
+          <JsonLiteralInput
+            text={jsonLiteral.text}
+            onEdit={jsonLiteral.edit}
+            onValueTypeChange={onValueTypeChange}
+          />
         ) : mode === 'value' ? (
           // Plain value — the common case for an `any` input that just takes
           // a string, number or boolean.

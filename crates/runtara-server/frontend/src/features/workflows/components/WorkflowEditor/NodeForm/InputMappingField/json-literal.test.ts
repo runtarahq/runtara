@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { isJsonLiteral, jsonLiteralText } from './json-literal';
+import {
+  isJsonLiteral,
+  jsonLiteralText,
+  parseJsonStructure,
+} from './json-literal';
 
 describe('isJsonLiteral', () => {
   it('is true for an immediate holding an object or an array', () => {
@@ -54,5 +58,20 @@ describe('jsonLiteralText', () => {
   it('shows nothing for null or undefined', () => {
     expect(jsonLiteralText(null)).toBe('');
     expect(jsonLiteralText(undefined)).toBe('');
+  });
+});
+
+describe('parseJsonStructure', () => {
+  it('returns the object or array the text describes', () => {
+    expect(parseJsonStructure('{"a": "{{x}}"}')).toEqual({ a: '{{x}}' });
+    expect(parseJsonStructure('[1, 2]')).toEqual([1, 2]);
+  });
+
+  it('is undefined for a JSON scalar, an empty string, or broken JSON', () => {
+    expect(parseJsonStructure('"abc"')).toBeUndefined();
+    expect(parseJsonStructure('12')).toBeUndefined();
+    expect(parseJsonStructure('null')).toBeUndefined();
+    expect(parseJsonStructure('')).toBeUndefined();
+    expect(parseJsonStructure('{"a":')).toBeUndefined();
   });
 });

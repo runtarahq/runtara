@@ -15,6 +15,11 @@
  * before render, so the number of rows must never depend on the context.
  */
 
+import {
+  isJsonTextHint,
+  parseJsonText,
+} from '@/features/workflows/utils/mapping-serialization';
+
 export type StepDetailKind =
   'reference' | 'template' | 'composite' | 'literal' | 'list';
 
@@ -344,7 +349,7 @@ function buildRow(
 
   // A condition held as a plain value (object-model query `condition`, a
   // Filter-style predicate) reads as a sentence, as on Conditional cards.
-  if (isCondition(literal)) {
+  if (isConditionExpression(literal)) {
     const sentence = describeCondition(literal, context);
     if (sentence) {
       return { key, label, value: truncate(sentence), kind: 'literal' };
@@ -354,32 +359,15 @@ function buildRow(
   return { key, label, value: formatLiteral(literal, key), kind: 'literal' };
 }
 
-/** Hints under which the save path parses an immediate's text as JSON. */
-const JSON_TEXT_HINTS: ReadonlySet<string> = new Set([
-  'json',
-  'object',
-  'array',
-]);
-
 /**
- * The value an immediate holds. One edited as JSON text in the step panel
- * stays that text, under a JSON hint, until a save parses it
- * (processMappingEntry, which also leaves `{{` text alone) — so it reads as
- * the value the save will write, not as raw JSON.
+ * The value an immediate holds. Text under a JSON hint (a literal being
+ * edited in the step panel) reads as what a save writes for it, by the save
+ * path's own rule, not as raw JSON.
  */
 function literalValue({ value, typeHint }: MappingEntry): unknown {
-  if (
-    typeof value !== 'string' ||
-    !JSON_TEXT_HINTS.has(typeHint ?? '') ||
-    value.includes('{{')
-  ) {
-    return value;
-  }
-  try {
-    return JSON.parse(value);
-  } catch {
-    return value;
-  }
+  return typeof value === 'string' && isJsonTextHint(typeHint)
+    ? parseJsonText(value)
+    : value;
 }
 
 function mappingEntries(data: StepDetailData): MappingEntry[] {
@@ -512,6 +500,23 @@ const UNARY_SUFFIX: Record<string, string> = {
 
 function isCondition(value: unknown): value is ConditionLike {
   return !!value && typeof value === 'object' && 'op' in value;
+}
+
+/**
+ * Whether a value is a condition operation, as the DSL reads one: an `op`
+ * and its `arguments`, with no `type` other than `"operation"`. A payload
+ * that merely has an `op` key, like a JSON Patch operation, is not one.
+ */
+export function isConditionExpression(value: unknown): value is ConditionLike {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const { op, arguments: args, type } = value as Record<string, unknown>;
+  return (
+    typeof op === 'string' &&
+    Array.isArray(args) &&
+    (type === undefined || type === 'operation')
+  );
 }
 
 function describeOperand(

@@ -38,6 +38,7 @@ import { Icons } from '@/shared/components/icons';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
 import { Switch as ToggleSwitch } from '@/shared/components/ui/switch';
+import { isJsonTextHint } from '@/features/workflows/utils/mapping-serialization';
 
 // Wrapper component for EmbedWorkflowConfigField that uses react-hook-form
 function EmbedWorkflowFieldRenderer() {
@@ -677,9 +678,7 @@ export const schema = () =>
             // - Reference values (they resolve at runtime)
             // - Template variables (they resolve at runtime)
             if (
-              (item.typeHint === 'json' ||
-                item.typeHint === 'object' ||
-                item.typeHint === 'array') &&
+              isJsonTextHint(item.typeHint) &&
               typeof item.value === 'string' &&
               item.value
             ) {

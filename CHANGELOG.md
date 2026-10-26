@@ -638,11 +638,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there rewrote the input as `composite`, which validation rejects for a
   condition input (E025), so the step could not be saved until the edit was
   discarded. Such a value now opens in Value mode as JSON. Left alone it is
-  saved unchanged, and edited it stays an immediate; JSON that does not parse
-  is reported under the row and blocks saving the step. A condition held this
-  way reads as a sentence in its collapsed row and, while being edited, on its
-  canvas card. Clicking the mode that is already selected no longer clears
-  the value.
+  saved unchanged, and edited it stays an immediate, including when it holds
+  `{{`; JSON that does not parse is reported under the row and blocks saving
+  the step, and an emptied box leaves the input out of the save. Picking
+  another mode and then Value again returns to the JSON box. A condition held
+  this way reads as a sentence in its collapsed row and, while being edited,
+  on its canvas card. Clicking the mode that is already selected no longer
+  clears the value.
 - **The session delivery worker handles only its own tenant's queues.** It
   scanned every session queue in Valkey, so a server sharing Valkey with
   other tenants tried to deliver their queued responses through its own

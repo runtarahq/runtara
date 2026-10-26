@@ -123,6 +123,19 @@ describe('describeConditionValue', () => {
     expect(describeConditionValue(null, 'immediate')).toBe('');
   });
 
+  it('reads a condition without the optional `type` tag', () => {
+    // The DSL reads an object with `op` and `arguments` as an operation.
+    const untagged = { op: condition.op, arguments: condition.arguments };
+    expect(describeConditionValue(untagged, 'immediate')).toBe(
+      'name is Input · body.supplier'
+    );
+  });
+
+  it('does not try to parse ordinary text', () => {
+    expect(describeConditionValue('name', 'immediate')).toBe('');
+    expect(describeConditionValue('[1, 2]', 'immediate')).toBe('');
+  });
+
   it('only reads immediates', () => {
     expect(describeConditionValue(condition, 'composite')).toBe('');
     expect(describeConditionValue('data.condition', 'reference')).toBe('');

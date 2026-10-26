@@ -46,11 +46,7 @@ import {
   getInputComponentType,
 } from '@/features/workflows/types/agent-metadata';
 import { MappingValueInput, ValueMode } from './MappingValueInput';
-import type {
-  InputMappingValueType,
-  CompositeObjectValue,
-  CompositeArrayValue,
-} from '@/features/workflows/stores/nodeFormStore';
+import type { InputMappingValueType } from '@/features/workflows/stores/nodeFormStore';
 import { FileInputWithReferences } from './FileInputWithReferences';
 import { ArrayMappingEditor } from './ArrayMappingEditor';
 import { ObjectMappingEditor } from './ObjectMappingEditor';
@@ -64,6 +60,7 @@ import {
   describeObjectValue,
 } from './value-display';
 import { TOGGLE_GUTTER_CLASS, VALUE_CELL_CLASS } from './value-cell-layout';
+import { JSON_TYPE_HINT } from './json-literal';
 
 /** Check if a field type is an array type */
 function isArrayType(type: string | undefined): boolean {
@@ -425,6 +422,7 @@ export function SimpleInputMappingEditor({
   const setFieldValue = useNodeFormStore((s) => s.setFieldValue);
   const setFieldValueType = useNodeFormStore((s) => s.setFieldValueType);
   const setFieldTypeHint = useNodeFormStore((s) => s.setFieldTypeHint);
+  const setFieldAutoSeeded = useNodeFormStore((s) => s.setFieldAutoSeeded);
   const addCustomField = useNodeFormStore((s) => s.addCustomField);
   const renameField = useNodeFormStore((s) => s.renameField);
 
@@ -741,21 +739,28 @@ export function SimpleInputMappingEditor({
     handleFieldChange();
   }, [handleFieldChange]);
 
-  const handleArrayValueChange = useCallback(
-    (
-      fieldName: string,
-      value: string | CompositeObjectValue | CompositeArrayValue
-    ) => {
-      // If the value is an object/array, ensure valueType is set to 'composite'
-      const isObjectValue = typeof value === 'object' && value !== null;
-      if (isObjectValue) {
-        setFieldValueType(nodeId, fieldName, 'composite');
-      }
+  // A value from an inline array/object editor. The editor sets the value
+  // type itself — a Build edit makes the field a composite, a literal from
+  // the JSON box stays an immediate — so only the value is written here. An
+  // emptied JSON literal is unset, like a seeded row never filled in: the
+  // save leaves it out (cleanNodeData) instead of sending ''.
+  const handleEditorValueChange = useCallback(
+    (fieldName: string, value: InputMappingEntry['value']) => {
       setFieldValue(nodeId, fieldName, value);
+      const entry = useNodeFormStore
+        .getState()
+        .getFieldEntry(nodeId, fieldName);
+      if (
+        value === '' &&
+        entry?.valueType === 'immediate' &&
+        entry.typeHint === JSON_TYPE_HINT
+      ) {
+        setFieldAutoSeeded(nodeId, fieldName, true);
+      }
       // Sync changes immediately - Zustand updates are synchronous
       syncToParent();
     },
-    [nodeId, setFieldValue, setFieldValueType, syncToParent]
+    [nodeId, setFieldValue, setFieldAutoSeeded, syncToParent]
   );
 
   const handleArrayValueTypeChange = useCallback(
@@ -792,33 +797,6 @@ export function SimpleInputMappingEditor({
       handleFieldChange();
     },
     [handleFieldChange]
-  );
-
-  const handleObjectValueChange = useCallback(
-    (
-      fieldName: string,
-      value: string | CompositeObjectValue | CompositeArrayValue
-    ) => {
-      const isObjectValue = typeof value === 'object' && value !== null;
-      console.log('[SimpleInputMappingEditor] handleObjectValueChange called', {
-        nodeId,
-        fieldName,
-        value,
-        valueType: typeof value,
-        isObject: isObjectValue,
-      });
-
-      // If the value is an object/array, we need to set valueType to 'composite'
-      // This ensures the value is properly passed back as an object on re-render
-      if (isObjectValue) {
-        setFieldValueType(nodeId, fieldName, 'composite');
-      }
-
-      setFieldValue(nodeId, fieldName, value);
-      // Sync changes immediately - Zustand updates are synchronous
-      syncToParent();
-    },
-    [nodeId, setFieldValue, setFieldValueType, syncToParent]
   );
 
   const handleObjectValueTypeChange = useCallback(
@@ -934,7 +912,7 @@ export function SimpleInputMappingEditor({
                                   'immediate') as InputMappingValueType
                               }
                               onChange={(value) =>
-                                handleArrayValueChange(field.name, value)
+                                handleEditorValueChange(field.name, value)
                               }
                               onValueTypeChange={(type) =>
                                 handleArrayValueTypeChange(field.name, type)
@@ -971,7 +949,7 @@ export function SimpleInputMappingEditor({
                                     'immediate') as InputMappingValueType
                                 }
                                 onChange={(value) =>
-                                  handleObjectValueChange(field.name, value)
+                                  handleEditorValueChange(field.name, value)
                                 }
                                 onValueTypeChange={(type) =>
                                   handleObjectValueTypeChange(field.name, type)

@@ -38,6 +38,30 @@ export function coerceValueToType(value: any, typeHint?: string): any {
   return value;
 }
 
+/**
+ * Type hints under which an immediate's text is JSON, parsed on save.
+ * 'object'/'array' keep the editors' object-vs-array distinction and parse
+ * like 'json'; none of the three is written as a backend hint
+ * (isValidValueType).
+ */
+export function isJsonTextHint(typeHint?: string): boolean {
+  return typeHint === 'json' || typeHint === 'object' || typeHint === 'array';
+}
+
+/**
+ * What an immediate's text under a JSON hint saves as: the parsed value, or
+ * the text itself when it holds `{{` (template variables, resolved at
+ * runtime) or does not parse.
+ */
+export function parseJsonText(text: string): unknown {
+  if (text.includes('{{')) return text;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
 // Check if a typeHint is a valid ValueType
 export function isValidValueType(typeHint?: string): typeHint is ValueType {
   return typeHint !== undefined && VALID_VALUE_TYPES.has(typeHint as ValueType);
@@ -179,21 +203,9 @@ export const processMappingEntry = ({
 
     if (!isTemplate) {
       // For non-template strings, only parse as JSON if the typeHint is
-      // explicitly JSON-shaped. 'object'/'array' keep the editors'
-      // object-vs-array distinction and parse like 'json'; none of the three
-      // is written as a backend hint (isValidValueType).
-      // No auto-detection - explicit typeHint required.
-      if (
-        typeHint === 'json' ||
-        typeHint === 'object' ||
-        typeHint === 'array'
-      ) {
-        try {
-          finalValue = JSON.parse(value);
-        } catch {
-          // If parsing fails, keep as string
-          finalValue = value;
-        }
+      // explicitly JSON-shaped. No auto-detection - explicit typeHint required.
+      if (isJsonTextHint(typeHint)) {
+        finalValue = parseJsonText(value);
       }
 
       // Convert numeric strings to actual numbers for integer/number type hints

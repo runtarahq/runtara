@@ -150,7 +150,7 @@ describe('ObjectMappingEditor — immediate structure', () => {
     expect(screen.queryByPlaceholderText('Enter a JSON value...')).toBeNull();
   });
 
-  it('edits it as text under the json hint, keeping it an immediate', () => {
+  it('stores valid JSON as the structure, keeping it an immediate', () => {
     const onChange = vi.fn();
     const onValueTypeChange = vi.fn();
     const onTypeHintChange = vi.fn();
@@ -166,9 +166,45 @@ describe('ObjectMappingEditor — immediate structure', () => {
     fireEvent.change(screen.getByPlaceholderText('Enter a JSON value...'), {
       target: { value: '{"type": "operation"}' },
     });
-    expect(onTypeHintChange).toHaveBeenCalledWith('json');
-    expect(onChange).toHaveBeenCalledWith('{"type": "operation"}');
+    expect(onChange).toHaveBeenCalledWith({ type: 'operation' });
+    expect(onTypeHintChange).not.toHaveBeenCalled();
     expect(onValueTypeChange).not.toHaveBeenCalled();
+  });
+
+  it('holds text that does not parse under the json hint', () => {
+    const onChange = vi.fn();
+    const onTypeHintChange = vi.fn();
+    renderEditor({
+      untyped: true,
+      value: condition,
+      valueType: 'immediate',
+      typeHint: 'auto',
+      onChange,
+      onTypeHintChange,
+    });
+    fireEvent.change(screen.getByPlaceholderText('Enter a JSON value...'), {
+      target: { value: '{"type":' },
+    });
+    expect(onTypeHintChange).toHaveBeenCalledWith('json');
+    expect(onChange).toHaveBeenCalledWith('{"type":');
+  });
+
+  it('makes a Build edit a composite', () => {
+    // A typed object field's empty seed is an immediate that opens in Build.
+    const onValueTypeChange = vi.fn();
+    renderEditor({
+      untyped: false,
+      value: '',
+      valueType: 'immediate',
+      typeHint: 'json',
+      onValueTypeChange,
+    });
+    fireEvent.click(screen.getByText('Add Field'));
+    fireEvent.change(screen.getByPlaceholderText('Enter field name...'), {
+      target: { value: 'note' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    expect(onValueTypeChange).toHaveBeenCalledWith('composite');
   });
 
   it('ignores a click on the lit mode instead of resetting the value', () => {

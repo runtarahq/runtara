@@ -77,6 +77,25 @@ describe('nodeFormStore', () => {
     });
   });
 
+  describe('setFieldAutoSeeded', () => {
+    it('marks an existing field unset while it is empty', () => {
+      useNodeFormStore.getState().setFieldValue('node-1', 'field', '');
+      useNodeFormStore.getState().setFieldAutoSeeded('node-1', 'field', true);
+
+      expect(
+        useNodeFormStore.getState().getFieldEntry('node-1', 'field')
+      ).toMatchObject({ value: '', autoSeeded: true });
+    });
+
+    it('does not create a field', () => {
+      useNodeFormStore.getState().setFieldAutoSeeded('node-1', 'missing', true);
+
+      expect(
+        useNodeFormStore.getState().getFieldEntry('node-1', 'missing')
+      ).toBeUndefined();
+    });
+  });
+
   describe('setFieldDefaultValue', () => {
     it('sets the reference fallback for a field', () => {
       useNodeFormStore.getState().setFieldValue('node-1', 'field', 'ref.path');

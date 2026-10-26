@@ -9,7 +9,7 @@
  * summarize as "Click to configure...", i.e. indistinguishable from empty.
  */
 
-import { describeCondition } from '../../step-details';
+import { describeCondition, isConditionExpression } from '../../step-details';
 
 type ValueTypeName = string;
 
@@ -83,15 +83,16 @@ export function describeConditionValue(
   if (valueType !== 'immediate') return '';
   let condition = value;
   if (typeof value === 'string') {
+    // Ordinary text is not worth a parse attempt on every render.
+    if (!value.trimStart().startsWith('{')) return '';
     try {
       condition = JSON.parse(value);
     } catch {
       return '';
     }
   }
-  // `type: "operation"` is what makes it a ConditionExpression: a payload
-  // that merely has an `op` key (a JSON Patch operation) is not one.
-  if (!isPlainObject(condition) || condition.type !== 'operation') return '';
+  // The same test the canvas card applies (isConditionExpression).
+  if (!isConditionExpression(condition)) return '';
   return describeCondition(condition);
 }
 

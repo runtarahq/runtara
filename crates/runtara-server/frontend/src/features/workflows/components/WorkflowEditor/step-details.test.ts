@@ -243,6 +243,37 @@ describe('stepDetailRows', () => {
     ]);
   });
 
+  it('tells a condition from a payload that merely has an `op` key', () => {
+    expect(
+      stepDetailRows({
+        stepType: 'Agent',
+        inputMapping: [
+          // No `type` tag: the DSL still reads `op` + `arguments` as one.
+          {
+            type: 'condition',
+            value: {
+              op: 'EQ',
+              arguments: [
+                { valueType: 'reference', value: 'stage' },
+                { valueType: 'immediate', value: 'intake' },
+              ],
+            },
+            valueType: 'immediate',
+          },
+          // A JSON Patch operation is a plain object, not a condition.
+          {
+            type: 'patch',
+            value: { op: 'add', path: '/a', value: 1 },
+            valueType: 'immediate',
+          },
+        ],
+      }).map((row) => [row.label, row.value])
+    ).toEqual([
+      ['Condition', 'stage is "intake"'],
+      ['Patch', 'Op, Path, Value'],
+    ]);
+  });
+
   it('says what a signal wait asks for', () => {
     const rows = stepDetailRows({
       stepType: 'WaitForSignal',
