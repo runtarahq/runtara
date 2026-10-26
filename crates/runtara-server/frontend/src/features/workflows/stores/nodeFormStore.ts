@@ -74,6 +74,11 @@ export type InputMappingEntry = {
    * path resolves to missing or null. Only meaningful for reference entries.
    */
   defaultValue?: unknown;
+  /**
+   * Editor-only: while the value is '', the input is unset and the save
+   * leaves it out (see SeededMappingEntry in mapping-entries.ts).
+   */
+  autoSeeded?: boolean;
 };
 
 type NodeFormState = {
@@ -95,6 +100,12 @@ type NodeFormState = {
     nodeId: string,
     fieldName: string,
     typeHint: string
+  ) => void;
+  /** Mark a field unset while it holds '' (see InputMappingEntry.autoSeeded) */
+  setFieldAutoSeeded: (
+    nodeId: string,
+    fieldName: string,
+    autoSeeded: boolean
   ) => void;
   /** Set or clear (pass undefined) the reference fallback for a field */
   setFieldDefaultValue: (
@@ -170,6 +181,13 @@ export const useNodeFormStore = create<NodeFormState>()(
             };
           }
           state.nodeInputMappings[nodeId][fieldName].typeHint = typeHint;
+        });
+      },
+
+      setFieldAutoSeeded: (nodeId, fieldName, autoSeeded) => {
+        set((state) => {
+          const entry = state.nodeInputMappings[nodeId]?.[fieldName];
+          if (entry) entry.autoSeeded = autoSeeded;
         });
       },
 

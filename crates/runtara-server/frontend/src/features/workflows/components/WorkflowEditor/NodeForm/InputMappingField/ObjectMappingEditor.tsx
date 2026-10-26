@@ -21,8 +21,11 @@ import {
 import type {
   CompositeObjectValue,
   CompositeArrayValue,
+  InputMappingEntry,
   InputMappingValueType,
 } from '@/features/workflows/stores/nodeFormStore';
+import { JsonLiteralInput } from './JsonLiteralInput';
+import { isStructuredValue, useJsonLiteral } from './json-literal';
 
 type ObjectMode = 'value' | 'reference' | 'build';
 
@@ -44,14 +47,18 @@ const UNTYPED_MODE_OPTIONS: readonly MappingModeToggleOption<ObjectMode>[] = [
 ];
 
 interface ObjectMappingEditorProps {
-  /** Current value (reference path for reference mode, or composite object for build mode) */
-  value: string | CompositeObjectValue | CompositeArrayValue;
+  /**
+   * Current value: a reference path, a composite structure for build mode, or
+   * an immediate — a scalar, or a structure held as one literal.
+   */
+  value: InputMappingEntry['value'];
   /** Current value type */
   valueType: InputMappingValueType;
-  /** Called when value changes */
-  onChange: (
-    value: string | CompositeObjectValue | CompositeArrayValue
-  ) => void;
+  /**
+   * Called when value changes: a path, a composite structure, or an
+   * immediate — text, or a literal structure parsed from the JSON box.
+   */
+  onChange: (value: InputMappingEntry['value']) => void;
   /** Called when value type changes */
   onValueTypeChange: (type: InputMappingValueType) => void;
   /** Schema for typed objects (from field.items) - used for hints */
@@ -71,6 +78,13 @@ interface ObjectMappingEditorProps {
    * fields keep the narrower reference-or-build choice.
    */
   untyped?: boolean;
+  /** The entry's type hint; JSON_LITERAL_HINT marks text from the JSON box. */
+  typeHint?: string;
+  /**
+   * Set the entry's type hint: JSON_LITERAL_HINT for text from the JSON box,
+   * `undefined` to return to the field's own hint on a mode switch.
+   */
+  onTypeHintChange?: (typeHint: string | undefined) => void;
 }
 
 export function ObjectMappingEditor({
@@ -81,21 +95,34 @@ export function ObjectMappingEditor({
   schema,
   onClose,
   untyped = false,
+  typeHint,
+  onTypeHintChange,
 }: ObjectMappingEditorProps) {
-  // Mode is derived from valueType. For an untyped field a non-structural
-  // immediate is a plain value; for a typed object field everything that is
-  // not a reference is a build.
+  const jsonLiteral = useJsonLiteral({
+    value,
+    valueType,
+    typeHint,
+    onChange,
+    onTypeHintChange,
+  });
+
+  // Mode is derived from the stored entry. Only a composite is a build: an
+  // immediate holding a structure is one literal value (see json-literal.ts).
+  // Otherwise an untyped field's immediate is a plain value, and a typed
+  // object field's empty seed opens in Build.
   const mode: ObjectMode =
     valueType === 'reference'
       ? 'reference'
-      : untyped && !(typeof value === 'object' && value !== null)
-        ? 'value'
-        : 'build';
+      : valueType === 'composite'
+        ? 'build'
+        : untyped || jsonLiteral.active
+          ? 'value'
+          : 'build';
 
   // For build mode, get the composite value
   const compositeValue = useMemo(() => {
     if (mode !== 'build') return {};
-    if (typeof value === 'object' && value !== null) {
+    if (isStructuredValue(value)) {
       return value as CompositeObjectValue;
     }
     return {};
@@ -113,6 +140,10 @@ export function ObjectMappingEditor({
   }, [schema]);
 
   const handleModeChange = (newMode: ObjectMode) => {
+    // Clicking the lit segment is not a request to start over: every branch
+    // below resets the value.
+    if (newMode === mode) return;
+    jsonLiteral.switchMode(newMode === 'value');
     if (newMode === 'reference') {
       onValueTypeChange('reference');
       onChange('');
@@ -125,12 +156,14 @@ export function ObjectMappingEditor({
     }
   };
 
-  // Handle composite value changes
+  // An edit in Build makes the field a composite. Only here: an object from
+  // the JSON box is a literal and stays an immediate.
   const handleCompositeChange = useCallback(
     (newValue: CompositeObjectValue | CompositeArrayValue) => {
+      if (valueType !== 'composite') onValueTypeChange('composite');
       onChange(newValue);
     },
-    [onChange]
+    [onChange, onValueTypeChange, valueType]
   );
 
   const handleClose = useCallback(() => {
@@ -143,7 +176,12 @@ export function ObjectMappingEditor({
       <div className="flex shrink-0 items-center gap-2 px-4 py-3">
         <MappingModeToggle
           className="flex-1"
-          options={untyped ? UNTYPED_MODE_OPTIONS : MODE_OPTIONS}
+          // A typed object field shows Value once it has held a literal while
+          // the editor is open, so the literal has somewhere to be seen and to
+          // return to after another mode is picked.
+          options={
+            untyped || jsonLiteral.held ? UNTYPED_MODE_OPTIONS : MODE_OPTIONS
+          }
           value={mode}
           onChange={handleModeChange}
         />
@@ -160,7 +198,13 @@ export function ObjectMappingEditor({
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4">
-        {mode === 'value' ? (
+        {mode === 'value' && jsonLiteral.active ? (
+          <JsonLiteralInput
+            text={jsonLiteral.text}
+            onEdit={jsonLiteral.edit}
+            onValueTypeChange={onValueTypeChange}
+          />
+        ) : mode === 'value' ? (
           // Plain value — the common case for an `any` input that just takes
           // a string, number or boolean.
           <div className="space-y-2">
@@ -168,7 +212,7 @@ export function ObjectMappingEditor({
               Enter a value directly. Use Build for an object or a list.
             </p>
             <MappingValueInput
-              value={typeof value === 'object' && value !== null ? '' : value}
+              value={isStructuredValue(value) ? '' : value}
               onChange={(v) => onChange(v ?? '')}
               valueType="immediate"
               onValueTypeChange={onValueTypeChange}

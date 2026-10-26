@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ObjectMappingEditor } from './ObjectMappingEditor';
@@ -108,5 +108,130 @@ describe('ObjectMappingEditor — any-typed field', () => {
     screen.getByText('Value').click();
     expect(onValueTypeChange).toHaveBeenCalledWith('immediate');
     expect(onChange).toHaveBeenCalledWith('');
+  });
+});
+
+/**
+ * An immediate holding a structure (authored via MCP or the REST API) is one
+ * literal. Read as a Build, its bare keys rendered as "Unknown type".
+ */
+describe('ObjectMappingEditor — immediate structure', () => {
+  const condition = {
+    type: 'operation',
+    op: 'EQ',
+    arguments: [{ valueType: 'reference', value: 'name' }, 'acme'],
+  };
+
+  it('shows it as JSON in Value mode on an any-typed field', () => {
+    renderEditor({ untyped: true, value: condition, valueType: 'immediate' });
+    const box = screen.getByPlaceholderText(
+      'Enter a JSON value...'
+    ) as HTMLTextAreaElement;
+    expect(box.value).toBe(JSON.stringify(condition, null, 2));
+    expect(screen.queryByText('Unknown type')).toBeNull();
+    expect(screen.queryByText('Composite Object')).toBeNull();
+  });
+
+  it('offers Value on a typed object field while it holds one', () => {
+    renderEditor({ untyped: false, value: { a: 1 }, valueType: 'immediate' });
+    expect(screen.getByText('Value')).toBeTruthy();
+    expect(screen.getByPlaceholderText('Enter a JSON value...')).toBeTruthy();
+  });
+
+  it('still opens the empty seed of a typed object field in Build', () => {
+    // New steps seed object inputs as an empty immediate with the json hint.
+    renderEditor({
+      untyped: false,
+      value: '',
+      valueType: 'immediate',
+      typeHint: 'json',
+    });
+    expect(screen.queryByText('Value')).toBeNull();
+    expect(screen.queryByPlaceholderText('Enter a JSON value...')).toBeNull();
+  });
+
+  it('stores valid JSON as the structure, keeping it an immediate', () => {
+    const onChange = vi.fn();
+    const onValueTypeChange = vi.fn();
+    const onTypeHintChange = vi.fn();
+    renderEditor({
+      untyped: true,
+      value: condition,
+      valueType: 'immediate',
+      typeHint: 'auto',
+      onChange,
+      onValueTypeChange,
+      onTypeHintChange,
+    });
+    fireEvent.change(screen.getByPlaceholderText('Enter a JSON value...'), {
+      target: { value: '{"type": "operation"}' },
+    });
+    expect(onChange).toHaveBeenCalledWith({ type: 'operation' });
+    expect(onTypeHintChange).not.toHaveBeenCalled();
+    expect(onValueTypeChange).not.toHaveBeenCalled();
+  });
+
+  it("holds text that does not parse under the JSON box's hint", () => {
+    const onChange = vi.fn();
+    const onTypeHintChange = vi.fn();
+    renderEditor({
+      untyped: true,
+      value: condition,
+      valueType: 'immediate',
+      typeHint: 'auto',
+      onChange,
+      onTypeHintChange,
+    });
+    fireEvent.change(screen.getByPlaceholderText('Enter a JSON value...'), {
+      target: { value: '{"type":' },
+    });
+    expect(onTypeHintChange).toHaveBeenCalledWith('json-literal');
+    expect(onChange).toHaveBeenCalledWith('{"type":');
+  });
+
+  it('makes a Build edit a composite', () => {
+    // A typed object field's empty seed is an immediate that opens in Build.
+    const onValueTypeChange = vi.fn();
+    renderEditor({
+      untyped: false,
+      value: '',
+      valueType: 'immediate',
+      typeHint: 'json',
+      onValueTypeChange,
+    });
+    fireEvent.click(screen.getByText('Add Field'));
+    fireEvent.change(screen.getByPlaceholderText('Enter field name...'), {
+      target: { value: 'note' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    expect(onValueTypeChange).toHaveBeenCalledWith('composite');
+  });
+
+  it('ignores a click on the lit mode instead of resetting the value', () => {
+    const onChange = vi.fn();
+    const onValueTypeChange = vi.fn();
+    renderEditor({
+      untyped: true,
+      value: condition,
+      valueType: 'immediate',
+      onChange,
+      onValueTypeChange,
+    });
+    fireEvent.click(screen.getByText('Value'));
+    expect(onChange).not.toHaveBeenCalled();
+    expect(onValueTypeChange).not.toHaveBeenCalled();
+  });
+
+  it("drops the JSON box's hint when the mode changes", () => {
+    const onTypeHintChange = vi.fn();
+    renderEditor({
+      untyped: true,
+      value: '{"type":',
+      valueType: 'immediate',
+      typeHint: 'json-literal',
+      onTypeHintChange,
+    });
+    fireEvent.click(screen.getByText('Reference'));
+    expect(onTypeHintChange).toHaveBeenCalledWith(undefined);
   });
 });

@@ -204,6 +204,92 @@ describe('stepDetailRows', () => {
     ]);
   });
 
+  it('reads a value being edited as JSON text as the value it saves as', () => {
+    // The step panel holds an edited JSON literal as text under the json hint
+    // until a save parses it; the card must not show that raw text meanwhile.
+    expect(
+      stepDetailRows({
+        stepType: 'Agent',
+        inputMapping: [
+          {
+            type: 'condition',
+            value:
+              '{"type": "operation", "op": "NE", "arguments": [{"valueType": "reference", "value": "name"}, {"valueType": "reference", "value": "data.body.supplier"}]}',
+            valueType: 'immediate',
+            typeHint: 'json-literal',
+          },
+          {
+            type: 'filters',
+            value: '{"city": "Lviv"}',
+            valueType: 'immediate',
+            typeHint: 'json-literal',
+          },
+          // Not JSON yet: shown as typed, as the save keeps it.
+          {
+            type: 'order_by',
+            value: '{"field":',
+            valueType: 'immediate',
+            typeHint: 'json-literal',
+          },
+          // JSON in the box even with `{{`: a string, without its quotes.
+          {
+            type: 'greeting',
+            value: '"hello {{name}}"',
+            valueType: 'immediate',
+            typeHint: 'json-literal',
+          },
+          // Under the other JSON hints, `{{` text is template text.
+          {
+            type: 'tags',
+            value: '["{{data.tag}}"]',
+            valueType: 'immediate',
+            typeHint: 'json',
+          },
+          // Only the JSON hints are parsed; a string field stays a string.
+          { type: 'note', value: '[1, 2]', valueType: 'immediate' },
+        ],
+      }).map((row) => [row.label, row.value])
+    ).toEqual([
+      ['Condition', 'name is not Input · body.supplier'],
+      ['Filters', 'City'],
+      ['Order by', '{"field":'],
+      ['Greeting', 'hello {{name}}'],
+      ['Tags', '["{{data.tag}}"]'],
+      ['Note', '[1, 2]'],
+    ]);
+  });
+
+  it('tells a condition from a payload that merely has an `op` key', () => {
+    expect(
+      stepDetailRows({
+        stepType: 'Agent',
+        inputMapping: [
+          // No `type` tag: the DSL still reads `op` + `arguments` as one.
+          {
+            type: 'condition',
+            value: {
+              op: 'EQ',
+              arguments: [
+                { valueType: 'reference', value: 'stage' },
+                { valueType: 'immediate', value: 'intake' },
+              ],
+            },
+            valueType: 'immediate',
+          },
+          // A JSON Patch operation is a plain object, not a condition.
+          {
+            type: 'patch',
+            value: { op: 'add', path: '/a', value: 1 },
+            valueType: 'immediate',
+          },
+        ],
+      }).map((row) => [row.label, row.value])
+    ).toEqual([
+      ['Condition', 'stage is "intake"'],
+      ['Patch', 'Op, Path, Value'],
+    ]);
+  });
+
   it('says what a signal wait asks for', () => {
     const rows = stepDetailRows({
       stepType: 'WaitForSignal',

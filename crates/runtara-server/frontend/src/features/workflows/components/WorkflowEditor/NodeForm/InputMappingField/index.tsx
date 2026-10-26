@@ -6,7 +6,7 @@ import {
 } from '@/shared/components/ui/condition-editor';
 import { ErrorConditionTemplates } from '@/shared/components/ErrorConditionTemplates';
 import { FieldError } from '@/shared/components/ui/form';
-import { useContext, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef } from 'react';
 import { NodeFormContext } from '../NodeFormContext';
 import { composeConditionSuggestions } from '../InputMappingValueField/VariableSuggestions';
 import { SwitchCasesField } from '../SwitchCasesField';
@@ -52,7 +52,22 @@ function getValueTypeFromSchemaType(schemaType: string): ValueType {
 
 export function InputMappingField(props: any) {
   const { label, name } = props;
-  const { watch, setValue, getValues } = useFormContext();
+  const { watch, setValue, getValues, trigger, getFieldState, formState } =
+    useFormContext();
+  // Read during render, so the form re-renders this field once it is
+  // submitted.
+  const { isSubmitted } = formState;
+
+  // setValue never validates a field array — react-hook-form ignores
+  // shouldValidate for one — so the rows' errors only changed on the next
+  // submit, and an "Invalid JSON" stayed under a row after the JSON was
+  // fixed. Once there is something to keep current (the form was submitted,
+  // or the rows have an error), re-validate them after each write, the way a
+  // plain field is re-validated as it changes after a failed submit. Before
+  // that, half-typed JSON is not flagged.
+  const revalidateRows = useCallback(() => {
+    if (isSubmitted || getFieldState(name).error) void trigger(name);
+  }, [isSubmitted, getFieldState, trigger, name]);
   const {
     agents,
     workflows,
@@ -333,6 +348,7 @@ export function InputMappingField(props: any) {
       enumPrefilledRef.current.add(`${keyPrefix}${fieldName}`)
     );
     setValue(name, result.entries, { shouldDirty: true, shouldValidate: true });
+    revalidateRows();
   }, [
     nodeId,
     stepType,
@@ -342,6 +358,7 @@ export function InputMappingField(props: any) {
     name,
     getValues,
     setValue,
+    revalidateRows,
     // Re-check when rows are added/removed (e.g. a late auto-populate);
     // current values are read via getValues.
     watchFieldArray.length,
@@ -527,6 +544,7 @@ export function InputMappingField(props: any) {
       shouldTouch: true,
       shouldValidate: true,
     });
+    revalidateRows();
   };
 
   // For EmbedWorkflow step types, use the SimpleInputMappingEditor with child workflow's input fields

@@ -38,6 +38,7 @@ import { Icons } from '@/shared/components/icons';
 import { Input } from '@/shared/components/ui/input';
 import { Label } from '@/shared/components/ui/label';
 import { Switch as ToggleSwitch } from '@/shared/components/ui/switch';
+import { jsonTextError } from '@/features/workflows/utils/mapping-serialization';
 
 // Wrapper component for EmbedWorkflowConfigField that uses react-hook-form
 function EmbedWorkflowFieldRenderer() {
@@ -670,46 +671,17 @@ export const schema = () =>
             autoSeeded: z.boolean().optional(),
           })
           .superRefine((item, ctx) => {
-            // Validate JSON fields contain valid JSON strings
-            // ('object'/'array' are form-level hints — e.g. Finish output
-            // types — that carry the same JSON parse semantics on save)
-            // BUT skip validation for:
-            // - Reference values (they resolve at runtime)
-            // - Template variables (they resolve at runtime)
-            if (
-              (item.typeHint === 'json' ||
-                item.typeHint === 'object' ||
-                item.typeHint === 'array') &&
-              typeof item.value === 'string' &&
-              item.value
-            ) {
-              // Skip validation for reference values - they're paths, not JSON
-              if (item.valueType === 'reference') {
-                return;
-              }
-
-              // Skip validation if value contains template syntax
-              // Template variables like {{data.node.tags}} will be resolved at runtime
-              if (item.value.includes('{{')) {
-                return;
-              }
-
-              // For literal values, validate JSON syntax. Surface the parser's
-              // own message — it carries a character position — rather than a
-              // flat "Invalid JSON format" the author cannot act on.
-              // MappingObjectField does the same at its JSON textarea.
-              try {
-                JSON.parse(item.value);
-              } catch (error) {
-                ctx.addIssue({
-                  code: z.ZodIssueCode.custom,
-                  message:
-                    error instanceof SyntaxError
-                      ? `Invalid JSON — ${error.message}`
-                      : 'Invalid JSON format',
-                  path: ['value'],
-                });
-              }
+            // Text under a JSON hint must parse ('object'/'array' are
+            // form-level hints, e.g. Finish output types, that parse like
+            // 'json' on save). References and template text are skipped;
+            // the JSON box's text is always checked (jsonTextError).
+            const message = jsonTextError(item);
+            if (message) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message,
+                path: ['value'],
+              });
             }
           })
       ),

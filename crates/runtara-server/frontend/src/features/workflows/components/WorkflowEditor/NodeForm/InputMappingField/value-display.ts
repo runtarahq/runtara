@@ -9,6 +9,8 @@
  * summarize as "Click to configure...", i.e. indistinguishable from empty.
  */
 
+import { describeCondition, isConditionExpression } from '../../step-details';
+
 type ValueTypeName = string;
 
 /** Pluralized "N item(s)". */
@@ -66,6 +68,32 @@ export function describeObjectValue(
     // Not JSON — fall through.
   }
   return EMPTY_VALUE_LABEL;
+}
+
+/**
+ * A condition held as an immediate (an Object Model query `condition`) as the
+ * sentence its canvas card shows — `name is Input · supplier` — rather than as
+ * "3 fields". Also reads the JSON text of one being edited. Empty for anything
+ * that is not a condition expression.
+ */
+export function describeConditionValue(
+  value: unknown,
+  valueType: ValueTypeName
+): string {
+  if (valueType !== 'immediate') return '';
+  let condition = value;
+  if (typeof value === 'string') {
+    // Ordinary text is not worth a parse attempt on every render.
+    if (!value.trimStart().startsWith('{')) return '';
+    try {
+      condition = JSON.parse(value);
+    } catch {
+      return '';
+    }
+  }
+  // The same test the canvas card applies (isConditionExpression).
+  if (!isConditionExpression(condition)) return '';
+  return describeCondition(condition);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

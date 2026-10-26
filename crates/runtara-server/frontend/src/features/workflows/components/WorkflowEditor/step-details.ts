@@ -15,6 +15,11 @@
  * before render, so the number of rows must never depend on the context.
  */
 
+import {
+  isJsonTextHint,
+  parseJsonText,
+} from '@/features/workflows/utils/mapping-serialization';
+
 export type StepDetailKind =
   'reference' | 'template' | 'composite' | 'literal' | 'list';
 
@@ -340,16 +345,29 @@ function buildRow(
     };
   }
 
+  const literal = literalValue(entry);
+
   // A condition held as a plain value (object-model query `condition`, a
   // Filter-style predicate) reads as a sentence, as on Conditional cards.
-  if (isCondition(value)) {
-    const sentence = describeCondition(value, context);
+  if (isConditionExpression(literal)) {
+    const sentence = describeCondition(literal, context);
     if (sentence) {
       return { key, label, value: truncate(sentence), kind: 'literal' };
     }
   }
 
-  return { key, label, value: formatLiteral(value, key), kind: 'literal' };
+  return { key, label, value: formatLiteral(literal, key), kind: 'literal' };
+}
+
+/**
+ * The value an immediate holds. Text under a JSON hint (a literal being
+ * edited in the step panel) reads as what a save writes for it, by the save
+ * path's own rule, not as raw JSON.
+ */
+function literalValue({ value, typeHint }: MappingEntry): unknown {
+  return typeof value === 'string' && isJsonTextHint(typeHint)
+    ? parseJsonText(value, typeHint)
+    : value;
 }
 
 function mappingEntries(data: StepDetailData): MappingEntry[] {
@@ -482,6 +500,23 @@ const UNARY_SUFFIX: Record<string, string> = {
 
 function isCondition(value: unknown): value is ConditionLike {
   return !!value && typeof value === 'object' && 'op' in value;
+}
+
+/**
+ * Whether a value is a condition operation, as the DSL reads one: an `op`
+ * and its `arguments`, with no `type` other than `"operation"`. A payload
+ * that merely has an `op` key, like a JSON Patch operation, is not one.
+ */
+export function isConditionExpression(value: unknown): value is ConditionLike {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const { op, arguments: args, type } = value as Record<string, unknown>;
+  return (
+    typeof op === 'string' &&
+    Array.isArray(args) &&
+    (type === undefined || type === 'operation')
+  );
 }
 
 function describeOperand(
