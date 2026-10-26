@@ -327,12 +327,23 @@ impl ApiLaunches {
             .len()
     }
 
+    /// The launch `binding` names, while it serves the API. An expired
+    /// cleanup alarm has selected the run's abort: from then on it is served
+    /// nothing, so no new call (an outcome, a signal acknowledgement) slips
+    /// in between the guest's epoch checks.
     fn slot(&self, binding: &Binding) -> Option<Arc<LaunchSlot>> {
         self.slots
             .lock()
             .expect("workflow API launches poisoned")
             .get(&binding.launch_id)
             .filter(|slot| slot.binding == *binding)
+            .filter(|slot| {
+                !slot
+                    .controls
+                    .cleanup_alarm
+                    .as_ref()
+                    .is_some_and(|alarm| alarm.expired())
+            })
             .cloned()
     }
 
@@ -1474,7 +1485,8 @@ mod tests {
     }
 
     /// The cleanup alarm is held by its call: dropping the call before it
-    /// expires disarms it, and letting it run latches the run's abort.
+    /// expires disarms it, and letting it run latches the run's abort, after
+    /// which the launch serves nothing.
     #[tokio::test]
     async fn a_dropped_alarm_call_disarms_and_an_expired_one_aborts() {
         let launches = Arc::new(ApiLaunches::default());
@@ -1495,13 +1507,19 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert!(!alarm.expired(), "dropping the call disarmed the alarm");
 
-        backend.alarm(&binding(1), 20).await.unwrap();
-        assert!(alarm.expired(), "an alarm left armed aborts the run");
-
         // A sleep is held for its duration.
         let started = std::time::Instant::now();
         backend.sleep(&binding(1), 30).await.unwrap();
         assert!(started.elapsed() >= std::time::Duration::from_millis(30));
+
+        backend.alarm(&binding(1), 20).await.unwrap();
+        assert!(alarm.expired(), "an alarm left armed aborts the run");
+        assert!(matches!(
+            backend.launch_state(&binding(1)).await.unwrap(),
+            LaunchState::Fenced
+        ));
+        assert!(backend.run_info(&binding(1)).await.is_err());
+        assert!(backend.heartbeat(&binding(1)).await.is_err());
     }
 
     /// Outside a run there is no alarm to arm.

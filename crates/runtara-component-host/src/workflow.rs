@@ -110,9 +110,9 @@ pub struct WorkflowRunSpec {
     pub timeout: Duration,
     pub cancel: Option<Arc<AtomicBool>>,
     pub limits: WorkflowLimits,
-    /// Native runtime host for the `runtara:workflow/runtime`
-    /// interface every composed workflow imports. An artifact that imports
-    /// it, run without a host, traps loudly on first use.
+    /// The run's runtime host, which serves its workflow API. A run
+    /// without one is served only a standalone launch (connections, HTTP,
+    /// SQL), and nothing that needs a run.
     pub runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
 }
 
@@ -336,8 +336,6 @@ pub struct WorkflowState {
     limiter: WorkflowLimiter,
     termination: Option<Termination>,
     pub(crate) cleanup_alarm: crate::cleanup_alarm::CleanupAlarmState,
-    /// The run's native runtime host, when the caller configured one.
-    runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
     execution: Option<Arc<ExecutionContext>>,
 }
 
@@ -356,11 +354,6 @@ impl WorkflowState {
         let deadline = tokio::time::Instant::now() + timeout;
         self.http_deadline = deadline;
         self.active_deadline = deadline;
-    }
-
-    /// The run's native runtime host, when configured.
-    pub(crate) fn runtime_host(&self) -> Option<&Arc<dyn crate::runtime_host::RuntimeHost>> {
-        self.runtime.as_ref()
     }
 }
 
@@ -448,8 +441,7 @@ impl PreparedWorkflow {
         let embedded_http_runtime = imports
             .iter()
             .any(|name| name.starts_with("wasi:http/") && !name.contains("@0.3"));
-        (imports.contains(&runtara_wit::workflow::RUNTIME) || workflow_api)
-            && !embedded_http_runtime
+        workflow_api && !embedded_http_runtime
     }
 
     /// The linked component; it exports the workflow entry.
@@ -627,10 +619,6 @@ impl WorkflowExecutor {
         // send hook routes only the workflow API origin (workflow_api.rs).
         wasmtime_wasi::p3::add_to_linker(&mut linker)?;
         wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
-        // Native runtime interface of composed workflows. Extra definitions
-        // are invisible to components that don't import them (the WASI surface
-        // above works the same way), so agents linked here are unaffected.
-        crate::runtime_host::add_runtime_to_linker(&mut linker)?;
         // Host-served tasks of isolated and scoped children.
         crate::execution_host::add_execution_to_linker(&mut linker)?;
         Ok(Self {
@@ -1214,7 +1202,6 @@ impl WorkflowExecutor {
             termination: None,
             cleanup_alarm: Default::default(),
             api_deadline: crate::workflow_api::ApiDeadline::new(),
-            runtime: spec.runtime.clone(),
             execution: control.execution,
         };
 
@@ -1555,7 +1542,6 @@ impl WorkflowExecutor {
             termination: None,
             cleanup_alarm: Default::default(),
             api_deadline: crate::workflow_api::ApiDeadline::new(),
-            runtime: None,
             execution: None,
         };
         let mut store = Store::new(&self.engine, state);

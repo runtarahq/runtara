@@ -1,43 +1,20 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Host-side surface for the `runtara:workflow/runtime` interface.
+//! The run services behind the workflow API.
 //!
-//! Every composed workflow (see `runtara-workflows::direct_wasm`) lists
-//! `runtara:workflow/runtime` among its component-level imports; the
-//! host is its only implementation. This module provides it: a
-//! [`RuntimeHost`] trait carrying the interface's guest-visible semantics, and
-//! [`add_runtime_to_linker`] which binds every interface function to the trait
-//! via `func_wrap_concurrent` (the interface's functions are `async`).
-//!
-//! On the workflow API ABI the same interface is served inside the guest by
-//! the services adapter instead, over the workflow API; this host binding is
-//! for artifacts that still import it.
+//! [`RuntimeHost`] carries the guest-visible semantics of a run's checkpoints,
+//! signals, events, sleeps and terminal publication. The workflow API backend
+//! (`api_launches`) serves `/v1` from it, under the run's root lease.
 //!
 //! Layering: this crate stays persistence-agnostic. The trait is DEFINED here;
 //! the production implementation lives in `runtara-environment`, delegating to
 //! `runtara-core::instance_handlers` over `Arc<dyn Persistence>`.
 //!
-//! Three interface functions are handled locally in the glue and never reach
-//! the trait:
-//! - `now-ms` — wall clock.
-//! - `blocking-sleep` — plain (non-durable) sleep for the requested duration.
-//! - `durable-sleep` — aliased to `durable-sleep-checkpoint` under
-//!   [`DURABLE_SLEEP_CHECKPOINT_ID`].
+//! A plain `durable-sleep` is a `durable-sleep-checkpoint` under
+//! [`DURABLE_SLEEP_CHECKPOINT_ID`].
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-use wasmtime::component::Linker;
-
-use crate::workflow::WorkflowState;
-
-/// Fully-qualified component import name of the runtime interface.
-///
-/// Must match `runtara:workflow@1.0.0`'s `runtime` interface as
-/// emitted into the workflow world by `runtara-workflows::direct_wasm`
-/// (`emit_world_wit`) — the Spike-B integration test asserts a HostImport
-/// composition surfaces exactly this name.
-pub use runtara_wit::workflow::RUNTIME as RUNTIME_INTERFACE_NAME;
 
 /// Checkpoint id used for plain `durable-sleep`: the host glue aliases
 /// `durable-sleep` to `durable-sleep-checkpoint` under this key. The value is
@@ -367,245 +344,9 @@ fn wall_clock_now_ms() -> Result<u64, String> {
         .map_err(|_| "current UNIX timestamp does not fit in u64 milliseconds".to_string())
 }
 
-/// Clone the run's `RuntimeHost` out of the store, or trap with a diagnosis.
-///
-/// A component that imports the runtime interface but runs without a
-/// configured host is a wiring bug (e.g. a HostImport artifact executed
-/// through a spec that never set [`crate::workflow::WorkflowRunSpec::runtime`])
-/// — trap loudly instead of surfacing a confusing guest-level error.
-fn require_host(state: &WorkflowState) -> wasmtime::Result<Arc<dyn RuntimeHost>> {
-    // An already selected emergency abort must also stop runtime calls between
-    // epoch checks, especially terminal publication and signal acknowledgement.
-    // This does not roll back a host operation that began before expiry.
-    if state.cleanup_alarm.expired() {
-        return Err(wasmtime::Error::new(
-            crate::cleanup_alarm::CleanupGraceExpired,
-        ));
-    }
-    state.runtime_host().cloned().ok_or_else(|| {
-        wasmtime::format_err!(
-            "workflow imports {RUNTIME_INTERFACE_NAME} but the run was not configured \
-             with a RuntimeHost (WorkflowRunSpec.runtime is None)"
-        )
-    })
-}
-
-/// Bind every `runtara:workflow/runtime` function to the store's
-/// [`RuntimeHost`].
-///
-/// Registering these definitions is non-invasive for components that do not
-/// import the interface — wasmtime only consults linker definitions for
-/// imports a component actually declares (the same way the full WASI surface
-/// coexists with minimal components).
-pub fn add_runtime_to_linker(linker: &mut Linker<WorkflowState>) -> anyhow::Result<()> {
-    let mut inst = linker.instance(RUNTIME_INTERFACE_NAME)?;
-    inst.func_wrap_concurrent("poll-signal", |accessor, (): ()| {
-        let host = accessor.with(|mut access| require_host(access.get()));
-        Box::pin(async move { Ok((host?.poll_signal().await,)) })
-    })?;
-
-    inst.func_wrap_concurrent("instance-id", |accessor, (): ()| {
-        let host = accessor.with(|mut access| require_host(access.get()));
-        Box::pin(async move { Ok((host?.instance_id(),)) })
-    })?;
-
-    inst.func_wrap_concurrent(
-        "custom-event",
-        |accessor, (kind, payload): (String, Vec<u8>)| {
-            let host = accessor.with(|mut access| require_host(access.get()));
-            Box::pin(async move { Ok((host?.custom_event(kind, payload).await,)) })
-        },
-    )?;
-
-    inst.func_wrap_concurrent("debug-mode-enabled", |accessor, (): ()| {
-        let host = accessor.with(|mut access| require_host(access.get()));
-        Box::pin(async move { Ok((host?.debug_mode_enabled(),)) })
-    })?;
-
-    inst.func_wrap_concurrent("breakpoint-pause", |accessor, (): ()| {
-        let host = accessor.with(|mut access| require_host(access.get()));
-        Box::pin(async move { Ok((host?.breakpoint_pause().await,)) })
-    })?;
-
-    inst.func_wrap_concurrent("heartbeat", |accessor, (): ()| {
-        let host = accessor.with(|mut access| require_host(access.get()));
-        Box::pin(async move { Ok((host?.heartbeat().await,)) })
-    })?;
-
-    inst.func_wrap_concurrent("is-cancelled", |accessor, (): ()| {
-        let host = accessor.with(|mut access| require_host(access.get()));
-        Box::pin(async move { Ok((host?.is_cancelled().await,)) })
-    })?;
-
-    inst.func_wrap_concurrent("check-signals", |accessor, (): ()| {
-        let host = accessor.with(|mut access| require_host(access.get()));
-        Box::pin(async move { Ok((host?.check_signals().await,)) })
-    })?;
-
-    inst.func_wrap_concurrent(
-        "poll-custom-signal",
-        |accessor, (checkpoint_id,): (String,)| {
-            let host = accessor.with(|mut access| require_host(access.get()));
-            Box::pin(async move { Ok((host?.poll_custom_signal(checkpoint_id).await,)) })
-        },
-    )?;
-
-    inst.func_wrap_concurrent(
-        "register-input",
-        |accessor, (descriptor, deadline): (Vec<u8>, Option<u64>)| {
-            let host = accessor.with(|mut access| require_host(access.get()));
-            Box::pin(async move { Ok((host?.register_input(descriptor, deadline).await,)) })
-        },
-    )?;
-    inst.func_wrap_concurrent("poll-input", |accessor, (signal_id,): (String,)| {
-        let host = accessor.with(|mut access| require_host(access.get()));
-        Box::pin(async move { Ok((host?.poll_input(signal_id).await,)) })
-    })?;
-    inst.func_wrap_concurrent("close-input", |accessor, (signal_id,): (String,)| {
-        let host = accessor.with(|mut access| require_host(access.get()));
-        Box::pin(async move {
-            let state = host?.close_input(signal_id).await.map_err(|_| {
-                wasmtime::format_err!("managed input abandonment could not be confirmed")
-            })?;
-            Ok((Ok::<RuntimeInputState, String>(state),))
-        })
-    })?;
-
-    inst.func_wrap_concurrent("now-ms", |accessor, (): ()| {
-        let host = accessor.with(|mut access| require_host(access.get()));
-        Box::pin(async move { Ok((host?.now_ms(),)) })
-    })?;
-
-    inst.func_wrap_concurrent("durable-sleep", |accessor, (ms,): (u64,)| {
-        let host = accessor.with(|mut access| require_host(access.get()));
-        Box::pin(async move {
-            // Alias to durable-sleep-checkpoint under the fixed key.
-            let result = host?
-                .durable_sleep_checkpoint(DURABLE_SLEEP_CHECKPOINT_ID.to_string(), Vec::new(), ms)
-                .await;
-            Ok((result,))
-        })
-    })?;
-
-    inst.func_wrap_concurrent("blocking-sleep", |accessor, (ms,): (u64,)| {
-        // The run keeps its Store while it sleeps here: say so for as long
-        // as the sleep lasts.
-        let waiting = accessor.with(|mut access| {
-            access
-                .get()
-                .runtime_host()
-                .and_then(|runtime| runtime.in_process_wait())
-        });
-        Box::pin(async move {
-            let _waiting = waiting;
-            // An async sleep returns after `ms`, like a blocking sleep,
-            // without pinning an executor thread.
-            tokio::time::sleep(Duration::from_millis(ms)).await;
-            Ok((Ok::<(), String>(()),))
-        })
-    })?;
-
-    inst.func_wrap_concurrent("get-checkpoint", |accessor, (checkpoint_id,): (String,)| {
-        let host = accessor.with(|mut access| require_host(access.get()));
-        Box::pin(async move { Ok((host?.get_checkpoint(checkpoint_id).await,)) })
-    })?;
-
-    inst.func_wrap_concurrent(
-        "checkpoint",
-        |accessor, (checkpoint_id, state): (String, Vec<u8>)| {
-            let host = accessor.with(|mut access| require_host(access.get()));
-            Box::pin(async move { Ok((host?.checkpoint(checkpoint_id, state).await,)) })
-        },
-    )?;
-
-    inst.func_wrap_concurrent(
-        "handle-checkpoint-signal",
-        |accessor, (signal_type, command_id): (String, String)| {
-            let host = accessor.with(|mut access| require_host(access.get()));
-            Box::pin(async move {
-                Ok((host?
-                    .handle_checkpoint_signal(signal_type, command_id)
-                    .await,))
-            })
-        },
-    )?;
-
-    inst.func_wrap_concurrent(
-        "record-retry-attempt",
-        |accessor,
-         (checkpoint_id, attempt_number, error_message): (String, u32, Option<String>)| {
-            let host = accessor.with(|mut access| require_host(access.get()));
-            Box::pin(async move {
-                Ok((host?
-                    .record_retry_attempt(checkpoint_id, attempt_number, error_message)
-                    .await,))
-            })
-        },
-    )?;
-
-    inst.func_wrap_concurrent(
-        "durable-sleep-checkpoint",
-        |accessor, (checkpoint_id, state, ms): (String, Vec<u8>, u64)| {
-            let host = accessor.with(|mut access| require_host(access.get()));
-            Box::pin(async move {
-                Ok((host?
-                    .durable_sleep_checkpoint(checkpoint_id, state, ms)
-                    .await,))
-            })
-        },
-    )?;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_runtime_links_with_its_signal_observation_contract() {
-        let engine = crate::build_engine(&crate::EngineConfig {
-            cache_dir: None,
-            enable_epoch_interruption: false,
-        })
-        .unwrap();
-        let mut linker = Linker::<WorkflowState>::new(&engine);
-        add_runtime_to_linker(&mut linker).unwrap();
-        let observation = r#"
-            (type $signal (record
-                (field "signal-type" string)
-                (field "command-id" string)
-                (field "payload" (list u8))
-                (field "checkpoint-id" (option string))))
-            (export "signal-info" (type $exported-signal (eq $signal)))
-            (export "poll-signal" (func async (result (result (option $exported-signal) (error string)))))
-        "#;
-        for (version, poll, expected) in [
-            (RUNTIME_INTERFACE_NAME, observation, true),
-            (RUNTIME_INTERFACE_NAME, "", true),
-        ] {
-            let component = wasmtime::component::Component::new(
-                &engine,
-                format!(
-                    r#"
-                (component (import "{version}" (instance
-                    {poll}
-                    (export "is-cancelled" (func async (result (result bool (error string)))))
-                    (export "handle-checkpoint-signal" (func async
-                        (param "signal-type" string) (param "command-id" string)
-                        (result (result bool (error string)))))
-                )))
-            "#
-                ),
-            )
-            .unwrap();
-            assert_eq!(
-                linker.instantiate_pre(&component).is_ok(),
-                expected,
-                "{version}"
-            );
-        }
-    }
 
     #[test]
     fn now_ms_is_epoch_scaled() {

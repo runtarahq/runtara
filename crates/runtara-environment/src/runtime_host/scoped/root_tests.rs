@@ -173,25 +173,18 @@ async fn native_root_pause_preserves_waiting_child_but_cancel_closes_it() {
 fn root_wat(exit: &str) -> String {
     format!(
         r#"(component
-      (import "runtara:workflow/runtime@1.0.0" (instance $runtime
-        (export "check-signals" (func async (result (result bool (error string)))))))
-      (alias export $runtime "check-signals" (func $signals))
       (core module $memory (memory (export "memory") 1)
         (global $heap (mut i32) (i32.const 8192))
         (func (export "realloc") (param i32 i32 i32 i32) (result i32)
           (local $p i32) global.get $heap local.set $p global.get $heap local.get 3 i32.add
           i32.const 7 i32.add i32.const -8 i32.and global.set $heap local.get $p))
       (core instance $memory (instantiate $memory))
-      (core func $signals (canon lower (func $signals) (memory $memory "memory") (realloc (func $memory "realloc"))))
       (core module $code (import "memory" "memory" (memory 1))
-        (import "host" "signals" (func $signals (param i32)))
         (data (i32.const 4000) "42")
         (func (export "invoke") (param i32 i32 i32 i32) (result i32)
-          (call $signals (i32.const 64))
           {exit}
           (i32.const 2048)))
-      (core instance $host (export "signals" (func $signals)))
-      (core instance $code (instantiate $code (with "host" (instance $host)) (with "memory" (instance $memory))))
+      (core instance $code (instantiate $code (with "memory" (instance $memory))))
       (type $error (record (field "code" string) (field "message" string) (field "category" string)
         (field "severity" string) (field "retryable" bool) (field "retry-after-ms" (option u64)) (field "attributes" (option string)) (field "details" (option string))))
       (type $signal (record (field "checkpoint-id" string) (field "deadline-ms" (option u64))))

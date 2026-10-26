@@ -1,11 +1,11 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Persistence-backed [`RuntimeHost`]: the production implementation of the
-//! `runtara:workflow/runtime` interface.
+//! Persistence-backed [`RuntimeHost`]: the production run services behind
+//! the workflow API.
 //!
-//! Every composed workflow imports `runtara:workflow/runtime`; the
-//! component host binds each function to this implementation, which delegates
-//! straight to `runtara_core::instance_handlers` over the environment's shared
+//! The component host serves every composed workflow's `/v1` calls from this
+//! implementation, which delegates straight to
+//! `runtara_core::instance_handlers` over the environment's shared
 //! `Arc<dyn Persistence>` — no HTTP loopback.
 //!
 //! - Signal polling is rate-limited (default 1s) and non-destructive until

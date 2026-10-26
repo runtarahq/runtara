@@ -712,6 +712,12 @@ jobs:
         # nothing and removes the whole class.
         run: cargo test -p runtara-environment --features scoped-workflow-integration-tests --test scoped_runner_test --test cooperative_stop_test --test managed_inputs --test agent_suspension_runner_test --test wait_for_instances_runner_test -- --test-threads=1
 
+      - name: Run the scoped runtime unit tests whose guests compose the api component
+        env:
+          TEST_ENVIRONMENT_DATABASE_URL: postgres://postgres@localhost:5432/scoped_runner_test
+          RUNTARA_AGENT_COMPONENTS_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
+        run: cargo test -p runtara-environment --features scoped-workflow-integration-tests --lib runtime_host::scoped -- --test-threads=1
+
   # Composed Agent and EmbedWorkflow deadline, suspension and cancellation
   # tests. Split out of components-build so its ~12 minutes run alongside the
   # smoke suite instead of after it. Each test runs in-process against its own
