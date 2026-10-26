@@ -331,13 +331,24 @@ impl Shim<'_> {
         old: &Type,
         stdlib: u32,
     ) -> Result<(), DirectCompileError> {
+        let old_err = self.layouts.offset(old, &[Step::Err])?;
+        self.on_error_return_json_at(new, old_err, stdlib)
+    }
+
+    /// [`Self::on_error_return_json`] into a result whose error string is at
+    /// `old_err` of the caller's result area.
+    fn on_error_return_json_at(
+        &mut self,
+        new: &Type,
+        old_err: u64,
+        stdlib: u32,
+    ) -> Result<(), DirectCompileError> {
         let layouts = self.layouts;
         let code = layouts.offset(new, &[Step::Err, Step::Field("code")])?;
         let message = layouts.offset(new, &[Step::Err, Step::Field("message")])?;
         let retry = layouts.offset(new, &[Step::Err, Step::Field("retry-after-ms")])?;
         let retry_value =
             layouts.offset(new, &[Step::Err, Step::Field("retry-after-ms"), Step::Some])?;
-        let old_err = layouts.offset(old, &[Step::Err])?;
         let [
             code_ptr,
             code_len,
@@ -876,17 +887,38 @@ pub(super) fn emit_runtime_shims(
         });
     }
     if state {
+        // The emitter's own `result<T, string>` convention: the tag, then
+        // the error string or the `list<u8>` at 4. `set(key, patch, retptr)`
+        // and `get(key, retptr)` call `runtara:api/state` directly.
+        const NATIVE_PAYLOAD: u64 = 4;
         let (set_ty, get_ty) = (api_result("state", "set")?, api_result("state", "get")?);
         let set = import("state.set", &[P, L, P, L, P])?;
         let get = import("state.get", &[P, L, P])?;
-        let set_index = define("state", "set", &mut |shim, old| {
+        let mut native = |params: usize,
+                          body: &mut dyn FnMut(&mut Shim) -> Result<(), DirectCompileError>|
+         -> Result<u32, DirectCompileError> {
+            let mut shim = Shim::new(params, scratch, &layouts);
+            body(&mut shim)?;
+            let index = imported_function_count + *next_defined_function;
+            *next_defined_function += 1;
+            functions.function(push_core_type(types, type_count, &vec![I32; params], &[]));
+            code.function(&shim.finish());
+            Ok(index)
+        };
+        let set_index = native(5, &mut |shim| {
             shim.call(set, &[0, 1, 2, 3], true);
-            shim.on_error_return_json(&set_ty, old, stdlib)
+            shim.on_error_return_json_at(&set_ty, NATIVE_PAYLOAD, stdlib)
         })?;
-        let get_index = define("state", "get", &mut |shim, old| {
+        let get_index = native(3, &mut |shim| {
             shim.call(get, &[0, 1], true);
-            shim.on_error_return_json(&get_ty, old, stdlib)?;
-            copy_list(shim, &get_ty, old)
+            shim.on_error_return_json_at(&get_ty, NATIVE_PAYLOAD, stdlib)?;
+            let from = shim.layouts.offset(&get_ty, &[Step::Ok])?;
+            let (ptr, len) = (shim.local(7), shim.local(8));
+            shim.load_i32(from, ptr);
+            shim.load_i32(from + 4, len);
+            shim.store_i32(NATIVE_PAYLOAD, ptr);
+            shim.store_i32(NATIVE_PAYLOAD + 4, len);
+            Ok(())
         })?;
         indices.run_state = Some(super::core_imports::DirectRunStateImports {
             set: set_index,

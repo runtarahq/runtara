@@ -475,9 +475,7 @@ pub fn check_agent_component_imports(
             AgentImportKind::Agent => agent_import_allowed(&import),
             // A workflow-agent runs inside its caller's instance and ignores
             // its state steps, so it never writes the caller's state.
-            AgentImportKind::StagedWorkflowAgent => {
-                !import.starts_with(runtara_wit::workflow::STATE_PREFIX)
-            }
+            AgentImportKind::StagedWorkflowAgent => !import.starts_with("runtara:api/state@"),
         };
         if !allowed {
             return Err(DirectCompileError::Component(format!(
@@ -995,15 +993,12 @@ mod tests {
     fn a_staged_workflow_agent_may_not_write_its_callers_state() {
         let error = resolve_fixture_agent_in(
             FixtureDir::Staging,
-            &[
-                "runtara:workflow/runtime@1.0.0",
-                runtara_wit::workflow::STATE,
-            ],
+            &["runtara:workflow/runtime@1.0.0", runtara_wit::api::STATE],
             STAGED_TAGS,
         )
         .expect_err("a workflow-agent runs in its caller's instance");
         assert!(
-            error.to_string().contains(runtara_wit::workflow::STATE),
+            error.to_string().contains(runtara_wit::api::STATE),
             "{error}"
         );
     }

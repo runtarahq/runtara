@@ -196,7 +196,6 @@ impl DirectComponentArtifacts {
         );
         for (old, new) in [
             (runtara_wit::workflow::WAITS, runtara_wit::api::WAITS),
-            (runtara_wit::workflow::STATE, runtara_wit::api::STATE),
             (
                 runtara_wit::host::CONNECTIONS,
                 runtara_wit::api::CONNECTIONS,
@@ -227,12 +226,12 @@ impl DirectComponentArtifacts {
         self
     }
 
-    /// Import `runtara:workflow/state` in the world when a SetState or
-    /// GetState step publishes state.
+    /// Import `runtara:api/state` in the world when a SetState or GetState
+    /// step publishes state.
     pub(super) fn with_run_state(mut self, run_state: bool) -> Self {
         if run_state && !self.run_state {
             let stdlib = format!("    import {STDLIB_JSON_INTERFACE};\n");
-            let import = format!("{stdlib}    import {};\n", runtara_wit::workflow::STATE);
+            let import = format!("{stdlib}    import {};\n", runtara_wit::api::STATE);
             self.world_wit = self.world_wit.replacen(&stdlib, &import, 1);
         }
         self.run_state |= run_state;

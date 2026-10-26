@@ -42,7 +42,6 @@ fn every_name_constant_names_a_real_interface() {
         crate::workflow::TASKS,
         crate::workflow::OPERATION,
         crate::workflow::WAITS,
-        crate::workflow::STATE,
         crate::stdlib::JSON,
         crate::trusted::EXECUTION,
     ] {
@@ -58,7 +57,6 @@ fn every_name_constant_names_a_real_interface() {
             crate::workflow::OPERATION,
         ),
         (crate::workflow::WAITS_PREFIX, crate::workflow::WAITS),
-        (crate::workflow::STATE_PREFIX, crate::workflow::STATE),
     ] {
         assert!(
             name.starts_with(prefix),
