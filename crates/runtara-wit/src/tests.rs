@@ -36,7 +36,6 @@ fn every_name_constant_names_a_real_interface() {
     for name in [
         crate::agent::TYPES,
         crate::agent::CAPABILITIES,
-        crate::host::CONNECTIONS,
         crate::host::TIMERS,
         crate::workflow::RUNTIME,
         crate::workflow::TASKS,
@@ -48,7 +47,7 @@ fn every_name_constant_names_a_real_interface() {
     }
     for (prefix, name) in [
         (crate::agent::TYPES_PREFIX, crate::agent::TYPES),
-        (crate::host::PREFIX, crate::host::CONNECTIONS),
+        (crate::host::PREFIX, crate::host::TIMERS),
         (crate::workflow::PREFIX, crate::workflow::RUNTIME),
     ] {
         assert!(
@@ -125,13 +124,6 @@ fn agent_package_resolves_for_every_shape() {
 fn host_services_are_async_and_explicit() {
     let resolve = resolve();
     let host = package(&resolve, crate::host::PACKAGE);
-    let connections = interface(&resolve, host, "connections");
-    for name in ["describe", "resolve-resource"] {
-        assert!(matches!(
-            connections.functions[name].kind,
-            FunctionKind::AsyncFreestanding
-        ));
-    }
     let timers = interface(&resolve, host, "timers");
     for name in ["sleep", "abort-after"] {
         assert!(matches!(
@@ -139,19 +131,14 @@ fn host_services_are_async_and_explicit() {
             FunctionKind::AsyncFreestanding
         ));
     }
-    for (world, interface) in [
-        ("connections-client", crate::host::CONNECTIONS),
-        ("timers-client", crate::host::TIMERS),
-    ] {
-        let world = &resolve.worlds[host.worlds[world]];
-        assert!(world.exports.is_empty());
-        assert!(
-            world
-                .imports
-                .keys()
-                .any(|key| resolve.name_world_key(key) == interface)
-        );
-    }
+    let world = &resolve.worlds[host.worlds["timers-client"]];
+    assert!(world.exports.is_empty());
+    assert!(
+        world
+            .imports
+            .keys()
+            .any(|key| resolve.name_world_key(key) == crate::host::TIMERS)
+    );
 }
 
 #[test]

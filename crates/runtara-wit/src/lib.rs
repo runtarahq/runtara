@@ -68,7 +68,6 @@ pub mod host {
     pub const PACKAGE: &str = concat!("runtara:host@", v!());
     /// Interface-name prefix of every host interface.
     pub const PREFIX: &str = "runtara:host/";
-    pub const CONNECTIONS: &str = concat!("runtara:host/connections@", v!());
     pub const TIMERS: &str = concat!("runtara:host/timers@", v!());
     pub const WIT: &str = include_str!("../wit/host/runtara-host.wit");
 }

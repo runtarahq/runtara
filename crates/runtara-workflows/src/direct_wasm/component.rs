@@ -193,11 +193,6 @@ impl DirectComponentArtifacts {
             &timers,
             1,
         );
-        self.world_wit = self.world_wit.replacen(
-            &format!("    import {};\n", runtara_wit::host::CONNECTIONS),
-            &format!("    import {};\n", runtara_wit::api::CONNECTIONS),
-            1,
-        );
         self
     }
 
@@ -403,7 +398,7 @@ fn emit_world_wit(
         out.push_str(&format!("    import {RUNTIME_INTERFACE_NAME};\n"));
     }
     if has_connections {
-        out.push_str(&format!("    import {};\n", runtara_wit::host::CONNECTIONS));
+        out.push_str(&format!("    import {};\n", runtara_wit::api::CONNECTIONS));
     }
     if needs_timers || !parallel_pools.is_empty() || !agents.is_empty() {
         out.push_str(&format!("    import {};\n", runtara_wit::host::TIMERS));
@@ -595,11 +590,11 @@ mod tests {
         assert!(with.has_connections);
         assert!(
             with.world_wit
-                .contains("import runtara:host/connections@1.0.0;")
+                .contains("import runtara:api/connections@1.0.0;")
         );
         assert!(
             with.wac_source.contains(" ... }"),
-            "the trailing spread must bubble the host resolver import"
+            "the trailing spread must bubble the connections import"
         );
     }
 

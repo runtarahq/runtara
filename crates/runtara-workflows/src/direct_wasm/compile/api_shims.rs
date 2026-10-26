@@ -1101,41 +1101,32 @@ fn write_checkpoint_result(
 }
 
 /// Where `runtara:api/connections.describe` leaves its answer, and where the
-/// old `runtara:host/connections.describe` left it. The logic's connection
-/// lookup is async-lowered, so it cannot go through a shim: once the call
-/// resolves, its answer is moved into the old layout in place, the
-/// api-error's message standing for the old error string (a connection
-/// failure's message is the host's own text).
+/// logic reads it: the emitter's own `result<list<u8>, string>`, payload at 4.
+/// The connection lookup is async-lowered, so it cannot go through a helper:
+/// once the call resolves, its answer is moved into that layout in place, the
+/// api-error's message standing for the error string (a connection failure's
+/// message is the host's own text).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct DescribeMoves {
     /// The descriptor `list<u8>` of the api answer.
     pub ok_from: u64,
     /// The api-error's `message` string.
     pub err_from: u64,
-    /// The old answer's payload: the descriptor, or the error string.
+    /// The logic's payload: the descriptor, or the error string.
     pub to: u64,
 }
 
 pub(super) fn describe_moves(resolve: &Resolve) -> Result<DescribeMoves, DirectCompileError> {
     let layouts = Layouts::new(resolve);
     let new = result_type(function(resolve, "runtara:api", "connections", "describe")?)?;
-    let old = result_type(function(
-        resolve,
-        "runtara:host",
-        "connections",
-        "describe",
-    )?)?;
     let moves = DescribeMoves {
         ok_from: layouts.offset(&new, &[Step::Ok])?,
         err_from: layouts.offset(&new, &[Step::Err, Step::Field("message")])?,
-        to: layouts.offset(&old, &[Step::Ok])?,
+        to: 4,
     };
     // Both are moved down word by word, so a source never sits below the
-    // destination, and both old payloads start at the same place.
-    if layouts.offset(&old, &[Step::Err])? != moves.to
-        || moves.ok_from < moves.to
-        || moves.err_from < moves.to
-    {
+    // destination.
+    if moves.ok_from < moves.to || moves.err_from < moves.to {
         return Err(component_error(
             "api shim: describe answers cannot be moved in place",
         ));
