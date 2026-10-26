@@ -1011,7 +1011,7 @@ mod tests {
                 "wasi:cli/environment@0.2.6",
                 "runtara:workflow/runtime@1.0.0",
                 "runtara:workflow-stdlib/json@1.0.0",
-                runtara_wit::workflow::OPERATION,
+                "runtara:workflow/operation@1.0.0",
                 "runtara:workflow/waits@1.0.0",
             ],
             STAGED_TAGS,

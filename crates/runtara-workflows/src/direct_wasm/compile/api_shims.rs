@@ -292,10 +292,16 @@ impl Shim<'_> {
     /// write the old `result<_, string>` error (the envelope's message) and
     /// return.
     fn on_error_return(&mut self, new: &Type, old: &Type) -> Result<(), DirectCompileError> {
+        let old_err = self.layouts.offset(old, &[Step::Err])?;
+        self.on_error_return_at(new, old_err)
+    }
+
+    /// [`Self::on_error_return`] into a result whose error string is at
+    /// `old_err` of the caller's result area.
+    fn on_error_return_at(&mut self, new: &Type, old_err: u64) -> Result<(), DirectCompileError> {
         let message = self
             .layouts
             .offset(new, &[Step::Err, Step::Field("message")])?;
-        let old_err = self.layouts.offset(old, &[Step::Err])?;
         let (ptr, len) = (self.local(0), self.local(1));
         let scratch = self.scratch;
         self.i(Instruction::I32Const(scratch))
@@ -674,34 +680,38 @@ pub(super) fn emit_runtime_shims(
     if !waits && !state && !operations {
         return Ok(());
     }
-    let mut define = |interface: &str,
-                      name: &str,
-                      body: &mut dyn FnMut(&mut Shim, &Type) -> Result<(), DirectCompileError>|
+    // Operations, waits and state call `runtara:api` straight from helpers
+    // in the emitter's own `result<T, string>` convention: the tag, then the
+    // error string or the `list<u8>` at 4. A helper without a result takes no
+    // result pointer.
+    const NATIVE_PAYLOAD: u64 = 4;
+    let mut native = |params: usize,
+                      returns: bool,
+                      body: &mut dyn FnMut(&mut Shim) -> Result<(), DirectCompileError>|
      -> Result<u32, DirectCompileError> {
-        let old_fn = function(resolve, "runtara:workflow", interface, name)?;
-        let old_sig = resolve.wasm_signature(mangling.import_variant(), old_fn);
-        let returns = old_fn.result.is_some();
-        let mut shim = Shim::new(old_sig.params.len(), scratch, &layouts);
+        let mut shim = Shim::new(params, scratch, &layouts);
         if !returns {
-            // No result pointer: nothing may write one.
             shim.retptr = u32::MAX;
         }
-        let old = old_fn.result.unwrap_or(Type::Bool);
-        body(&mut shim, &old)?;
+        body(&mut shim)?;
         let index = imported_function_count + *next_defined_function;
         *next_defined_function += 1;
-        functions.function(push_core_type(
-            types,
-            type_count,
-            &old_sig.params,
-            &old_sig.results,
-        ));
+        functions.function(push_core_type(types, type_count, &vec![I32; params], &[]));
         code.function(&if returns {
             shim.finish()
         } else {
             shim.finish_void()
         });
         Ok(index)
+    };
+    let native_list = |shim: &mut Shim, new: &Type| -> Result<(), DirectCompileError> {
+        let from = shim.layouts.offset(new, &[Step::Ok])?;
+        let (ptr, len) = (shim.local(7), shim.local(8));
+        shim.load_i32(from, ptr);
+        shim.load_i32(from + 4, len);
+        shim.store_i32(NATIVE_PAYLOAD, ptr);
+        shim.store_i32(NATIVE_PAYLOAD + 4, len);
+        Ok(())
     };
     if operations {
         let cell = scratch + API_SCRATCH_BYTES;
@@ -721,10 +731,11 @@ pub(super) fn emit_runtime_shims(
         let code = layouts.offset(&suspend_ty, &[Step::Err, Step::Field("code")])?;
         // A refused enter, or one whose operation cannot be entered, is the
         // step error the emitter lays out: no operation is entered.
-        let enter_index = define("operation", "enter", &mut |shim, old| {
+        // `enter(checkpoint-key, attempt, load, retptr)`.
+        let enter_index = native(5, true, &mut |shim| {
             set_cell(shim, cell, OPERATION_STATE, 0);
             shim.call(enter, &[0, 1, 2, 3], true);
-            shim.on_error_return(&enter_ty, old)?;
+            shim.on_error_return_at(&enter_ty, NATIVE_PAYLOAD)?;
             let (ptr, len, tag) = (shim.local(2), shim.local(3), shim.local(4));
             shim.load_i32(id_at, ptr);
             shim.load_i32(id_at + 4, len);
@@ -759,8 +770,9 @@ pub(super) fn emit_runtime_shims(
         // A suspension the host refuses (its caps, or no entered operation)
         // is the step error; failing to keep the continuation fails the run,
         // since a lost one would re-run the operation from scratch.
-        let suspend_index = define("operation", "suspend", &mut |shim, old| {
-            let old_err = shim.layouts.offset(old, &[Step::Err])?;
+        // `suspend(state, wakes, retptr)`.
+        let suspend_index = native(5, true, &mut |shim| {
+            let old_err = NATIVE_PAYLOAD;
             let refuse = |shim: &mut Shim| {
                 shim.store_const_u8(0, 1);
                 shim.store_const_i32(old_err, 0);
@@ -801,7 +813,8 @@ pub(super) fn emit_runtime_shims(
         // The old `exit` trapped when it could not confirm closing the
         // operation's wait and discarding its continuation. It keeps the id
         // for `release`; a refused enter left nothing to leave.
-        let exit_index = define("operation", "exit", &mut |shim, _| {
+        // `exit(failed)`.
+        let exit_index = native(1, false, &mut |shim| {
             cell_state(shim, cell);
             shim.i(Instruction::I32Const(ENTERED))
                 .i(Instruction::I32Eq)
@@ -821,7 +834,8 @@ pub(super) fn emit_runtime_shims(
         // checkpoint), so the cell names the operation its key does. Like
         // the old one it cannot fail: a continuation left behind goes with
         // the instance.
-        let release_index = define("operation", "release", &mut |shim, _| {
+        // `release(checkpoint-key)`.
+        let release_index = native(2, false, &mut |shim| {
             cell_state(shim, cell);
             shim.i(Instruction::If(BlockType::Empty))
                 .i(Instruction::I32Const(id))
@@ -855,39 +869,6 @@ pub(super) fn emit_runtime_shims(
             stdlib_sig.params
         )));
     }
-    // Waits and state call `runtara:api` straight from helpers in the
-    // emitter's own `result<T, string>` convention: the tag, then the error
-    // string or the `list<u8>` at 4. A helper without a result takes no
-    // result pointer.
-    const NATIVE_PAYLOAD: u64 = 4;
-    let mut native = |params: usize,
-                      returns: bool,
-                      body: &mut dyn FnMut(&mut Shim) -> Result<(), DirectCompileError>|
-     -> Result<u32, DirectCompileError> {
-        let mut shim = Shim::new(params, scratch, &layouts);
-        if !returns {
-            shim.retptr = u32::MAX;
-        }
-        body(&mut shim)?;
-        let index = imported_function_count + *next_defined_function;
-        *next_defined_function += 1;
-        functions.function(push_core_type(types, type_count, &vec![I32; params], &[]));
-        code.function(&if returns {
-            shim.finish()
-        } else {
-            shim.finish_void()
-        });
-        Ok(index)
-    };
-    let native_list = |shim: &mut Shim, new: &Type| -> Result<(), DirectCompileError> {
-        let from = shim.layouts.offset(new, &[Step::Ok])?;
-        let (ptr, len) = (shim.local(7), shim.local(8));
-        shim.load_i32(from, ptr);
-        shim.load_i32(from + 4, len);
-        shim.store_i32(NATIVE_PAYLOAD, ptr);
-        shim.store_i32(NATIVE_PAYLOAD + 4, len);
-        Ok(())
-    };
     if waits {
         let register_ty = api_result("waits", "register")?;
         let register = import("waits.register", &[P, L, P, L, P])?;

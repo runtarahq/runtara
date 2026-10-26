@@ -9,7 +9,7 @@ the compiler composes into every artifact. The other packages:
 | Package | Imported / exported by |
 |---|---|
 | `runtara:agent` | every component (`types`); the agent export shape |
-| `runtara:workflow` | compiled workflow logic: host-served `tasks`, and lowering vocabulary |
+| `runtara:workflow` | compiled workflow logic: host-served `tasks`, and lowering vocabulary (`runtime`) |
 | `runtara:host` | lowering vocabulary of compiled workflow logic (`connections`, `timers`) |
 | `runtara:workflow-stdlib` | the compiler-private JSON stdlib component |
 | `runtara:trusted` | approved trusted agents (`execution`, called by the host executor) |

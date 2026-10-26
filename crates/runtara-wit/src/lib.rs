@@ -74,8 +74,8 @@ pub mod host {
 }
 
 /// `runtara:workflow`: compiled workflow logic's host-served `tasks`, its
-/// entry, and its lowering vocabulary (`runtime`, `operation`, `waits`,
-/// `state`), served inside the artifact from `runtara:api`.
+/// entry, and its lowering vocabulary (`runtime`), served inside the artifact
+/// from `runtara:api`.
 pub mod workflow {
     pub const PACKAGE: &str = concat!("runtara:workflow@", v!());
     /// Interface-name prefix of every workflow interface.
@@ -98,9 +98,6 @@ pub mod workflow {
     pub const MANIFEST_SECTION: &str = "runtara.direct_workflow.manifest";
     pub const RUNTIME: &str = concat!("runtara:workflow/runtime@", v!());
     pub const TASKS: &str = concat!("runtara:workflow/tasks@", v!());
-    pub const OPERATION: &str = concat!("runtara:workflow/operation@", v!());
-    /// Any version of the operation interface.
-    pub const OPERATION_PREFIX: &str = "runtara:workflow/operation@";
     pub const WIT: &str = include_str!("../wit/workflow/runtara-workflow.wit");
 }
 

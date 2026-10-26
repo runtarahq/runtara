@@ -40,7 +40,6 @@ fn every_name_constant_names_a_real_interface() {
         crate::host::TIMERS,
         crate::workflow::RUNTIME,
         crate::workflow::TASKS,
-        crate::workflow::OPERATION,
         crate::stdlib::JSON,
         crate::trusted::EXECUTION,
     ] {
@@ -51,10 +50,6 @@ fn every_name_constant_names_a_real_interface() {
         (crate::agent::TYPES_PREFIX, crate::agent::TYPES),
         (crate::host::PREFIX, crate::host::CONNECTIONS),
         (crate::workflow::PREFIX, crate::workflow::RUNTIME),
-        (
-            crate::workflow::OPERATION_PREFIX,
-            crate::workflow::OPERATION,
-        ),
     ] {
         assert!(
             name.starts_with(prefix),
@@ -337,23 +332,6 @@ fn workflow_package_declares_the_workflow_abi() {
     ] {
         assert!(tasks.types.contains_key(name));
     }
-
-    let operation = interface(&resolve, workflow, "operation");
-    assert_eq!(
-        operation
-            .functions
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        ["enter", "suspend", "exit", "release"]
-    );
-    assert!(
-        operation
-            .functions
-            .values()
-            .all(|function| matches!(function.kind, FunctionKind::Freestanding)),
-        "the operation scope is compiler-called and synchronous"
-    );
 }
 
 fn variant_cases(resolve: &Resolve, types: &wit_parser::Interface, name: &str) -> Vec<String> {

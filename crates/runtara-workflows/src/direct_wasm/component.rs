@@ -157,13 +157,12 @@ pub struct DirectComponentArtifacts {
     pub shared_components: Vec<DirectSharedComponentRequirement>,
     /// Agent components required for static composition.
     pub agent_components: Vec<DirectAgentComponentRequirement>,
-    /// Agents with a suspending site: composed with the continuation import.
+    /// Agents with a suspending site, handed their continuation in their
+    /// input's `_operation`.
     pub suspending_agents: std::collections::BTreeSet<String>,
-    /// Whether an operation-scoped site imports
-    /// `runtara:workflow/operation`.
+    /// Whether an operation-scoped site imports `runtara:api/operations`.
     pub operation_scope: bool,
-    /// Whether a WaitForInstances step imports
-    /// `runtara:workflow/waits`.
+    /// Whether a WaitForInstances step imports `runtara:api/waits`.
     pub wait_instances: bool,
     /// Whether a state step publishes through `runtara:workflow/state`.
     pub run_state: bool,
@@ -194,22 +193,11 @@ impl DirectComponentArtifacts {
             &timers,
             1,
         );
-        for (old, new) in [
-            (
-                runtara_wit::host::CONNECTIONS,
-                runtara_wit::api::CONNECTIONS,
-            ),
-            (
-                runtara_wit::workflow::OPERATION,
-                runtara_wit::api::OPERATIONS,
-            ),
-        ] {
-            self.world_wit = self.world_wit.replacen(
-                &format!("    import {old};\n"),
-                &format!("    import {new};\n"),
-                1,
-            );
-        }
+        self.world_wit = self.world_wit.replacen(
+            &format!("    import {};\n", runtara_wit::host::CONNECTIONS),
+            &format!("    import {};\n", runtara_wit::api::CONNECTIONS),
+            1,
+        );
         self
     }
 
@@ -427,10 +415,7 @@ fn emit_world_wit(
         ));
     }
     if operation_scope || !suspending_agents.is_empty() {
-        out.push_str(&format!(
-            "    import {};\n",
-            runtara_wit::workflow::OPERATION
-        ));
+        out.push_str(&format!("    import {};\n", runtara_wit::api::OPERATIONS));
     }
     for agent in agents {
         let interface = if scoped_agents.contains(agent) {
