@@ -29,7 +29,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use wasmtime::component::Linker;
 
-use crate::host_io::HostIoContext;
 use crate::workflow::WorkflowState;
 
 /// Fully-qualified component import name of the runtime interface.
@@ -378,7 +377,7 @@ fn require_host(state: &WorkflowState) -> wasmtime::Result<Arc<dyn RuntimeHost>>
     // An already selected emergency abort must also stop runtime calls between
     // epoch checks, especially terminal publication and signal acknowledgement.
     // This does not roll back a host operation that began before expiry.
-    if state.cleanup_alarm().is_some_and(|alarm| alarm.expired()) {
+    if state.cleanup_alarm.expired() {
         return Err(wasmtime::Error::new(
             crate::cleanup_alarm::CleanupGraceExpired,
         ));
@@ -491,8 +490,12 @@ pub fn add_runtime_to_linker(linker: &mut Linker<WorkflowState>) -> anyhow::Resu
     inst.func_wrap_concurrent("blocking-sleep", |accessor, (ms,): (u64,)| {
         // The run keeps its Store while it sleeps here: say so for as long
         // as the sleep lasts.
-        let waiting = accessor
-            .with(|mut access| crate::host_io::HostIoContext::in_process_wait(&*access.get()));
+        let waiting = accessor.with(|mut access| {
+            access
+                .get()
+                .runtime_host()
+                .and_then(|runtime| runtime.in_process_wait())
+        });
         Box::pin(async move {
             let _waiting = waiting;
             // An async sleep returns after `ms`, like a blocking sleep,

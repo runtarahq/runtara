@@ -8,10 +8,9 @@
 //!     behaviour can show;
 //! (c) the result offsets the emitter reads are the WIT's `SizeAlign` layout
 //!     (pinned hermetically in `operation_scoped_tests`);
-//! (d) a relaunch delivers the saved continuation (host `context` import);
-//! (e) the composed control agent calls the host's control API under the
-//!     step's operation, while a control API call outside a run's prepared
-//!     entry, or from any agent-linker store, is `denied`.
+//! (d) a relaunch delivers the saved continuation (the input's `_operation`);
+//! (e) the composed control agent calls control over the workflow API under
+//!     the step's operation.
 use super::*;
 use runtara_component_host::InvokeRunResult;
 use runtara_component_host::control_host::{
@@ -61,7 +60,7 @@ const MEMORY: &str = r#"(core module $memory
   (core instance $memory (instantiate $memory))"#;
 
 /// An ordinary suspending agent. `capabilities.invoke` answers `plain` with
-/// "capabilities"; `pause` reads its continuation through the host context
+/// "capabilities"; `pause` finds its continuation in its input's `_operation`
 /// and completes with it, or, without one, suspends until `PROBE_WAKE_AT`
 /// with `PROBE_STATE`.
 fn suspend_probe() -> Vec<u8> {
@@ -139,13 +138,28 @@ fn suspendable_body(behaviour: Behaviour) -> String {
         }
     };
     format!(
-        r#"(func $suspendable (result i32)
-      (call $continuation (i32.const 3072))
+        r#"(func $suspendable (param $input i32) (param $len i32) (result i32)
+      ;; The only continuation a probe saves is `PROBE_STATE`: an
+      ;; `option<list<u8>>` of it at 3072 when the input carries it.
+      (i32.store8 (i32.const 3072) (call $contains (local.get $input) (local.get $len)
+        (i32.const 1300) (i32.const {needle_len})))
+      (i32.store (i32.const 3076) (i32.const 1056))
+      (i32.store (i32.const 3080) (i32.const {state_len}))
       (i32.store8 (i32.const 2048) (i32.const 0))
       (if (i32.load8_u (i32.const 3072))
         (then {with})
         (else {without}))
-      (i32.const 2048))"#
+      (i32.const 2048))"#,
+        needle_len = continuation_needle().len(),
+        state_len = PROBE_STATE.len(),
+    )
+}
+
+/// The `_operation` member that hands a probe back `PROBE_STATE`.
+fn continuation_needle() -> String {
+    format!(
+        r#""continuation":"{}""#,
+        runtara_agent_suspension::encode_continuation(PROBE_STATE)
     )
 }
 
@@ -154,14 +168,9 @@ fn suspendable_body(behaviour: Behaviour) -> String {
 fn probe_component(agent: &str, behaviour: Behaviour) -> Vec<u8> {
     wat::parse_str(format!(
         r#"(component
-  (import "runtara:agent/continuation@1.0.0" (instance $context
-    (export "continuation" (func (result (option (list u8)))))))
   {MEMORY}
-  (core func $continuation (canon lower (func $context "continuation")
-    (memory $memory "memory") (realloc (func $memory "realloc"))))
   (core module $code
     (import "m" "memory" (memory 1))
-    (import "h" "continuation" (func $continuation (param i32)))
     (data (i32.const 1024) "\22capabilities\22")
     (data (i32.const 1056) "\22paused\22")
     (data (i32.const 1100) "foreign")
@@ -169,11 +178,30 @@ fn probe_component(agent: &str, behaviour: Behaviour) -> Vec<u8> {
     (data (i32.const 1240) "stale")
     (data (i32.const 1250) "transient")
     (data (i32.const 1260) "error")
+    (data (i32.const 1300) "{needle}")
     ;; `plain` and `pause` differ in their second byte.
     (func (export "invoke") (param i32 i32 i32 i32) (result i32)
       (if (i32.eq (i32.load8_u offset=1 (local.get 0)) (i32.const 0x6c))
         (then (return (call $plain))))
-      (call $suspendable))
+      (call $suspendable (local.get 2) (local.get 3)))
+    ;; Whether the `n`-byte needle at `p` occurs in the `hl` bytes at `h`.
+    (func $contains (param $h i32) (param $hl i32) (param $p i32) (param $n i32)
+      (result i32) (local $i i32) (local $j i32)
+      (block $absent
+        (loop $outer
+          (br_if $absent (i32.gt_u (i32.add (local.get $i) (local.get $n)) (local.get $hl)))
+          (local.set $j (i32.const 0))
+          (block $mismatch
+            (loop $inner
+              (if (i32.eq (local.get $j) (local.get $n)) (then (return (i32.const 1))))
+              (br_if $mismatch (i32.ne
+                (i32.load8_u (i32.add (local.get $h) (i32.add (local.get $i) (local.get $j))))
+                (i32.load8_u (i32.add (local.get $p) (local.get $j)))))
+              (local.set $j (i32.add (local.get $j) (i32.const 1)))
+              (br $inner)))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $outer)))
+      (i32.const 0))
     (func $plain (result i32)
       (i32.store8 (i32.const 2048) (i32.const 0))
       (i32.store8 (i32.const 2056) (i32.const 0))
@@ -181,9 +209,7 @@ fn probe_component(agent: &str, behaviour: Behaviour) -> Vec<u8> {
       (i32.store (i32.const 2064) (i32.const 14))
       (i32.const 2048))
     {body})
-  (core instance $code (instantiate $code
-    (with "m" (instance $memory))
-    (with "h" (instance (export "continuation" (func $continuation))))))
+  (core instance $code (instantiate $code (with "m" (instance $memory))))
   {ERROR_INFO}
   {OUTCOME}
   (func $invoke async (param "capability-id" string) (param "input" (list u8))
@@ -192,65 +218,9 @@ fn probe_component(agent: &str, behaviour: Behaviour) -> Vec<u8> {
   (instance $capabilities {OUTCOME_EXPORTS} (export "invoke" (func $invoke)))
   (export "runtara:agent-{agent}/capabilities@1.0.0" (instance $capabilities)))"#,
         body = suspendable_body(behaviour),
+        needle = continuation_needle().replace('"', "\\22"),
     ))
     .expect("suspend probe parses")
-}
-
-/// A component that calls `runtara:control/api.pause` directly from its
-/// ordinary `capabilities.invoke` and answers "denied" when the store refused
-/// it with `denied`.
-fn control_api_probe() -> Vec<u8> {
-    wat::parse_str(format!(
-        r#"(component
-  (import "runtara:control/api@1.0.0" (instance $api
-    (type $outcome-def (enum "requested" "applied" "unchanged" "already-terminal"))
-    (export "command-outcome" (type $outcome (eq $outcome-def)))
-    (type $result-def (record (field "instance-id" string) (field "outcome" $outcome)
-      (field "replayed" bool)))
-    (export "command-result" (type $result (eq $result-def)))
-    (type $code-def (enum "denied" "invalid" "not-found" "not-runnable" "not-child"
-      "requires-instance" "requires-operation" "capacity" "replay-conflict" "label-conflict"
-      "too-large" "unavailable" "unsupported" "not-waiting" "ambiguous" "already-answered"
-      "not-pausable" "not-paused" "timeout"))
-    (export "error-code" (type $code (eq $code-def)))
-    (type $error-def (record (field "code" $code) (field "message" string)
-      (field "retry-after-ms" (option u64))))
-    (export "control-error" (type $control-error (eq $error-def)))
-    (export "pause" (func async (param "instance-id" string)
-      (result (result $result (error $control-error)))))))
-  (alias export $api "pause" (func $pause))
-  {MEMORY}
-  (core func $pause-lower (canon lower (func $pause) (memory $memory "memory")
-    (realloc (func $memory "realloc"))))
-  (core module $code
-    (import "m" "memory" (memory 1))
-    (import "h" "pause" (func $pause (param i32 i32 i32)))
-    (data (i32.const 1024) "w")
-    (data (i32.const 1040) "\22denied\22")
-    (data (i32.const 1056) "\22allowed\22")
-    (func (export "invoke") (param i32 i32 i32 i32) (result i32)
-      (call $pause (i32.const 1024) (i32.const 1) (i32.const 3072))
-      (i32.store8 (i32.const 2048) (i32.const 0))
-      ;; `result<command-result, control-error>` is 8-aligned: err payload at +8.
-      (if (i32.and
-            (i32.eq (i32.load8_u (i32.const 3072)) (i32.const 1))
-            (i32.eqz (i32.load8_u (i32.const 3080))))
-        (then (i32.store (i32.const 2060) (i32.const 1040)) (i32.store (i32.const 2064) (i32.const 8)))
-        (else (i32.store (i32.const 2060) (i32.const 1056)) (i32.store (i32.const 2064) (i32.const 9))))
-      (i32.store8 (i32.const 2056) (i32.const 0))
-      (i32.const 2048)))
-  (core instance $code (instantiate $code
-    (with "m" (instance $memory))
-    (with "h" (instance (export "pause" (func $pause-lower))))))
-  {ERROR_INFO}
-  {OUTCOME}
-  (func $invoke async (param "capability-id" string) (param "input" (list u8))
-    (result (result $outcome (error $error)))
-    (canon lift (core func $code "invoke") (memory $memory "memory") (realloc (func $memory "realloc"))))
-  (instance $capabilities {OUTCOME_EXPORTS} (export "invoke" (func $invoke)))
-  (export "runtara:agent-api-probe/capabilities@1.0.0" (instance $capabilities)))"#
-    ))
-    .expect("control API probe parses")
 }
 
 fn probe_info() -> runtara_dsl::agent_meta::AgentInfo {
@@ -405,6 +375,15 @@ async fn launch(
         .await)
 }
 
+/// The runtara interfaces among `imports` the host would have to link: all
+/// but the types-only agent vocabulary.
+fn host_imports(imports: &[String]) -> Vec<&String> {
+    imports
+        .iter()
+        .filter(|name| name.starts_with("runtara:") && !name.starts_with("runtara:agent/types@"))
+        .collect()
+}
+
 fn root_imports(wasm: &Path) -> anyhow::Result<Vec<String>> {
     let wit_component::DecodedWasm::Component(resolve, world) =
         wit_component::decode(&fs::read(wasm)?)?
@@ -435,7 +414,7 @@ fn one_agent_instance_serves_plain_and_suspending_capabilities() -> anyhow::Resu
     let artifacts = &compiled.component_artifacts;
     for import in [
         "import runtara:agent-suspend-probe/capabilities@1.0.0;",
-        "import runtara:workflow/operation@1.0.0;",
+        "import runtara:api/operations@1.0.0;",
     ] {
         assert!(
             artifacts.world_wit.contains(import),
@@ -459,15 +438,10 @@ fn one_agent_instance_serves_plain_and_suspending_capabilities() -> anyhow::Resu
             .any(|name| name.starts_with("runtara:agent-suspend-probe/")),
         "wac wires the agent internally: {imports:?}"
     );
-    for bubbled in [
-        runtara_wit::workflow::OPERATION,
-        runtara_wit::agent::CONTINUATION,
-    ] {
-        assert!(
-            imports.iter().any(|name| name == bubbled),
-            "{bubbled} is left to the host: {imports:?}"
-        );
-    }
+    assert!(
+        host_imports(&imports).is_empty(),
+        "the api component serves operations and continuations: {imports:?}"
+    );
     let entries: Vec<_> = compiled
         .artifact_metadata
         .agent_components
@@ -479,7 +453,7 @@ fn one_agent_instance_serves_plain_and_suspending_capabilities() -> anyhow::Resu
 }
 
 /// The control copy is a plain agent: a control step binds only its
-/// `capabilities`, leaves the control API to the host, and pins nothing
+/// `capabilities`, reaches control over the workflow API, and pins nothing
 /// (decision D2, revised); the dispatcher registry loads it as one agent.
 #[test]
 fn a_control_step_binds_capabilities_and_pins_nothing() -> anyhow::Result<()> {
@@ -488,7 +462,7 @@ fn a_control_step_binds_capabilities_and_pins_nothing() -> anyhow::Result<()> {
     let artifacts = &compiled.component_artifacts;
     for import in [
         "import runtara:agent-control/capabilities@1.0.0;",
-        "import runtara:workflow/operation@1.0.0;",
+        "import runtara:api/operations@1.0.0;",
     ] {
         assert!(
             artifacts.world_wit.contains(import),
@@ -497,17 +471,9 @@ fn a_control_step_binds_capabilities_and_pins_nothing() -> anyhow::Result<()> {
         );
     }
     let imports = root_imports(&compiled.wasm_path)?;
-    for bubbled in [runtara_wit::control::API, runtara_wit::workflow::OPERATION] {
-        assert!(
-            imports.iter().any(|name| name == bubbled),
-            "{bubbled} is left to the host: {imports:?}"
-        );
-    }
     assert!(
-        !imports
-            .iter()
-            .any(|name| name == runtara_wit::agent::CONTINUATION),
-        "no continuation is delivered to control: {imports:?}"
+        host_imports(&imports).is_empty(),
+        "control reaches the host over the workflow API: {imports:?}"
     );
 
     // The dependency registry: one control entry, bound to the staged bytes.
@@ -839,67 +805,6 @@ async fn a_fault_replay_reuses_the_operation_key() -> anyhow::Result<()> {
     let operations = fake.operations("child-1");
     assert_eq!(operations.len(), 2, "{operations:?}");
     assert_eq!(operations[0], operations[1]);
-    Ok(())
-}
-
-/// (e) A control API call outside a run's prepared entry gets `denied`: a
-/// component invoked on its own in a workflow store, even with a control
-/// service configured, and one in an agent-linker store (dispatcher,
-/// trusted).
-#[tokio::test(flavor = "multi_thread")]
-async fn a_control_api_call_is_denied_outside_a_run_entry() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let probe = dir.path().join("api-probe.wasm");
-    fs::write(&probe, control_api_probe())?;
-    let interface = "runtara:agent-api-probe/capabilities@1.0.0";
-
-    let fake = Arc::new(FakeControl::default());
-    let root = workflow_executor(Some(control_host(fake.clone())))?;
-    let pre = root.load_instance_pre(&probe).await?;
-    let answer = root
-        .invoke_capability(&pre, interface, "probe", b"{}".to_vec())
-        .await?
-        .map_err(|error| anyhow::anyhow!("{error:?}"))?;
-    assert_eq!(answer, b"\"denied\"", "workflow root store");
-
-    let engine = Arc::clone(executor().engine());
-    let loaded = runtara_component_host::load_agent(
-        &engine,
-        &runtara_component_host::build_linker(&engine)?,
-        &probe,
-        "api-probe",
-    )?;
-    let (mut store, instance) = runtara_component_host::instantiate(
-        &engine,
-        &loaded.pre,
-        runtara_component_host::HostState::new(Arc::new(
-            runtara_component_host::CallContext::for_test("fixture"),
-        )),
-    )
-    .await?;
-    let exported = instance
-        .get_export_index(&mut store, None, &loaded.capabilities_iface)
-        .expect("capabilities export");
-    let invoke = instance
-        .get_export_index(&mut store, Some(&exported), "invoke")
-        .expect("invoke export");
-    use runtara_component_host::bindings::exports::runtara::agent::capabilities::Outcome;
-    let invoke = instance
-        .get_typed_func::<(String, Vec<u8>), (Result<Outcome, runtara_component_host::ErrorInfo>,)>(
-            &mut store, invoke,
-        )?;
-    let (answer,) = invoke
-        .call_async(&mut store, ("probe".into(), b"{}".to_vec()))
-        .await?;
-    let Outcome::Completed(answer) = answer.map_err(|error| anyhow::anyhow!("{error:?}"))? else {
-        panic!("the probe never suspends");
-    };
-    assert_eq!(answer, b"\"denied\"", "agent-linker store");
-    assert_eq!(
-        *fake.pauses.lock().unwrap(),
-        0,
-        "the control service was never reached"
-    );
     Ok(())
 }
 
@@ -1259,8 +1164,8 @@ async fn a_workflow_agent_calls_control_as_its_caller() -> anyhow::Result<()> {
     )?;
     let imports = root_imports(&compiled.wasm_path)?;
     assert!(
-        imports.iter().any(|name| name == runtara_wit::control::API),
-        "the workflow-agent leaves the control API to its caller's host: {imports:?}"
+        host_imports(&imports).is_empty(),
+        "the workflow-agent reaches control over the workflow API: {imports:?}"
     );
     assert!(
         !imports

@@ -48,7 +48,6 @@ pub use prepared_launcher::{
 
 use crate::engine::EPOCH_TICK;
 use crate::execution_host::{ExecutionContext, ExecutionView};
-use crate::host_io::HostIoContext;
 
 /// Outgoing-body stream tuning, kept identical to the flags `WasmRunner`
 /// passes the wasmtime CLI (`--wasi http-outgoing-body-buffer-chunks=4096`,
@@ -336,7 +335,7 @@ pub struct WorkflowState {
     active_deadline: tokio::time::Instant,
     limiter: WorkflowLimiter,
     termination: Option<Termination>,
-    cleanup_alarm: crate::cleanup_alarm::CleanupAlarmState,
+    pub(crate) cleanup_alarm: crate::cleanup_alarm::CleanupAlarmState,
     /// The run's native runtime host, when the caller configured one.
     runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
     execution: Option<Arc<ExecutionContext>>,
@@ -349,15 +348,6 @@ impl ExecutionView for WorkflowState {
 
     fn execution_context(&self) -> Option<&Arc<ExecutionContext>> {
         self.execution.as_ref()
-    }
-}
-
-impl HostIoContext for WorkflowState {
-    fn cleanup_alarm(&self) -> Option<&crate::cleanup_alarm::CleanupAlarmState> {
-        Some(&self.cleanup_alarm)
-    }
-    fn in_process_wait(&self) -> Option<Box<dyn std::any::Any + Send>> {
-        self.runtime.as_ref()?.in_process_wait()
     }
 }
 
@@ -641,9 +631,7 @@ impl WorkflowExecutor {
         // are invisible to components that don't import them (the WASI surface
         // above works the same way), so agents linked here are unaffected.
         crate::runtime_host::add_runtime_to_linker(&mut linker)?;
-        // Concurrent timers and outbound calls suspend only the calling guest
-        // task, allowing parallel Split subtasks to overlap their I/O.
-        crate::host_io::add_host_io_to_linker(&mut linker)?;
+        // Host-served tasks of isolated and scoped children.
         crate::execution_host::add_execution_to_linker(&mut linker)?;
         Ok(Self {
             trusted: std::sync::OnceLock::new(),

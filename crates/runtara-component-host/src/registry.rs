@@ -46,7 +46,6 @@ pub fn build_linker(engine: &Engine) -> Result<Linker<HostState>> {
     wasmtime_wasi::p3::add_to_linker(&mut linker)?;
     wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
     // Timers retain their interface; HTTP uses the injected outbound service.
-    crate::host_io::add_host_io_to_linker(&mut linker)?;
     // A store outside a workflow run has no operation, so no continuation.
     Ok(linker)
 }

@@ -22,7 +22,6 @@ pub use outbound_http::OutboundHttpHost;
 pub mod dispatcher;
 pub mod engine;
 pub mod execution_host;
-pub(crate) mod host_io;
 pub mod host_state;
 pub mod instance_wait_host;
 pub use instance_wait_host::InstanceWaitHost;

@@ -380,7 +380,7 @@ impl ComponentDispatcherService {
                 root_lease_epoch: 0,
             };
             launches
-                .begin_standalone(
+                .begin_standalone_with_alarm(
                     binding.clone(),
                     // Unpinned, as the host-linked test path was. Only the
                     // control agent acts for the tenant (with no calling
@@ -393,6 +393,8 @@ impl ComponentDispatcherService {
                     } else {
                         crate::api_launches::StandaloneControl::Denied
                     },
+                    // The call's own cleanup alarm, which its guards watch.
+                    Some(state.cleanup_alarm.clone()),
                 )
                 .map_err(|error| anyhow::anyhow!(error))?;
             let launch = TestLaunch {

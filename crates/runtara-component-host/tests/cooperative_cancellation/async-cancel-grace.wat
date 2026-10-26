@@ -5,8 +5,8 @@
   (import "cleanup" (func $cleanup async))
   (import "ready" (func $ready async))
   (import "trace" (func $trace (param "event" u32)))
-  (import "runtara:host/timers@1.0.0" (instance $timers
-    (export "sleep" (func async (param "ms" u64)))))
+  (import "wasi:clocks/monotonic-clock@0.3.0" (instance $timers
+    (export "wait-for" (func async (param "how-long" u64)))))
   (component $agent
     (import "request" (func $request async))
     (import "cleanup" (func $cleanup async))
@@ -84,7 +84,7 @@
   (component $workflow
     (import "target" (func $target async))
     (import "ready" (func $ready async))
-    (import "sleep" (func $sleep async (param "ms" u64)))
+    (import "sleep" (func $sleep async (param "how-long" u64)))
     (import "trace" (func $trace (param "event" u32)))
     (core module $memory (memory (export "memory") 1))
     (core instance $memory (instantiate $memory))
@@ -118,7 +118,7 @@
         (local $target i32) (local $timer i32) (local $set i32) (local $event i32)
         (local.set $target (call $handle (call $target)))
         (call $ready)
-        (local.set $timer (call $handle (call $sleep (i64.const {{GRACE_MS}}))))
+        (local.set $timer (call $handle (call $sleep (i64.const {{GRACE_NS}}))))
         (local.set $set (call $new))
         (call $join (local.get $target) (local.get $set))
         (call $join (local.get $timer) (local.get $set))
@@ -165,5 +165,5 @@
     (func (export "run") async (result u32) (canon lift (core func $code "run"))))
   (instance $workflow (instantiate $workflow
     (with "target" (func $agent "run")) (with "ready" (func $ready))
-    (with "sleep" (func $timers "sleep")) (with "trace" (func $trace))))
+    (with "sleep" (func $timers "wait-for")) (with "trace" (func $trace))))
   (export "run" (func $workflow "run")))

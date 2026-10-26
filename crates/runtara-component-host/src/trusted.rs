@@ -555,31 +555,9 @@ mod tests {
         }
     }
 
-    fn fixture(body: &str, pages: u32, start: &str, timer: bool) -> Vec<u8> {
-        let import = if timer {
-            r#"
-            (import "runtara:host/timers@1.0.0" (instance $timers
-                (export "sleep" (func async (param "ms" u64)))))
-            (alias export $timers "sleep" (func $sleep))
-            (core func $sleep-lower (canon lower (func $sleep)))
-        "#
-        } else {
-            ""
-        };
-        let core_import = if timer {
-            r#"(import "host" "sleep" (func $sleep (param i64)))"#
-        } else {
-            ""
-        };
-        let args = if timer {
-            r#"(with "host" (instance (export "sleep" (func $sleep-lower))))"#
-        } else {
-            ""
-        };
+    fn fixture(body: &str, pages: u32, start: &str) -> Vec<u8> {
         wat::parse_str(format!(r#"(component
-            {import}
             (core module $m
-                {core_import}
                 (memory (export "memory") {pages})
                 (global $heap (mut i32) (i32.const 4096))
                 (global $counter (mut i32) (i32.const 0))
@@ -590,7 +568,7 @@ mod tests {
                 (func (export "invoke") (param i32 i32 i32 i32 i32 i32) (result i32)
                     {body}
                     i32.const 0))
-            (core instance $i (instantiate $m {args}))
+            (core instance $i (instantiate $m))
             (func $invoke async (param "capability-id" string) (param "input" (list u8))
                 (param "context" (list u8)) (result (result (list u8) (error string)))
                 (canon lift (core func $i "invoke") (memory $i "memory") (realloc (func $i "realloc"))))
@@ -666,7 +644,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn earlier_approved_pins_run_installed_bytes_only_on_wake_or_resume() {
         use runtara_dsl::agent_meta::trusted_artifact_import;
-        let (executor, credentials) = executor(&fixture(counting_body(), 1, "", false));
+        let (executor, credentials) = executor(&fixture(counting_body(), 1, ""));
         let installed = executor.artifact_pins().next().unwrap().to_owned();
         let pin = |agent: &str, seed: &str| {
             trusted_artifact_import(agent, &seed.repeat(64), &"f".repeat(64))
@@ -771,7 +749,7 @@ mod tests {
         let mut info = runtara_agent_crypto::agent_info();
         info.capabilities[0].trusted = true;
         info.supports_connections = true;
-        let wasm = fixture(counting_body(), 1, "", false);
+        let wasm = fixture(counting_body(), 1, "");
         for types in [vec![], vec!["*".into()], vec!["".into()]] {
             info.integration_ids = types;
             assert!(registry.register(&info, &wasm, b"{}").is_err());
@@ -804,7 +782,7 @@ mod tests {
             "i32.const 4 i32.const 16 i32.store i32.const 8 i32.const {} i32.store",
             secret.len()
         ));
-        let (executor, _) = executor(&fixture(&body, 1, "", false));
+        let (executor, _) = executor(&fixture(&body, 1, ""));
         let err = call(&executor, Duration::from_secs(5)).await.unwrap_err();
         assert!(err.contains("TRUSTED_CAPABILITY_FAILED"));
         assert!(!err.contains("fixture-secret"));
@@ -812,7 +790,7 @@ mod tests {
             "i32.const 0 i32.const 1 i32.store8",
             "i32.const 0 i32.const 0 i32.store8",
         );
-        let (bad_output, _) = self::executor(&fixture(&body, 1, "", false));
+        let (bad_output, _) = self::executor(&fixture(&body, 1, ""));
         assert!(
             call(&bad_output, Duration::from_secs(5))
                 .await
@@ -823,7 +801,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn fresh_instances_for_sequential_and_concurrent_calls() {
-        let (executor, _) = executor(&fixture(counting_body(), 1, "", false));
+        let (executor, _) = executor(&fixture(counting_body(), 1, ""));
         for _ in 0..2 {
             assert_eq!(call(&executor, Duration::from_secs(5)).await.unwrap(), b"1");
         }
@@ -850,19 +828,7 @@ mod tests {
             ),
             (counting_body(), 1, "unreachable"),
         ] {
-            let (executor, _) = executor(&fixture(body, pages, start, false));
-            assert!(call(&executor, Duration::from_secs(5)).await.is_err());
-            assert_eq!(executor.permits.available_permits(), 16);
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn denied_timer_import_in_startup_and_invocation() {
-        for (body, start) in [
-            ("i64.const 0 call $sleep", ""),
-            (counting_body(), "i64.const 0 call $sleep"),
-        ] {
-            let (executor, _) = executor(&fixture(body, 1, start, true));
+            let (executor, _) = executor(&fixture(body, pages, start));
             assert!(call(&executor, Duration::from_secs(5)).await.is_err());
             assert_eq!(executor.permits.available_permits(), 16);
         }
@@ -870,8 +836,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn deadlines_and_cancellation_stop_running_guest() {
-        let (executor, credentials) =
-            executor(&fixture("(loop $forever br $forever)", 1, "", false));
+        let (executor, credentials) = executor(&fixture("(loop $forever br $forever)", 1, ""));
         assert!(call(&executor, Duration::from_millis(150)).await.is_err());
         assert_eq!(executor.permits.available_permits(), 16);
         let run = executor.clone();

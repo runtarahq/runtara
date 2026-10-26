@@ -413,13 +413,14 @@ pub enum AgentImportKind {
 const AGENT_TYPES_INTERFACE_PREFIX: &str = "runtara:agent/types@";
 
 /// Every non-WASI host interface an ordinary agent may import: exactly the
-/// ones `runtara_component_host::registry::build_linker` links today. Kept
-/// explicit rather than derived from the linker, because the linker may also
-/// carry stubs that agents must not bind; new host services add entries here.
-/// `runtara:workflow/` is never an agent import. The test
+/// ones `runtara_component_host::registry::build_linker` links today. None
+/// does: agents reach the platform through the workflow API over `wasi:http`.
+/// Kept explicit rather than derived from the linker, because the linker may
+/// also carry stubs that agents must not bind; new host services add entries
+/// here. `runtara:workflow/` is never an agent import. The test
 /// `every_allowlisted_import_links_against_the_agent_linker` links every entry
 /// against `build_linker`, so an entry needs its WIT pushed there too.
-pub const AGENT_IMPORT_ALLOWLIST: &[&str] = &[runtara_wit::host::TIMERS];
+pub const AGENT_IMPORT_ALLOWLIST: &[&str] = &[];
 
 /// Control interfaces the canonical `control` agent may import. This grant is
 /// the only gate on control (decision D2): the host makes `api` real for a
@@ -1602,10 +1603,14 @@ mod tests {
             }
         }
         // The probe checks definitions, not just names: an interface the
-        // linker does not define is refused.
+        // linker does not define is refused, as are the deleted host timers.
         assert!(
             links("runtara:host/timers@2.0.0").is_err(),
             "an undefined interface version must not link"
+        );
+        assert!(
+            links(runtara_wit::host::TIMERS).is_err(),
+            "the host timers are no longer linked"
         );
     }
 

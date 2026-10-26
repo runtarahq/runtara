@@ -17,8 +17,6 @@ use wasmtime_wasi_http::{
     },
 };
 
-use crate::host_io::HostIoContext;
-
 /// Per-call context. One of these is built before each component invocation.
 /// Carries authoritative identity only. Credentials belong to injected native
 /// services, never this context, and guests get no runtime address: every
@@ -282,15 +280,6 @@ struct StoreApi {
 impl Drop for StoreApi {
     fn drop(&mut self) {
         self.launches.release(&self.launch_id);
-    }
-}
-
-impl HostIoContext for HostState {
-    fn cleanup_alarm(&self) -> Option<&crate::cleanup_alarm::CleanupAlarmState> {
-        (!self.restricted).then_some(&self.cleanup_alarm)
-    }
-    fn timers_allowed(&self) -> bool {
-        !self.restricted
     }
 }
 

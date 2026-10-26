@@ -41,11 +41,11 @@ fn source(cleanup: Cleanup) -> String {
             },
         )
         .replace(
-            "{{GRACE_MS}}",
+            "{{GRACE_NS}}",
             if matches!(cleanup, Cleanup::Acknowledge | Cleanup::Return) {
-                "60000"
+                "60000000000"
             } else {
-                "100"
+                "100000000"
             },
         )
 }
@@ -112,10 +112,10 @@ async fn run(cleanup: Cleanup) -> anyhow::Result<()> {
     let mut linker = if matches!(cleanup, Cleanup::CpuLoopWithTimerTrap) {
         let mut linker = Linker::<HostState>::new(&engine);
         linker
-            .instance("runtara:host/timers@1.0.0")?
-            .func_wrap_concurrent("sleep", |_, (ms,): (u64,)| {
+            .instance("wasi:clocks/monotonic-clock@0.3.0")?
+            .func_wrap_concurrent("wait-for", |_, (ns,): (u64,)| {
                 Box::pin(async move {
-                    tokio::time::sleep(Duration::from_millis(ms)).await;
+                    tokio::time::sleep(Duration::from_nanos(ns)).await;
                     Err::<(), _>(wasmtime::Error::msg("qualification cleanup grace expired"))
                 })
             })?;
