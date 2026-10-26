@@ -706,6 +706,14 @@ impl WorkflowApiBackend for Backend {
         self.runtime(binding)?.heartbeat().await.map_err(host_error)
     }
 
+    /// The run parks at the breakpoint, so the pause answers at once.
+    async fn breakpoint(&self, binding: &Binding, _wait_ms: u64) -> Result<(), ApiError> {
+        self.runtime(binding)?
+            .breakpoint_pause()
+            .await
+            .map_err(host_error)
+    }
+
     async fn register_input(
         &self,
         binding: &Binding,

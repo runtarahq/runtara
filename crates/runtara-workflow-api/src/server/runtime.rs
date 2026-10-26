@@ -286,6 +286,30 @@ pub(super) async fn get_sleep(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BreakpointRequest {
+    wait_ms: u64,
+}
+
+/// `200` once the run is paused at the breakpoint.
+pub(super) async fn post_breakpoint(
+    State(state): State<WorkflowApiState>,
+    request: Request,
+) -> Result<Response, Failure> {
+    let binding = binding_of(&request)?;
+    let body = to_bytes(request.into_body(), state.caps.request_body_bytes)
+        .await
+        .map_err(|_| ApiError::new(ErrorCode::TooLarge, "breakpoint body is over the cap"))?;
+    let breakpoint: BreakpointRequest = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::new(ErrorCode::Invalid, format!("breakpoint: {e}")))?;
+    state
+        .backend
+        .breakpoint(&binding, breakpoint.wait_ms)
+        .await?;
+    Ok(StatusCode::OK.into_response())
+}
+
 pub(super) async fn post_heartbeat(
     State(state): State<WorkflowApiState>,
     request: Request,

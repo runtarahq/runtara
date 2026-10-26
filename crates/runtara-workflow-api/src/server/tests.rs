@@ -23,6 +23,7 @@ struct FakeRun {
     custom_after: u32,
     events: Vec<Event>,
     heartbeats: u32,
+    breakpoints: Vec<u64>,
 }
 
 #[derive(Default)]
@@ -156,6 +157,10 @@ impl WorkflowApiBackend for FakeBackend {
         Ok(1_730_000_000_000)
     }
 
+    async fn breakpoint(&self, _: &Binding, wait_ms: u64) -> Result<(), ApiError> {
+        self.run.lock().unwrap().breakpoints.push(wait_ms);
+        Ok(())
+    }
     async fn heartbeat(&self, _: &Binding) -> Result<(), ApiError> {
         self.run.lock().unwrap().heartbeats += 1;
         Ok(())
@@ -642,6 +647,14 @@ async fn time_heartbeat_and_retry_attempts() {
     let (status, _, _) = send(&app, write("POST", "/v1/heartbeat", "h1", "")).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(backend.run.lock().unwrap().heartbeats, 1);
+
+    let (status, _, _) = send(
+        &app,
+        write("POST", "/v1/debug/breakpoint", "b1", r#"{"waitMs":0}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(backend.run.lock().unwrap().breakpoints, [0]);
 
     let (status, _, _) = send(
         &app,

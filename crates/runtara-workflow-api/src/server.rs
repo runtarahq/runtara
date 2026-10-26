@@ -158,6 +158,13 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
         let _ = binding;
         Err(unsupported_service("heartbeat"))
     }
+    /// Pause the run at a breakpoint. A host that parks the paused run
+    /// answers once the pause is recorded; `wait_ms` bounds a host that
+    /// waits for the resume in process instead.
+    async fn breakpoint(&self, binding: &Binding, wait_ms: u64) -> Result<(), ApiError> {
+        let _ = (binding, wait_ms);
+        Err(unsupported_service("breakpoints"))
+    }
     /// Append events, in order.
     async fn append_events(&self, binding: &Binding, events: Vec<Event>) -> Result<(), ApiError> {
         let _ = (binding, events);
@@ -480,6 +487,7 @@ pub fn router(state: WorkflowApiState) -> Router {
         .route("/v1/time", get(runtime::get_time))
         .route("/v1/time/sleep", get(runtime::get_sleep))
         .route("/v1/heartbeat", post(runtime::post_heartbeat))
+        .route("/v1/debug/breakpoint", post(runtime::post_breakpoint))
         .route("/v1/events", post(runtime::post_events))
         .route(
             "/v1/inputs/{signal_id}",
