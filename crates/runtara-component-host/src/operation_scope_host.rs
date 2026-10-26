@@ -1,21 +1,16 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Host side of typed agent suspension.
+//! Operation identities of typed agent suspension.
 //!
-//! - `runtara:workflow/operation`, imported only by compiled workflow
-//!   logic, names the operation of an operation-scoped call site (a suspending
-//!   capability or a control call, durable or not). `enter` parses the site's
-//!   canonical v2 Agent checkpoint key into an [`OperationIdentity`] and the
-//!   host keys everything by `op_hash = sha256(checkpoint-key)` inside the
-//!   run's own instance; nothing about the identity comes from agent input.
-//!   The entered `op_hash` is the `operation` of every control call the site
-//!   makes (`ControlAuthority`), and a second `enter` in one run fails closed.
-//! - `runtara:agent/continuation.continuation()` hands a suspending
-//!   agent the continuation of the entered operation.
+//! An operation-scoped call site (a suspending capability or a control call,
+//! durable or not) enters its operation over the workflow API
+//! (`POST /v1/operations`). The host parses the site's canonical v2 Agent
+//! checkpoint key into an [`OperationIdentity`] and keys everything by
+//! `op_hash = sha256(checkpoint-key)` inside the run's own instance; nothing
+//! about the identity comes from agent input.
 //!
-//! An agent suspension may wake at a time (`at`). Nothing lets an agent
-//! register an instance wait, so an `instances` wake is refused as
-//! `AGENT_INVALID_SUSPENSION`; a run waits on other runs with the
+//! An agent suspension may wake only at a time (`at`). Nothing lets an agent
+//! register an instance wait; a run waits on other runs with the
 //! `WaitForInstances` step (`instance_wait_host`).
 //!
 //! Persistence goes through [`crate::runtime_host::RuntimeHost`]; hosts
@@ -23,28 +18,12 @@
 //! state.
 
 use sha2::{Digest, Sha256};
-use wasmtime::StoreContextMut;
-use wasmtime::component::Linker;
-
-use crate::workflow::WorkflowState;
 
 /// The suspension types are the shared `runtara:agent/types` mirrors.
 pub use crate::lifecycle::{
     WorkflowOutcome as SuspendableOutcome, WorkflowSuspension as Suspension,
     WorkflowWake as SuspensionWake,
 };
-
-/// The contract form of an agent's wake: only `at` and `instances` are
-/// an agent's to return; `on-signal` and `on-resume` belong to workflow logic.
-fn to_contract(wake: &SuspensionWake) -> Option<runtara_agent_suspension::Wake> {
-    match wake {
-        SuspensionWake::At(at) => Some(runtara_agent_suspension::Wake::At(*at)),
-        SuspensionWake::Instances(id) => {
-            Some(runtara_agent_suspension::Wake::Instances(id.clone()))
-        }
-        SuspensionWake::OnSignal(_) | SuspensionWake::OnResume => None,
-    }
-}
 
 /// Largest checkpoint key `enter` accepts.
 pub const MAX_OPERATION_KEY_BYTES: usize = 16 * 1024;
@@ -136,246 +115,9 @@ pub fn parse_agent_operation_key(key: &str, attempt: u32) -> Result<OperationIde
     })
 }
 
-/// The operation a call site entered and has not left.
-#[derive(Debug, Clone)]
-pub(crate) struct EnteredOperation {
-    pub(crate) identity: OperationIdentity,
-    pub(crate) continuation: Option<Vec<u8>>,
-}
-
-const SECOND_ENTER: &str =
-    "an operation is already entered; operation-scoped sites run one at a time";
-
-/// Per-run operation-scope state, owned by the workflow store.
-#[derive(Debug, Default)]
-pub(crate) struct OperationScopeState {
-    current: Option<EnteredOperation>,
-}
-
-impl OperationScopeState {
-    /// The entered operation, if any.
-    pub(crate) fn current(&self) -> Option<&EnteredOperation> {
-        self.current.as_ref()
-    }
-
-    /// Check that no operation is entered and parse the site's identity.
-    pub(crate) fn admit(&self, key: &str, attempt: u32) -> Result<OperationIdentity, String> {
-        if self.current.is_some() {
-            return Err(SECOND_ENTER.into());
-        }
-        parse_agent_operation_key(key, attempt)
-    }
-
-    /// Enter `identity`. Fails closed when another operation got in first
-    /// (`admit` and this straddle the continuation load).
-    pub(crate) fn enter(
-        &mut self,
-        identity: OperationIdentity,
-        continuation: Option<Vec<u8>>,
-    ) -> Result<(), String> {
-        if self.current.is_some() {
-            return Err(SECOND_ENTER.into());
-        }
-        self.current = Some(EnteredOperation {
-            identity,
-            continuation,
-        });
-        Ok(())
-    }
-
-    /// Leave the entered operation, if any.
-    pub(crate) fn leave(&mut self) -> Option<EnteredOperation> {
-        self.current.take()
-    }
-
-    /// Check a suspension of the entered operation against the caps, and
-    /// return its identity. No operation registers instance waits, so an
-    /// `instances` wake is refused.
-    pub(crate) fn check_suspension(
-        &self,
-        state: &[u8],
-        wakes: &[SuspensionWake],
-    ) -> Result<OperationIdentity, String> {
-        let Some(current) = self.current.as_ref() else {
-            return Err("no operation is entered".into());
-        };
-        let invalid = |error: String| {
-            format!(
-                "{}: {error}",
-                runtara_agent_suspension::AGENT_INVALID_SUSPENSION
-            )
-        };
-        let contract = wakes
-            .iter()
-            .map(to_contract)
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| invalid("an agent may wake only `at` or on `instances`".into()))?;
-        runtara_agent_suspension::validate_suspension(&contract, state).map_err(invalid)?;
-        if let Some(foreign) = wakes.iter().find_map(|wake| match wake {
-            SuspensionWake::Instances(id) => Some(id),
-            _ => None,
-        }) {
-            return Err(invalid(format!(
-                "`{foreign}` is not an instance wait this operation registered; agents cannot register one"
-            )));
-        }
-        Ok(current.identity.clone())
-    }
-
-    /// Leave the entered operation as suspended.
-    pub(crate) fn suspended(&mut self) {
-        self.current = None;
-    }
-}
-
 /// `op_hash` of a call site: hex sha256 of its canonical checkpoint key.
 pub fn operation_hash(checkpoint_key: &str) -> String {
     format!("{:x}", Sha256::digest(checkpoint_key.as_bytes()))
-}
-
-/// Store data that can answer `runtara:agent/continuation`.
-pub(crate) trait SuspensionContextView {
-    /// The continuation of the entered operation, if any.
-    fn continuation(&self) -> Option<Vec<u8>>;
-}
-
-impl SuspensionContextView for WorkflowState {
-    fn continuation(&self) -> Option<Vec<u8>> {
-        self.operation
-            .current()
-            .and_then(|operation| operation.continuation.clone())
-    }
-}
-
-/// Stores outside a workflow run (dispatcher, trusted and control executor
-/// stores) have no operation, so no continuation.
-impl SuspensionContextView for crate::host_state::HostState {
-    fn continuation(&self) -> Option<Vec<u8>> {
-        None
-    }
-}
-
-/// Bind `runtara:agent/continuation`.
-pub(crate) fn add_suspension_context_to_linker<T: SuspensionContextView + Send + 'static>(
-    linker: &mut Linker<T>,
-) -> anyhow::Result<()> {
-    linker
-        .instance(runtara_wit::agent::CONTINUATION)?
-        .func_wrap("continuation", |store: StoreContextMut<'_, T>, (): ()| {
-            Ok((store.data().continuation(),))
-        })?;
-    Ok(())
-}
-
-fn runtime(
-    store: &StoreContextMut<'_, WorkflowState>,
-) -> Result<std::sync::Arc<dyn crate::runtime_host::RuntimeHost>, String> {
-    store.data().runtime_host().cloned().ok_or_else(|| {
-        "typed agent suspension needs a runtime host (WorkflowRunSpec.runtime is None)".to_string()
-    })
-}
-
-/// Bind `runtara:workflow/operation` for workflow stores.
-pub(crate) fn add_operation_scope_to_linker(
-    linker: &mut Linker<WorkflowState>,
-) -> anyhow::Result<()> {
-    let mut scope = linker.instance(runtara_wit::workflow::OPERATION)?;
-    scope.func_wrap_async(
-        "enter",
-        |mut store: StoreContextMut<'_, WorkflowState>,
-         (key, attempt, load): (String, u32, bool)| {
-            Box::new(async move {
-                let identity = match store.data().operation.admit(&key, attempt) {
-                    Ok(identity) => identity,
-                    Err(error) => return Ok((Err(error),)),
-                };
-                let op_hash = identity.op_hash.clone();
-                let continuation = if load {
-                    let host = match runtime(&store) {
-                        Ok(host) => host,
-                        Err(error) => return Ok((Err(error),)),
-                    };
-                    match host
-                        .operation_continuation_load(op_hash.clone(), attempt)
-                        .await
-                    {
-                        Ok(continuation) => continuation,
-                        Err(error) => return Ok((Err(error),)),
-                    }
-                } else {
-                    None
-                };
-                Ok((store.data_mut().operation.enter(identity, continuation),))
-            })
-        },
-    )?;
-    scope.func_wrap_async(
-        "suspend",
-        |mut store: StoreContextMut<'_, WorkflowState>,
-         (state, wakes): (Vec<u8>, Vec<SuspensionWake>)| {
-            Box::new(async move {
-                // A suspension that breaks the caps is the step error
-                // `AGENT_INVALID_SUSPENSION`; the operation stays entered so
-                // the failed exit discards whatever it kept.
-                let identity = match store.data().operation.check_suspension(&state, &wakes) {
-                    Ok(identity) => identity,
-                    Err(error) => return Ok((Err(error),)),
-                };
-                // Losing the continuation would re-run the operation from
-                // scratch, so a store failure fails the run instead of the step.
-                runtime(&store)
-                    .map_err(wasmtime::Error::msg)?
-                    .operation_continuation_store(identity.op_hash, identity.attempt, state)
-                    .await
-                    .map_err(|error| {
-                        wasmtime::format_err!("storing the operation continuation failed: {error}")
-                    })?;
-                store.data_mut().operation.suspended();
-                Ok((Ok(()),))
-            })
-        },
-    )?;
-    scope.func_wrap_async(
-        "exit",
-        |mut store: StoreContextMut<'_, WorkflowState>, (failed,): (bool,)| {
-            Box::new(async move {
-                let operation = store.data_mut().operation.leave();
-                // A failure is not checkpointed, so a replay or retry starts
-                // the operation afresh: its wait is closed (a retry registers
-                // a new one) and its continuation goes. Both must be confirmed
-                // before the step's error path runs.
-                if failed && let Some(operation) = operation {
-                    let host = runtime(&store).map_err(wasmtime::Error::msg)?;
-                    let op_hash = operation.identity.op_hash;
-                    host.operation_wait_close(op_hash.clone())
-                        .await
-                        .map_err(wasmtime::Error::msg)?;
-                    host.operation_release(op_hash)
-                        .await
-                        .map_err(wasmtime::Error::msg)?;
-                }
-                Ok(())
-            })
-        },
-    )?;
-    scope.func_wrap_async(
-        "release",
-        |store: StoreContextMut<'_, WorkflowState>, (key,): (String,)| {
-            Box::new(async move {
-                // The result is already checkpointed, so a failed release only
-                // leaves a stale continuation that instance cleanup removes.
-                let released = match runtime(&store) {
-                    Ok(host) => host.operation_release(operation_hash(&key)).await,
-                    Err(error) => Err(error),
-                };
-                if let Err(error) = released {
-                    tracing::warn!(%error, "operation release failed");
-                }
-                Ok(())
-            })
-        },
-    )?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -439,65 +181,6 @@ mod tests {
             assert!(parse_agent_operation_key(&key, 1).is_err(), "{key}");
         }
         assert!(parse_agent_operation_key(&root, 0).is_err());
-    }
-
-    #[test]
-    fn a_second_enter_fails_closed_until_the_first_leaves() {
-        let mut state = OperationScopeState::default();
-        let first = key("wf", serde_json::json!([]), "a");
-        let identity = state.admit(&first, 1).unwrap();
-        state.enter(identity.clone(), None).unwrap();
-        let second = key("wf", serde_json::json!([]), "b");
-        assert_eq!(state.admit(&second, 1).unwrap_err(), SECOND_ENTER);
-        // A racing enter that was admitted before the first one landed.
-        assert_eq!(
-            state.enter(identity.clone(), None).unwrap_err(),
-            SECOND_ENTER
-        );
-        assert_eq!(state.current().unwrap().identity, identity);
-        state.leave();
-        assert!(state.admit(&second, 1).is_ok());
-    }
-
-    #[test]
-    fn a_suspension_is_checked_against_the_caps_and_names_no_instance_wait() {
-        let mut state = OperationScopeState::default();
-        let wakes = [SuspensionWake::At(9)];
-        assert!(
-            state.check_suspension(b"s", &wakes).is_err(),
-            "outside an operation"
-        );
-        let site = key("wf", serde_json::json!([]), "pause");
-        let identity = state.admit(&site, 2).unwrap();
-        state.enter(identity.clone(), None).unwrap();
-
-        let invalid = runtara_agent_suspension::AGENT_INVALID_SUSPENSION;
-        for (wakes, bytes) in [
-            (vec![], 0),
-            (
-                vec![SuspensionWake::At(1); runtara_agent_suspension::MAX_WAKES + 1],
-                0,
-            ),
-            (
-                vec![SuspensionWake::At(1)],
-                runtara_agent_suspension::MAX_CONTINUATION_BYTES + 1,
-            ),
-            // No operation registers an instance wait.
-            (vec![SuspensionWake::Instances("w1".into())], 0),
-            (
-                vec![
-                    SuspensionWake::At(1),
-                    SuspensionWake::Instances("w1".into()),
-                ],
-                0,
-            ),
-        ] {
-            let error = state.check_suspension(&vec![0; bytes], &wakes).unwrap_err();
-            assert!(error.starts_with(invalid), "{error}");
-        }
-        assert_eq!(state.check_suspension(b"s", &wakes).unwrap(), identity);
-        state.suspended();
-        assert!(state.current().is_none());
     }
 
     /// The hand-written suspension mirrors have the canonical layout the

@@ -314,12 +314,6 @@ impl WasiHttpHooks for WorkflowHooks {
 pub struct WorkflowState {
     /// The trusted pins of the run, when the host runs trusted agents.
     trusted_pins: Option<Arc<std::collections::HashSet<String>>>,
-    /// The operation a suspending call site entered.
-    pub(crate) operation: crate::operation_scope_host::OperationScopeState,
-    /// Durable instance waits of WaitForInstances steps.
-    pub(crate) instance_waits: crate::instance_wait_host::RunInstanceWaits,
-    /// The run's queryable state (SetState / GetState steps).
-    pub(crate) run_state: crate::run_state_host::RunStateAccess,
     wasi: WasiCtx,
     http: WasiHttpCtx,
     table: ResourceTable,
@@ -651,15 +645,6 @@ impl WorkflowExecutor {
         // task, allowing parallel Split subtasks to overlap their I/O.
         crate::host_io::add_host_io_to_linker(&mut linker)?;
         crate::execution_host::add_execution_to_linker(&mut linker)?;
-        // Typed agent suspension: the compiler-emitted operation scope, the
-        // continuation context of ordinary suspending agents, and the control
-        // API, real only for a run's own prepared entry.
-        crate::operation_scope_host::add_operation_scope_to_linker(&mut linker)?;
-        crate::operation_scope_host::add_suspension_context_to_linker(&mut linker)?;
-        // Durable instance waits of compiled WaitForInstances steps.
-        crate::instance_wait_host::add_instance_waits_to_linker(&mut linker)?;
-        // Queryable run state of compiled SetState / GetState steps.
-        crate::run_state_host::add_run_state_to_linker(&mut linker)?;
         Ok(Self {
             trusted: std::sync::OnceLock::new(),
             control_host: std::sync::OnceLock::new(),
@@ -1218,17 +1203,6 @@ impl WorkflowExecutor {
                     .clone()
                     .unwrap_or_else(|| self.trusted_pins(pre.component()))
             }),
-            operation: Default::default(),
-            instance_waits: crate::instance_wait_host::RunInstanceWaits::for_run(
-                self.instance_waits.get().cloned(),
-                spec.trusted_tenant.as_deref(),
-                spec.trusted_instance.as_deref(),
-            ),
-            run_state: crate::run_state_host::RunStateAccess::for_run(
-                self.run_state.get().cloned(),
-                spec.trusted_tenant.as_deref(),
-                spec.trusted_instance.as_deref(),
-            ),
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
@@ -1530,10 +1504,9 @@ impl WorkflowExecutor {
         }
 
         let mut exit = exit;
-        let mut instance_waits = parked_waits(store.data());
-        // A run on the workflow API ABI names the waits it parks on as
-        // `instances` wakes; report them where the old ABI's host attached
-        // them, so callers see one shape on either ABI.
+        let mut instance_waits = Vec::new();
+        // A run names the waits it parks on as `instances` wakes; report them
+        // apart from its lifecycle wakes.
         if let InvokeExit::Suspended(wakes) = &mut exit {
             wakes.retain(|wake| match wake {
                 crate::lifecycle::WorkflowWake::Instances(id) => {
@@ -1573,9 +1546,6 @@ impl WorkflowExecutor {
         let deadline = tokio::time::Instant::now() + crate::outbound_http::MAX_TIMEOUT;
         let state = WorkflowState {
             trusted_pins: None,
-            operation: Default::default(),
-            instance_waits: Default::default(),
-            run_state: Default::default(),
             wasi: WasiCtxBuilder::new()
                 .allow_tcp(false)
                 .allow_udp(false)
@@ -1655,12 +1625,6 @@ pub enum InvokeExit {
     Cancelled,
     /// Cleanup exceeded its grace; no cooperative acknowledgement is implied.
     CleanupAborted,
-}
-
-/// The instance waits a suspended run parks on: those its WaitForInstances
-/// steps left pending.
-fn parked_waits(state: &WorkflowState) -> Vec<String> {
-    state.instance_waits.pending().to_vec()
 }
 
 /// Result of one workflow run.

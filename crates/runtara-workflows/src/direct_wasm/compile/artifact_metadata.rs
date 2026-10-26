@@ -1601,13 +1601,6 @@ mod tests {
                 panic!("allowlisted `{entry}` does not link against build_linker: {error:#}");
             }
         }
-        // The granted continuation context links too, without a
-        // continuation, so the full bundle loads in the dispatcher.
-        for entry in [runtara_wit::agent::CONTINUATION] {
-            if let Err(error) = links(entry) {
-                panic!("granted `{entry}` does not link against build_linker: {error:#}");
-            }
-        }
         // The probe checks definitions, not just names: an interface the
         // linker does not define is refused.
         assert!(

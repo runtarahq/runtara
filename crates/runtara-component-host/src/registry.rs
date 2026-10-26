@@ -48,7 +48,6 @@ pub fn build_linker(engine: &Engine) -> Result<Linker<HostState>> {
     // Timers retain their interface; HTTP uses the injected outbound service.
     crate::host_io::add_host_io_to_linker(&mut linker)?;
     // A store outside a workflow run has no operation, so no continuation.
-    crate::operation_scope_host::add_suspension_context_to_linker(&mut linker)?;
     Ok(linker)
 }
 
