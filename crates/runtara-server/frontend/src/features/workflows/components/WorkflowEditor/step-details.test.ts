@@ -204,6 +204,45 @@ describe('stepDetailRows', () => {
     ]);
   });
 
+  it('reads a value being edited as JSON text as the value it saves as', () => {
+    // The step panel holds an edited JSON literal as text under the json hint
+    // until a save parses it; the card must not show that raw text meanwhile.
+    expect(
+      stepDetailRows({
+        stepType: 'Agent',
+        inputMapping: [
+          {
+            type: 'condition',
+            value:
+              '{"type": "operation", "op": "NE", "arguments": [{"valueType": "reference", "value": "name"}, {"valueType": "reference", "value": "data.body.supplier"}]}',
+            valueType: 'immediate',
+            typeHint: 'json',
+          },
+          {
+            type: 'filters',
+            value: '{"city": "Lviv"}',
+            valueType: 'immediate',
+            typeHint: 'json',
+          },
+          // Not JSON yet: shown as typed, as the save keeps it.
+          {
+            type: 'order_by',
+            value: '{"field":',
+            valueType: 'immediate',
+            typeHint: 'json',
+          },
+          // Only the JSON hints are parsed; a string field stays a string.
+          { type: 'note', value: '[1, 2]', valueType: 'immediate' },
+        ],
+      }).map((row) => [row.label, row.value])
+    ).toEqual([
+      ['Condition', 'name is not Input · body.supplier'],
+      ['Filters', 'City'],
+      ['Order by', '{"field":'],
+      ['Note', '[1, 2]'],
+    ]);
+  });
+
   it('says what a signal wait asks for', () => {
     const rows = stepDetailRows({
       stepType: 'WaitForSignal',

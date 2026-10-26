@@ -340,16 +340,46 @@ function buildRow(
     };
   }
 
+  const literal = literalValue(entry);
+
   // A condition held as a plain value (object-model query `condition`, a
   // Filter-style predicate) reads as a sentence, as on Conditional cards.
-  if (isCondition(value)) {
-    const sentence = describeCondition(value, context);
+  if (isCondition(literal)) {
+    const sentence = describeCondition(literal, context);
     if (sentence) {
       return { key, label, value: truncate(sentence), kind: 'literal' };
     }
   }
 
-  return { key, label, value: formatLiteral(value, key), kind: 'literal' };
+  return { key, label, value: formatLiteral(literal, key), kind: 'literal' };
+}
+
+/** Hints under which the save path parses an immediate's text as JSON. */
+const JSON_TEXT_HINTS: ReadonlySet<string> = new Set([
+  'json',
+  'object',
+  'array',
+]);
+
+/**
+ * The value an immediate holds. One edited as JSON text in the step panel
+ * stays that text, under a JSON hint, until a save parses it
+ * (processMappingEntry, which also leaves `{{` text alone) — so it reads as
+ * the value the save will write, not as raw JSON.
+ */
+function literalValue({ value, typeHint }: MappingEntry): unknown {
+  if (
+    typeof value !== 'string' ||
+    !JSON_TEXT_HINTS.has(typeHint ?? '') ||
+    value.includes('{{')
+  ) {
+    return value;
+  }
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
 }
 
 function mappingEntries(data: StepDetailData): MappingEntry[] {

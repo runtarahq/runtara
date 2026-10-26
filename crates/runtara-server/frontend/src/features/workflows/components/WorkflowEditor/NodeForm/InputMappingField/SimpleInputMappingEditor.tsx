@@ -58,7 +58,11 @@ import { StructuredValueSummary } from './StructuredValueSummary';
 import { CustomFieldRow } from './CustomFieldRow';
 import { AddCustomFieldDialog } from './AddCustomFieldDialog';
 import { useTabContext } from '../NodeFormItem';
-import { describeArrayValue, describeObjectValue } from './value-display';
+import {
+  describeArrayValue,
+  describeConditionValue,
+  describeObjectValue,
+} from './value-display';
 import { TOGGLE_GUTTER_CLASS, VALUE_CELL_CLASS } from './value-cell-layout';
 
 /** Check if a field type is an array type */
@@ -109,6 +113,19 @@ function collectLegacyObjectFields(
   });
 
   return result;
+}
+
+/**
+ * The value an inline array/object editor gets: a reference as its path,
+ * anything else as stored — a composite structure, or an immediate scalar or
+ * literal structure, which the editor shows as JSON.
+ */
+function editorValue(
+  entry: InputMappingEntry | undefined
+): InputMappingEntry['value'] {
+  if (!entry) return '';
+  if (entry.valueType === 'reference') return String(entry.value ?? '');
+  return entry.value ?? '';
 }
 
 /**
@@ -271,6 +288,7 @@ function FieldRow({
 
   // Get display value for objects
   const getObjectDisplayValue = () =>
+    (legacyFieldCount === 0 && describeConditionValue(value, valueType)) ||
     describeObjectValue(value, valueType, legacyFieldCount);
 
   return (
@@ -406,6 +424,7 @@ export function SimpleInputMappingEditor({
   );
   const setFieldValue = useNodeFormStore((s) => s.setFieldValue);
   const setFieldValueType = useNodeFormStore((s) => s.setFieldValueType);
+  const setFieldTypeHint = useNodeFormStore((s) => s.setFieldTypeHint);
   const addCustomField = useNodeFormStore((s) => s.addCustomField);
   const renameField = useNodeFormStore((s) => s.renameField);
 
@@ -811,6 +830,20 @@ export function SimpleInputMappingEditor({
     [nodeId, setFieldValueType, syncToParent]
   );
 
+  // A JSON literal edited as text carries the `json` hint so the save path
+  // parses it back; `undefined` returns the field to its own hint.
+  const handleTypeHintChange = useCallback(
+    (field: CapabilityField, typeHint: string | undefined) => {
+      setFieldTypeHint(
+        nodeId,
+        field.name,
+        typeHint ?? getTypeHintFromFieldType(field.type)
+      );
+      syncToParent();
+    },
+    [nodeId, setFieldTypeHint, syncToParent]
+  );
+
   // Previously closed array/object editor when clicking on other fields,
   // but now we keep it open to allow editing multiple fields simultaneously.
   // The user can explicitly close the editor using the close button.
@@ -891,15 +924,11 @@ export function SimpleInputMappingEditor({
                       <TableRow className="hover:bg-transparent">
                         <TableCell colSpan={3} className="border-t-0 p-0">
                           <div className="border-t border-primary/20 bg-muted/20">
+                            {/* The stored value as is: an immediate list is
+                                one literal, which the editor shows as JSON. */}
                             <ArrayMappingEditor
                               arrayType={field.type || 'array'}
-                              value={
-                                fieldEntry?.valueType === 'composite'
-                                  ? (fieldEntry.value as
-                                      | CompositeObjectValue
-                                      | CompositeArrayValue)
-                                  : String(fieldEntry?.value ?? '')
-                              }
+                              value={editorValue(fieldEntry)}
                               valueType={
                                 (fieldEntry?.valueType ??
                                   'immediate') as InputMappingValueType
@@ -909,6 +938,10 @@ export function SimpleInputMappingEditor({
                               }
                               onValueTypeChange={(type) =>
                                 handleArrayValueTypeChange(field.name, type)
+                              }
+                              typeHint={fieldEntry?.typeHint}
+                              onTypeHintChange={(typeHint) =>
+                                handleTypeHintChange(field, typeHint)
                               }
                               itemSchema={field.items as any}
                               onClose={handleArrayClose}
@@ -922,61 +955,43 @@ export function SimpleInputMappingEditor({
                       !isArrayType(field.type) &&
                       (isObjectType(field.type) ||
                         isUntypedField(field.type) ||
-                        fieldEntry?.valueType === 'composite') &&
-                      (() => {
-                        // Determine the value and valueType for the editor
-                        // If the value is already an object/array, treat it as composite even if valueType says otherwise
-                        const isValueObject =
-                          typeof fieldEntry?.value === 'object' &&
-                          fieldEntry?.value !== null;
-                        const effectiveValueType: InputMappingValueType =
-                          fieldEntry?.valueType === 'composite' ||
-                          fieldEntry?.valueType === 'reference'
-                            ? fieldEntry.valueType
-                            : isValueObject
-                              ? 'composite'
-                              : 'immediate';
-
-                        // Get the value for the editor
-                        // If valueType is composite OR the value is actually an object, pass it directly
-                        // Otherwise convert to string for immediate/reference modes
-                        const valueForEditor =
-                          effectiveValueType === 'composite'
-                            ? ((isValueObject ? fieldEntry.value : {}) as
-                                CompositeObjectValue | CompositeArrayValue)
-                            : effectiveValueType === 'reference'
-                              ? String(fieldEntry?.value ?? '')
-                              : String(fieldEntry?.value ?? '');
-
-                        return (
-                          <TableRow className="hover:bg-transparent">
-                            <TableCell colSpan={3} className="border-t-0 p-0">
-                              <div className="border-t border-primary/20 bg-muted/20">
-                                <ObjectMappingEditor
-                                  value={valueForEditor}
-                                  valueType={effectiveValueType}
-                                  onChange={(value) =>
-                                    handleObjectValueChange(field.name, value)
-                                  }
-                                  onValueTypeChange={(type) =>
-                                    handleObjectValueTypeChange(
-                                      field.name,
-                                      type
-                                    )
-                                  }
-                                  schema={field.items as any}
-                                  // A non-object field holding a built value
-                                  // (http `body` is declared string) needs the
-                                  // Value option too, to get back to a plain
-                                  // value.
-                                  untyped={!isObjectType(field.type)}
-                                  onClose={() => handleObjectClose(field.name)}
-                                />
-                              </div>
-                            </TableCell>
-                          </TableRow>
-                        );
-                      })()}
+                        fieldEntry?.valueType === 'composite') && (
+                        <TableRow className="hover:bg-transparent">
+                          <TableCell colSpan={3} className="border-t-0 p-0">
+                            <div className="border-t border-primary/20 bg-muted/20">
+                              {/* The stored value and type as they are. An
+                                  immediate object is one literal, not a build:
+                                  reading it as composite showed every key as
+                                  "Unknown type" and turned the first edit into
+                                  a composite (see json-literal.ts). */}
+                              <ObjectMappingEditor
+                                value={editorValue(fieldEntry)}
+                                valueType={
+                                  (fieldEntry?.valueType ??
+                                    'immediate') as InputMappingValueType
+                                }
+                                onChange={(value) =>
+                                  handleObjectValueChange(field.name, value)
+                                }
+                                onValueTypeChange={(type) =>
+                                  handleObjectValueTypeChange(field.name, type)
+                                }
+                                typeHint={fieldEntry?.typeHint}
+                                onTypeHintChange={(typeHint) =>
+                                  handleTypeHintChange(field, typeHint)
+                                }
+                                schema={field.items as any}
+                                // A non-object field holding a built value
+                                // (http `body` is declared string) needs the
+                                // Value option too, to get back to a plain
+                                // value.
+                                untyped={!isObjectType(field.type)}
+                                onClose={() => handleObjectClose(field.name)}
+                              />
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )}
                   </React.Fragment>
                 );
               })

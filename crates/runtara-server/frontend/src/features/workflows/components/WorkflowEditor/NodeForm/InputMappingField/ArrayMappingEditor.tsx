@@ -9,8 +9,8 @@
  * and writes changes directly via onChange (which updates the Zustand store).
  */
 
-import { useCallback, useMemo } from 'react';
-import { Link, Layers, X } from 'lucide-react';
+import { useCallback, useMemo, useState } from 'react';
+import { Link, Layers, Type, X } from 'lucide-react';
 import { Button } from '@/shared/components/ui/button';
 import { MappingValueInput } from './MappingValueInput';
 import { CompositeValueEditor } from './CompositeValueEditor';
@@ -21,21 +21,32 @@ import {
 import type {
   CompositeObjectValue,
   CompositeArrayValue,
+  InputMappingEntry,
   InputMappingValueType,
 } from '@/features/workflows/stores/nodeFormStore';
+import { JSON_TYPE_HINT, isJsonLiteral, jsonLiteralText } from './json-literal';
 
-type ArrayMode = 'reference' | 'build';
+type ArrayMode = 'value' | 'reference' | 'build';
 
 const MODE_OPTIONS: readonly MappingModeToggleOption<ArrayMode>[] = [
   { value: 'reference', label: 'Reference', icon: Link, tone: 'info' },
   { value: 'build', label: 'Build', icon: Layers },
 ];
 
+/** Shown while the field holds a literal list, so it has somewhere to be seen. */
+const LITERAL_MODE_OPTIONS: readonly MappingModeToggleOption<ArrayMode>[] = [
+  { value: 'value', label: 'Value', icon: Type },
+  ...MODE_OPTIONS,
+];
+
 interface ArrayMappingEditorProps {
   /** The array type (e.g., "array<string>", "array<object>") - used for hints */
   arrayType: string;
-  /** Current value (reference path for reference mode, or composite array for build mode) */
-  value: string | CompositeObjectValue | CompositeArrayValue;
+  /**
+   * Current value: a reference path, a composite array for build mode, or an
+   * immediate list held as one literal.
+   */
+  value: InputMappingEntry['value'];
   /** Current value type */
   valueType: InputMappingValueType;
   /** Called when value changes */
@@ -55,6 +66,13 @@ interface ArrayMappingEditorProps {
   };
   /** Called when closing the array editor */
   onClose: () => void;
+  /** The entry's type hint; `json` marks the text of a JSON literal. */
+  typeHint?: string;
+  /**
+   * Set the entry's type hint: `json` when a JSON literal is edited as text,
+   * `undefined` to return to the field's own hint on a mode switch.
+   */
+  onTypeHintChange?: (typeHint: string | undefined) => void;
 }
 
 /** Parse the inner type from array type string */
@@ -74,9 +92,23 @@ export function ArrayMappingEditor({
   onValueTypeChange,
   itemSchema,
   onClose,
+  typeHint,
+  onTypeHintChange,
 }: ArrayMappingEditorProps) {
-  // Mode is derived from valueType: reference stays as reference, everything else is build (composite)
-  const mode: ArrayMode = valueType === 'reference' ? 'reference' : 'build';
+  // Set once the author edits a JSON literal, so clearing the text to retype
+  // it does not drop the field back to an empty Build.
+  const [editingJson, setEditingJson] = useState(false);
+
+  // Mode is derived from the stored entry: an immediate holding a list is one
+  // literal value (see json-literal.ts), anything else that is not a
+  // reference is a build.
+  const mode: ArrayMode =
+    valueType === 'reference'
+      ? 'reference'
+      : isJsonLiteral(value, valueType, typeHint, false) ||
+          (editingJson && valueType === 'immediate')
+        ? 'value'
+        : 'build';
 
   // For build mode, get the composite value
   const compositeValue = useMemo(() => {
@@ -101,8 +133,16 @@ export function ArrayMappingEditor({
     : [];
 
   const handleModeChange = (newMode: ArrayMode) => {
+    // Clicking the lit segment is not a request to start over: every branch
+    // below resets the value.
+    if (newMode === mode) return;
+    setEditingJson(false);
+    if (typeHint === JSON_TYPE_HINT) onTypeHintChange?.(undefined);
     if (newMode === 'reference') {
       onValueTypeChange('reference');
+      onChange('');
+    } else if (newMode === 'value') {
+      onValueTypeChange('immediate');
       onChange('');
     } else {
       onValueTypeChange('composite');
@@ -128,7 +168,7 @@ export function ArrayMappingEditor({
       <div className="flex shrink-0 items-center gap-2 px-4 py-3">
         <MappingModeToggle
           className="flex-1"
-          options={MODE_OPTIONS}
+          options={mode === 'value' ? LITERAL_MODE_OPTIONS : MODE_OPTIONS}
           value={mode}
           onChange={handleModeChange}
         />
@@ -145,7 +185,28 @@ export function ArrayMappingEditor({
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4">
-        {mode === 'reference' ? (
+        {mode === 'value' ? (
+          <div className="space-y-2">
+            <p className="text-sm text-muted-foreground">
+              A JSON value, sent as written.
+            </p>
+            <MappingValueInput
+              value={jsonLiteralText(value)}
+              onChange={(v) => {
+                setEditingJson(true);
+                if (typeHint !== JSON_TYPE_HINT) {
+                  onTypeHintChange?.(JSON_TYPE_HINT);
+                }
+                onChange(v ?? '');
+              }}
+              valueType="immediate"
+              onValueTypeChange={onValueTypeChange}
+              fieldType="json"
+              hideReferenceToggle
+              placeholder="Enter a JSON value..."
+            />
+          </div>
+        ) : mode === 'reference' ? (
           // Reference mode - single reference input
           <div className="space-y-2">
             <p className="text-sm text-muted-foreground">

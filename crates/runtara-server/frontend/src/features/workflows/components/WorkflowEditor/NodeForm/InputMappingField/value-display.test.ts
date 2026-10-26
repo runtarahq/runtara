@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   describeArrayValue,
+  describeConditionValue,
   describeObjectValue,
   EMPTY_VALUE_LABEL,
 } from './value-display';
@@ -80,5 +81,50 @@ describe('describeObjectValue', () => {
     expect(describeObjectValue('', 'immediate')).toBe(EMPTY_VALUE_LABEL);
     expect(describeObjectValue(null, 'immediate')).toBe(EMPTY_VALUE_LABEL);
     expect(describeObjectValue('nope', 'immediate')).toBe(EMPTY_VALUE_LABEL);
+  });
+});
+
+describe('describeConditionValue', () => {
+  // The Object Model query condition from the ticket that found this: a
+  // literal whose second argument reads run data through a reference.
+  const condition = {
+    type: 'operation',
+    op: 'EQ',
+    arguments: [
+      { valueType: 'reference', value: 'name' },
+      { valueType: 'reference', value: 'data.body.supplier' },
+    ],
+  };
+
+  it('reads a literal condition as the sentence its canvas card shows', () => {
+    expect(describeConditionValue(condition, 'immediate')).toBe(
+      'name is Input · body.supplier'
+    );
+  });
+
+  it('reads the JSON text of a condition being edited', () => {
+    expect(
+      describeConditionValue(
+        JSON.stringify({ ...condition, op: 'NE' }),
+        'immediate'
+      )
+    ).toBe('name is not Input · body.supplier');
+  });
+
+  it('is empty for anything that is not a condition expression', () => {
+    expect(describeConditionValue({ a: 1 }, 'immediate')).toBe('');
+    // A JSON Patch operation has an `op` key but is not a condition.
+    expect(
+      describeConditionValue({ op: 'add', path: '/a', value: 1 }, 'immediate')
+    ).toBe('');
+    expect(describeConditionValue('{"type": "operation",', 'immediate')).toBe(
+      ''
+    );
+    expect(describeConditionValue(null, 'immediate')).toBe('');
+  });
+
+  it('only reads immediates', () => {
+    expect(describeConditionValue(condition, 'composite')).toBe('');
+    expect(describeConditionValue('data.condition', 'reference')).toBe('');
   });
 });
