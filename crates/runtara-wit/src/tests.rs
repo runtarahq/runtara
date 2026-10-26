@@ -41,7 +41,6 @@ fn every_name_constant_names_a_real_interface() {
         crate::workflow::RUNTIME,
         crate::workflow::TASKS,
         crate::workflow::OPERATION,
-        crate::workflow::WAITS,
         crate::stdlib::JSON,
         crate::trusted::EXECUTION,
     ] {
@@ -56,7 +55,6 @@ fn every_name_constant_names_a_real_interface() {
             crate::workflow::OPERATION_PREFIX,
             crate::workflow::OPERATION,
         ),
-        (crate::workflow::WAITS_PREFIX, crate::workflow::WAITS),
     ] {
         assert!(
             name.starts_with(prefix),
@@ -356,34 +354,6 @@ fn workflow_package_declares_the_workflow_abi() {
             .all(|function| matches!(function.kind, FunctionKind::Freestanding)),
         "the operation scope is compiler-called and synchronous"
     );
-
-    let waits = interface(&resolve, workflow, "waits");
-    assert_eq!(
-        waits
-            .functions
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        ["register", "poll", "release"]
-    );
-    assert!(
-        waits
-            .functions
-            .values()
-            .all(|function| matches!(function.kind, FunctionKind::Freestanding)),
-        "the waits are compiler-called and synchronous"
-    );
-    let params = |name: &str| {
-        waits.functions[name]
-            .params
-            .iter()
-            .map(|param| param.name.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(params("register"), ["key", "request"]);
-    assert_eq!(params("poll"), ["key"]);
-    assert_eq!(params("release"), ["key"]);
-    assert!(waits.functions["release"].result.is_none());
 }
 
 fn variant_cases(resolve: &Resolve, types: &wit_parser::Interface, name: &str) -> Vec<String> {

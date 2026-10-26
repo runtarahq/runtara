@@ -325,19 +325,8 @@ impl Shim<'_> {
     /// write the old `result<_, string>` error as the `{code, message,
     /// retryAfterMs}` JSON the wait and state errors read (built by the
     /// stdlib's `api-error-json`, at `stdlib`), and return.
+    /// The error string goes to `old_err` of the caller's result area.
     fn on_error_return_json(
-        &mut self,
-        new: &Type,
-        old: &Type,
-        stdlib: u32,
-    ) -> Result<(), DirectCompileError> {
-        let old_err = self.layouts.offset(old, &[Step::Err])?;
-        self.on_error_return_json_at(new, old_err, stdlib)
-    }
-
-    /// [`Self::on_error_return_json`] into a result whose error string is at
-    /// `old_err` of the caller's result area.
-    fn on_error_return_json_at(
         &mut self,
         new: &Type,
         old_err: u64,
@@ -866,18 +855,52 @@ pub(super) fn emit_runtime_shims(
             stdlib_sig.params
         )));
     }
+    // Waits and state call `runtara:api` straight from helpers in the
+    // emitter's own `result<T, string>` convention: the tag, then the error
+    // string or the `list<u8>` at 4. A helper without a result takes no
+    // result pointer.
+    const NATIVE_PAYLOAD: u64 = 4;
+    let mut native = |params: usize,
+                      returns: bool,
+                      body: &mut dyn FnMut(&mut Shim) -> Result<(), DirectCompileError>|
+     -> Result<u32, DirectCompileError> {
+        let mut shim = Shim::new(params, scratch, &layouts);
+        if !returns {
+            shim.retptr = u32::MAX;
+        }
+        body(&mut shim)?;
+        let index = imported_function_count + *next_defined_function;
+        *next_defined_function += 1;
+        functions.function(push_core_type(types, type_count, &vec![I32; params], &[]));
+        code.function(&if returns {
+            shim.finish()
+        } else {
+            shim.finish_void()
+        });
+        Ok(index)
+    };
+    let native_list = |shim: &mut Shim, new: &Type| -> Result<(), DirectCompileError> {
+        let from = shim.layouts.offset(new, &[Step::Ok])?;
+        let (ptr, len) = (shim.local(7), shim.local(8));
+        shim.load_i32(from, ptr);
+        shim.load_i32(from + 4, len);
+        shim.store_i32(NATIVE_PAYLOAD, ptr);
+        shim.store_i32(NATIVE_PAYLOAD + 4, len);
+        Ok(())
+    };
     if waits {
         let register_ty = api_result("waits", "register")?;
         let register = import("waits.register", &[P, L, P, L, P])?;
         let release = import("waits.release", &[P, L, P])?;
-        let register_index = define("waits", "register", &mut |shim, old| {
+        // `register(key, request, retptr)`.
+        let register_index = native(5, true, &mut |shim| {
             shim.call(register, &[0, 1, 2, 3], true);
-            shim.on_error_return_json(&register_ty, old, stdlib)?;
-            copy_list(shim, &register_ty, old)
+            shim.on_error_return_json(&register_ty, NATIVE_PAYLOAD, stdlib)?;
+            native_list(shim, &register_ty)
         })?;
-        // The old `release` cannot fail: the result is already checkpointed,
+        // `release(key)` cannot fail: the result is already checkpointed,
         // and a settled wait left behind goes with the instance.
-        let release_index = define("waits", "release", &mut |shim, _| {
+        let release_index = native(2, false, &mut |shim| {
             shim.call(release, &[0, 1], true);
             Ok(())
         })?;
@@ -887,38 +910,18 @@ pub(super) fn emit_runtime_shims(
         });
     }
     if state {
-        // The emitter's own `result<T, string>` convention: the tag, then
-        // the error string or the `list<u8>` at 4. `set(key, patch, retptr)`
-        // and `get(key, retptr)` call `runtara:api/state` directly.
-        const NATIVE_PAYLOAD: u64 = 4;
         let (set_ty, get_ty) = (api_result("state", "set")?, api_result("state", "get")?);
         let set = import("state.set", &[P, L, P, L, P])?;
         let get = import("state.get", &[P, L, P])?;
-        let mut native = |params: usize,
-                          body: &mut dyn FnMut(&mut Shim) -> Result<(), DirectCompileError>|
-         -> Result<u32, DirectCompileError> {
-            let mut shim = Shim::new(params, scratch, &layouts);
-            body(&mut shim)?;
-            let index = imported_function_count + *next_defined_function;
-            *next_defined_function += 1;
-            functions.function(push_core_type(types, type_count, &vec![I32; params], &[]));
-            code.function(&shim.finish());
-            Ok(index)
-        };
-        let set_index = native(5, &mut |shim| {
+        // `set(key, patch, retptr)` and `get(key, retptr)`.
+        let set_index = native(5, true, &mut |shim| {
             shim.call(set, &[0, 1, 2, 3], true);
-            shim.on_error_return_json_at(&set_ty, NATIVE_PAYLOAD, stdlib)
+            shim.on_error_return_json(&set_ty, NATIVE_PAYLOAD, stdlib)
         })?;
-        let get_index = native(3, &mut |shim| {
+        let get_index = native(3, true, &mut |shim| {
             shim.call(get, &[0, 1], true);
-            shim.on_error_return_json_at(&get_ty, NATIVE_PAYLOAD, stdlib)?;
-            let from = shim.layouts.offset(&get_ty, &[Step::Ok])?;
-            let (ptr, len) = (shim.local(7), shim.local(8));
-            shim.load_i32(from, ptr);
-            shim.load_i32(from + 4, len);
-            shim.store_i32(NATIVE_PAYLOAD, ptr);
-            shim.store_i32(NATIVE_PAYLOAD + 4, len);
-            Ok(())
+            shim.on_error_return_json(&get_ty, NATIVE_PAYLOAD, stdlib)?;
+            native_list(shim, &get_ty)
         })?;
         indices.run_state = Some(super::core_imports::DirectRunStateImports {
             set: set_index,
@@ -958,21 +961,6 @@ fn code_is(shim: &mut Shim, ptr: u32, len: u32, text: &str) {
     shim.i(Instruction::Else)
         .i(Instruction::I32Const(0))
         .i(Instruction::End);
-}
-
-/// The `list<u8>` ok payload of `new` into `old`'s.
-fn copy_list(shim: &mut Shim, new: &Type, old: &Type) -> Result<(), DirectCompileError> {
-    let layouts = shim.layouts;
-    let (from, to) = (
-        layouts.offset(new, &[Step::Ok])?,
-        layouts.offset(old, &[Step::Ok])?,
-    );
-    let (ptr, len) = (shim.local(7), shim.local(8));
-    shim.load_i32(from, ptr);
-    shim.load_i32(from + 4, len);
-    shim.store_i32(to, ptr);
-    shim.store_i32(to + 4, len);
-    Ok(())
 }
 
 /// `option<list<u8>>` from `new`'s ok payload into `old`'s.

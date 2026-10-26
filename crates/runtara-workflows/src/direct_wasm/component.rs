@@ -195,7 +195,6 @@ impl DirectComponentArtifacts {
             1,
         );
         for (old, new) in [
-            (runtara_wit::workflow::WAITS, runtara_wit::api::WAITS),
             (
                 runtara_wit::host::CONNECTIONS,
                 runtara_wit::api::CONNECTIONS,
@@ -214,12 +213,12 @@ impl DirectComponentArtifacts {
         self
     }
 
-    /// Import `runtara:workflow/waits` in the world when a
-    /// WaitForInstances step needs it.
+    /// Import `runtara:api/waits` in the world when a WaitForInstances step
+    /// needs it.
     pub(super) fn with_wait_instances(mut self, wait_instances: bool) -> Self {
         if wait_instances && !self.wait_instances {
             let stdlib = format!("    import {STDLIB_JSON_INTERFACE};\n");
-            let import = format!("{stdlib}    import {};\n", runtara_wit::workflow::WAITS);
+            let import = format!("{stdlib}    import {};\n", runtara_wit::api::WAITS);
             self.world_wit = self.world_wit.replacen(&stdlib, &import, 1);
         }
         self.wait_instances |= wait_instances;

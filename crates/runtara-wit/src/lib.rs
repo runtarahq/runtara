@@ -101,9 +101,6 @@ pub mod workflow {
     pub const OPERATION: &str = concat!("runtara:workflow/operation@", v!());
     /// Any version of the operation interface.
     pub const OPERATION_PREFIX: &str = "runtara:workflow/operation@";
-    pub const WAITS: &str = concat!("runtara:workflow/waits@", v!());
-    /// Any version of the waits interface.
-    pub const WAITS_PREFIX: &str = "runtara:workflow/waits@";
     pub const WIT: &str = include_str!("../wit/workflow/runtara-workflow.wit");
 }
 

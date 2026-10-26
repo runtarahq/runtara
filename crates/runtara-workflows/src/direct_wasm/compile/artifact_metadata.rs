@@ -1012,7 +1012,7 @@ mod tests {
                 "runtara:workflow/runtime@1.0.0",
                 "runtara:workflow-stdlib/json@1.0.0",
                 runtara_wit::workflow::OPERATION,
-                runtara_wit::workflow::WAITS,
+                "runtara:workflow/waits@1.0.0",
             ],
             STAGED_TAGS,
         )
