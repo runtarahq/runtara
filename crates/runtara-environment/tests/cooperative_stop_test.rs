@@ -64,7 +64,26 @@ fn stalled_agent_components(source: &Path, output: &Path, url: &str) -> anyhow::
         .replace("{{REQUEST_LEN}}", &first.len().to_string())
         .replace("{{CLEANUP}}", &escape(&cleanup))
         .replace("{{CLEANUP_LEN}}", &cleanup.len().to_string());
-    std::fs::write(output.join("runtara_agent_http.wasm"), wat::parse_str(wat)?)?;
+    // The fixture reaches HTTP through `runtara:api`, like the real agent's
+    // SDK reaches the workflow API: compose it with the api component.
+    let mut graph = wac_graph::CompositionGraph::new();
+    let fixture = wac_graph::types::Package::from_bytes(
+        "test:stalled",
+        None,
+        wat::parse_str(wat)?,
+        graph.types_mut(),
+    )?;
+    let socket = graph.register_package(fixture)?;
+    let api = wac_graph::types::Package::from_bytes(
+        "runtara:api-component",
+        None,
+        std::fs::read(source.join("runtara_api_component.wasm"))?,
+        graph.types_mut(),
+    )?;
+    let plug = graph.register_package(api)?;
+    wac_graph::plug(&mut graph, vec![plug], socket)?;
+    let agent = graph.encode(wac_graph::EncodeOptions::default())?;
+    std::fs::write(output.join("runtara_agent_http.wasm"), agent)?;
     Ok(output)
 }
 

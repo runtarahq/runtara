@@ -1,6 +1,6 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Host implementation of the universal connection resolver interface.
+//! Native connection resolver behind the workflow API connection routes.
 //!
 //! The workflow supplies only a resolved opaque connection id. This host calls
 //! the native connection service with the authoritative tenant id and returns
@@ -12,18 +12,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::Mutex;
-use wasmtime::component::Linker;
-
-use crate::workflow::WorkflowState;
 
 type ResourceCacheKey = (String, Vec<u8>);
 type ResourceCache = HashMap<ResourceCacheKey, Vec<u8>>;
 
-/// Fully-qualified component import name of the resolver interface.
-pub const CONNECTION_RESOLVER_INTERFACE_NAME: &str = runtara_wit::host::CONNECTIONS;
-
 /// Process-wide native service injected by the embedding application.
-/// The linker supplies host-owned tenant authority and per-run caches.
+/// The workflow API supplies host-owned tenant authority and per-run caches.
 /// Results must contain safe metadata/resources, never raw credentials.
 #[async_trait::async_trait]
 pub trait ConnectionResolverHost: Send + Sync {
@@ -100,54 +94,4 @@ pub fn resolver_for_run(
         descriptions: Mutex::new(HashMap::new()),
         resources: Mutex::new(HashMap::new()),
     }))
-}
-
-pub(crate) trait ConnectionResolverContext {
-    fn resolver(&self) -> Result<Arc<RunConnectionResolver>, String>;
-}
-
-impl ConnectionResolverContext for WorkflowState {
-    fn resolver(&self) -> Result<Arc<RunConnectionResolver>, String> {
-        self.connection_resolver_host().cloned().ok_or_else(|| {
-            self.connection_resolver_error()
-                .unwrap_or("resolver was not configured")
-                .to_owned()
-        })
-    }
-}
-
-impl ConnectionResolverContext for crate::host_state::HostState {
-    fn resolver(&self) -> Result<Arc<RunConnectionResolver>, String> {
-        if self.restricted {
-            return Err("connection resolution is denied in trusted instances".into());
-        }
-        self.connection_resolver.clone()
-    }
-}
-
-fn require_host<T: ConnectionResolverContext>(
-    state: &T,
-) -> wasmtime::Result<Arc<RunConnectionResolver>> {
-    state
-        .resolver()
-        .map_err(|error| wasmtime::format_err!("connection resolution is unavailable: {error}"))
-}
-
-/// Bind the connections interface to the native run-scoped service.
-pub(crate) fn add_connection_resolver_to_linker<T: ConnectionResolverContext + Send + 'static>(
-    linker: &mut Linker<T>,
-) -> anyhow::Result<()> {
-    let mut inst = linker.instance(CONNECTION_RESOLVER_INTERFACE_NAME)?;
-    inst.func_wrap_concurrent("describe", |accessor, (connection_id,): (String,)| {
-        let host = accessor.with(|mut access| require_host(access.get()));
-        Box::pin(async move { Ok((host?.describe(connection_id).await,)) })
-    })?;
-    inst.func_wrap_concurrent(
-        "resolve-resource",
-        |accessor, (connection_id, request): (String, Vec<u8>)| {
-            let host = accessor.with(|mut access| require_host(access.get()));
-            Box::pin(async move { Ok((host?.resolve_resource(connection_id, request).await,)) })
-        },
-    )?;
-    Ok(())
 }

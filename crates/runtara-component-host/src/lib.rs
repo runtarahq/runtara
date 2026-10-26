@@ -41,7 +41,7 @@ pub use workflow_api::{WorkflowApiFuture, WorkflowApiTransport};
 pub mod workflow_manifest;
 
 pub use bindings::exports::runtara::agent::capabilities::ErrorInfo;
-pub use connection_resolver_host::{CONNECTION_RESOLVER_INTERFACE_NAME, ConnectionResolverHost};
+pub use connection_resolver_host::ConnectionResolverHost;
 pub use dispatcher::{
     ComponentDispatcherService, ResolvedConnection, TestCapabilityRequest, TestError, TestResult,
 };

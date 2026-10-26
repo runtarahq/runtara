@@ -293,7 +293,7 @@ impl WasiHttpHooks for WorkflowHooks {
         request: http::Request<HyperOutgoingBody>,
         config: OutgoingRequestConfig,
     ) -> HttpResult<HostFutureIncomingResponse> {
-        // Generated workflow and agent HTTP goes through `runtara:host/http`,
+        // Outbound HTTP goes through the workflow API connection routes,
         // where a single absolute deadline and response cap are enforced.
         // The legacy raw wasi:http route must not remain as an ungoverned
         // fallback: it would bypass both protections.
@@ -312,7 +312,8 @@ impl WasiHttpHooks for WorkflowHooks {
 
 /// Store data for a workflow run.
 pub struct WorkflowState {
-    trusted: Option<crate::trusted::TrustedCall>,
+    /// The trusted pins of the run, when the host runs trusted agents.
+    trusted_pins: Option<Arc<std::collections::HashSet<String>>>,
     /// The operation a suspending call site entered.
     pub(crate) operation: crate::operation_scope_host::OperationScopeState,
     /// Durable instance waits of WaitForInstances steps.
@@ -345,10 +346,6 @@ pub struct WorkflowState {
     /// The run's native runtime host, when the caller configured one.
     runtime: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
     execution: Option<Arc<ExecutionContext>>,
-    pub(crate) outbound_http: Result<Arc<crate::outbound_http::RunOutboundHttp>, String>,
-    pub(crate) database: Result<Arc<crate::database_host::RunDatabase>, String>,
-    connection_resolver:
-        Result<Arc<crate::connection_resolver_host::RunConnectionResolver>, String>,
 }
 
 impl ExecutionView for WorkflowState {
@@ -371,10 +368,6 @@ impl HostIoContext for WorkflowState {
 }
 
 impl WorkflowState {
-    pub(crate) fn database_deadline(&self) -> tokio::time::Instant {
-        self.active_deadline
-    }
-
     fn begin_active_execution(&mut self, timeout: Duration) {
         let deadline = tokio::time::Instant::now() + timeout;
         self.http_deadline = deadline;
@@ -384,16 +377,6 @@ impl WorkflowState {
     /// The run's native runtime host, when configured.
     pub(crate) fn runtime_host(&self) -> Option<&Arc<dyn crate::runtime_host::RuntimeHost>> {
         self.runtime.as_ref()
-    }
-
-    pub(crate) fn connection_resolver_host(
-        &self,
-    ) -> Option<&Arc<crate::connection_resolver_host::RunConnectionResolver>> {
-        self.connection_resolver.as_ref().ok()
-    }
-
-    pub(crate) fn connection_resolver_error(&self) -> Option<&str> {
-        self.connection_resolver.as_ref().err().map(String::as_str)
     }
 }
 
@@ -664,14 +647,10 @@ impl WorkflowExecutor {
         // are invisible to components that don't import them (the WASI surface
         // above works the same way), so agents linked here are unaffected.
         crate::runtime_host::add_runtime_to_linker(&mut linker)?;
-        crate::connection_resolver_host::add_connection_resolver_to_linker(&mut linker)?;
-        crate::database_host::add_database_to_linker(&mut linker)?;
         // Concurrent timers and outbound calls suspend only the calling guest
         // task, allowing parallel Split subtasks to overlap their I/O.
         crate::host_io::add_host_io_to_linker(&mut linker)?;
-        crate::outbound_http::add_to_linker(&mut linker)?;
         crate::execution_host::add_execution_to_linker(&mut linker)?;
-        crate::trusted::add_to_linker(&mut linker)?;
         // Typed agent suspension: the compiler-emitted operation scope, the
         // continuation context of ordinary suspending agents, and the control
         // API, real only for a run's own prepared entry.
@@ -731,13 +710,11 @@ impl WorkflowExecutor {
             // The store's own trusted pins bind its trusted calls, as its
             // host-linked calls were bound.
             use crate::api_launches::StandaloneTrust;
-            let trust = match &store.data().trusted {
-                Some(call) => call
-                    .pins
-                    .clone()
-                    .map_or(StandaloneTrust::Unpinned, StandaloneTrust::Pinned),
-                None => StandaloneTrust::Denied,
-            };
+            let trust = store
+                .data()
+                .trusted_pins
+                .clone()
+                .map_or(StandaloneTrust::Denied, StandaloneTrust::Pinned);
             // A run without a host was never granted control.
             let control = crate::api_launches::StandaloneControl::Denied;
             let alarm = Some(store.data().cleanup_alarm.clone());
@@ -777,12 +754,7 @@ impl WorkflowExecutor {
         let deadline = store.data().api_deadline.clone();
         let controls = crate::runtime_host::WorkflowApiControls {
             shorten_deadline: Arc::new(move |after| deadline.shorten(after)),
-            trusted_pins: store
-                .data()
-                .trusted
-                .as_ref()
-                .and_then(|call| call.pins.clone())
-                .unwrap_or_default(),
+            trusted_pins: store.data().trusted_pins.clone().unwrap_or_default(),
             cleanup_alarm: Some(store.data().cleanup_alarm.clone()),
         };
         let launches = Arc::clone(self.workflow_api());
@@ -1240,22 +1212,12 @@ impl WorkflowExecutor {
             inherited_deadline.map_or(initial_deadline, |deadline| deadline.min(initial_deadline));
         let api_binding = Arc::new(std::sync::OnceLock::new());
         let state = WorkflowState {
-            trusted: self
-                .trusted
-                .get()
-                .cloned()
-                .map(|executor| crate::trusted::TrustedCall {
-                    executor,
-                    tenant: spec.trusted_tenant.clone().unwrap_or_default(),
-                    deadline: tokio::time::Instant::now() + spec.timeout,
-                    pins: Some(
-                        control
-                            .trusted_pins
-                            .clone()
-                            .unwrap_or_else(|| self.trusted_pins(pre.component())),
-                    ),
-                    launch: trusted_launch(spec.runtime.as_ref()),
-                }),
+            trusted_pins: self.trusted.get().map(|_| {
+                control
+                    .trusted_pins
+                    .clone()
+                    .unwrap_or_else(|| self.trusted_pins(pre.component()))
+            }),
             operation: Default::default(),
             instance_waits: crate::instance_wait_host::RunInstanceWaits::for_run(
                 self.instance_waits.get().cloned(),
@@ -1292,19 +1254,6 @@ impl WorkflowExecutor {
             api_deadline: crate::workflow_api::ApiDeadline::new(),
             runtime: spec.runtime.clone(),
             execution: control.execution,
-            outbound_http: crate::outbound_http::for_run(
-                self.outbound_http.get(),
-                spec.trusted_tenant.as_deref(),
-                spec.trusted_instance.as_deref(),
-            ),
-            database: crate::database_host::database_for_run(
-                self.database.get(),
-                spec.trusted_tenant.as_deref(),
-            ),
-            connection_resolver: crate::connection_resolver_host::resolver_for_run(
-                self.connection_resolver.get(),
-                spec.trusted_tenant.as_deref(),
-            ),
         };
 
         let mut store = Store::new(&self.engine, state);
@@ -1623,7 +1572,7 @@ impl WorkflowExecutor {
         let limits = WorkflowLimits::default();
         let deadline = tokio::time::Instant::now() + crate::outbound_http::MAX_TIMEOUT;
         let state = WorkflowState {
-            trusted: None,
+            trusted_pins: None,
             operation: Default::default(),
             instance_waits: Default::default(),
             run_state: Default::default(),
@@ -1650,11 +1599,6 @@ impl WorkflowExecutor {
             api_deadline: crate::workflow_api::ApiDeadline::new(),
             runtime: None,
             execution: None,
-            outbound_http: Err("outbound HTTP is not configured in test state".into()),
-            database: Err("database is not configured in test state".into()),
-            connection_resolver: Err(
-                "connection resolution is unavailable for direct capability invocation".to_string(),
-            ),
         };
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limiter);
@@ -1745,23 +1689,6 @@ fn evict_lru(cache: &mut HashMap<PathBuf, CachedComponent>) {
             return;
         };
         cache.remove(&oldest);
-    }
-}
-
-/// The launch kind trusted calls of this run are judged by: the host's, from
-/// the run's runtime host, and `Start` (the strictest) without one.
-fn trusted_launch(
-    runtime: Option<&Arc<dyn crate::runtime_host::RuntimeHost>>,
-) -> crate::trusted::TrustedLaunch {
-    runtime.map_or_else(Default::default, |runtime| runtime.trusted_launch())
-}
-
-impl crate::trusted::TrustedCaller for WorkflowState {
-    fn trusted_call(&self) -> Option<crate::trusted::TrustedCall> {
-        self.trusted.clone().map(|mut call| {
-            call.deadline = self.http_deadline;
-            call
-        })
     }
 }
 
@@ -1956,16 +1883,8 @@ pub use scoped_execution::{RootExecutionCoordinator, RootLifecycleDecision};
 mod test_support;
 
 #[cfg(test)]
-#[path = "workflow/connection_resolver_tests.rs"]
-mod connection_resolver_tests;
-
-#[cfg(test)]
 #[path = "workflow/cleanup_alarm_tests.rs"]
 mod cleanup_alarm_tests;
-
-#[cfg(test)]
-#[path = "workflow/database_tests.rs"]
-mod database_tests;
 
 #[cfg(test)]
 #[path = "workflow/raw_http_tests.rs"]

@@ -132,12 +132,7 @@ pub enum Termination {
 }
 
 pub struct HostState {
-    pub(crate) outbound_http: Result<Arc<crate::outbound_http::RunOutboundHttp>, String>,
-    pub(crate) database: Result<Arc<crate::database_host::RunDatabase>, String>,
-    pub(crate) connection_resolver:
-        Result<Arc<crate::connection_resolver_host::RunConnectionResolver>, String>,
     pub(crate) restricted: bool,
-    pub(crate) trusted: Option<Arc<crate::trusted::TrustedExecutor>>,
     pub wasi: WasiCtx,
     pub http: WasiHttpCtx,
     pub table: ResourceTable,
@@ -164,18 +159,11 @@ pub struct HostState {
 
 impl HostState {
     pub fn with_outbound_http(mut self, service: Arc<dyn crate::OutboundHttpHost>) -> Self {
-        self.outbound_http = crate::outbound_http::for_run(
-            Some(&service),
-            Some(&self.ctx.tenant_id),
-            self.ctx.instance_id.as_deref(),
-        );
         let _ = self.store_api().set_outbound_http(service);
         self
     }
 
     pub fn with_database(mut self, database: Arc<dyn crate::DatabaseHost>) -> Self {
-        self.database =
-            crate::database_host::database_for_run(Some(&database), Some(&self.ctx.tenant_id));
         let _ = self.store_api().set_database(database);
         self
     }
@@ -185,10 +173,6 @@ impl HostState {
         mut self,
         resolver: Arc<dyn crate::ConnectionResolverHost>,
     ) -> Self {
-        self.connection_resolver = crate::connection_resolver_host::resolver_for_run(
-            Some(&resolver),
-            Some(&self.ctx.tenant_id),
-        );
         let _ = self.store_api().set_connection_resolver(resolver);
         self
     }
@@ -255,10 +239,6 @@ impl HostState {
 
         Self {
             restricted: false,
-            outbound_http: Err("native outbound HTTP service is not configured".into()),
-            database: Err("native database service is not configured".into()),
-            connection_resolver: Err("native connection resolver is not configured".into()),
-            trusted: None,
             wasi: builder.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),

@@ -419,12 +419,7 @@ const AGENT_TYPES_INTERFACE_PREFIX: &str = "runtara:agent/types@";
 /// `runtara:workflow/` is never an agent import. The test
 /// `every_allowlisted_import_links_against_the_agent_linker` links every entry
 /// against `build_linker`, so an entry needs its WIT pushed there too.
-pub const AGENT_IMPORT_ALLOWLIST: &[&str] = &[
-    runtara_wit::host::TIMERS,
-    runtara_wit::host::HTTP,
-    runtara_wit::host::CONNECTIONS,
-    runtara_wit::host::SQL,
-];
+pub const AGENT_IMPORT_ALLOWLIST: &[&str] = &[runtara_wit::host::TIMERS];
 
 /// Control interfaces the canonical `control` agent may import. This grant is
 /// the only gate on control (decision D2): the host makes `api` real for a
@@ -1606,12 +1601,9 @@ mod tests {
                 panic!("allowlisted `{entry}` does not link against build_linker: {error:#}");
             }
         }
-        // Granted imports link too: the control API and a context
-        // without a continuation, so the full bundle loads in the dispatcher.
-        for entry in CONTROL_AGENT_IMPORTS.iter().chain(&[
-            runtara_wit::agent::CONTINUATION,
-            runtara_wit::trusted::EXECUTOR,
-        ]) {
+        // The granted continuation context links too, without a
+        // continuation, so the full bundle loads in the dispatcher.
+        for entry in [runtara_wit::agent::CONTINUATION] {
             if let Err(error) = links(entry) {
                 panic!("granted `{entry}` does not link against build_linker: {error:#}");
             }

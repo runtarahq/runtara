@@ -405,15 +405,6 @@ impl ComponentDispatcherService {
             );
             launch
         };
-        state.trusted = Some(Arc::clone(&self.trusted));
-        state.outbound_http =
-            crate::outbound_http::for_run(self.outbound_http.get(), Some(&req.tenant_id), None);
-        state.database =
-            crate::database_host::database_for_run(self.database.get(), Some(&req.tenant_id));
-        state.connection_resolver = crate::connection_resolver_host::resolver_for_run(
-            self.connection_resolver.get(),
-            Some(&req.tenant_id),
-        );
         state.set_limits(self.memory_max_bytes, DEFAULT_GUEST_TABLE_MAX_ELEMENTS);
         let (mut store, instance) = instantiate(&self.engine, &agent.pre, state).await?;
 

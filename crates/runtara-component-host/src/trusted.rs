@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use runtara_agent_trusted::{TrustedContext, error};
 use runtara_dsl::agent_meta::{AgentInfo, canonical_agent_id};
-use runtara_wit::trusted::{EXECUTION as EXECUTION_INTERFACE, EXECUTOR as EXECUTOR_INTERFACE};
+use runtara_wit::trusted::EXECUTION as EXECUTION_INTERFACE;
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use wasmtime::component::{Component, InstancePre, Linker};
@@ -121,20 +121,6 @@ impl TrustedLaunch {
     pub fn continues_parked_run(self) -> bool {
         matches!(self, Self::Wake | Self::Resume)
     }
-}
-
-#[derive(Clone)]
-pub(crate) struct TrustedCall {
-    pub executor: Arc<TrustedExecutor>,
-    pub tenant: String,
-    pub deadline: tokio::time::Instant,
-    pub pins: Option<Arc<HashSet<String>>>,
-    /// Host-supplied launch kind of the calling run.
-    pub launch: TrustedLaunch,
-}
-
-pub(crate) trait TrustedCaller {
-    fn trusted_call(&self) -> Option<TrustedCall>;
 }
 
 impl TrustedExecutor {
@@ -545,53 +531,6 @@ impl TrustedExecutor {
     }
 }
 
-pub(crate) fn add_to_linker<T: TrustedCaller + Send + 'static>(
-    linker: &mut Linker<T>,
-) -> Result<()> {
-    linker.instance(EXECUTOR_INTERFACE)?.func_wrap_concurrent(
-        "invoke",
-        |accessor, (agent, capability, connection, input): (String, String, String, Vec<u8>)| {
-            let call = accessor.with(|mut access| access.get().trusted_call());
-            Box::pin(async move {
-                let result = match call {
-                    Some(call) => {
-                        call.executor
-                            .invoke_pinned(
-                                call.pins.as_deref(),
-                                call.launch,
-                                &call.tenant,
-                                &agent,
-                                &capability,
-                                &connection,
-                                input,
-                                call.deadline,
-                            )
-                            .await
-                    }
-                    None => Err(error(
-                        "TRUSTED_CAPABILITY_DENIED",
-                        "Trusted execution is not available in this context",
-                    )),
-                };
-                Ok((result,))
-            })
-        },
-    )?;
-    Ok(())
-}
-
-impl TrustedCaller for HostState {
-    fn trusted_call(&self) -> Option<TrustedCall> {
-        Some(TrustedCall {
-            executor: self.trusted.clone()?,
-            tenant: self.ctx.tenant_id.clone(),
-            deadline: self.http_deadline?,
-            pins: None,
-            launch: TrustedLaunch::Start,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,75 +597,6 @@ mod tests {
             (instance $execution (export "invoke" (func $invoke)))
             (export "runtara:trusted/execution@1.0.0" (instance $execution))
         )"#)).unwrap()
-    }
-
-    fn http_probe(startup: bool) -> Vec<u8> {
-        let check = r#"i32.const 0 i32.const 128 call $request
-            i32.const 128 i32.load i32.const 1 i32.ne if unreachable end
-            i32.const 140 i32.load i32.const 16 i32.ne if unreachable end
-            i32.const 136 i32.load i32.load8_u i32.const 72 i32.ne if unreachable end"#;
-        let start = if startup { check } else { "" };
-        let body = if startup { "" } else { check };
-        wat::parse_str(format!(r#"(component
-            (import "runtara:host/http@1.0.0" (instance $http
-                (type $connection-def (record (field "connection-id" string) (field "url" string)
-                    (field "endpoint" (option string)) (field "endpoint-ref" (option string))
-                    (field "ai-provider" (option string)) (field "aws-service" (option string))))
-                (export "connection-destination" (type $connection (eq $connection-def)))
-                (type $destination-def (variant (case "connection" $connection) (case "public" string)))
-                (export "destination" (type $destination (eq $destination-def)))
-                (type $headers (list (tuple string string)))
-                (type $request-def (record (field "destination" $destination) (field "method" string)
-                    (field "headers" $headers) (field "body" (option (list u8)))
-                    (field "timeout-ms" (option u64)) (field "max-response-bytes" (option u64))))
-                (export "request-options" (type $request (eq $request-def)))
-                (type $response-def (record (field "status" u16) (field "headers" $headers) (field "body" (list u8))))
-                (export "response" (type $response (eq $response-def)))
-                (type $error-def (record (field "code" string) (field "message" string)
-                    (field "status" (option u16)) (field "body" (list u8)) (field "retry-after-ms" (option u64))))
-                (export "outbound-error" (type $error (eq $error-def)))
-                (export "request" (func async (param "options" $request) (result (result $response (error $error)))))))
-            (alias export $http "request" (func $request))
-            (core module $memory
-                (memory (export "memory") 1)
-                (global $heap (mut i32) (i32.const 4096))
-                (func (export "realloc") (param i32 i32 i32 i32) (result i32) (local $old i32)
-                    global.get $heap local.tee $old local.get 3 i32.add i32.const 16 i32.add global.set $heap local.get $old))
-            (core instance $memory (instantiate $memory))
-            (core func $request (canon lower (func $request) (memory $memory "memory") (realloc (func $memory "realloc"))))
-            (core module $main
-                (import "memory" "memory" (memory 1))
-                (import "host" "request" (func $request (param i32 i32)))
-                (func $start {start}) (start $start)
-                (func (export "invoke") (param i32 i32 i32 i32 i32 i32) (result i32)
-                    {body}
-                    i32.const 16 i32.const 49 i32.store8
-                    i32.const 4 i32.const 16 i32.store
-                    i32.const 8 i32.const 1 i32.store
-                    i32.const 0))
-            (core instance $i (instantiate $main
-                (with "memory" (instance $memory))
-                (with "host" (instance (export "request" (func $request))))))
-            (func $invoke async (param "capability-id" string) (param "input" (list u8)) (param "context" (list u8))
-                (result (result (list u8) (error string)))
-                (canon lift (core func $i "invoke") (memory $memory "memory") (realloc (func $memory "realloc"))))
-            (instance $execution (export "invoke" (func $invoke)))
-            (export "runtara:trusted/execution@1.0.0" (instance $execution)))"#)).unwrap()
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn http_is_denied_before_parsing_or_sending_in_startup_and_invocation() {
-        for startup in [false, true] {
-            let (executor, _) = executor(&http_probe(startup));
-            let result = call(&executor, Duration::from_secs(5)).await;
-            if startup {
-                // Component initialization cannot block on an async host
-                // import. It traps before any network work can escape.
-                assert!(result.is_err());
-            } else {
-                assert_eq!(result.unwrap(), b"1");
-            }
-        }
     }
 
     fn counting_body() -> &'static str {

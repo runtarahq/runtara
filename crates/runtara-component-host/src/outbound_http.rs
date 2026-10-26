@@ -1,10 +1,6 @@
 //! Outbound HTTP contract and native service injection. No network transport here.
 use std::sync::Arc;
 use std::time::Duration;
-use wasmtime::component::{ComponentType, Lift, Linker, WasmList};
-use wasmtime::{AsContext, AsContextMut};
-mod text;
-use text::BorrowedText;
 
 mod bindings {
     wasmtime::component::bindgen!({
@@ -95,74 +91,6 @@ pub fn response_limit(requested: Option<u64>) -> Result<usize, OutboundError> {
     }
 }
 
-pub(crate) trait OutboundHttpContext {
-    fn outbound_http(&self) -> Result<Arc<RunOutboundHttp>, String>;
-    fn outbound_deadline(&self) -> Option<tokio::time::Instant>;
-}
-
-impl OutboundHttpContext for crate::host_state::HostState {
-    fn outbound_http(&self) -> Result<Arc<RunOutboundHttp>, String> {
-        if self.restricted {
-            return Err("Outbound HTTP is disabled in trusted execution".into());
-        }
-        self.outbound_http.clone()
-    }
-    fn outbound_deadline(&self) -> Option<tokio::time::Instant> {
-        self.http_deadline
-    }
-}
-
-impl OutboundHttpContext for crate::workflow::WorkflowState {
-    fn outbound_http(&self) -> Result<Arc<RunOutboundHttp>, String> {
-        self.outbound_http.clone()
-    }
-    fn outbound_deadline(&self) -> Option<tokio::time::Instant> {
-        Some(self.database_deadline())
-    }
-}
-
-// Borrow guest data until authority and byte budgets have been checked. The
-// generated owned records above remain the service contract; linker typechecking
-// checks these borrowed lift shapes against the same canonical WIT records.
-#[derive(ComponentType, Lift)]
-#[component(record)]
-struct BorrowedConnection {
-    #[component(name = "connection-id")]
-    connection_id: BorrowedText,
-    url: BorrowedText,
-    endpoint: Option<BorrowedText>,
-    #[component(name = "endpoint-ref")]
-    endpoint_ref: Option<BorrowedText>,
-    #[component(name = "ai-provider")]
-    ai_provider: Option<BorrowedText>,
-    #[component(name = "aws-service")]
-    aws_service: Option<BorrowedText>,
-}
-
-#[derive(ComponentType, Lift)]
-#[component(variant)]
-// Keep canonical ABI lift fields inline: borrowing guest strings must not allocate.
-#[allow(clippy::large_enum_variant)]
-enum BorrowedDestination {
-    #[component(name = "connection")]
-    Connection(BorrowedConnection),
-    #[component(name = "public")]
-    Public(BorrowedText),
-}
-
-#[derive(ComponentType, Lift)]
-#[component(record)]
-struct BorrowedRequest {
-    destination: BorrowedDestination,
-    method: BorrowedText,
-    headers: WasmList<(BorrowedText, BorrowedText)>,
-    body: Option<WasmList<u8>>,
-    #[component(name = "timeout-ms")]
-    timeout_ms: Option<u64>,
-    #[component(name = "max-response-bytes")]
-    max_response_bytes: Option<u64>,
-}
-
 fn too_large() -> OutboundError {
     error(
         "HTTP_TOO_LARGE",
@@ -173,87 +101,6 @@ fn too_large() -> OutboundError {
 fn charge(remaining: &mut usize, size: usize) -> Result<(), OutboundError> {
     *remaining = remaining.checked_sub(size).ok_or_else(too_large)?;
     Ok(())
-}
-
-fn text<T: 'static>(
-    value: &BorrowedText,
-    context: impl AsContext<Data = T>,
-    remaining: &mut usize,
-) -> Result<String, OutboundError> {
-    charge(remaining, value.utf8_len)?;
-    let value = value
-        .value
-        .to_str(context.as_context())
-        .map_err(|_| error("HTTP_INVALID_REQUEST", "Invalid HTTP text encoding"))?;
-    Ok(value.into_owned())
-}
-
-fn optional_text<T: 'static>(
-    value: &Option<BorrowedText>,
-    context: impl AsContext<Data = T>,
-    remaining: &mut usize,
-) -> Result<Option<String>, OutboundError> {
-    value
-        .as_ref()
-        .map(|s| text(s, context, remaining))
-        .transpose()
-}
-
-impl BorrowedRequest {
-    fn own<T: 'static>(
-        self,
-        mut context: impl AsContextMut<Data = T>,
-    ) -> Result<RequestOptions, OutboundError> {
-        let mut remaining = MAX_REQUEST_BYTES;
-        charge(&mut remaining, 64)?;
-        charge(&mut remaining, self.body.as_ref().map_or(0, WasmList::len))?;
-        charge(&mut remaining, self.headers.len().saturating_mul(16))?;
-        let method = text(&self.method, &context, &mut remaining)?;
-        let destination = match self.destination {
-            BorrowedDestination::Public(url) => {
-                Destination::Public(text(&url, &context, &mut remaining)?)
-            }
-            BorrowedDestination::Connection(c) => {
-                let connection_id = text(&c.connection_id, &context, &mut remaining)?;
-                if connection_id.trim().is_empty() {
-                    return Err(error(
-                        "HTTP_INVALID_REQUEST",
-                        "Connection ID must not be empty",
-                    ));
-                }
-                Destination::Connection(ConnectionDestination {
-                    connection_id,
-                    url: text(&c.url, &context, &mut remaining)?,
-                    endpoint: optional_text(&c.endpoint, &context, &mut remaining)?,
-                    endpoint_ref: optional_text(&c.endpoint_ref, &context, &mut remaining)?,
-                    ai_provider: optional_text(&c.ai_provider, &context, &mut remaining)?,
-                    aws_service: optional_text(&c.aws_service, &context, &mut remaining)?,
-                })
-            }
-        };
-        let mut headers = Vec::with_capacity(self.headers.len());
-        for i in 0..self.headers.len() {
-            let (name, value) = self
-                .headers
-                .get(context.as_context_mut(), i)
-                .expect("index inside checked header list")
-                .map_err(|_| error("HTTP_INVALID_REQUEST", "Invalid HTTP headers"))?;
-            headers.push((
-                text(&name, &context, &mut remaining)?,
-                text(&value, &context, &mut remaining)?,
-            ));
-        }
-        Ok(RequestOptions {
-            destination,
-            method,
-            headers,
-            body: self
-                .body
-                .map(|body| body.as_le_slice(context.as_context()).to_vec()),
-            timeout_ms: self.timeout_ms,
-            max_response_bytes: self.max_response_bytes,
-        })
-    }
 }
 
 fn check_response(response: &Response, limit: usize) -> Result<(), OutboundError> {
@@ -268,7 +115,7 @@ fn check_response(response: &Response, limit: usize) -> Result<(), OutboundError
     Ok(())
 }
 
-/// Send `request` through `host` the way `runtara:host/http.request` does:
+/// Send `request` through `host` the way `POST /v1/http` does:
 /// within the request's own timeout (capped) and the run's active deadline,
 /// with the response checked against its byte limit.
 pub async fn send_bounded(
@@ -317,39 +164,6 @@ async fn bounded(
     }
 }
 
-pub(crate) fn add_to_linker<T: OutboundHttpContext + Send + 'static>(
-    linker: &mut Linker<T>,
-) -> anyhow::Result<()> {
-    linker
-        .instance(runtara_wit::host::HTTP)?
-        .func_wrap_concurrent("request", |accessor, (request,): (BorrowedRequest,)| {
-            let started = tokio::time::Instant::now();
-            let ready = accessor.with(|mut access| {
-                let state = access.get();
-                let deadline = state.outbound_deadline();
-                let host = state
-                    .outbound_http()
-                    .map_err(|message| error("HTTP_UNAVAILABLE", &message))?;
-                let request = request.own(access.as_context_mut())?;
-                let requested_deadline = started + timeout(request.timeout_ms)?;
-                let deadline =
-                    deadline.map_or(requested_deadline, |active| active.min(requested_deadline));
-                let limit = response_limit(request.max_response_bytes)?;
-                Ok::<_, OutboundError>((host, request, deadline, limit))
-            });
-            Box::pin(async move {
-                let result = match ready {
-                    Err(error) => Err(error),
-                    Ok((host, request, deadline, limit)) => {
-                        bounded(&host, request, deadline, limit).await
-                    }
-                };
-                Ok((result,))
-            })
-        })?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,11 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_backend_and_restricted_instances_have_no_fallback() {
+    fn missing_backend_has_no_fallback() {
         assert!(for_run(None, Some("tenant"), None).is_err());
-        assert!(crate::HostState::restricted().outbound_http().is_err());
-        let metadata =
-            crate::HostState::new(Arc::new(crate::CallContext::placeholder_for_metadata()));
-        assert!(metadata.outbound_http().is_err());
     }
 }
