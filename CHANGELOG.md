@@ -309,6 +309,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking: workflows and agents reach the platform only through the
+  workflow API, so every workflow must be recompiled.** A compiled workflow
+  now carries the `runtara:api` component and calls the server's `/v1`
+  workflow API for its run services: checkpoints, signals, events, sleeps,
+  operations, instance waits, state, connections, HTTP, SQL and control.
+  Agents do the same through the agent SDK. The host interfaces they
+  imported before are no longer linked: `runtara:workflow/runtime`,
+  `operation`, `waits` and `state`, `runtara:host/*`, `runtara:control/*`,
+  `runtara:trusted/executor` and `runtara:agent/continuation`.
+  `runtara:workflow/tasks` (isolated and scoped children) is unchanged.
+  - Recompile every workflow after upgrading (compile it, or set its current
+    version again). An artifact built before is refused at load: "built for
+    the removed host ABI … recompile the workflow".
+  - Runs are not carried over. A run parked, paused or waiting on an old
+    artifact cannot wake on an upgraded server; let such runs finish, or
+    cancel them, before upgrading.
+  - Third-party agents built against the old WIT must be rebuilt with the
+    agent SDK. A component that imports any of the interfaces above is
+    refused when a workflow is compiled against it, and at load.
+
 - **BREAKING: a Telegram Channel trigger that holds no webhook secret
   rejects inbound calls (401) instead of accepting them unauthenticated.**
   Since 9.0.0 runtara stores a webhook's secret before it calls Telegram, so

@@ -43,8 +43,8 @@ println!("{}", result.output.unwrap());  // {"hash":"2cf24...","algorithm":"sha2
 
 ## Security posture
 
-Raw WASI HTTP is denied. Guest HTTP uses
-`runtara:host/http@1.0.0`, with explicit connection IDs or public URLs,
+Raw WASI HTTP is denied except to the workflow API origin. Guest HTTP goes
+through its `POST /v1/http`, with explicit connection IDs or public URLs,
 raw body bytes, bounded responses and the invocation's active deadline.
 `OutboundHttpHost` receives tenant and instance identity from host-owned context;
 guest headers and environment cannot override it. Missing services fail explicitly.
