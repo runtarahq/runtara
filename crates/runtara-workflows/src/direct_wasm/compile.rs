@@ -87,9 +87,9 @@ use wit_parser::{Resolve, WorldId};
 pub use super::child_workflows::DirectChildWorkflowDependencyMetadata;
 use super::child_workflows::resolve_direct_child_workflow_metadata;
 pub use artifact_metadata::{
-    AGENT_IMPORT_ALLOWLIST, AgentImportGrants, AgentImportKind, CONTROL_AGENT_IMPORTS,
-    DirectArtifactFileMetadata, DirectArtifactMetadata, DirectComponentDependencyMetadata,
-    DirectComponentSidecarMetadata, DirectIsolationMetadata, check_agent_component_imports,
+    AGENT_IMPORT_ALLOWLIST, AgentImportKind, DirectArtifactFileMetadata, DirectArtifactMetadata,
+    DirectComponentDependencyMetadata, DirectComponentSidecarMetadata, DirectIsolationMetadata,
+    check_agent_component_imports,
 };
 use artifact_metadata::{
     InitialArtifactMetadataInput, initial_artifact_metadata, resolve_agent_component_dependencies,
@@ -1659,7 +1659,6 @@ fn build_direct_component_resolve_with_waits(
     for agent in agents {
         let shape = runtara_wit::AgentShape {
             scoped: scoped_agents.contains(agent),
-            suspendable: suspending_agents.contains(agent),
             ..Default::default()
         };
         resolve

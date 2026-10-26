@@ -582,9 +582,7 @@ fn shared_components_dir() -> PathBuf {
 /// a compile failure of whichever workflow first uses it.
 #[test]
 fn bundled_agents_satisfy_import_allowlist() {
-    use runtara_workflows::direct_wasm::{
-        AgentImportGrants, AgentImportKind, check_agent_component_imports,
-    };
+    use runtara_workflows::direct_wasm::{AgentImportKind, check_agent_component_imports};
     let dir = shared_components_dir();
     let mut checked = Vec::new();
     for entry in fs::read_dir(&dir).expect("read staged component bundle") {
@@ -599,19 +597,13 @@ fn bundled_agents_satisfy_import_allowlist() {
             continue;
         };
         let wasm = fs::read(&path).unwrap_or_else(|error| panic!("read {path:?}: {error}"));
-        let meta: serde_json::Value = serde_json::from_slice(
+        // Every bundled agent ships a parseable sidecar.
+        let _: serde_json::Value = serde_json::from_slice(
             &fs::read(path.with_extension("meta.json"))
                 .unwrap_or_else(|error| panic!("read the sidecar of {path:?}: {error}")),
         )
         .expect("bundled sidecar parses");
-        let declares = |flag: &str| {
-            meta["capabilities"]
-                .as_array()
-                .is_some_and(|capabilities| capabilities.iter().any(|c| c[flag] == true))
-        };
-        let grants =
-            AgentImportGrants::for_agent(agent, declares("suspends"), declares("trusted"), true);
-        check_agent_component_imports(agent, &wasm, AgentImportKind::Agent, grants).unwrap_or_else(
+        check_agent_component_imports(agent, &wasm, AgentImportKind::Agent).unwrap_or_else(
             |error| panic!("bundled agent `{agent}` breaks the allowlist: {error}"),
         );
         checked.push(agent.to_string());

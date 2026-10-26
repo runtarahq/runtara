@@ -427,14 +427,10 @@ fn unscoped_workflows_carry_nothing_of_the_operation_scope() {
 fn the_emitted_result_offsets_match_the_wit_layout() {
     use wit_parser::{Int, Resolve, SizeAlign, Type, TypeDefKind};
     let mut resolve: Resolve = runtara_wit::resolve().unwrap();
-    let shape = runtara_wit::AgentShape {
-        suspendable: true,
-        ..Default::default()
-    };
     let package = resolve
         .push_str(
             "probe.wit",
-            &runtara_wit::agent_package("suspend-probe", shape),
+            &runtara_wit::agent_package("suspend-probe", Default::default()),
         )
         .unwrap();
     let mut sizes = SizeAlign::default();

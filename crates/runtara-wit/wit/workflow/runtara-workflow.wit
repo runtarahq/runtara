@@ -1,11 +1,12 @@
-// The host ABI of compiled workflow logic.
+// Compiled workflow logic's interfaces.
 //
-// Only compiled workflow logic imports these interfaces (published
-// workflow-agents included); ordinary agents are denied the whole package.
-// A workflow exports its entry as a `runtara:agent-<id>/capabilities` package
-// (see `runtara:agent`) and imports these.
-//
-// Released WIT is never edited, only versioned (see `runtara-wit`'s crate docs).
+// `tasks` is the one the host still serves (isolated and scoped children).
+// `runtime`, `operation`, `waits` and `state` are compiler lowering
+// vocabulary: workflow logic is emitted against them, and the compiler serves
+// them inside the artifact from `runtara:api` (the workflow API). No host
+// links them, and an artifact that imports one is refused as built for the
+// removed host ABI. A workflow exports its entry as a
+// `runtara:agent-<id>/capabilities` package (see `runtara:agent`).
 package runtara:workflow@1.0.0;
 
 // Run services: events, cancellation, heartbeat, checkpoints and durable

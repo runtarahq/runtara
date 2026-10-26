@@ -71,9 +71,7 @@ fn expand_tokens(input: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     // compiler also uses; `path` only supplies the shared packages it names,
     // as absolute directories inside `runtara-wit`.
     let shape = runtara_wit::AgentShape {
-        suspendable: args.suspending.is_some(),
         trusted: args.trusted,
-        control: args.control,
         ..Default::default()
     };
     let package = runtara_wit::agent_package(agent, shape);

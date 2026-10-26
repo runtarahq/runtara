@@ -35,10 +35,7 @@ fn every_name_constant_names_a_real_interface() {
     }
     for name in [
         crate::agent::TYPES,
-        crate::agent::CONTINUATION,
         crate::agent::CAPABILITIES,
-        crate::host::HTTP,
-        crate::host::SQL,
         crate::host::CONNECTIONS,
         crate::host::TIMERS,
         crate::workflow::RUNTIME,
@@ -47,17 +44,14 @@ fn every_name_constant_names_a_real_interface() {
         crate::workflow::WAITS,
         crate::workflow::STATE,
         crate::stdlib::JSON,
-        crate::trusted::EXECUTOR,
         crate::trusted::EXECUTION,
-        crate::control::TYPES,
-        crate::control::API,
     ] {
         assert!(names.contains(name), "{name} is not a runtara interface");
         assert!(name.ends_with(&format!("@{}", crate::VERSION)));
     }
     for (prefix, name) in [
         (crate::agent::TYPES_PREFIX, crate::agent::TYPES),
-        (crate::host::PREFIX, crate::host::HTTP),
+        (crate::host::PREFIX, crate::host::CONNECTIONS),
         (crate::workflow::PREFIX, crate::workflow::RUNTIME),
         (
             crate::workflow::OPERATION_PREFIX,
@@ -65,7 +59,6 @@ fn every_name_constant_names_a_real_interface() {
         ),
         (crate::workflow::WAITS_PREFIX, crate::workflow::WAITS),
         (crate::workflow::STATE_PREFIX, crate::workflow::STATE),
-        (crate::control::PREFIX, crate::control::API),
     ] {
         assert!(
             name.starts_with(prefix),
@@ -86,7 +79,6 @@ fn every_name_constant_names_a_real_interface() {
         crate::workflow::PACKAGE,
         crate::stdlib::PACKAGE,
         crate::trusted::PACKAGE,
-        crate::control::PACKAGE,
     ] {
         assert!(packages.iter().any(|package| package == name), "{name}");
     }
@@ -98,48 +90,42 @@ fn every_name_constant_names_a_real_interface() {
 #[test]
 fn agent_package_resolves_for_every_shape() {
     for scoped in [false, true] {
-        for suspendable in [false, true] {
-            for trusted in [false, true] {
-                for control in [false, true] {
-                    let shape = AgentShape {
-                        scoped,
-                        suspendable,
-                        trusted,
-                        control,
-                    };
-                    let mut resolve = resolve();
-                    let wit = agent_package("probe-agent", shape);
-                    let id = resolve
-                        .push_str("probe.wit", &wit)
-                        .unwrap_or_else(|error| panic!("{shape:?}: {error:#}\n{wit}"));
-                    let package = &resolve.packages[id];
-                    assert_eq!(
-                        package.name.to_string(),
-                        format!("runtara:agent-probe-agent@{}", crate::VERSION)
-                    );
-                    let capabilities = crate::capabilities_interface(shape);
-                    assert!(package.interfaces.contains_key(capabilities));
-                    assert!(!package.interfaces.contains_key("suspendable"));
-                    let world = &resolve.worlds[package.worlds["agent"]];
-                    let imports: Vec<String> = world
-                        .imports
-                        .keys()
-                        .map(|key| resolve.name_world_key(key))
-                        .collect();
-                    let exports: Vec<String> = world
-                        .exports
-                        .keys()
-                        .map(|key| resolve.name_world_key(key))
-                        .collect();
-                    let has = |names: &[String], name: &str| names.iter().any(|n| n == name);
-                    // Suspending and control agents read their operation
-                    // from their input and reach the host over HTTP.
-                    assert!(!has(&imports, crate::agent::CONTINUATION), "{imports:?}");
-                    assert!(!has(&imports, crate::control::API), "{imports:?}");
-                    assert_eq!(has(&exports, crate::trusted::EXECUTION), trusted);
-                    assert_eq!(exports.len(), 1 + usize::from(trusted), "{exports:?}");
-                }
-            }
+        for trusted in [false, true] {
+            let shape = AgentShape { scoped, trusted };
+            let mut resolve = resolve();
+            let wit = agent_package("probe-agent", shape);
+            let id = resolve
+                .push_str("probe.wit", &wit)
+                .unwrap_or_else(|error| panic!("{shape:?}: {error:#}\n{wit}"));
+            let package = &resolve.packages[id];
+            assert_eq!(
+                package.name.to_string(),
+                format!("runtara:agent-probe-agent@{}", crate::VERSION)
+            );
+            let capabilities = crate::capabilities_interface(shape);
+            assert!(package.interfaces.contains_key(capabilities));
+            let world = &resolve.worlds[package.worlds["agent"]];
+            // Agents reach the host over the workflow API: they import only
+            // the shared types their `invoke` uses.
+            let imports: Vec<String> = world
+                .imports
+                .keys()
+                .map(|key| resolve.name_world_key(key))
+                .collect();
+            assert!(
+                imports.iter().all(|name| name == crate::agent::TYPES),
+                "{shape:?}: {imports:?}"
+            );
+            let exports: Vec<String> = world
+                .exports
+                .keys()
+                .map(|key| resolve.name_world_key(key))
+                .collect();
+            assert_eq!(
+                exports.iter().any(|name| name == crate::trusted::EXECUTION),
+                trusted
+            );
+            assert_eq!(exports.len(), 1 + usize::from(trusted), "{exports:?}");
         }
     }
 }
@@ -148,14 +134,6 @@ fn agent_package_resolves_for_every_shape() {
 fn host_services_are_async_and_explicit() {
     let resolve = resolve();
     let host = package(&resolve, crate::host::PACKAGE);
-    let sql = interface(&resolve, host, "sql");
-    assert_eq!(sql.functions.len(), 3);
-    for name in ["query", "execute", "execute-batch"] {
-        assert!(matches!(
-            sql.functions[name].kind,
-            FunctionKind::AsyncFreestanding
-        ));
-    }
     let connections = interface(&resolve, host, "connections");
     for name in ["describe", "resolve-resource"] {
         assert!(matches!(
@@ -170,36 +148,7 @@ fn host_services_are_async_and_explicit() {
             FunctionKind::AsyncFreestanding
         ));
     }
-    let http = interface(&resolve, host, "http");
-    assert!(matches!(
-        http.functions["request"].kind,
-        FunctionKind::AsyncFreestanding
-    ));
-    let TypeDefKind::Variant(destination) = &resolve.types[http.types["destination"]].kind else {
-        panic!("destination must be a variant")
-    };
-    assert_eq!(
-        destination
-            .cases
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect::<Vec<_>>(),
-        ["connection", "public"]
-    );
-    assert_eq!(
-        record_fields(&resolve, http, "request-options"),
-        [
-            "destination",
-            "method",
-            "headers",
-            "body",
-            "timeout-ms",
-            "max-response-bytes"
-        ]
-    );
     for (world, interface) in [
-        ("http-client", crate::host::HTTP),
-        ("sql-client", crate::host::SQL),
         ("connections-client", crate::host::CONNECTIONS),
         ("timers-client", crate::host::TIMERS),
     ] {
@@ -439,47 +388,6 @@ fn workflow_package_declares_the_workflow_abi() {
     assert!(waits.functions["release"].result.is_none());
 }
 
-#[test]
-fn the_control_api_takes_no_identity() {
-    let resolve = resolve();
-    let package = package(&resolve, crate::control::PACKAGE);
-    let api = &resolve.interfaces[package.interfaces["api"]];
-    for function in api.functions.values() {
-        assert!(matches!(function.kind, FunctionKind::AsyncFreestanding));
-        assert!(
-            function
-                .params
-                .iter()
-                .all(|param| !["tenant", "parent", "operation", "caller"]
-                    .iter()
-                    .any(|forbidden| param.name.contains(forbidden))),
-            "identity never rides api arguments: {}",
-            function.name
-        );
-    }
-    // The host's world links exactly `api`; the package has no other world
-    // and no other interface an agent could import or export.
-    assert_eq!(package.worlds.keys().collect::<Vec<_>>(), ["control-host"]);
-    assert_eq!(
-        package.interfaces.keys().collect::<Vec<_>>(),
-        ["types", "api"]
-    );
-    let world = &resolve.worlds[package.worlds["control-host"]];
-    assert!(
-        world
-            .imports
-            .keys()
-            .any(|key| resolve.name_world_key(key) == crate::control::API)
-    );
-}
-
-fn enum_cases(resolve: &Resolve, types: &wit_parser::Interface, name: &str) -> Vec<String> {
-    let TypeDefKind::Enum(cases) = &resolve.types[types.types[name]].kind else {
-        panic!("{name} must be an enum");
-    };
-    cases.cases.iter().map(|case| case.name.clone()).collect()
-}
-
 fn variant_cases(resolve: &Resolve, types: &wit_parser::Interface, name: &str) -> Vec<String> {
     let TypeDefKind::Variant(cases) = &resolve.types[types.types[name]].kind else {
         panic!("{name} must be a variant");
@@ -498,169 +406,6 @@ fn record_fields(resolve: &Resolve, types: &wit_parser::Interface, name: &str) -
         .collect()
 }
 
-/// 1.0.0 is frozen: wasmtime lifts exactly, so every function, case and
-/// field is pinned here, and a change needs a new package version.
-#[test]
-fn the_control_api_is_complete_and_frozen() {
-    let resolve = resolve();
-    let package = package(&resolve, crate::control::PACKAGE);
-    let api = &resolve.interfaces[package.interfaces["api"]];
-    let signatures: Vec<(String, Vec<String>)> = api
-        .functions
-        .values()
-        .map(|function| {
-            (
-                function.name.clone(),
-                function.params.iter().map(|p| p.name.clone()).collect(),
-            )
-        })
-        .collect();
-    let expected: Vec<(String, Vec<String>)> = [
-        ("start", "request"),
-        ("get", "instance-id"),
-        ("get-state", "instance-id"),
-        ("query", "request"),
-        ("list-pending-signals", "request"),
-        ("send-signal", "request"),
-        ("cancel", "request"),
-        ("pause", "instance-id"),
-        ("resume", "instance-id"),
-    ]
-    .iter()
-    .map(|(name, param)| (name.to_string(), vec![param.to_string()]))
-    .collect();
-    assert_eq!(signatures, expected);
-    assert!(
-        api.functions
-            .values()
-            .all(|function| matches!(function.kind, FunctionKind::AsyncFreestanding))
-    );
-
-    let types = &resolve.interfaces[package.interfaces["types"]];
-    let codes: Vec<String> = runtara_control_contract::ErrorCode::ALL
-        .iter()
-        .map(|code| code.wit_name().to_string())
-        .collect();
-    assert_eq!(codes.len(), 19);
-    assert_eq!(
-        enum_cases(&resolve, types, "error-code"),
-        codes,
-        "runtara-control-contract mirrors the WIT error codes in order"
-    );
-    assert_eq!(
-        enum_cases(&resolve, types, "parent-close-policy"),
-        runtara_control_contract::ParentClosePolicy::ALL
-            .map(|policy| policy.wit_name().to_string())
-    );
-    for (name, cases) in [
-        (
-            "instance-status",
-            &[
-                "queued",
-                "pending",
-                "running",
-                "suspended",
-                "completed",
-                "failed",
-                "cancelled",
-                "not-started",
-            ][..],
-        ),
-        (
-            "suspension-reason",
-            &[
-                "paused",
-                "waiting-signal",
-                "waiting-instances",
-                "sleeping",
-                "shutdown",
-            ],
-        ),
-        ("sort-field", &["created-at", "finished-at"]),
-        ("sort-order", &["ascending", "descending"]),
-        (
-            "command-outcome",
-            &["requested", "applied", "unchanged", "already-terminal"],
-        ),
-    ] {
-        assert_eq!(enum_cases(&resolve, types, name), cases, "{name}");
-    }
-    for (name, cases) in [
-        ("parent-filter", &["caller", "instance"][..]),
-        ("signal-scope", &["instance", "workflow", "children"]),
-    ] {
-        assert_eq!(variant_cases(&resolve, types, name), cases, "{name}");
-    }
-    for (name, fields) in [
-        ("control-error", &["code", "message", "retry-after-ms"][..]),
-        (
-            "terminal-result",
-            &[
-                "output",
-                "output-bytes",
-                "output-omitted",
-                "error",
-                "error-omitted",
-            ],
-        ),
-        (
-            "start-request",
-            &[
-                "workflow-id",
-                "version",
-                "input",
-                "run-label",
-                "parent-close-policy",
-            ],
-        ),
-        (
-            "start-result",
-            &[
-                "instance-id",
-                "workflow-id",
-                "version",
-                "run-label",
-                "replayed",
-            ],
-        ),
-        (
-            "send-signal-request",
-            &[
-                "instance-id",
-                "signal-id",
-                "action-key",
-                "request-id",
-                "payload",
-            ],
-        ),
-        ("cancel-request", &["instance-id", "reason", "grace-ms"]),
-        ("state-read", &["instance", "state", "state-updated-at-ms"]),
-        (
-            "query-request",
-            &[
-                "workflow-id",
-                "run-label",
-                "statuses",
-                "parent",
-                "created-after-ms",
-                "created-before-ms",
-                "finished-after-ms",
-                "finished-before-ms",
-                "state",
-                "sort-by",
-                "order",
-                "page-size",
-                "page-token",
-            ],
-        ),
-        ("command-result", &["instance-id", "outcome", "replayed"]),
-    ] {
-        assert_eq!(record_fields(&resolve, types, name), fields, "{name}");
-    }
-}
-
-/// Every agent and every workflow answers `invoke` with the same outcome, and
-/// the wake variant keeps the lifecycle order with `instances` appended.
 #[test]
 fn agents_and_workflows_share_one_outcome() {
     let resolve = resolve();

@@ -1,58 +1,11 @@
-// Host services any ordinary agent and every compiled workflow may import.
+// Compiler lowering vocabulary, not a host ABI.
 //
-// Tenant authority, credentials and network access stay in the host: guests
-// pass opaque connection ids and never see secrets, driver details or raw
-// sockets.
-//
-// Released WIT is never edited, only versioned (see `runtara-wit`'s crate docs).
+// Workflow logic is emitted against these shapes, and the compiler serves
+// them inside the artifact from `runtara:api` (the workflow API). No host
+// links them: an artifact that imports one is refused as built for the
+// removed host ABI. Tenant authority, credentials and network access stay in
+// the host, behind the workflow API.
 package runtara:host@1.0.0;
-
-/// Outbound HTTP through the host's credential proxy and outbound guard.
-interface http {
-    record connection-destination {
-        connection-id: string,
-        url: string,
-        endpoint: option<string>,
-        endpoint-ref: option<string>,
-        ai-provider: option<string>,
-        aws-service: option<string>,
-    }
-    variant destination {
-        connection(connection-destination),
-        public(string),
-    }
-    record request-options {
-        destination: destination,
-        method: string,
-        headers: list<tuple<string, string>>,
-        body: option<list<u8>>,
-        timeout-ms: option<u64>,
-        max-response-bytes: option<u64>,
-    }
-    record response {
-        status: u16,
-        headers: list<tuple<string, string>>,
-        body: list<u8>,
-    }
-    record outbound-error {
-        code: string,
-        message: string,
-        // Existing agent HTTP status/error semantics, when applicable.
-        status: option<u16>,
-        body: list<u8>,
-        retry-after-ms: option<u64>,
-    }
-    request: async func(options: request-options) -> result<response, outbound-error>;
-}
-
-/// Native SQL execution. Requests and results use runtara-database-contract's
-/// versioned JSON schema; error strings carry its serialized DatabaseError,
-/// never driver details.
-interface sql {
-    query: async func(connection-id: string, request: list<u8>) -> result<list<u8>, string>;
-    execute: async func(connection-id: string, request: list<u8>) -> result<list<u8>, string>;
-    execute-batch: async func(connection-id: string, request: list<u8>) -> result<list<u8>, string>;
-}
 
 /// Safe connection metadata and connection-backed resources.
 interface connections {
@@ -76,14 +29,6 @@ interface timers {
     sleep: async func(ms: u64);
     /// Emergency whole-execution alarm; dispose through standard cancellation.
     abort-after: async func(ms: u64);
-}
-
-world http-client {
-    import http;
-}
-
-world sql-client {
-    import sql;
 }
 
 world connections-client {

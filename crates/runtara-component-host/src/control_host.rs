@@ -1,28 +1,16 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Host side of `runtara:control`.
+//! The control service behind the workflow API.
 //!
 //! The control service behind the workflow API's `/v1/instances`
 //! (`control_host::json`). The tenant, caller instance and operation of a
 //! call come from the launch's binding ([`ControlAuthority`]), never from the
 //! request.
 
-mod bindings {
-    // Types only: the host links `api` by hand below, so every type is
-    // generated from the WIT itself and cannot drift from it.
-    wasmtime::component::bindgen!({
-        path: [
-            "../runtara-wit/wit/agent",
-            "../runtara-wit/wit/control",
-        ],
-        world: "runtara:control/control-host",
-        imports: { default: async | trappable },
-        exports: { default: async },
-        additional_derives: [PartialEq, Eq],
-    });
-}
+/// The control service's request and response types.
+pub mod types;
 
-pub use bindings::runtara::control::types::{
+pub use types::{
     CancelRequest, CommandOutcome, CommandResult, ControlError, ErrorCode as ControlErrorCode,
     InstanceDetail, InstancePage, InstanceStatus, InstanceSummary, ParentClosePolicy, ParentFilter,
     PendingSignal, PendingSignalPage, PendingSignalsRequest, QueryRequest, SendSignalRequest,

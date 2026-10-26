@@ -224,28 +224,6 @@ mod tests {
         assert_eq!(cases("outcome"), ["completed", "suspended"]);
     }
 
-    #[test]
-    fn the_generated_suspending_agent_imports_no_continuation() {
-        let mut resolve = resolve();
-        let shape = runtara_wit::AgentShape {
-            suspendable: true,
-            ..Default::default()
-        };
-        let id = resolve
-            .push_str("probe.wit", &runtara_wit::agent_package("probe", shape))
-            .unwrap();
-        let package = &resolve.packages[id];
-        assert!(!package.interfaces.contains_key("suspendable"));
-        // The continuation arrives in the input's `_operation`.
-        let world = &resolve.worlds[package.worlds["agent"]];
-        assert!(
-            !world
-                .imports
-                .keys()
-                .any(|key| resolve.name_world_key(key) == runtara_wit::agent::CONTINUATION)
-        );
-    }
-
     /// The canonical layout of the suspension types equals the constants the
     /// emitter reads and the host mirrors ([`layout`]).
     #[test]
@@ -253,14 +231,10 @@ mod tests {
         use wit_parser::{Int, SizeAlign, Type};
 
         let mut resolve = resolve();
-        let shape = runtara_wit::AgentShape {
-            suspendable: true,
-            ..Default::default()
-        };
         let id = resolve
             .push_str(
                 "probe.wit",
-                &runtara_wit::agent_package("layout-probe", shape),
+                &runtara_wit::agent_package("layout-probe", Default::default()),
             )
             .unwrap();
         let mut sizes = SizeAlign::default();

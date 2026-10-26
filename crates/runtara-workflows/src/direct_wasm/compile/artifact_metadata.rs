@@ -377,17 +377,10 @@ pub(super) fn resolve_agent_component_dependencies(
             if let Some(sites) = capability_sites.get(&component.agent_id) {
                 check_sidecar_suspends(&component.agent_id, &meta_path, sites)?;
             }
-            let grants = AgentImportGrants::for_agent(
-                &component.agent_id,
-                sidecar_declares(&meta_path, "suspends"),
-                sidecar_declares(&meta_path, "trusted"),
-                !from_staging_dir,
-            );
             check_agent_component_imports(
                 &component.agent_id,
                 &fs::read(&resolved.wasm_path)?,
                 kind,
-                grants,
             )?;
             Ok(resolved)
         })
@@ -422,63 +415,10 @@ const AGENT_TYPES_INTERFACE_PREFIX: &str = "runtara:agent/types@";
 /// against `build_linker`, so an entry needs its WIT pushed there too.
 pub const AGENT_IMPORT_ALLOWLIST: &[&str] = &[];
 
-/// Control interfaces the canonical `control` agent may import. This grant is
-/// the only gate on control (decision D2): the host makes `api` real for a
-/// run's own entry and checks nothing further.
-pub const CONTROL_AGENT_IMPORTS: &[&str] =
-    &[runtara_wit::control::TYPES, runtara_wit::control::API];
-
-/// What an ordinary agent's metadata and location entitle it to import beyond
-/// [`AGENT_IMPORT_ALLOWLIST`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct AgentImportGrants {
-    /// The sidecar declares a suspending capability: the suspension types and
-    /// the host `context` that delivers its continuation.
-    pub suspends: bool,
-    /// The canonical `control` agent resolved from the primary components
-    /// dir: [`CONTROL_AGENT_IMPORTS`].
-    pub control: bool,
-    /// A trusted built-in resolved from the primary components dir whose
-    /// sidecar declares a trusted capability: `runtara:trusted/executor`, the
-    /// path its ordinary copy forwards through. No other agent may drive the
-    /// credential-bearing executor.
-    pub trusted: bool,
-}
-
-impl AgentImportGrants {
-    /// Grants for `agent_id`, whose sidecar declares `suspends` and `trusted`
-    /// capabilities and which was (`from_primary_dir`) or was not found in the
-    /// primary components dir.
-    pub fn for_agent(
-        agent_id: &str,
-        suspends: bool,
-        trusted: bool,
-        from_primary_dir: bool,
-    ) -> Self {
-        Self {
-            suspends,
-            trusted: from_primary_dir && trusted,
-            control: from_primary_dir
-                && runtara_dsl::agent_meta::canonical_agent_id(agent_id)
-                    == runtara_dsl::agent_meta::CONTROL_AGENT_ID,
-        }
-    }
-}
-
 fn agent_import_allowed(import: &str) -> bool {
     import.starts_with("wasi:")
         || import.starts_with(AGENT_TYPES_INTERFACE_PREFIX)
         || AGENT_IMPORT_ALLOWLIST.contains(&import)
-}
-
-fn agent_import_granted(import: &str, grants: AgentImportGrants) -> bool {
-    if import == runtara_wit::agent::CONTINUATION {
-        grants.suspends
-    } else if import == runtara_wit::trusted::EXECUTOR {
-        grants.trusted
-    } else {
-        grants.control && CONTROL_AGENT_IMPORTS.contains(&import)
-    }
 }
 
 /// Refuse an agent whose sidecar and the compiled call sites disagree on
@@ -519,25 +459,6 @@ fn check_sidecar_suspends(
     Ok(())
 }
 
-/// True when a sidecar declares any capability `suspends`. A missing or
-/// unreadable sidecar declares nothing.
-/// Whether any capability in the sidecar at `meta` sets the boolean `flag`.
-fn sidecar_declares(meta: &Path, flag: &str) -> bool {
-    fs::read(meta)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|meta| meta.get("capabilities").cloned())
-        .and_then(|capabilities| capabilities.as_array().cloned())
-        .is_some_and(|capabilities| {
-            capabilities.iter().any(|capability| {
-                capability
-                    .get(flag)
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false)
-            })
-        })
-}
-
 /// Reject an agent component whose root imports reach past what its kind may
 /// bind. Only root imports count: nested components are already linked, and
 /// composition lifts anything they leave unresolved to the root.
@@ -545,27 +466,13 @@ pub fn check_agent_component_imports(
     agent_id: &str,
     wasm: &[u8],
     kind: AgentImportKind,
-    grants: AgentImportGrants,
 ) -> Result<(), DirectCompileError> {
     let imports = component_root_imports(wasm).map_err(|error| {
         DirectCompileError::Component(format!("agent component `{agent_id}`: {error}"))
     })?;
-    // The trusted executor: only a component whose `execution` the host
-    // executor can run may forward to it.
-    let mut grants = grants;
-    if grants.trusted {
-        grants.trusted = component_root_exports(wasm)
-            .map_err(|error| {
-                DirectCompileError::Component(format!("agent component `{agent_id}`: {error}"))
-            })?
-            .iter()
-            .any(|export| export == runtara_wit::trusted::EXECUTION);
-    }
     for import in imports {
         let allowed = match kind {
-            AgentImportKind::Agent => {
-                agent_import_allowed(&import) || agent_import_granted(&import, grants)
-            }
+            AgentImportKind::Agent => agent_import_allowed(&import),
             // A workflow-agent runs inside its caller's instance and ignores
             // its state steps, so it never writes the caller's state.
             AgentImportKind::StagedWorkflowAgent => {
@@ -711,29 +618,6 @@ fn component_root_imports(wasm: &[u8]) -> Result<Vec<String>, DirectCompileError
         }
     }
     Ok(imports)
-}
-
-/// Every export name at the component's ROOT.
-fn component_root_exports(wasm: &[u8]) -> Result<Vec<String>, DirectCompileError> {
-    let parse_error = |err: wasmparser::BinaryReaderError| {
-        DirectCompileError::Component(format!("failed to parse agent component: {err}"))
-    };
-    let mut exports = Vec::new();
-    let mut depth = 0usize;
-    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
-        match payload.map_err(parse_error)? {
-            wasmparser::Payload::ModuleSection { .. }
-            | wasmparser::Payload::ComponentSection { .. } => depth += 1,
-            wasmparser::Payload::End(_) => depth = depth.saturating_sub(1),
-            wasmparser::Payload::ComponentExportSection(reader) if depth == 0 => {
-                for export in reader {
-                    exports.push(export.map_err(parse_error)?.name.0.to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(exports)
 }
 
 fn resolve_component_dependency(
@@ -1032,13 +916,9 @@ mod tests {
         let core_module =
             wat::parse_str(r#"(module (import "runtara:control/api@1.0.0" "stop" (func)))"#)
                 .expect("fixture module parses");
-        let error = check_agent_component_imports(
-            "published-flow",
-            &core_module,
-            AgentImportKind::Agent,
-            AgentImportGrants::default(),
-        )
-        .expect_err("a core module is not an agent component");
+        let error =
+            check_agent_component_imports("published-flow", &core_module, AgentImportKind::Agent)
+                .expect_err("a core module is not an agent component");
         assert!(
             error.to_string().contains("published-flow")
                 && error.to_string().contains("core module"),
@@ -1138,19 +1018,10 @@ mod tests {
                 "runtara:workflow-stdlib/json@1.0.0",
                 runtara_wit::workflow::OPERATION,
                 runtara_wit::workflow::WAITS,
-                runtara_wit::agent::CONTINUATION,
-                runtara_wit::control::API,
             ],
             STAGED_TAGS,
         )
-        .expect("a staged workflow-agent parks, waits and calls control under its caller");
-
-        resolve_fixture_agent_in(
-            FixtureDir::Staging,
-            &[runtara_wit::agent::CONTINUATION],
-            STAGED_TAGS,
-        )
-        .expect("a composed suspending agent leaves its continuation to the host");
+        .expect("a staged workflow-agent parks and waits under its caller");
     }
 
     /// Stage `agent_id` importing `imports`, with a sidecar that does or does
@@ -1212,52 +1083,6 @@ mod tests {
         .map(|_| ())
     }
 
-    /// Only a trusted built-in from the primary components dir that the host
-    /// executor can run (it exports `execution`) may import the executor.
-    #[test]
-    fn the_trusted_executor_is_granted_only_to_trusted_built_ins() {
-        let executor = &[runtara_wit::trusted::EXECUTOR][..];
-        let execution = &[runtara_wit::trusted::EXECUTION][..];
-        resolve_declared_agent_with(
-            "s3-storage",
-            FixtureDir::Primary,
-            executor,
-            execution,
-            false,
-            true,
-        )
-        .expect("a trusted built-in forwards through the executor");
-        for (label, location, exports, trusted) in [
-            ("an ordinary agent", FixtureDir::Primary, execution, false),
-            (
-                "a trusted agent without execution",
-                FixtureDir::Primary,
-                &[][..],
-                true,
-            ),
-            (
-                "a staged copy of a trusted agent",
-                FixtureDir::Staging,
-                execution,
-                true,
-            ),
-        ] {
-            let error = resolve_declared_agent_with(
-                "s3-storage",
-                location,
-                executor,
-                exports,
-                false,
-                trusted,
-            )
-            .expect_err(label);
-            assert!(
-                error.to_string().contains(runtara_wit::trusted::EXECUTOR),
-                "{label}: {error}"
-            );
-        }
-    }
-
     #[test]
     fn the_sidecar_must_agree_with_the_compiled_sites_on_suspension() {
         let resolve = |declared: bool, compiled: bool| {
@@ -1307,52 +1132,22 @@ mod tests {
         }
     }
 
+    /// The removed host ABI's agent interfaces are refused for every agent,
+    /// the bundled control, suspending and trusted agents included: they
+    /// reach the host over the workflow API.
     #[test]
-    fn the_suspension_context_is_admitted_only_for_agents_declaring_suspends() {
-        let imports = [runtara_wit::agent::CONTINUATION];
-        resolve_declared_agent("pauser", FixtureDir::Primary, &imports, true)
-            .expect("a suspending agent reads its continuation");
-        resolve_declared_agent("pauser", FixtureDir::Staging, &imports, true)
-            .expect("an operator agent in an extra dir may suspend too");
-        for import in imports {
-            let error = resolve_declared_agent("pauser", FixtureDir::Primary, &[import], false)
-                .expect_err("an agent that never suspends has no continuation");
-            assert!(error.to_string().contains(import), "{error}");
-        }
-    }
-
-    #[test]
-    fn control_interfaces_are_admitted_only_for_the_canonical_control_agent() {
-        resolve_declared_agent("control", FixtureDir::Primary, CONTROL_AGENT_IMPORTS, false)
-            .expect("the bundled control agent calls the control API");
-        // Control no longer suspends, so it gets no suspension interface.
-        let import = runtara_wit::agent::CONTINUATION;
-        let error = resolve_declared_agent("control", FixtureDir::Primary, &[import], false)
-            .expect_err("control never suspends");
-        assert!(error.to_string().contains(import), "{error}");
-        for (agent, location) in [
-            ("controller", FixtureDir::Primary),
-            ("pauser", FixtureDir::Primary),
-            // A same-named component from a staging dir is not the bundled one.
-            ("control", FixtureDir::Staging),
-        ] {
-            for import in CONTROL_AGENT_IMPORTS {
-                let error = resolve_declared_agent(agent, location, &[import], true)
-                    .expect_err("only the bundled control agent reaches control");
+    fn no_agent_may_import_the_removed_host_abi() {
+        for (agent, suspends) in [("control", false), ("pauser", true), ("s3-storage", false)] {
+            for import in [
+                "runtara:agent/continuation@1.0.0",
+                "runtara:control/api@1.0.0",
+                "runtara:control/types@1.0.0",
+                "runtara:trusted/executor@1.0.0",
+            ] {
+                let error = resolve_declared_agent(agent, FixtureDir::Primary, &[import], suspends)
+                    .expect_err("the removed host ABI is no agent import");
                 assert!(error.to_string().contains(import), "{agent}: {error}");
             }
-        }
-        // Any other control interface, another version, or a workflow
-        // interface is refused even for the control agent.
-        for import in [
-            "runtara:control/executor@1.0.0",
-            "runtara:control/api@0.2.0",
-            runtara_wit::workflow::OPERATION,
-        ] {
-            assert!(
-                resolve_declared_agent("control", FixtureDir::Primary, &[import], true).is_err(),
-                "{import}"
-            );
         }
     }
 
@@ -1482,18 +1277,14 @@ mod tests {
     #[test]
     fn the_agent_import_allowlist_never_admits_workflow_or_control_interfaces() {
         for entry in AGENT_IMPORT_ALLOWLIST {
-            for forbidden in [
-                runtara_wit::workflow::PREFIX,
-                runtara_wit::control::PREFIX,
-                "wasi:",
-            ] {
+            for forbidden in [runtara_wit::workflow::PREFIX, "runtara:control/", "wasi:"] {
                 assert!(
                     !entry.starts_with(forbidden),
                     "`{entry}` must not be on the agent import allowlist (`{forbidden}`)"
                 );
             }
         }
-        for prefix in ["runtara:agent/continuation@", runtara_wit::control::PREFIX] {
+        for prefix in ["runtara:agent/continuation@", "runtara:control/"] {
             for suffix in ["", "api", "scope@0.1.0", "scope@0.2.0", "anything@9.9.9"] {
                 let import = format!("{prefix}{suffix}");
                 assert!(
