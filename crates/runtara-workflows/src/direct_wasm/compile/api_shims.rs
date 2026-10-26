@@ -1,22 +1,22 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `runtara:workflow/runtime` lowered onto `runtara:api` for the workflow API
-//! guest ABI.
+//! The emitter's run-service helpers over `runtara:api`.
 //!
-//! The emitter's call sites speak the core signatures and result layouts of
-//! the old runtime interface. On the workflow API ABI the logic imports
-//! `runtara:api` instead, and each old runtime function becomes a function
-//! defined in the module (a shim) with the old core signature: it calls the
-//! matching `runtara:api` function with a scratch area of its own as the
-//! result pointer (an `api-error` is far larger than the old `string`, so
-//! the caller's result area would not hold it), then writes the old layout
-//! into the caller's result area. `is-cancelled` and `check-signals` call
-//! the host's own composites (`/v1/signals/lifecycle/cancelled` and
-//! `/check`), which keep the host's cancel flag.
+//! The emitter's call sites speak the emitter's own convention: a synchronous
+//! call whose `result<T, string>` lands at the caller's result pointer
+//! ([`native`] describes each helper's core signature and layout). Each
+//! helper is a function defined in the module: it calls the matching
+//! `runtara:api` function with a scratch area of its own as the result
+//! pointer (an `api-error` is far larger than a `string`, so the caller's
+//! result area would not hold it), then writes the caller's layout.
+//! `is-cancelled` and `check-signals` call the host's own composites
+//! (`/v1/signals/lifecycle/cancelled` and `/check`), which keep the host's
+//! cancel flag.
 //!
-//! Every offset comes from the WIT through `SizeAlign`, and every shim checks
-//! that the import has the flat signature it pushes for, so a WIT change that
-//! moves a field fails the compile instead of corrupting memory. The scratch
+//! Every `runtara:api` offset comes from its WIT through `SizeAlign`, and
+//! every helper checks that the import has the flat signature it pushes for,
+//! so a WIT change that moves a field fails the compile instead of corrupting
+//! memory. The scratch
 //! area sits just past the static data, below the heap, and every new result
 //! fits it ([`tests`] pins that). The logic never runs two shims at once: its
 //! runtime calls are synchronous.
@@ -289,16 +289,9 @@ impl Shim<'_> {
     }
 
     /// After a call into `new` (a `result<_, api-error>`): when it failed,
-    /// write the old `result<_, string>` error (the envelope's message) and
-    /// return.
-    fn on_error_return(&mut self, new: &Type, old: &Type) -> Result<(), DirectCompileError> {
-        let old_err = self.layouts.offset(old, &[Step::Err])?;
-        self.on_error_return_at(new, old_err)
-    }
-
-    /// [`Self::on_error_return`] into a result whose error string is at
-    /// `old_err` of the caller's result area.
-    fn on_error_return_at(&mut self, new: &Type, old_err: u64) -> Result<(), DirectCompileError> {
+    /// write the caller's `result<_, string>` error (the envelope's message)
+    /// at `old_err` of its result area, and return.
+    fn on_error_return(&mut self, new: &Type, old_err: u64) -> Result<(), DirectCompileError> {
         let message = self
             .layouts
             .offset(new, &[Step::Err, Step::Field("message")])?;
@@ -401,6 +394,65 @@ pub(super) struct ApiImport {
     pub(super) params: Vec<WasmType>,
 }
 
+/// The emitter's own core signatures and result layouts of its runtime
+/// helpers: the canonical ABI of a synchronous `result<T, string>` call, the
+/// result pointer last. The tag is at 0; the error string and every 4-aligned
+/// `T` at 4, a `u64` at 8. The call sites read these offsets
+/// (`DIRECT_RESULT_*`, `DIRECT_CHECKPOINT_*`), and a helper writes them from
+/// the `runtara:api` answer.
+pub(super) mod native {
+    use wit_parser::abi::WasmType::{self, I32, I64, Length as L, Pointer as P};
+
+    /// The error string, and every 4-aligned ok payload.
+    pub(crate) const PAYLOAD: u64 = 4;
+    /// A `u64` ok payload (`now-ms`).
+    pub(crate) const U64_PAYLOAD: u64 = 8;
+    /// The list of an `option<list<u8>>` or of an input's `accepted(list)`,
+    /// whose tag is at [`PAYLOAD`].
+    pub(crate) const OPTION_LIST: u64 = 8;
+
+    /// A lifecycle signal: `signal-type`, `command-id`, `payload`, then an
+    /// optional `checkpoint-id` (tag, then string), from its start.
+    pub(crate) const SIGNAL_TYPE: u64 = 0;
+    pub(crate) const SIGNAL_COMMAND: u64 = 8;
+    pub(crate) const SIGNAL_PAYLOAD: u64 = 16;
+    pub(crate) const SIGNAL_CHECKPOINT: u64 = 24;
+    pub(crate) const SIGNAL_CHECKPOINT_VALUE: u64 = 28;
+    /// `poll-signal`: an optional signal, its tag at [`PAYLOAD`].
+    pub(crate) const POLLED_SIGNAL: u64 = 8;
+
+    /// `checkpoint`: whether a checkpoint was already there, the stored
+    /// state, an optional pending signal and an optional custom signal.
+    pub(crate) const CHECKPOINT_FOUND: u64 = 4;
+    pub(crate) const CHECKPOINT_STATE: u64 = 8;
+    pub(crate) const CHECKPOINT_PENDING: u64 = 16;
+    pub(crate) const CHECKPOINT_SIGNAL: u64 = 20;
+    pub(crate) const CHECKPOINT_CUSTOM: u64 = 56;
+
+    /// Where the error string of helper `name`'s result goes.
+    pub(crate) fn error_at(name: &str) -> u64 {
+        if name == "now-ms" {
+            U64_PAYLOAD
+        } else {
+            PAYLOAD
+        }
+    }
+
+    /// The core parameters of helper `name`, its result pointer last.
+    pub(crate) fn params(name: &str) -> Vec<WasmType> {
+        match name {
+            "debug-mode-enabled" | "breakpoint-pause" | "heartbeat" | "instance-id"
+            | "poll-signal" | "is-cancelled" | "check-signals" | "now-ms" => vec![P],
+            "poll-input" | "close-input" | "get-checkpoint" => vec![P, L, P],
+            "custom-event" | "checkpoint" | "handle-checkpoint-signal" => vec![P, L, P, L, P],
+            "register-input" => vec![P, L, I32, I64, P],
+            "record-retry-attempt" => vec![P, L, I32, I32, P, L, P],
+            "blocking-sleep" => vec![I64, P],
+            other => unreachable!("no runtime helper {other}"),
+        }
+    }
+}
+
 /// Every old runtime function the emitter calls, by name, in the order their
 /// shims are defined.
 pub(super) const SHIMMED: [&str; 17] = [
@@ -458,15 +510,9 @@ pub(super) fn emit_runtime_shims(
     use WasmType::{I32, I64, Length as L, Pointer as P};
 
     for name in SHIMMED {
-        let old_fn = function(resolve, "runtara:workflow", "runtime", name)?;
-        let old_sig = resolve.wasm_signature(mangling.import_variant(), old_fn);
-        if !old_sig.retptr {
-            return Err(component_error(format!(
-                "api shim: runtime.{name} has no retptr"
-            )));
-        }
-        let old = result_type(old_fn)?;
-        let mut shim = Shim::new(old_sig.params.len(), scratch, &layouts);
+        let params = native::params(name);
+        let err = native::error_at(name);
+        let mut shim = Shim::new(params.len(), scratch, &layouts);
         let param = |n: u32| n;
         match name {
             "custom-event" => {
@@ -492,13 +538,13 @@ pub(super) fn emit_runtime_shims(
                     .i(Instruction::LocalSet(one));
                 let append = import("events.append", &[P, L, P])?;
                 shim.call(append, &[list, one], true);
-                shim.on_error_return(&events, &old)?;
+                shim.on_error_return(&events, err)?;
             }
             "debug-mode-enabled" | "instance-id" => {
                 let info = api_result("run", "info")?;
                 shim.call(import("run.info", &[P])?, &[], true);
-                shim.on_error_return(&info, &old)?;
-                let ok = layouts.offset(&old, &[Step::Ok])?;
+                shim.on_error_return(&info, err)?;
+                let ok = native::PAYLOAD;
                 if name == "debug-mode-enabled" {
                     let debug = layouts.offset(&info, &[Step::Ok, Step::Field("debug")])?;
                     let value = shim.local(2);
@@ -519,21 +565,18 @@ pub(super) fn emit_runtime_shims(
                 shim.i(Instruction::I64Const(0))
                     .i(Instruction::LocalSet(wait));
                 shim.call(import("debug.breakpoint", &[I64, P])?, &[wait], true);
-                shim.on_error_return(&breakpoint, &old)?;
+                shim.on_error_return(&breakpoint, err)?;
             }
             "heartbeat" => {
                 let heartbeat = api_result("time", "heartbeat")?;
                 shim.call(import("time.heartbeat", &[P])?, &[], true);
-                shim.on_error_return(&heartbeat, &old)?;
+                shim.on_error_return(&heartbeat, err)?;
             }
             "now-ms" => {
                 let now = api_result("time", "now-ms")?;
                 shim.call(import("time.now-ms", &[P])?, &[], true);
-                shim.on_error_return(&now, &old)?;
-                let (from, to) = (
-                    layouts.offset(&now, &[Step::Ok])?,
-                    layouts.offset(&old, &[Step::Ok])?,
-                );
+                shim.on_error_return(&now, err)?;
+                let (from, to) = (layouts.offset(&now, &[Step::Ok])?, native::U64_PAYLOAD);
                 let value = shim.tmp_i64;
                 let retptr = shim.retptr;
                 shim.i(Instruction::I32Const(scratch))
@@ -546,8 +589,8 @@ pub(super) fn emit_runtime_shims(
             "poll-signal" => {
                 let poll = api_result("signals", "poll-lifecycle")?;
                 shim.call(import("signals.poll-lifecycle", &[P])?, &[], true);
-                shim.on_error_return(&poll, &old)?;
-                write_polled_signal(&mut shim, &poll, &old)?;
+                shim.on_error_return(&poll, err)?;
+                write_polled_signal(&mut shim, &poll)?;
             }
             "is-cancelled" | "check-signals" => {
                 // The host's own composites: it keeps the cancel flag and
@@ -559,10 +602,10 @@ pub(super) fn emit_runtime_shims(
                 };
                 let checked = api_result("signals", function)?;
                 shim.call(import(key, &[P])?, &[], true);
-                shim.on_error_return(&checked, &old)?;
+                shim.on_error_return(&checked, err)?;
                 let value = shim.local(2);
                 shim.load_u8(layouts.offset(&checked, &[Step::Ok])?, value);
-                shim.store_u8(layouts.offset(&old, &[Step::Ok])?, value);
+                shim.store_u8(native::PAYLOAD, value);
             }
             "handle-checkpoint-signal" => {
                 let ack = api_result("signals", "ack-lifecycle")?;
@@ -573,9 +616,9 @@ pub(super) fn emit_runtime_shims(
                     &[param(2), param(3), param(0), param(1)],
                     true,
                 );
-                shim.on_error_return(&ack, &old)?;
+                shim.on_error_return(&ack, err)?;
                 shim.load_u8(layouts.offset(&ack, &[Step::Ok])?, applied);
-                shim.store_u8(layouts.offset(&old, &[Step::Ok])?, applied);
+                shim.store_u8(native::PAYLOAD, applied);
             }
             "register-input" => {
                 let register = api_result("inputs", "register")?;
@@ -584,7 +627,7 @@ pub(super) fn emit_runtime_shims(
                     &[param(0), param(1), param(2), param(3)],
                     true,
                 );
-                shim.on_error_return(&register, &old)?;
+                shim.on_error_return(&register, err)?;
             }
             "poll-input" | "close-input" => {
                 let (key, ty) = if name == "poll-input" {
@@ -601,19 +644,16 @@ pub(super) fn emit_runtime_shims(
                         &[param(0), param(1), wait],
                         true,
                     );
-                    shim.on_error_return(&ty, &old)?;
+                    shim.on_error_return(&ty, err)?;
                 } else {
                     shim.call(import(key, &[P, L, P])?, &[param(0), param(1)], true);
                     shim.on_error_trap();
                 }
-                // `input-read` and the old `input-state` are the same variant.
-                let (from, to) = (
-                    layouts.offset(&ty, &[Step::Ok])?,
-                    layouts.offset(&old, &[Step::Ok])?,
-                );
+                // `input-read` as the emitter's `open | accepted(list) | closed`.
+                let (from, to) = (layouts.offset(&ty, &[Step::Ok])?, native::PAYLOAD);
                 let (from_payload, to_payload) = (
                     layouts.offset(&ty, &[Step::Ok, Step::Case("accepted")])?,
-                    layouts.offset(&old, &[Step::Ok, Step::Case("accepted")])?,
+                    native::OPTION_LIST,
                 );
                 let (tag, ptr, len) = (shim.local(2), shim.local(3), shim.local(4));
                 shim.load_u8(from, tag);
@@ -630,8 +670,8 @@ pub(super) fn emit_runtime_shims(
                     &[param(0), param(1)],
                     true,
                 );
-                shim.on_error_return(&get, &old)?;
-                copy_option_list(&mut shim, &get, &old)?;
+                shim.on_error_return(&get, err)?;
+                copy_option_list(&mut shim, &get)?;
             }
             "checkpoint" => {
                 let put = api_result("checkpoints", "put")?;
@@ -640,8 +680,8 @@ pub(super) fn emit_runtime_shims(
                     &[param(0), param(1), param(2), param(3)],
                     true,
                 );
-                shim.on_error_return(&put, &old)?;
-                write_checkpoint_result(&mut shim, &put, &old)?;
+                shim.on_error_return(&put, err)?;
+                write_checkpoint_result(&mut shim, &put)?;
             }
             "record-retry-attempt" => {
                 let record = api_result("checkpoints", "record-retry-attempt")?;
@@ -653,7 +693,7 @@ pub(super) fn emit_runtime_shims(
                     &[param(0), param(1), param(2), param(3), param(4), param(5)],
                     true,
                 );
-                shim.on_error_return(&record, &old)?;
+                shim.on_error_return(&record, err)?;
             }
             "blocking-sleep" => {
                 shim.call(import("time.sleep", &[I64])?, &[param(0)], false);
@@ -663,12 +703,7 @@ pub(super) fn emit_runtime_shims(
 
         let index = imported_function_count + *next_defined_function;
         *next_defined_function += 1;
-        functions.function(push_core_type(
-            types,
-            type_count,
-            &old_sig.params,
-            &old_sig.results,
-        ));
+        functions.function(push_core_type(types, type_count, &params, &[]));
         code.function(&shim.finish());
         indices.set_runtime_shim(name, index);
     }
@@ -735,7 +770,7 @@ pub(super) fn emit_runtime_shims(
         let enter_index = native(5, true, &mut |shim| {
             set_cell(shim, cell, OPERATION_STATE, 0);
             shim.call(enter, &[0, 1, 2, 3], true);
-            shim.on_error_return_at(&enter_ty, NATIVE_PAYLOAD)?;
+            shim.on_error_return(&enter_ty, NATIVE_PAYLOAD)?;
             let (ptr, len, tag) = (shim.local(2), shim.local(3), shim.local(4));
             shim.load_i32(id_at, ptr);
             shim.load_i32(id_at + 4, len);
@@ -945,41 +980,37 @@ fn code_is(shim: &mut Shim, ptr: u32, len: u32, text: &str) {
 }
 
 /// `option<list<u8>>` from `new`'s ok payload into `old`'s.
-fn copy_option_list(shim: &mut Shim, new: &Type, old: &Type) -> Result<(), DirectCompileError> {
+fn copy_option_list(shim: &mut Shim, new: &Type) -> Result<(), DirectCompileError> {
     let layouts = shim.layouts;
-    let (from, to) = (
+    let (from, from_list) = (
         layouts.offset(new, &[Step::Ok])?,
-        layouts.offset(old, &[Step::Ok])?,
-    );
-    let (from_list, to_list) = (
         layouts.offset(new, &[Step::Ok, Step::Some])?,
-        layouts.offset(old, &[Step::Ok, Step::Some])?,
     );
     let (tag, ptr, len) = (shim.local(2), shim.local(3), shim.local(4));
     shim.load_u8(from, tag);
     shim.load_i32(from_list, ptr);
     shim.load_i32(from_list + 4, len);
-    shim.store_u8(to, tag);
-    shim.store_i32(to_list, ptr);
-    shim.store_i32(to_list + 4, len);
+    shim.store_u8(native::PAYLOAD, tag);
+    shim.store_i32(native::OPTION_LIST, ptr);
+    shim.store_i32(native::OPTION_LIST + 4, len);
     Ok(())
 }
 
 /// `option<lifecycle-signal>` (new) as `option<signal-info>` (old).
-fn write_polled_signal(shim: &mut Shim, new: &Type, old: &Type) -> Result<(), DirectCompileError> {
+fn write_polled_signal(shim: &mut Shim, new: &Type) -> Result<(), DirectCompileError> {
     use Step::{Field, Ok, Some};
     let layouts = shim.layouts;
     // (new path, old path) of each string or list field.
-    let fields: [(&[Step], &[Step]); 3] = [
+    let fields: [(&[Step], u64); 3] = [
         (
             &[Ok, Some, Field("notice"), Field("signal-type")],
-            &[Ok, Some, Field("signal-type")],
+            native::SIGNAL_TYPE,
         ),
         (
             &[Ok, Some, Field("notice"), Field("command-id")],
-            &[Ok, Some, Field("command-id")],
+            native::SIGNAL_COMMAND,
         ),
-        (&[Ok, Some, Field("payload")], &[Ok, Some, Field("payload")]),
+        (&[Ok, Some, Field("payload")], native::SIGNAL_PAYLOAD),
     ];
     let tag = shim.local(2);
     shim.load_u8(layouts.offset(new, &[Ok])?, tag);
@@ -1004,31 +1035,23 @@ fn write_polled_signal(shim: &mut Shim, new: &Type, old: &Type) -> Result<(), Di
     shim.load_i32(checkpoint_value, cp_ptr);
     shim.load_i32(checkpoint_value + 4, cp_len);
 
-    shim.store_u8(layouts.offset(old, &[Ok])?, tag);
+    let base = native::POLLED_SIGNAL;
+    shim.store_u8(native::PAYLOAD, tag);
     for (n, (_, to)) in fields.iter().enumerate() {
-        let offset = layouts.offset(old, to)?;
         let (ptr, len) = loaded[n];
-        shim.store_i32(offset, ptr);
-        shim.store_i32(offset + 4, len);
+        shim.store_i32(base + to, ptr);
+        shim.store_i32(base + to + 4, len);
     }
-    shim.store_u8(
-        layouts.offset(old, &[Ok, Some, Field("checkpoint-id")])?,
-        cp_tag,
-    );
-    let old_value = layouts.offset(old, &[Ok, Some, Field("checkpoint-id"), Some])?;
-    shim.store_i32(old_value, cp_ptr);
-    shim.store_i32(old_value + 4, cp_len);
+    shim.store_u8(base + native::SIGNAL_CHECKPOINT, cp_tag);
+    shim.store_i32(base + native::SIGNAL_CHECKPOINT_VALUE, cp_ptr);
+    shim.store_i32(base + native::SIGNAL_CHECKPOINT_VALUE + 4, cp_len);
     Result::Ok(())
 }
 
 /// `checkpoint-written` (new) as the old `checkpoint-result`. Call sites read
 /// `found`, `state` and the pending signal's type and command id; the old
 /// result's signal payload and custom signal are left empty.
-fn write_checkpoint_result(
-    shim: &mut Shim,
-    new: &Type,
-    old: &Type,
-) -> Result<(), DirectCompileError> {
+fn write_checkpoint_result(shim: &mut Shim, new: &Type) -> Result<(), DirectCompileError> {
     let layouts = shim.layouts;
     let field = |name| [Step::Ok, Step::Field(name)];
     let stored = layouts.offset(new, &field("stored"))?;
@@ -1070,33 +1093,22 @@ fn write_checkpoint_result(
     shim.load_i32(command, cmd_ptr);
     shim.load_i32(command + 4, cmd_len);
 
-    shim.store_u8(layouts.offset(old, &field("found"))?, found);
-    let old_state = layouts.offset(old, &field("state"))?;
-    shim.store_i32(old_state, state_ptr);
-    shim.store_i32(old_state + 4, state_len);
-    let old_pending = [Step::Ok, Step::Field("pending-signal")];
-    shim.store_u8(layouts.offset(old, &old_pending)?, tag);
-    let signal = |name| {
-        [
-            Step::Ok,
-            Step::Field("pending-signal"),
-            Step::Some,
-            Step::Field(name),
-        ]
-    };
-    for (name, ptr, len) in [
-        ("signal-type", ty_ptr, ty_len),
-        ("command-id", cmd_ptr, cmd_len),
+    shim.store_u8(native::CHECKPOINT_FOUND, found);
+    shim.store_i32(native::CHECKPOINT_STATE, state_ptr);
+    shim.store_i32(native::CHECKPOINT_STATE + 4, state_len);
+    shim.store_u8(native::CHECKPOINT_PENDING, tag);
+    let signal = native::CHECKPOINT_SIGNAL;
+    for (to, ptr, len) in [
+        (native::SIGNAL_TYPE, ty_ptr, ty_len),
+        (native::SIGNAL_COMMAND, cmd_ptr, cmd_len),
     ] {
-        let offset = layouts.offset(old, &signal(name))?;
-        shim.store_i32(offset, ptr);
-        shim.store_i32(offset + 4, len);
+        shim.store_i32(signal + to, ptr);
+        shim.store_i32(signal + to + 4, len);
     }
-    let payload = layouts.offset(old, &signal("payload"))?;
-    shim.store_const_i32(payload, 0);
-    shim.store_const_i32(payload + 4, 0);
-    shim.store_const_u8(layouts.offset(old, &signal("checkpoint-id"))?, 0);
-    shim.store_const_u8(layouts.offset(old, &field("custom-signal"))?, 0);
+    shim.store_const_i32(signal + native::SIGNAL_PAYLOAD, 0);
+    shim.store_const_i32(signal + native::SIGNAL_PAYLOAD + 4, 0);
+    shim.store_const_u8(signal + native::SIGNAL_CHECKPOINT, 0);
+    shim.store_const_u8(native::CHECKPOINT_CUSTOM, 0);
     Ok(())
 }
 
@@ -1185,12 +1197,8 @@ mod tests {
                 ("checkpoints", "record-retry-attempt"),
             ),
         ] {
-            let old_ty =
-                result_type(function(&resolve, "runtara:workflow", "runtime", old).unwrap())
-                    .unwrap();
             let new_ty =
                 result_type(function(&resolve, "runtara:api", new.0, new.1).unwrap()).unwrap();
-            let _ = old_ty;
             assert!(
                 layouts.size(&new_ty) <= API_SCRATCH_BYTES as u64,
                 "{old}: runtara:api {}.{} result is {} bytes",
@@ -1221,40 +1229,28 @@ mod tests {
         assert!(layouts.size(&new) <= 120);
     }
 
+    /// The helpers write the layouts the call sites read.
     #[test]
-    fn offsets_follow_the_wit() {
+    fn helper_layouts_are_the_call_sites_constants() {
+        use super::super::*;
+        assert_eq!(native::CHECKPOINT_FOUND, DIRECT_CHECKPOINT_FOUND_OFFSET);
+        assert_eq!(
+            native::CHECKPOINT_PENDING,
+            DIRECT_CHECKPOINT_PENDING_SIGNAL_TAG_OFFSET
+        );
+        assert_eq!(
+            native::CHECKPOINT_SIGNAL + native::SIGNAL_TYPE,
+            DIRECT_CHECKPOINT_SIGNAL_TYPE_PTR_OFFSET
+        );
+        assert_eq!(native::PAYLOAD, DIRECT_RESULT_OPTION_TAG_OFFSET);
+        assert_eq!(native::OPTION_LIST, DIRECT_RESULT_OPTION_LIST_PTR_OFFSET);
+        assert_eq!(native::U64_PAYLOAD, DIRECT_RET_U64_OK_OFFSET);
+    }
+
+    #[test]
+    fn api_offsets_follow_the_wit() {
         let resolve = resolve();
         let layouts = Layouts::new(&resolve);
-        let old =
-            result_type(function(&resolve, "runtara:workflow", "runtime", "checkpoint").unwrap())
-                .unwrap();
-        // The emitter's own constants for the old checkpoint result.
-        assert_eq!(
-            layouts
-                .offset(&old, &[Step::Ok, Step::Field("found")])
-                .unwrap(),
-            super::super::DIRECT_CHECKPOINT_FOUND_OFFSET
-        );
-        assert_eq!(
-            layouts
-                .offset(&old, &[Step::Ok, Step::Field("pending-signal")])
-                .unwrap(),
-            super::super::DIRECT_CHECKPOINT_PENDING_SIGNAL_TAG_OFFSET
-        );
-        assert_eq!(
-            layouts
-                .offset(
-                    &old,
-                    &[
-                        Step::Ok,
-                        Step::Field("pending-signal"),
-                        Step::Some,
-                        Step::Field("signal-type")
-                    ]
-                )
-                .unwrap(),
-            super::super::DIRECT_CHECKPOINT_SIGNAL_TYPE_PTR_OFFSET
-        );
         let now =
             result_type(function(&resolve, "runtara:api", "time", "now-ms").unwrap()).unwrap();
         assert_eq!(layouts.offset(&now, &[Step::Ok]).unwrap(), 8);

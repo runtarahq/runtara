@@ -14,7 +14,6 @@
 //! names imports it never defines, and `wac` resolves them.
 
 use runtara_wit::stdlib::{JSON as STDLIB_JSON_INTERFACE, PACKAGE as STDLIB_PACKAGE};
-use runtara_wit::workflow::RUNTIME as RUNTIME_INTERFACE_NAME;
 
 /// Package of the world direct-emitted workflow logic is encoded against, and
 /// of the logic component in the composition.
@@ -77,8 +76,8 @@ pub struct DirectAgentComponentRequirement {
 
 /// Shared components every direct workflow logic component imports.
 ///
-/// The `runtara:workflow/runtime` interface is not a shared component:
-/// it is always left unbound and satisfied natively by the embedding host.
+/// The `runtara:api` component is composed separately, in front of logic that
+/// imports it.
 pub const DIRECT_SHARED_COMPONENT_REQUIREMENTS: &[DirectSharedComponentRequirement] =
     &[DirectSharedComponentRequirement {
         package: "runtara:workflow-stdlib",
@@ -169,20 +168,6 @@ pub struct DirectComponentArtifacts {
 }
 
 impl DirectComponentArtifacts {
-    /// Import `runtara:api` in the world in place of the runtime, when the
-    /// workflow has one.
-    pub(super) fn with_api_runtime(mut self, api_runtime: bool) -> Self {
-        let runtime = format!("    import {};\n", runtara_wit::workflow::RUNTIME);
-        if api_runtime && self.world_wit.contains(&runtime) {
-            let api: String = runtara_wit::api::RUNTIME_REPLACEMENTS
-                .iter()
-                .map(|interface| format!("    import {interface};\n"))
-                .collect();
-            self.world_wit = self.world_wit.replacen(&runtime, &api, 1);
-        }
-        self
-    }
-
     /// Import `runtara:api/waits` in the world when a WaitForInstances step
     /// needs it.
     pub(super) fn with_wait_instances(mut self, wait_instances: bool) -> Self {
@@ -215,10 +200,9 @@ impl DirectComponentArtifacts {
 /// artifacts define the WIT/WAC contract the runtime completion dispatcher will
 /// continue to implement without changing the output directory contract.
 ///
-/// The emitted `workflow.wac` never instantiates a runtime component: the
-/// `runtara:workflow/runtime` interface bubbles up as an import of the
-/// composed artifact (surfaced by the trailing `...` in the `wf`
-/// instantiation) for the embedding host to satisfy natively.
+/// The emitted `workflow.wac` leaves the logic's `runtara:api` imports to the
+/// trailing `...` of the `wf` instantiation; composition puts the api
+/// component in front of them.
 pub fn emit_direct_component_artifacts(agents: &[String]) -> DirectComponentArtifacts {
     emit_direct_component_artifacts_configured(agents, WorkflowRole::default(), false, None)
 }
@@ -382,7 +366,10 @@ fn emit_world_wit(
          \x20   import {STDLIB_JSON_INTERFACE};\n",
     );
     if !omit_runtime {
-        out.push_str(&format!("    import {RUNTIME_INTERFACE_NAME};\n"));
+        // The run services: `runtara:api`'s runtime interfaces.
+        for interface in runtara_wit::api::RUN_SERVICES {
+            out.push_str(&format!("    import {interface};\n"));
+        }
     }
     if has_connections {
         out.push_str(&format!("    import {};\n", runtara_wit::api::CONNECTIONS));
@@ -547,11 +534,14 @@ mod tests {
                 .world_wit
                 .contains("import runtara:workflow-stdlib/json@1.0.0;")
         );
-        assert!(
-            artifacts
-                .world_wit
-                .contains("import runtara:workflow/runtime@1.0.0;")
-        );
+        for interface in runtara_wit::api::RUN_SERVICES {
+            assert!(
+                artifacts
+                    .world_wit
+                    .contains(&format!("import {interface};")),
+                "{interface}"
+            );
+        }
         // The Phase-5 default exports the invoke lifecycle.
         assert!(
             artifacts
@@ -604,7 +594,13 @@ package runtara:workflow-logic@1.0.0;
 
 world workflow {
     import runtara:workflow-stdlib/json@1.0.0;
-    import runtara:workflow/runtime@1.0.0;
+    import runtara:api/run@1.0.0;
+    import runtara:api/time@1.0.0;
+    import runtara:api/signals@1.0.0;
+    import runtara:api/checkpoints@1.0.0;
+    import runtara:api/events@1.0.0;
+    import runtara:api/inputs@1.0.0;
+    import runtara:api/debug@1.0.0;
     import runtara:agent-crypto/capabilities@1.0.0;
     import runtara:agent-object-model/capabilities@1.0.0;
     export runtara:agent-workflow-agent/capabilities@1.0.0;
@@ -707,12 +703,14 @@ world workflow {
             vec!["runtara:workflow-stdlib"],
         );
 
-        // The logic module still imports the runtime interface; the host
-        // satisfies it.
+        // The logic imports the run services from `runtara:api`, which the
+        // api component composed in front of it serves.
         assert!(
             artifacts
                 .world_wit
-                .contains("import runtara:workflow/runtime@1.0.0;")
+                .contains("import runtara:api/run@1.0.0;"),
+            "{}",
+            artifacts.world_wit
         );
     }
 

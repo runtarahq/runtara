@@ -586,8 +586,8 @@ pub struct DirectCompilationResult {
     pub component_artifacts: DirectComponentArtifacts,
     /// Dependency/provenance metadata emitted beside the direct artifact.
     pub artifact_metadata: DirectArtifactMetadata,
-    /// Whether this compile dropped the `runtara:workflow/runtime`
-    /// import (a pure, non-durable, invoke-ABI workflow compiled agent-shaped).
+    /// Whether this compile dropped the run services import (a pure,
+    /// non-durable, invoke-ABI workflow compiled agent-shaped).
     /// Re-emit paths (e.g. the composed axis) must honor this to keep the
     /// on-disk world/wac consistent with the emitted module.
     pub omit_runtime: bool,
@@ -1094,7 +1094,7 @@ fn workflow_abi_tag(abi: super::component::WorkflowRole) -> &'static str {
     }
 }
 
-/// Opt-in to dropping the `runtara:workflow/runtime` import for a PURE,
+/// Opt-in to dropping the run services import for a PURE,
 /// non-durable, invoke-ABI workflow (see `WorkflowFeatureSummary::needs_runtime`
 /// and the omit path in the emitter). Default OFF — the runtime import is
 /// kept. Set to `1`/`true`
@@ -1305,11 +1305,6 @@ fn compile_direct_workflow_inner(
     // runs inside its caller's instance and keeps local state, like an
     // embedded child.
     manifest.configure_run_state(abi == super::component::WorkflowRole::Root, !omit_runtime);
-    // The runtime is `runtara:api`'s, for a run's own entry and a published
-    // workflow-agent alike: the agent composes its own (stateless) api
-    // component and runs in its caller's launch. A runtime-free workflow
-    // imports no runtime; its timers and connections are `runtara:api`'s too.
-    let api_runtime = !omit_runtime;
     let manifest_json = manifest.to_canonical_json()?;
     let support_json = serde_json::to_vec(&support_report)?;
     let (wasm, parallel_pools) = emit_direct_artifact(
@@ -1346,8 +1341,7 @@ fn compile_direct_workflow_inner(
         super::manifest::needs_monotonic_clock(&manifest.graph, &manifest.child_workflows),
     )
     .with_wait_instances(manifest.has_wait_for_instances())
-    .with_run_state(manifest.publishes_state())
-    .with_api_runtime(api_runtime);
+    .with_run_state(manifest.publishes_state());
 
     let build_dir = input.output_dir.join(format!(
         "{}-v{}-direct",
@@ -1697,7 +1691,7 @@ fn build_direct_component_resolve_with_waits(
     // the workflow is runtime-free), connections, timers, operations, waits
     // and state.
     if !omit_runtime {
-        for interface in runtara_wit::api::RUNTIME_REPLACEMENTS {
+        for interface in runtara_wit::api::RUN_SERVICES {
             workflow_wit.push_str(&format!("    import {interface};\n"));
         }
     }

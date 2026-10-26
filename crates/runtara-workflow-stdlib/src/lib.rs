@@ -11,7 +11,7 @@
 //!
 //! Everything here is pure: JSON in, JSON out, plus an interning value
 //! store. Durability (registration, checkpointing, signals, heartbeats)
-//! is the host-implemented `runtara:workflow/runtime` interface, and
+//! is the workflow API's (`runtara:api`), and
 //! agent calls go out over each
 //! agent's own WIT interface (`runtara:agent-<id>/capabilities@1.0.0`),
 //! bound at `wac compose` time. This crate therefore has no HTTP client,

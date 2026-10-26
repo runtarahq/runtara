@@ -36,7 +36,6 @@ fn every_name_constant_names_a_real_interface() {
     for name in [
         crate::agent::TYPES,
         crate::agent::CAPABILITIES,
-        crate::workflow::RUNTIME,
         crate::workflow::TASKS,
         crate::stdlib::JSON,
         crate::trusted::EXECUTION,
@@ -46,7 +45,7 @@ fn every_name_constant_names_a_real_interface() {
     }
     for (prefix, name) in [
         (crate::agent::TYPES_PREFIX, crate::agent::TYPES),
-        (crate::workflow::PREFIX, crate::workflow::RUNTIME),
+        (crate::workflow::PREFIX, crate::workflow::TASKS),
     ] {
         assert!(
             name.starts_with(prefix),
@@ -225,46 +224,9 @@ fn workflow_package_declares_the_workflow_abi() {
 
     assert!(!workflow.interfaces.contains_key("lifecycle"));
 
-    let runtime = interface(&resolve, workflow, "runtime");
-    for function in [
-        "instance-id",
-        "custom-event",
-        "debug-mode-enabled",
-        "breakpoint-pause",
-        "heartbeat",
-        "poll-signal",
-        "is-cancelled",
-        "check-signals",
-        "poll-custom-signal",
-        "register-input",
-        "poll-input",
-        "close-input",
-        "now-ms",
-        "durable-sleep",
-        "blocking-sleep",
-        "get-checkpoint",
-        "checkpoint",
-        "handle-checkpoint-signal",
-        "record-retry-attempt",
-        "durable-sleep-checkpoint",
-    ] {
-        assert!(
-            runtime.functions.contains_key(function),
-            "missing runtime function {function}"
-        );
-    }
-    // A run finishes through its entry's return value only.
-    for retired in ["load-input", "complete", "fail"] {
-        assert!(
-            !runtime.functions.contains_key(retired),
-            "runtime.{retired} is retired"
-        );
-    }
-    for type_name in ["signal-info", "custom-signal-info", "checkpoint-result"] {
-        assert!(
-            runtime.types.contains_key(type_name),
-            "missing runtime type {type_name}"
-        );
+    // Only `tasks` is left: the run services are `runtara:api`'s.
+    for retired in ["runtime", "operation", "waits", "state"] {
+        assert!(!workflow.interfaces.contains_key(retired), "{retired}");
     }
 
     let tasks = interface(&resolve, workflow, "tasks");

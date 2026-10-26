@@ -539,15 +539,9 @@ fn workflow_agent_import_kind(
     Ok(AgentImportKind::Agent)
 }
 
-/// True when the component's TOP-LEVEL imports include the workflow runtime
-/// (`runtara:workflow/runtime`) — the shape of a DURABLE published
-/// workflow-agent, whose checkpoint/sleep calls bubble up to the composing
-/// parent's instance host. Imports of nested (already-linked) components
-/// don't count: only what the composed child still asks the outside world
-/// for matters.
-/// Whether `wasm` is composed workflow logic: it imports the old runtime at
-/// its root, or (on the workflow API ABI, where it carries its own api
-/// component) contains a component importing `runtara:api`. An agent built
+/// Whether `wasm` is composed workflow logic: it carries a component
+/// importing `runtara:api` (its own api component's client), or, built for
+/// the removed host ABI, imports `runtara:workflow/runtime` at its root. An agent built
 /// on the guest SDK imports neither, at any depth.
 fn component_imports_workflow_runtime(wasm: &[u8]) -> Result<bool, DirectCompileError> {
     if component_imports_prefix(wasm, "runtara:workflow/runtime")? {
