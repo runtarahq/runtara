@@ -8,8 +8,7 @@
 //!
 //! 1. `scope.enter(checkpoint-key, attempt, load)` names the operation. The
 //!    host derives `op_hash = sha256(checkpoint-key)` and hands the saved
-//!    continuation to the capability itself (`runtara:agent/continuation`).
-//!    `invoke` never carries one, so this module passes none.
+//!    continuation to the capability in its input's `_operation`.
 //! 2. `suspended { wakes, state }`: `scope.suspend(state, wakes)` persists the
 //!    continuation for the entered attempt, then the workflow returns the
 //!    unchanged lifecycle

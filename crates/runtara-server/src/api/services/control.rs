@@ -1,7 +1,6 @@
-//! Native control service behind `runtara:control/api`.
+//! Native control service behind the workflow API's `/v1/instances`.
 //!
-//! The component host runs the approved control agent in fresh stores and
-//! hands every `api` call here with the caller's authority (tenant, calling
+//! The component host hands every control call here with the caller's authority (tenant, calling
 //! instance, operation) taken from the calling run, never from arguments.
 //!
 //! - Reads (`get`, `query`, `list-pending-signals`) cover the caller's tenant.

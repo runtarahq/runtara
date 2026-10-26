@@ -1237,7 +1237,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         )))?;
     }
 
-    // The control service behind every run's `runtara:control/api` and the
+    // The control service behind every run's `/v1/instances` calls and the
     // control agent's test invocations, on every tier (decision D5). It binds
     // to the runtime once it exists.
     let native_control = Arc::new(

@@ -3,10 +3,10 @@
 //! Control agent: coordinate child runs from a workflow.
 //!
 //! An ordinary composed agent: each capability validates its input, makes
-//! exactly one `runtara:control/api` call and shapes the result. The host
-//! makes `api` real in the run's own store, with the caller's tenant, instance
-//! and operation from the host, and links it `denied` everywhere else. The
-//! compiler grants `runtara:control` to this agent alone.
+//! exactly one workflow API control call (`/v1/instances`) and shapes the
+//! result. The host serves it for the run's own launch, with the caller's
+//! tenant, instance and operation from the launch, and answers `denied`
+//! everywhere else.
 //!
 //! Reads: `get`, `get-state`, `query` and `list-pending-signals` cover the
 //! caller's tenant; identity and caller-relative filters need a calling
@@ -1528,7 +1528,7 @@ runtara_agent_macro::agent_component!(
 mod tests {
     use super::*;
 
-    /// Every capability makes exactly one `runtara:control/api` call, so the
+    /// Every capability makes exactly one control call, so the
     /// host's per-call bound and the operation it reads at the call are the
     /// capability's own. A second call would get its own 90 s and reuse the
     /// capability's operation for a second mutation.

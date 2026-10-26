@@ -1,5 +1,5 @@
-//! The control family (`/v1/instances`): `runtara:control@1.0.0`'s calls with
-//! their JSON bodies. The host enforces the control rules; the API only names
+//! The control family (`/v1/instances`): the control calls with their JSON
+//! bodies. The host enforces the control rules; the API only names
 //! the call and carries the operation it runs inside.
 
 use serde_json::Value;

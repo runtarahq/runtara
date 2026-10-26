@@ -142,7 +142,7 @@ impl InstanceWaitHost for StoreWaits {
     }
 }
 
-/// The control service behind `runtara:control/api`: `get` answers every
+/// The control service behind `/v1/instances`: `get` answers every
 /// run as completed, which is all a control call after the wake needs.
 struct Reads;
 

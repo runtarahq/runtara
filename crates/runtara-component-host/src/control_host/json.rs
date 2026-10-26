@@ -1,6 +1,5 @@
-//! JSON forms of the `runtara:control` records, for the workflow API's
-//! `/v1/instances` family. Field names are camelCase and enum cases follow the
-//! WIT names in camelCase. Byte fields that carry JSON (inputs, outputs,
+//! JSON forms of the control records, for the workflow API's `/v1/instances`
+//! family. Field names and enum cases are camelCase. Byte fields that carry JSON (inputs, outputs,
 //! errors, state, payloads, schemas, contexts) appear as inline JSON values.
 
 use serde_json::{Map, Value, json};

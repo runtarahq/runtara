@@ -49,10 +49,8 @@ pub struct ControlAuthority {
     pub operation: Option<String>,
 }
 
-/// The native control service behind `runtara:control/api`. Every operation
-/// defaults to `unsupported` until its slice lands, so `runtara:control@1.0.0`
-/// never needs a new version for it. The rules each operation enforces are
-/// pinned in the WIT's doc comments.
+/// The native control service behind the workflow API's `/v1/instances`.
+/// Every operation defaults to `unsupported` until its slice lands.
 #[async_trait::async_trait]
 pub trait ControlHost: Send + Sync {
     /// Durably admit a child of the caller.

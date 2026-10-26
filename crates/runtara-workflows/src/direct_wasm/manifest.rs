@@ -215,8 +215,8 @@ impl DirectWorkflowManifest {
     }
 
     /// Agent ids with a suspending call site anywhere in the root graph, its
-    /// nested graphs or its embedded children. Each is composed with the host
-    /// `runtara:agent/continuation` import.
+    /// nested graphs or its embedded children. Each is handed its continuation
+    /// in its input's `_operation`.
     pub fn suspending_agent_ids(&self) -> std::collections::BTreeSet<String> {
         fn collect(graph: &DirectGraphManifest, ids: &mut std::collections::BTreeSet<String>) {
             for agent in &graph.agents {

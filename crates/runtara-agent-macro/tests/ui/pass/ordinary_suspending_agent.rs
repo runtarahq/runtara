@@ -1,6 +1,6 @@
 //! An ordinary agent with a suspending capability:
 //! the glue answers it with the `suspended` outcome and reads the continuation
-//! from the host's `runtara:agent/continuation`.
+//! from its input's `_operation`.
 use runtara_agent_macro::{CapabilityInput, capability};
 use runtara_agent_suspension::{SuspendContext, Suspendable, Wake};
 use serde::{Deserialize, Serialize};

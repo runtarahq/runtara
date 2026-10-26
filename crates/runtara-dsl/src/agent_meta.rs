@@ -1811,8 +1811,8 @@ pub fn validate_agent_metadata_or_panic() {
 // AgentCatalog — runtime-loaded snapshot of every agent's metadata.
 // ============================================================================
 
-/// Canonical id of the built-in control agent, the only agent that may import
-/// `runtara:control/*`. Reserved: no workflow-agent slug may fold onto it.
+/// Canonical id of the built-in control agent, the only agent whose test calls
+/// act for the tenant. Reserved: no workflow-agent slug may fold onto it.
 pub const CONTROL_AGENT_ID: &str = "control";
 
 /// Whether a call to `capability` of `agent_id` is operation-scoped: the

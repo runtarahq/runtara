@@ -1,5 +1,4 @@
-//! The control family, `/v1/instances` (`runtara:control/api` of the old WIT
-//! ABI), and trusted calls, `/v1/trusted` (`runtara:trusted/executor`).
+//! The control family, `/v1/instances`, and trusted calls, `/v1/trusted`.
 //! Handlers only parse; the backend enforces every rule (tenant scope,
 //! children, ancestors, operations, artifact pins).
 

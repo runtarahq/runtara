@@ -528,7 +528,7 @@ impl WorkflowExecutor {
             .map_err(|_| anyhow::anyhow!("trusted executor already configured"))
     }
 
-    /// Serve every run's `runtara:control/api` with `host`. Without one, every
+    /// Serve every run's control calls with `host`. Without one, every
     /// control call is `denied`.
     pub fn set_control_host(&self, host: Arc<dyn crate::control_host::ControlHost>) -> Result<()> {
         self.control_host

@@ -775,8 +775,7 @@ impl EmbeddedWasmRunner {
         Ok(self)
     }
 
-    /// Attach the control service behind every run's `runtara:control/api`
-    /// and the workflow API's `/v1/instances`.
+    /// Attach the control service behind every run's `/v1/instances` calls.
     pub fn with_control_host(
         self,
         host: Arc<dyn runtara_component_host::control_host::ControlHost>,
