@@ -32,6 +32,7 @@ pub mod lifecycle;
 pub mod operation_scope_host;
 pub mod precompile;
 pub mod registry;
+mod removed_abi;
 pub mod runtime_host;
 pub mod trusted;
 pub mod workflow;

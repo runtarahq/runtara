@@ -500,17 +500,7 @@ impl WorkflowExecutor {
         // TRUSTED_VERSION_REQUIRED before any credential lookup, except a
         // wake or resume under an approved earlier pin, which runs the
         // installed bytes; everything else in it keeps running.
-        let pins = self.trusted_pins(component);
-        if component
-            .component_type()
-            .imports(&self.engine)
-            .any(|(name, _)| name == runtara_wit::trusted::EXECUTOR)
-        {
-            anyhow::ensure!(
-                !pins.is_empty(),
-                "workflow trusted executor import has no artifact pins"
-            );
-        }
+        crate::removed_abi::refuse(&self.engine, component)?;
         let mut linker = self.linker.clone();
         if let Some(executor) = self.trusted.get() {
             executor.add_artifact_pins(&mut linker)?;
@@ -885,6 +875,8 @@ impl WorkflowExecutor {
         let mut child_pins = std::collections::BTreeMap::new();
         let linker = self.linker_with_trusted_pins(&package.root)?;
         for (digest, component) in &package.artifacts {
+            crate::removed_abi::refuse(&self.engine, component)
+                .with_context(|| format!("isolated child {digest}"))?;
             let mut pins = (*self.trusted_pins(component)).clone();
             pins.extend(
                 root_pins
@@ -901,12 +893,7 @@ impl WorkflowExecutor {
                     "isolated trusted dependency is not pinned by root"
                 );
             }
-            if trusted_callers.contains(digest.as_str())
-                || component
-                    .component_type()
-                    .imports(&self.engine)
-                    .any(|(name, _)| name == runtara_wit::trusted::EXECUTOR)
-            {
+            if trusted_callers.contains(digest.as_str()) {
                 anyhow::ensure!(
                     !pins.is_empty(),
                     "isolated trusted caller has no approved artifact pin"

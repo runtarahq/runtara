@@ -180,6 +180,7 @@ impl TrustedExecutor {
                 && matches!(results.as_slice(), [Type::Result(result)] if result.ok().is_some_and(|ty| bytes(&ty)) && matches!(result.err(), Some(Type::String))),
             "trusted execution has incompatible invoke ABI"
         );
+        crate::removed_abi::refuse(&self.engine, &component)?;
         let linker = crate::registry::build_linker(&self.engine)?;
         let pre = linker.instantiate_pre(&component)?;
         let mut hash = Sha256::new();

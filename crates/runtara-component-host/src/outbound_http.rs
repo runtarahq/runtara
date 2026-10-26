@@ -2,17 +2,52 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-mod bindings {
-    wasmtime::component::bindgen!({
-        path: "../runtara-wit/wit/host",
-        world: "http-client",
-        imports: { default: async | trappable },
-    });
+/// A request through a connection: the host applies its credentials.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectionDestination {
+    pub connection_id: String,
+    pub url: String,
+    pub endpoint: Option<String>,
+    pub endpoint_ref: Option<String>,
+    pub ai_provider: Option<String>,
+    pub aws_service: Option<String>,
 }
 
-pub use bindings::runtara::host::http::{
-    ConnectionDestination, Destination, OutboundError, RequestOptions, Response,
-};
+/// Where an outbound request goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Destination {
+    Connection(ConnectionDestination),
+    /// A public URL, without credentials.
+    Public(String),
+}
+
+/// One outbound request, as `POST /v1/http` carries it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestOptions {
+    pub destination: Destination,
+    pub method: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<Vec<u8>>,
+    pub timeout_ms: Option<u64>,
+    pub max_response_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Response {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// A request that failed, with whatever upstream response was received.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutboundError {
+    pub code: String,
+    pub message: String,
+    pub status: Option<u16>,
+    pub body: Vec<u8>,
+    pub retry_after_ms: Option<u64>,
+}
 
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;

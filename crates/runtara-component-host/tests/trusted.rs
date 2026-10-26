@@ -371,19 +371,13 @@ async fn scoped_child_presigning_keeps_root_authority_and_exact_artifact_version
         error.contains("isolated trusted dependency is not pinned by root"),
         "{error}"
     );
-    // A root that imports the trusted executor must pin what it calls.
-    let unpinned_root = Component::new(
+    // A root built for the removed trusted executor import is refused.
+    let old_root = Component::new(
         &engine,
-        minimal_entry(&format!(
-            r#"(import "{}" (instance))"#,
-            runtara_wit::trusted::EXECUTOR
-        )),
+        minimal_entry(r#"(import "runtara:trusted/executor@1.0.0" (instance))"#),
     )?;
-    let error = rejection(executor.prepare_precompiled(unpinned_root).await);
-    assert!(
-        error.contains("workflow trusted executor import has no artifact pins"),
-        "{error}"
-    );
+    let error = rejection(executor.prepare_precompiled(old_root).await);
+    assert!(error.contains("removed host ABI"), "{error}");
     assert_eq!(credentials.calls.load(Ordering::SeqCst), 0);
     let tasks =
         runtara_component_host::isolated_tasks::IsolatedTasks::new(engine.clone(), 2, 1024 * 1024)

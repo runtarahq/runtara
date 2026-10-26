@@ -75,6 +75,8 @@ pub(crate) fn load_agent_bytes(
     let component = Component::new(engine, wasm)?;
     let capabilities_iface = find_capabilities_iface(engine, &component)
         .with_context(|| format!("agent `{agent_id}`"))?;
+    crate::removed_abi::refuse(engine, &component)
+        .with_context(|| format!("agent `{agent_id}`"))?;
     let pre = linker.instantiate_pre(&component)?;
     Ok(Arc::new(LoadedAgent {
         agent_id,
