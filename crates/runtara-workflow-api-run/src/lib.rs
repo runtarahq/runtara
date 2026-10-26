@@ -21,7 +21,6 @@ mod bindings {
         path: [
             "../runtara-wit/wit-p3",
             "../runtara-wit/wit/agent",
-            "../runtara-wit/wit/workflow",
             "../runtara-wit/wit-p3/entry",
             "../runtara-wit/wit-p3/adapter",
         ],

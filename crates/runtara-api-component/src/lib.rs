@@ -55,7 +55,7 @@ mod api {
     use super::{envelope, json, json_text};
     use crate::bindings::exports::runtara::api::{
         checkpoints, connections, control, debug, events, inputs, operations, run, signals, state,
-        time, trusted, types, waits,
+        tasks, time, trusted, types, waits,
     };
     use types::{ApiError, Wake};
 
@@ -102,6 +102,26 @@ mod api {
             Wake::OnResume => wire::Wake::OnResume,
             Wake::Instances(id) => wire::Wake::Instances(id),
         }
+    }
+
+    fn wit_wake(wake: wire::Wake) -> Wake {
+        match wake {
+            wire::Wake::At(at) => Wake::At(at),
+            wire::Wake::OnSignal(wait) => Wake::OnSignal(types::SignalWait {
+                checkpoint_id: wait.checkpoint_id,
+                deadline_ms: wait.deadline_ms,
+            }),
+            wire::Wake::OnResume => Wake::OnResume,
+            wire::Wake::Instances(id) => Wake::Instances(id),
+        }
+    }
+
+    /// A JSON text field of `error-info`, as [`json_text`] posted it.
+    fn text(value: Option<serde_json::Value>) -> Option<String> {
+        value.map(|value| match value {
+            serde_json::Value::String(text) => text,
+            other => other.to_string(),
+        })
     }
 
     fn notice(notice: wire::LifecycleNotice) -> signals::LifecycleNotice {
@@ -590,6 +610,62 @@ mod api {
     impl debug::Guest for Api {
         async fn breakpoint(wait_ms: u64) -> Result<bool, ApiError> {
             sdk::breakpoint(wait_ms).await.map_err(api_error)
+        }
+    }
+
+    impl tasks::Guest for Api {
+        async fn start(
+            binding: String,
+            entry: tasks::Entry,
+            input: Vec<u8>,
+            context: tasks::InvocationContext,
+        ) -> Result<String, ApiError> {
+            let start = wire::TaskStart {
+                binding,
+                entry: match entry {
+                    tasks::Entry::Capability(id) => wire::TaskEntry::Capability(id),
+                    tasks::Entry::Workflow => wire::TaskEntry::Workflow,
+                },
+                context: wire::TaskContext {
+                    path: context.path,
+                    attempt: context.attempt,
+                },
+            };
+            sdk::task_start(&start, input).await.map_err(api_error)
+        }
+
+        async fn join(task_id: String) -> Result<tasks::TaskOutcome, ApiError> {
+            Ok(match sdk::task_join(&task_id).await.map_err(api_error)? {
+                wire::TaskOutcome::Completed(bytes) => tasks::TaskOutcome::Completed(bytes),
+                wire::TaskOutcome::Failed(error) => tasks::TaskOutcome::Failed(types::ErrorInfo {
+                    code: error.code,
+                    message: error.message,
+                    category: error.category,
+                    severity: error.severity,
+                    retryable: error.retryable,
+                    retry_after_ms: error.retry_after_ms,
+                    attributes: text(error.attributes),
+                    details: text(error.details),
+                }),
+                wire::TaskOutcome::Suspended(wakes) => {
+                    tasks::TaskOutcome::Suspended(wakes.into_iter().map(wit_wake).collect())
+                }
+                wire::TaskOutcome::Cancelled => tasks::TaskOutcome::Cancelled,
+                wire::TaskOutcome::TimedOut => tasks::TaskOutcome::TimedOut,
+                wire::TaskOutcome::Trapped(message) => tasks::TaskOutcome::Trapped(message),
+            })
+        }
+
+        async fn request_cancel(task_id: String) -> Result<tasks::CancelStatus, ApiError> {
+            Ok(match sdk::task_cancel(&task_id).await.map_err(api_error)? {
+                wire::CancelStatus::Requested => tasks::CancelStatus::Requested,
+                wire::CancelStatus::AlreadyRequested => tasks::CancelStatus::AlreadyRequested,
+                wire::CancelStatus::AlreadyTerminal => tasks::CancelStatus::AlreadyTerminal,
+            })
+        }
+
+        async fn release(task_id: String) -> Result<(), ApiError> {
+            sdk::task_release(&task_id).await.map_err(api_error)
         }
     }
 

@@ -8,9 +8,7 @@ use wasm_encoder::{
     FunctionSection, GlobalSection, GlobalType, ImportSection, MemArg, MemorySection, MemoryType,
     Module, TypeSection, ValType,
 };
-use wit_parser::{
-    ManglingAndAbi, ResourceIntrinsic, WasmExport, WasmExportKind, WasmImport, WorldItem,
-};
+use wit_parser::{ManglingAndAbi, WasmExport, WasmExportKind, WasmImport, WorldItem};
 
 fn emit(body: &mut WasmFunction, instructions: impl IntoIterator<Item = Instruction<'static>>) {
     for instruction in instructions {
@@ -56,8 +54,11 @@ pub(super) fn emit_adapter_configured(
     binding: &str,
     scoped: bool,
 ) -> Result<Vec<u8>, DirectCompileError> {
-    let execution = runtara_wit::workflow::TASKS;
+    let execution = runtara_wit::api::TASKS;
     let mut resolve = runtara_wit::resolve().map_err(component_error)?;
+    resolve
+        .push_str("runtara-api.wit", runtara_wit::api::WIT)
+        .map_err(component_error)?;
     let shape = runtara_wit::AgentShape {
         scoped,
         ..Default::default()
@@ -106,21 +107,6 @@ pub(super) fn emit_adapter_configured(
                 },
             );
             calls.insert(function.name.clone(), imports.len());
-            imports.import(&module, &name, EntityType::Function(ty));
-        }
-        if let Some(resource) = resolve.interfaces[*id].types.get("task") {
-            let ty = type_count;
-            type_count += 1;
-            types.ty().function([ValType::I32], []);
-            let (module, name) = resolve.wasm_import_name(
-                mangling,
-                WasmImport::ResourceIntrinsic {
-                    interface: Some(key),
-                    resource: *resource,
-                    intrinsic: ResourceIntrinsic::ImportedDrop,
-                },
-            );
-            calls.insert("drop".into(), imports.len());
             imports.import(&module, &name, EntityType::Function(ty));
         }
     }
@@ -185,8 +171,10 @@ pub(super) fn emit_adapter_configured(
                 index,
             );
             let frame = if scoped { 9 } else { 4 };
+            // The task id `start` answers: its string.
             let handle = frame + 1;
-            let mut body = WasmFunction::new([(if scoped { 3 } else { 2 }, ValType::I32)]);
+            let handle_len = frame + if scoped { 3 } else { 2 };
+            let mut body = WasmFunction::new([(if scoped { 4 } else { 3 }, ValType::I32)]);
             emit(
                 &mut body,
                 [
@@ -262,13 +250,18 @@ pub(super) fn emit_adapter_configured(
                 ],
             );
             check_result(&mut body, frame, 0);
+            // `result<string, api-error>` is 8-aligned: the id at +8.
             emit(
                 &mut body,
                 [
                     Instruction::LocalGet(frame),
-                    Instruction::I32Load(mem(4)),
+                    Instruction::I32Load(mem(8)),
                     Instruction::LocalSet(handle),
+                    Instruction::LocalGet(frame),
+                    Instruction::I32Load(mem(12)),
+                    Instruction::LocalSet(handle_len),
                     Instruction::LocalGet(handle),
+                    Instruction::LocalGet(handle_len),
                 ],
             );
             address(&mut body, frame, 32);
@@ -373,18 +366,12 @@ pub(super) fn emit_adapter_configured(
                     Instruction::End,
                     Instruction::End,
                     Instruction::LocalGet(handle),
+                    Instruction::LocalGet(handle_len),
                 ],
             );
             address(&mut body, frame, 128);
             emit(&mut body, [Instruction::Call(calls["release"])]);
             check_result(&mut body, frame, 128);
-            emit(
-                &mut body,
-                [
-                    Instruction::LocalGet(handle),
-                    Instruction::Call(calls["drop"]),
-                ],
-            );
             address(&mut body, frame, 192);
             emit(&mut body, [Instruction::End]);
             code.function(&body);

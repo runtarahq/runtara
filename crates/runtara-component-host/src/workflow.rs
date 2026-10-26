@@ -47,7 +47,7 @@ pub use prepared_launcher::{
 };
 
 use crate::engine::EPOCH_TICK;
-use crate::execution_host::{ExecutionContext, ExecutionView};
+use crate::execution_host::ExecutionContext;
 
 /// Outgoing-body stream tuning, kept identical to the flags `WasmRunner`
 /// passes the wasmtime CLI (`--wasi http-outgoing-body-buffer-chunks=4096`,
@@ -339,16 +339,6 @@ pub struct WorkflowState {
     execution: Option<Arc<ExecutionContext>>,
 }
 
-impl ExecutionView for WorkflowState {
-    fn execution_table(&mut self) -> &mut ResourceTable {
-        &mut self.table
-    }
-
-    fn execution_context(&self) -> Option<&Arc<ExecutionContext>> {
-        self.execution.as_ref()
-    }
-}
-
 impl WorkflowState {
     fn begin_active_execution(&mut self, timeout: Duration) {
         let deadline = tokio::time::Instant::now() + timeout;
@@ -609,8 +599,6 @@ impl WorkflowExecutor {
         // send hook routes only the workflow API origin (workflow_api.rs).
         wasmtime_wasi::p3::add_to_linker(&mut linker)?;
         wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
-        // Host-served tasks of isolated and scoped children.
-        crate::execution_host::add_execution_to_linker(&mut linker)?;
         Ok(Self {
             trusted: std::sync::OnceLock::new(),
             control_host: std::sync::OnceLock::new(),
@@ -669,9 +657,14 @@ impl WorkflowExecutor {
             // A run without a host was never granted control.
             let control = crate::api_launches::StandaloneControl::Denied;
             let alarm = Some(store.data().cleanup_alarm.clone());
-            if let Err(error) =
-                launches.begin_standalone_with_alarm(binding.clone(), trust, control, alarm)
-            {
+            let execution = store.data().execution.clone();
+            if let Err(error) = launches.begin_standalone_with_alarm(
+                binding.clone(),
+                trust,
+                control,
+                alarm,
+                execution,
+            ) {
                 tracing::warn!(%error, "the store is not served the workflow API");
                 return None;
             }
@@ -707,6 +700,7 @@ impl WorkflowExecutor {
             shorten_deadline: Arc::new(move |after| deadline.shorten(after)),
             trusted_pins: store.data().trusted_pins.clone().unwrap_or_default(),
             cleanup_alarm: Some(store.data().cleanup_alarm.clone()),
+            execution: store.data().execution.clone(),
         };
         let launches = Arc::clone(self.workflow_api());
         if let Err(error) = launches.begin(

@@ -313,12 +313,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workflow API, so every workflow must be recompiled.** A compiled workflow
   now carries the `runtara:api` component and calls the server's `/v1`
   workflow API for its run services: checkpoints, signals, events, sleeps,
-  operations, instance waits, state, connections, HTTP, SQL and control.
+  operations, instance waits, state, connections, HTTP, SQL, control and the
+  child runs of isolated and scoped agents (`/v1/tasks`).
   Agents do the same through the agent SDK. The host interfaces they
-  imported before are no longer linked: `runtara:workflow/runtime`,
-  `operation`, `waits` and `state`, `runtara:host/*`, `runtara:control/*`,
-  `runtara:trusted/executor` and `runtara:agent/continuation`.
-  `runtara:workflow/tasks` (isolated and scoped children) is unchanged.
+  imported before are no longer linked: `runtara:workflow/*` (`runtime`,
+  `operation`, `waits`, `state` and `tasks`), `runtara:host/*`,
+  `runtara:control/*`, `runtara:trusted/executor` and
+  `runtara:agent/continuation`.
   - Recompile every workflow after upgrading (compile it, or set its current
     version again). An artifact built before is refused at load: "built for
     the removed host ABI … recompile the workflow".

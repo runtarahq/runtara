@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Structural checks of the runtara WIT packages.
 
-use wit_parser::{FunctionKind, Package, Resolve, TypeDefKind, WorldItem};
+use wit_parser::{Package, Resolve, TypeDefKind, WorldItem};
 
 use crate::{AgentShape, PACKAGES, agent_package};
 
@@ -36,22 +36,13 @@ fn every_name_constant_names_a_real_interface() {
     for name in [
         crate::agent::TYPES,
         crate::agent::CAPABILITIES,
-        crate::workflow::TASKS,
         crate::stdlib::JSON,
         crate::trusted::EXECUTION,
     ] {
         assert!(names.contains(name), "{name} is not a runtara interface");
         assert!(name.ends_with(&format!("@{}", crate::VERSION)));
     }
-    for (prefix, name) in [
-        (crate::agent::TYPES_PREFIX, crate::agent::TYPES),
-        (crate::workflow::PREFIX, crate::workflow::TASKS),
-    ] {
-        assert!(
-            name.starts_with(prefix),
-            "{name} does not start with {prefix}"
-        );
-    }
+    assert!(crate::agent::TYPES.starts_with(crate::agent::TYPES_PREFIX));
     let packages: Vec<String> = resolve
         .packages
         .iter()
@@ -62,7 +53,6 @@ fn every_name_constant_names_a_real_interface() {
     assert!(names.contains(crate::wasi::MONOTONIC_CLOCK));
     for name in [
         crate::agent::PACKAGE,
-        crate::workflow::PACKAGE,
         crate::stdlib::PACKAGE,
         crate::trusted::PACKAGE,
     ] {
@@ -217,46 +207,16 @@ fn stdlib_exports_the_json_world() {
     );
 }
 
+/// The host serves no workflow interface: child runs are `runtara:api`'s.
 #[test]
-fn workflow_package_declares_the_workflow_abi() {
+fn no_workflow_package_remains() {
     let resolve = resolve();
-    let workflow = package(&resolve, crate::workflow::PACKAGE);
-
-    assert!(!workflow.interfaces.contains_key("lifecycle"));
-
-    // Only `tasks` is left: the run services are `runtara:api`'s.
-    for retired in ["runtime", "operation", "waits", "state"] {
-        assert!(!workflow.interfaces.contains_key(retired), "{retired}");
-    }
-
-    let tasks = interface(&resolve, workflow, "tasks");
-    assert!(matches!(
-        resolve.types[tasks.types["task"]].kind,
-        TypeDefKind::Resource
-    ));
-    assert!(matches!(
-        tasks.functions["start"].kind,
-        FunctionKind::Freestanding
-    ));
-    for name in ["join", "release"] {
-        assert!(matches!(
-            tasks.functions[name].kind,
-            FunctionKind::AsyncFreestanding
-        ));
-    }
-    assert!(matches!(
-        tasks.functions["request-cancel"].kind,
-        FunctionKind::Freestanding
-    ));
-    for name in [
-        "entry",
-        "invocation-context",
-        "execution-error",
-        "cancel-status",
-        "task-outcome",
-    ] {
-        assert!(tasks.types.contains_key(name));
-    }
+    assert!(
+        resolve
+            .packages
+            .iter()
+            .all(|(_, package)| package.name.to_string() != "runtara:workflow@1.0.0")
+    );
 }
 
 fn variant_cases(resolve: &Resolve, types: &wit_parser::Interface, name: &str) -> Vec<String> {

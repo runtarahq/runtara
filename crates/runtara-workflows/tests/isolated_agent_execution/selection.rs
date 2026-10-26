@@ -568,10 +568,7 @@ fn production_compile_wrapper_uses_standard_composition_while_legacy_fixture_sta
     };
     for item in resolve.worlds[world].imports.values() {
         if let wit_parser::WorldItem::Interface { id, .. } = item {
-            assert_ne!(
-                resolve.id_of(*id).as_deref(),
-                Some(runtara_wit::workflow::TASKS)
-            );
+            assert_ne!(resolve.id_of(*id).as_deref(), Some(runtara_wit::api::TASKS));
         }
     }
 }

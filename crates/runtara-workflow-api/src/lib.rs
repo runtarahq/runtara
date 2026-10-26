@@ -22,6 +22,7 @@ mod run;
 #[cfg(feature = "server")]
 pub mod server;
 mod signals;
+mod tasks;
 mod wake;
 
 pub use binding::Binding;
@@ -33,6 +34,9 @@ pub use error::{ApiError, ErrorCode};
 pub use keys::{IdempotencyKeyError, decode_path_key, encode_path_key, validate_idempotency_key};
 pub use run::{ErrorInfo, OutcomeKind, PostedOutcome, RunInfo, Suspension};
 pub use signals::{CustomSignalNotice, Event, InputRead, LifecycleNotice};
+pub use tasks::{
+    CancelAnswer, CancelStatus, TaskContext, TaskEntry, TaskOutcome, TaskStart, TaskStarted,
+};
 pub use wake::{SignalWait, Wake};
 
 /// Scheme of the workflow API origin. There is no TLS: requests never touch a

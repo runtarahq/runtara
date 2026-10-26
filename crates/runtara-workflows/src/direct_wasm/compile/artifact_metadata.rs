@@ -1266,7 +1266,7 @@ mod tests {
     #[test]
     fn the_agent_import_allowlist_never_admits_workflow_or_control_interfaces() {
         for entry in AGENT_IMPORT_ALLOWLIST {
-            for forbidden in [runtara_wit::workflow::PREFIX, "runtara:control/", "wasi:"] {
+            for forbidden in ["runtara:workflow/", "runtara:control/", "wasi:"] {
                 assert!(
                     !entry.starts_with(forbidden),
                     "`{entry}` must not be on the agent import allowlist (`{forbidden}`)"

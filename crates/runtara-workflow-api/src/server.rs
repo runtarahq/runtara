@@ -21,7 +21,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use bytes::Bytes;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -48,6 +48,7 @@ pub use crate::PostedOutcome;
 mod connections;
 mod control;
 mod runtime;
+mod tasks;
 pub use crate::{CustomSignalNotice, Event, LifecycleNotice};
 pub use connections::OutboundReply;
 pub use runtime::{CheckpointWrite, LifecycleSignal};
@@ -153,6 +154,41 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
     async fn alarm(&self, binding: &Binding, ms: u64) -> Result<(), ApiError> {
         let _ = (binding, ms);
         Err(unsupported_service("alarms"))
+    }
+    /// Start a child run of `start.binding` with `input`; a start with the
+    /// context of a live task of this launch returns that task.
+    async fn start_task(
+        &self,
+        binding: &Binding,
+        start: crate::TaskStart,
+        input: Vec<u8>,
+    ) -> Result<String, ApiError> {
+        let _ = (binding, start, input);
+        Err(unsupported_service("tasks"))
+    }
+    /// The task's outcome once its execution was destroyed, waiting up to
+    /// `wait_ms` for it; `None` while it runs.
+    async fn task_outcome(
+        &self,
+        binding: &Binding,
+        task_id: &str,
+        wait_ms: u64,
+    ) -> Result<Option<crate::TaskOutcome>, ApiError> {
+        let _ = (binding, task_id, wait_ms);
+        Err(unsupported_service("tasks"))
+    }
+    async fn cancel_task(
+        &self,
+        binding: &Binding,
+        task_id: &str,
+    ) -> Result<crate::CancelStatus, ApiError> {
+        let _ = (binding, task_id);
+        Err(unsupported_service("tasks"))
+    }
+    /// Cancel and reap the task. Idempotent.
+    async fn release_task(&self, binding: &Binding, task_id: &str) -> Result<(), ApiError> {
+        let _ = (binding, task_id);
+        Err(unsupported_service("tasks"))
     }
     async fn heartbeat(&self, binding: &Binding) -> Result<(), ApiError> {
         let _ = binding;
@@ -488,6 +524,10 @@ pub fn router(state: WorkflowApiState) -> Router {
         .route("/v1/time/sleep", get(runtime::get_sleep))
         .route("/v1/heartbeat", post(runtime::post_heartbeat))
         .route("/v1/debug/breakpoint", post(runtime::post_breakpoint))
+        .route("/v1/tasks", post(tasks::post_task))
+        .route("/v1/tasks/{task_id}", delete(tasks::delete_task))
+        .route("/v1/tasks/{task_id}/outcome", get(tasks::get_task_outcome))
+        .route("/v1/tasks/{task_id}/cancel", post(tasks::post_task_cancel))
         .route("/v1/events", post(runtime::post_events))
         .route(
             "/v1/inputs/{signal_id}",

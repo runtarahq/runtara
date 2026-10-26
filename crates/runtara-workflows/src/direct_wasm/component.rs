@@ -108,23 +108,63 @@ pub const WORKFLOW_API_ADAPTER_REQUIREMENTS: &[DirectSharedComponentRequirement]
     }];
 
 /// `wac` composed for the workflow API: the `runtara:api` component (when
-/// `with_api`) satisfies the logic's `runtara:api` imports, and the run shim
-/// re-exports its entry as `wasi:cli/run`, the only export left.
-pub(crate) fn http_guest_wac(wac: &str, with_api: bool, entry: bool) -> Result<String, String> {
+/// `with_api`) satisfies the `runtara:api` imports of the logic and of the
+/// `isolated` packages (the isolation adapters), and the run shim re-exports
+/// its entry as `wasi:cli/run`, the only export left.
+pub(crate) fn http_guest_wac(
+    wac: &str,
+    with_api: bool,
+    entry: bool,
+    isolated: &std::collections::BTreeSet<String>,
+) -> Result<String, String> {
     const LOGIC: &str = "let wf = new runtara:workflow-logic {";
     const EXPORT: &str = "export wf...;\n";
     if wac.matches(LOGIC).count() != 1 || !wac.ends_with(EXPORT) {
         return Err("the workflow composition has no single logic instance to wrap".into());
     }
+    // The api component serves the logic and the isolation adapters, which
+    // start their child through `runtara:api/tasks`. A plain agent imports
+    // none of it, and a spread that satisfies nothing is a wac error.
+    const STDLIB: &str = "let workflow-stdlib = new runtara:workflow-stdlib { ... };\n";
+    let wac = if with_api {
+        if wac.matches(STDLIB).count() != 1 {
+            return Err("the workflow composition has no single stdlib instance".into());
+        }
+        wac.replacen(
+            STDLIB,
+            &format!("{STDLIB}let workflow-api = new runtara:api-component {{ ... }};\n"),
+            1,
+        )
+        .lines()
+        .map(|line| {
+            let adapter = line.starts_with("let agent-")
+                && line.ends_with(" { ... };")
+                && isolated.iter().any(|package| {
+                    line.ends_with(&format!(" = new {} {{ ... }};", wac_name(package)))
+                });
+            if adapter {
+                format!(
+                    "{} {{ ...workflow-api, ... }};",
+                    &line[..line.len() - " { ... };".len()]
+                )
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+            + "\n"
+    } else {
+        wac.to_string()
+    };
     let wac = if with_api {
         wac.replacen(
             LOGIC,
-            "let workflow-api = new runtara:api-component { ... };\n\n\
-             let wf = new runtara:workflow-logic { ...workflow-api,",
+            "let wf = new runtara:workflow-logic { ...workflow-api,",
             1,
         )
     } else {
-        wac.to_string()
+        wac
     };
     // A published workflow-agent keeps its capabilities export.
     if !entry {

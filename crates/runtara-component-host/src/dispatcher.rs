@@ -394,6 +394,7 @@ impl ComponentDispatcherService {
                     },
                     // The call's own cleanup alarm, which its guards watch.
                     Some(state.cleanup_alarm.clone()),
+                    None,
                 )
                 .map_err(|error| anyhow::anyhow!(error))?;
             let launch = TestLaunch {

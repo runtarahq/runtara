@@ -1,4 +1,4 @@
-use super::super::test_support::{Ticker, bounded, parent_wat, spec};
+use super::super::test_support::{Ticker, bounded, spec};
 use super::*;
 use crate::execution_host::{InvocationContext, TaskOutcome};
 use crate::isolated_tasks::{IsolatedTasks, TaskError, TaskId};
@@ -366,10 +366,12 @@ async fn prestart_cancel_skips_spec_and_initializer_but_closes_child_scope() {
     fx.tasks.shutdown().await.unwrap();
 }
 
+#[cfg(feature = "component-integration-tests")]
 #[tokio::test]
 async fn prepared_root_parent_controls_cancellation_through_real_launcher() {
+    use super::super::test_support::{parent_wat, with_api_component};
     let fx = Fixture::new(true);
-    let root = Component::new(fx.executor.engine(), parent_wat("")).unwrap();
+    let root = Component::new(fx.executor.engine(), with_api_component(&parent_wat(""))).unwrap();
     let package = crate::precompile::CompiledWorkflowPackage {
         invocations: None,
         root,

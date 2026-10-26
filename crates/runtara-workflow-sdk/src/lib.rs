@@ -902,6 +902,77 @@ pub async fn alarm(after_ms: u64) -> Error {
     }
 }
 
+/// How long one `GET /v1/tasks/{id}/outcome` is held before it answers
+/// `202`; [`task_join`] asks again until the task is terminal.
+const TASK_JOIN_WAIT_MS: u64 = 30_000;
+
+/// `POST /v1/tasks`: start a child run of `start.binding` with `input`; its
+/// task id.
+pub async fn task_start(
+    start: &runtara_workflow_api::TaskStart,
+    input: Vec<u8>,
+) -> Result<String, Error> {
+    let meta = serde_json::to_string(start)
+        .map_err(|e| Error::Transport(format!("task metadata: {e}")))?;
+    let response = call(
+        "POST",
+        "/v1/tasks",
+        &[(runtara_workflow_api::headers::TASK, meta.as_str())],
+        Some(input),
+    )
+    .await?;
+    serde_json::from_slice::<runtara_workflow_api::TaskStarted>(&response.body)
+        .map(|started| started.task_id)
+        .map_err(|e| Error::Transport(format!("task start: {e}")))
+}
+
+/// `GET /v1/tasks/{id}/outcome`: the task's outcome once its execution was
+/// destroyed, waiting up to `wait_ms`; `None` while it runs.
+pub async fn task_outcome(
+    task_id: &str,
+    wait_ms: u64,
+) -> Result<Option<runtara_workflow_api::TaskOutcome>, Error> {
+    let path = format!(
+        "{}/outcome?waitMs={wait_ms}",
+        key_path("/v1/tasks", task_id)
+    );
+    let response = call("GET", &path, &[], None).await?;
+    if response.status == 202 {
+        return Ok(None);
+    }
+    let kind = response
+        .header(runtara_workflow_api::headers::OUTCOME)
+        .ok_or_else(|| Error::Transport("task outcome without Runtara-Outcome".into()))?;
+    runtara_workflow_api::TaskOutcome::parse(kind, &response.body)
+        .map(Some)
+        .map_err(Error::Transport)
+}
+
+/// The task's outcome, asking until its execution was destroyed.
+pub async fn task_join(task_id: &str) -> Result<runtara_workflow_api::TaskOutcome, Error> {
+    loop {
+        if let Some(outcome) = task_outcome(task_id, TASK_JOIN_WAIT_MS).await? {
+            return Ok(outcome);
+        }
+    }
+}
+
+/// `POST /v1/tasks/{id}/cancel`.
+pub async fn task_cancel(task_id: &str) -> Result<runtara_workflow_api::CancelStatus, Error> {
+    let path = format!("{}/cancel", key_path("/v1/tasks", task_id));
+    let response = call("POST", &path, &[], None).await?;
+    serde_json::from_slice::<runtara_workflow_api::CancelAnswer>(&response.body)
+        .map(|answer| answer.status)
+        .map_err(|e| Error::Transport(format!("task cancel: {e}")))
+}
+
+/// `DELETE /v1/tasks/{id}`: cancel and reap the task. Idempotent.
+pub async fn task_release(task_id: &str) -> Result<(), Error> {
+    call("DELETE", &key_path("/v1/tasks", task_id), &[], None)
+        .await
+        .map(|_| ())
+}
+
 /// `POST /v1/debug/breakpoint`: wait at a breakpoint for up to `wait_ms`.
 /// True when the run was resumed, false when the wait ran out.
 pub async fn breakpoint(wait_ms: u64) -> Result<bool, Error> {

@@ -24,6 +24,9 @@ struct FakeRun {
     events: Vec<Event>,
     heartbeats: u32,
     breakpoints: Vec<u64>,
+    tasks: Vec<(crate::TaskStart, Vec<u8>)>,
+    task_done: bool,
+    task_calls: Vec<String>,
 }
 
 #[derive(Default)]
@@ -168,6 +171,48 @@ impl WorkflowApiBackend for FakeBackend {
 
     async fn append_events(&self, _: &Binding, events: Vec<Event>) -> Result<(), ApiError> {
         self.run.lock().unwrap().events.extend(events);
+        Ok(())
+    }
+    async fn start_task(
+        &self,
+        _: &Binding,
+        start: crate::TaskStart,
+        input: Vec<u8>,
+    ) -> Result<String, ApiError> {
+        let mut run = self.run.lock().unwrap();
+        run.tasks.push((start, input));
+        Ok(format!("task-{}", run.tasks.len()))
+    }
+    async fn task_outcome(
+        &self,
+        _: &Binding,
+        task_id: &str,
+        wait_ms: u64,
+    ) -> Result<Option<crate::TaskOutcome>, ApiError> {
+        let mut run = self.run.lock().unwrap();
+        run.task_calls.push(format!("outcome {task_id} {wait_ms}"));
+        Ok(run
+            .task_done
+            .then(|| crate::TaskOutcome::Completed(b"42".to_vec())))
+    }
+    async fn cancel_task(
+        &self,
+        _: &Binding,
+        task_id: &str,
+    ) -> Result<crate::CancelStatus, ApiError> {
+        self.run
+            .lock()
+            .unwrap()
+            .task_calls
+            .push(format!("cancel {task_id}"));
+        Ok(crate::CancelStatus::Requested)
+    }
+    async fn release_task(&self, _: &Binding, task_id: &str) -> Result<(), ApiError> {
+        self.run
+            .lock()
+            .unwrap()
+            .task_calls
+            .push(format!("release {task_id}"));
         Ok(())
     }
 }
@@ -1116,4 +1161,62 @@ async fn trusted_calls_need_a_connection_and_an_input() {
         "this backend serves none"
     );
     assert_eq!(error_code(&answer), "unsupported");
+}
+
+#[tokio::test]
+async fn tasks_start_join_cancel_and_release() {
+    let backend = Arc::new(FakeBackend::default());
+    let app = app(backend.clone());
+    let start = request("POST", "/v1/tasks")
+        .header(headers::IDEMPOTENCY_KEY, "t1")
+        .header(
+            headers::TASK,
+            r#"{"binding":"child","entry":"workflow","context":{"path":"p","attempt":1}}"#,
+        )
+        .body(Body::from("input"))
+        .unwrap();
+    let (status, _, body) = send(&app, start).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body[..], br#"{"taskId":"task-1"}"#);
+    let (task, input) = backend.run.lock().unwrap().tasks[0].clone();
+    assert_eq!(task.binding, "child");
+    assert_eq!(task.entry, crate::TaskEntry::Workflow);
+    assert_eq!(input, b"input");
+
+    let outcome = || {
+        request("GET", "/v1/tasks/task-1/outcome?waitMs=5")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let (status, _, _) = send(&app, outcome()).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    backend.run.lock().unwrap().task_done = true;
+    let (status, headers_out, body) = send(&app, outcome()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers_out[headers::OUTCOME], "completed");
+    assert_eq!(&body[..], b"42");
+
+    let (status, _, body) = send(&app, write("POST", "/v1/tasks/task-1/cancel", "c1", "")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body[..], br#"{"status":"requested"}"#);
+    let (status, _, _) = send(&app, write("DELETE", "/v1/tasks/task-1", "d1", "")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        backend.run.lock().unwrap().task_calls,
+        [
+            "outcome task-1 5",
+            "outcome task-1 5",
+            "cancel task-1",
+            "release task-1"
+        ]
+    );
+
+    // The metadata is required.
+    let bare = request("POST", "/v1/tasks")
+        .header(headers::IDEMPOTENCY_KEY, "t2")
+        .body(Body::from("input"))
+        .unwrap();
+    let (status, _, body) = send(&app, bare).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_code(&body), "invalid");
 }

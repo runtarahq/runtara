@@ -6,8 +6,6 @@
 //! component interface (`wit-p3/api`). The packages here:
 //!
 //! - `runtara:agent`: the shared vocabulary and the agent export shape;
-//! - `runtara:workflow`: the host-served `tasks` of compiled workflow logic,
-//!   and its entry;
 //! - `runtara:workflow-stdlib`: the compiler-private JSON stdlib component;
 //! - `runtara:trusted`: the execution export of approved trusted agents.
 //!
@@ -59,12 +57,9 @@ pub mod agent {
     pub const WIT: &str = include_str!("../wit/agent/runtara-agent.wit");
 }
 
-/// `runtara:workflow`: compiled workflow logic's host-served `tasks` and its
-/// entry.
+/// Names of compiled workflow logic's entry. A workflow imports only
+/// `runtara:api` and its agents; it has no WIT package of its own.
 pub mod workflow {
-    pub const PACKAGE: &str = concat!("runtara:workflow@", v!());
-    /// Interface-name prefix of every workflow interface.
-    pub const PREFIX: &str = "runtara:workflow/";
     /// Agent id of a top-level workflow's entry package: a root run exports
     /// `runtara:agent-workflow-agent/capabilities` (a published workflow-agent
     /// exports its slug instead). Reserved, so no workflow slug can take it.
@@ -81,8 +76,6 @@ pub mod workflow {
     /// its embedded children's graphs), next to [`LOGIC_SECTION`] in every
     /// workflow-logic component.
     pub const MANIFEST_SECTION: &str = "runtara.direct_workflow.manifest";
-    pub const TASKS: &str = concat!("runtara:workflow/tasks@", v!());
-    pub const WIT: &str = include_str!("../wit/workflow/runtara-workflow.wit");
 }
 
 /// `runtara:workflow-stdlib`: the compiler-private JSON stdlib component.
@@ -119,6 +112,7 @@ pub mod api {
     pub const STATE: &str = "runtara:api/state@1.0.0";
     pub const CONNECTIONS: &str = "runtara:api/connections@1.0.0";
     pub const OPERATIONS: &str = "runtara:api/operations@1.0.0";
+    pub const TASKS: &str = "runtara:api/tasks@1.0.0";
     /// The run services workflow logic imports.
     pub const RUN_SERVICES: [&str; 7] = [RUN, TIME, SIGNALS, CHECKPOINTS, EVENTS, INPUTS, DEBUG];
     pub const WIT: &str = include_str!("../wit-p3/api/runtara-api.wit");
@@ -137,7 +131,6 @@ pub mod wasi {
 /// order.
 pub const PACKAGES: &[(&str, &str)] = &[
     ("runtara-agent.wit", agent::WIT),
-    ("runtara-workflow.wit", workflow::WIT),
     ("runtara-workflow-stdlib.wit", stdlib::WIT),
     ("runtara-trusted.wit", trusted::WIT),
 ];

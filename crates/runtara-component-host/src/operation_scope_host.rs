@@ -36,8 +36,7 @@ const DURABLE_KEY_V2_PREFIX: &str = "runtara:v2:";
 const DERIVED_KEY_SUFFIXES: [&str; 3] = ["::attempt::", "::retry_sleep::", "::retry::"];
 
 /// The identity of an operation-scoped call site, parsed from the canonical
-/// v2 Agent checkpoint key the compiler hands `scope.enter`. Frozen with
-/// `runtara:workflow@1.0.0`: the key is
+/// v2 Agent checkpoint key the compiler hands `scope.enter`. Frozen: the key is
 /// `runtara:v2:["agent", workflow, namespace, loop-path, [agent, capability, step]]`,
 /// so it differs per loop iteration and per embedding and is the same on every
 /// replay and retry of the same site.

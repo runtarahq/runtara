@@ -7,14 +7,10 @@
 use wasmtime::Engine;
 use wasmtime::component::Component;
 
-/// Interface-name prefixes of the removed host ABI. `runtara:workflow/tasks`
-/// is still served, and `runtara:trusted-artifacts/` pins are not imports
-/// of the old ABI.
+/// Interface-name prefixes of the removed host ABI. `runtara:trusted-artifacts/`
+/// pins are not imports of the old ABI.
 const REMOVED: &[&str] = &[
-    "runtara:workflow/runtime@",
-    "runtara:workflow/operation@",
-    "runtara:workflow/waits@",
-    "runtara:workflow/state@",
+    "runtara:workflow/",
     "runtara:host/",
     "runtara:control/",
     "runtara:trusted/executor@",
@@ -61,6 +57,7 @@ mod tests {
         };
         for name in [
             "runtara:workflow/runtime@1.0.0",
+            "runtara:workflow/tasks@1.0.0",
             "runtara:host/timers@1.0.0",
             "runtara:control/api@1.0.0",
             "runtara:trusted/executor@1.0.0",
@@ -73,7 +70,7 @@ mod tests {
             );
         }
         for name in [
-            "runtara:workflow/tasks@1.0.0",
+            "runtara:api/tasks@1.0.0",
             "runtara:api/run@1.0.0",
             "wasi:http/client@0.3.0",
         ] {

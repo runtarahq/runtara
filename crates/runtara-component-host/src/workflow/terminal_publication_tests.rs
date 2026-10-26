@@ -135,7 +135,7 @@ fn run_publishing_coordinated(
     (i32.store (i32.const 2068) (i32.const 2))"#,
         );
     }
-    let component = Component::new(fx.executor.engine(), wat).unwrap();
+    let component = Component::new(fx.executor.engine(), super::with_api_component(&wat)).unwrap();
     let pre = fx.executor.linker.instantiate_pre(&component).unwrap();
     let executor = fx.executor.clone();
     let context = fx.context.clone();

@@ -1,4 +1,5 @@
-//! Versioned generic child-execution imports. The guest owns orchestration.
+//! Child runs of a workflow, served as the workflow API's `/v1/tasks`. The
+//! guest owns orchestration.
 //!
 //! The embedding provides a launcher bound to immutable package/root/tenant
 //! context. It must validate guest-supplied relative invocation metadata. Its
@@ -6,10 +7,6 @@
 //! before the task registry's pre-start cancellation boundary.
 use std::{future::Future, pin::Pin, sync::Arc};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
-use wasmtime::{
-    StoreContextMut,
-    component::{Linker, Resource, ResourceTable, ResourceType},
-};
 
 use crate::lifecycle::{WorkflowErrorInfo, WorkflowWake};
 use crate::{
@@ -19,8 +16,6 @@ use crate::{
         TaskLifecycle, TeardownDisposition,
     },
 };
-
-pub use runtara_wit::workflow::TASKS as EXECUTION_INTERFACE_NAME;
 
 #[derive(
     Debug,
@@ -230,6 +225,28 @@ impl ExecutionContext {
         })
     }
 
+    /// Start a child run, owned by the returned handle: dropping it cancels
+    /// the child, as destroying its owner does.
+    pub(crate) fn start_task(
+        self: &Arc<Self>,
+        request: StartRequest,
+    ) -> Result<TaskHandle, ExecutionError> {
+        let factory = self.launcher.prepare(request)?;
+        let permit = match self.handles.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(TryAcquireError::Closed) => return Err(ExecutionError::Closed),
+            Err(TryAcquireError::NoPermits) => return Err(ExecutionError::Capacity),
+        };
+        let id = self
+            .tasks
+            .spawn_managed(factory.run, factory.cleanup, factory.lifecycle)?;
+        Ok(TaskHandle {
+            id,
+            owner: Arc::clone(self),
+            _permit: permit,
+        })
+    }
+
     pub async fn shutdown(&self) -> Result<(), ExecutionError> {
         self.shutdown_with(TeardownDisposition::Terminal).await
     }
@@ -246,20 +263,46 @@ impl ExecutionContext {
     }
 }
 
-/// Each Store exposes its own resource table and parent-bound execution context.
-/// A launcher is absent for legacy runs and cannot be installed by guest input.
-pub trait ExecutionView: Send + 'static {
-    fn execution_table(&mut self) -> &mut ResourceTable;
-    fn execution_context(&self) -> Option<&Arc<ExecutionContext>>;
-}
-
-/// Canonical resource identity protects the host-local representation. The
-/// registry additionally checks its owner/generation; raw guest integers are
-/// never accepted as task identities by these imports.
+/// One child run, owned by its launch: dropping it cancels the child, as
+/// destroying the owner does. The registry checks its owner and generation;
+/// a guest names a task only by the id its launch handed out.
 pub struct TaskHandle {
     id: TaskId,
     owner: Arc<ExecutionContext>,
     _permit: OwnedSemaphorePermit,
+}
+
+impl TaskHandle {
+    pub(crate) fn request_cancel(&self) -> Result<CancelStatus, ExecutionError> {
+        self.owner
+            .tasks
+            .cancel(self.id)
+            .map(|status| match status {
+                CancelResult::Requested => CancelStatus::Requested,
+                CancelResult::AlreadyRequested => CancelStatus::AlreadyRequested,
+                CancelResult::AlreadyTerminal => CancelStatus::AlreadyTerminal,
+            })
+            .map_err(ExecutionError::from)
+    }
+
+    /// The task's outcome, once its execution was destroyed.
+    pub(crate) async fn join(&self) -> Result<TaskOutcome, ExecutionError> {
+        self.owner
+            .tasks
+            .join(self.id)
+            .await
+            .map(|result| TaskOutcome::from(result.outcome()))
+            .map_err(ExecutionError::from)
+    }
+
+    /// Cancel and reap the task.
+    pub(crate) async fn release(&self) -> Result<(), ExecutionError> {
+        self.owner
+            .tasks
+            .release(self.id)
+            .await
+            .map_err(ExecutionError::from)
+    }
 }
 
 impl Drop for TaskHandle {
@@ -268,121 +311,6 @@ impl Drop for TaskHandle {
         // guest drop/release records local cancellation before reaching here.
         let _ = self.owner.tasks.owner_dropped(self.id);
     }
-}
-
-fn task<T: ExecutionView>(
-    state: &mut T,
-    handle: &Resource<TaskHandle>,
-) -> wasmtime::Result<(Arc<ExecutionContext>, TaskId)> {
-    let resource = state.execution_table().get(handle)?;
-    let owner = resource.owner.clone();
-    let id = resource.id;
-    // Defense in depth if a host accidentally moves a resource between tables.
-    wasmtime::ensure!(
-        state
-            .execution_context()
-            .is_some_and(|context| Arc::ptr_eq(context, &owner)),
-        "execution task belongs to another parent"
-    );
-    Ok((owner, id))
-}
-
-pub fn add_execution_to_linker<T: ExecutionView>(linker: &mut Linker<T>) -> anyhow::Result<()> {
-    let mut interface = linker.instance(EXECUTION_INTERFACE_NAME)?;
-    interface.resource_async(
-        "task",
-        ResourceType::host::<TaskHandle>(),
-        |mut store, rep| {
-            Box::new(async move {
-                let handle = Resource::<TaskHandle>::new_own(rep);
-                let (owner, id) = task(store.data_mut(), &handle)?;
-                let resource = store.data_mut().execution_table().delete(handle)?;
-                // Cancel first, even if the destructor future is interrupted.
-                match owner.tasks.cancel(id) {
-                    Ok(_) | Err(TaskError::UnknownTask) => {}
-                    Err(error) => return Err(error.into()),
-                }
-                drop(resource);
-                owner.tasks.release(id).await?;
-                Ok(())
-            })
-        },
-    )?;
-    interface.func_wrap(
-        "start",
-        |mut store: StoreContextMut<'_, T>,
-         (binding, entry, input, context): (String, Entry, Vec<u8>, InvocationContext)| {
-            let Some(owner) = store.data().execution_context().cloned() else {
-                return Ok((Err(ExecutionError::Unavailable),));
-            };
-            let factory = match owner.launcher.prepare(StartRequest {
-                binding,
-                entry,
-                input,
-                context,
-            }) {
-                Ok(factory) => factory,
-                Err(error) => return Ok((Err(error),)),
-            };
-            let permit = match owner.handles.clone().try_acquire_owned() {
-                Ok(permit) => permit,
-                Err(TryAcquireError::Closed) => return Ok((Err(ExecutionError::Closed),)),
-                Err(TryAcquireError::NoPermits) => return Ok((Err(ExecutionError::Capacity),)),
-            };
-            let started =
-                owner
-                    .tasks
-                    .spawn_managed(factory.run, factory.cleanup, factory.lifecycle);
-            let id = match started {
-                Ok(id) => id,
-                Err(error) => return Ok((Err(ExecutionError::from(error)),)),
-            };
-            // Table insertion owns a cancel-on-drop handle even on insertion error.
-            let handle = store.data_mut().execution_table().push(TaskHandle {
-                id,
-                owner,
-                _permit: permit,
-            })?;
-            Ok((Ok::<_, ExecutionError>(handle),))
-        },
-    )?;
-    interface.func_wrap(
-        "request-cancel",
-        |mut store: StoreContextMut<'_, T>, (handle,): (Resource<TaskHandle>,)| {
-            let (owner, id) = task(store.data_mut(), &handle)?;
-            let result = owner
-                .tasks
-                .cancel(id)
-                .map(|status| match status {
-                    CancelResult::Requested => CancelStatus::Requested,
-                    CancelResult::AlreadyRequested => CancelStatus::AlreadyRequested,
-                    CancelResult::AlreadyTerminal => CancelStatus::AlreadyTerminal,
-                })
-                .map_err(ExecutionError::from);
-            Ok((result,))
-        },
-    )?;
-    interface.func_wrap_concurrent("join", |accessor, (handle,): (Resource<TaskHandle>,)| {
-        let task = accessor.with(|mut access| task(access.get(), &handle));
-        Box::pin(async move {
-            let (owner, id) = task?;
-            let result = owner
-                .tasks
-                .join(id)
-                .await
-                .map(|result| TaskOutcome::from(result.outcome()))
-                .map_err(ExecutionError::from);
-            Ok((result,))
-        })
-    })?;
-    interface.func_wrap_concurrent("release", |accessor, (handle,): (Resource<TaskHandle>,)| {
-        let task = accessor.with(|mut access| task(access.get(), &handle));
-        Box::pin(async move {
-            let (owner, id) = task?;
-            Ok((owner.tasks.release(id).await.map_err(ExecutionError::from),))
-        })
-    })?;
-    Ok(())
 }
 
 #[cfg(test)]

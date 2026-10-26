@@ -737,10 +737,26 @@ fn compose_direct_workflow_selected(
             .component_artifacts
             .world_wit
             .contains(&format!("export {};", runtara_wit::workflow::ENTRY));
-    let with_api = result
-        .component_artifacts
-        .world_wit
-        .contains(runtara_wit::api::PREFIX);
+    // The packages an isolation adapter replaces; each imports `runtara:api`.
+    let isolated: std::collections::BTreeSet<String> = selection
+        .as_ref()
+        .map(|(reviewed, _)| {
+            reviewed
+                .keys()
+                .filter_map(|agent| {
+                    agent_components
+                        .iter()
+                        .find(|c| c.metadata.agent_id.as_ref() == Some(agent))
+                        .map(|c| c.package.clone())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let with_api = !isolated.is_empty()
+        || result
+            .component_artifacts
+            .world_wit
+            .contains(runtara_wit::api::PREFIX);
     let mut shared_components = shared_components;
     let mut wac_source = result.component_artifacts.wac_source.clone();
     if entry || with_api {
@@ -756,7 +772,7 @@ fn compose_direct_workflow_selected(
             components_dir,
             &adapters,
         )?);
-        wac_source = super::component::http_guest_wac(&wac_source, with_api, entry)
+        wac_source = super::component::http_guest_wac(&wac_source, with_api, entry, &isolated)
             .map_err(component_error)?;
         fs::write(result.build_dir.join("workflow.wac"), &wac_source)?;
     }
