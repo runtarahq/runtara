@@ -75,6 +75,8 @@ pub enum ArtifactError {
     MissingContent { key: String, content: Digest },
     #[error("manifest {key} is malformed: {message}")]
     InvalidManifest { key: String, message: String },
+    #[error("object store: {0}")]
+    Store(String),
     #[error("release: {0}")]
     Release(String),
     #[error("artifact store I/O: {0}")]
@@ -334,6 +336,8 @@ impl ArtifactStore for FilesystemArtifactStore {
     }
 }
 
+#[cfg(feature = "object-store")]
+pub mod object;
 pub mod release;
 
 #[cfg(feature = "test-support")]

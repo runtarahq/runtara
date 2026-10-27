@@ -683,6 +683,28 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
     start_with(pool, ServerOptions::default()).await
 }
 
+/// `RUNTARA_ARTIFACT_STORE_URL`, when set: where artifacts live instead of
+/// `<DATA_DIR>/artifacts`.
+fn artifact_store_url() -> Option<String> {
+    std::env::var("RUNTARA_ARTIFACT_STORE_URL")
+        .ok()
+        .map(|url| url.trim().to_owned())
+        .filter(|url| !url.is_empty())
+}
+
+/// The store URL without any userinfo or query, for the boot log.
+fn redact_store_url(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(mut parsed) => {
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+            parsed.set_query(None);
+            parsed.to_string()
+        }
+        Err(_) => "<unparseable URL>".to_owned(),
+    }
+}
+
 /// [`start`], composed with `options`.
 pub async fn start_with(
     pool: PgPool,
@@ -693,11 +715,32 @@ pub async fn start_with(
     // published from the components directory when one is set, and the
     // agent allowlist is that release's agents.
     let artifacts: Arc<dyn runtara_environment::artifacts::ArtifactStore> =
-        options.artifacts.clone().unwrap_or_else(|| {
-            Arc::new(runtara_environment::image_registry::default_artifact_store(
-                &embedded_runtara::data_dir(),
-            ))
-        });
+        match options.artifacts.clone() {
+            Some(artifacts) => artifacts,
+            None => match artifact_store_url() {
+                // An object store (`s3://bucket/prefix`, `gs://`, `az://`),
+                // configured from the provider's standard environment
+                // variables; content local readers need is cached under
+                // DATA_DIR.
+                Some(url) => {
+                    let cache = embedded_runtara::data_dir().join("artifact-cache");
+                    match runtara_artifact_store::object::ObjectArtifactStore::from_url(&url, cache)
+                    {
+                        Ok(store) => {
+                            println!("✓ Artifact store: {}", redact_store_url(&url));
+                            Arc::new(store)
+                        }
+                        Err(error) => {
+                            eprintln!("❌ RUNTARA_ARTIFACT_STORE_URL: {error}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                None => Arc::new(runtara_environment::image_registry::default_artifact_store(
+                    &embedded_runtara::data_dir(),
+                )),
+            },
+        };
     let options = ServerOptions {
         artifacts: Some(artifacts.clone()),
         ..options

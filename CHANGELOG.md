@@ -58,6 +58,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lost `DATA_DIR/workflow-agents` loses nothing, and agents staged before the
   store are recorded from their files. Unpublishing removes the record first.
 
+- **Artifacts can live in object storage.** `RUNTARA_ARTIFACT_STORE_URL`
+  (`s3://bucket/prefix`, `gs://…`, `az://…`, `file://…`) puts every artifact
+  (workflow images, the release and its agent records, published
+  workflow-agents) in a bucket through the `object_store` crate, configured
+  from the provider's standard environment variables (`AWS_ENDPOINT`,
+  `AWS_ACCESS_KEY_ID`, …). The layout is the filesystem store's, content is
+  verified against its digest on every read, and local readers (the runner,
+  the compile view) get files from a verified cache under
+  `<DATA_DIR>/artifact-cache`. A server with an empty data dir and no
+  components directory loads its agents from the bucket, and compiles and
+  runs workflows there (`e2e/test_object_store.sh`, against MinIO). TLS is
+  rustls on ring, so no C crypto build is added.
+
 - **A runner can report an executor lost.** `RunExitReport::Lost` (for a
   node or link that went away) hands the run to recovery instead of failing
   it: recovery suspends it (`termination_reason = executor_lost`, a new value

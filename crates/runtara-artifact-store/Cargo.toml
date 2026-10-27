@@ -11,6 +11,12 @@ publish = false
 [features]
 # `test_support::FileMapStore`: artifacts that are files where they already are.
 test-support = []
+# `object::ObjectArtifactStore`: S3-compatible storage, Azure Blob, GCS and the
+# local filesystem through the `object_store` crate. TLS uses rustls on ring,
+# like the rest of the workspace (no aws-lc C build).
+object-store = ["dep:object_store", "dep:futures", "dep:url", "dep:reqwest", "dep:rustls"]
+# Tests against a real S3-compatible store (MinIO); needs docker.
+object-store-integration-tests = ["object-store"]
 
 [dependencies]
 async-trait = "0.1"
@@ -20,7 +26,17 @@ sha2 = { workspace = true }
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "rt"] }
 uuid = { version = "1", features = ["v4"] }
+object_store = { version = "0.14", default-features = false, features = ["fs", "aws-base", "gcp-base", "azure-base", "reqwest", "ring"], optional = true }
+futures = { version = "0.3", optional = true }
+url = { version = "2", optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["fs", "io-util", "rt", "macros"] }
+
+[[test]]
+name = "object_store_minio"
+path = "tests/object_store_minio.rs"
+required-features = ["object-store-integration-tests"]

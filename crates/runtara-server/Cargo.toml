@@ -167,6 +167,8 @@ runtara-agents = { path = "../runtara-agents" }
 runtara-core = { path = "../runtara-core" }
 runtara-store-postgres = { path = "../runtara-store-postgres" }
 runtara-environment = { path = "../runtara-environment" }
+# Artifacts can live in S3-compatible storage, Azure Blob or GCS (RUNTARA_ARTIFACT_STORE_URL).
+runtara-artifact-store = { path = "../runtara-artifact-store", features = ["object-store"] }
 runtara-control-contract = { path = "../runtara-control-contract" }
 runtara-agent-suspension = { path = "../runtara-agent-suspension" }
 runtara-object-store = { path = "../runtara-object-store" }

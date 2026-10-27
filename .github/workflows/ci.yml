@@ -39,7 +39,7 @@ env:
   # plus embed-ui. Used by the lint and build jobs so `--all-targets` really
   # means all targets. Static value — no workflow-context interpolation.
   GATE_FEATURES: >-
-    runtara-server/embed-ui,runtara-server/db-integration-tests,runtara-server/component-integration-tests,runtara-server/valkey-integration-tests,runtara-server/valkey-tls-integration-tests,runtara-object-store/db-integration-tests,runtara-agent-object-model/db-integration-tests,runtara-environment/db-integration-tests,runtara-environment/scoped-workflow-integration-tests,runtara-store-postgres/db-integration-tests,runtara-component-host/component-integration-tests,runtara-component-host/db-integration-tests,runtara-workflows/direct-wasm-integration-tests
+    runtara-server/embed-ui,runtara-server/db-integration-tests,runtara-server/component-integration-tests,runtara-server/valkey-integration-tests,runtara-server/valkey-tls-integration-tests,runtara-object-store/db-integration-tests,runtara-agent-object-model/db-integration-tests,runtara-environment/db-integration-tests,runtara-environment/scoped-workflow-integration-tests,runtara-store-postgres/db-integration-tests,runtara-component-host/component-integration-tests,runtara-component-host/db-integration-tests,runtara-workflows/direct-wasm-integration-tests,runtara-artifact-store/test-support,runtara-artifact-store/object-store-integration-tests
   WASM_PACK_VERSION: "0.13.1"
   WIT_DEPS_VERSION: "0.6.0"
   WASM_TOOLS_VERSION: "1.252.0"
@@ -293,6 +293,13 @@ jobs:
         env:
           TEST_RUNTARA_DATABASE_URL: postgres://postgres:postgres@localhost:5432/runtara_test
         run: cargo test -p runtara-store-postgres --features db-integration-tests -- --test-threads=1
+
+      # The artifact store's object-storage backend against a real
+      # S3-compatible service: a throwaway MinIO container started by the test.
+      - name: Run runtara-artifact-store tests (filesystem + MinIO)
+        run: |
+          docker pull minio/minio:latest
+          cargo test -p runtara-artifact-store --features test-support,object-store-integration-tests
 
   test-server:
     runs-on: ubuntu-latest
