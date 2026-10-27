@@ -780,8 +780,19 @@ case "$(echo "${OUT}" | jq -r '.outcome')" in
     applied|requested) ;;
     *) print_error "the caller must be able to cancel its workflow-agent's run: ${OUT}"; exit 1 ;;
 esac
-[ "$(echo "${OUT}" | jq -r '.status')" = "cancelled" ] \
-    || { print_error "the started run must be cancelled by its caller: ${OUT}"; exit 1; }
+# A cancel that meets the run while its launch is being claimed is stored as
+# an intent (`requested`) and lands when that launch publishes, so the caller
+# may still read it `pending`; it must end `cancelled` all the same.
+STARTED_STATUS=$(echo "${OUT}" | jq -r '.status')
+if [ "${STARTED_STATUS}" != "cancelled" ] && [ "$(echo "${OUT}" | jq -r '.outcome')" = "requested" ]; then
+    for _ in {1..60}; do
+        STARTED_STATUS=$(curl -sS "${API}/workflows/instances/${STARTED}" | jq -r '.data.status // empty')
+        case "${STARTED_STATUS}" in cancelled|completed|failed|crashed|stopped) break ;; esac
+        sleep 0.5
+    done
+fi
+[ "${STARTED_STATUS}" = "cancelled" ] \
+    || { print_error "the started run must be cancelled by its caller: ${OUT} (now ${STARTED_STATUS})"; exit 1; }
 echo "  run started by the workflow-agent belongs to the caller and was cancelled by it ✓"
 
 print_success "workflow<>agent parity: slug + synchronous publish + parent invoke + parking agents (sleep + wait) + embedded signal discovery + pause/resume + control as the caller, all green"
