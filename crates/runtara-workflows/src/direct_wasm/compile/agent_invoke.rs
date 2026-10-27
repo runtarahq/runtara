@@ -41,6 +41,20 @@ pub(super) fn emit_agent_invoke(
     source_len_local: u32,
     site: AgentInvocationSite,
 ) {
+    if let Some(binding) = static_data.agent_child_run(agent_id) {
+        emit_child_run(
+            body,
+            indices,
+            static_data,
+            binding,
+            agent_id,
+            input_ptr_local,
+            input_len_local,
+            source_ptr_local,
+            source_len_local,
+        );
+        return;
+    }
     super::cooperative_wait::emit_poll_before_call(body, indices);
     let deadline = matches!(
         site,
@@ -147,6 +161,122 @@ pub(super) fn emit_agent_invoke(
     if scoped_deadline {
         body.instruction(&Instruction::End);
     }
+}
+
+/// Run a workflow-agent whose version may park as a child run of its own:
+/// the `child-run` helper starts it (a replay of this call finds the same
+/// child) and reads its outcome. A finished child leaves the result an
+/// invoke would; a running one parks this run on a wait for it, and the
+/// relaunch replays to this call.
+#[allow(clippy::too_many_arguments)]
+fn emit_child_run(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    binding: &DirectDataSegment,
+    agent_id: u32,
+    input_ptr_local: u32,
+    input_len_local: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+) {
+    use super::api_shims::child_run;
+    // The call site's durable key names the child and its wait. A child-run
+    // step never shares a WaitForSignal's key locals.
+    let (key_ptr, key_len) = (
+        super::DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+        super::DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+    );
+    super::agent_io::emit_agent_cache_key(
+        body,
+        indices,
+        agent_id,
+        source_ptr_local,
+        source_len_local,
+        key_ptr,
+        key_len,
+    );
+    push_segment_args(body, binding);
+    body.instruction(&Instruction::LocalGet(input_ptr_local));
+    body.instruction(&Instruction::LocalGet(input_len_local));
+    body.instruction(&Instruction::LocalGet(key_ptr));
+    body.instruction(&Instruction::LocalGet(key_len));
+    body.instruction(&Instruction::LocalGet(
+        super::DIRECT_AGENT_RETRY_ATTEMPT_LOCAL,
+    ));
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(
+        indices
+            .child_run
+            .expect("a child-run call imports the child-run helper"),
+    ));
+    let errors = static_data
+        .child_run_errors
+        .as_ref()
+        .expect("a child-run call lays out its errors");
+    for (tag, then) in [
+        (child_run::PENDING, None),
+        (
+            child_run::CANCELLED,
+            Some((
+                &errors[0],
+                crate::direct_wasm::static_data::CHILD_RUN_CANCELLED_FIELDS,
+            )),
+        ),
+        (
+            child_run::TRAPPED,
+            Some((
+                &errors[1],
+                crate::direct_wasm::static_data::CHILD_RUN_TRAPPED_FIELDS,
+            )),
+        ),
+        (
+            child_run::UNAVAILABLE,
+            Some((
+                &errors[2],
+                crate::direct_wasm::static_data::CHILD_RUN_UNAVAILABLE_FIELDS,
+            )),
+        ),
+    ] {
+        super::abi::load_retptr_tag(body);
+        body.instruction(&Instruction::I32Const(tag));
+        body.instruction(&Instruction::I32Eq);
+        body.instruction(&Instruction::If(BlockType::Empty));
+        match then {
+            // Its wait is registered: the host attaches it to the suspension.
+            None => super::abi::emit_entry_suspend_return(body, indices),
+            Some((segment, fields)) => {
+                // `unavailable` keeps the API's message past the error-info,
+                // which `error_info` leaves alone.
+                let message = (tag == child_run::UNAVAILABLE).then_some(child_run::MESSAGE);
+                super::agent_deadline::error_info(body, segment.offset, fields);
+                if let Some(message) = message {
+                    // The error-info's message (ptr, len at 16).
+                    for (from, to) in [(message, 16u64), (message + 4, 20)] {
+                        body.instruction(&Instruction::I32Const(0));
+                        body.instruction(&Instruction::I32Const(0));
+                        body.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                            offset: from,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+                            offset: to,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                    }
+                }
+            }
+        }
+        body.instruction(&Instruction::End);
+    }
+    super::abi::load_retptr_tag(body);
+    body.instruction(&Instruction::I32Const(child_run::TIMED_OUT));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    super::agent_deadline::error(body, static_data);
+    body.instruction(&Instruction::End);
 }
 
 /// Normalize an agent's `result<outcome, error-info>` in the retptr area so

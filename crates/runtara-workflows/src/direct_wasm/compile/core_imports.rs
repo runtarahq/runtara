@@ -196,6 +196,8 @@ pub(super) struct DirectCoreImportIndices {
     pub(super) monotonic_now: Option<u32>,
     pub(super) agent_invokes_async: BTreeMap<AgentImportKey, DirectAgentInvokeImport>,
     pub(super) operation_scope: Option<DirectOperationScopeImports>,
+    /// The `child-run` helper, when an Agent runs a child run.
+    pub(super) child_run: Option<u32>,
     pub(super) wait_instances: Option<DirectWaitInstancesImports>,
     pub(super) run_state: Option<DirectRunStateImports>,
 }
@@ -787,6 +789,7 @@ impl DirectCoreImportIndices {
             agent_invokes_async: self.agent_invokes_async,
             operation_scope: self.operation_scope,
             wait_instances: self.wait_instances,
+            child_run: self.child_run,
             run_state: self.run_state,
         })
     }
@@ -979,6 +982,8 @@ pub(super) struct DirectCoreFunctionIndices {
     /// Present when the workflow has an operation-scoped call site.
     pub(super) operation_scope: Option<DirectOperationScopeImports>,
     /// Present when the workflow has a WaitForInstances step.
+    /// The `child-run` helper (`api_shims`), when an Agent runs a child run.
+    pub(super) child_run: Option<u32>,
     pub(super) wait_instances: Option<DirectWaitInstancesImports>,
     /// Present when a SetState or GetState step publishes state.
     pub(super) run_state: Option<DirectRunStateImports>,

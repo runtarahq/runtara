@@ -253,9 +253,20 @@ pub(super) fn emit_agent_plan(
         !suspends || (durable_checkpoint && memo_slot_ptr_local.is_none()),
         "agent_suspend::check_sites admits only durable sequential suspending sites"
     );
-    let invoke = indices
-        .agent_invoke(agent_component_id)
-        .expect("direct Agent run plans have matching component imports");
+    // A child run calls no composed component (`emit_agent_invoke` runs it
+    // through the `child-run` helper), so it has no import of its own.
+    let child_run_invoke;
+    let invoke = if static_data.agent_child_run(agent_id).is_some() {
+        child_run_invoke = super::core_imports::DirectAgentInvokeImport {
+            function_index: u32::MAX,
+            params: Vec::new(),
+        };
+        &child_run_invoke
+    } else {
+        indices
+            .agent_invoke(agent_component_id)
+            .expect("direct Agent run plans have matching component imports")
+    };
     let capability_id = static_data
         .agent_capability_id(agent_id)
         .expect("direct Agent run plans have static capability ids");

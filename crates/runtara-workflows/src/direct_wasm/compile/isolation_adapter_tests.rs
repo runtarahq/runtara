@@ -87,6 +87,11 @@ fn linker(engine: &wasmtime::Engine, tasks: Arc<Mutex<Tasks>>) -> Linker<()> {
         })
         .unwrap();
     }
+    // The adapter joins; it never reads an outcome without waiting.
+    api.func_wrap_concurrent("outcome", |_, (_id, _wait): (String, u64)| {
+        Box::pin(async move { Ok((Ok::<Option<TaskOutcome>, ApiError>(None),)) })
+    })
+    .unwrap();
     api.func_wrap_concurrent("request-cancel", |_, (_id,): (String,)| {
         Box::pin(async move { Ok((Ok::<_, ApiError>(CancelStatus::AlreadyTerminal),)) })
     })

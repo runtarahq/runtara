@@ -410,7 +410,15 @@ pub(super) fn emit_direct_core_module(
             &mut next_defined_function,
             api_scratch,
         )?;
-        api_scratch + super::api_shims::API_SCRATCH_BYTES + super::api_shims::OPERATION_CELL_BYTES
+        let child_run_request = if config.static_data.child_run_errors.is_some() {
+            super::api_shims::CHILD_RUN_REQUEST_BYTES
+        } else {
+            0
+        };
+        api_scratch
+            + super::api_shims::API_SCRATCH_BYTES
+            + super::api_shims::OPERATION_CELL_BYTES
+            + child_run_request
     } else {
         config.static_data.heap_base
     };

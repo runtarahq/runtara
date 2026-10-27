@@ -317,6 +317,48 @@ fn check_graph(
     {
         check_wait_for_instances(graph, &step.id, in_on_wait, in_tool_workflow, target)?;
     }
+    // A child run parks this run while the child runs, so it needs every
+    // place a WaitForInstances step needs.
+    for agent in graph
+        .agents
+        .iter()
+        .filter(|agent| agent.child_run.is_some())
+    {
+        let step = agent.step_id.as_str();
+        let kind = "a workflow-agent that parks, so it runs as a child run, and its";
+        if agent.step_type != "Agent" || agent.purpose != "agent.config" {
+            return refuse(step, kind, "cannot back an AiAgent");
+        }
+        let callers = graph.edges.iter().filter(|edge| edge.to_step == step);
+        if callers.clone().any(|edge| is_ai_edge(graph, edge)) {
+            return refuse(step, kind, "cannot be an AiAgent tool or memory provider");
+        }
+        if in_tool_workflow {
+            return refuse(
+                step,
+                kind,
+                "cannot run in a workflow embedded as an AiAgent tool",
+            );
+        }
+        if in_on_wait {
+            return refuse(step, kind, "cannot run in a WaitForSignal onWait graph");
+        }
+        if target.omit_runtime {
+            return refuse(step, kind, "needs the host-imported workflow runtime");
+        }
+        if target.scoped_agents.contains(&agent.agent_id) {
+            return refuse(step, kind, "cannot run under scoped isolation");
+        }
+        if !agent.durable {
+            return refuse(step, kind, "must be durable");
+        }
+        if callers
+            .clone()
+            .any(|edge| edge.label.as_deref() == Some("onError"))
+        {
+            return refuse(step, kind, "cannot run in an onError handler");
+        }
+    }
     for step in &graph.steps {
         for nested in &step.nested_graphs {
             let on_wait = in_on_wait || nested.role == ON_WAIT_ROLE;

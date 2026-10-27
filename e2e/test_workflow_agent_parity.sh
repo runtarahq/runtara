@@ -369,8 +369,9 @@ execute_and_assert "${SLEEP_PARENT_ID}" '{"data":{"msg":"slept-through"}}' \
 
 #-------------------------------------------------------------------------
 print_step "5. A waiting workflow publishes as a parking agent and resumes on its signal..."
-# The nested wait parks on-signal carrying its full route, so the caller's
-# instance is recorded as a signal park and a signal to that route wakes it.
+# A workflow-agent that parks runs as a child run of its own: the child parks
+# on its signal, the caller parks on a wait for the child, and a signal to the
+# child finishes it and wakes the caller.
 RESP=$(api_post /workflows/create '{"name":"Waiting Approval","description":"parity e2e","slug":"waiting-approval"}')
 WAITING_ID=$(echo "${RESP}" | jq -r '.data.id // empty')
 [ -n "${WAITING_ID}" ] || { print_error "waiting workflow create failed: ${RESP}"; exit 1; }
@@ -433,22 +434,33 @@ done
     || { print_error "a waiting agent must park its caller, instance is '${PARKED}'"; tail -40 "${TEST_LOG}"; exit 1; }
 echo "  caller parked while the nested agent waits (${PARKED}) ✓"
 
-# The wait advertises itself through pending-input with its full nested route.
+# The child is a run of the caller's own, and its wait advertises itself
+# through the child's pending-input.
+CHILD_INSTANCE=""
+for _ in {1..30}; do
+    RESP=$(curl -sS "${API}/executions?parentInstanceId=${WAIT_INSTANCE}")
+    CHILD_INSTANCE=$(echo "${RESP}" | jq -r '.data.content[0].instanceId // .data.content[0].id // empty')
+    [ -n "${CHILD_INSTANCE}" ] && break
+    sleep 1
+done
+[ -n "${CHILD_INSTANCE}" ] \
+    || { print_error "the waiting agent must run as a child run of the caller: ${RESP}"; tail -40 "${TEST_LOG}"; exit 1; }
+echo "  the waiting agent runs as child run ${CHILD_INSTANCE} ✓"
 WAIT_SIGNAL=""
 for _ in {1..30}; do
-    RESP=$(curl -sS "${API}/workflows/${WAIT_PARENT_ID}/instances/${WAIT_INSTANCE}/pending-input")
+    RESP=$(curl -sS "${API}/workflows/${WAITING_ID}/instances/${CHILD_INSTANCE}/pending-input")
     WAIT_SIGNAL=$(echo "${RESP}" | jq -r '.data.pendingInputs[]?.requestId // empty' | head -1)
     [ -n "${WAIT_SIGNAL}" ] && break
     sleep 1
 done
 [ -n "${WAIT_SIGNAL}" ] \
-    || { print_error "pending-input never surfaced the nested wait: ${RESP}"; tail -40 "${TEST_LOG}"; exit 1; }
-echo "  nested wait discoverable through pending-input ✓"
+    || { print_error "pending-input never surfaced the child's wait: ${RESP}"; tail -40 "${TEST_LOG}"; exit 1; }
+echo "  the child's wait is discoverable through its pending-input ✓"
 
-# A nested route carries JSON punctuation of its own — runtara:v2:["wait",...] —
+# A route carries JSON punctuation of its own — runtara:v2:["wait",...] —
 # so it must be escaped into the body, never interpolated into a string.
 SIGNAL_BODY=$(jq -nc --arg signal "${WAIT_SIGNAL}" '{requestId: $signal, operationId: ("e2e-" + $signal), payload: {decision: "approved-nested"}}')
-RESP=$(api_post "/signals/${WAIT_INSTANCE}" "${SIGNAL_BODY}")
+RESP=$(api_post "/signals/${CHILD_INSTANCE}" "${SIGNAL_BODY}")
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
     || { print_error "nested signal submit failed: ${RESP}"; exit 1; }
 

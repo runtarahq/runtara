@@ -462,7 +462,16 @@ impl Backend {
                 },
             )
             .await
-            .map_err(|error| control_host::json::api_error(&error))?;
+            .map_err(|error| {
+                tracing::warn!(
+                    instance_id = %binding.instance_id,
+                    binding = %start.binding,
+                    code = ?error.code,
+                    message = %error.message,
+                    "child run start refused"
+                );
+                control_host::json::api_error(&error)
+            })?;
         Ok(runtara_workflow_api::TaskStarted {
             task_id: started.instance_id.clone(),
             instance_id: Some(started.instance_id),
@@ -483,7 +492,16 @@ impl Backend {
             let detail = host
                 .get(&authority, task_id.to_owned())
                 .await
-                .map_err(|error| control_host::json::api_error(&error))?;
+                .map_err(|error| {
+                    tracing::warn!(
+                        instance_id = %binding.instance_id,
+                        task_id,
+                        code = ?error.code,
+                        message = %error.message,
+                        "child run read refused"
+                    );
+                    control_host::json::api_error(&error)
+                })?;
             if detail.instance.parent_instance_id.as_deref() != Some(binding.instance_id.as_str()) {
                 return Err(task_error(
                     crate::execution_host::ExecutionError::InvalidTask,

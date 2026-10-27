@@ -156,7 +156,11 @@ pub(super) fn emit_agent_scope_input(
     source_ptr_local: u32,
     source_len_local: u32,
 ) {
-    if !static_data.agent_is_workflow_agent(agent_id) {
+    // A child run is a run of its own, with its own checkpoints: the host
+    // gives it the `{data, variables}` envelope every root run gets.
+    if !static_data.agent_is_workflow_agent(agent_id)
+        || static_data.agent_child_run(agent_id).is_some()
+    {
         return;
     }
 

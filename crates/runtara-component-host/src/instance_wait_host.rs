@@ -224,13 +224,18 @@ const DURABLE_KEY_V2_PREFIX: &str = "runtara:v2:";
 /// Key kind of a WaitForInstances step.
 pub const WAIT_INSTANCES_KEY_KIND: &str = "wait-instances";
 
-/// The wait id of a WaitForInstances step: the operation hash of its
-/// canonical v2 `wait-instances` key
-/// (`runtara:v2:["wait-instances", workflow, namespace, loop-path, [step]]`),
-/// so it differs per loop iteration and per embedding and is the same on
-/// every replay. Fails closed on any other key.
+/// Key kind of an Agent call, the key a child-run call waits on its child
+/// under.
+pub const AGENT_KEY_KIND: &str = "agent";
+
+/// The wait id of a WaitForInstances step or a child-run call: the operation
+/// hash of its canonical v2 key
+/// (`runtara:v2:["wait-instances", workflow, namespace, loop-path, [step]]`,
+/// or the call's `["agent", …, [agent, capability, step]]`), so it differs
+/// per loop iteration and per embedding and is the same on every replay.
+/// Fails closed on any other key.
 pub fn wait_instances_id(key: &str) -> Result<String, String> {
-    let malformed = || "a wait key must be a canonical v2 wait-instances key".to_string();
+    let malformed = || "a wait key must be a canonical v2 wait-instances or agent key".to_string();
     if key.is_empty() || key.len() > crate::operation_scope_host::MAX_OPERATION_KEY_BYTES {
         return Err(malformed());
     }
@@ -247,11 +252,14 @@ pub fn wait_instances_id(key: &str) -> Result<String, String> {
         .as_array()
         .filter(|parts| parts.len() == 5)
         .ok_or_else(malformed)?;
-    let step = parts[4].as_array().and_then(|site| match site.as_slice() {
-        [serde_json::Value::String(step)] if !step.is_empty() => Some(step),
-        _ => None,
-    });
-    if parts[0].as_str() != Some(WAIT_INSTANCES_KEY_KIND) || step.is_none() {
+    let named = |value: &serde_json::Value| value.as_str().is_some_and(|s| !s.is_empty());
+    let site = parts[4].as_array().map(Vec::as_slice).unwrap_or_default();
+    let well_formed = match parts[0].as_str() {
+        Some(WAIT_INSTANCES_KEY_KIND) => matches!(site, [step] if named(step)),
+        Some(AGENT_KEY_KIND) => site.len() == 3 && site.iter().all(named),
+        _ => false,
+    };
+    if !well_formed {
         return Err(malformed());
     }
     Ok(crate::operation_scope_host::operation_hash(key))
@@ -348,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wait_id_is_the_hash_of_a_canonical_wait_instances_key() {
+    fn a_wait_id_is_the_hash_of_a_canonical_wait_or_call_key() {
         let root = wait_key("wait-instances", json!([]), json!(["approvals"]));
         assert_eq!(
             wait_instances_id(&root).unwrap(),
@@ -364,10 +372,18 @@ mod tests {
             wait_instances_id(&iteration).unwrap(),
             wait_instances_id(&root).unwrap()
         );
+        // A child-run call waits under its own agent key.
+        let call = wait_key("agent", json!([]), json!(["waiter", "run", "approvals"]));
+        assert_eq!(
+            wait_instances_id(&call).unwrap(),
+            crate::operation_scope_host::operation_hash(&call)
+        );
         for refused in [
             String::new(),
             "wait-instances::approvals".to_string(),
-            wait_key("agent", json!([]), json!(["waiter", "pause", "approvals"])),
+            wait_key("agent", json!([]), json!(["waiter", "approvals"])),
+            wait_key("agent", json!([]), json!(["waiter", "", "approvals"])),
+            wait_key("checkpoint", json!([]), json!(["approvals"])),
             wait_key("wait-instances", json!([]), json!([])),
             wait_key("wait-instances", json!([]), json!([""])),
             wait_key("wait-instances", json!([]), json!(["a", "b"])),

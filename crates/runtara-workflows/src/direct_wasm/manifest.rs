@@ -98,7 +98,7 @@ impl DirectWorkflowManifest {
     pub fn workflow_agent_ids(&self) -> std::collections::BTreeSet<String> {
         fn collect(graph: &DirectGraphManifest, ids: &mut std::collections::BTreeSet<String>) {
             for agent in &graph.agents {
-                if agent.is_workflow_agent {
+                if agent.is_workflow_agent && agent.child_run.is_none() {
                     ids.insert(agent.agent_id.clone());
                 }
             }
@@ -210,6 +210,20 @@ impl DirectWorkflowManifest {
                 step.step_type == "WaitForInstances"
                     || step.nested_graphs.iter().any(|nested| any(&nested.graph))
             })
+        }
+        any(&self.graph) || self.child_workflows.iter().any(|child| any(&child.graph))
+    }
+
+    /// Whether a call anywhere in the root graph, its nested graphs or its
+    /// embedded children runs a workflow-agent as a child run.
+    pub fn has_child_runs(&self) -> bool {
+        fn any(graph: &DirectGraphManifest) -> bool {
+            graph.agents.iter().any(|agent| agent.child_run.is_some())
+                || graph
+                    .steps
+                    .iter()
+                    .flat_map(|step| &step.nested_graphs)
+                    .any(|nested| any(&nested.graph))
         }
         any(&self.graph) || self.child_workflows.iter().any(|child| any(&child.graph))
     }
@@ -600,6 +614,11 @@ pub struct DirectAgentManifest {
     /// manifests stay byte-identical.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_workflow_agent: bool,
+    /// A workflow-agent whose version may park runs as a child run of its
+    /// own (`runtara:api/tasks`), not composed into this workflow: the
+    /// `/v1/tasks` binding of the version it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_run: Option<String>,
     /// Whether the catalog declares the capability `suspends`: the site calls
     /// the agent inside an operation scope. Skipped
     /// when false so existing manifests stay byte-identical.
@@ -815,6 +834,20 @@ pub fn build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
     }
     feature_summary.agent_ids.sort();
     feature_summary.agent_ids.dedup();
+    // A workflow-agent that runs as a child run is not composed: nothing
+    // imports or links its component.
+    feature_summary.agent_ids.retain(|agent_id| {
+        !agent_catalog.is_some_and(|catalog| {
+            catalog.agent(agent_id).is_some_and(|agent| {
+                agent.capabilities.iter().any(|capability| {
+                    capability
+                        .workflow_run
+                        .as_ref()
+                        .is_some_and(|target| target.parks)
+                })
+            })
+        })
+    });
 
     let mut manifest = DirectWorkflowManifest {
         version: DIRECT_WORKFLOW_MANIFEST_VERSION,
@@ -1220,6 +1253,11 @@ fn step_manifest(
                     &agent_id,
                     &step.capability_id,
                 ),
+                child_run: agent_capability_child_run(
+                    agent_catalog,
+                    &agent_id,
+                    &step.capability_id,
+                ),
                 suspends: agent_catalog.is_some_and(|catalog| {
                     catalog.capability_suspends(&agent_id, &step.capability_id)
                 }),
@@ -1374,6 +1412,7 @@ fn step_manifest(
                     capability_id,
                 ),
                 is_workflow_agent: false,
+                child_run: None,
                 suspends: false,
                 operation_scoped: false,
                 input_mapping_id,
@@ -1429,6 +1468,7 @@ fn step_manifest(
                             },
                         rate_limited: false,
                         is_workflow_agent: false,
+                        child_run: None,
                         // Classified like any call, so the compiler refuses an
                         // operation-scoped memory provider instead of lowering it.
                         suspends: agent_catalog.is_some_and(|catalog| {
@@ -1478,6 +1518,7 @@ fn step_manifest(
                             "summarize-memory",
                         ),
                         is_workflow_agent: false,
+                        child_run: None,
                         suspends: false,
                         operation_scoped: false,
                         input_mapping_id: conversation_mapping_id,
@@ -1520,6 +1561,7 @@ fn step_manifest(
                             capability,
                         ),
                         is_workflow_agent: false,
+                        child_run: None,
                         suspends: false,
                         operation_scoped: false,
                         input_mapping_id,
@@ -1776,6 +1818,22 @@ fn agent_capability_workflow_agent(
                 .any(|tag| tag == capability_tags::WORKFLOW_AGENT)
         })
         .unwrap_or(false)
+}
+
+/// The `/v1/tasks` binding of a workflow-agent whose published version may
+/// park: such a call runs the version as a child run of its own.
+fn agent_capability_child_run(
+    agent_catalog: Option<&AgentCatalog>,
+    agent_id: &str,
+    capability_id: &str,
+) -> Option<String> {
+    let target = agent_catalog?
+        .capability(agent_id, capability_id)?
+        .workflow_run
+        .as_ref()?;
+    target
+        .parks
+        .then(|| format!("workflow:{}@{}", target.workflow_id, target.version))
 }
 
 fn required_agent_inputs(

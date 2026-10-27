@@ -1361,6 +1361,7 @@ fn compile_direct_workflow_inner(
         super::manifest::needs_monotonic_clock(&manifest.graph, &manifest.child_workflows),
     )
     .with_wait_instances(manifest.has_wait_for_instances())
+    .with_child_runs(manifest.has_child_runs())
     .with_run_state(manifest.publishes_state());
 
     let build_dir = input.output_dir.join(format!(
@@ -1533,6 +1534,7 @@ fn emit_direct_component(
         core_config.static_data.needs_monotonic_clock(),
         manifest.has_wait_for_instances(),
         manifest.publishes_state(),
+        manifest.has_child_runs(),
     )?;
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
@@ -1630,6 +1632,7 @@ fn build_direct_component_resolve_scoped(
         needs_monotonic_clock,
         false,
         false,
+        false,
     )
 }
 
@@ -1651,6 +1654,7 @@ fn build_direct_component_resolve_with_waits(
     needs_monotonic_clock: bool,
     wait_instances: bool,
     run_state: bool,
+    child_runs: bool,
 ) -> Result<(Resolve, WorldId), DirectCompileError> {
     // Control sites need the scope without any suspending agent.
     let operation_scope = operation_scope || !suspending_agents.is_empty();
@@ -1731,8 +1735,13 @@ fn build_direct_component_resolve_with_waits(
     if operation_scope {
         workflow_wit.push_str(&format!("    import {};\n", runtara_wit::api::OPERATIONS));
     }
-    if wait_instances {
+    // A child run is started and read through tasks and waited on through
+    // waits.
+    if wait_instances || child_runs {
         workflow_wit.push_str(&format!("    import {};\n", runtara_wit::api::WAITS));
+    }
+    if child_runs {
+        workflow_wit.push_str(&format!("    import {};\n", runtara_wit::api::TASKS));
     }
     if run_state {
         workflow_wit.push_str(&format!("    import {};\n", runtara_wit::api::STATE));

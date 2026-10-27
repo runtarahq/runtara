@@ -220,6 +220,24 @@ impl DirectComponentArtifacts {
         self
     }
 
+    /// Import `runtara:api/tasks` and `runtara:api/waits` in the world when
+    /// an Agent runs a workflow-agent as a child run: the parent starts and
+    /// reads the child through tasks and parks on it through waits.
+    pub(super) fn with_child_runs(mut self, child_runs: bool) -> Self {
+        if child_runs {
+            let stdlib = format!("    import {STDLIB_JSON_INTERFACE};\n");
+            let mut imports = stdlib.clone();
+            for interface in [runtara_wit::api::TASKS, runtara_wit::api::WAITS] {
+                let import = format!("    import {interface};\n");
+                if !self.world_wit.contains(&import) {
+                    imports.push_str(&import);
+                }
+            }
+            self.world_wit = self.world_wit.replacen(&stdlib, &imports, 1);
+        }
+        self
+    }
+
     /// Import `runtara:api/state` in the world when a SetState or GetState
     /// step publishes state.
     pub(super) fn with_run_state(mut self, run_state: bool) -> Self {

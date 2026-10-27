@@ -712,7 +712,8 @@ pub(super) fn emit_runtime_shims(
     let waits = api.contains_key("waits.register");
     let state = api.contains_key("state.set");
     let operations = api.contains_key("operations.enter");
-    if !waits && !state && !operations {
+    let child_runs = api.contains_key("tasks.start");
+    if !waits && !state && !operations && !child_runs {
         return Ok(());
     }
     // Operations, waits and state call `runtara:api` straight from helpers
@@ -944,7 +945,245 @@ pub(super) fn emit_runtime_shims(
             get: get_index,
         });
     }
+    if child_runs {
+        indices.child_run = Some(emit_child_run_shim(
+            &layouts,
+            &import,
+            &api_result,
+            &mut native,
+            scratch + API_SCRATCH_BYTES + OPERATION_CELL_BYTES,
+        )?);
+    }
     Ok(())
+}
+
+/// Bytes after the operation cell where the `child-run` helper builds its
+/// wait request, `{"instanceIds":["<task id>"],"mode":"all"}`; the heap starts after them
+/// when a child run exists.
+pub(super) const CHILD_RUN_REQUEST_BYTES: i32 = 176;
+const CHILD_RUN_REQUEST_PREFIX: &[u8] = br#"{"instanceIds":[""#;
+const CHILD_RUN_REQUEST_SUFFIX: &[u8] = br#""],"mode":"all"}"#;
+
+/// What `child-run` leaves at its result pointer: the tag, then the payload
+/// at 8, where the composed Agent invoke leaves its normalized result.
+pub(super) mod child_run {
+    /// `ok(list<u8>)`: the child's output, ptr/len at 8.
+    pub(crate) const COMPLETED: i32 = 0;
+    /// `err(error-info)`: the child's error at 8.
+    pub(crate) const FAILED: i32 = 1;
+    /// Still running: its wait is registered and the run parks.
+    pub(crate) const PENDING: i32 = 2;
+    pub(crate) const CANCELLED: i32 = 3;
+    pub(crate) const TIMED_OUT: i32 = 4;
+    pub(crate) const TRAPPED: i32 = 5;
+    /// The workflow API refused or failed a call; its message is at
+    /// [`MESSAGE`].
+    pub(crate) const UNAVAILABLE: i32 = 6;
+    /// Where an `unavailable` result keeps the API's message (ptr, len),
+    /// past the error-info the step error is written into.
+    pub(crate) const MESSAGE: u64 = 96;
+}
+
+/// `child-run(binding, input, path, attempt, retptr)`: start the child run of
+/// `binding` for this call site (a replay finds the same child), read its
+/// outcome without waiting, and, while it still runs, register a wait on it
+/// under `path` so the run can park. An ended child's task and wait are
+/// released.
+/// Looks up an imported `runtara:api` function by `interface.function`,
+/// checking its core signature.
+type ImportLookup<'a> = dyn Fn(&str, &[WasmType]) -> Result<&'a ApiImport, DirectCompileError> + 'a;
+/// Defines a helper with `n` i32 params (its result pointer last when it
+/// returns) and the body the callback writes; answers its function index.
+type DefineNative<'d> = dyn FnMut(
+        usize,
+        bool,
+        &mut dyn FnMut(&mut Shim) -> Result<(), DirectCompileError>,
+    ) -> Result<u32, DirectCompileError>
+    + 'd;
+
+fn emit_child_run_shim<'a>(
+    layouts: &Layouts<'_>,
+    import: &ImportLookup<'a>,
+    api_result: &dyn Fn(&str, &str) -> Result<Type, DirectCompileError>,
+    native: &mut DefineNative<'_>,
+    request: i32,
+) -> Result<u32, DirectCompileError> {
+    use wit_parser::abi::WasmType::{I32, I64, Length as L, Pointer as P};
+    let start_ty = api_result("tasks", "start")?;
+    let outcome_ty = api_result("tasks", "outcome")?;
+    let register_ty = api_result("waits", "register")?;
+    let message_of = |ty: &Type| layouts.offset(ty, &[Step::Err, Step::Field("message")]);
+    let (start_message, outcome_message, register_message) = (
+        message_of(&start_ty)?,
+        message_of(&outcome_ty)?,
+        message_of(&register_ty)?,
+    );
+    let start = import("tasks.start", &[P, L, I32, P, L, P, L, P, L, I64, P])?.index;
+    let outcome = import("tasks.outcome", &[P, L, I64, P])?.index;
+    let release = import("tasks.release", &[P, L, P])?.index;
+    let register = import("waits.register", &[P, L, P, L, P])?.index;
+    let wait_release = import("waits.release", &[P, L, P])?.index;
+    let id_at = layouts.offset(&start_ty, &[Step::Ok])?;
+    let ended_at = layouts.offset(&outcome_ty, &[Step::Ok])?;
+    let case_at = layouts.offset(&outcome_ty, &[Step::Ok, Step::Some])?;
+    let output_at = layouts.offset(
+        &outcome_ty,
+        &[Step::Ok, Step::Some, Step::Case("completed")],
+    )?;
+    let error_at = layouts.offset(&outcome_ty, &[Step::Ok, Step::Some, Step::Case("failed")])?;
+    // The composed invoke's `error-info`, which this one copies over.
+    const ERROR_INFO_BYTES: i32 = 80;
+    let id_max = CHILD_RUN_REQUEST_BYTES
+        - (CHILD_RUN_REQUEST_PREFIX.len() + CHILD_RUN_REQUEST_SUFFIX.len()) as i32;
+    native(8, true, &mut |shim| {
+        let scratch = shim.scratch;
+        let retptr = shim.retptr;
+        let [id_ptr, id_len, tag] = [0, 1, 2].map(|n| shim.local(n));
+        let attempt = shim.tmp_i64;
+        // A refused or failed call is `unavailable`, with the API's message.
+        let unavailable_if_error = |shim: &mut Shim, message: u64| {
+            let (ptr, len) = (shim.local(5), shim.local(6));
+            shim.i(Instruction::I32Const(scratch))
+                .i(Instruction::I32Load8U(mem(0, 0)))
+                .i(Instruction::If(BlockType::Empty));
+            shim.load_i32(message, ptr);
+            shim.load_i32(message + 4, len);
+            shim.store_i32(child_run::MESSAGE, ptr);
+            shim.store_i32(child_run::MESSAGE + 4, len);
+            shim.store_const_u8(0, child_run::UNAVAILABLE);
+            shim.i(Instruction::Return).i(Instruction::End);
+        };
+
+        // start(binding, workflow, input, {path, attempt})
+        shim.i(Instruction::LocalGet(6))
+            .i(Instruction::I64ExtendI32U)
+            .i(Instruction::LocalSet(attempt));
+        shim.i(Instruction::LocalGet(0))
+            .i(Instruction::LocalGet(1))
+            .i(Instruction::I32Const(1))
+            .i(Instruction::I32Const(0))
+            .i(Instruction::I32Const(0));
+        for param in [2, 3, 4, 5] {
+            shim.i(Instruction::LocalGet(param));
+        }
+        shim.i(Instruction::LocalGet(attempt))
+            .i(Instruction::I32Const(scratch))
+            .i(Instruction::Call(start));
+        unavailable_if_error(shim, start_message);
+        shim.load_i32(id_at, id_ptr);
+        shim.load_i32(id_at + 4, id_len);
+
+        // outcome(id, 0)
+        shim.i(Instruction::LocalGet(id_ptr))
+            .i(Instruction::LocalGet(id_len))
+            .i(Instruction::I64Const(0))
+            .i(Instruction::I32Const(scratch))
+            .i(Instruction::Call(outcome));
+        unavailable_if_error(shim, outcome_message);
+
+        // Still running: register(path, {"instanceIds":[id]}) and park.
+        shim.load_u8(ended_at, tag);
+        shim.i(Instruction::LocalGet(tag))
+            .i(Instruction::I32Eqz)
+            .i(Instruction::If(BlockType::Empty));
+        shim.i(Instruction::LocalGet(id_len))
+            .i(Instruction::I32Const(id_max))
+            .i(Instruction::I32GtU)
+            .i(Instruction::If(BlockType::Empty));
+        shim.store_i32(child_run::MESSAGE, id_ptr);
+        shim.store_i32(child_run::MESSAGE + 4, id_len);
+        shim.store_const_u8(0, child_run::UNAVAILABLE);
+        shim.i(Instruction::Return).i(Instruction::End);
+        for (n, byte) in CHILD_RUN_REQUEST_PREFIX.iter().enumerate() {
+            shim.i(Instruction::I32Const(request + n as i32))
+                .i(Instruction::I32Const(i32::from(*byte)))
+                .i(Instruction::I32Store8(mem(0, 0)));
+        }
+        let id_at_request = request + CHILD_RUN_REQUEST_PREFIX.len() as i32;
+        shim.i(Instruction::I32Const(id_at_request))
+            .i(Instruction::LocalGet(id_ptr))
+            .i(Instruction::LocalGet(id_len))
+            .i(Instruction::MemoryCopy {
+                src_mem: 0,
+                dst_mem: 0,
+            });
+        for (n, byte) in CHILD_RUN_REQUEST_SUFFIX.iter().enumerate() {
+            shim.i(Instruction::I32Const(id_at_request))
+                .i(Instruction::LocalGet(id_len))
+                .i(Instruction::I32Add)
+                .i(Instruction::I32Const(i32::from(*byte)))
+                .i(Instruction::I32Store8(mem(n as u64, 0)));
+        }
+        shim.i(Instruction::LocalGet(4))
+            .i(Instruction::LocalGet(5))
+            .i(Instruction::I32Const(request))
+            .i(Instruction::LocalGet(id_len))
+            .i(Instruction::I32Const(
+                (CHILD_RUN_REQUEST_PREFIX.len() + CHILD_RUN_REQUEST_SUFFIX.len()) as i32,
+            ))
+            .i(Instruction::I32Add)
+            .i(Instruction::I32Const(scratch))
+            .i(Instruction::Call(register));
+        unavailable_if_error(shim, register_message);
+        shim.store_const_u8(0, child_run::PENDING);
+        shim.i(Instruction::Return).i(Instruction::End);
+
+        // Ended: its outcome, then the task and the wait go.
+        shim.load_u8(case_at, tag);
+        // completed(list)
+        shim.i(Instruction::LocalGet(tag))
+            .i(Instruction::I32Eqz)
+            .i(Instruction::If(BlockType::Empty));
+        let (ptr, len) = (shim.local(3), shim.local(4));
+        shim.load_i32(output_at, ptr);
+        shim.load_i32(output_at + 4, len);
+        shim.store_i32(8, ptr);
+        shim.store_i32(12, len);
+        shim.i(Instruction::I32Const(child_run::COMPLETED))
+            .i(Instruction::LocalSet(tag))
+            .i(Instruction::Else);
+        // failed(error-info)
+        shim.i(Instruction::LocalGet(tag))
+            .i(Instruction::I32Const(1))
+            .i(Instruction::I32Eq)
+            .i(Instruction::If(BlockType::Empty));
+        shim.i(Instruction::LocalGet(retptr))
+            .i(Instruction::I32Const(8))
+            .i(Instruction::I32Add)
+            .i(Instruction::I32Const(scratch + error_at as i32))
+            .i(Instruction::I32Const(ERROR_INFO_BYTES))
+            .i(Instruction::MemoryCopy {
+                src_mem: 0,
+                dst_mem: 0,
+            })
+            .i(Instruction::I32Const(child_run::FAILED))
+            .i(Instruction::LocalSet(tag))
+            .i(Instruction::Else);
+        // suspended (never a run of its own) and trapped are a trap; the
+        // others keep their case number.
+        shim.i(Instruction::LocalGet(tag))
+            .i(Instruction::I32Const(2))
+            .i(Instruction::I32Eq)
+            .i(Instruction::If(BlockType::Result(ValType::I32)))
+            .i(Instruction::I32Const(child_run::TRAPPED))
+            .i(Instruction::Else)
+            .i(Instruction::LocalGet(tag))
+            .i(Instruction::End)
+            .i(Instruction::LocalSet(tag))
+            .i(Instruction::End)
+            .i(Instruction::End);
+        shim.i(Instruction::LocalGet(id_ptr))
+            .i(Instruction::LocalGet(id_len))
+            .i(Instruction::I32Const(scratch))
+            .i(Instruction::Call(release));
+        shim.i(Instruction::LocalGet(4))
+            .i(Instruction::LocalGet(5))
+            .i(Instruction::I32Const(scratch))
+            .i(Instruction::Call(wait_release));
+        shim.store_u8(0, tag);
+        shim.i(Instruction::Return);
+        Ok(())
+    })
 }
 
 fn set_cell(shim: &mut Shim, cell: i32, offset: u64, value: i32) {
