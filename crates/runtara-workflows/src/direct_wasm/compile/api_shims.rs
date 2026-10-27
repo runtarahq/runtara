@@ -987,15 +987,25 @@ pub(super) mod child_run {
     /// starts it again after the hint (ms, a `u64` at [`RETRY_AFTER`]).
     pub(crate) const CAPACITY: i32 = 7;
     pub(crate) const RETRY_AFTER: u64 = 8;
+    /// Once the child started, its task id (ptr, len) whatever the outcome;
+    /// the len is 0 when no child was started.
+    pub(crate) const TASK_ID: u64 = 104;
+    /// Flags: the call's wait settled with the child still running.
+    pub(crate) const SETTLED: i32 = 1;
+    /// Flags: a running child answers `pending` with no wait of its own (the
+    /// caller waits on several at once).
+    pub(crate) const NO_WAIT: i32 = 2;
 }
 
-/// `child-run(binding, input, path, attempt, deadline, settled, retptr)`:
+/// `child-run(binding, input, path, attempt, deadline, flags, retptr)`:
 /// start the child run of `binding` for this call site (a replay finds the
 /// same child) and read its outcome without waiting. While it still runs,
 /// register a wait on it under `path`, with `deadline` (ms since the epoch,
 /// 0 for none), and answer `pending` with the wait's read at 8 so the run can
-/// park; with `settled` (the wait's deadline passed) cancel it instead and
-/// answer `timed-out`. An ended child's task and wait are released.
+/// park; with [`child_run::SETTLED`] (the wait's deadline passed) cancel it
+/// instead and answer `timed-out`, and with [`child_run::NO_WAIT`] answer
+/// `pending` without a wait. The started child's id is left at
+/// [`child_run::TASK_ID`]. An ended child's task and wait are released.
 /// Looks up an imported `runtara:api` function by `interface.function`,
 /// checking its core signature.
 type ImportLookup<'a> = dyn Fn(&str, &[WasmType]) -> Result<&'a ApiImport, DirectCompileError> + 'a;
@@ -1083,6 +1093,7 @@ fn emit_child_run_shim<'a>(
                 .i(Instruction::Call(wait_release));
         };
 
+        shim.store_const_i32(child_run::TASK_ID + 4, 0);
         // start(binding, workflow, input, {path, attempt})
         shim.i(Instruction::LocalGet(6))
             .i(Instruction::I64ExtendI32U)
@@ -1122,6 +1133,8 @@ fn emit_child_run_shim<'a>(
         unavailable_if_error(shim, start_message);
         shim.load_i32(id_at, id_ptr);
         shim.load_i32(id_at + 4, id_len);
+        shim.store_i32(child_run::TASK_ID, id_ptr);
+        shim.store_i32(child_run::TASK_ID + 4, id_len);
 
         // outcome(id, 0)
         shim.i(Instruction::LocalGet(id_ptr))
@@ -1138,9 +1151,17 @@ fn emit_child_run_shim<'a>(
             .i(Instruction::I32Eqz)
             .i(Instruction::If(BlockType::Empty));
         shim.i(Instruction::LocalGet(8))
+            .i(Instruction::I32Const(child_run::SETTLED))
+            .i(Instruction::I32And)
             .i(Instruction::If(BlockType::Empty));
         release_both(shim);
         shim.store_const_u8(0, child_run::TIMED_OUT);
+        shim.i(Instruction::Return).i(Instruction::End);
+        shim.i(Instruction::LocalGet(8))
+            .i(Instruction::I32Const(child_run::NO_WAIT))
+            .i(Instruction::I32And)
+            .i(Instruction::If(BlockType::Empty));
+        shim.store_const_u8(0, child_run::PENDING);
         shim.i(Instruction::Return).i(Instruction::End);
 
         // Otherwise register(path, {"instanceIds":[id],"mode":"all",

@@ -348,7 +348,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     this release stay composed into their caller until republished.
   - The step's `timeoutMs` is the child's deadline: past it the caller
     wakes, cancels the child and fails the step with `AGENT_TIMEOUT`.
-  - A parallel Split starts up to 15 such children per window, then parks.
+  - A parallel Split starts up to 100 such children per window (its
+    `parallelism`), then parks on one wait over all of them.
     Parallel branches headed by such calls start all their children before
     the first branch parks.
   - Each call is a run with its own instance row, costing a launch instead

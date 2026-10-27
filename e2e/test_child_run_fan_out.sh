@@ -1,17 +1,18 @@
 #!/bin/bash
 # E2E Test: a parallel Split fans a parking workflow-agent out as child runs.
 #
-# One parent, ten children, half of them asleep:
+# One parent, twenty children, half of them asleep:
 #
 #   1. PUBLISH — `maybe-sleep` sleeps (a durable Delay) when its input says
 #      so, and otherwise finishes at once. It may park, so its staged meta
 #      binds it to its version with `workflowRun.parks`.
-#   2. FAN OUT — a durable parent Splits ten items over `maybe-sleep` with
-#      parallelism 10. The window starts all ten children before any of them
-#      parks; the five that do not sleep complete while the five sleepers
+#   2. FAN OUT — a durable parent Splits twenty items over `maybe-sleep` with
+#      parallelism 20. The window starts all twenty children before any of
+#      them parks, and parks on one wait over all of them; the ten that do not
+#      sleep complete while the ten sleepers
 #      sleep, and the parent parks on a wait per sleeping child.
-#   3. JOIN — every wake replays the Split, which finds the same ten children
-#      (no duplicates), and the parent completes once all ten have ended,
+#   3. JOIN — every wake replays the Split, which finds the same twenty
+#      children (no duplicates), and the parent completes once all have ended,
 #      with each item's result in order.
 #   4. BRANCHES — a fan-out of two branches, each calling `maybe-sleep` to
 #      sleep, starts both children before parking on the first, and finds
@@ -147,7 +148,7 @@ psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_SERVER}" >/dev/null
 psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_RUNTIME}" >/dev/null
 SERVER_DB_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}"
 
-# Ten children and their parent fit the tenant's limit and its control share
+# Twenty children and their parent fit the tenant's limit and its control share
 # with room to spare, so no start is refused for capacity.
 print_step "Starting runtara-server on :${TEST_PORT_PUBLIC}..."
 RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
@@ -253,7 +254,7 @@ jq -e --arg id "${CHILD_ID}" \
 echo "  maybe-sleep published; its version parks (workflowRun.parks) ✓"
 
 #-------------------------------------------------------------------------
-print_step "2. A parallel Split starts ten children at once..."
+print_step "2. A parallel Split starts twenty children at once..."
 PARENT_GRAPH='{
   "name": "Fan Out Maybe Sleep",
   "durable": true,
@@ -263,7 +264,7 @@ PARENT_GRAPH='{
       "id": "split",
       "config": {
         "value": { "valueType": "reference", "value": "data.items" },
-        "parallelism": 10,
+        "parallelism": 20,
         "maxRetries": 0
       },
       "subgraph": {
@@ -306,13 +307,13 @@ PARENT_GRAPH='{
   "outputSchema": {}
 }'
 PARENT_ID=$(create_and_compile "Fan Out Maybe Sleep" "${PARENT_GRAPH}")
-ITEMS=$(jq -nc '[range(10) | {item: ., sleep: (. % 2 == 1)}]')
+ITEMS=$(jq -nc '[range(20) | {item: ., sleep: (. % 2 == 1)}]')
 RESP=$(api_post "/workflows/${PARENT_ID}/execute" "{\"inputs\": {\"data\": {\"items\": ${ITEMS}}}}")
 PARENT=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
 [ -n "${PARENT}" ] || { print_error "parent execute failed: ${RESP}"; exit 1; }
 STARTED_AT=$(date +%s)
 
-# Snapshot the children while the sleepers sleep: all ten exist, the five
+# Snapshot the children while the sleepers sleep: all twenty exist, the ten
 # that do not sleep have completed, and the five sleepers have not.
 SNAPSHOT=""
 PARENT_STATUS=""
@@ -322,31 +323,31 @@ for _ in {1..60}; do
     TOTAL=$(echo "${SNAPSHOT}" | jq 'length')
     PARENT_STATUS=$(curl -sS "${API}/workflows/instances/${PARENT}" | jq -r '.data.status // empty')
     case "${PARENT_STATUS}" in completed|failed|crashed|stopped) break ;; esac
-    [ "${TOTAL}" = "10" ] && [ "${COMPLETED}" -ge 5 ] && break
+    [ "${TOTAL}" = "20" ] && [ "${COMPLETED}" -ge 10 ] && break
     sleep 0.5
 done
 ELAPSED=$(( $(date +%s) - STARTED_AT ))
 TOTAL=$(echo "${SNAPSHOT}" | jq 'length')
 COMPLETED=$(echo "${SNAPSHOT}" | jq '[.[] | select(.status == "completed")] | length')
-[ "${TOTAL}" = "10" ] \
-    || { print_error "the window must start all ten children, saw ${TOTAL}: ${SNAPSHOT}"; tail -60 "${TEST_LOG}"; exit 1; }
-[ "${COMPLETED}" = "5" ] \
-    || { print_error "five children must complete while five sleep, saw ${COMPLETED} completed after ${ELAPSED}s: ${SNAPSHOT}"; tail -60 "${TEST_LOG}"; exit 1; }
+[ "${TOTAL}" = "20" ] \
+    || { print_error "the window must start all twenty children, saw ${TOTAL}: ${SNAPSHOT}"; tail -60 "${TEST_LOG}"; exit 1; }
+[ "${COMPLETED}" = "10" ] \
+    || { print_error "ten children must complete while ten sleep, saw ${COMPLETED} completed after ${ELAPSED}s: ${SNAPSHOT}"; tail -60 "${TEST_LOG}"; exit 1; }
 [ "${PARENT_STATUS}" = "suspended" ] \
     || { print_error "the parent must park while its children sleep, it is '${PARENT_STATUS}'"; tail -60 "${TEST_LOG}"; exit 1; }
-echo "  ten children started; five completed, five still sleeping after ${ELAPSED}s ✓"
+echo "  twenty children started in one window; ten completed, ten still sleeping after ${ELAPSED}s ✓"
 echo "  the parent parked (${PARENT_STATUS}) while its children sleep ✓"
 
-# The five that completed are the five that did not sleep.
+# The ten that completed are the ten that did not sleep.
 for CHILD in $(echo "${SNAPSHOT}" | jq -r '.[] | select(.status == "completed") | .id'); do
     OUT=$(curl -sS "${API}/workflows/instances/${CHILD}" | jq -c '.data.outputs')
     echo "${OUT}" | jq -e '.slept == false and (.item % 2 == 0)' >/dev/null \
         || { print_error "a child that completed early must be a non-sleeper: ${CHILD} → ${OUT}"; exit 1; }
 done
-echo "  the early five are the even (non-sleeping) items ✓"
+echo "  the early ten are the even (non-sleeping) items ✓"
 
 #-------------------------------------------------------------------------
-print_step "3. The parent completes once all ten children have ended..."
+print_step "3. The parent completes once all twenty children have ended..."
 for _ in {1..90}; do
     RESP=$(curl -sS "${API}/workflows/instances/${PARENT}")
     PARENT_STATUS=$(echo "${RESP}" | jq -r '.data.status // empty')
@@ -357,16 +358,16 @@ done
     || { print_error "the parent ended '${PARENT_STATUS}': $(echo "${RESP}" | jq -c '.data.error // empty')"; tail -60 "${TEST_LOG}"; exit 1; }
 RESULTS=$(echo "${RESP}" | jq -c '.data.outputs.results | if type == "object" and has("data") then .data else . end')
 echo "${RESULTS}" | jq -e '
-    length == 10
-    and ([.[] | .item] == [range(10)])
+    length == 20
+    and ([.[] | .item] == [range(20)])
     and all(.[]; .slept == (.item % 2 == 1))' >/dev/null \
-    || { print_error "the parent must return ten results in order, slept = odd: ${RESULTS}"; exit 1; }
-echo "  ten results in order, each slept exactly when its item is odd ✓"
+    || { print_error "the parent must return twenty results in order, slept = odd: ${RESULTS}"; exit 1; }
+echo "  twenty results in order, each slept exactly when its item is odd ✓"
 
 FINAL=$(children_of "${PARENT}")
-echo "${FINAL}" | jq -e 'length == 10 and all(.[]; .status == "completed")' >/dev/null \
-    || { print_error "replays must find the same ten children, all completed: ${FINAL}"; exit 1; }
-echo "  replays found the same ten children (no duplicates), all completed ✓"
+echo "${FINAL}" | jq -e 'length == 20 and all(.[]; .status == "completed")' >/dev/null \
+    || { print_error "replays must find the same twenty children, all completed: ${FINAL}"; exit 1; }
+echo "  replays found the same twenty children (no duplicates), all completed ✓"
 
 #-------------------------------------------------------------------------
 print_step "4. Parallel branches start their children together..."
@@ -441,4 +442,4 @@ echo "${FINAL}" | jq -e 'length == 2 and all(.[]; .status == "completed")' >/dev
     || { print_error "the branches must find the two children they started, both completed: ${FINAL}"; exit 1; }
 echo "  completed with both results; still exactly two children ✓"
 
-print_success "child-run fan-out: ten children started at once, five finished while five slept, the parent parked and completed with every result; parallel branches started their children together"
+print_success "child-run fan-out: twenty children started in one window, ten finished while ten slept, the parent parked and completed with every result; parallel branches started their children together"

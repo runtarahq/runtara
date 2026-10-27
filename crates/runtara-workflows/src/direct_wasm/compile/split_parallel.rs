@@ -97,10 +97,18 @@ pub(in crate::direct_wasm) fn pool_size_for_window(window: u32) -> u32 {
     window.clamp(1, PARALLEL_POOL_MAX)
 }
 
-/// Ceiling on how many child runs one window starts. A window that parks
-/// carries one wake per pending child beside its own resume wake, and a
-/// suspension carries at most `runtara_agent_suspension::MAX_WAKES`.
-const CHILD_RUN_WINDOW_MAX: u32 = 15;
+/// Ceiling on how many child runs one window starts. A window parks on one
+/// wait over all of its children, so the cap only bounds the request it
+/// builds ([`CHILD_RUN_REQUEST_BYTES`]).
+const CHILD_RUN_WINDOW_MAX: u32 = 100;
+/// The longest child id a window's wait request takes (instance ids are
+/// 36-character UUIDs).
+const CHILD_RUN_ID_MAX: i32 = 60;
+const CHILD_RUN_REQUEST_PREFIX: &[u8] = br#"{"instanceIds":["#;
+const CHILD_RUN_REQUEST_SUFFIX: &[u8] = br#"],"mode":"all"}"#;
+/// Bytes a child-run window reserves for its wait request: the frame, then
+/// each id quoted, with a comma.
+const CHILD_RUN_REQUEST_BYTES: i32 = 64 + CHILD_RUN_WINDOW_MAX as i32 * (CHILD_RUN_ID_MAX + 3);
 
 /// Borrowed fields of the eligible single-Agent Split body.
 pub(super) struct ParallelAgentBody<'a> {
@@ -801,6 +809,17 @@ pub(super) fn emit_parallel_split_items(
         body.instruction(&Instruction::LocalSet(
             super::DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
         ));
+        // The window's wait request is built as children start: reserve it,
+        // write its head, and count no child yet.
+        body.instruction(&Instruction::GlobalGet(0));
+        body.instruction(&Instruction::LocalSet(CHILD_RUN_REQUEST_CURSOR));
+        body.instruction(&Instruction::GlobalGet(0));
+        body.instruction(&Instruction::I32Const(CHILD_RUN_REQUEST_BYTES));
+        body.instruction(&Instruction::I32Add);
+        body.instruction(&Instruction::GlobalSet(0));
+        emit_write_bytes(body, CHILD_RUN_REQUEST_CURSOR, CHILD_RUN_REQUEST_PREFIX);
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::LocalSet(CHILD_RUN_STARTED));
     }
     if child_run.is_none() {
         body.instruction(&Instruction::GlobalGet(0));
@@ -977,11 +996,11 @@ pub(super) fn emit_parallel_split_items(
     body.instruction(&Instruction::End); // $launch_done
 
     if child_run.is_some() {
-        // A child still runs: park on the waits the helper registered, one
-        // per pending child. The relaunch replays to this window and starts
-        // nothing new: each item finds its child again.
+        // A child still runs: park. The relaunch replays to this window and
+        // starts nothing new: each item finds its child again.
         body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_PENDING_LOCAL));
         body.instruction(&Instruction::If(BlockType::Empty));
+        // A start refused for capacity: retry after its hint.
         body.instruction(&Instruction::LocalGet(
             super::DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
         ));
@@ -992,7 +1011,7 @@ pub(super) fn emit_parallel_split_items(
             super::DIRECT_WAIT_DEADLINE_MS_LOCAL,
         );
         body.instruction(&Instruction::End);
-        super::abi::emit_entry_suspend_return(body, indices);
+        emit_child_run_window_wait(body, indices);
         body.instruction(&Instruction::End);
     } else {
         // ── DRAIN ───────────────────────────────────────────────────────────
@@ -1294,6 +1313,131 @@ fn emit_agent_launch(
 /// same child) with the bare mapped input, as the sequential call does. An
 /// ended child's normalized result fills the slot for assembly; a running
 /// one counts as pending and leaves the slot EMPTY. Emitted inside `$skip`.
+// Child-run window state, in locals a child-run window leaves unused: the
+// request cursor in the waitable-set local, the count of children started in
+// the round cursor, and the last started item's key in the WaitForSignal
+// key pair (a Split never sits in an onWait graph's wait).
+const CHILD_RUN_REQUEST_CURSOR: u32 = DIRECT_PSPLIT_WS_LOCAL;
+const CHILD_RUN_STARTED: u32 = DIRECT_PSPLIT_ROUND_CURSOR_LOCAL;
+const CHILD_RUN_KEY_PTR: u32 = super::DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL;
+const CHILD_RUN_KEY_LEN: u32 = super::DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL;
+
+/// Store `bytes` at the address in `cursor`, advancing it.
+fn emit_write_bytes(body: &mut WasmFunction, cursor: u32, bytes: &[u8]) {
+    for (n, byte) in bytes.iter().enumerate() {
+        body.instruction(&Instruction::LocalGet(cursor));
+        body.instruction(&Instruction::I32Const(i32::from(*byte)));
+        body.instruction(&Instruction::I32Store8(wasm_encoder::MemArg {
+            offset: n as u64,
+            align: 0,
+            memory_index: 0,
+        }));
+    }
+    body.instruction(&Instruction::LocalGet(cursor));
+    body.instruction(&Instruction::I32Const(bytes.len() as i32));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::LocalSet(cursor));
+}
+
+/// Append the child the helper started (its id at `TASK_ID`) to the
+/// window's wait request. The last one's call-site key names the wait.
+fn emit_child_run_collect(body: &mut WasmFunction) {
+    use super::api_shims::child_run::TASK_ID;
+    let load = |body: &mut WasmFunction, offset: u64| {
+        body.instruction(&Instruction::I32Const(super::DIRECT_RUN_RETPTR_OFFSET));
+        body.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+            offset,
+            align: 2,
+            memory_index: 0,
+        }));
+    };
+    load(body, TASK_ID + 4);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    // An id the request has no room for cannot be waited on.
+    load(body, TASK_ID + 4);
+    body.instruction(&Instruction::I32Const(CHILD_RUN_ID_MAX));
+    body.instruction(&Instruction::I32GtU);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::Unreachable);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::LocalGet(CHILD_RUN_STARTED));
+    body.instruction(&Instruction::If(BlockType::Empty));
+    emit_write_bytes(body, CHILD_RUN_REQUEST_CURSOR, b",");
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_ITEM_PTR_LOCAL));
+    body.instruction(&Instruction::LocalSet(CHILD_RUN_KEY_PTR));
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_ITEM_LEN_LOCAL));
+    body.instruction(&Instruction::LocalSet(CHILD_RUN_KEY_LEN));
+    emit_write_bytes(body, CHILD_RUN_REQUEST_CURSOR, b"\"");
+    body.instruction(&Instruction::LocalGet(CHILD_RUN_REQUEST_CURSOR));
+    load(body, TASK_ID);
+    load(body, TASK_ID + 4);
+    body.instruction(&Instruction::MemoryCopy {
+        src_mem: 0,
+        dst_mem: 0,
+    });
+    body.instruction(&Instruction::LocalGet(CHILD_RUN_REQUEST_CURSOR));
+    load(body, TASK_ID + 4);
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::LocalSet(CHILD_RUN_REQUEST_CURSOR));
+    emit_write_bytes(body, CHILD_RUN_REQUEST_CURSOR, b"\"");
+    body.instruction(&Instruction::LocalGet(CHILD_RUN_STARTED));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::LocalSet(CHILD_RUN_STARTED));
+    body.instruction(&Instruction::End);
+}
+
+/// The window's request buffer, reserved right after its slots.
+fn push_child_run_request_base(body: &mut WasmFunction) {
+    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_CHUNK_END_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_CHUNK_START_LOCAL));
+    body.instruction(&Instruction::I32Sub);
+    body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_SLOT_STRIDE));
+    body.instruction(&Instruction::I32Mul);
+    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_SLOTS_LOCAL));
+    body.instruction(&Instruction::I32Add);
+}
+
+/// Park a window whose children still run on one wait over every child it
+/// started (`mode: all`). The children a window starts only grow across its
+/// replays, so the wait is keyed by the last one's call site (a canonical
+/// agent key): a replay that started the same children names the same wait,
+/// and one that started more names another. A
+/// wait that already settled (the last child ended since its read) parks
+/// for no time, so the relaunch reads every outcome.
+fn emit_child_run_window_wait(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
+    let waits = indices.wait_instances().clone();
+    emit_write_bytes(body, CHILD_RUN_REQUEST_CURSOR, CHILD_RUN_REQUEST_SUFFIX);
+    // register(key, request): (key ptr, len) then (request ptr, len).
+    body.instruction(&Instruction::LocalGet(CHILD_RUN_KEY_PTR));
+    body.instruction(&Instruction::LocalGet(CHILD_RUN_KEY_LEN));
+    push_child_run_request_base(body);
+    body.instruction(&Instruction::LocalGet(CHILD_RUN_REQUEST_CURSOR));
+    push_child_run_request_base(body);
+    body.instruction(&Instruction::I32Sub);
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(waits.register));
+    super::abi::return_if_retptr_error(body, indices);
+    // Pending: park on it. Settled: relaunch now.
+    super::abi::push_retptr_i32_load(body, 4);
+    super::abi::push_retptr_i32_load(body, 8);
+    push_retptr_arg(body);
+    super::abi::emit_call_wide_result(body, indices.stdlib_wait_instances_state);
+    super::abi::return_if_retptr_error(body, indices);
+    super::abi::push_retptr_u8_load(body, super::wait_instances::PROGRESS_PENDING_OFFSET);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    super::abi::emit_entry_suspend_return(body, indices);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::I64Const(0));
+    body.instruction(&Instruction::LocalSet(super::DIRECT_WAIT_DEADLINE_MS_LOCAL));
+    super::agent_invoke::emit_child_run_retry_park(
+        body,
+        indices,
+        super::DIRECT_WAIT_DEADLINE_MS_LOCAL,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_child_run_launch(
     body: &mut WasmFunction,
@@ -1324,8 +1468,9 @@ fn emit_child_run_launch(
         (DIRECT_SPLIT_ITEM_PTR_LOCAL, DIRECT_SPLIT_ITEM_LEN_LOCAL),
         None,
         None,
-        false,
+        super::api_shims::child_run::NO_WAIT,
     );
+    emit_child_run_collect(body);
     super::agent_invoke::emit_child_run_outcome(body, static_data);
     // A start refused for capacity is pending too, and the window parks no
     // longer than its retry hint.

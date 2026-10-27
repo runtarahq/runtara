@@ -202,7 +202,7 @@ fn emit_child_run(
     );
     let deadline = super::DIRECT_WAIT_DEADLINE_MS_LOCAL;
     emit_child_run_deadline(body, indices, static_data, agent_id, deadline);
-    let call = |body: &mut WasmFunction, settled: bool| {
+    let call = |body: &mut WasmFunction, flags: i32| {
         emit_child_run_call(
             body,
             indices,
@@ -211,10 +211,10 @@ fn emit_child_run(
             (key_ptr, key_len),
             attempt_local,
             Some(deadline),
-            settled,
+            flags,
         );
     };
-    call(body, false);
+    call(body, 0);
 
     // Refused for capacity: park, and start again after the hint.
     super::abi::load_retptr_tag(body);
@@ -255,7 +255,7 @@ fn emit_child_run(
         deadline,
     );
     body.instruction(&Instruction::Else);
-    call(body, true);
+    call(body, super::api_shims::child_run::SETTLED);
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
     emit_child_run_outcome(body, static_data);
@@ -318,7 +318,7 @@ pub(super) fn emit_child_run_deadline(
 /// and the attempt is the retry attempt, or 1 for a step that never retries
 /// (whatever an earlier step left in the attempt local must not name a
 /// different child on a replay). `deadline` (ms since the epoch) goes on
-/// the wait; `settled` times out a child that still runs.
+/// the wait; `flags` are [`super::api_shims::child_run`]'s.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_child_run_call(
     body: &mut WasmFunction,
@@ -328,7 +328,7 @@ pub(super) fn emit_child_run_call(
     (path_ptr, path_len): (u32, u32),
     attempt_local: Option<u32>,
     deadline_local: Option<u32>,
-    settled: bool,
+    flags: i32,
 ) {
     push_segment_args(body, binding);
     body.instruction(&Instruction::LocalGet(input_ptr));
@@ -343,7 +343,7 @@ pub(super) fn emit_child_run_call(
         Some(local) => body.instruction(&Instruction::LocalGet(local)),
         None => body.instruction(&Instruction::I64Const(0)),
     };
-    body.instruction(&Instruction::I32Const(i32::from(settled)));
+    body.instruction(&Instruction::I32Const(flags));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(
         indices
