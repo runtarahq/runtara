@@ -18,6 +18,10 @@
 #   5. OWN LIMITS — the second tenant is limited to one workflow
 #      (RUNTARA_TENANT_ENTITLEMENTS_JSON): its second is refused while the
 #      primary tenant still creates more, and each reads its own entitlements.
+#   6. OAUTH AND CONNECTION EVENTS — the second tenant's authorize URL
+#      redirects to its own callback path; that state is refused at the
+#      primary tenant's callback and is spent; its connection.created product
+#      event carries the second tenant.
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
 # environment) + docker (isolated Valkey) and the shared workflow components
@@ -327,4 +331,33 @@ RESP=$(api_post /workflows/create '{"name":"Primary again","description":"limit"
 echo "${RESP}" | jq -e '.data.id' >/dev/null || { print_error "the primary tenant could not create another workflow: ${RESP}"; exit 1; }
 echo "  the second tenant is held to one workflow; the primary is not; each reads its own entitlements ✓"
 
-print_success "served tenants: webhooks, API keys, triggers and cron reach exactly the tenants this server serves, each its own, under its own limits"
+#-------------------------------------------------------------------------
+print_step "6. OAuth callbacks and connection events belong to the connection's tenant..."
+AUTH=(-H "Authorization: Bearer ${SECOND_KEY}")
+RESP=$(api_post /connections '{"title":"B OAuth","integrationId":"http_oauth2_authorization_code","connectionParameters":{"auth_url":"http://127.0.0.1:9/authorize","token_url":"http://127.0.0.1:9/token","client_id":"cid","client_secret":"csec","base_url":"https://api.example.com"}}')
+AUTH=()
+B_CONN=$(echo "${RESP}" | jq -r '.connection_id // .connectionId // empty')
+[ -n "${B_CONN}" ] || { print_error "the second tenant could not create an OAuth connection: ${RESP}"; exit 1; }
+AUTHORIZE=$(curl -sS -H "Authorization: Bearer ${SECOND_KEY}" "${API}/connections/${B_CONN}/oauth/authorize" | jq -r '.authorization_url // .authorizationUrl // empty')
+case "${AUTHORIZE}" in
+    *"%2Fapi%2Foauth%2F${SECOND_TENANT}%2Fcallback"*) ;;
+    *) print_error "the authorize URL does not redirect to the second tenant's callback: ${AUTHORIZE}"; exit 1 ;;
+esac
+STATE=$(python3 -c 'import sys,urllib.parse as u; print(u.parse_qs(u.urlparse(sys.argv[1]).query)["state"][0])' "${AUTHORIZE}")
+CALLBACK="http://127.0.0.1:${TEST_PORT_PUBLIC}/api/oauth"
+curl -sS "${CALLBACK}/${TENANT}/callback?state=${STATE}&code=c1" | grep -q "Invalid or expired authorization" \
+    || { print_error "the primary tenant's callback accepted the second tenant's state"; exit 1; }
+curl -sS "${CALLBACK}/${SECOND_TENANT}/callback?state=${STATE}&code=c1" | grep -q "Invalid or expired authorization" \
+    || { print_error "a state refused at the wrong callback was not spent"; exit 1; }
+EVENT_TENANT=""
+for _ in {1..10}; do
+    EVENT_TENANT=$(docker exec "${VALKEY_CONTAINER}" valkey-cli --raw XRANGE runtara:product_events:stream - + \
+        | grep '^{' | jq -r --arg c "${B_CONN}" 'select(.event_type == "connection.created" and .resource_id == $c) | .tenant_id' | head -1)
+    [ -n "${EVENT_TENANT}" ] && break
+    sleep 1
+done
+[ "${EVENT_TENANT}" = "${SECOND_TENANT}" ] \
+    || { print_error "the second tenant's connection.created event names '${EVENT_TENANT}'"; exit 1; }
+echo "  the redirect names the second tenant; its state is refused at the primary's callback and spent; its connection event is its own ✓"
+
+print_success "served tenants: webhooks, API keys, triggers, cron, OAuth callbacks and connection events reach exactly the tenants this server serves, each its own, under its own limits"

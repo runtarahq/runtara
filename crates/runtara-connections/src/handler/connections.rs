@@ -54,6 +54,7 @@ pub async fn create_connection_handler(
         Ok(connection_id) => {
             crate::events::emit(
                 &events,
+                &tenant_id,
                 crate::events::ConnectionLifecycleEvent::Created {
                     connection_id: connection_id.clone(),
                     integration,
@@ -383,6 +384,7 @@ pub async fn delete_connection_handler(
         Ok(()) => {
             crate::events::emit(
                 &events,
+                &tenant_id,
                 crate::events::ConnectionLifecycleEvent::Deleted {
                     connection_id: id.clone(),
                 },

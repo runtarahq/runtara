@@ -344,6 +344,7 @@ impl ConnectionsFacade {
     ) -> Result<ResolvedConnectionAuth, ConnectionsError> {
         let resolved = match provider_auth::resolve_connection_auth(
             &self.state.http_client,
+            tenant_id,
             connection_id,
             integration_id,
             params,

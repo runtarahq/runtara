@@ -160,6 +160,7 @@ pub(crate) async fn resolve_deferred_auth(
     client: &Client,
     auth: DeferredAuth,
     events: &crate::events::ConnectionEvents,
+    tenant_id: &str,
     connection_id: &str,
     integration: &str,
 ) -> Result<ResolvedDeferredAuth, AuthResolutionError> {
@@ -260,6 +261,7 @@ pub(crate) async fn resolve_deferred_auth(
             // Emitted on every actual refresh (connection-health signal), regardless of outcome.
             crate::events::emit(
                 events,
+                tenant_id,
                 crate::events::ConnectionLifecycleEvent::TokenRefreshed {
                     connection_id: connection_id.to_string(),
                     integration: integration.to_string(),
@@ -771,7 +773,7 @@ mod tests {
             fallback_expires_at: Some(Utc::now() + Duration::minutes(30)),
         };
 
-        let resolved = resolve_deferred_auth(&client, auth, &None, "conn-1", "hubspot")
+        let resolved = resolve_deferred_auth(&client, auth, &None, "tenant-1", "conn-1", "hubspot")
             .await
             .unwrap();
         assert_eq!(resolved.header_name, "Authorization");
@@ -829,6 +831,7 @@ mod tests {
             &Client::new(),
             client_credentials_auth(key("conn-p1", "perm-401-cache"), url),
             &None,
+            "tenant-1",
             "conn-p1",
             "teams_bot",
         )
@@ -849,6 +852,7 @@ mod tests {
             &Client::new(),
             client_credentials_auth(key("conn-t1", "trans-503-cache"), url),
             &None,
+            "tenant-1",
             "conn-t1",
             "teams_bot",
         )
@@ -867,6 +871,7 @@ mod tests {
             &Client::new(),
             client_credentials_auth(key("conn-t2", "trans-429-cache"), url),
             &None,
+            "tenant-1",
             "conn-t2",
             "teams_bot",
         )
@@ -916,6 +921,7 @@ mod tests {
                 &Client::new(),
                 refresh_auth(key("conn-http-refresh", tag), token_url),
                 &None,
+                "tenant-1",
                 "conn-http-refresh",
                 "http_oauth2_authorization_code",
             )
@@ -940,6 +946,7 @@ mod tests {
                 format!("{}/token", server.uri()),
             ),
             &None,
+            "tenant-1",
             "conn-http-refresh-ok",
             "http_oauth2_authorization_code",
         )
@@ -958,6 +965,7 @@ mod tests {
                 format!("{}/token", server.uri()),
             ),
             &None,
+            "tenant-1",
             "conn-http-mint",
             "http_oauth2_client_credentials",
         )
@@ -992,7 +1000,8 @@ mod tests {
     }
 
     impl crate::events::ConnectionEventSink for RecordingSink {
-        fn emit(&self, event: crate::events::ConnectionLifecycleEvent) {
+        fn emit(&self, tenant_id: &str, event: crate::events::ConnectionLifecycleEvent) {
+            assert_eq!(tenant_id, "tenant-1");
             self.events.lock().unwrap().push(event);
         }
     }
@@ -1018,7 +1027,8 @@ mod tests {
             fallback_expires_at: None,
         };
 
-        let result = resolve_deferred_auth(&client, auth, &events, "conn-42", "hubspot").await;
+        let result =
+            resolve_deferred_auth(&client, auth, &events, "tenant-1", "conn-42", "hubspot").await;
         assert!(
             result.is_err(),
             "refresh against an unreachable endpoint should fail"
@@ -1060,9 +1070,10 @@ mod tests {
             fallback_expires_at: Some(Utc::now() + Duration::minutes(30)),
         };
 
-        let resolved = resolve_deferred_auth(&client, auth, &events, "conn-1", "hubspot")
-            .await
-            .unwrap();
+        let resolved =
+            resolve_deferred_auth(&client, auth, &events, "tenant-1", "conn-1", "hubspot")
+                .await
+                .unwrap();
         assert_eq!(resolved.header_value, "Bearer existing");
         assert!(
             recorder.events.lock().unwrap().is_empty(),
@@ -1092,11 +1103,25 @@ mod tests {
             fallback_expires_at: None,
         };
 
-        let first =
-            resolve_deferred_auth(&client, make_auth(), &events, "conn-neg", "hubspot").await;
+        let first = resolve_deferred_auth(
+            &client,
+            make_auth(),
+            &events,
+            "tenant-1",
+            "conn-neg",
+            "hubspot",
+        )
+        .await;
         assert!(first.is_err());
-        let second =
-            resolve_deferred_auth(&client, make_auth(), &events, "conn-neg", "hubspot").await;
+        let second = resolve_deferred_auth(
+            &client,
+            make_auth(),
+            &events,
+            "tenant-1",
+            "conn-neg",
+            "hubspot",
+        )
+        .await;
         assert!(second.is_err());
 
         assert_eq!(

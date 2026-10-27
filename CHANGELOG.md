@@ -95,6 +95,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tenant. `e2e/test_served_tenants.sh` serves two tenants from one process
   and checks neither reads the other's workflows, versions or runs.
 
+- **OAuth callbacks and connection events belong to the connection's tenant.**
+  An OAuth state is redeemed only at the callback URL of the tenant it was
+  issued for (`/api/oauth/{tenant}/callback`); one presented at another
+  tenant's URL is refused and spent. Connection lifecycle product events
+  (created, deleted, OAuth started/completed/failed, token refreshed) carry
+  the connection's tenant instead of the process's primary tenant:
+  `ConnectionEventSink::emit` now receives the tenant, and
+  `provider_auth::resolve_connection_auth` takes it.
+
 - **Connection credentials are bound to their tenant and connection.** New
   writes store a version 2 envelope whose AES-256-GCM associated data is the
   tenant and connection id, so a ciphertext copied to another connection or

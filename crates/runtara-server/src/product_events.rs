@@ -151,12 +151,17 @@ impl ProductEvent {
     /// An event for the process's primary tenant. Work that belongs to a
     /// tenant (a run, a trigger, a compile) uses [`ProductEvent::for_tenant`].
     pub fn new(event_type: EventType) -> Self {
+        Self::for_tenant(event_type, crate::config::tenant_id())
+    }
+
+    /// An event for `tenant`'s work.
+    pub fn for_tenant(event_type: EventType, tenant: &str) -> Self {
         Self {
             event_id: Uuid::new_v4(),
             occurred_at: Utc::now(),
             event_type,
             event_version: 1,
-            tenant_id: crate::config::tenant_id().to_string(),
+            tenant_id: tenant.to_owned(),
             user_id: None,
             actor_id: None,
             actor_type: None,
@@ -167,13 +172,6 @@ impl ProductEvent {
             request_id: None,
             source: None,
         }
-    }
-
-    /// An event for `tenant`'s work.
-    pub fn for_tenant(event_type: EventType, tenant: &str) -> Self {
-        let mut event = Self::new(event_type);
-        event.tenant_id = tenant.to_owned();
-        event
     }
 
     /// Build an event for an authenticated request, deriving tenant + actor from the
@@ -511,32 +509,34 @@ impl ConnectionEventBridge {
 }
 
 impl runtara_connections::events::ConnectionEventSink for ConnectionEventBridge {
-    fn emit(&self, event: runtara_connections::events::ConnectionLifecycleEvent) {
+    fn emit(&self, tenant_id: &str, event: runtara_connections::events::ConnectionLifecycleEvent) {
         use runtara_connections::events::ConnectionLifecycleEvent as Lifecycle;
 
         let product_event = match event {
             Lifecycle::Created {
                 connection_id,
                 integration,
-            } => ProductEvent::new(EventType::ConnectionCreated)
+            } => ProductEvent::for_tenant(EventType::ConnectionCreated, tenant_id)
                 .no_user_actor("connections", ActorType::System)
                 .resource(connection_id, "connection")
                 .properties(serde_json::json!({ "integration": integration })),
-            Lifecycle::Deleted { connection_id } => ProductEvent::new(EventType::ConnectionDeleted)
-                .no_user_actor("connections", ActorType::System)
-                .resource(connection_id, "connection"),
+            Lifecycle::Deleted { connection_id } => {
+                ProductEvent::for_tenant(EventType::ConnectionDeleted, tenant_id)
+                    .no_user_actor("connections", ActorType::System)
+                    .resource(connection_id, "connection")
+            }
             Lifecycle::OAuthStarted { connection_id } => {
-                ProductEvent::new(EventType::ConnectionOauthStarted)
+                ProductEvent::for_tenant(EventType::ConnectionOauthStarted, tenant_id)
                     .no_user_actor("connections", ActorType::System)
                     .resource(connection_id, "connection")
             }
             Lifecycle::OAuthCompleted { connection_id } => {
-                ProductEvent::new(EventType::ConnectionOauthCompleted)
+                ProductEvent::for_tenant(EventType::ConnectionOauthCompleted, tenant_id)
                     .no_user_actor("connections", ActorType::System)
                     .resource(connection_id, "connection")
             }
             Lifecycle::OAuthFailed { reason } => {
-                ProductEvent::new(EventType::ConnectionOauthFailed)
+                ProductEvent::for_tenant(EventType::ConnectionOauthFailed, tenant_id)
                     .no_user_actor("connections", ActorType::System)
                     .properties(serde_json::json!({ "reason": reason }))
             }
@@ -544,7 +544,7 @@ impl runtara_connections::events::ConnectionEventSink for ConnectionEventBridge 
                 connection_id,
                 integration,
                 success,
-            } => ProductEvent::new(EventType::ConnectionTokenRefreshed)
+            } => ProductEvent::for_tenant(EventType::ConnectionTokenRefreshed, tenant_id)
                 .no_user_actor("connections", ActorType::System)
                 .source(EventSource::Worker)
                 .resource(connection_id, "connection")
@@ -722,6 +722,35 @@ mod tests {
     fn source_sets_source() {
         let e = sample_event().source(EventSource::Mcp);
         assert_eq!(e.source, Some(EventSource::Mcp));
+    }
+
+    // ---- connection events carry their connection's tenant ----
+
+    #[test]
+    fn connection_events_are_attributed_to_the_connections_tenant() {
+        use runtara_connections::events::{ConnectionEventSink, ConnectionLifecycleEvent};
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let bridge = ConnectionEventBridge::new(ProductEventSink::new(tx));
+        bridge.emit(
+            "tenant-b",
+            ConnectionLifecycleEvent::Created {
+                connection_id: "conn-1".to_string(),
+                integration: Some("hubspot".to_string()),
+            },
+        );
+        bridge.emit(
+            "tenant-c",
+            ConnectionLifecycleEvent::OAuthFailed {
+                reason: "invalid_state".to_string(),
+            },
+        );
+        let created = rx.try_recv().expect("created event");
+        assert_eq!(created.event_type, EventType::ConnectionCreated);
+        assert_eq!(created.tenant_id, "tenant-b");
+        assert_eq!(created.resource_id.as_deref(), Some("conn-1"));
+        let failed = rx.try_recv().expect("failed event");
+        assert_eq!(failed.tenant_id, "tenant-c");
     }
 
     // ---- emit_quota_exceeded: only fires for LimitExceeded ----

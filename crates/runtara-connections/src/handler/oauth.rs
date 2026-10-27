@@ -62,6 +62,7 @@ pub async fn authorize_handler(
         Ok(url) => {
             crate::events::emit(
                 &events,
+                &tenant_id,
                 crate::events::ConnectionLifecycleEvent::OAuthStarted {
                     connection_id: id.clone(),
                 },
@@ -138,11 +139,14 @@ pub struct OAuthCallbackQuery {
 ))]
 pub async fn callback_handler(
     State(state): State<ConnectionsState>,
-    Path(_tenant_id): Path<String>,
+    Path(tenant_id): Path<String>,
     Query(params): Query<OAuthCallbackQuery>,
     axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
 ) -> Response {
     let events = state.connection_events.clone();
+    // The path names the tenant the redirect URI was issued for. A completed
+    // callback has matched it to the state's tenant; a failed one carries it
+    // unverified, which only attributes the analytics event.
 
     // The full callback query, from which the descriptor's extra_callback_params
     // (e.g. Intuit realmId) are captured in handle_callback.
@@ -161,6 +165,7 @@ pub async fn callback_handler(
         let reason = format!("{}: {}", error, desc);
         crate::events::emit(
             &events,
+            &tenant_id,
             crate::events::ConnectionLifecycleEvent::OAuthFailed {
                 reason: reason.clone(),
             },
@@ -181,12 +186,13 @@ pub async fn callback_handler(
     let service = OAuthService::new(state.db_pool, state.cipher, state.public_base_url);
 
     match service
-        .handle_callback(&oauth_state, &code, &callback_params)
+        .handle_callback(&tenant_id, &oauth_state, &code, &callback_params)
         .await
     {
         Ok(connection_id) => {
             crate::events::emit(
                 &events,
+                &tenant_id,
                 crate::events::ConnectionLifecycleEvent::OAuthCompleted {
                     connection_id: connection_id.clone(),
                 },
@@ -196,6 +202,7 @@ pub async fn callback_handler(
         Err(OAuthError::InvalidState) => {
             crate::events::emit(
                 &events,
+                &tenant_id,
                 crate::events::ConnectionLifecycleEvent::OAuthFailed {
                     reason: "invalid_state".to_string(),
                 },
@@ -209,6 +216,7 @@ pub async fn callback_handler(
         Err(OAuthError::TokenExchangeFailed(msg)) => {
             crate::events::emit(
                 &events,
+                &tenant_id,
                 crate::events::ConnectionLifecycleEvent::OAuthFailed {
                     reason: format!("token_exchange_failed: {}", msg),
                 },
@@ -218,6 +226,7 @@ pub async fn callback_handler(
         Err(e) => {
             crate::events::emit(
                 &events,
+                &tenant_id,
                 crate::events::ConnectionLifecycleEvent::OAuthFailed {
                     reason: e.to_string(),
                 },
