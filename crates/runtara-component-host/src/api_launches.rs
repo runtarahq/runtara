@@ -391,12 +391,13 @@ impl Backend {
             .ok_or_else(|| task_error(crate::execution_host::ExecutionError::InvalidTask))
     }
 
-    /// Whether `task_id` is a task this launch runs in process. Any other id
-    /// is a child run of the launch's instance, read from persistence.
+    /// Whether `task_id` names a task this launch runs in process, live or
+    /// released. Any other id is a child run of the launch's instance, read
+    /// from persistence.
     fn is_live_task(&self, binding: &Binding, task_id: &str) -> Result<bool, ApiError> {
         let slot = self.0.slot(binding).ok_or_else(not_serving)?;
         let tasks = slot.tasks.lock().expect("launch tasks poisoned");
-        Ok(tasks.live.contains_key(task_id))
+        Ok(tasks.live.contains_key(task_id) || task_id.starts_with(IN_PROCESS_TASK_PREFIX))
     }
 
     /// The control host and the authority a child run of `binding`'s run is
@@ -702,6 +703,10 @@ impl Backend {
         ))
     }
 }
+
+/// Every in-process task id starts with this; a child run's id is its
+/// instance id, which never does.
+const IN_PROCESS_TASK_PREFIX: &str = "task-";
 
 /// How often a join re-reads a child run that has not ended.
 const CHILD_RUN_POLL: std::time::Duration = std::time::Duration::from_millis(50);
@@ -1092,7 +1097,7 @@ impl WorkflowApiBackend for Backend {
             })
             .map_err(task_error)?;
         tasks.next += 1;
-        let id = format!("task-{}", tasks.next);
+        let id = format!("{IN_PROCESS_TASK_PREFIX}{}", tasks.next);
         tasks.live.insert(id.clone(), Arc::new(handle));
         Ok(runtara_workflow_api::TaskStarted {
             task_id: id,

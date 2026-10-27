@@ -10409,9 +10409,8 @@ fn direct_compile_composes_finish_with_shared_components_when_available() {
             .map(|file| file.sha256.as_str()),
         Some(result.wasm_checksum.as_str())
     );
-    // Only the stdlib is a compose-time dependency — the runtime interface is
-    // left unbound and satisfied by the host at run time, so it is never
-    // composed in.
+    // Every workflow composes the stdlib, the run shim and the `runtara:api`
+    // component; the host serves only the workflow API behind them.
     assert_eq!(
         result
             .artifact_metadata
@@ -10419,7 +10418,11 @@ fn direct_compile_composes_finish_with_shared_components_when_available() {
             .iter()
             .map(|component| component.package.as_str())
             .collect::<Vec<_>>(),
-        vec!["runtara:workflow-stdlib"]
+        vec![
+            "runtara:workflow-stdlib",
+            "runtara:workflow-api-run",
+            "runtara:api-component"
+        ]
     );
     for component in &result.artifact_metadata.shared_components {
         let wasm = component.wasm.as_ref().expect("resolved shared component");
