@@ -1870,6 +1870,9 @@ mod operation_scoped_tests;
 mod wait_failure_tests;
 
 #[cfg(test)]
+mod asyncify_shape_tests;
+
+#[cfg(test)]
 mod wide_result_tests;
 
 #[cfg(test)]

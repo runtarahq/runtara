@@ -17,6 +17,8 @@
 //! `child_workflows` and `error` are supporting concerns.
 
 #[cfg(feature = "compiler")]
+mod asyncify;
+#[cfg(feature = "compiler")]
 mod child_workflows;
 #[cfg(feature = "compiler")]
 pub mod compile;
