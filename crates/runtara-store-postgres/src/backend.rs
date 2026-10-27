@@ -2698,6 +2698,36 @@ mod tests {
         cleanup_misc_instance(&pool, &instance_id).await;
     }
 
+    /// Instance-scoped rows record their instance's tenant without the write
+    /// path naming it (migration 053's fill trigger).
+    #[tokio::test]
+    async fn instance_scoped_rows_take_their_instances_tenant() {
+        let pool = test_pool().await;
+        let p = PostgresPersistence::new(pool.clone());
+        let instance_id = misc_instance_id("row-tenant");
+        let tenant = misc_tenant_id("row-tenant");
+        p.register_instance(&instance_id, &tenant).await.unwrap();
+        p.save_checkpoint(&instance_id, "cp-1", b"state")
+            .await
+            .unwrap();
+        p.insert_signal(&instance_id, CoreSignalType::Pause, b"")
+            .await
+            .unwrap();
+
+        for table in ["checkpoints", "pending_signals"] {
+            let recorded: Option<String> = sqlx::query_scalar(&format!(
+                "SELECT tenant_id FROM {table} WHERE instance_id = $1 LIMIT 1"
+            ))
+            .bind(&instance_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(recorded.as_deref(), Some(tenant.as_str()), "{table}");
+        }
+
+        cleanup_misc_instance(&pool, &instance_id).await;
+    }
+
     #[tokio::test]
     async fn test_count_checkpoints() {
         let pool = test_pool().await;

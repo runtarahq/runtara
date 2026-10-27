@@ -95,6 +95,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tenant. `e2e/test_served_tenants.sh` serves two tenants from one process
   and checks neither reads the other's workflows, versions or runs.
 
+- **Every instance-scoped table records its tenant.** Store migration 053
+  adds `tenant_id` to checkpoints, events, signals, state, waits, leases,
+  attempts, continuations and control receipts, and environment migration
+  `20261028000000` to workflow API receipts. Existing rows are backfilled
+  from their instance (or launch), and a `BEFORE INSERT` trigger fills new
+  rows the same way, so no write path changes. This is the first step of
+  tenant-scoped persistence (M5.3); row-level security follows.
+
 - **Entitlements are per tenant.** Every entitlement check (features,
   agents, limits, API keys, SQL, trusted calls, concurrent executions, bulk
   sizes) reads the tenant it acts for through
