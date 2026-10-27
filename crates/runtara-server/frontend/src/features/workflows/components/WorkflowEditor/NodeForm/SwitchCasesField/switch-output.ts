@@ -6,20 +6,17 @@
  * `process_switch_output` (runtara-workflow-stdlib/src/switch_helpers.rs):
  *
  *   - a literal scalar is returned as-is;
- *   - `{valueType: "reference", value: "dot.path"}` resolves the path against
- *     the workflow scope;
+ *   - `{valueType: "reference", value: "path"}` resolves the path against
+ *     the workflow scope, through the same resolver as any other mapping
+ *     reference (bracket or dotted paths, `default`, `type`);
  *   - `{valueType: "immediate", value: X}` yields X;
  *   - any other object or array is recursed, so nested reference wrappers
  *     inside a structure resolve too.
  *
- * Two consequences the editor has to respect:
- *
- *   - **There is no template support.** A `{valueType: "template"}` wrapper
- *     falls through to the recurse arm and is emitted as a literal object, so
- *     offering template mode here would let someone build something that
- *     silently does not work.
- *   - **References are plain dot paths.** `resolve_dot_path` splits on `.`
- *     only, so bracket syntax (`steps['a'].outputs`) does not resolve.
+ * One consequence the editor has to respect: **there is no template
+ * support.** A `{valueType: "template"}` wrapper falls through to the recurse
+ * arm and is emitted as a literal object, so offering template mode here would
+ * let someone build something that silently does not work.
  */
 
 export type SwitchOutputMode = 'immediate' | 'reference' | 'composite';

@@ -6061,7 +6061,7 @@ fn apply_switch(config: &Value, source: &Value) -> Result<DirectSwitchResult, St
             .cloned()
             .unwrap_or_else(|| Value::Object(Map::new()));
         return Ok(DirectSwitchResult {
-            output: process_switch_output(&default, source),
+            output: process_switch_output(&default, source)?,
             route: "default".to_string(),
         });
     };
@@ -6078,7 +6078,7 @@ fn apply_switch(config: &Value, source: &Value) -> Result<DirectSwitchResult, St
                     .get("output")
                     .ok_or_else(|| "Switch case missing output".to_string())?;
                 return Ok(DirectSwitchResult {
-                    output: process_switch_output(output, source),
+                    output: process_switch_output(output, source)?,
                     route: case
                         .get("route")
                         .and_then(Value::as_str)
@@ -6094,7 +6094,7 @@ fn apply_switch(config: &Value, source: &Value) -> Result<DirectSwitchResult, St
         .cloned()
         .unwrap_or_else(|| Value::Object(Map::new()));
     Ok(DirectSwitchResult {
-        output: process_switch_output(&default, source),
+        output: process_switch_output(&default, source)?,
         route: "default".to_string(),
     })
 }
@@ -7402,7 +7402,7 @@ fn apply_mapping_value(value: &Value, source: &Value) -> Result<Value, String> {
     }
 }
 
-fn apply_reference(map: &Map<String, Value>, source: &Value) -> Result<Value, String> {
+pub(crate) fn apply_reference(map: &Map<String, Value>, source: &Value) -> Result<Value, String> {
     let path = map
         .get("value")
         .and_then(Value::as_str)
@@ -12038,6 +12038,88 @@ mod tests {
         assert_eq!(route, "default");
         assert_eq!(steps["switch"]["outputs"], json!({ "bucket": "other" }));
         assert_eq!(steps["switch"]["route"], json!("default"));
+    }
+
+    /// Case and default outputs resolve references through the shared resolver:
+    /// the bracket form the reference picker writes resolves like the dotted
+    /// form, including into a step output large enough to be interned.
+    #[test]
+    fn value_switch_output_references_resolve_bracket_paths_into_interned_steps() {
+        reset_value_store();
+        let manifest = DirectJsonManifest::parse(&switch_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.status" },
+            "cases": [
+                {
+                    "matchType": "EQ",
+                    "match": "active",
+                    "output": {
+                        "dotted": { "valueType": "reference", "value": "steps.fetch.outputs.q" },
+                        "bracket": { "valueType": "reference", "value": "steps['fetch'].outputs.q" },
+                        "missing": {
+                            "valueType": "reference",
+                            "value": "steps['fetch'].outputs.nope",
+                            "default": "fallback"
+                        }
+                    }
+                }
+            ],
+            "default": {
+                "fromDefault": { "valueType": "reference", "value": r#"steps["fetch"].outputs.q"# }
+            }
+        })))
+        .expect("manifest");
+        let steps = serde_json::to_vec(&json!({
+            "fetch": { "outputs": { "q": "found", "blob": "x".repeat(20 * 1024) } }
+        }))
+        .unwrap();
+
+        let active = build_source(br#"{"status":"active"}"#, b"{}", &steps).expect("source");
+        let active_source: Value = serde_json::from_slice(&active).unwrap();
+        assert!(
+            wfref_id(&active_source["steps"]["fetch"]).is_some(),
+            "the large step output must be interned for this test to cover handles"
+        );
+        let result = manifest.value_switch(0, &active).expect("steps context");
+        let result: Value = serde_json::from_slice(&result).expect("steps json");
+        assert_eq!(
+            result["switch"]["outputs"],
+            json!({ "dotted": "found", "bracket": "found", "missing": "fallback" })
+        );
+
+        let other = build_source(br#"{"status":"done"}"#, b"{}", &steps).expect("source");
+        let result = manifest.value_switch(0, &other).expect("steps context");
+        let result: Value = serde_json::from_slice(&result).expect("steps json");
+        assert_eq!(
+            result["switch"]["outputs"],
+            json!({ "fromDefault": "found" })
+        );
+    }
+
+    /// A Switch output reference with a shape mismatch fails the step like any
+    /// other mapping reference, instead of silently routing a null.
+    #[test]
+    fn switch_output_reference_shape_mismatch_fails_the_step() {
+        let manifest = DirectJsonManifest::parse(&switch_manifest(json!({
+            "value": { "valueType": "reference", "value": "data.status" },
+            "cases": [
+                {
+                    "matchType": "EQ",
+                    "match": "active",
+                    "output": { "valueType": "reference", "value": "data.items.first" },
+                    "route": "active"
+                }
+            ],
+            "default": { "bucket": "other" }
+        })))
+        .expect("manifest");
+        let source =
+            build_source(br#"{"status":"active","items":[1,2]}"#, b"{}", b"{}").expect("source");
+
+        let err = manifest
+            .value_switch(0, &source)
+            .expect_err("mismatched output reference");
+        assert!(err.contains("is an array with no field 'first'"), "{err}");
+        assert!(manifest.process_switch(0, &source).is_err());
     }
 
     #[test]

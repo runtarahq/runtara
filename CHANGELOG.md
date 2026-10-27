@@ -630,6 +630,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A Switch case output or `default` that references a value now gets that
+  value.** These references were resolved by a walker of their own that split
+  the path on every `.`, so the bracket form the editor's reference picker
+  writes (`steps['fetch'].outputs.q`), and a quoted key holding a dot
+  (`data['a.b']`), resolved to null. So did a plain dotted reference into a
+  step output large enough to be held out of line (over 16 KiB). The step
+  still took its route and reported success. A declared `default` and `type`
+  were ignored too. Switch outputs now resolve through the same resolver as
+  every other mapping reference, so both spellings agree, `default` and
+  `type` apply, and a reference that names a field on an array (such as
+  `steps.split.outputs.result`) fails the step unless it declares a
+  `default`, instead of routing a null. A workflow picks this up when it is
+  next compiled.
 - **The step editor shows an object or list stored as a plain value as that
   value.** An Agent input saved through MCP or the API as
   `{valueType: "immediate", value: {...}}`, such as an Object Model query
