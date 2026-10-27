@@ -52,6 +52,10 @@ pub(super) fn emit_agent_invoke(
             input_len_local,
             source_ptr_local,
             source_len_local,
+            match site {
+                AgentInvocationSite::Step(attempt) => attempt,
+                _ => None,
+            },
         );
         return;
     }
@@ -179,8 +183,8 @@ fn emit_child_run(
     input_len_local: u32,
     source_ptr_local: u32,
     source_len_local: u32,
+    attempt_local: Option<u32>,
 ) {
-    use super::api_shims::child_run;
     // The call site's durable key names the child and its wait. A child-run
     // step never shares a WaitForSignal's key locals.
     let (key_ptr, key_len) = (
@@ -196,20 +200,58 @@ fn emit_child_run(
         key_ptr,
         key_len,
     );
+    emit_child_run_call(
+        body,
+        indices,
+        binding,
+        (input_ptr_local, input_len_local),
+        (key_ptr, key_len),
+        attempt_local,
+    );
+    emit_child_run_outcome(body, indices, static_data, true);
+}
+
+/// Call the `child-run` helper for one call site: `path` is its durable key,
+/// and the attempt is the retry attempt, or 1 for a step that never retries
+/// (whatever an earlier step left in the attempt local must not name a
+/// different child on a replay).
+pub(super) fn emit_child_run_call(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    binding: &DirectDataSegment,
+    (input_ptr, input_len): (u32, u32),
+    (path_ptr, path_len): (u32, u32),
+    attempt_local: Option<u32>,
+) {
     push_segment_args(body, binding);
-    body.instruction(&Instruction::LocalGet(input_ptr_local));
-    body.instruction(&Instruction::LocalGet(input_len_local));
-    body.instruction(&Instruction::LocalGet(key_ptr));
-    body.instruction(&Instruction::LocalGet(key_len));
-    body.instruction(&Instruction::LocalGet(
-        super::DIRECT_AGENT_RETRY_ATTEMPT_LOCAL,
-    ));
+    body.instruction(&Instruction::LocalGet(input_ptr));
+    body.instruction(&Instruction::LocalGet(input_len));
+    body.instruction(&Instruction::LocalGet(path_ptr));
+    body.instruction(&Instruction::LocalGet(path_len));
+    match attempt_local {
+        Some(local) => body.instruction(&Instruction::LocalGet(local)),
+        None => body.instruction(&Instruction::I32Const(1)),
+    };
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(
         indices
             .child_run
             .expect("a child-run call imports the child-run helper"),
     ));
+}
+
+/// Turn a `child-run` result into the normalized `result<list<u8>,
+/// error-info>` an invoke leaves: an ended child that did not complete or
+/// fail becomes its step error. With `park`, a pending child parks the run
+/// (its wait is registered: the host attaches it to the suspension);
+/// without, the pending tag stays for the caller to read.
+pub(super) fn emit_child_run_outcome(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    park: bool,
+) {
+    use super::api_shims::child_run;
     let errors = static_data
         .child_run_errors
         .as_ref()
@@ -238,6 +280,9 @@ fn emit_child_run(
             )),
         ),
     ] {
+        if then.is_none() && !park {
+            continue;
+        }
         super::abi::load_retptr_tag(body);
         body.instruction(&Instruction::I32Const(tag));
         body.instruction(&Instruction::I32Eq);

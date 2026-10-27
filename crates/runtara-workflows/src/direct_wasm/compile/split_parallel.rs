@@ -29,10 +29,18 @@
 //!   - Split: no retries; `dontStopOnFailed` stays on the sequential
 //!     lowering.
 //!   - Body: exactly one Agent step (terminal next), no retries, no breakpoint,
-//!     and not a workflow-agent child (those share the parent's
+//!     and not a composed workflow-agent child (those share the parent's
 //!     runtime host and checkpoint scope — concurrent invocations are a
 //!     Phase-4 question). A retrying body degrades like every other ineligible
 //!     shape: the sequential lowering owns the retry and parks it durably.
+//!
+//! A workflow-agent whose version parks runs as a child run of its own, and
+//! is eligible: its window's launch pass starts every item's child through
+//! the synchronous `child-run` helper instead of an async invoke (there is no
+//! drain), memoizes each ended child's result, and parks the run when any
+//! child still runs. The host holds one registered wait per pending child;
+//! the relaunch replays the Split, finds the same children, and assembles the
+//! window once all of them have ended.
 
 use std::collections::BTreeMap;
 
@@ -88,6 +96,11 @@ pub(in crate::direct_wasm) fn pool_member_component_id(base: &str, member: u32) 
 pub(in crate::direct_wasm) fn pool_size_for_window(window: u32) -> u32 {
     window.clamp(1, PARALLEL_POOL_MAX)
 }
+
+/// Ceiling on how many child runs one window starts. A window that parks
+/// carries one wake per pending child beside its own resume wake, and a
+/// suspension carries at most `runtara_agent_suspension::MAX_WAKES`.
+const CHILD_RUN_WINDOW_MAX: u32 = 15;
 
 /// Borrowed fields of the eligible single-Agent Split body.
 pub(super) struct ParallelAgentBody<'a> {
@@ -149,9 +162,13 @@ pub(super) fn parallel_agent_body<'a>(
     // An operation-scoped (suspending or control) call anywhere in the body
     // keeps one identity per operation only if items run one at a time, so
     // the body serializes (advisory W075).
+    // A composed workflow-agent shares this run's runtime host; one that
+    // parks runs as a child run of its own, which a window can start
+    // alongside its siblings.
     if *breakpoint
         || *agent_retries > 0
-        || static_data.agent_is_workflow_agent(*agent_id)
+        || (static_data.agent_is_workflow_agent(*agent_id)
+            && static_data.agent_child_run(*agent_id).is_none())
         || crate::direct_wasm::plan::plan_contains_operation_scoped(nested_plan)
     {
         return None;
@@ -221,7 +238,9 @@ fn collect_parallel_agent_components(
                 *durable,
                 *max_retries,
                 nested_plan,
-            ) {
+            ) && static_data.agent_child_run(body.agent_id).is_none()
+            {
+                // A child run composes no component, so it has no pool.
                 let pool =
                     pool_size_for_window(parallel_window.expect("eligible body implies a window"));
                 let entry = out.entry(body.agent_component_id.to_string()).or_insert(1);
@@ -663,7 +682,18 @@ pub(super) fn emit_parallel_split_items(
     fresh_failure_target: Option<super::DirectFailureTarget>,
     variables: DirectVariables<'_>,
 ) {
-    let pool_size = pool_size_for_window(window);
+    // A child-run body calls the synchronous `child-run` helper: no pool, no
+    // waitable set, no drain (see the module docs).
+    let child_run = static_data.agent_child_run(parallel.agent_id);
+    let window = match child_run {
+        Some(_) => window.min(CHILD_RUN_WINDOW_MAX),
+        None => window,
+    };
+    let pool_size = if child_run.is_some() {
+        0
+    } else {
+        pool_size_for_window(window)
+    };
     let invoke_pool: Vec<&super::DirectAgentInvokeImport> = (0..pool_size)
         .map(|member| {
             let component_id = pool_member_component_id(parallel.agent_component_id, member);
@@ -675,15 +705,8 @@ pub(super) fn emit_parallel_split_items(
     let capability_id = static_data
         .agent_capability_id(parallel.agent_id)
         .expect("parallel split bodies have static capability ids");
-    let ws_new = indices
-        .waitable_set_new
-        .expect("parallel split compiles import the waitable builtins");
-    let waitable_join = indices
-        .waitable_join
-        .expect("parallel split compiles import the waitable builtins");
-    let subtask_drop = indices
-        .subtask_drop
-        .expect("parallel split compiles import the waitable builtins");
+    let builtin =
+        |index: Option<u32>| index.expect("parallel split compiles import the waitable builtins");
 
     // item cursor starts at 0 (set by the caller, mirroring sequential).
     body.instruction(&Instruction::Block(BlockType::Empty)); // $chunks_done
@@ -764,14 +787,19 @@ pub(super) fn emit_parallel_split_items(
     body.instruction(&Instruction::I32Sub);
     body.instruction(&Instruction::MemoryFill(0));
 
-    // ws = waitable-set.new(); pending = 0.
-    body.instruction(&Instruction::Call(ws_new));
-    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_WS_LOCAL));
+    // ws = waitable-set.new(); pending = 0. A child-run window has no set,
+    // and its pending count is of children still running.
+    if child_run.is_none() {
+        body.instruction(&Instruction::Call(builtin(indices.waitable_set_new)));
+        body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_WS_LOCAL));
+    }
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_PENDING_LOCAL));
-    body.instruction(&Instruction::GlobalGet(0));
-    super::cooperative_wait::emit_window_open(body);
-    super::cooperative_wait::emit_poll_before_call(body, indices);
+    if child_run.is_none() {
+        body.instruction(&Instruction::GlobalGet(0));
+        super::cooperative_wait::emit_window_open(body);
+        super::cooperative_wait::emit_poll_before_call(body, indices);
+    }
 
     // ── LAUNCH pass ─────────────────────────────────────────────────────────
     body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_CHUNK_START_LOCAL));
@@ -783,11 +811,17 @@ pub(super) fn emit_parallel_split_items(
     body.instruction(&Instruction::I32GeU);
     body.instruction(&Instruction::BrIf(1));
 
-    super::cooperative_wait::emit_window_deadline_boundary(
-        body,
-        indices,
-        fresh_failure_target.map(|target| target.nested(4)),
-    );
+    if child_run.is_some() {
+        // Nothing runs between helper calls: cooperate as the sequential
+        // loop does at each item.
+        super::cooperative_wait::emit_iteration_boundary(body, indices);
+    } else {
+        super::cooperative_wait::emit_window_deadline_boundary(
+            body,
+            indices,
+            fresh_failure_target.map(|target| target.nested(4)),
+        );
+    }
     body.instruction(&Instruction::Block(BlockType::Empty)); // $skip
     // Any retptr error below (mapping, validation, connection) skips the
     // launch — the slot stays EMPTY and assemble reproduces the exact failure
@@ -894,6 +928,158 @@ pub(super) fn emit_parallel_split_items(
     body.instruction(&Instruction::LocalGet(route_len_local));
     body.instruction(&Instruction::BrIf(0)); // -> $skip
 
+    if let Some(binding) = child_run {
+        emit_child_run_launch(
+            body,
+            indices,
+            static_data,
+            binding,
+            parallel,
+            source_ptr_local,
+            source_len_local,
+            output_ptr_local,
+            output_len_local,
+            route_ptr_local,
+        );
+    } else {
+        emit_agent_launch(
+            body,
+            indices,
+            static_data,
+            parallel,
+            &invoke_pool,
+            capability_id,
+            builtin(indices.waitable_join),
+            source_ptr_local,
+            source_len_local,
+            output_ptr_local,
+            output_len_local,
+            route_ptr_local,
+            route_len_local,
+            fresh_failure_target,
+        );
+    }
+
+    body.instruction(&Instruction::End); // $skip
+    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_LAUNCH_LOCAL));
+    body.instruction(&Instruction::Br(0)); // -> $launch
+    body.instruction(&Instruction::End); // loop
+    body.instruction(&Instruction::End); // $launch_done
+
+    if child_run.is_some() {
+        // A child still runs: park on the waits the helper registered, one
+        // per pending child. The relaunch replays to this window and starts
+        // nothing new: each item finds its child again.
+        body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_PENDING_LOCAL));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        super::abi::emit_entry_suspend_return(body, indices);
+        body.instruction(&Instruction::End);
+    } else {
+        // ── DRAIN ───────────────────────────────────────────────────────────
+        // Wait until every launched subtask has RETURNED. Results are written
+        // through the slot retptrs by the runtime before the completion event. The
+        // Cooperative signal observation remains live while every call is pending.
+        emit_drain_pending(
+            body,
+            indices,
+            builtin(indices.subtask_drop),
+            fresh_failure_target.map(|target| target.nested(2)),
+        );
+
+        super::cooperative_wait::emit_window_close(body, indices);
+    }
+
+    // ── ASSEMBLE pass ───────────────────────────────────────────────────────
+    // The EXACT sequential per-item pipeline, in input order, with the invoke
+    // memoized. Failure semantics (dontStopOnFailed buckets, onError routing,
+    // fatal fail) are identical to the sequential lowering — every subtask has
+    // already resolved, so error exits can never leak an in-flight call.
+    body.instruction(&Instruction::Block(BlockType::Empty)); // $assemble_done
+    body.instruction(&Instruction::Loop(BlockType::Empty)); // $assemble
+    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
+    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_CHUNK_END_LOCAL));
+    body.instruction(&Instruction::I32GeU);
+    body.instruction(&Instruction::BrIf(1));
+
+    if child_run.is_some() {
+        super::loop_deadline::check(
+            body,
+            indices,
+            fresh_failure_target.map(|target| target.nested(4)),
+        );
+    } else {
+        super::cooperative_wait::emit_window_deadline_boundary(
+            body,
+            indices,
+            fresh_failure_target.map(|target| target.nested(4)),
+        );
+    }
+    super::split::emit_split_item_pipeline(
+        body,
+        indices,
+        static_data,
+        track_events,
+        variables,
+        split_id,
+        dont_stop_on_failed,
+        has_error_plan,
+        parallel,
+        data_ptr_local,
+        data_len_local,
+        steps_ptr_local,
+        steps_len_local,
+        source_ptr_local,
+        source_len_local,
+        output_ptr_local,
+        output_len_local,
+        route_ptr_local,
+        route_len_local,
+        workflow_log_kind,
+        workflow_error_kind,
+        active_iteration_failure_target,
+        outer_iteration_failure_target,
+        split_iteration_failure_target,
+        fresh_failure_target,
+    );
+
+    body.instruction(&Instruction::Br(0)); // -> $assemble
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End); // $assemble_done
+
+    // All results have been assembled and checkpointed before pause/shutdown.
+    // A child-run window opened none: its launch pass cooperated per item.
+    if child_run.is_none() {
+        super::cooperative_wait::emit_window_boundary(body, indices);
+    }
+
+    body.instruction(&Instruction::Br(0)); // -> $chunks
+    body.instruction(&Instruction::End); // loop $chunks
+    body.instruction(&Instruction::End); // $chunks_done
+}
+
+/// The launch of one prepared item's async agent call: per-call deadline,
+/// connection injection, slot fill and the pooled invoke, joined into the
+/// window's waitable set while it is pending. Emitted inside `$skip`.
+#[allow(clippy::too_many_arguments)]
+fn emit_agent_launch(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    parallel: &ParallelAgentBody<'_>,
+    invoke_pool: &[&super::DirectAgentInvokeImport],
+    capability_id: &super::DirectDataSegment,
+    waitable_join: u32,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    route_ptr_local: u32,
+    route_len_local: u32,
+    fresh_failure_target: Option<super::DirectFailureTarget>,
+) {
     let own_deadline = static_data.agent_timeout(parallel.agent_id).is_some();
     emit_slot_ptr(
         body,
@@ -929,7 +1115,8 @@ pub(super) fn emit_parallel_split_items(
         body.instruction(&Instruction::LocalGet(source_len_local));
         push_retptr_arg(body);
         body.instruction(&Instruction::Call(indices.stdlib_agent_connection_id));
-        skip_on_error(body);
+        load_retptr_tag(body);
+        body.instruction(&Instruction::BrIf(0)); // -> $skip
         load_retptr_list(body, route_ptr_local, route_len_local);
 
         body.instruction(&Instruction::LocalGet(route_len_local));
@@ -1049,7 +1236,7 @@ pub(super) fn emit_parallel_split_items(
             body,
             indices,
             own_deadline,
-            &invoke_pool,
+            invoke_pool,
             capability_id,
             static_data.invocation_site(parallel.agent_id, parallel.agent_id, 0),
             DIRECT_PSPLIT_LAUNCH_LOCAL,
@@ -1071,7 +1258,7 @@ pub(super) fn emit_parallel_split_items(
             body,
             indices,
             own_deadline,
-            &invoke_pool,
+            invoke_pool,
             capability_id,
             static_data.invocation_site(parallel.agent_id, parallel.agent_id, 0),
             DIRECT_PSPLIT_LAUNCH_LOCAL,
@@ -1083,84 +1270,74 @@ pub(super) fn emit_parallel_split_items(
         );
         emit_join_if_pending(body, route_len_local, route_ptr_local, waitable_join);
     }
+}
 
-    body.instruction(&Instruction::End); // $skip
-    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_LAUNCH_LOCAL));
-    body.instruction(&Instruction::I32Const(1));
-    body.instruction(&Instruction::I32Add);
-    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_LAUNCH_LOCAL));
-    body.instruction(&Instruction::Br(0)); // -> $launch
-    body.instruction(&Instruction::End); // loop
-    body.instruction(&Instruction::End); // $launch_done
-
-    // ── DRAIN ───────────────────────────────────────────────────────────────
-    // Wait until every launched subtask has RETURNED. Results are written
-    // through the slot retptrs by the runtime before the completion event. The
-    // Cooperative signal observation remains live while every call is pending.
-    emit_drain_pending(
+/// The launch of one prepared item's child run: the synchronous `child-run`
+/// helper starts the child under the call's durable key (a replay finds the
+/// same child) with the bare mapped input, as the sequential call does. An
+/// ended child's normalized result fills the slot for assembly; a running
+/// one counts as pending and leaves the slot EMPTY. Emitted inside `$skip`.
+#[allow(clippy::too_many_arguments)]
+fn emit_child_run_launch(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    binding: &super::DirectDataSegment,
+    parallel: &ParallelAgentBody<'_>,
+    source_ptr_local: u32,
+    source_len_local: u32,
+    output_ptr_local: u32,
+    output_len_local: u32,
+    slot_ptr_local: u32,
+) {
+    emit_agent_cache_key(
         body,
         indices,
-        subtask_drop,
-        fresh_failure_target.map(|target| target.nested(2)),
-    );
-
-    super::cooperative_wait::emit_window_close(body, indices);
-
-    // ── ASSEMBLE pass ───────────────────────────────────────────────────────
-    // The EXACT sequential per-item pipeline, in input order, with the invoke
-    // memoized. Failure semantics (dontStopOnFailed buckets, onError routing,
-    // fatal fail) are identical to the sequential lowering — every subtask has
-    // already resolved, so error exits can never leak an in-flight call.
-    body.instruction(&Instruction::Block(BlockType::Empty)); // $assemble_done
-    body.instruction(&Instruction::Loop(BlockType::Empty)); // $assemble
-    body.instruction(&Instruction::LocalGet(DIRECT_SPLIT_INDEX_LOCAL));
-    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_CHUNK_END_LOCAL));
-    body.instruction(&Instruction::I32GeU);
-    body.instruction(&Instruction::BrIf(1));
-
-    super::cooperative_wait::emit_window_deadline_boundary(
-        body,
-        indices,
-        fresh_failure_target.map(|target| target.nested(4)),
-    );
-    super::split::emit_split_item_pipeline(
-        body,
-        indices,
-        static_data,
-        track_events,
-        variables,
-        split_id,
-        dont_stop_on_failed,
-        has_error_plan,
-        parallel,
-        data_ptr_local,
-        data_len_local,
-        steps_ptr_local,
-        steps_len_local,
+        parallel.agent_id,
         source_ptr_local,
         source_len_local,
-        output_ptr_local,
-        output_len_local,
-        route_ptr_local,
-        route_len_local,
-        workflow_log_kind,
-        workflow_error_kind,
-        active_iteration_failure_target,
-        outer_iteration_failure_target,
-        split_iteration_failure_target,
-        fresh_failure_target,
+        DIRECT_SPLIT_ITEM_PTR_LOCAL,
+        DIRECT_SPLIT_ITEM_LEN_LOCAL,
     );
-
-    body.instruction(&Instruction::Br(0)); // -> $assemble
+    super::agent_invoke::emit_child_run_call(
+        body,
+        indices,
+        binding,
+        (output_ptr_local, output_len_local),
+        (DIRECT_SPLIT_ITEM_PTR_LOCAL, DIRECT_SPLIT_ITEM_LEN_LOCAL),
+        None,
+    );
+    super::agent_invoke::emit_child_run_outcome(body, indices, static_data, false);
+    load_retptr_tag(body);
+    body.instruction(&Instruction::I32Const(super::api_shims::child_run::PENDING));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_PENDING_LOCAL));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_PENDING_LOCAL));
+    body.instruction(&Instruction::Else);
+    emit_slot_ptr(
+        body,
+        DIRECT_PSPLIT_LAUNCH_LOCAL,
+        DIRECT_PSPLIT_CHUNK_START_LOCAL,
+        DIRECT_PSPLIT_SLOTS_LOCAL,
+        slot_ptr_local,
+    );
+    // slot.result = the normalized result; slot.state = READY.
+    body.instruction(&Instruction::LocalGet(slot_ptr_local));
+    body.instruction(&Instruction::I32Const(DIRECT_PSPLIT_SLOT_RESULT_OFFSET));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::I32Const(super::DIRECT_PSPLIT_SLOT_RESULT_LEN));
+    body.instruction(&Instruction::MemoryCopy {
+        src_mem: 0,
+        dst_mem: 0,
+    });
+    body.instruction(&Instruction::LocalGet(slot_ptr_local));
+    body.instruction(&Instruction::I32Const(SLOT_AGENT_READY));
+    body.instruction(&Instruction::I32Store(mem32()));
     body.instruction(&Instruction::End);
-    body.instruction(&Instruction::End); // $assemble_done
-
-    // All results have been assembled and checkpointed before pause/shutdown.
-    super::cooperative_wait::emit_window_boundary(body, indices);
-
-    body.instruction(&Instruction::Br(0)); // -> $chunks
-    body.instruction(&Instruction::End); // loop $chunks
-    body.instruction(&Instruction::End); // $chunks_done
 }
 
 /// Assemble-phase agent body: compute the item's slot pointer into a scratch

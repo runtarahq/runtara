@@ -10847,6 +10847,125 @@ fn direct_compile_parallel_split_emits_async_lowered_invoke() {
     assert!(has("[async-lower]invoke"), "async-lowered invoke missing");
 }
 
+/// A parallel Split over a workflow-agent whose published version parks runs
+/// its window as child runs: the body is eligible, it composes nothing (no
+/// pool, no `[async-lower]invoke`, no phantom pool member), and the logic
+/// imports `runtara:api/tasks` for the `child-run` helper.
+#[test]
+fn direct_compile_parallel_split_starts_child_runs() {
+    let info = runtara_dsl::agent_meta::with_workflow_run(
+        runtara_dsl::agent_meta::workflow_agent_info(
+            "maybe-sleep",
+            "maybe-sleep",
+            "fixture",
+            &HashMap::new(),
+            &HashMap::new(),
+        ),
+        runtara_dsl::agent_meta::WorkflowRunTarget {
+            workflow_id: "wf-maybe-sleep".to_string(),
+            version: 2,
+            parks: true,
+        },
+    );
+    let catalog = runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![info]);
+    let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "durable": true,
+        "entryPoint": "split",
+        "steps": {
+            "split": {"id": "split", "stepType": "Split",
+                "config": {"value": {"valueType": "reference", "value": "data.items"},
+                    "parallelism": 10},
+                "subgraph": {"entryPoint": "call", "steps": {
+                    "call": {"id": "call", "stepType": "Agent", "agentId": "maybe-sleep",
+                        "capabilityId": "run", "maxRetries": 0,
+                        "inputMapping": {"item": {"valueType": "reference", "value": "item"}}},
+                    "done": {"id": "done", "stepType": "Finish", "inputMapping": {
+                        "result": {"valueType": "reference", "value": "steps.call.outputs"}}}},
+                    "executionPlan": [{"fromStep": "call", "toStep": "done"}]}},
+            "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
+                "results": {"valueType": "reference", "value": "steps.split.outputs"}}}
+        },
+        "executionPlan": [{"fromStep": "split", "toStep": "finish"}]
+    }))
+    .expect("graph");
+
+    let manifest = super::super::manifest::build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
+        &graph,
+        &[],
+        Some(&catalog),
+    )
+    .expect("manifest");
+    assert!(manifest.has_child_runs());
+    assert!(manifest.feature_summary.agent_ids.is_empty());
+    let manifest_json = manifest.to_canonical_json().expect("manifest json");
+    let core_config = DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+    let DirectRunPlan::Split {
+        parallel_window,
+        durable,
+        max_retries,
+        nested_plan,
+        ..
+    } = &core_config.run_plan
+    else {
+        panic!("expected a Split run plan");
+    };
+    let body = split_parallel::parallel_agent_body(
+        &core_config.static_data,
+        *parallel_window,
+        *durable,
+        *max_retries,
+        nested_plan,
+    )
+    .expect("a child-run body runs in a parallel window");
+    assert!(
+        core_config
+            .static_data
+            .agent_child_run(body.agent_id)
+            .is_some()
+    );
+    assert!(
+        split_parallel::parallel_agent_pools(&core_config.static_data, &core_config.run_plan)
+            .is_empty(),
+        "a child run composes no component, so it has no pool"
+    );
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "split-child-runs".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: Some(std::sync::Arc::new(catalog)),
+        agent_slug: None,
+    })
+    .expect("a parallel Split of child runs compiles");
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
+        .validate_all(&wasm)
+        .expect("the artifact validates");
+    let has = |needle: &str| {
+        wasm.windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    };
+    assert!(
+        has("runtara:api/tasks"),
+        "the child-run helper imports tasks"
+    );
+    assert!(has("runtara:api/waits"), "a pending child registers a wait");
+    assert!(
+        !has("[async-lower]invoke"),
+        "nothing is invoked asynchronously"
+    );
+    assert!(
+        !has("runtara:agent-maybe-sleep"),
+        "nothing imports the child-run agent"
+    );
+    assert!(!has("-par1"), "no phantom pool member");
+}
+
 /// Sequential scheduling also uses standard async calls so an individual
 /// operation can cooperate with cancellation.
 #[test]
