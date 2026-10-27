@@ -39,7 +39,7 @@ pub fn require_agent(server: &SmoMcpServer, module_id: &str) -> Result<(), Error
     crate::middleware::entitlement::tenant_agent_decision(
         crate::config::entitlements(),
         module_id,
-        || crate::workflow_agents::published_agent_ids(&server.tenant_id),
+        || crate::workflow_agents::published_agent_ids(&server.tenant()),
     )
     .map_err(|d| d.to_rmcp_error())
 }

@@ -88,7 +88,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as the primary tenant), session delivery, default object-model connection
   and workflow-agent restage. Membership roles are read per tenant: the
   primary tenant keeps `member:{user}`, another served tenant uses
-  `member:{tenant}:{user}`. `e2e/test_served_tenants.sh`.
+  `member:{tenant}:{user}`. MCP tools act for the calling request's tenant,
+  not the one the server was built for. Channel webhooks and the intake
+  worker take the tenant from the channel connection, which must be served,
+  and Teams reply refs carry it. Control and instance waits accept any served
+  tenant. `e2e/test_served_tenants.sh` serves two tenants from one process
+  and checks neither reads the other's workflows, versions or runs.
 
 - **The platform object-model database is optional.** Without
   `OBJECT_MODEL_DATABASE_URL` the server has no default database and creates

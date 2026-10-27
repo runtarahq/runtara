@@ -47,7 +47,7 @@ async fn compile_workflow_for_mcp(
     // answer: the allowlist may have changed since the version was saved.
     let closure = crate::api::services::compilation::check_compile_agent_allowlist(
         &server.pool,
-        &server.tenant_id,
+        &server.tenant(),
         workflow_id,
         version,
     )
@@ -70,13 +70,13 @@ async fn compile_workflow_for_mcp(
     // invalidated and rebuilt below, and a compile already queued is reused.
     if !force_recompile
         && let Some(image_id) = repository
-            .get_fresh_registered_image_id(&server.tenant_id, workflow_id, version)
+            .get_fresh_registered_image_id(&server.tenant(), workflow_id, version)
             .await
             .map_err(|e| err(format!("Failed to check compilation freshness: {}", e)))?
         && closure
             .may_reuse_cached_image(
                 server.runtime_client.as_deref(),
-                &server.tenant_id,
+                &server.tenant(),
                 &image_id,
             )
             .await
@@ -115,7 +115,7 @@ async fn compile_workflow_for_mcp(
     let redis_url = valkey_config.connection_url();
     let pending = crate::workers::compilation_worker::is_compilation_pending(
         &redis_url,
-        &server.tenant_id,
+        &server.tenant(),
         workflow_id,
         version,
     )
@@ -127,14 +127,14 @@ async fn compile_workflow_for_mcp(
         // it once before queueing; retries after a successful compile will pass
         // the freshness check above and will not rebuild.
         repository
-            .invalidate_compilation(&server.tenant_id, workflow_id, version)
+            .invalidate_compilation(&server.tenant(), workflow_id, version)
             .await
             .map_err(|e| err(format!("Failed to invalidate stale compilation: {}", e)))?;
     }
 
     let queued = crate::workers::compilation_worker::enqueue_compilation(
         &redis_url,
-        &server.tenant_id,
+        &server.tenant(),
         workflow_id,
         version,
         force_recompile || !pending,
@@ -145,7 +145,7 @@ async fn compile_workflow_for_mcp(
     let timeout = mcp_compile_wait_timeout();
     let completed = crate::workers::compilation_worker::wait_for_compilation(
         &redis_url,
-        &server.tenant_id,
+        &server.tenant(),
         workflow_id,
         version,
         timeout,
@@ -183,7 +183,7 @@ async fn query_mcp_compilation_result(
         WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3
         "#,
     )
-    .bind(&server.tenant_id)
+    .bind(server.tenant())
     .bind(workflow_id)
     .bind(version)
     .fetch_optional(&server.pool)
@@ -203,7 +203,7 @@ async fn query_mcp_compilation_result(
                     // the same source/mode-aware lookup as execution before
                     // telling MCP that the artifact is deployable.
                     let image_id = WorkflowRepository::new(server.pool.clone())
-                        .get_fresh_registered_image_id(&server.tenant_id, workflow_id, version)
+                        .get_fresh_registered_image_id(&server.tenant(), workflow_id, version)
                         .await
                         .map_err(|e| {
                             err(format!("Failed to check compilation freshness: {}", e))

@@ -13,6 +13,8 @@
 #      HTTP trigger runs it through the second tenant's trigger stream, and
 #      its cron trigger fires; its runs are its own, and the primary tenant
 #      sees none of them.
+#   4. NO CROSS-TENANT READS — neither tenant reads the other's workflow,
+#      versions or runs by id.
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
 # environment) + docker (isolated Valkey) and the shared workflow components
@@ -289,5 +291,23 @@ for _ in {1..150}; do [ "$(b_runs)" -ge 2 ] && break; sleep 1; done
     || [ "$(curl -sS "${API}/workflows/${B_WF}/instances" | jq '(.data.content // .data // []) | length')" = "0" ] \
     || { print_error "the primary tenant sees the second tenant's runs"; exit 1; }
 echo "  the second tenant's workflow compiled, its webhook and cron ran it as the second tenant; the primary sees none ✓"
+
+#-------------------------------------------------------------------------
+print_step "4. Neither tenant reads the other's resources by id..."
+for path in "/workflows/${WF_ID}" "/workflows/${WF_ID}/versions" "/workflows/${WF_ID}/instances"; do
+    RESP=$(curl -sS -H "Authorization: Bearer ${SECOND_KEY}" "${API}${path}")
+    if echo "${RESP}" | jq -e '(.data | type) == "object" and (.data.id? // .data.workflowId? // "") != ""' >/dev/null 2>&1 \
+        || echo "${RESP}" | jq -e '((.data.content // .data // []) | type) == "array" and ((.data.content // .data // []) | length) > 0' >/dev/null 2>&1; then
+        print_error "the second tenant read the primary's ${path}: $(echo "${RESP}" | head -c 200)"; exit 1
+    fi
+done
+for path in "/workflows/${B_WF}" "/workflows/${B_WF}/versions"; do
+    RESP=$(curl -sS "${API}${path}")
+    if echo "${RESP}" | jq -e '(.data | type) == "object" and (.data.id? // .data.workflowId? // "") != ""' >/dev/null 2>&1 \
+        || echo "${RESP}" | jq -e '((.data.content // .data // []) | type) == "array" and ((.data.content // .data // []) | length) > 0' >/dev/null 2>&1; then
+        print_error "the primary read the second tenant's ${path}: $(echo "${RESP}" | head -c 200)"; exit 1
+    fi
+done
+echo "  neither tenant reads the other's workflow, versions or runs by id ✓"
 
 print_success "served tenants: webhooks, API keys, triggers and cron reach exactly the tenants this server serves, each its own"

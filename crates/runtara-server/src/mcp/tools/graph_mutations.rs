@@ -174,7 +174,7 @@ async fn fetch_latest_graph_locked(
     rmcp::ErrorData,
 > {
     validate_path_param("workflow_id", workflow_id)?;
-    let key = format!("{}:{}", server.tenant_id, workflow_id);
+    let key = format!("{}:{}", server.tenant(), workflow_id);
     let lock = server
         .workflow_mutation_locks
         .entry(key)

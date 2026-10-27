@@ -151,13 +151,14 @@ impl InstanceWaits {
         }
     }
 
-    /// The tenant of the call, which must be this process's.
+    /// The tenant of the call, which this process must serve.
     fn tenant<'a>(
         &self,
         authority: &'a InstanceWaitAuthority,
     ) -> Result<&'a str, InstanceWaitError> {
         let tenant = authority.tenant.as_str();
-        if tenant.is_empty() || self.tenant.as_deref().is_some_and(|own| own != tenant) {
+        let served = |own: &str| own == tenant || crate::config::is_served_tenant(tenant);
+        if tenant.is_empty() || self.tenant.as_deref().is_some_and(|own| !served(own)) {
             return Err(InstanceWaitError::new(
                 InstanceWaitErrorCode::Denied,
                 "the call's tenant is not served here",

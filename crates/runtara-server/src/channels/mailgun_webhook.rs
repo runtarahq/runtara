@@ -360,10 +360,10 @@ async fn verify_mailgun_signature(
     connection_id: &str,
     fields: &HashMap<String, String>,
 ) -> anyhow::Result<()> {
-    let expected_tenant = crate::config::tenant_id();
+    let expected_tenant = router.served_connection_tenant(connection_id).await?;
     let conn = router
         .connections()
-        .get_with_parameters(connection_id, expected_tenant)
+        .get_with_parameters(connection_id, &expected_tenant)
         .await
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?
         .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;

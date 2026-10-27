@@ -2313,7 +2313,7 @@ async fn fetch_execution_for_references(
         Some(&workflow),
         instance_id,
         workflow_id,
-        &server.tenant_id,
+        &server.tenant(),
     );
     Ok((execution, workflow))
 }
@@ -2623,7 +2623,7 @@ pub async fn why_execution_failed(
             workflow.as_ref(),
             &params.instance_id,
             &params.workflow_id,
-            &server.tenant_id,
+            &server.tenant(),
         );
 
         let located = workflow

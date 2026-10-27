@@ -206,8 +206,9 @@ impl ChannelRouter {
         connection_id: &str,
         secret_header: Option<&str>,
     ) -> anyhow::Result<()> {
+        let tenant_id = self.served_connection_tenant(connection_id).await?;
         let trigger = TriggerRepository::new(self.pool.clone())
-            .newest_live_channel_trigger(connection_id, crate::config::tenant_id(), None)
+            .newest_live_channel_trigger(connection_id, &tenant_id, None)
             .await
             .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
 
@@ -230,6 +231,22 @@ impl ChannelRouter {
         }
     }
 
+    /// The tenant of a channel connection, which this process must serve: an
+    /// inbound webhook is unauthenticated, and only its connection names whose
+    /// it is.
+    pub async fn served_connection_tenant(&self, connection_id: &str) -> anyhow::Result<String> {
+        let conn = self
+            .connections
+            .get_channel_connection(connection_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("DB error: {}", e))?
+            .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
+        match conn.tenant_id {
+            Some(tenant) if crate::config::is_served_tenant(&tenant) => Ok(tenant),
+            _ => anyhow::bail!("Connection not found"),
+        }
+    }
+
     /// Look up the connection and its newest live Channel trigger, the same
     /// one webhook registration and Telegram's secret check use.
     async fn resolve_route(&self, connection_id: &str) -> Result<Route, RouteError> {
@@ -245,7 +262,7 @@ impl ChannelRouter {
         let tenant_id = conn.tenant_id.ok_or_else(|| {
             RouteError::Unroutable(anyhow::anyhow!("Connection has no tenant_id"))
         })?;
-        if tenant_id != crate::config::tenant_id() {
+        if !crate::config::is_served_tenant(&tenant_id) {
             return Err(RouteError::Unroutable(anyhow::anyhow!(
                 "Connection tenant mismatch"
             )));
@@ -375,14 +392,16 @@ impl ChannelRouter {
         loop {
             tick.tick().await;
             self.sweep_intake().await;
-            match self
-                .intake
-                .purge(crate::config::tenant_id(), super::intake::RETENTION, 1000)
-                .await
-            {
-                Ok(0) => {}
-                Ok(deleted) => debug!(deleted, "Purged handled channel intake"),
-                Err(e) => warn!(error = %e, "Unable to purge channel intake"),
+            for tenant in crate::config::served_tenants() {
+                match self
+                    .intake
+                    .purge(tenant, super::intake::RETENTION, 1000)
+                    .await
+                {
+                    Ok(0) => {}
+                    Ok(deleted) => debug!(%tenant, deleted, "Purged handled channel intake"),
+                    Err(e) => warn!(%tenant, error = %e, "Unable to purge channel intake"),
+                }
             }
         }
     }
@@ -390,14 +409,12 @@ impl ChannelRouter {
     /// Make messages a previous process accepted but did not finish due now,
     /// and dispatch them.
     pub async fn recover_pending(self: &Arc<Self>) {
-        match self
-            .intake
-            .release_orphans(crate::config::tenant_id(), self.started_at)
-            .await
-        {
-            Ok(0) => {}
-            Ok(count) => info!(count, "Recovering pending channel messages"),
-            Err(e) => warn!(error = %e, "Unable to release pending channel intake"),
+        for tenant in crate::config::served_tenants() {
+            match self.intake.release_orphans(tenant, self.started_at).await {
+                Ok(0) => {}
+                Ok(count) => info!(%tenant, count, "Recovering pending channel messages"),
+                Err(e) => warn!(%tenant, error = %e, "Unable to release pending channel intake"),
+            }
         }
         self.sweep_intake().await;
     }
@@ -405,13 +422,16 @@ impl ChannelRouter {
     /// Dispatch every pending message whose next attempt is due. A message
     /// whose launch failed transiently is retried here, with backoff.
     pub async fn sweep_intake(self: &Arc<Self>) {
+        for tenant in crate::config::served_tenants() {
+            self.sweep_tenant_intake(tenant).await;
+        }
+    }
+
+    /// Dispatch `tenant`'s due messages.
+    async fn sweep_tenant_intake(self: &Arc<Self>, tenant: &str) {
         const BATCH: i64 = 100;
         loop {
-            let claimed = match self
-                .intake
-                .claim_due(crate::config::tenant_id(), BATCH)
-                .await
-            {
+            let claimed = match self.intake.claim_due(tenant, BATCH).await {
                 Ok(claimed) => claimed,
                 Err(e) => {
                     warn!(error = %e, "Unable to claim pending channel intake");
@@ -421,7 +441,7 @@ impl ChannelRouter {
             let full = claimed.len() as i64 == BATCH;
             for row in claimed {
                 if let Some(binding) = &row.reply {
-                    self.recover_reply(row.intake_id, binding).await;
+                    self.recover_reply(tenant, row.intake_id, binding).await;
                     continue;
                 }
                 match self.resolve_route(&row.connection_id).await {
@@ -450,9 +470,8 @@ impl ChannelRouter {
     /// Finish a reply whose session ended before it reached the managed queue.
     /// It goes to the request it was bound to, exactly as the session would
     /// have handed it off, and never starts a run. Errors leave it pending.
-    async fn recover_reply(&self, intake_id: Uuid, binding: &ReplyBinding) {
+    async fn recover_reply(&self, tenant: &str, intake_id: Uuid, binding: &ReplyBinding) {
         let outcome = async {
-            let tenant = crate::config::tenant_id();
             let scope = QueueScope::new(tenant, &binding.session_id)?;
             let message_id = intake_id.to_string();
             let mut valkey = self.valkey.clone();

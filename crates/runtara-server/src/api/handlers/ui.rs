@@ -558,10 +558,11 @@ fn runtime_config_json(entitlements: &EntitlementSnapshot) -> String {
     };
     entries.push(("authMode".to_string(), auth_mode.to_string()));
 
-    if let Ok(tenant) = std::env::var("TENANT_ID")
-        && !tenant.trim().is_empty()
+    // The primary tenant; a process serving more than one leaves the choice
+    // to the signed-in user's token.
+    if let Some(tenant) = crate::config::try_tenant_id().filter(|tenant| !tenant.trim().is_empty())
     {
-        entries.push(("tenantId".to_string(), tenant));
+        entries.push(("tenantId".to_string(), tenant.to_string()));
     }
 
     // Operator switch: when set, the SPA stops prefixing /api/runtime/ with the
