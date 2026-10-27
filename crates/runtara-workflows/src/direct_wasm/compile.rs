@@ -36,6 +36,7 @@ mod ai_agent_loop;
 mod api_shims;
 mod artifact_metadata;
 mod branch_parallel;
+mod callback_lift;
 mod checkpoint;
 mod cooperative_wait;
 mod core_imports;
@@ -1537,6 +1538,9 @@ fn emit_direct_component(
         manifest.has_child_runs(),
     )?;
     let mut core_module = emit_direct_core_module(&resolve, world, &core_config)?;
+    if abi == super::component::WorkflowRole::PublishedAgent {
+        core_module = lift_published_agent_with_callback(&core_module, &resolve, world)?;
+    }
     embed_component_metadata(&mut core_module, &resolve, world, StringEncoding::UTF8)
         .map_err(component_error)?;
 
@@ -1547,6 +1551,28 @@ fn emit_direct_component(
         .encode()
         .map_err(component_error)?;
     Ok((component, parallel_pools))
+}
+
+/// Lift a published workflow-agent's `invoke` with a callback, so it sees its
+/// caller's cancel as an event (see [`callback_lift`]).
+fn lift_published_agent_with_callback(
+    core_module: &[u8],
+    resolve: &Resolve,
+    world: WorldId,
+) -> Result<Vec<u8>, DirectCompileError> {
+    for (key, item) in &resolve.worlds[world].exports {
+        let wit_parser::WorldItem::Interface { id, .. } = item else {
+            continue;
+        };
+        for function in resolve.interfaces[*id].functions.values() {
+            if core_imports::is_capabilities_invoke_export(resolve, Some(key), function) {
+                return callback_lift::lift_with_callback(core_module, resolve, key, function);
+            }
+        }
+    }
+    Err(component_error(
+        "a published workflow-agent exports no capabilities.invoke",
+    ))
 }
 
 #[cfg(test)]

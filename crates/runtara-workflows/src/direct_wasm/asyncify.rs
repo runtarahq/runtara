@@ -30,10 +30,6 @@
 //! inserts. A `block`, `loop` or `if` that holds a call that can unwind must
 //! take no parameters and have no results; anything else the pass refuses.
 
-// Only the tests call the pass until published workflow-agents are emitted
-// with the callback lift (SYN-770).
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use wasm_encoder::reencode::{Reencode, RoundtripReencoder};
