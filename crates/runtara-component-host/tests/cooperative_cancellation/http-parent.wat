@@ -35,14 +35,14 @@
       (local.get $p)))
   (core instance $memory (instantiate $memory))
   (core func $invoke (canon lower (func $http "invoke") async
-    (memory $memory "memory") (realloc (func $memory "realloc"))))
+    (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
   (core func $signal (canon lower (func $signal)))
-  (core func $sibling (canon lower (func $sibling) async (memory $memory "memory")))
+  (core func $sibling (canon lower (func $sibling) async (memory (core memory $memory "memory"))))
   (core func $cancel (canon subtask.cancel))
   (core func $drop (canon subtask.drop))
   (core func $new (canon waitable-set.new))
   (core func $join (canon waitable.join))
-  (core func $wait (canon waitable-set.wait (memory $memory "memory")))
+  (core func $wait (canon waitable-set.wait (memory (core memory $memory "memory"))))
   (core func $drop-set (canon waitable-set.drop))
   (core module $code
     (import "m" "memory" (memory 2))
@@ -96,4 +96,4 @@
       (export "join" (func $join)) (export "wait" (func $wait))
       (export "drop-set" (func $drop-set))))))
   (func (export "run") async (result (list u8))
-    (canon lift (core func $code "run") (memory $memory "memory") (realloc (func $memory "realloc")))))
+    (canon lift (core func $code "run") (memory (core memory $memory "memory")) (realloc (core func $memory "realloc")))))

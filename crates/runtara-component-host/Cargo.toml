@@ -84,7 +84,7 @@ runtara-wit = { path = "../runtara-wit" }
 runtara-invocation-contract = { path = "../runtara-invocation-contract" }
 
 # Embedded wasmtime engine + WASI Preview 2 support.
-wasmtime = { version = "46", default-features = false, features = [
+wasmtime = { version = "49", default-features = false, features = [
     "std",
     "anyhow",
     "runtime",
@@ -104,8 +104,8 @@ wasmtime = { version = "46", default-features = false, features = [
 ] }
 # `p3` links wasi:http@0.3, the transport of the workflow API (see
 # workflow_api.rs). Its send hook is the one interception point.
-wasmtime-wasi = { version = "46", features = ["p3"] }
-wasmtime-wasi-http = { version = "46", features = ["p3"] }
+wasmtime-wasi = { version = "49", features = ["p3"] }
+wasmtime-wasi-http = { version = "49", features = ["p3"] }
 # `server`: the `/v1` router this host serves its runs in process
 # (api_launches.rs).
 runtara-workflow-api = { path = "../runtara-workflow-api", features = ["server"] }
@@ -149,7 +149,7 @@ getrandom = "0.3"
 wat = "1"
 # Tests author minimal components in WAT; the `wat` feature lets
 # `Component::from_file` parse text-format components.
-wasmtime = { version = "46", default-features = false, features = ["wat"] }
+wasmtime = { version = "49", default-features = false, features = ["wat"] }
 # Tests build their own bundle (.wasm + sidecar meta.json) at runtime by
 # calling each agent crate's host-only `agent_info()` and serializing the
 # resulting `AgentInfo` to JSON next to the freshly-built `.wasm`.

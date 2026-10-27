@@ -8,13 +8,8 @@
 use std::sync::Arc;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{
-    WasiHttpCtx,
-    p2::{
-        HttpResult, WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
-        bindings::http::types::ErrorCode,
-        body::HyperOutgoingBody,
-        types::{HostFutureIncomingResponse, OutgoingRequestConfig},
-    },
+    Error as HttpError, RequestOptions, WasiBody, WasiHttp, WasiHttpCtx, WasiHttpCtxView,
+    WasiHttpHooks, WasiHttpView,
 };
 
 /// Per-call context. One of these is built before each component invocation.
@@ -51,14 +46,46 @@ impl CallContext {
 /// Raw WASI HTTP cannot bypass the typed outbound service.
 pub struct HostHooks;
 
+/// What a denied `send_request` returns.
+pub(crate) type DeniedSend = Box<
+    dyn std::future::Future<
+            Output = Result<
+                (
+                    http::Response<WasiBody>,
+                    Box<dyn std::future::Future<Output = Result<(), HttpError>> + Send>,
+                ),
+                HttpError,
+            >,
+        > + Send,
+>;
+
+/// A send that is refused.
+pub(crate) fn deny_send() -> DeniedSend {
+    Box::new(async { Err(HttpError::HttpRequestDenied) })
+}
+
 impl WasiHttpHooks for HostHooks {
     fn send_request(
         &mut self,
-        _request: http::Request<HyperOutgoingBody>,
-        _config: OutgoingRequestConfig,
-    ) -> HttpResult<HostFutureIncomingResponse> {
-        Err(ErrorCode::HttpRequestDenied.into())
+        _request: http::Request<WasiBody>,
+        _options: Option<RequestOptions>,
+        _fut: Box<dyn std::future::Future<Output = Result<(), HttpError>> + Send>,
+    ) -> DeniedSend {
+        deny_send()
     }
+}
+
+/// Link `wasi:http@0.2` with its own view of a store, so its requests meet
+/// that view's hooks rather than the `wasi:http@0.3` ones of [`WasiHttpView`].
+pub(crate) fn add_p2_http_to_linker<T: Send + 'static>(
+    linker: &mut wasmtime::component::Linker<T>,
+    http: fn(&mut T) -> WasiHttpCtxView<'_>,
+) -> wasmtime::Result<()> {
+    use wasmtime_wasi_http::p2::bindings;
+    let options = bindings::LinkOptions::default();
+    bindings::http::outgoing_handler::add_to_linker::<_, WasiHttp>(linker, http)?;
+    bindings::http::types::add_to_linker::<_, WasiHttp>(linker, &options.into(), http)?;
+    Ok(())
 }
 
 /// Cap on any single guest linear memory for a host-guarded invocation, in
@@ -292,9 +319,10 @@ impl WasiView for HostState {
     }
 }
 
-impl wasmtime_wasi_http::p3::WasiHttpView for HostState {
-    fn http(&mut self) -> wasmtime_wasi_http::p3::WasiHttpCtxView<'_> {
-        wasmtime_wasi_http::p3::WasiHttpCtxView {
+/// `wasi:http@0.3`: the workflow API route of the store, if any.
+impl WasiHttpView for HostState {
+    fn http(&mut self) -> WasiHttpCtxView<'_> {
+        WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,
             hooks: &mut self.api_hooks,
@@ -302,8 +330,9 @@ impl wasmtime_wasi_http::p3::WasiHttpView for HostState {
     }
 }
 
-impl WasiHttpView for HostState {
-    fn http(&mut self) -> WasiHttpCtxView<'_> {
+impl HostState {
+    /// `wasi:http@0.2`: always denied.
+    pub(crate) fn p2_http(&mut self) -> WasiHttpCtxView<'_> {
         WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,

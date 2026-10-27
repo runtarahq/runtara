@@ -889,7 +889,7 @@ mod tests {
     fn initial_memory_counts_every_instantiation() {
         let wasm = wat::parse_str(
             r#"(component
-                (core module $a (memory 2) (memory 1))
+                (core module $a (memory (export "memory") 2) (memory 1))
                 (core module $b (import "a" "m" (memory 5)))
                 (core module $unused (memory 100))
                 (component $c
@@ -897,8 +897,9 @@ mod tests {
                   (core instance (instantiate $m)))
                 (core instance $a1 (instantiate $a))
                 (core instance (instantiate $a))
+                (alias core export $a1 "memory" (core memory $a1-memory))
                 (core instance (instantiate $b
-                  (with "a" (instance (export "m" (memory $a1 "memory"))))))
+                  (with "a" (instance (export "m" (memory $a1-memory))))))
                 (instance (instantiate $c))
                 (instance (instantiate $c)))"#,
         );

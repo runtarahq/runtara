@@ -214,7 +214,7 @@ fn probe_component(agent: &str, behaviour: Behaviour) -> Vec<u8> {
   {OUTCOME}
   (func $invoke async (param "capability-id" string) (param "input" (list u8))
     (result (result $outcome (error $error)))
-    (canon lift (core func $code "invoke") (memory $memory "memory") (realloc (func $memory "realloc"))))
+    (canon lift (core func $code "invoke") (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
   (instance $capabilities {OUTCOME_EXPORTS} (export "invoke" (func $invoke)))
   (export "runtara:agent-{agent}/capabilities@1.0.0" (instance $capabilities)))"#,
         body = suspendable_body(behaviour),

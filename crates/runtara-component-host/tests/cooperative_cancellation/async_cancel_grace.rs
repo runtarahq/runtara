@@ -90,8 +90,7 @@ fn async_cancel_requires_an_additional_engine_capability() -> anyhow::Result<()>
         enable_epoch_interruption: false,
     })?;
     let error = Component::new(&engine, source(Cleanup::Acknowledge))
-        .err()
-        .expect("production engine must reject the unqualified ABI extension");
+        .expect_err("production engine must reject the unqualified ABI extension");
     let message = format!("{error:#}");
     assert!(
         message.contains(

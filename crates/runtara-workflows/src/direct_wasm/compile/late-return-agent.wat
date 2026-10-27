@@ -38,14 +38,14 @@
   (core instance $memory (instantiate $memory))
   (core func $request (canon lower (func $timers "wait-for") async))
   (core func $event (canon lower (func $events "append") async
-    (memory $memory "memory") (realloc (func $memory "realloc"))))
-  (core func $wait (canon waitable-set.wait (memory $memory "memory")))
+    (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
+  (core func $wait (canon waitable-set.wait (memory (core memory $memory "memory"))))
   (core func $new (canon waitable-set.new))
   (core func $join (canon waitable.join))
   (core func $drop-set (canon waitable-set.drop))
   (core func $cancel (canon subtask.cancel))
   (core func $drop (canon subtask.drop))
-  (core func $return (canon task.return (result (result $outcome (error $error))) (memory $memory "memory")))
+  (core func $return (canon task.return (result (result $outcome (error $error))) (memory (core memory $memory "memory"))))
   (core module $code
     (import "m" "memory" (memory 1))
     (import "h" "request" (func $request (param i64) (result i32)))
@@ -137,8 +137,8 @@
       (export "return" (func $return))))))
   (func $invoke async (param "capability-id" string) (param "input" (list u8))
     (result (result $outcome (error $error)))
-    (canon lift (core func $code "invoke") async (callback (func $code "callback"))
-      (memory $memory "memory") (realloc (func $memory "realloc"))))
+    (canon lift (core func $code "invoke") async (callback (core func $code "callback"))
+      (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
   (instance $capabilities
     (export "error-info" (type $error))
     (export "signal-wait" (type $signal)) (export "wake" (type $wake))

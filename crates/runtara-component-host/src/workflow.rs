@@ -30,11 +30,8 @@ use wasmtime::{Engine, Store, UpdateDeadline};
 use wasmtime_wasi::cli::OutputFile;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{
-    WasiHttpCtx,
-    p2::{
-        HttpResult, WasiHttpCtxView, WasiHttpHooks, WasiHttpView, bindings::http::types::ErrorCode,
-        body::HyperOutgoingBody, types::HostFutureIncomingResponse, types::OutgoingRequestConfig,
-    },
+    Error as HttpError, RequestOptions, WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks,
+    WasiHttpView,
 };
 
 #[path = "workflow/prepared_catalog.rs"]
@@ -295,22 +292,23 @@ struct WorkflowHooks;
 impl WasiHttpHooks for WorkflowHooks {
     fn send_request(
         &mut self,
-        request: http::Request<HyperOutgoingBody>,
-        config: OutgoingRequestConfig,
-    ) -> HttpResult<HostFutureIncomingResponse> {
+        request: http::Request<WasiBody>,
+        options: Option<RequestOptions>,
+        fut: Box<dyn std::future::Future<Output = Result<(), HttpError>> + Send>,
+    ) -> crate::host_state::DeniedSend {
         // Outbound HTTP goes through the workflow API connection routes,
         // where a single absolute deadline and response cap are enforced.
         // The legacy raw wasi:http route must not remain as an ungoverned
         // fallback: it would bypass both protections.
-        let _ = (request, config);
-        Err(ErrorCode::HttpRequestDenied.into())
+        let _ = (request, options, fut);
+        crate::host_state::deny_send()
     }
 
-    fn outgoing_body_buffer_chunks(&mut self) -> usize {
+    fn p2_outgoing_body_buffer_chunks(&mut self) -> usize {
         OUTGOING_BODY_BUFFER_CHUNKS
     }
 
-    fn outgoing_body_chunk_size(&mut self) -> usize {
+    fn p2_outgoing_body_chunk_size(&mut self) -> usize {
         OUTGOING_BODY_CHUNK_SIZE
     }
 }
@@ -362,22 +360,24 @@ impl WasiView for WorkflowState {
     }
 }
 
+/// `wasi:http@0.3`: the workflow API route of the run.
 impl WasiHttpView for WorkflowState {
     fn http(&mut self) -> WasiHttpCtxView<'_> {
         WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,
-            hooks: &mut self.hooks,
+            hooks: &mut self.api_hooks,
         }
     }
 }
 
-impl wasmtime_wasi_http::p3::WasiHttpView for WorkflowState {
-    fn http(&mut self) -> wasmtime_wasi_http::p3::WasiHttpCtxView<'_> {
-        wasmtime_wasi_http::p3::WasiHttpCtxView {
+impl WorkflowState {
+    /// `wasi:http@0.2`: always denied.
+    fn p2_http(&mut self) -> WasiHttpCtxView<'_> {
+        WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,
-            hooks: &mut self.api_hooks,
+            hooks: &mut self.hooks,
         }
     }
 }
@@ -600,7 +600,7 @@ impl WorkflowExecutor {
     pub fn new(engine: Arc<Engine>) -> Result<Self> {
         let mut linker = Linker::<WorkflowState>::new(&engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
-        wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
+        crate::host_state::add_p2_http_to_linker(&mut linker, WorkflowState::p2_http)?;
         // wasi@0.3 and wasi:http@0.3: the transport of the workflow API. Its
         // send hook routes only the workflow API origin (workflow_api.rs).
         wasmtime_wasi::p3::add_to_linker(&mut linker)?;

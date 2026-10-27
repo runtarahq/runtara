@@ -14,11 +14,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, Limited, combinators::UnsyncBoxBody};
+use http_body_util::{BodyExt, Full, Limited};
 use runtara_workflow_api::{Binding, Caps, headers};
-use wasmtime_wasi::TrappableError;
-use wasmtime_wasi_http::p3::bindings::http::types::ErrorCode;
-use wasmtime_wasi_http::p3::{RequestOptions, WasiHttpHooks};
+use wasmtime_wasi_http::{Error as HttpError, RequestOptions, WasiBody, WasiHttpHooks};
 
 /// A request the hook hands over, and the response it returns.
 pub type WorkflowApiFuture = Pin<Box<dyn Future<Output = http::Response<Bytes>> + Send>>;
@@ -30,12 +28,10 @@ pub trait WorkflowApiTransport: Send + Sync + 'static {
     fn call(&self, request: http::Request<Bytes>) -> WorkflowApiFuture;
 }
 
-type HookBody = UnsyncBoxBody<Bytes, ErrorCode>;
-type IoFuture = Box<dyn Future<Output = Result<(), ErrorCode>> + Send>;
-type SendFuture = Box<
-    dyn Future<Output = Result<(http::Response<HookBody>, IoFuture), TrappableError<ErrorCode>>>
-        + Send,
->;
+type HookBody = WasiBody;
+type IoFuture = Box<dyn Future<Output = Result<(), HttpError>> + Send>;
+type SendFuture =
+    Box<dyn Future<Output = Result<(http::Response<HookBody>, IoFuture), HttpError>> + Send>;
 
 /// A deadline the workflow API can bring forward (`PUT /v1/run/deadline`),
 /// checked by the executor's epoch callback and watchdog next to the launch
@@ -122,7 +118,7 @@ fn into_api_request(
     parts: http::request::Parts,
     body: Bytes,
     binding: Binding,
-) -> Result<http::Request<Bytes>, ErrorCode> {
+) -> Result<http::Request<Bytes>, HttpError> {
     let path = parts
         .uri
         .path_and_query()
@@ -132,7 +128,7 @@ fn into_api_request(
         .method(parts.method)
         .uri(path)
         .body(body)
-        .map_err(|_| ErrorCode::HttpRequestUriInvalid)?;
+        .map_err(|_| HttpError::HttpRequestUriInvalid)?;
     for (name, value) in &parts.headers {
         if !headers::is_stripped(name.as_str()) && name != http::header::HOST {
             request.headers_mut().append(name.clone(), value.clone());
@@ -151,7 +147,29 @@ fn from_api_response(response: http::Response<Bytes>) -> http::Response<HookBody
 }
 
 fn denied() -> SendFuture {
-    Box::new(async { Err(ErrorCode::HttpRequestDenied.into()) })
+    Box::new(async { Err(HttpError::HttpRequestDenied) })
+}
+
+/// A spawned request, aborted when the guest drops the call.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<Result<T, HttpError>>);
+
+impl<T> Future for AbortOnDrop<T> {
+    type Output = Result<T, HttpError>;
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(cx).map(|joined| {
+            joined.unwrap_or_else(|error| Err(HttpError::InternalError(Some(error.to_string()))))
+        })
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl WasiHttpHooks for WorkflowApiHooks {
@@ -171,15 +189,22 @@ impl WasiHttpHooks for WorkflowApiHooks {
             return denied();
         };
         let limit = self.caps.request_body_bytes;
-        Box::new(async move {
+        // Served on a task of its own, so the request makes progress while
+        // the guest runs CPU-bound code: the Store's event loop polls the
+        // returned future only when the guest yields to it, and a cleanup
+        // alarm must be armed before that. Dropping the call aborts it.
+        let served = AbortOnDrop(tokio::spawn(async move {
             let (parts, body) = request.into_parts();
             let body = Limited::new(body, limit)
                 .collect()
                 .await
-                .map_err(|_| ErrorCode::HttpRequestBodySize(Some(limit as u64)))?
+                .map_err(|_| HttpError::HttpRequestBodySize(Some(limit as u64)))?
                 .to_bytes();
             let request = into_api_request(parts, body, binding)?;
-            let response = transport.call(request).await;
+            Ok::<_, HttpError>(transport.call(request).await)
+        }));
+        Box::new(async move {
+            let response = served.await?;
             let io: IoFuture = Box::new(async { Ok(()) });
             Ok((from_api_response(response), io))
         })
@@ -248,7 +273,7 @@ mod tests {
     async fn send(
         hooks: &mut WorkflowApiHooks,
         request: http::Request<HookBody>,
-    ) -> Result<(u16, Bytes), ErrorCode> {
+    ) -> Result<(u16, Bytes), HttpError> {
         let fut = hooks.send_request(request, None, Box::new(async { Ok(()) }));
         match Box::into_pin(fut).await {
             Ok((response, _io)) => {
@@ -256,7 +281,7 @@ mod tests {
                 let body = response.into_body().collect().await.unwrap().to_bytes();
                 Ok((status, body))
             }
-            Err(error) => Err(error.downcast().unwrap()),
+            Err(error) => Err(error),
         }
     }
 
@@ -305,7 +330,7 @@ mod tests {
         ] {
             let result = send(&mut hooks, guest_request(uri)).await;
             assert!(
-                matches!(result, Err(ErrorCode::HttpRequestDenied)),
+                matches!(result, Err(HttpError::HttpRequestDenied)),
                 "{uri}: {result:?}"
             );
         }
@@ -338,7 +363,7 @@ mod tests {
                 guest_request("http://api.runtara.internal/v1/run"),
             )
             .await;
-            assert!(matches!(result, Err(ErrorCode::HttpRequestDenied)));
+            assert!(matches!(result, Err(HttpError::HttpRequestDenied)));
         }
         assert!(recorder.seen.lock().unwrap().is_empty());
     }
@@ -353,7 +378,7 @@ mod tests {
             guest_request("http://api.runtara.internal/v1/run/outcome"),
         )
         .await;
-        assert!(matches!(result, Err(ErrorCode::HttpRequestBodySize(_))));
+        assert!(matches!(result, Err(HttpError::HttpRequestBodySize(_))));
         assert!(recorder.seen.lock().unwrap().is_empty());
     }
 }

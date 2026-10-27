@@ -75,7 +75,7 @@ fn minimal_entry(imports: &str) -> String {
   (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
   (func $invoke async (param "capability-id" string) (param "input" (list u8))
     (result (result $outcome (error $error)))
-    (canon lift (core func $m "invoke") (memory $m "memory") (realloc (func $m "realloc"))))
+    (canon lift (core func $m "invoke") (memory (core memory $m "memory")) (realloc (core func $m "realloc"))))
   (instance $entry (export "error-info" (type $error)) (export "signal-wait" (type $signal))
     (export "wake" (type $wake)) (export "suspension" (type $suspension))
     (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))

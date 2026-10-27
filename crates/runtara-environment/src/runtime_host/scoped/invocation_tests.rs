@@ -234,8 +234,8 @@ fn child_wat() -> String {
           (local $base i32) global.get $heap local.set $base
           global.get $heap local.get 3 i32.add i32.const 7 i32.add i32.const -8 i32.and global.set $heap local.get $base))
       (core instance $memory (instantiate $memory))
-      (core func $heartbeat (canon lower (func $heartbeat) (memory $memory "memory") (realloc (func $memory "realloc"))))
-      (core func $signals (canon lower (func $signals) (memory $memory "memory") (realloc (func $memory "realloc"))))
+      (core func $heartbeat (canon lower (func $heartbeat) (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
+      (core func $signals (canon lower (func $signals) (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
       (core module $code
         (import "memory" "memory" (memory 1))
         (import "host" "heartbeat" (func $heartbeat (param i32)))
@@ -263,7 +263,7 @@ fn child_wat() -> String {
       (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
       (func $invoke async (param "capability" string) (param "input" (list u8))
         (result (result $outcome (error $error)))
-        (canon lift (core func $code "invoke") (memory $memory "memory") (realloc (func $memory "realloc"))))
+        (canon lift (core func $code "invoke") (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
       (instance $api (export "error-info" (type $error)) (export "signal-wait" (type $signal))
         (export "wake" (type $wake)) (export "suspension" (type $suspension))
         (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))

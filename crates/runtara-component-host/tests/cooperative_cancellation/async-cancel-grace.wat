@@ -77,7 +77,7 @@
       (export "cancel" (func $cancel)) (export "drop" (func $drop))
       (export "cancelled" (func $cancelled)) (export "return" (func $return))))))
     (func (export "run") async
-      (canon lift (core func $code "run") async (callback (func $code "callback")))))
+      (canon lift (core func $code "run") async (callback (core func $code "callback")))))
   (instance $agent (instantiate $agent
     (with "request" (func $request)) (with "cleanup" (func $cleanup))
     (with "trace" (func $trace))))
@@ -96,7 +96,7 @@
     (core func $drop (canon subtask.drop))
     (core func $new (canon waitable-set.new))
     (core func $join (canon waitable.join))
-    (core func $wait (canon waitable-set.wait (memory $memory "memory")))
+    (core func $wait (canon waitable-set.wait (memory (core memory $memory "memory"))))
     (core func $drop-set (canon waitable-set.drop))
     (core module $code
       (import "m" "memory" (memory 1))
@@ -125,8 +125,12 @@
         (call $trace (i32.const 10))
         ;; BLOCKED means resolution must be awaited on the original handle.
         ;; It does not permit dropping the handle or issuing another cancel.
+        ;; A subtask leaves its waitable set to be cancelled, then rejoins to
+        ;; be awaited.
+        (call $join (local.get $target) (i32.const 0))
         (if (i32.ne (call $cancel (local.get $target)) (i32.const -1))
           (then unreachable))
+        (call $join (local.get $target) (local.get $set))
         (call $trace (i32.const 40))
         (loop $wait
           (local.set $event (call $wait (local.get $set) (i32.const 0)))
@@ -143,8 +147,10 @@
         (call $drop (local.get $target))
         ;; Cancel the generous success-case timer rather than racing cleanup
         ;; against a short fixture deadline. Resolve this host subtask too.
+        (call $join (local.get $timer) (i32.const 0))
         (if (i32.ne (call $cancel (local.get $timer)) (i32.const -1))
           (then unreachable))
+        (call $join (local.get $timer) (local.get $set))
         (loop $timer
           (if (i32.ne (call $wait (local.get $set) (i32.const 0)) (i32.const 1)) (then unreachable))
           (br_if $timer (i32.lt_u (i32.load (i32.const 4)) (i32.const 2)))

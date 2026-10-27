@@ -330,6 +330,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     agent SDK. A component that imports any of the interfaces above is
     refused when a workflow is compiled against it, and at load.
 
+- **Wasmtime 49 (from 46).** Agents and workflows need no rebuild: the WASI
+  0.3 interfaces are unchanged. Wasmtime 50 is held back: it drops the
+  `cancellable` waits that published workflow-agents use to see their
+  caller's cancel (component-model #716).
+  - Raw `wasi:http@0.2` stays denied; `wasi:http@0.3` reaches only the
+    workflow API.
+  - A workflow API request is now served on a task of its own, so it makes
+    progress while the guest runs CPU-bound code. A cleanup alarm armed just
+    before such code starts its clock at once rather than at the guest's
+    next yield.
+
 - **Breaking: a workflow's memory tier now limits its runs.** The tier (S 8
   MiB, M 64 MiB, L 128 MiB, XL 256 MiB; XL by default) was stored but never
   applied. It now caps the sum of a run's linear memories, and each child

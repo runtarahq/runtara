@@ -40,7 +40,7 @@
       (local.get $p)))
   (core instance $memory (instantiate $memory))
   (core func $request (canon lower (func $http "http") async
-    (memory $memory "memory") (realloc (func $memory "realloc"))))
+    (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
   (core func $new (canon waitable-set.new))
   (core func $join (canon waitable.join))
   (core module $code
@@ -99,8 +99,8 @@
   (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
   (func $invoke async (param "capability-id" string) (param "input" (list u8))
     (result (result $outcome (error $error)))
-    (canon lift (core func $code "invoke") async (callback (func $code "callback"))
-      (memory $memory "memory") (realloc (func $memory "realloc"))))
+    (canon lift (core func $code "invoke") async (callback (core func $code "callback"))
+      (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
   (instance $capabilities
     (export "error-info" (type $error))
     (export "signal-wait" (type $signal)) (export "wake" (type $wake))

@@ -572,7 +572,7 @@ mod tests {
             (core instance $i (instantiate $m))
             (func $invoke async (param "capability-id" string) (param "input" (list u8))
                 (param "context" (list u8)) (result (result (list u8) (error string)))
-                (canon lift (core func $i "invoke") (memory $i "memory") (realloc (func $i "realloc"))))
+                (canon lift (core func $i "invoke") (memory (core memory $i "memory")) (realloc (core func $i "realloc"))))
             (instance $execution (export "invoke" (func $invoke)))
             (export "runtara:trusted/execution@1.0.0" (instance $execution))
         )"#)).unwrap()
