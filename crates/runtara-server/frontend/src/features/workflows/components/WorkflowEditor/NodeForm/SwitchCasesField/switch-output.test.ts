@@ -36,6 +36,32 @@ describe('readSwitchOutput', () => {
     ).toEqual({ mode: 'reference', value: 'steps.a.outputs.x' });
   });
 
+  it("reads a reference's type and default as typeHint and defaultValue", () => {
+    expect(
+      readSwitchOutput({
+        valueType: 'reference',
+        value: 'data.count',
+        type: 'integer',
+        default: 0,
+      })
+    ).toEqual({
+      mode: 'reference',
+      value: 'data.count',
+      typeHint: 'integer',
+      defaultValue: 0,
+    });
+    expect(
+      readSwitchOutput({
+        id: { valueType: 'reference', value: 'a.b', default: 'none' },
+      })
+    ).toEqual({
+      mode: 'composite',
+      value: {
+        id: { valueType: 'reference', value: 'a.b', defaultValue: 'none' },
+      },
+    });
+  });
+
   it('unwraps an immediate wrapper', () => {
     expect(readSwitchOutput({ valueType: 'immediate', value: 7 })).toEqual({
       mode: 'immediate',
@@ -136,6 +162,49 @@ describe('writeSwitchOutput', () => {
     ).toEqual({ valueType: 'reference', value: 'data.country' });
   });
 
+  it("writes a reference's typeHint and defaultValue as type and default", () => {
+    expect(
+      writeSwitchOutput({
+        mode: 'reference',
+        value: 'data.count',
+        typeHint: 'integer',
+        defaultValue: '0',
+      })
+    ).toEqual({
+      valueType: 'reference',
+      value: 'data.count',
+      type: 'integer',
+      default: '0',
+    });
+    // A cleared default leaves the key out.
+    expect(
+      writeSwitchOutput({
+        mode: 'reference',
+        value: 'data.count',
+        defaultValue: undefined,
+      })
+    ).toEqual({ valueType: 'reference', value: 'data.count' });
+  });
+
+  it("keeps a nested reference's type and default when another field changes", () => {
+    const stored = {
+      label: 'x',
+      count: {
+        valueType: 'reference',
+        value: "steps['fetch'].outputs.count",
+        type: 'integer',
+        default: 0,
+      },
+    };
+    const read = readSwitchOutput(stored);
+    const entries = read.value as Record<string, unknown>;
+    const edited = {
+      ...read,
+      value: { ...entries, label: { valueType: 'immediate', value: 'y' } },
+    };
+    expect(writeSwitchOutput(edited)).toEqual({ ...stored, label: 'y' });
+  });
+
   it('coerces a non-string reference to empty', () => {
     expect(writeSwitchOutput({ mode: 'reference', value: 42 })).toEqual({
       valueType: 'reference',
@@ -186,6 +255,7 @@ describe('writeSwitchOutput', () => {
       'Poland',
       42,
       { valueType: 'reference', value: 'data.x' },
+      { valueType: 'reference', value: 'data.x', type: 'number', default: 1 },
       { label: 'x' },
       { queue: 'web-team' },
       {
@@ -193,6 +263,12 @@ describe('writeSwitchOutput', () => {
         nested: {
           tags: ['a', 2, true],
           id: { valueType: 'reference', value: 'data.id' },
+          qty: {
+            valueType: 'reference',
+            value: "steps['a'].outputs.qty",
+            type: 'integer',
+            default: 0,
+          },
         },
       },
       [1, 2, 3],

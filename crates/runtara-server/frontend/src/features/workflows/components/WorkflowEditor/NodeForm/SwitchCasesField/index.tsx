@@ -171,7 +171,8 @@ function SwitchOutputCell({
   onChange: (next: unknown) => void;
   testId: string;
 }) {
-  const { mode, value } = readSwitchOutput(output);
+  const current = readSwitchOutput(output);
+  const { mode, value } = current;
 
   if (mode === 'composite') {
     return (
@@ -208,13 +209,22 @@ function SwitchOutputCell({
         modes={SWITCH_OUTPUT_MODES}
         onValueTypeChange={(next) =>
           onChange(
-            writeSwitchOutput({
-              mode: next as SwitchOutputMode,
-              value: next === mode ? value : '',
-            })
+            writeSwitchOutput(
+              next === mode
+                ? current
+                : { mode: next as SwitchOutputMode, value: '' }
+            )
           )
         }
-        onChange={(next) => onChange(writeSwitchOutput({ mode, value: next }))}
+        // Spread `current` so a reference's `type` and `default` survive a
+        // path change.
+        onChange={(next) =>
+          onChange(writeSwitchOutput({ ...current, value: next }))
+        }
+        defaultValue={current.defaultValue}
+        onDefaultValueChange={(next) =>
+          onChange(writeSwitchOutput({ ...current, defaultValue: next }))
+        }
         fieldType="text"
         placeholder="Value, or pick a reference"
       />

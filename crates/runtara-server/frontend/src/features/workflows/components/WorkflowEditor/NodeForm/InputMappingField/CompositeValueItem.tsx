@@ -270,12 +270,24 @@ export function CompositeValueItem({
     [onChange]
   );
 
+  // Point the reference at a new path. Its `typeHint` / `defaultValue` (the
+  // stored `type` and `default`) belong to the reference, not to the path,
+  // and the runtime honours both, so clearing or replacing the path keeps them.
+  const setReferencePath = useCallback(
+    (path: string) => {
+      onChange(
+        value.valueType === 'reference'
+          ? { ...value, value: path }
+          : { valueType: 'reference', value: path }
+      );
+    },
+    [onChange, value]
+  );
+
   // Handle variable selection from picker
   const handleVariableSelect = useCallback(
-    (variable: VariableSuggestion) => {
-      onChange({ valueType: 'reference', value: variable.value });
-    },
-    [onChange]
+    (variable: VariableSuggestion) => setReferencePath(variable.value),
+    [setReferencePath]
   );
 
   // Get current type hint (only for immediate values)
@@ -519,7 +531,7 @@ export function CompositeValueItem({
                 type={referenceType}
                 stepName={stepInfo.stepName}
                 fieldPath={stepInfo.fieldPath ?? undefined}
-                onRemove={() => onChange({ valueType: 'reference', value: '' })}
+                onRemove={() => setReferencePath('')}
                 disabled={disabled}
                 className={
                   hasError || referenceError ? 'border-destructive' : undefined

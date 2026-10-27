@@ -4,32 +4,45 @@
 //!
 //! Switch case matching is now handled at compile time via condition expression
 //! codegen (shared with Conditional steps). Only output reference resolution
-//! remains a runtime operation.
+//! remains a runtime operation, and it goes through the same resolver as every
+//! other mapping reference.
 
 use serde_json::Value;
+
+use crate::direct_json::apply_reference;
+use crate::reference_path::reference_segments;
 
 /// Process switch case output values, resolving reference-style mappings.
 ///
 /// - Literal values (strings, numbers, bools, null): returned as-is
 /// - Objects with `valueType` + `value` keys:
-///   - `"reference"`: resolves dot-path against `source`
+///   - `"reference"`: resolved against `source` exactly like any other mapping
+///     reference — bracket and dotted paths, interned values, `default` and the
+///     `type` hint all behave the same. A shape mismatch with no `default` is
+///     an error. A path with no segments (`""`) resolves as absent.
 ///   - `"immediate"`: returns the `value` field directly
 /// - Other objects/arrays: recursively processed
-pub fn process_switch_output(output: &Value, source: &Value) -> Value {
+pub fn process_switch_output(output: &Value, source: &Value) -> Result<Value, String> {
     match output {
-        Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null => output.clone(),
+        Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null => Ok(output.clone()),
 
         Value::Object(map) => {
             if let (Some(value_type), Some(value)) = (map.get("valueType"), map.get("value")) {
                 match value_type.as_str() {
                     Some("reference") => {
-                        if let Some(path) = value.as_str() {
-                            resolve_dot_path(source, path)
-                        } else {
-                            Value::Null
-                        }
+                        // The shared resolver reads a path with no segments as
+                        // the whole scope. The editor stores `""` as soon as an
+                        // output is switched to reference mode, so an unfinished
+                        // reference would emit every step's output. Resolve it
+                        // against an empty scope instead: like any absent
+                        // reference, it yields its `default` (through `type`) or
+                        // null.
+                        let unset = value
+                            .as_str()
+                            .is_some_and(|path| reference_segments(path).is_empty());
+                        apply_reference(map, if unset { &Value::Null } else { source })
                     }
-                    Some("immediate") => value.clone(),
+                    Some("immediate") => Ok(value.clone()),
                     _ => recurse_object(map, source),
                 }
             } else {
@@ -37,55 +50,20 @@ pub fn process_switch_output(output: &Value, source: &Value) -> Value {
             }
         }
 
-        Value::Array(arr) => Value::Array(
-            arr.iter()
-                .map(|v| process_switch_output(v, source))
-                .collect(),
-        ),
-    }
-}
-
-/// Resolve a dot-separated path against a JSON value.
-///
-/// Walks each `.`-separated segment as an object key or array index. Array
-/// indices support Python-style negative suffix indexing (`-1` is the last
-/// element), matching the workflow reference resolver. An unmatched segment
-/// resolves to `Value::Null`.
-fn resolve_dot_path(source: &Value, dot_path: &str) -> Value {
-    let mut current = source;
-    for segment in dot_path.split('.') {
-        let next = match current {
-            Value::Object(map) => map.get(segment),
-            Value::Array(items) => array_index(segment, items.len()).and_then(|i| items.get(i)),
-            _ => None,
-        };
-        match next {
-            Some(value) => current = value,
-            None => return Value::Null,
-        }
-    }
-    current.clone()
-}
-
-/// Resolve a path segment to a concrete array index, supporting Python-style
-/// negative suffix indexing (`-1` is the last element). Non-numeric segments and
-/// out-of-range negatives return `None`.
-fn array_index(segment: &str, len: usize) -> Option<usize> {
-    let raw: i64 = segment.parse().ok()?;
-    if raw >= 0 {
-        usize::try_from(raw).ok()
-    } else {
-        len.checked_sub(usize::try_from(raw.unsigned_abs()).ok()?)
+        Value::Array(arr) => arr
+            .iter()
+            .map(|v| process_switch_output(v, source))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
     }
 }
 
 /// Recursively process all values in a JSON object.
-fn recurse_object(map: &serde_json::Map<String, Value>, source: &Value) -> Value {
-    let processed: serde_json::Map<String, Value> = map
-        .iter()
-        .map(|(k, v)| (k.clone(), process_switch_output(v, source)))
-        .collect();
-    Value::Object(processed)
+fn recurse_object(map: &serde_json::Map<String, Value>, source: &Value) -> Result<Value, String> {
+    map.iter()
+        .map(|(k, v)| Ok((k.clone(), process_switch_output(v, source)?)))
+        .collect::<Result<serde_json::Map<String, Value>, String>>()
+        .map(Value::Object)
 }
 
 #[cfg(test)]
@@ -93,16 +71,17 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn resolve(output: &Value, source: &Value) -> Value {
+        process_switch_output(output, source).expect("switch output resolves")
+    }
+
     #[test]
     fn test_output_literals_pass_through() {
         let source = json!({"data": {"name": "test"}});
-        assert_eq!(
-            process_switch_output(&json!("hello"), &source),
-            json!("hello")
-        );
-        assert_eq!(process_switch_output(&json!(42), &source), json!(42));
-        assert_eq!(process_switch_output(&json!(true), &source), json!(true));
-        assert_eq!(process_switch_output(&json!(null), &source), json!(null));
+        assert_eq!(resolve(&json!("hello"), &source), json!("hello"));
+        assert_eq!(resolve(&json!(42), &source), json!(42));
+        assert_eq!(resolve(&json!(true), &source), json!(true));
+        assert_eq!(resolve(&json!(null), &source), json!(null));
     }
 
     #[test]
@@ -115,48 +94,172 @@ mod tests {
         });
 
         let output = json!({"valueType": "reference", "value": "data.country"});
-        assert_eq!(process_switch_output(&output, &source), json!("Poland"));
+        assert_eq!(resolve(&output, &source), json!("Poland"));
 
         let output = json!({"valueType": "reference", "value": "data.nested.value"});
-        assert_eq!(process_switch_output(&output, &source), json!(42));
+        assert_eq!(resolve(&output, &source), json!(42));
     }
 
     #[test]
     fn test_output_reference_missing_path() {
         let source = json!({"data": {}});
         let output = json!({"valueType": "reference", "value": "data.missing"});
-        assert_eq!(process_switch_output(&output, &source), json!(null));
+        assert_eq!(resolve(&output, &source), json!(null));
     }
 
-    /// SYN-448: switch output references support Python-style negative array
-    /// indexing, consistent with the workflow reference resolver.
+    /// Switch output references support Python-style negative array indexing,
+    /// consistent with the workflow reference resolver.
     #[test]
     fn test_output_reference_negative_index() {
         let source = json!({"data": {"items": ["a", "b", "c"]}});
 
         let last = json!({"valueType": "reference", "value": "data.items.-1"});
-        assert_eq!(process_switch_output(&last, &source), json!("c"));
+        assert_eq!(resolve(&last, &source), json!("c"));
 
         let first = json!({"valueType": "reference", "value": "data.items.-3"});
-        assert_eq!(process_switch_output(&first, &source), json!("a"));
+        assert_eq!(resolve(&first, &source), json!("a"));
 
         // Positive indexing unchanged.
         let positive = json!({"valueType": "reference", "value": "data.items.1"});
-        assert_eq!(process_switch_output(&positive, &source), json!("b"));
+        assert_eq!(resolve(&positive, &source), json!("b"));
 
         // Out-of-range negative misses → null.
         let oob = json!({"valueType": "reference", "value": "data.items.-4"});
-        assert_eq!(process_switch_output(&oob, &source), json!(null));
+        assert_eq!(resolve(&oob, &source), json!(null));
+    }
+
+    /// The reference picker writes bracket form (`steps['id'].outputs…`); every
+    /// spelling of the same path must resolve to the same value.
+    #[test]
+    fn test_output_reference_bracket_and_dotted_spellings_agree() {
+        let source = json!({
+            "steps": {"fetch": {"outputs": {"q": "found", "items": ["x", "y"]}}}
+        });
+
+        for path in [
+            "steps.fetch.outputs.q",
+            "steps['fetch'].outputs.q",
+            r#"steps["fetch"].outputs.q"#,
+            "steps['fetch']['outputs']['q']",
+        ] {
+            let output = json!({"valueType": "reference", "value": path});
+            assert_eq!(resolve(&output, &source), json!("found"), "path {path}");
+        }
+
+        for path in [
+            "steps.fetch.outputs.items.1",
+            "steps['fetch'].outputs.items[1]",
+        ] {
+            let output = json!({"valueType": "reference", "value": path});
+            assert_eq!(resolve(&output, &source), json!("y"), "path {path}");
+        }
+    }
+
+    #[test]
+    fn test_output_reference_quoted_key_containing_a_dot() {
+        let source = json!({"data": {"a.b": "dotted", "a": {"b": "nested"}}});
+
+        let quoted = json!({"valueType": "reference", "value": "data['a.b']"});
+        assert_eq!(resolve(&quoted, &source), json!("dotted"));
+
+        let nested = json!({"valueType": "reference", "value": "data.a.b"});
+        assert_eq!(resolve(&nested, &source), json!("nested"));
+    }
+
+    #[test]
+    fn test_output_reference_default_applies_when_absent_or_null() {
+        let source = json!({"data": {"present": "here", "empty": null}});
+
+        let absent = json!({
+            "valueType": "reference", "value": "data['missing']", "default": "fallback"
+        });
+        assert_eq!(resolve(&absent, &source), json!("fallback"));
+
+        let null = json!({
+            "valueType": "reference", "value": "data.empty", "default": "fallback"
+        });
+        assert_eq!(resolve(&null, &source), json!("fallback"));
+
+        let present = json!({
+            "valueType": "reference", "value": "data.present", "default": "fallback"
+        });
+        assert_eq!(resolve(&present, &source), json!("here"));
+    }
+
+    /// An unfinished reference (no path picked yet) must not emit the whole
+    /// workflow scope: it resolves like an absent one.
+    #[test]
+    fn test_output_reference_empty_path_resolves_as_absent() {
+        let source = json!({
+            "data": {"secret": "s"},
+            "steps": {"fetch": {"outputs": {"q": "found"}}}
+        });
+
+        for path in ["", ".", ".."] {
+            let output = json!({"valueType": "reference", "value": path});
+            assert_eq!(resolve(&output, &source), json!(null), "path {path:?}");
+        }
+
+        let with_default = json!({"valueType": "reference", "value": "", "default": "unset"});
+        assert_eq!(resolve(&with_default, &source), json!("unset"));
+
+        let typed_default = json!({
+            "valueType": "reference", "value": "", "default": "7", "type": "integer"
+        });
+        assert_eq!(resolve(&typed_default, &source), json!(7));
+
+        let nested = json!({
+            "picked": {"valueType": "reference", "value": "steps['fetch'].outputs.q"},
+            "unpicked": {"valueType": "reference", "value": ""}
+        });
+        assert_eq!(
+            resolve(&nested, &source),
+            json!({"picked": "found", "unpicked": null})
+        );
+    }
+
+    #[test]
+    fn test_output_reference_type_hint_coerces() {
+        let source = json!({"data": {"count": "42"}});
+        let output = json!({"valueType": "reference", "value": "data.count", "type": "integer"});
+        assert_eq!(resolve(&output, &source), json!(42));
+    }
+
+    /// `+1` is not an index token, so it addresses a named key — and a named key
+    /// into an array is a shape mismatch, which fails loudly unless a `default`
+    /// is declared.
+    #[test]
+    fn test_output_reference_shape_mismatch_errors_without_default() {
+        let source = json!({"data": {"items": ["a", "b"]}});
+
+        let plus = json!({"valueType": "reference", "value": "data.items.+1"});
+        let err = process_switch_output(&plus, &source).expect_err("+1 is a key, not an index");
+        assert!(err.contains("is an array with no field '+1'"), "{err}");
+
+        let named = json!({"valueType": "reference", "value": "data.items.first"});
+        assert!(process_switch_output(&named, &source).is_err());
+
+        let with_default = json!({
+            "valueType": "reference", "value": "data.items.first", "default": "none"
+        });
+        assert_eq!(resolve(&with_default, &source), json!("none"));
+    }
+
+    #[test]
+    fn test_output_nested_reference_error_propagates() {
+        let source = json!({"data": {"items": []}});
+        let output = json!({
+            "label": "ok",
+            "list": [{"valueType": "reference", "value": "data.items.first"}]
+        });
+        assert!(process_switch_output(&output, &source).is_err());
     }
 
     #[test]
     fn test_output_immediate_value() {
         let source = json!({});
         let output = json!({"valueType": "immediate", "value": {"result": true}});
-        assert_eq!(
-            process_switch_output(&output, &source),
-            json!({"result": true})
-        );
+        assert_eq!(resolve(&output, &source), json!({"result": true}));
     }
 
     #[test]
@@ -166,7 +269,7 @@ mod tests {
             "label": "Status",
             "resolved": {"valueType": "reference", "value": "data.status"}
         });
-        let result = process_switch_output(&output, &source);
+        let result = resolve(&output, &source);
         assert_eq!(result["label"], json!("Status"));
         assert_eq!(result["resolved"], json!("active"));
     }
@@ -179,7 +282,7 @@ mod tests {
             {"valueType": "immediate", "value": "literal"},
             "plain"
         ]);
-        let result = process_switch_output(&output, &source);
+        let result = resolve(&output, &source);
         assert_eq!(result, json!([1, "literal", "plain"]));
     }
 }
