@@ -95,6 +95,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tenant. `e2e/test_served_tenants.sh` serves two tenants from one process
   and checks neither reads the other's workflows, versions or runs.
 
+- **A missing connection is named by its id.** The guest-facing connection
+  resolver answers `CONNECTION_NOT_FOUND` with "Connection '<id>' not found",
+  echoing the id the workflow asked for and still nothing else
+  (`e2e/test_connection_ref_workflow.sh` passes again; SYN-780).
+
 - **S3 tests run on RustFS.** MinIO no longer publishes open images, so
   the artifact store's S3 test (now `tests/object_store_s3.rs`), the trusted
   signing roundtrip and `e2e/test_object_store.sh` use a pinned
