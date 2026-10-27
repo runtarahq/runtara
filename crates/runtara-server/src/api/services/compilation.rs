@@ -1493,6 +1493,69 @@ impl CompilationService {
         })
     }
 
+    /// Republish the tenant's staged workflow-agents that another lowering
+    /// built (see [`crate::workflow_agents::stale_agents`]), from the version
+    /// each was published from, or the workflow's current version when it
+    /// recorded none. A parent compiled afterwards composes the new
+    /// artifact. Answers how many were republished and how many failed.
+    pub async fn restage_stale_workflow_agents(&self, tenant_id: &str) -> (usize, usize) {
+        let lowering = crate::config::workflow_lowering_tag();
+        let (mut restaged, mut failed) = (0, 0);
+        for agent in crate::workflow_agents::stale_agents(tenant_id, &lowering) {
+            let target = match agent.published.clone() {
+                Some((workflow_id, version)) => Ok(Some((workflow_id, version as i32))),
+                None => self.current_version_of_slug(tenant_id, &agent.slug).await,
+            };
+            let outcome = match target {
+                Ok(Some((workflow_id, version))) => self
+                    .publish_workflow_agent(tenant_id, &workflow_id, version, agent.slug.clone())
+                    .await
+                    .map(|_| ()),
+                Ok(None) => Err(ServiceError::NotFound(format!(
+                    "no live workflow has the slug `{}`",
+                    agent.slug
+                ))),
+                Err(error) => Err(error),
+            };
+            match outcome {
+                Ok(()) => {
+                    restaged += 1;
+                    info!(%tenant_id, slug = %agent.slug, "restaged workflow-agent for this lowering");
+                }
+                Err(error) => {
+                    failed += 1;
+                    warn!(
+                        %tenant_id, slug = %agent.slug, %error,
+                        "could not restage workflow-agent; republish it"
+                    );
+                }
+            }
+        }
+        (restaged, failed)
+    }
+
+    async fn current_version_of_slug(
+        &self,
+        tenant_id: &str,
+        slug: &str,
+    ) -> Result<Option<(String, i32)>, ServiceError> {
+        let database = |e: sqlx::Error| ServiceError::DatabaseError(e.to_string());
+        let Some(workflow_id) = self
+            .repository
+            .find_by_slug(tenant_id, slug)
+            .await
+            .map_err(database)?
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .repository
+            .get_current_or_latest_version(tenant_id, &workflow_id)
+            .await
+            .map_err(database)?
+            .map(|version| (workflow_id, version)))
+    }
+
     /// Publish a workflow version AS an agent: compile it with the
     /// `PublishedAgent` ABI (exports `runtara:agent-<slug>/capabilities`),
     /// synthesize the catalog `AgentInfo` from its input/output schemas, and

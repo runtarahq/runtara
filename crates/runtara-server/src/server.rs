@@ -1314,6 +1314,32 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
         native_control.install(runtime_client.clone());
     }
 
+    // Workflow-agents staged by another lowering (an upgrade changed how
+    // they compile) are republished from their versions, off the boot path.
+    {
+        let service = api::services::compilation::CompilationService::new(
+            Arc::new(api::repositories::workflows::WorkflowRepository::new(
+                pool.clone(),
+            )),
+            runtime_client.clone(),
+        )
+        .with_agent_catalog(agent_catalog.clone())
+        .with_direct_compilation(
+            api::services::compilation::direct_compilation_settings_from_config(),
+        );
+        let tenant_id = config::tenant_id().to_string();
+        tokio::spawn(async move {
+            let (restaged, failed) = service.restage_stale_workflow_agents(&tenant_id).await;
+            if restaged + failed > 0 {
+                tracing::info!(
+                    restaged,
+                    failed,
+                    "restaged workflow-agents for this lowering"
+                );
+            }
+        });
+    }
+
     // Install before any Valkey worker is started. Environment commits its
     // launch lifecycle transitions in a separate database, so the adapter
     // owns only the matching server-side outbox reservation; failed callbacks

@@ -500,6 +500,23 @@ impl WorkflowRepository {
         .await
     }
 
+    /// The live workflow that has `slug` in the tenant.
+    pub async fn find_by_slug(
+        &self,
+        tenant_id: &str,
+        slug: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT workflow_id FROM workflows \
+             WHERE tenant_id = $1 AND slug = $2 AND deleted_at IS NULL",
+        )
+        .bind(tenant_id)
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(workflow_id,)| workflow_id))
+    }
+
     /// Read a workflow's slug from the identity row.
     pub async fn get_slug(
         &self,

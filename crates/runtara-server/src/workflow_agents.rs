@@ -167,6 +167,7 @@ pub fn unstage(tenant_id: &str, slug: &str) -> std::io::Result<()> {
     for name in [
         format!("runtara_agent_{snake}.wasm"),
         format!("runtara_agent_{snake}.meta.json"),
+        format!("runtara_agent_{snake}.lowering"),
     ] {
         match std::fs::remove_file(dir.join(&name)) {
             Ok(()) => {}
@@ -210,7 +211,51 @@ pub fn stage(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(&meta_path, meta_json)?;
     std::fs::copy(composed_wasm, &wasm_path)?;
+    // Last: an artifact with no record of its lowering is restaged.
+    std::fs::write(
+        dir.join(format!("runtara_agent_{snake}.lowering")),
+        crate::config::workflow_lowering_tag(),
+    )?;
     Ok((wasm_path, meta_path))
+}
+
+/// A staged workflow-agent that was built by another lowering than this
+/// server's, and the version it was published from when it recorded one.
+#[derive(Debug, Clone)]
+pub struct StaleAgent {
+    pub slug: String,
+    pub published: Option<(String, u32)>,
+}
+
+/// The tenant's staged workflow-agents that must be rebuilt: no record of
+/// their lowering, another lowering than `lowering`, or `cancellable` waits
+/// the runtime no longer loads.
+pub fn stale_agents(tenant_id: &str, lowering: &str) -> Vec<StaleAgent> {
+    let dir = staging_dir(tenant_id);
+    let mut stale = Vec::new();
+    for info in load_tenant_agents(tenant_id) {
+        let snake = info.id.replace('-', "_");
+        let recorded = std::fs::read_to_string(dir.join(format!("runtara_agent_{snake}.lowering")));
+        let cancellable = std::fs::read(dir.join(format!("runtara_agent_{snake}.wasm")))
+            .map(|bytes| {
+                let marker = b"[cancellable]";
+                bytes.windows(marker.len()).any(|window| window == marker)
+            })
+            .unwrap_or(false);
+        if recorded.as_deref().ok() == Some(lowering) && !cancellable {
+            continue;
+        }
+        let published = info
+            .capabilities
+            .iter()
+            .find_map(|capability| capability.workflow_run.as_ref())
+            .map(|run| (run.workflow_id.clone(), run.version));
+        stale.push(StaleAgent {
+            slug: info.id.clone(),
+            published,
+        });
+    }
+    stale
 }
 
 #[cfg(test)]
@@ -279,6 +324,47 @@ mod tests {
         let merged = catalog_with_workflow_agents(&base, TENANT);
         let ids: Vec<_> = merged.agents().iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["s3-storage", "tenant-safe"]);
+    }
+
+    #[tokio::test]
+    async fn agents_staged_by_another_lowering_or_with_cancellable_waits_are_stale() {
+        // No other test uses this tenant.
+        const TENANT: &str = "stale-lowering-tenant";
+        let _env = crate::test_env::ENV_MUTEX.lock().await;
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set("DATA_DIR", data_dir.path().to_str().unwrap());
+        let lowering = crate::config::workflow_lowering_tag();
+        let wasm = data_dir.path().join("agent.wasm");
+        std::fs::write(&wasm, b"\0asm[async-lift]").unwrap();
+        let waits = data_dir.path().join("waits.wasm");
+        std::fs::write(&waits, b"\0asm[cancellable][waitable-set-wait]").unwrap();
+
+        stage(TENANT, "fresh", &wasm, &info("fresh")).unwrap();
+        let published = runtara_dsl::agent_meta::with_workflow_run(
+            info("relowered"),
+            runtara_dsl::agent_meta::WorkflowRunTarget {
+                workflow_id: "wf-1".into(),
+                version: 3,
+                parks: false,
+            },
+        );
+        stage(TENANT, "relowered", &wasm, &published).unwrap();
+        let dir = staging_dir(TENANT);
+        std::fs::write(dir.join("runtara_agent_relowered.lowering"), "older").unwrap();
+        stage(TENANT, "unrecorded", &wasm, &info("unrecorded")).unwrap();
+        std::fs::remove_file(dir.join("runtara_agent_unrecorded.lowering")).unwrap();
+        stage(TENANT, "waits", &waits, &info("waits")).unwrap();
+
+        let mut stale = stale_agents(TENANT, &lowering);
+        stale.sort_by(|a, b| a.slug.cmp(&b.slug));
+        let slugs: Vec<_> = stale.iter().map(|agent| agent.slug.as_str()).collect();
+        assert_eq!(slugs, ["relowered", "unrecorded", "waits"]);
+        assert_eq!(stale[0].published, Some(("wf-1".to_string(), 3)));
+        assert_eq!(stale[1].published, None);
+
+        unstage(TENANT, "relowered").unwrap();
+        assert!(!dir.join("runtara_agent_relowered.lowering").exists());
     }
 
     #[test]

@@ -337,9 +337,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Published workflow-agents are now lifted async with a callback. The
     emitted body is unchanged; the compiler instruments it so that each wait
     returns to the event loop and resumes where it stopped. Workflow-agents
-    published before this release must be republished: their artifacts use
-    `cancellable` waits that Wasmtime 50 refuses to load, and compiling a
-    workflow that calls one says so.
+    published before this release are republished from their versions when
+    the server boots: their artifacts use `cancellable` waits that Wasmtime
+    50 refuses to load. One that cannot be republished is logged, and
+    compiling a workflow that calls it asks for a republish.
   - Raw `wasi:http@0.2` stays denied; `wasi:http@0.3` reaches only the
     workflow API.
   - A workflow API request is now served on a task of its own, so it makes
