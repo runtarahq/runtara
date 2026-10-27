@@ -295,10 +295,10 @@ jobs:
         run: cargo test -p runtara-store-postgres --features db-integration-tests -- --test-threads=1
 
       # The artifact store's object-storage backend against a real
-      # S3-compatible service: a throwaway MinIO container started by the test.
-      - name: Run runtara-artifact-store tests (filesystem + MinIO)
+      # S3-compatible service: a throwaway RustFS container started by the test.
+      - name: Run runtara-artifact-store tests (filesystem + RustFS)
         run: |
-          docker pull minio/minio:latest
+          docker pull rustfs/rustfs:1.0.4
           cargo test -p runtara-artifact-store --features test-support,object-store-integration-tests
 
   test-server:

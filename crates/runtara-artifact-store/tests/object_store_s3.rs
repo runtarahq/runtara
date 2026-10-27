@@ -1,8 +1,8 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The object-storage artifact store against a real S3-compatible service:
-//! a MinIO container started for the test (needs docker and the
-//! `minio/minio` image).
+//! a RustFS container started for the test (needs docker and the pinned
+//! `rustfs/rustfs` image), which checks SigV4 signatures.
 
 use std::process::Command;
 
@@ -13,20 +13,21 @@ use runtara_artifact_store::{ArtifactStore, Digest, Manifest, release};
 const USER: &str = "runtara-test";
 const SECRET: &str = "runtara-test-secret";
 const BUCKET: &str = "runtara-artifacts";
+const IMAGE: &str = "rustfs/rustfs:1.0.4";
 
-/// A MinIO container with one bucket, removed when dropped.
-struct Minio {
+/// An S3-compatible container with one bucket, removed when dropped.
+struct S3Service {
     container: String,
     endpoint: String,
 }
 
-impl Minio {
+impl S3Service {
     fn start() -> Self {
         let output = Command::new("docker")
             .args(["run", "-d", "--rm", "-p", "127.0.0.1::9000"])
-            .args(["-e", &format!("MINIO_ROOT_USER={USER}")])
-            .args(["-e", &format!("MINIO_ROOT_PASSWORD={SECRET}")])
-            .args(["minio/minio:latest", "server", "/data"])
+            .args(["-e", &format!("RUSTFS_ACCESS_KEY={USER}")])
+            .args(["-e", &format!("RUSTFS_SECRET_KEY={SECRET}")])
+            .arg(IMAGE)
             .output()
             .expect("docker is required for the object-store integration tests");
         assert!(output.status.success(), "docker run: {output:?}");
@@ -42,19 +43,19 @@ impl Minio {
             .expect("a mapped port")
             .trim()
             .to_owned();
-        let minio = Self {
+        let service = Self {
             endpoint: format!("http://{address}"),
             container,
         };
-        // Ready once the bucket can be made.
+        // Ready once the bucket can be made: a SigV4-signed PUT from the
+        // image's own curl.
         let mut made = false;
         for _ in 0..60 {
             let status = Command::new("docker")
-                .args(["exec", &minio.container, "sh", "-c"])
-                .arg(format!(
-                    "mc alias set local http://127.0.0.1:9000 {USER} {SECRET} >/dev/null 2>&1 \
-                     && mc mb --ignore-existing local/{BUCKET} >/dev/null 2>&1"
-                ))
+                .args(["exec", &service.container, "curl", "-sf", "-o", "/dev/null"])
+                .args(["--aws-sigv4", "aws:amz:us-east-1:s3"])
+                .args(["--user", &format!("{USER}:{SECRET}")])
+                .args(["-X", "PUT", &format!("http://127.0.0.1:9000/{BUCKET}")])
                 .status()
                 .unwrap();
             if status.success() {
@@ -63,8 +64,8 @@ impl Minio {
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
-        assert!(made, "MinIO did not come up");
-        minio
+        assert!(made, "the S3 service did not come up");
+        service
     }
 
     fn store(&self, prefix: &str, cache: &std::path::Path) -> ObjectArtifactStore {
@@ -84,7 +85,7 @@ impl Minio {
     }
 }
 
-impl Drop for Minio {
+impl Drop for S3Service {
     fn drop(&mut self) {
         let _ = Command::new("docker")
             .args(["rm", "-f", &self.container])
@@ -94,9 +95,9 @@ impl Drop for Minio {
 
 #[tokio::test]
 async fn a_bucket_holds_content_records_and_releases() {
-    let minio = Minio::start();
+    let s3 = S3Service::start();
     let cache = tempfile::tempdir().unwrap();
-    let store = minio.store("tenant-a", cache.path());
+    let store = s3.store("tenant-a", cache.path());
 
     let digest = store.put(b"workflow").await.unwrap();
     assert_eq!(digest, Digest::of(b"workflow"));
@@ -132,7 +133,7 @@ async fn a_bucket_holds_content_records_and_releases() {
     );
 
     // A prefix is its own store.
-    let other = minio.store("tenant-b", cache.path());
+    let other = s3.store("tenant-b", cache.path());
     assert!(other.list_manifests("").await.unwrap().is_empty());
 
     // A release published to the bucket loads back whole.

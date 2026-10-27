@@ -1,5 +1,5 @@
 #!/bin/bash
-# E2E Test: every artifact lives in an S3-compatible bucket (MinIO).
+# E2E Test: every artifact lives in an S3-compatible bucket (RustFS).
 #
 #   1. PUBLISH — a server with RUNTARA_ARTIFACT_STORE_URL pointing at the
 #      bucket publishes its components as a release and compiles and runs a
@@ -10,8 +10,8 @@
 #      workflow from its image in the bucket, and compiles and runs a new one.
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
-# environment) + docker (isolated Valkey, and MinIO from the local
-# minio/minio image) and the shared workflow components
+# environment) + docker (isolated Valkey, and RustFS from the pinned
+# rustfs/rustfs image) and the shared workflow components
 # in target/wasm32-wasip2/release (scripts/build-agent-components.sh).
 
 set -euo pipefail
@@ -40,10 +40,11 @@ TEST_DATA_DIR="$(mktemp -d -t runtara_object_store_e2e_XXXXXX)"
 TEST_LOG="${TEST_DATA_DIR}/server.log"
 SERVER_PID=""
 VALKEY_CONTAINER=""
-MINIO_CONTAINER=""
-# Test-only credentials of the throwaway MinIO container.
-MINIO_USER="runtara-test"
-MINIO_SECRET="runtara-test-secret"
+S3_CONTAINER=""
+S3_IMAGE="rustfs/rustfs:1.0.4"
+# Test-only credentials of the throwaway S3 container.
+S3_USER="runtara-test"
+S3_SECRET="runtara-test-secret"
 BUCKET="runtara-artifacts"
 TENANT="object_store_e2e"
 
@@ -70,8 +71,8 @@ cleanup() {
     if [ -n "${VALKEY_CONTAINER}" ]; then
         docker rm -f "${VALKEY_CONTAINER}" >/dev/null 2>&1 || true
     fi
-    if [ -n "${MINIO_CONTAINER}" ]; then
-        docker rm -f "${MINIO_CONTAINER}" >/dev/null 2>&1 || true
+    if [ -n "${S3_CONTAINER}" ]; then
+        docker rm -f "${S3_CONTAINER}" >/dev/null 2>&1 || true
     fi
     psql_quiet -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB_SERVER}" >/dev/null 2>&1 || true
     psql_quiet -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB_RUNTIME}" >/dev/null 2>&1 || true
@@ -134,20 +135,22 @@ for _ in {1..20}; do
     sleep 0.5
 done
 
-print_step "Starting MinIO with bucket ${BUCKET}..."
-MINIO_CONTAINER=$(docker run -d --rm -p 127.0.0.1::9000 \
-    -e "MINIO_ROOT_USER=${MINIO_USER}" -e "MINIO_ROOT_PASSWORD=${MINIO_SECRET}" \
-    minio/minio:latest server /data)
-MINIO_ENDPOINT="http://$(docker port "${MINIO_CONTAINER}" 9000/tcp | head -1)"
-mc_in_minio() {
-    docker exec "${MINIO_CONTAINER}" sh -c \
-        "mc alias set local http://127.0.0.1:9000 ${MINIO_USER} ${MINIO_SECRET} >/dev/null 2>&1 && $1"
+print_step "Starting RustFS with bucket ${BUCKET}..."
+S3_CONTAINER=$(docker run -d --rm -p 127.0.0.1::9000 \
+    -e "RUSTFS_ACCESS_KEY=${S3_USER}" -e "RUSTFS_SECRET_KEY=${S3_SECRET}" \
+    "${S3_IMAGE}")
+S3_ENDPOINT="http://$(docker port "${S3_CONTAINER}" 9000/tcp | head -1)"
+# A SigV4-signed request from the container's own curl.
+s3_request() {
+    docker exec "${S3_CONTAINER}" curl -sf --aws-sigv4 "aws:amz:us-east-1:s3" \
+        --user "${S3_USER}:${S3_SECRET}" "$@"
 }
 for _ in {1..60}; do
-    mc_in_minio "mc mb --ignore-existing local/${BUCKET}" >/dev/null 2>&1 && break
+    s3_request -o /dev/null -X PUT "http://127.0.0.1:9000/${BUCKET}" 2>/dev/null && break
     sleep 0.5
 done
-mc_in_minio "mc ls local/${BUCKET}" >/dev/null || { print_error "MinIO did not come up"; exit 1; }
+s3_request -o /dev/null "http://127.0.0.1:9000/${BUCKET}?list-type=2" \
+    || { print_error "RustFS did not come up"; exit 1; }
 
 print_step "Creating test databases..."
 psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_SERVER}" >/dev/null
@@ -168,11 +171,11 @@ start_server() {
     RUNTARA_ENV_HTTP_PORT="${TEST_ENV_HTTP_PORT}" \
     RUNTARA_AGENT_COMPONENTS_DIR="${AGENTS_DIR-${COMPONENTS_DIR}}" \
     RUNTARA_ARTIFACT_STORE_URL="s3://${BUCKET}/runtara" \
-    AWS_ENDPOINT="${MINIO_ENDPOINT}" \
+    AWS_ENDPOINT="${S3_ENDPOINT}" \
     AWS_ALLOW_HTTP=true \
     AWS_REGION=us-east-1 \
-    AWS_ACCESS_KEY_ID="${MINIO_USER}" \
-    AWS_SECRET_ACCESS_KEY="${MINIO_SECRET}" \
+    AWS_ACCESS_KEY_ID="${S3_USER}" \
+    AWS_SECRET_ACCESS_KEY="${S3_SECRET}" \
     MAX_CONCURRENT_EXECUTIONS=40 \
     DATA_DIR="${SERVER_DATA_DIR:-${TEST_DATA_DIR}/a}" \
     RUST_LOG="warn,runtara_server=info" \
@@ -220,7 +223,12 @@ run_echo() {
 
 
 runtime_sql() { psql_quiet -d "${TEST_DB_RUNTIME}" -c "$1"; }
-bucket_objects() { mc_in_minio "mc ls --recursive local/${BUCKET}/runtara/$1" | awk '{print $NF}'; }
+# The keys under runtara/<prefix>, relative to it.
+bucket_objects() {
+    local prefix="runtara/$1"
+    s3_request "http://127.0.0.1:9000/${BUCKET}?list-type=2&max-keys=1000&prefix=${prefix//\//%2F}" \
+        | grep -o '<Key>[^<]*</Key>' | sed -e 's#^<Key>##' -e 's#</Key>$##' -e "s#^${prefix}##"
+}
 
 HASH_OF_HELLO="2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 run_workflow() {

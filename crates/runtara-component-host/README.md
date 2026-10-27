@@ -65,12 +65,10 @@ lives in `runtara-wit` and moves as one release.
 
 Run `cargo test -p runtara-component-host --features component-integration-tests --test trusted`
 after building the agent components with `scripts/build-agent-components.sh`.
-The provider roundtrip tests require Docker. The MinIO fixture builds its pinned
-source release with the embedded `tests/trusted/minio.Dockerfile`, rather than
-pulling an upstream MinIO image. Its first run needs access to Docker Hub and
-the Go module proxy and takes longer; subsequent runs use Docker's build cache.
-Azurite uses its published container image. Both providers remain real HTTP
-roundtrip tests of the restricted WASM signing exports.
+The provider roundtrip tests require Docker. S3 runs against a pinned RustFS
+image (`rustfs/rustfs`, which verifies SigV4) and Azure against Azurite's
+published image. Both remain real HTTP roundtrip tests of the restricted WASM
+signing exports.
 
 ## Where it slots in
 

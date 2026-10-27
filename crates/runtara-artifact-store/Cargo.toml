@@ -15,7 +15,7 @@ test-support = []
 # local filesystem through the `object_store` crate. TLS uses rustls on ring,
 # like the rest of the workspace (no aws-lc C build).
 object-store = ["dep:object_store", "dep:futures", "dep:url", "dep:reqwest", "dep:rustls"]
-# Tests against a real S3-compatible store (MinIO); needs docker.
+# Tests against a real S3-compatible store (RustFS); needs docker.
 object-store-integration-tests = ["object-store"]
 
 [dependencies]
@@ -34,11 +34,11 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 
 [dev-dependencies]
 tempfile = "3"
-# The MinIO test fetches presigned URLs over plain HTTP.
+# The S3 test fetches presigned URLs over plain HTTP.
 reqwest = { version = "0.13", default-features = false }
 tokio = { version = "1", features = ["fs", "io-util", "rt", "macros", "time"] }
 
 [[test]]
-name = "object_store_minio"
-path = "tests/object_store_minio.rs"
+name = "object_store_s3"
+path = "tests/object_store_s3.rs"
 required-features = ["object-store-integration-tests"]

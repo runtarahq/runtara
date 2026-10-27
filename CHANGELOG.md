@@ -95,6 +95,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tenant. `e2e/test_served_tenants.sh` serves two tenants from one process
   and checks neither reads the other's workflows, versions or runs.
 
+- **S3 tests run on RustFS.** MinIO no longer publishes open images, so
+  the artifact store's S3 test (now `tests/object_store_s3.rs`), the trusted
+  signing roundtrip and `e2e/test_object_store.sh` use a pinned
+  `rustfs/rustfs:1.0.4`, which verifies SigV4. Buckets are created with a
+  signed request from the image's own `curl`, and the MinIO source-build
+  Dockerfile is gone.
+
 - **The UI switches tenants.** Where the UI is served at the bare mount, each
   served tenant also has its own copy at `/ui/{tenant}/`, with that tenant's
   base href, id and entitlements, so one server's SPA works for any of its
