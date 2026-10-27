@@ -42,6 +42,23 @@ impl PostgresPersistence {
         }
     }
 
+    /// Persistence for one tenant: every connection names the tenant
+    /// (`runtara.tenant_id`), so row-level security confines its reads and
+    /// writes to that tenant's rows, and a read of another tenant's fails
+    /// closed. An unscoped [`PostgresPersistence::new`] is the system path.
+    pub async fn for_tenant(
+        options: sqlx::postgres::PgConnectOptions,
+        tenant: &str,
+        max_connections: u32,
+    ) -> Result<Self, sqlx::Error> {
+        let options = options.options([("runtara.tenant_id", tenant)]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(max_connections)
+            .connect_with(options)
+            .await?;
+        Ok(Self::new(pool))
+    }
+
     /// Report terminal-state metrics to `sink`.
     ///
     /// Core assembles the facts; the host decides what they mean and where
@@ -2696,6 +2713,80 @@ mod tests {
         assert_eq!(checkpoints[0].checkpoint_id, "cp-1");
 
         cleanup_misc_instance(&pool, &instance_id).await;
+    }
+
+    /// A tenant-scoped store sees only its tenant: another tenant's instance
+    /// and checkpoints read as absent, and a write into them is refused.
+    #[tokio::test]
+    async fn a_tenant_scoped_store_cannot_cross_tenants() {
+        let pool = test_pool().await;
+        let system = PostgresPersistence::new(pool.clone());
+        let (own, other) = (misc_instance_id("rls-own"), misc_instance_id("rls-other"));
+        let (own_tenant, other_tenant) = (misc_tenant_id("rls-own"), misc_tenant_id("rls-other"));
+        system.register_instance(&own, &own_tenant).await.unwrap();
+        system
+            .register_instance(&other, &other_tenant)
+            .await
+            .unwrap();
+        system.save_checkpoint(&own, "cp", b"own").await.unwrap();
+        system
+            .save_checkpoint(&other, "cp", b"other")
+            .await
+            .unwrap();
+
+        // Row-level security does not bind a superuser or a BYPASSRLS role,
+        // which the test database's own role may be: the scoped store logs in
+        // as a plain role made for this test.
+        let role = format!("rls_probe_{}", Uuid::new_v4().simple());
+        let secret = Uuid::new_v4().simple().to_string();
+        for statement in [
+            format!("CREATE ROLE {role} LOGIN PASSWORD '{secret}' NOSUPERUSER NOBYPASSRLS"),
+            format!("GRANT USAGE ON SCHEMA public TO {role}"),
+            format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {role}"
+            ),
+            format!("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {role}"),
+        ] {
+            sqlx::query(&statement).execute(&pool).await.unwrap();
+        }
+        let url = std::env::var("TEST_RUNTARA_DATABASE_URL").unwrap();
+        let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
+        let scoped = PostgresPersistence::for_tenant(
+            options.username(&role).password(&secret),
+            &own_tenant,
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(scoped.get_instance(&own).await.unwrap().is_some());
+        assert!(scoped.load_checkpoint(&own, "cp").await.unwrap().is_some());
+        assert!(
+            scoped.get_instance(&other).await.unwrap().is_none(),
+            "fails closed"
+        );
+        assert!(
+            scoped
+                .load_checkpoint(&other, "cp")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            scoped
+                .insert_signal(&other, CoreSignalType::Pause, b"")
+                .await
+                .is_err(),
+            "a write into another tenant is refused"
+        );
+        // The system path still sees both.
+        assert!(system.get_instance(&other).await.unwrap().is_some());
+
+        scoped.pool.close().await;
+        for statement in [format!("DROP OWNED BY {role}"), format!("DROP ROLE {role}")] {
+            sqlx::query(&statement).execute(&pool).await.unwrap();
+        }
+        cleanup_misc_instance(&pool, &own).await;
+        cleanup_misc_instance(&pool, &other).await;
     }
 
     /// Instance-scoped rows record their instance's tenant without the write

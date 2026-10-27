@@ -100,8 +100,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attempts, continuations and control receipts, and environment migration
   `20261028000000` to workflow API receipts. Existing rows are backfilled
   from their instance (or launch), and a `BEFORE INSERT` trigger fills new
-  rows the same way, so no write path changes. This is the first step of
-  tenant-scoped persistence (M5.3); row-level security follows.
+  rows the same way, so no write path changes. Store migration 054 and
+  environment migration `20261028000100` then enable and force row-level
+  security on every tenant-bearing table: a connection that names a tenant
+  (`runtara.tenant_id`, set by `PostgresPersistence::for_tenant`) reads and
+  writes only that tenant's rows, so a read of another tenant's fails closed,
+  while a connection that names none is the system path (today's pools and
+  the cross-tenant workers) and is unchanged. Row-level security does not
+  bind a superuser or a `BYPASSRLS` role, so a tenant-scoped pool must log in
+  as a plain role.
 
 - **Entitlements are per tenant.** Every entitlement check (features,
   agents, limits, API keys, SQL, trusted calls, concurrent executions, bulk
