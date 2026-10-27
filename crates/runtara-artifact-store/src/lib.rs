@@ -8,6 +8,11 @@
 //! image, later an agent release) record its digest, never a path: where the
 //! bytes live is the store's business. [`FilesystemArtifactStore`] is the
 //! default; an object-storage store implements the same trait.
+//!
+//! An artifact's record is a [`Manifest`] under a key (`agents/<id>/<version>.json`,
+//! `components/<name>/<version>.json`, `agents/index/<release>.json`): its
+//! metadata and the digest of its content, written after the content, so the
+//! manifest is the commit point and the two cannot drift.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -41,6 +46,19 @@ impl Digest {
     }
 }
 
+impl serde::Serialize for Digest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Digest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let hex = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Digest::parse(&hex).map_err(serde::de::Error::custom)
+    }
+}
+
 impl fmt::Display for Digest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -51,8 +69,67 @@ impl fmt::Display for Digest {
 pub enum ArtifactError {
     #[error("not a sha256 digest: {0:?}")]
     InvalidDigest(String),
+    #[error("not a manifest key: {0:?}")]
+    InvalidKey(String),
+    #[error("manifest {key} names content {content} that is not stored")]
+    MissingContent { key: String, content: Digest },
+    #[error("manifest {key} is malformed: {message}")]
+    InvalidManifest { key: String, message: String },
+    #[error("release: {0}")]
+    Release(String),
     #[error("artifact store I/O: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// An artifact's record: the digest of its content and its metadata (an
+/// agent's `.meta.json`), kept as the exact JSON text it was written with, so
+/// anything hashed over the metadata hashes the same bytes it was built from.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Manifest {
+    pub content: Digest,
+    pub metadata: Box<serde_json::value::RawValue>,
+}
+
+impl Manifest {
+    /// A manifest for `content` with `metadata`, which must be JSON.
+    pub fn new(content: Digest, metadata: &[u8]) -> Result<Self, serde_json::Error> {
+        let text = std::str::from_utf8(metadata).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            content,
+            metadata: serde_json::value::RawValue::from_string(text.to_owned())?,
+        })
+    }
+
+    /// The metadata's exact bytes.
+    pub fn metadata_bytes(&self) -> &[u8] {
+        self.metadata.get().as_bytes()
+    }
+}
+
+impl PartialEq for Manifest {
+    fn eq(&self, other: &Self) -> bool {
+        self.content == other.content && self.metadata.get() == other.metadata.get()
+    }
+}
+
+/// A manifest key: `/`-separated segments of lowercase letters, digits, `.`,
+/// `_` and `-`, ending in `.json`, never `.` or `..`. Keys name files and
+/// object keys, so nothing else gets in.
+pub fn validate_manifest_key(key: &str) -> Result<(), ArtifactError> {
+    let valid = key.ends_with(".json")
+        && key.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment
+                    .bytes()
+                    .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'))
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(ArtifactError::InvalidKey(key.to_owned()))
+    }
 }
 
 /// Where artifacts are kept, by digest.
@@ -78,6 +155,14 @@ pub trait ArtifactStore: Send + Sync {
     /// Remove the artifact; `false` when it was not stored. The caller owns
     /// knowing that nothing references it any more.
     async fn delete(&self, digest: &Digest) -> Result<bool, ArtifactError>;
+
+    /// Record `manifest` under `key`, replacing what was there. Refused when
+    /// its content is not stored: content first, then the manifest.
+    async fn put_manifest(&self, key: &str, manifest: &Manifest) -> Result<(), ArtifactError>;
+
+    /// The manifest under `key`, or `None`. A manifest whose content is not
+    /// stored is refused, never half-loaded.
+    async fn get_manifest(&self, key: &str) -> Result<Option<Manifest>, ArtifactError>;
 }
 
 /// Artifacts as files under a root directory: `blobs/sha256/<digest>`.
@@ -102,6 +187,30 @@ impl FilesystemArtifactStore {
     fn blob(&self, digest: &Digest) -> PathBuf {
         self.blobs().join(digest.as_str())
     }
+
+    fn manifest(&self, key: &str) -> Result<PathBuf, ArtifactError> {
+        validate_manifest_key(key)?;
+        Ok(self.root.join("manifests").join(key))
+    }
+}
+
+/// Write `bytes` to `path` whole or not at all: beside it, then renamed.
+async fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), ArtifactError> {
+    let dir = path.parent().expect("artifact paths have a parent");
+    tokio::fs::create_dir_all(dir).await?;
+    let temporary = dir.join(format!(".upload-{}", uuid::Uuid::new_v4()));
+    let written = async {
+        let mut file = tokio::fs::File::create(&temporary).await?;
+        file.write_all(bytes).await?;
+        file.sync_all().await?;
+        tokio::fs::rename(&temporary, path).await
+    }
+    .await;
+    if let Err(error) = written {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -112,23 +221,8 @@ impl ArtifactStore for FilesystemArtifactStore {
         if tokio::fs::try_exists(&path).await? {
             return Ok(digest);
         }
-        let blobs = self.blobs();
-        tokio::fs::create_dir_all(&blobs).await?;
-        // Written beside its final name and renamed into place, so a reader
-        // sees the whole artifact or none. A racing writer of the same bytes
-        // renames identical content over it.
-        let temporary = blobs.join(format!(".upload-{}", uuid::Uuid::new_v4()));
-        let written = async {
-            let mut file = tokio::fs::File::create(&temporary).await?;
-            file.write_all(bytes).await?;
-            file.sync_all().await?;
-            tokio::fs::rename(&temporary, &path).await
-        }
-        .await;
-        if let Err(error) = written {
-            let _ = tokio::fs::remove_file(&temporary).await;
-            return Err(error.into());
-        }
+        // A racing writer of the same bytes renames identical content over it.
+        write_atomically(&path, bytes).await?;
         Ok(digest)
     }
 
@@ -156,7 +250,41 @@ impl ArtifactStore for FilesystemArtifactStore {
             Err(error) => Err(error.into()),
         }
     }
+
+    async fn put_manifest(&self, key: &str, manifest: &Manifest) -> Result<(), ArtifactError> {
+        let path = self.manifest(key)?;
+        if !self.exists(&manifest.content).await? {
+            return Err(ArtifactError::MissingContent {
+                key: key.to_owned(),
+                content: manifest.content.clone(),
+            });
+        }
+        let bytes = serde_json::to_vec(manifest).expect("a manifest serializes");
+        write_atomically(&path, &bytes).await
+    }
+
+    async fn get_manifest(&self, key: &str) -> Result<Option<Manifest>, ArtifactError> {
+        let bytes = match tokio::fs::read(self.manifest(key)?).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let manifest: Manifest =
+            serde_json::from_slice(&bytes).map_err(|error| ArtifactError::InvalidManifest {
+                key: key.to_owned(),
+                message: error.to_string(),
+            })?;
+        if !self.exists(&manifest.content).await? {
+            return Err(ArtifactError::MissingContent {
+                key: key.to_owned(),
+                content: manifest.content,
+            });
+        }
+        Ok(Some(manifest))
+    }
 }
+
+pub mod release;
 
 #[cfg(feature = "test-support")]
 pub mod test_support {
@@ -167,13 +295,14 @@ pub mod test_support {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
-    use super::{ArtifactError, ArtifactStore, Digest, async_trait};
+    use super::{ArtifactError, ArtifactStore, Digest, Manifest, async_trait};
 
     /// Artifacts as the files they were added from, by the digest of the
     /// bytes each held when added.
     #[derive(Debug, Default)]
     pub struct FileMapStore {
         files: Mutex<HashMap<Digest, PathBuf>>,
+        manifests: Mutex<HashMap<String, Manifest>>,
     }
 
     impl FileMapStore {
@@ -225,6 +354,20 @@ pub mod test_support {
         async fn delete(&self, digest: &Digest) -> Result<bool, ArtifactError> {
             Ok(self.files.lock().unwrap().remove(digest).is_some())
         }
+
+        async fn put_manifest(&self, key: &str, manifest: &Manifest) -> Result<(), ArtifactError> {
+            super::validate_manifest_key(key)?;
+            self.manifests
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), manifest.clone());
+            Ok(())
+        }
+
+        async fn get_manifest(&self, key: &str) -> Result<Option<Manifest>, ArtifactError> {
+            super::validate_manifest_key(key)?;
+            Ok(self.manifests.lock().unwrap().get(key).cloned())
+        }
     }
 }
 
@@ -248,6 +391,68 @@ mod tests {
         ] {
             assert!(Digest::parse(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn manifest_keys_are_relative_json_paths() {
+        for good in [
+            "agents/http/1.2.0.json",
+            "agents/index/9.0.1.json",
+            "components/stdlib/a_b-c.json",
+        ] {
+            validate_manifest_key(good).unwrap();
+        }
+        for bad in [
+            "",
+            "agents/../x.json",
+            "/abs.json",
+            "agents//x.json",
+            "agents/x",
+            "Agents/x.json",
+            "agents/./x.json",
+        ] {
+            assert!(validate_manifest_key(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_manifest_is_committed_after_its_content_and_never_half_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FilesystemArtifactStore::new(dir.path());
+        let meta = b"{\n  \"id\": \"http\"\n}";
+        let missing = Manifest::new(Digest::of(b"agent"), meta).unwrap();
+        assert!(matches!(
+            store.put_manifest("agents/http/1.json", &missing).await,
+            Err(ArtifactError::MissingContent { .. })
+        ));
+        assert_eq!(
+            store.get_manifest("agents/http/1.json").await.unwrap(),
+            None
+        );
+
+        store.put(b"agent").await.unwrap();
+        store
+            .put_manifest("agents/http/1.json", &missing)
+            .await
+            .unwrap();
+        let read = store
+            .get_manifest("agents/http/1.json")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read, missing);
+        assert_eq!(
+            read.metadata_bytes(),
+            meta,
+            "metadata keeps its exact bytes"
+        );
+
+        // Content lost from under its manifest: refused, not served.
+        store.delete(&missing.content).await.unwrap();
+        assert!(matches!(
+            store.get_manifest("agents/http/1.json").await,
+            Err(ArtifactError::MissingContent { .. })
+        ));
     }
 
     #[tokio::test]

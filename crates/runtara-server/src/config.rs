@@ -242,8 +242,8 @@ impl Config {
         let dev_mode: bool = parse_bool_or("RUNTARA_DEV_MODE", cfg!(debug_assertions))?;
 
         // The entitlement allowlist tracks exactly the agents that are
-        // deployable — i.e. the WASM components present at
-        // `RUNTARA_AGENT_COMPONENTS_DIR`. The runtime only dispatches
+        // deployable — i.e. the agents of the release this server runs (see
+        // `agent_release`). The runtime only dispatches
         // components, so an agent that isn't there can't run and must not be
         // "registered". (The static `runtara_agents::registry` is no longer a
         // source here: most of it duplicates components that supersede it, and
@@ -369,15 +369,28 @@ fn parse_bool_or(name: &'static str, default: bool) -> Result<bool, ConfigError>
     }
 }
 
-/// Discover the kebab-cased agent ids deployed at
-/// `$RUNTARA_AGENT_COMPONENTS_DIR`, derived from `runtara_agent_*.wasm`
-/// filenames. Returns an empty set when the env var is unset or the directory
+static RELEASE_AGENTS: OnceLock<BTreeSet<String>> = OnceLock::new();
+
+/// Record the agents of the release this server runs, before the config is
+/// loaded; the entitlement allowlist is exactly these. Set once, at boot.
+pub fn install_release_agents(ids: impl IntoIterator<Item = String>) {
+    let _ = RELEASE_AGENTS.set(ids.into_iter().collect());
+}
+
+/// The kebab-cased agent ids of the release this server runs, as installed
+/// at boot by [`install_release_agents`]. A config built outside the server's
+/// boot (tests, tools) has no release, and falls back to the agent ids
+/// deployed at `$RUNTARA_AGENT_COMPONENTS_DIR`, derived from
+/// `runtara_agent_*.wasm` filenames. Returns an empty set when the env var is unset or the directory
 /// is unreadable — the static registry alone is enough for CLI / fallback
 /// paths. Doesn't parse the `.meta.json` files (the `ComponentDispatcherService`
 /// already does that at boot for full metadata); the filename stem is all the
 /// entitlement allowlist needs, and parsing has to wait until after env-var
 /// parsing has finished anyway.
 fn discover_component_agent_ids() -> BTreeSet<String> {
+    if let Some(ids) = RELEASE_AGENTS.get() {
+        return ids.clone();
+    }
     let Ok(dir) = std::env::var("RUNTARA_AGENT_COMPONENTS_DIR") else {
         return BTreeSet::new();
     };

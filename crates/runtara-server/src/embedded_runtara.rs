@@ -337,6 +337,21 @@ pub async fn create_runtara_pool(
 /// `RUNTARA_RUNTIME_POOL_IDLE_TIMEOUT_SECS`,
 /// `RUNTARA_RUNTIME_POOL_MAX_LIFETIME_SECS`) comes from [`RuntimePoolConfig`],
 /// already parsed at startup. It applies only to the pool this process opens.
+/// `DATA_DIR` (default `.data`), made absolute: what it roots must not move
+/// with the working directory.
+pub fn data_dir() -> PathBuf {
+    let data_dir_raw = std::env::var("DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(".data"));
+    if data_dir_raw.is_absolute() {
+        data_dir_raw
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&data_dir_raw))
+            .unwrap_or(data_dir_raw)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn maybe_start_embedded(
     trusted: Option<Arc<runtara_component_host::trusted::TrustedExecutor>>,
@@ -392,18 +407,7 @@ pub async fn maybe_start_embedded(
         .and_then(|s| s.parse().ok())
         .unwrap_or(8003);
 
-    // Get data_dir from environment and convert to absolute path
-    // This is critical: paths stored in the DB must be absolute for the runner
-    let data_dir_raw = std::env::var("DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(".data"));
-    let data_dir = if data_dir_raw.is_absolute() {
-        data_dir_raw
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(&data_dir_raw))
-            .unwrap_or(data_dir_raw)
-    };
+    let data_dir = data_dir();
     info!(
         "Runtara data_dir: {:?} (was raw: {:?})",
         data_dir,

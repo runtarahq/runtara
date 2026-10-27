@@ -1,3 +1,4 @@
+pub mod agent_release;
 pub mod api;
 pub mod audit;
 pub mod auth;

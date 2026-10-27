@@ -1,5 +1,6 @@
 #!/bin/bash
-# E2E Test: workflow images live in the artifact store, by digest.
+# E2E Test: workflow images and platform components live in the artifact
+# store, by digest.
 #
 #   1. RUN — a compiled workflow runs; its image row names its artifact by
 #      digest (no path), and the bytes are at artifacts/blobs/sha256/<digest>.
@@ -8,6 +9,10 @@
 #      pointing at that path.
 #   3. IMPORT — on boot the server moves the bytes into the store, clears the
 #      path and removes the old directory; the workflow runs again.
+#   4. RELEASE — the components directory was published as the server's
+#      release: one record per agent and an index. A server booted with no
+#      components directory loads its agents from that release, serves them,
+#      runs one, and runs a workflow that calls one.
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
 # environment) + docker (isolated Valkey) and the shared workflow components
@@ -142,7 +147,8 @@ start_server() {
     RUNTARA_ENVIRONMENT_PORT="${TEST_ENV_PORT}" \
     RUNTARA_CORE_HTTP_PORT="${TEST_CORE_HTTP_PORT}" \
     RUNTARA_ENV_HTTP_PORT="${TEST_ENV_HTTP_PORT}" \
-    RUNTARA_AGENT_COMPONENTS_DIR="${COMPONENTS_DIR}" \
+    RUNTARA_AGENT_COMPONENTS_DIR="${AGENTS_DIR-${COMPONENTS_DIR}}" \
+    RUNTARA_DIRECT_WASM_COMPONENTS_DIR="${COMPONENTS_DIR}" \
     MAX_CONCURRENT_EXECUTIONS=40 \
     DATA_DIR="${TEST_DATA_DIR}" \
     RUST_LOG="warn,runtara_server=info" \
@@ -183,7 +189,8 @@ run_echo() {
         sleep 0.5
     done
     resp=$(curl -sS "${API}/workflows/instances/${instance}")
-    [ "${status}" = "completed" ] && echo "${resp}" | jq -e '.data.outputs.answer == 42' >/dev/null \
+    [ "${status}" = "completed" ] && echo "${resp}" \
+        | jq -e '.data.outputs.answer == 42 and .data.outputs.hash == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"' >/dev/null \
         || { print_error "the run ended '${status}': $(echo "${resp}" | jq -c '.data.error // .data.outputs')"; tail -40 "${TEST_LOG}"; exit 1; }
 }
 
@@ -192,13 +199,20 @@ print_step "1. A compiled workflow runs from the artifact store..."
 GRAPH='{
   "name": "Answer",
   "steps": {
+    "hash": {
+      "stepType": "Agent", "id": "hash", "agentId": "crypto", "capabilityId": "hash",
+      "inputMapping": { "data": { "valueType": "immediate", "value": "hello" } }
+    },
     "finish": {
       "stepType": "Finish", "id": "finish",
-      "inputMapping": { "answer": { "valueType": "immediate", "value": 42 } }
+      "inputMapping": {
+        "answer": { "valueType": "immediate", "value": 42 },
+        "hash": { "valueType": "reference", "value": "steps.hash.outputs.hash" }
+      }
     }
   },
-  "entryPoint": "finish",
-  "executionPlan": [],
+  "entryPoint": "hash",
+  "executionPlan": [{ "fromStep": "hash", "toStep": "finish" }],
   "variables": {},
   "inputSchema": {},
   "outputSchema": {}
@@ -237,4 +251,30 @@ PATH_COL=$(runtime_sql "SELECT coalesce(binary_path, '') FROM images WHERE image
 run_echo
 echo "  imported, the path cleared, the old directory removed, and the workflow runs ✓"
 
-print_success "artifact store: images name their workflow by digest, and legacy images are imported at boot"
+#-------------------------------------------------------------------------
+print_step "4. The components were published as a release; boot without them..."
+INDEX=$(find "${TEST_DATA_DIR}/artifacts/manifests/agents/index" -name '*.json')
+[ "$(echo "${INDEX}" | wc -l | tr -d ' ')" = "1" ] || { print_error "expected one release index, got: ${INDEX}"; exit 1; }
+RELEASE=$(basename "${INDEX}" .json)
+CRYPTO=$(find "${TEST_DATA_DIR}/artifacts/manifests/agents/crypto" -name '*.json' | head -1)
+[ -n "${CRYPTO}" ] || { print_error "no record for the crypto agent"; exit 1; }
+jq -e '.metadata.id == "crypto" and (.content | test("^[0-9a-f]{64}$"))' "${CRYPTO}" >/dev/null \
+    || { print_error "the crypto record is not its metadata and content digest: $(head -c 200 "${CRYPTO}")"; exit 1; }
+[ -f "${TEST_DATA_DIR}/artifacts/blobs/sha256/$(jq -r .content "${CRYPTO}")" ] \
+    || { print_error "the crypto record names content that is not stored"; exit 1; }
+echo "  release ${RELEASE}: one record per agent (metadata + content digest), and an index ✓"
+
+kill "${SERVER_PID}"; wait "${SERVER_PID}" 2>/dev/null || true
+SERVER_PID=""
+AGENTS_DIR="" start_server
+grep -q "loaded [0-9]* agent(s) from release ${RELEASE}" "${TEST_LOG}" \
+    || { print_error "the server did not load its agents from release ${RELEASE}"; tail -20 "${TEST_LOG}"; exit 1; }
+curl -sS "${API}/agents" | jq -e '[.. | objects | select(.id? == "crypto")] | length > 0' >/dev/null \
+    || { print_error "the agents API does not list crypto: $(curl -sS "${API}/agents" | head -c 300)"; exit 1; }
+RESP=$(api_post "/agents/crypto/capabilities/hash/test" '{"input": {"data": "hello"}}')
+echo "${RESP}" | jq -e '.. | objects | select(has("hash")) | .hash == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"' >/dev/null \
+    || { print_error "testing crypto from the release failed: ${RESP}"; exit 1; }
+run_echo
+echo "  with no components directory: agents loaded from the release, served, tested, and the workflow runs ✓"
+
+print_success "artifact store: images name their workflow by digest, legacy images are imported at boot, and agents load from a release in the store"

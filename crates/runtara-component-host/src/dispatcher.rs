@@ -111,6 +111,13 @@ pub struct ComponentDispatcherService {
     )>,
 }
 
+/// One agent to load: its canonical id, `.wasm` bytes and `.meta.json` bytes.
+struct AgentSource {
+    id: String,
+    wasm: Vec<u8>,
+    meta: Vec<u8>,
+}
+
 /// A test call's standalone launch, released when dropped.
 struct TestLaunch {
     launches: Arc<crate::api_launches::ApiLaunches>,
@@ -154,17 +161,7 @@ impl ComponentDispatcherService {
     /// server without metadata. Mismatched ids (filename stem vs.
     /// `meta.id`) are also rejected so registration can't silently misroute.
     pub async fn from_dir(component_dir: &Path) -> Result<Self> {
-        let engine = build_engine(&EngineConfig::default())?;
-        // Drive the epoch clock for this engine so the per-call deadlines set in
-        // `test_capability` can actually fire — without a ticker the epoch never
-        // advances and an unbounded guest would run forever.
-        spawn_epoch_ticker(Arc::clone(&engine));
-        let linker = build_linker(&engine)?;
-
-        let mut trusted = crate::trusted::TrustedExecutor::new(Arc::clone(&engine));
-        let mut agents = HashMap::new();
-        let mut agent_info: HashMap<String, AgentInfo> = HashMap::new();
-
+        let mut sources = Vec::new();
         let entries = std::fs::read_dir(component_dir)
             .with_context(|| format!("read component directory {}", component_dir.display()))?;
         for entry in entries {
@@ -187,18 +184,62 @@ impl ComponentDispatcherService {
             let agent_id = canonical_agent_id(stem_id);
 
             let meta_path = path.with_extension("meta.json");
-            let meta_bytes = std::fs::read(&meta_path).with_context(|| {
+            let meta = std::fs::read(&meta_path).with_context(|| {
                 format!(
                     "agent `{agent_id}`: missing sidecar metadata at {}",
                     meta_path.display()
                 )
             })?;
-            let mut info: AgentInfo = serde_json::from_slice(&meta_bytes).with_context(|| {
-                format!(
-                    "agent `{agent_id}`: failed to parse sidecar metadata {}",
-                    meta_path.display()
-                )
-            })?;
+            sources.push(AgentSource {
+                id: agent_id,
+                wasm: std::fs::read(&path)?,
+                meta,
+            });
+        }
+        Self::from_sources(sources)
+    }
+
+    /// Build the service from a release in the artifact store: each agent's
+    /// record holds its `.wasm` digest and its `.meta.json`, so the two are
+    /// loaded together or not at all.
+    pub async fn from_release(
+        store: &dyn runtara_artifact_store::ArtifactStore,
+        index: &runtara_artifact_store::release::ReleaseIndex,
+    ) -> Result<Self> {
+        let mut sources = Vec::with_capacity(index.agents.len());
+        for entry in &index.agents {
+            let component = runtara_artifact_store::release::read(store, entry)
+                .await
+                .with_context(|| format!("agent `{}` of release {}", entry.id, index.release))?;
+            sources.push(AgentSource {
+                id: canonical_agent_id(&component.id),
+                meta: component.manifest.metadata_bytes().to_vec(),
+                wasm: component.wasm,
+            });
+        }
+        Self::from_sources(sources)
+    }
+
+    fn from_sources(sources: Vec<AgentSource>) -> Result<Self> {
+        let engine = build_engine(&EngineConfig::default())?;
+        // Drive the epoch clock for this engine so the per-call deadlines set in
+        // `test_capability` can actually fire — without a ticker the epoch never
+        // advances and an unbounded guest would run forever.
+        spawn_epoch_ticker(Arc::clone(&engine));
+        let linker = build_linker(&engine)?;
+
+        let mut trusted = crate::trusted::TrustedExecutor::new(Arc::clone(&engine));
+        let mut agents = HashMap::new();
+        let mut agent_info: HashMap<String, AgentInfo> = HashMap::new();
+
+        for AgentSource {
+            id: agent_id,
+            wasm: bytes,
+            meta: meta_bytes,
+        } in sources
+        {
+            let mut info: AgentInfo = serde_json::from_slice(&meta_bytes)
+                .with_context(|| format!("agent `{agent_id}`: failed to parse sidecar metadata"))?;
             // Normalize both sides to kebab for the equality check —
             // cargo-component drops snake_case filenames, but the canonical
             // id everywhere else is kebab, so an agent crate can sensibly
@@ -217,7 +258,6 @@ impl ComponentDispatcherService {
             // returns None while `agent_ids()` yields it.
             info.id = agent_id.clone();
 
-            let bytes = std::fs::read(&path)?;
             trusted.register(&info, &bytes, &meta_bytes)?;
             let loaded = load_agent_bytes(&engine, &linker, &bytes, &agent_id)?;
 

@@ -27,6 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose bytes no longer match the checksum its image recorded.
   `e2e/test_image_artifact_store.sh` covers both.
 
+- **Platform agents load from a release in the artifact store.** Each
+  agent's `.wasm` and `.meta.json` are one record in the store, a manifest of
+  the content digest and the metadata's exact bytes, written after the
+  content (`agents/<id>/<record>.json`; shared components under
+  `components/`), so the two can no longer drift. A release index
+  (`agents/index/<release>.json`) pins every record by digest. At boot the
+  components directory is published as the server's release
+  (`RUNTARA_AGENT_RELEASE`, default the server version), and the component
+  dispatcher, agent catalog and entitlement allowlist load from that index
+  instead of a directory listing. Without `RUNTARA_AGENT_COMPONENTS_DIR`, the
+  server runs the release the store already holds. A record whose content is
+  missing or does not match its digest is refused. Compilation still reads
+  the components directory (`RUNTARA_DIRECT_WASM_COMPONENTS_DIR`).
+
 - **A runner can report an executor lost.** `RunExitReport::Lost` (for a
   node or link that went away) hands the run to recovery instead of failing
   it: recovery suspends it (`termination_reason = executor_lost`, a new value

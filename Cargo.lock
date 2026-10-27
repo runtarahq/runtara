@@ -4471,6 +4471,8 @@ name = "runtara-artifact-store"
 version = "9.0.1"
 dependencies = [
  "async-trait",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
@@ -4497,6 +4499,7 @@ dependencies = [
  "runtara-agent-suspension",
  "runtara-agent-trusted",
  "runtara-agent-xlsx",
+ "runtara-artifact-store",
  "runtara-connections",
  "runtara-control-contract",
  "runtara-database-contract",

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 
+use crate::agent_release;
 use crate::api;
 use crate::auth;
 use crate::channels;
@@ -686,6 +687,41 @@ pub async fn start_with(
     pool: PgPool,
     options: ServerOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Every artifact lives in one store, shared with Environment and its
+    // runner. The platform components this server runs are a release in it:
+    // published from the components directory when one is set, and the
+    // agent allowlist is that release's agents.
+    let artifacts: Arc<dyn runtara_environment::artifacts::ArtifactStore> =
+        options.artifacts.clone().unwrap_or_else(|| {
+            Arc::new(runtara_environment::image_registry::default_artifact_store(
+                &embedded_runtara::data_dir(),
+            ))
+        });
+    let options = ServerOptions {
+        artifacts: Some(artifacts.clone()),
+        ..options
+    };
+    let release_name = agent_release::release_name();
+    let components_dir = std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
+        .filter(|dir| !dir.to_string_lossy().trim().is_empty())
+        .map(std::path::PathBuf::from);
+    let release =
+        match agent_release::prepare(artifacts.as_ref(), components_dir.as_deref(), &release_name)
+            .await
+        {
+            Ok(release) => release,
+            Err(error) => {
+                eprintln!(
+                    "❌ {error}\n\
+                 The server has NO runnable agents until this is resolved."
+                );
+                std::process::exit(1);
+            }
+        };
+    if let Some(release) = &release {
+        config::install_release_agents(release.agents.iter().map(|agent| agent.id.clone()));
+    }
+
     // Load all env-derived configuration up front; fails fast on missing/invalid.
     let server_config = config::Config::from_env()?;
 
@@ -894,55 +930,51 @@ pub async fn start_with(
     // through it; `AgentsService` reads its metadata to override the legacy
     // registry for component-backed agents.
     let component_dispatcher: Option<Arc<runtara_component_host::ComponentDispatcherService>> = {
-        let cfg = config::get();
-        if let Some(ref dir) = cfg.agent_components_dir {
-            use runtara_component_host::ComponentDispatcherService;
-            // Agent components reach the host through imports, not HTTP, so
-            // no core URL is exported into their environment.
-            match ComponentDispatcherService::from_dir(dir).await {
-                Ok(dispatcher) => {
-                    let loaded: Vec<&str> = dispatcher.agent_ids().collect();
-                    if loaded.is_empty() {
-                        // The runtime dispatches ONLY WASM components, so zero
-                        // agents means the server can't run any workflow. Fail
-                        // fast rather than silently serving an empty agent
-                        // surface (a `cargo clean` wiping the build-output
-                        // components dir is the usual cause).
-                        eprintln!(
-                            "❌ Component dispatcher loaded 0 agents from {}.\n\
-                             The directory exists but contains no runtara_agent_*.wasm \
-                             components — the server has NO runnable agents.\n\
-                             Rebuild them (scripts/build-agent-components.sh) or point \
-                             RUNTARA_AGENT_COMPONENTS_DIR at a populated bundle.",
-                            dir.display()
-                        );
-                        std::process::exit(1);
-                    }
-                    println!(
-                        "✓ Component dispatcher loaded {} agent(s) from {}: {}",
-                        loaded.len(),
-                        dir.display(),
-                        loaded.join(", ")
-                    );
-                    Some(Arc::new(dispatcher))
-                }
-                Err(e) => {
+        use runtara_component_host::ComponentDispatcherService;
+        let Some(release) = &release else {
+            eprintln!(
+                "❌ RUNTARA_AGENT_COMPONENTS_DIR is not set and the artifact store holds no \
+                 release {release_name} — the server dispatches ONLY WASM agent components \
+                 and has NO runnable agents without them.\n\
+                 Set it to a directory of runtara_agent_*.wasm components, or publish \
+                 release {release_name} into the store."
+            );
+            std::process::exit(1);
+        };
+        // Agent components reach the host through imports, not HTTP, so
+        // no core URL is exported into their environment.
+        match ComponentDispatcherService::from_release(artifacts.as_ref(), release).await {
+            Ok(dispatcher) => {
+                let loaded: Vec<&str> = dispatcher.agent_ids().collect();
+                if loaded.is_empty() {
+                    // The runtime dispatches ONLY WASM components, so zero
+                    // agents means the server can't run any workflow. Fail
+                    // fast rather than silently serving an empty agent
+                    // surface (a `cargo clean` wiping the build-output
+                    // components dir is the usual cause).
                     eprintln!(
-                        "❌ Failed to load WASM agent components from {}: {}\n\
-                         The server has NO runnable agents until this is resolved.",
-                        dir.display(),
-                        e
+                        "❌ Component dispatcher loaded 0 agents from release {release_name}.\n\
+                         It holds no runtara_agent_*.wasm components — the server has NO \
+                         runnable agents.\n\
+                         Rebuild them (scripts/build-agent-components.sh) or point \
+                         RUNTARA_AGENT_COMPONENTS_DIR at a populated bundle."
                     );
                     std::process::exit(1);
                 }
+                println!(
+                    "✓ Component dispatcher loaded {} agent(s) from release {release_name}: {}",
+                    loaded.len(),
+                    loaded.join(", ")
+                );
+                Some(Arc::new(dispatcher))
             }
-        } else {
-            eprintln!(
-                "❌ RUNTARA_AGENT_COMPONENTS_DIR is not set — the server dispatches \
-                 ONLY WASM agent components and has NO runnable agents without them.\n\
-                 Set it to a directory of runtara_agent_*.wasm components."
-            );
-            std::process::exit(1);
+            Err(e) => {
+                eprintln!(
+                    "❌ Failed to load the agents of release {release_name}: {e:#}\n\
+                     The server has NO runnable agents until this is resolved."
+                );
+                std::process::exit(1);
+            }
         }
     };
 
