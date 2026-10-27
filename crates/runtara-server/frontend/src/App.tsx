@@ -10,6 +10,9 @@ import { useEffect } from 'react';
 import { cleanupPointerEvents } from '@/lib/utils';
 import { MaintenancePage } from '@/shared/components/maintenance-page';
 import { useHealthCheck } from '@/shared/hooks/useHealthCheck';
+import { tenantIdFromUrl } from '@/shared/config/oidcConfig';
+import { isOidcAuth } from '@/shared/config/runtimeConfig';
+import { TenantGate } from '@/shared/tenant/TenantGate';
 
 function App() {
   const auth = useAutoSignin();
@@ -41,6 +44,17 @@ function App() {
 
   if (isMaintenanceMode) {
     return <MaintenancePage />;
+  }
+
+  // Signed in with a token that names no tenant, at the bare mount: the user
+  // picks (or is sent to) a workspace they belong to.
+  if (
+    isOidcAuth &&
+    auth.isAuthenticated &&
+    !tenantIdFromUrl &&
+    !auth.user?.profile?.org_id
+  ) {
+    return <TenantGate />;
   }
 
   return <RouterProvider router={router} />;

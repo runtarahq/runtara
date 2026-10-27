@@ -20,6 +20,7 @@ import { config } from '@/shared/config/runtimeConfig';
 import { useEntitlements } from '@/shared/hooks/useEntitlements';
 import Logo from '@/assets/logo/runtara-logo-icon.svg';
 import { AuthSidebar } from './AuthSidebar.tsx';
+import { TenantSwitcher } from '@/shared/tenant/TenantSwitcher';
 import {
   useAuthStore,
   useHasExplicitPermission,
@@ -196,6 +197,7 @@ function FooterMenu() {
         {versionLabel}
       </span>
       <div className="flex shrink-0 items-center gap-0.5 group-data-[state=collapsed]:flex-col group-data-[state=collapsed]:gap-1">
+        <TenantSwitcher className={iconButton} />
         <AuthSidebar className={iconButton} />
         <Button
           variant="secondary"

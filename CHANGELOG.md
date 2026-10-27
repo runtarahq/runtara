@@ -95,6 +95,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tenant. `e2e/test_served_tenants.sh` serves two tenants from one process
   and checks neither reads the other's workflows, versions or runs.
 
+- **The UI switches tenants.** Where the UI is served at the bare mount, each
+  served tenant also has its own copy at `/ui/{tenant}/`, with that tenant's
+  base href, id and entitlements, so one server's SPA works for any of its
+  tenants without a gateway. The SPA takes its tenant from that path. A user
+  signed in with a token that names no tenant is sent to their only workspace or
+  picks one, and the sidebar offers a workspace switcher when they belong to
+  several (`GET /api/runtime/me/tenants`). `RUNTARA_UI_OIDC_ORGANIZATIONS=false`
+  stops the login from sending Auth0's `organization` parameter. A served tenant
+  that inherits the primary's entitlements now reports its own `tenantId`.
+
 - **The request names the tenant; membership authorizes it.** A path
   `/api/runtime/{tenant}/…` or `/mcp/{tenant}` naming a served tenant is routed
   as the tenant-less path, for that tenant (the SPA's org-prefixed URLs now work

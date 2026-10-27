@@ -935,12 +935,20 @@ pub fn entitlements_for(tenant: &str) -> Arc<EntitlementSnapshot> {
         return source.entitlements(tenant);
     }
     let config = get();
-    config
+    let snapshot = config
         .tenant_entitlements
         .get(tenant)
         .or_else(|| config.tenant_entitlements.get(&config.tenant_id))
         .cloned()
-        .unwrap_or_else(|| Arc::new(config.entitlement_snapshot.clone()))
+        .unwrap_or_else(|| Arc::new(config.entitlement_snapshot.clone()));
+    // A tenant inheriting the primary's entitlements still names itself.
+    if snapshot.tenant_id == tenant {
+        snapshot
+    } else {
+        let mut own = (*snapshot).clone();
+        own.tenant_id = tenant.to_owned();
+        Arc::new(own)
+    }
 }
 
 /// `RUNTARA_TENANT_ENTITLEMENTS_JSON`: an object of served tenant to

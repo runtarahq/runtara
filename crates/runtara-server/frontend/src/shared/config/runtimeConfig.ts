@@ -14,6 +14,9 @@ type RuntimeConfig = {
   oidcAuthority?: string;
   oidcClientId?: string;
   oidcAudience?: string;
+  /** "false" when the IdP has no Auth0 Organizations: the login then never
+   *  sends an `organization` parameter. */
+  oidcOrganizations?: string;
   apiBaseUrl?: string;
   plausibleDomain?: string;
   plausibleHost?: string;
@@ -76,6 +79,11 @@ export const config = {
     authority: pick(runtime.oidcAuthority, import.meta.env.VITE_OIDC_AUTHORITY),
     clientId: pick(runtime.oidcClientId, import.meta.env.VITE_OIDC_CLIENT_ID),
     audience: pick(runtime.oidcAudience, import.meta.env.VITE_OIDC_AUDIENCE),
+    organizations:
+      pick(
+        runtime.oidcOrganizations,
+        import.meta.env.VITE_OIDC_ORGANIZATIONS
+      ) !== 'false',
   },
   apiBaseUrl:
     pick(runtime.apiBaseUrl, import.meta.env.VITE_RUNTARA_API_BASE_URL) ?? '',
