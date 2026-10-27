@@ -359,7 +359,7 @@ fn normalize_condition(value: Value) -> Result<Value, rmcp::ErrorData> {
 pub struct ListObjectSchemasParams {
     #[schemars(
         description = "Optional connection ID to target a specific Object Model \
-                       connection's database. Omit to use the default object-model database."
+                       connection's database. Omit to use the default object-model database, when the server has one."
     )]
     #[serde(rename = "connectionId", alias = "connection_id")]
     pub connection_id: Option<String>,
@@ -372,7 +372,7 @@ pub struct GetObjectSchemaParams {
     pub name: String,
     #[schemars(
         description = "Optional connection ID to target a specific Object Model \
-                       connection's database. Omit to use the default object-model database."
+                       connection's database. Omit to use the default object-model database, when the server has one."
     )]
     #[serde(rename = "connectionId", alias = "connection_id")]
     pub connection_id: Option<String>,
@@ -395,7 +395,7 @@ pub struct CreateObjectSchemaParams {
     pub indexes: Option<Vec<Value>>,
     #[schemars(
         description = "Optional connection ID to target a specific Object Model \
-                       connection's database. Omit to use the default object-model database."
+                       connection's database. Omit to use the default object-model database, when the server has one."
     )]
     #[serde(rename = "connectionId", alias = "connection_id")]
     pub connection_id: Option<String>,
@@ -441,7 +441,7 @@ pub struct UpdateObjectSchemaParams {
     pub allow_destructive: Option<bool>,
     #[schemars(
         description = "Optional connection ID to target a specific Object Model \
-                       connection's database. Omit to use the default object-model database."
+                       connection's database. Omit to use the default object-model database, when the server has one."
     )]
     #[serde(rename = "connectionId", alias = "connection_id")]
     pub connection_id: Option<String>,
@@ -454,7 +454,7 @@ pub struct DeleteObjectSchemaParams {
     pub name: String,
     #[schemars(
         description = "Optional connection ID to target a specific Object Model \
-                       connection's database. Omit to use the default object-model database."
+                       connection's database. Omit to use the default object-model database, when the server has one."
     )]
     #[serde(rename = "connectionId", alias = "connection_id")]
     pub connection_id: Option<String>,
@@ -473,7 +473,7 @@ pub struct ListObjectInstancesParams {
     pub offset: Option<i64>,
     #[schemars(
         description = "Optional connection ID to target a specific Object Model \
-                       connection's database. Omit to use the default object-model database."
+                       connection's database. Omit to use the default object-model database, when the server has one."
     )]
     #[serde(rename = "connectionId", alias = "connection_id")]
     pub connection_id: Option<String>,
@@ -516,7 +516,7 @@ pub struct QueryObjectInstancesParams {
     pub offset: Option<i64>,
     #[schemars(
         description = "Optional connection ID to target a specific Object Model \
-                       connection's database. Omit to use the default object-model database."
+                       connection's database. Omit to use the default object-model database, when the server has one."
     )]
     #[serde(rename = "connectionId", alias = "connection_id")]
     pub connection_id: Option<String>,
@@ -585,7 +585,7 @@ pub struct QueryAggregateParams {
     pub offset: Option<i64>,
     #[schemars(
         description = "Optional connection ID to target a specific Object Model \
-                       connection's database. Omit to use the default object-model database."
+                       connection's database. Omit to use the default object-model database, when the server has one."
     )]
     #[serde(rename = "connectionId", alias = "connection_id")]
     pub connection_id: Option<String>,
@@ -611,7 +611,7 @@ pub struct QuerySqlParams {
     #[serde(rename = "resultSchema", alias = "result_schema", default)]
     pub result_schema: serde_json::Value,
     #[schemars(
-        description = "Optional connection ID for database selection. Omit to use the default object-model database."
+        description = "Optional connection ID for database selection. Omit to use the default object-model database, when the server has one."
     )]
     #[serde(rename = "connectionId", alias = "connection_id")]
     pub connection_id: Option<String>,
@@ -628,7 +628,7 @@ pub struct QuerySqlRawParams {
     #[serde(default)]
     pub params: Vec<serde_json::Value>,
     #[schemars(
-        description = "Optional connection ID for database selection. Omit to use the default object-model database."
+        description = "Optional connection ID for database selection. Omit to use the default object-model database, when the server has one."
     )]
     #[serde(rename = "connectionId", alias = "connection_id")]
     pub connection_id: Option<String>,
@@ -645,7 +645,7 @@ pub struct ExecuteSqlParams {
     #[serde(default)]
     pub params: Vec<serde_json::Value>,
     #[schemars(
-        description = "Optional connection ID for database selection. Omit to use the default object-model database."
+        description = "Optional connection ID for database selection. Omit to use the default object-model database, when the server has one."
     )]
     #[serde(rename = "connectionId", alias = "connection_id")]
     pub connection_id: Option<String>,
@@ -661,7 +661,7 @@ pub struct CreateObjectInstanceParams {
     pub properties: serde_json::Value,
     #[schemars(
         description = "Optional connection ID to target a specific Object Model \
-                       connection's database. Omit to use the default object-model database."
+                       connection's database. Omit to use the default object-model database, when the server has one."
     )]
     #[serde(rename = "connectionId", alias = "connection_id")]
     pub connection_id: Option<String>,
@@ -679,7 +679,7 @@ pub struct UpdateObjectInstanceParams {
     pub properties: serde_json::Value,
     #[schemars(
         description = "Optional connection ID to target a specific Object Model \
-                       connection's database. Omit to use the default object-model database."
+                       connection's database. Omit to use the default object-model database, when the server has one."
     )]
     #[serde(rename = "connectionId", alias = "connection_id")]
     pub connection_id: Option<String>,
@@ -738,7 +738,7 @@ pub struct BulkCreateInstancesParams {
     pub conflict_columns: Option<Vec<String>>,
     #[schemars(
         description = "Optional connection ID to target a specific Object Model \
-                       connection's database. Omit to use the default object-model database."
+                       connection's database. Omit to use the default object-model database, when the server has one."
     )]
     #[serde(rename = "connectionId", alias = "connection_id")]
     pub connection_id: Option<String>,
@@ -774,7 +774,7 @@ pub struct BulkUpdateInstancesParams {
     pub updates: Option<Vec<serde_json::Value>>,
     #[schemars(
         description = "Optional connection ID to target a specific Object Model \
-                       connection's database. Omit to use the default object-model database."
+                       connection's database. Omit to use the default object-model database, when the server has one."
     )]
     #[serde(rename = "connectionId", alias = "connection_id")]
     pub connection_id: Option<String>,
@@ -790,7 +790,7 @@ pub struct BulkDeleteInstancesParams {
     pub instance_ids: Vec<String>,
     #[schemars(
         description = "Optional connection ID to target a specific Object Model \
-                       connection's database. Omit to use the default object-model database."
+                       connection's database. Omit to use the default object-model database, when the server has one."
     )]
     #[serde(rename = "connectionId", alias = "connection_id")]
     pub connection_id: Option<String>,

@@ -26,11 +26,11 @@ const DEFAULT_STORE_CACHE_TTL: Duration = Duration::from_secs(900);
 enum StoreKey {
     /// Per-tenant store in DB-per-tenant template mode (`{tenant_id}` URL).
     Tenant(String),
-    /// Connection-based store, keyed by a hash of the resolved database URL.
-    /// Hashing keeps credentials out of the key and makes credential rotation
-    /// transparent: a rotated URL hashes to a new key, so the next request builds
-    /// a fresh pool and the stale one idles out.
-    Url(u64),
+    /// Connection-based store of one tenant, keyed by a hash of the resolved
+    /// database URL. Hashing keeps credentials out of the key and makes
+    /// credential rotation transparent: a rotated URL hashes to a new key, so
+    /// the next request builds a fresh pool and the stale one idles out.
+    Url { tenant: String, url: u64 },
 }
 
 fn hash_url(url: &str) -> u64 {
@@ -100,7 +100,16 @@ pub struct ObjectStoreManager {
     /// Short-lived negative cache of failed builds (keyed like `stores`) so a
     /// dead database fast-fails instead of cold-connecting on every request.
     failures: Cache<StoreKey, String>,
+    /// The most connection pools one tenant may hold open at once.
+    tenant_pool_max: usize,
 }
+
+/// Why a store is refused when the server has no default database.
+pub const NO_DEFAULT_DATABASE: &str = "this server has no default object model database \
+     (OBJECT_MODEL_DATABASE_URL is not set): add a Postgres connection and use its connectionId";
+
+/// The default limit on pools one tenant's connections may hold open.
+const DEFAULT_TENANT_POOL_MAX: usize = 16;
 
 impl ObjectStoreManager {
     /// Create a new ObjectStoreManager
@@ -115,7 +124,19 @@ impl ObjectStoreManager {
             database_url,
             pool_config: PoolConfig::default(),
             failures: build_failure_cache(),
+            tenant_pool_max: DEFAULT_TENANT_POOL_MAX,
         }
+    }
+
+    /// A manager with no default database: only connection-based stores.
+    pub fn without_default_database() -> Self {
+        Self::new(String::new())
+    }
+
+    /// Cap the pools one tenant's connections may hold open at once.
+    pub fn with_tenant_pool_max(mut self, tenant_pool_max: usize) -> Self {
+        self.tenant_pool_max = tenant_pool_max.max(1);
+        self
     }
 
     /// Override the connection-pool tuning used for stores this manager builds.
@@ -150,6 +171,7 @@ impl ObjectStoreManager {
             database_url: String::new(), // Not used in pool mode
             pool_config: PoolConfig::default(),
             failures: build_failure_cache(),
+            tenant_pool_max: DEFAULT_TENANT_POOL_MAX,
         })
     }
 
@@ -165,6 +187,21 @@ impl ObjectStoreManager {
         if let Some(cached_error) = self.failures.get(&key).await {
             tracing::debug!(key = ?key, "object-model store in failure cooldown; fast-failing");
             return Err(ObjectStoreError::Connection(cached_error));
+        }
+        if let StoreKey::Url { tenant, .. } = &key
+            && !self.stores.contains_key(&key)
+        {
+            let held = self
+                .stores
+                .iter()
+                .filter(|(held, _)| matches!(held.as_ref(), StoreKey::Url { tenant: t, .. } if t == tenant))
+                .count();
+            if held >= self.tenant_pool_max {
+                return Err(ObjectStoreError::Connection(format!(
+                    "this tenant already holds {held} database connection pools, the limit \
+                     (OBJECT_MODEL_TENANT_POOL_MAX); unused ones close after they idle"
+                )));
+            }
         }
 
         let pool_config = self.pool_config.clone();
@@ -217,6 +254,11 @@ impl ObjectStoreManager {
         if let Some(store) = &self.default_store {
             return Ok(Arc::clone(store));
         }
+        if self.database_url.is_empty() {
+            return Err(ObjectStoreError::Validation(
+                NO_DEFAULT_DATABASE.to_string(),
+            ));
+        }
 
         let database_url = self.database_url.replace("{tenant_id}", tenant_id);
         let store = self
@@ -240,9 +282,10 @@ impl ObjectStoreManager {
     /// resolving to a customer/external database). Caches by a hash of the URL.
     pub async fn get_store_by_url(
         &self,
+        tenant_id: &str,
         database_url: &str,
     ) -> Result<Arc<ObjectStore>, ObjectStoreError> {
-        let store = self.get_database_by_url(database_url).await?;
+        let store = self.get_database_by_url(tenant_id, database_url).await?;
         store.initialize_object_model().await?;
         Ok(store)
     }
@@ -250,10 +293,14 @@ impl ObjectStoreManager {
     /// Share the native pool without Object Model initialization or DDL.
     pub async fn get_database_by_url(
         &self,
+        tenant_id: &str,
         database_url: &str,
     ) -> Result<Arc<ObjectStore>, ObjectStoreError> {
         self.get_or_build(
-            StoreKey::Url(hash_url(database_url)),
+            StoreKey::Url {
+                tenant: tenant_id.to_string(),
+                url: hash_url(database_url),
+            },
             database_url.to_string(),
         )
         .await
@@ -306,7 +353,10 @@ mod tests {
     fn store_keys_are_distinct_across_variants() {
         // A tenant id and a URL hash must never collide as the same key.
         let tenant = StoreKey::Tenant("42".to_string());
-        let url = StoreKey::Url(hash_url("postgres://localhost/42"));
+        let url = StoreKey::Url {
+            tenant: "42".to_string(),
+            url: hash_url("postgres://localhost/42"),
+        };
         assert_ne!(tenant, url);
     }
 
@@ -314,7 +364,10 @@ mod tests {
     async fn negative_cache_fast_fails_a_known_bad_store() {
         let manager = ObjectStoreManager::new(String::new());
         let url = "postgres://user:pass@127.0.0.1:1/missing";
-        let key = StoreKey::Url(hash_url(url));
+        let key = StoreKey::Url {
+            tenant: "t".to_string(),
+            url: hash_url(url),
+        };
         // Simulate a recent failed build for this store.
         manager
             .failures
@@ -323,12 +376,26 @@ mod tests {
         manager.failures.run_pending_tasks().await;
         // The request fast-fails from the negative cache — no build attempt, so it
         // does not depend on global config or a reachable database.
-        match manager.get_store_by_url(url).await {
+        match manager.get_store_by_url("t", url).await {
             Ok(_) => panic!("expected a fast-fail from the negative cache"),
             Err(e) => assert!(
                 e.to_string().contains("connection refused"),
                 "should return the negative-cached failure, got: {e}"
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn without_a_default_database_the_default_store_says_what_to_do() {
+        let manager = ObjectStoreManager::without_default_database();
+        let error = manager
+            .get_store("t")
+            .await
+            .err()
+            .expect("no default store");
+        assert!(
+            error.to_string().contains("add a Postgres connection"),
+            "{error}"
+        );
     }
 }

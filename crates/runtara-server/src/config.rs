@@ -43,8 +43,17 @@ pub struct Config {
     pub max_429_retries: u32,
     /// Maximum retry delay in milliseconds.
     pub max_retry_delay_ms: u64,
-    /// Object model database URL (required).
-    pub object_model_database_url: String,
+    /// The platform's object model database URL. Optional: without it there
+    /// is no default database, and the object model, SQL steps and database
+    /// tools use the tenant's own Postgres connections.
+    pub object_model_database_url: Option<String>,
+    /// Whether tenant database connections must not reach private, loopback
+    /// or metadata addresses (`RUNTARA_DATABASE_CONNECTION_GUARD`,
+    /// `enforce`/`off`; enforced by default without a platform database).
+    pub database_connection_guard: bool,
+    /// The most database pools one tenant's connections may hold open at once
+    /// (`OBJECT_MODEL_TENANT_POOL_MAX`).
+    pub object_model_tenant_pool_max: usize,
     /// Maximum pool connections for the object model database.
     pub object_model_max_connections: u32,
     /// Whether the object model uses soft delete.
@@ -115,7 +124,9 @@ impl Config {
     ///
     /// Required:
     /// - `TENANT_ID`: organization identifier
-    /// - `OBJECT_MODEL_DATABASE_URL`: Postgres URL for the object model DB
+    ///
+    /// Optional:
+    /// - `OBJECT_MODEL_DATABASE_URL`: the platform's object model database
     pub fn from_env() -> Result<Self, ConfigError> {
         let tenant_id =
             std::env::var("TENANT_ID").map_err(|_| ConfigError::Missing("TENANT_ID"))?;
@@ -142,7 +153,26 @@ impl Config {
         let execution_timeout_policy = execution_timeout_policy_from_env()?;
 
         let object_model_database_url = std::env::var("OBJECT_MODEL_DATABASE_URL")
-            .map_err(|_| ConfigError::Missing("OBJECT_MODEL_DATABASE_URL"))?;
+            .ok()
+            .map(|url| url.trim().to_owned())
+            .filter(|url| !url.is_empty());
+        let database_connection_guard = match std::env::var("RUNTARA_DATABASE_CONNECTION_GUARD")
+            .ok()
+            .map(|mode| mode.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            None | Some("") => object_model_database_url.is_none(),
+            Some("enforce") => true,
+            Some("off") => false,
+            Some(_) => {
+                return Err(ConfigError::Invalid(
+                    "RUNTARA_DATABASE_CONNECTION_GUARD",
+                    "must be enforce or off",
+                ));
+            }
+        };
+        let object_model_tenant_pool_max: usize =
+            parse_usize_or("OBJECT_MODEL_TENANT_POOL_MAX", 16)?;
         let object_model_max_connections: u32 = parse_u32_or("OBJECT_MODEL_MAX_CONNECTIONS", 10)?;
         let object_model_soft_delete: bool = parse_bool_or("OBJECT_MODEL_SOFT_DELETE", true)?;
         let object_model_bulk_request_limit: usize = parse_usize_or(
@@ -276,6 +306,8 @@ impl Config {
             max_429_retries,
             max_retry_delay_ms,
             object_model_database_url,
+            database_connection_guard,
+            object_model_tenant_pool_max,
             object_model_max_connections,
             object_model_soft_delete,
             object_model_bulk_request_limit,
@@ -718,9 +750,20 @@ pub fn max_retry_delay_ms() -> u64 {
     get().max_retry_delay_ms
 }
 
-/// Get the object model database URL.
-pub fn object_model_database_url() -> String {
+/// The platform's object model database URL, when the server has one.
+pub fn object_model_database_url() -> Option<String> {
     get().object_model_database_url.clone()
+}
+
+/// Whether tenant database connections are refused private, loopback and
+/// metadata addresses.
+pub fn database_connection_guard() -> bool {
+    get().database_connection_guard
+}
+
+/// The most database pools one tenant's connections may hold open.
+pub fn object_model_tenant_pool_max() -> usize {
+    get().object_model_tenant_pool_max
 }
 
 /// Get the maximum number of connections for the object model database pool.

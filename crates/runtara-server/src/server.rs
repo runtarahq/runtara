@@ -1200,42 +1200,63 @@ pub async fn start_with(
         }
     });
 
-    // Initialize object store manager for object model database
+    // The platform's object model database is optional. Without it there is
+    // no default database: the object model, SQL steps and database tools use
+    // the tenant's own Postgres connections, which the address guard admits.
     let object_model_database_url = config::object_model_database_url();
-
-    println!("Connecting to object model database...");
     let object_model_pool_config = config::object_model_pool_config();
-    let object_model_pool = PgPoolOptions::new()
-        .max_connections(object_model_pool_config.max_connections)
-        .min_connections(object_model_pool_config.min_connections)
-        .acquire_timeout(object_model_pool_config.acquire_timeout)
-        .idle_timeout(object_model_pool_config.idle_timeout)
-        .max_lifetime(object_model_pool_config.max_lifetime)
-        .test_before_acquire(object_model_pool_config.test_before_acquire)
-        .connect(&object_model_database_url)
-        .await
-        .expect("Failed to connect to object model database");
-
-    // Raw SQL runs as the object-model role: warn when that role is a
-    // superuser or the object-model database is the server's own.
-    crate::object_model_privileges::warn_if_overprivileged(&object_model_pool, &pool).await;
 
     // Run server migrations (workflows, api_keys, etc.) against the main pool
     run_server_migrations(&pool).await?;
 
-    // Create ObjectStoreManager from the pool (single-database mode for now)
+    let object_store_manager = match &object_model_database_url {
+        Some(object_model_database_url) => {
+            println!("Connecting to object model database...");
+            let object_model_pool = PgPoolOptions::new()
+                .max_connections(object_model_pool_config.max_connections)
+                .min_connections(object_model_pool_config.min_connections)
+                .acquire_timeout(object_model_pool_config.acquire_timeout)
+                .idle_timeout(object_model_pool_config.idle_timeout)
+                .max_lifetime(object_model_pool_config.max_lifetime)
+                .test_before_acquire(object_model_pool_config.test_before_acquire)
+                .connect(object_model_database_url)
+                .await
+                .expect("Failed to connect to object model database");
+
+            // Raw SQL runs as the object-model role: warn when that role is a
+            // superuser or the object-model database is the server's own.
+            crate::object_model_privileges::warn_if_overprivileged(&object_model_pool, &pool).await;
+
+            // Create ObjectStoreManager from the pool (single-database mode)
+            let manager = ObjectStoreManager::from_pool(object_model_pool)
+                .await
+                .expect("Failed to initialize ObjectStoreManager");
+            println!("✓ Object model database connected successfully");
+            manager
+        }
+        None => {
+            println!(
+                "✓ No platform object model database (OBJECT_MODEL_DATABASE_URL is not set): \
+                 the object model and SQL use the tenant's Postgres connections"
+            );
+            ObjectStoreManager::without_default_database()
+        }
+    };
+    if config::database_connection_guard() {
+        println!(
+            "✓ Database connections must reach public addresses \
+             (RUNTARA_DATABASE_CONNECTION_GUARD; allowlist RUNTARA_PROXY_ALLOWED_HOSTS)"
+        );
+    }
     let object_store_manager = Arc::new(
-        ObjectStoreManager::from_pool(object_model_pool)
-            .await
-            .expect("Failed to initialize ObjectStoreManager")
+        object_store_manager
             .with_pool_config(object_model_pool_config)
             .with_cache_config(
                 config::object_model_pool_cache_max(),
                 config::object_model_pool_cache_ttl(),
-            ),
+            )
+            .with_tenant_pool_max(config::object_model_tenant_pool_max()),
     );
-
-    println!("✓ Object model database connected successfully");
 
     // Spawn background task to report object-model pool stats / warn on pressure.
     let object_model_pool_monitor = object_store_manager.clone();
@@ -1273,24 +1294,30 @@ pub async fn start_with(
         }
     });
 
-    match connections_facade
-        .ensure_default_connection(
-            &tenant_id,
-            "object_model",
-            format!("Default Object Model Database ({})", tenant_id),
-            "postgres".to_string(),
-            serde_json::json!({ "database_url": object_model_database_url }),
-        )
-        .await
-    {
-        Ok(connection_id) => {
+    let default_connection = match &object_model_database_url {
+        Some(object_model_database_url) => Some(
+            connections_facade
+                .ensure_default_connection(
+                    &tenant_id,
+                    "object_model",
+                    format!("Default Object Model Database ({})", tenant_id),
+                    "postgres".to_string(),
+                    serde_json::json!({ "database_url": object_model_database_url }),
+                )
+                .await,
+        ),
+        None => None,
+    };
+    match default_connection {
+        None => {}
+        Some(Ok(connection_id)) => {
             tracing::info!(
                 tenant_id = %tenant_id,
                 connection_id = %connection_id,
                 "Default object_model connection is configured"
             );
         }
-        Err(error) => {
+        Some(Err(error)) => {
             tracing::warn!(
                 tenant_id = %tenant_id,
                 error = ?error,

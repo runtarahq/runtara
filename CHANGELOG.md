@@ -71,6 +71,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs workflows there (`e2e/test_object_store.sh`, against MinIO). TLS is
   rustls on ring, so no C crypto build is added.
 
+- **The platform object-model database is optional.** Without
+  `OBJECT_MODEL_DATABASE_URL` the server has no default database and creates
+  no default `object_model` connection. The object model, SQL steps, CSV
+  import/export and the MCP database tools then work through a tenant's own
+  Postgres connection, and a request for the default answers that one is
+  needed. Tenant database connections pass an address guard, enforced by
+  default without a platform database (`RUNTARA_DATABASE_CONNECTION_GUARD`):
+  loopback, private, metadata and local-socket addresses are refused before
+  anything connects (allowlist: `RUNTARA_PROXY_ALLOWED_HOSTS`), and the
+  connection is pinned to the vetted address. `OBJECT_MODEL_TENANT_POOL_MAX`
+  (default 16) caps the pools one tenant's connections hold open. With the
+  variable set, behaviour is unchanged. `e2e/test_optional_platform_db.sh`.
+
 - **A runner can report an executor lost.** `RunExitReport::Lost` (for a
   node or link that went away) hands the run to recovery instead of failing
   it: recovery suspends it (`termination_reason = executor_lost`, a new value

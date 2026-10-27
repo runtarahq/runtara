@@ -138,7 +138,8 @@ fn service(admin: &PgPool) -> InstanceService {
     )));
     InstanceService::new(
         Arc::new(ObjectStoreManager::new(
-            runtara_server::config::object_model_database_url(),
+            runtara_server::config::object_model_database_url()
+                .expect("this test sets OBJECT_MODEL_DATABASE_URL"),
         )),
         connections,
     )
@@ -169,9 +170,12 @@ fn validation_message(result: Result<impl std::fmt::Debug, ServiceError>) -> Str
 
 async fn assertions(admin: &PgPool, n: &Names) {
     let svc = service(admin);
-    let objects_pool = PgPool::connect(&runtara_server::config::object_model_database_url())
-        .await
-        .unwrap();
+    let objects_pool = PgPool::connect(
+        &runtara_server::config::object_model_database_url()
+            .expect("this test sets OBJECT_MODEL_DATABASE_URL"),
+    )
+    .await
+    .unwrap();
 
     // The boot check sees a non-superuser role on its own database.
     let facts = privileges::collect_facts(&objects_pool, admin)

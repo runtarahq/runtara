@@ -119,7 +119,14 @@ pub(crate) async fn resolve_database_url_uncached(
                     ))
                 })?;
 
-            Ok(Some(db_url.to_string()))
+            super::database_guard::admit(db_url)
+                .await
+                .map(Some)
+                .map_err(|reason| {
+                    ServiceError::ValidationError(format!(
+                        "Connection '{conn_id}' is refused: {reason}"
+                    ))
+                })
         }
         None => {
             let Some(facade) = facade else {
@@ -135,9 +142,9 @@ pub(crate) async fn resolve_database_url_uncached(
                     ))
                 })?
             else {
-                tracing::warn!(
+                tracing::debug!(
                     tenant_id = %tenant_id,
-                    "No default object_model connection configured; using legacy OBJECT_MODEL_DATABASE_URL store"
+                    "No default object_model connection; using the platform object model store, if any"
                 );
                 return Ok(None);
             };
@@ -166,7 +173,14 @@ pub(crate) async fn resolve_database_url_uncached(
                     )
                 })?;
 
-            Ok(Some(db_url.to_string()))
+            super::database_guard::admit(db_url)
+                .await
+                .map(Some)
+                .map_err(|reason| {
+                    ServiceError::ValidationError(format!(
+                        "The default object_model connection is refused: {reason}"
+                    ))
+                })
         }
     }
 }
@@ -181,11 +195,18 @@ pub(crate) async fn get_store(
     let database_url = resolve_database_url(facade, connection_id, tenant_id).await?;
 
     match database_url {
-        Some(url) => manager.get_store_by_url(&url).await.map_err(|e| {
-            ServiceError::DatabaseError(format!("Failed to connect to database: {}", e))
-        }),
-        None => manager.get_store(tenant_id).await.map_err(|e| {
-            ServiceError::DatabaseError(format!("Failed to get default store: {}", e))
+        Some(url) => manager
+            .get_store_by_url(tenant_id, &url)
+            .await
+            .map_err(|e| {
+                ServiceError::DatabaseError(format!("Failed to connect to database: {}", e))
+            }),
+        None => manager.get_store(tenant_id).await.map_err(|e| match e {
+            // No platform database: say what to do, as a request error.
+            runtara_object_store::ObjectStoreError::Validation(message) => {
+                ServiceError::ValidationError(message)
+            }
+            e => ServiceError::DatabaseError(format!("Failed to get default store: {}", e)),
         }),
     }
 }
