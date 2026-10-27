@@ -664,7 +664,7 @@ async fn execute_request(
         // durable_sleep() (suspendable/resumable) to wait.
         if crate::config::adaptive_rate_limiting_enabled()
             && let Err(retry_after_ms) = facade
-                .check_rate_limit(connection_id, &conn.rate_limit_config)
+                .check_rate_limit(tenant_id, connection_id, &conn.rate_limit_config)
                 .await
         {
             record_credential_request_async(

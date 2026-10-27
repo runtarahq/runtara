@@ -223,7 +223,7 @@ async fn resolve_api_key_membership(
     };
 
     if let Some(jti) = jti {
-        match token_is_revoked(manager, jti).await {
+        match token_is_revoked(manager, tenant, jti).await {
             Ok(true) => return Err(MembershipDenial::TokenRevoked),
             Ok(false) => {}
             Err(e) => return Err(MembershipDenial::ValkeyUnavailable(e.to_string())),
@@ -418,7 +418,7 @@ async fn resolve_membership(
         ));
     };
 
-    match token_is_revoked(manager, jti).await {
+    match token_is_revoked(manager, &ctx.org_id, jti).await {
         Ok(true) => return Err(MembershipDenial::TokenRevoked),
         Ok(false) => {}
         Err(e) => return Err(MembershipDenial::ValkeyUnavailable(e.to_string())),
@@ -730,7 +730,7 @@ mod tests {
         let mut conn = manager.clone();
         let _: () = conn
             .set(
-                format!("member:{uid}"),
+                format!("org:member:{uid}"),
                 r#"{"role":"admin","updated_at":"2026-05-28T12:00:00Z"}"#,
             )
             .await
@@ -741,7 +741,32 @@ mod tests {
         assert!(enforce_membership(&st, &mut ctx).await.is_ok());
         assert_eq!(ctx.role, Some(Role::Admin));
 
-        let _: () = conn.del(format!("member:{uid}")).await.expect("cleanup");
+        let _: () = conn
+            .del(format!("org:member:{uid}"))
+            .await
+            .expect("cleanup");
+    }
+
+    #[cfg(feature = "valkey-integration-tests")]
+    #[tokio::test]
+    async fn another_tenants_member_record_does_not_answer_403() {
+        let manager = manager_required!();
+        let uid = unique("auth0|member");
+        let mut conn = manager.clone();
+        let _: () = conn
+            .set(format!("other:member:{uid}"), r#"{"role":"owner"}"#)
+            .await
+            .expect("seed member");
+
+        let mut ctx = jwt_ctx(&uid, Some(&unique("jti")));
+        let st = state(MembershipPolicy::Required, Some(manager));
+        let resp = enforce_membership(&st, &mut ctx).await.unwrap_err();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let _: () = conn
+            .del(format!("other:member:{uid}"))
+            .await
+            .expect("cleanup");
     }
 
     #[cfg(feature = "valkey-integration-tests")]
@@ -763,7 +788,7 @@ mod tests {
         let jti = unique("jti");
         let mut conn = manager.clone();
         let _: () = conn
-            .set(format!("member:{uid}"), r#"{"role":"member"}"#)
+            .set(format!("org:member:{uid}"), r#"{"role":"member"}"#)
             .await
             .expect("seed member");
         let _: () = conn
@@ -779,7 +804,10 @@ mod tests {
         let resp = enforce_membership(&st, &mut ctx).await.unwrap_err();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
-        let _: () = conn.del(format!("member:{uid}")).await.expect("cleanup");
+        let _: () = conn
+            .del(format!("org:member:{uid}"))
+            .await
+            .expect("cleanup");
         let _: () = conn
             .del(format!("token:revoked:{jti}"))
             .await
@@ -793,7 +821,7 @@ mod tests {
         let uid = unique("auth0|keyuser");
         let mut conn = manager.clone();
         let _: () = conn
-            .set(format!("member:{uid}"), r#"{"role":"viewer"}"#)
+            .set(format!("org:member:{uid}"), r#"{"role":"viewer"}"#)
             .await
             .expect("seed member");
 
@@ -807,7 +835,10 @@ mod tests {
         );
         assert_eq!(ctx.role, Some(Role::Viewer));
 
-        let _: () = conn.del(format!("member:{uid}")).await.expect("cleanup");
+        let _: () = conn
+            .del(format!("org:member:{uid}"))
+            .await
+            .expect("cleanup");
     }
 
     #[cfg(feature = "valkey-integration-tests")]
@@ -831,11 +862,11 @@ mod tests {
         let jti = unique("jti");
         let mut conn = manager.clone();
         let _: () = conn
-            .set(format!("member:{uid}"), r#"{"role":"member"}"#)
+            .set(format!("org:member:{uid}"), r#"{"role":"member"}"#)
             .await
             .expect("seed member");
         let _: () = conn
-            .set(format!("token:revoked:{jti}"), r#"{"revoked_at":"x"}"#)
+            .set(format!("org:token:revoked:{jti}"), r#"{"revoked_at":"x"}"#)
             .await
             .expect("seed revocation");
 
@@ -847,9 +878,12 @@ mod tests {
             .unwrap_err();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
-        let _: () = conn.del(format!("member:{uid}")).await.expect("cleanup");
         let _: () = conn
-            .del(format!("token:revoked:{jti}"))
+            .del(format!("org:member:{uid}"))
+            .await
+            .expect("cleanup");
+        let _: () = conn
+            .del(format!("org:token:revoked:{jti}"))
             .await
             .expect("cleanup");
     }

@@ -95,6 +95,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tenant. `e2e/test_served_tenants.sh` serves two tenants from one process
   and checks neither reads the other's workflows, versions or runs.
 
+- **One Valkey can serve many tenants.** Every key a server uses names its
+  tenant: membership `{tenant}:member:{uid}`, revocation
+  `{tenant}:token:revoked:{jti}`, connection rate limits
+  `{tenant}:rate_limit:{connection}`, the compilation queue
+  `{tenant}:compilation:*` (a server consumes only its served tenants' queues)
+  and the admission counter `{tenant}:admission:reserved` (seeded and
+  reconciled only for served tenants; previously a server reseeding or
+  reconciling would reset every tenant's counter on the same Valkey). The
+  user-management contract is now version 2 (`docs/security/user-management-contracts.md` §3,
+  including every runtara key). Version 1 keys still work: `member:{uid}` answers
+  for the primary tenant unless `RUNTARA_AUTH_LEGACY_MEMBER_KEYS=false`, which a
+  shared Valkey must set, and `token:revoked:{jti}` still revokes; the old
+  compilation queue is drained into the new one at boot. Tenant ids may not
+  contain `:`. `e2e/test_shared_valkey.sh`.
+
 - **OAuth callbacks and connection events belong to the connection's tenant.**
   An OAuth state is redeemed only at the callback URL of the tenant it was
   issued for (`/api/oauth/{tenant}/callback`); one presented at another

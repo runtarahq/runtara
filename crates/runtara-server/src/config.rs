@@ -57,6 +57,11 @@ pub struct Config {
     /// The most database pools one tenant's connections may hold open at once
     /// (`OBJECT_MODEL_TENANT_POOL_MAX`).
     pub object_model_tenant_pool_max: usize,
+    /// Whether the contract version 1 `member:{uid}` record still answers for
+    /// the primary tenant (`RUNTARA_AUTH_LEGACY_MEMBER_KEYS`, default true).
+    /// A Valkey shared by several processes must turn it off: that record
+    /// names no tenant, so it would answer for every process's primary.
+    pub legacy_member_keys: bool,
     /// Maximum pool connections for the object model database.
     pub object_model_max_connections: u32,
     /// Whether the object model uses soft delete.
@@ -139,6 +144,14 @@ impl Config {
             std::env::var("TENANT_ID").map_err(|_| ConfigError::Missing("TENANT_ID"))?;
         let served_tenants =
             served_tenants_from_raw(&tenant_id, std::env::var("RUNTARA_SERVED_TENANTS").ok());
+        // Valkey keys are `{tenant}:…`; a tenant naming a separator could
+        // spell another tenant's key.
+        if let Some(tenant) = served_tenants.iter().find(|t| t.contains(':')) {
+            return Err(ConfigError::InvalidValue(
+                "TENANT_ID / RUNTARA_SERVED_TENANTS",
+                format!("tenant '{tenant}' contains ':'"),
+            ));
+        }
 
         let max_concurrent_executions: usize = parse_usize_or(
             "MAX_CONCURRENT_EXECUTIONS",
@@ -182,6 +195,7 @@ impl Config {
         };
         let object_model_tenant_pool_max: usize =
             parse_usize_or("OBJECT_MODEL_TENANT_POOL_MAX", 16)?;
+        let legacy_member_keys = parse_bool_or("RUNTARA_AUTH_LEGACY_MEMBER_KEYS", true)?;
         let object_model_max_connections: u32 = parse_u32_or("OBJECT_MODEL_MAX_CONNECTIONS", 10)?;
         let object_model_soft_delete: bool = parse_bool_or("OBJECT_MODEL_SOFT_DELETE", true)?;
         let object_model_bulk_request_limit: usize = parse_usize_or(
@@ -329,6 +343,7 @@ impl Config {
             object_model_database_url,
             database_connection_guard,
             object_model_tenant_pool_max,
+            legacy_member_keys,
             object_model_max_connections,
             object_model_soft_delete,
             object_model_bulk_request_limit,
@@ -803,6 +818,12 @@ pub fn object_model_database_url() -> Option<String> {
 /// metadata addresses.
 pub fn database_connection_guard() -> bool {
     get().database_connection_guard
+}
+
+/// Whether the version 1 `member:{uid}` record answers for the primary tenant.
+/// True before config is initialised (unit tests).
+pub fn legacy_member_keys() -> bool {
+    try_get().is_none_or(|config| config.legacy_member_keys)
 }
 
 /// The most database pools one tenant's connections may hold open.

@@ -108,26 +108,50 @@ impl CompilationRequest {
 
 /// Compilation queue backed by Redis/Valkey
 ///
-/// Uses two Redis keys:
-/// - `runtara:compilation:queue` - LIST for ordered processing
-/// - `runtara:compilation:pending` - SET for deduplication and tracking
+/// Uses three Redis keys per tenant, so processes serving different tenants
+/// can share one Valkey without taking each other's work:
+/// - `{tenant}:compilation:queue` - LIST for ordered processing
+/// - `{tenant}:compilation:pending` - SET for deduplication and tracking
+/// - `{tenant}:compilation:requests` - HASH of full request payloads
 pub struct CompilationQueue {
     /// Shared Redis connection manager (built once at startup and cloned per
     /// operation — no new TCP connection per call).
     manager: ConnectionManager,
+    /// The tenants whose queues this process consumes.
+    tenants: Vec<String>,
+    /// Which tenant's queue `dequeue` tries first, rotated so one busy tenant
+    /// does not starve the others.
+    next: std::sync::atomic::AtomicUsize,
+}
+
+/// The single-Valkey-per-tenant keys of earlier versions, drained into the
+/// tenant-prefixed ones at startup.
+const LEGACY_QUEUE_KEY: &str = "runtara:compilation:queue";
+const LEGACY_PENDING_KEY: &str = "runtara:compilation:pending";
+const LEGACY_REQUESTS_KEY: &str = "runtara:compilation:requests";
+const QUEUE_SUFFIX: &str = ":compilation:queue";
+
+fn queue_key(tenant: &str) -> String {
+    format!("{tenant}{QUEUE_SUFFIX}")
+}
+
+fn pending_key(tenant: &str) -> String {
+    format!("{tenant}:compilation:pending")
+}
+
+fn requests_key(tenant: &str) -> String {
+    format!("{tenant}:compilation:requests")
 }
 
 impl CompilationQueue {
-    /// Queue key for the LIST (FIFO order)
-    const QUEUE_KEY: &'static str = "runtara:compilation:queue";
-    /// Set key for tracking pending compilations (deduplication)
-    const PENDING_KEY: &'static str = "runtara:compilation:pending";
-    /// Hash key storing full request payloads by dedupe key.
-    const REQUESTS_KEY: &'static str = "runtara:compilation:requests";
-
-    /// Create a new compilation queue from a shared connection manager.
-    pub fn new(manager: ConnectionManager) -> Self {
-        Self { manager }
+    /// Create a compilation queue consuming `tenants`' work from a shared
+    /// connection manager.
+    pub fn new(manager: ConnectionManager, tenants: Vec<String>) -> Self {
+        Self {
+            manager,
+            tenants,
+            next: std::sync::atomic::AtomicUsize::new(0),
+        }
     }
 
     /// Get a connection from the shared manager (cheap clone — no TCP).
@@ -183,9 +207,9 @@ impl CompilationQueue {
         );
 
         let added: i32 = script
-            .key(Self::PENDING_KEY)
-            .key(Self::QUEUE_KEY)
-            .key(Self::REQUESTS_KEY)
+            .key(pending_key(&request.tenant_id))
+            .key(queue_key(&request.tenant_id))
+            .key(requests_key(&request.tenant_id))
             .arg(&key)
             .arg(&payload)
             .arg(force_recompile)
@@ -222,19 +246,31 @@ impl CompilationQueue {
         timeout: Duration,
     ) -> Result<Option<CompilationRequest>, CompilationQueueError> {
         let mut conn = self.get_connection();
+        if self.tenants.is_empty() {
+            tokio::time::sleep(timeout).await;
+            return Ok(None);
+        }
 
-        // BLPOP with timeout (returns list name and value)
-        let result: Option<(String, String)> = redis::cmd("BLPOP")
-            .arg(Self::QUEUE_KEY)
+        // BLPOP over every served tenant's queue, starting from a rotating one
+        // (returns the list name and value).
+        let start = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut command = redis::cmd("BLPOP");
+        for i in 0..self.tenants.len() {
+            command.arg(queue_key(&self.tenants[(start + i) % self.tenants.len()]));
+        }
+        let result: Option<(String, String)> = command
             .arg(timeout.as_secs())
             .query_async(&mut conn)
             .await
             .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
 
         match result {
-            Some((_queue_name, key)) => {
+            Some((queue_name, key)) => {
+                let tenant = queue_name
+                    .strip_suffix(QUEUE_SUFFIX)
+                    .ok_or_else(|| CompilationQueueError::ParseError(queue_name.clone()))?;
                 let payload: Option<String> = conn
-                    .hget(Self::REQUESTS_KEY, &key)
+                    .hget(requests_key(tenant), &key)
                     .await
                     .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
                 let request = payload
@@ -270,11 +306,11 @@ impl CompilationQueue {
 
         // Remove from pending set
         let _: () = conn
-            .srem(Self::PENDING_KEY, &key)
+            .srem(pending_key(&request.tenant_id), &key)
             .await
             .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
         let _: () = conn
-            .hdel(Self::REQUESTS_KEY, &key)
+            .hdel(requests_key(&request.tenant_id), &key)
             .await
             .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
 
@@ -299,21 +335,25 @@ impl CompilationQueue {
         let key = request.unique_key();
 
         let is_member: bool = conn
-            .sismember(Self::PENDING_KEY, &key)
+            .sismember(pending_key(&request.tenant_id), &key)
             .await
             .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
 
         Ok(is_member)
     }
 
-    /// Get the number of pending compilations
+    /// Get the number of pending compilations across the served tenants
     pub async fn pending_count(&self) -> Result<usize, CompilationQueueError> {
         let mut conn = self.get_connection();
 
-        let count: usize = conn
-            .scard(Self::PENDING_KEY)
-            .await
-            .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
+        let mut count = 0usize;
+        for tenant in &self.tenants {
+            let pending: usize = conn
+                .scard(pending_key(tenant))
+                .await
+                .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
+            count += pending;
+        }
 
         Ok(count)
     }
@@ -355,11 +395,63 @@ impl CompilationQueue {
     ///
     /// It moves any pending items that are NOT in the queue back to the queue.
     pub async fn recover_orphaned(&self) -> Result<usize, CompilationQueueError> {
+        self.drain_legacy().await?;
+        let mut recovered = 0;
+        for tenant in &self.tenants {
+            recovered += self.recover_orphaned_for(tenant).await?;
+        }
+        Ok(recovered)
+    }
+
+    /// Move the served tenants' requests from the unprefixed keys of earlier
+    /// versions into their own queues. Another tenant's requests are left.
+    async fn drain_legacy(&self) -> Result<usize, CompilationQueueError> {
+        let mut conn = self.get_connection();
+        let pending: Vec<String> = conn
+            .smembers(LEGACY_PENDING_KEY)
+            .await
+            .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
+        let mut moved = 0;
+        for key in pending {
+            let Some(parsed) = CompilationRequest::from_unique_key(&key) else {
+                continue;
+            };
+            if !self.tenants.contains(&parsed.tenant_id) {
+                continue;
+            }
+            let payload: Option<String> = conn
+                .hget(LEGACY_REQUESTS_KEY, &key)
+                .await
+                .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
+            let request = payload
+                .as_deref()
+                .and_then(CompilationRequest::from_payload)
+                .unwrap_or(parsed);
+            self.enqueue(&request).await?;
+            let _: () = redis::pipe()
+                .lrem(LEGACY_QUEUE_KEY, 0, &key)
+                .srem(LEGACY_PENDING_KEY, &key)
+                .hdel(LEGACY_REQUESTS_KEY, &key)
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
+            moved += 1;
+        }
+        if moved > 0 {
+            info!(
+                count = moved,
+                "Moved compilation requests from the unprefixed queue"
+            );
+        }
+        Ok(moved)
+    }
+
+    async fn recover_orphaned_for(&self, tenant: &str) -> Result<usize, CompilationQueueError> {
         let mut conn = self.get_connection();
 
         // Get all pending items
         let pending: Vec<String> = conn
-            .smembers(Self::PENDING_KEY)
+            .smembers(pending_key(tenant))
             .await
             .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
 
@@ -369,7 +461,7 @@ impl CompilationQueue {
 
         // Get all items in the queue
         let queue_items: Vec<String> = conn
-            .lrange(Self::QUEUE_KEY, 0, -1)
+            .lrange(queue_key(tenant), 0, -1)
             .await
             .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
 
@@ -391,7 +483,7 @@ impl CompilationQueue {
         // Re-add orphaned items to the queue
         for item in &orphaned {
             let _: () = conn
-                .rpush(Self::QUEUE_KEY, item.as_str())
+                .rpush(queue_key(tenant), item.as_str())
                 .await
                 .map_err(|e| CompilationQueueError::RedisError(e.to_string()))?;
 

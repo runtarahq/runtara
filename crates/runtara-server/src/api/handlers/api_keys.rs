@@ -341,7 +341,9 @@ pub async fn revoke_api_key(
             // block for `rt_*` keys, so a Valkey failure here is logged, not fatal.
             if let (Some(jti), Some(manager)) = (jti.as_deref(), valkey.as_ref()) {
                 let ttl = expires_at.map(|exp| (exp - Utc::now()).num_seconds().max(0) as u64);
-                if let Err(e) = crate::valkey::auth::revoke_token(manager, jti, ttl).await {
+                if let Err(e) =
+                    crate::valkey::auth::revoke_token(manager, &tenant_id, jti, ttl).await
+                {
                     tracing::warn!(error = %e, "failed to write token revocation to Valkey");
                 }
             }

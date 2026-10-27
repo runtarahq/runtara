@@ -150,6 +150,11 @@ path = "tests/valkey_auth.rs"
 required-features = ["valkey-integration-tests"]
 
 [[test]]
+name = "shared_valkey"
+path = "tests/shared_valkey.rs"
+required-features = ["valkey-integration-tests"]
+
+[[test]]
 name = "valkey_tls"
 path = "tests/valkey_tls.rs"
 required-features = ["valkey-tls-integration-tests"]

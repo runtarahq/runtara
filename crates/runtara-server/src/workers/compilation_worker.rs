@@ -121,7 +121,7 @@ pub async fn run(
             return;
         }
     };
-    let queue = CompilationQueue::new(manager);
+    let queue = CompilationQueue::new(manager, crate::config::served_tenants().to_vec());
 
     // Recover any orphaned pending compilations (from previous crashes)
     match queue.recover_orphaned().await {
@@ -494,7 +494,10 @@ async fn open_shared_queue(
         .map_err(|e| {
             crate::valkey::compilation_queue::CompilationQueueError::ConnectionError(e.to_string())
         })?;
-    Ok(CompilationQueue::new(manager))
+    Ok(CompilationQueue::new(
+        manager,
+        crate::config::served_tenants().to_vec(),
+    ))
 }
 
 #[cfg(test)]

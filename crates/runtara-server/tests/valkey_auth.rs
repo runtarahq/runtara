@@ -52,7 +52,7 @@ async fn get_member_role_reads_each_role() {
         ("viewer", Role::Viewer),
     ] {
         let uid = unique("auth0|test");
-        let key = format!("member:{uid}");
+        let key = format!("primary:member:{uid}");
         let value = format!(r#"{{"role":"{wire}","updated_at":"2026-05-28T12:00:00Z"}}"#);
         let mut conn = manager.clone();
         let _: () = conn.set(&key, &value).await.expect("set member");
@@ -84,7 +84,7 @@ async fn get_member_role_malformed_fails_closed() {
     let manager = fresh_manager(&url).await;
 
     let uid = unique("auth0|bad");
-    let key = format!("member:{uid}");
+    let key = format!("primary:member:{uid}");
     let mut conn = manager.clone();
     let _: () = conn
         .set(&key, r#"{"role":"superuser"}"#)
@@ -100,17 +100,76 @@ async fn get_member_role_malformed_fails_closed() {
 }
 
 #[tokio::test]
+async fn another_tenants_member_record_does_not_answer() {
+    let url = redis_url_or_skip!();
+    let manager = fresh_manager(&url).await;
+
+    let uid = unique("auth0|other");
+    let key = format!("other:member:{uid}");
+    let mut conn = manager.clone();
+    let _: () = conn.set(&key, r#"{"role":"owner"}"#).await.expect("set");
+
+    let got = get_member_role(&manager, "primary", &uid)
+        .await
+        .expect("read role");
+    assert_eq!(
+        got, None,
+        "a record in another tenant is not membership here"
+    );
+
+    let _: () = conn.del(&key).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn version_1_member_record_still_answers_for_the_primary() {
+    let url = redis_url_or_skip!();
+    let manager = fresh_manager(&url).await;
+
+    let uid = unique("auth0|v1");
+    let key = format!("member:{uid}");
+    let mut conn = manager.clone();
+    let _: () = conn.set(&key, r#"{"role":"viewer"}"#).await.expect("set");
+
+    let got = get_member_role(&manager, "primary", &uid)
+        .await
+        .expect("read role");
+    assert_eq!(got, Some(Role::Viewer));
+
+    let _: () = conn.del(&key).await.expect("cleanup");
+}
+
+#[tokio::test]
 async fn token_is_revoked_reflects_presence() {
     let url = redis_url_or_skip!();
     let manager = fresh_manager(&url).await;
 
     let jti = unique("jti");
     assert!(
-        !token_is_revoked(&manager, &jti).await.expect("check"),
+        !token_is_revoked(&manager, "primary", &jti)
+            .await
+            .expect("check"),
         "absent denylist key means not revoked"
     );
 
-    let key = format!("token:revoked:{jti}");
+    for key in [
+        format!("primary:token:revoked:{jti}"),
+        format!("token:revoked:{jti}"),
+    ] {
+        let mut conn = manager.clone();
+        let _: () = conn
+            .set(&key, r#"{"revoked_at":"2026-05-28T12:00:00Z"}"#)
+            .await
+            .expect("set");
+        assert!(
+            token_is_revoked(&manager, "primary", &jti)
+                .await
+                .expect("check"),
+            "a present denylist key ({key}) means revoked"
+        );
+        let _: () = conn.del(&key).await.expect("cleanup");
+    }
+
+    let key = format!("other:token:revoked:{jti}");
     let mut conn = manager.clone();
     let _: () = conn
         .set(&key, r#"{"revoked_at":"2026-05-28T12:00:00Z"}"#)
@@ -118,8 +177,10 @@ async fn token_is_revoked_reflects_presence() {
         .expect("set");
 
     assert!(
-        token_is_revoked(&manager, &jti).await.expect("check"),
-        "present denylist key means revoked"
+        !token_is_revoked(&manager, "primary", &jti)
+            .await
+            .expect("check"),
+        "another tenant's denylist does not revoke here"
     );
 
     let _: () = conn.del(&key).await.expect("cleanup");
@@ -132,21 +193,25 @@ async fn revoke_token_then_seen_as_revoked() {
 
     let jti = unique("jti");
     assert!(
-        !token_is_revoked(&manager, &jti).await.expect("check"),
+        !token_is_revoked(&manager, "primary", &jti)
+            .await
+            .expect("check"),
         "not revoked before write"
     );
 
-    revoke_token(&manager, &jti, Some(60))
+    revoke_token(&manager, "primary", &jti, Some(60))
         .await
         .expect("revoke");
     assert!(
-        token_is_revoked(&manager, &jti).await.expect("check"),
+        token_is_revoked(&manager, "primary", &jti)
+            .await
+            .expect("check"),
         "revoked after write"
     );
 
     let mut conn = manager.clone();
     let _: () = conn
-        .del(format!("token:revoked:{jti}"))
+        .del(format!("primary:token:revoked:{jti}"))
         .await
         .expect("cleanup");
 }

@@ -954,7 +954,9 @@ pub async fn start_with(
         .clone()
         .filter(|_| config::valkey_admission_enabled())
     {
-        match workers::admission_counter::install(manager, &pool).await {
+        match workers::admission_counter::install(manager, &pool, config::served_tenants().to_vec())
+            .await
+        {
             Ok(()) => println!("✓ Valkey admission counter installed"),
             Err(error) => eprintln!(
                 "⚠ Failed to install Valkey admission counter, using the database counter: {error}"

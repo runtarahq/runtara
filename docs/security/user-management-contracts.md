@@ -1,6 +1,6 @@
 # User-management contracts
 
-**Contract version:** `1`
+**Contract version:** `2` (version 1 keys are still read; see §3.4)
 **Status:** authoritative — this document is the single source of truth for the
 cross-service contracts between Auth0, smo-management and runtara. runtara
 *enforces* these contracts; smo-management and the Auth0 Post-Login Action
@@ -39,8 +39,8 @@ Where each piece of state lives. Every contract below assumes this split.
 | Tenant business state (slug, `valkey_url`, plan, settings, provisioning state) | **smo-management DB** | `auth0_org_id` joins back to Auth0. |
 | Invitations | **smo-management DB** | Auth0 invitation API doesn't fit our flow. |
 | Audit log | **smo-management DB** | Aggregates runtara- and smo-management-emitted events. See §6. |
-| **Hot-path role per request** | **Per-tenant Valkey** (`member:{sub}`) | Written by smo-management, read by runtara. See §3. |
-| **Token revocation** | **Per-tenant Valkey** (`token:revoked:{jti}`) | Written on revoke/removal; read by runtara. See §3. |
+| **Hot-path role per request** | **Valkey, tenant-prefixed** (`{tenant}:member:{sub}`) | Written by smo-management, read by runtara. See §3. |
+| **Token revocation** | **Valkey, tenant-prefixed** (`{tenant}:token:revoked:{jti}`) | Written on revoke/removal; read by runtara. See §3. |
 | Permission map (role → permissions) | **runtara code** (static) | Not data. Exported as JSON for the admin UI; runtara is the enforcer. See §4. |
 
 Key consequences:
@@ -81,9 +81,9 @@ below.
 
 | Claim | Required | Source | Used by runtara for |
 |---|---|---|---|
-| `sub` | yes² | Auth0 | User identity; key for `member:{sub}` lookup. |
+| `sub` | yes² | Auth0 | User identity; key for `{tenant}:member:{sub}` lookup. |
 | `org_id` | yes | Auth0 Organization id | Tenant id. Must equal the request's `TENANT_ID`; mismatch → `403`. |
-| `jti` | yes¹ | Auth0 Action | Token identity; key for `token:revoked:{jti}` lookup. |
+| `jti` | yes¹ | Auth0 Action | Token identity; key for `{tenant}:token:revoked:{jti}` lookup. |
 | `email` | no | Auth0 | `/me` response only. |
 | `name` | no | Auth0 | `/me` response only. |
 | `tenant_slug` | no | smo-management → Auth0 org metadata | `/me` response only. **Not** used for routing — `org_id` is the tenant key everywhere internally. |
@@ -105,7 +105,7 @@ and `jti` — **not** `email`, `name` or `tenant_slug`, which reach nothing but
 the `/me` body.
 
 **`roles` is intentionally NOT in the token.** runtara reads the live role from
-`member:{sub}` in Valkey on every request, so demotions and removals take effect
+`{tenant}:member:{sub}` in Valkey on every request, so demotions and removals take effect
 within a Valkey round-trip. A `roles` claim would be cached for the token's
 lifetime (1–24h), defeating immediate revocation.
 
@@ -118,17 +118,19 @@ audience permits; no other service depends on a specific shape.
 
 ---
 
-## 3. Valkey key schema (per tenant)
+## 3. Valkey key schema
 
-The Valkey instance *is* the tenant boundary — no tenant prefix on keys. In the
-current deployment model each tenant host runs Valkey on `localhost:6379`;
-runtara reads it on every authenticated request (two `GET`s, sub-millisecond).
+One Valkey may serve many tenants, so every key names its tenant: `{tenant}` is
+the tenant id (Auth0 `org_id`), which never contains `:` (runtara refuses to boot
+with one that does). A process reads and writes only its own tenants' keys.
 
-### `member:{uid}` — membership and role
+### 3.1 `{tenant}:member:{uid}` — membership and role
 
-- **Key:** `member:{uid}` where `{uid}` is the Auth0 `sub`.
-- **Writer:** smo-management (on invite-accept, role change, reconciliation).
-- **Reader:** runtara (every authenticated request).
+- **Key:** `{tenant}:member:{uid}` where `{uid}` is the Auth0 `sub`.
+- **Writer:** the control plane (smo-management; in runtara-cloud the customer
+  plane) on invite-accept, role change, reconciliation.
+- **Reader:** runtara (every authenticated request), for the tenant the request
+  acts for. A record in another tenant is not membership here.
 - **Value:** JSON object.
 
 ```json
@@ -138,18 +140,18 @@ runtara reads it on every authenticated request (two `GET`s, sub-millisecond).
 - `role` — one of the four built-in roles (see §4). Required.
 - `updated_at` — RFC 3339 / ISO 8601 UTC timestamp of the last write. Advisory;
   used for drift diagnostics, not for authorization decisions.
-- **No TTL.** Membership persists until smo-management deletes it (user removed)
-  or overwrites it (role changed). Valkey AOF persistence plus the hourly
-  reconciliation job protect against loss.
+- **No TTL.** Membership persists until the control plane deletes it (user
+  removed) or overwrites it (role changed). Valkey AOF persistence plus the
+  hourly reconciliation job protect against loss.
 - Parse as JSON — do **not** string-split. This is a cross-service contract;
   unknown fields are ignored, an unknown `role` value fails closed.
 
-### `token:revoked:{jti}` — revocation denylist
+### 3.2 `{tenant}:token:revoked:{jti}` — revocation denylist
 
-- **Key:** `token:revoked:{jti}` where `{jti}` is the token's `jti` claim (JWT)
-  or the API key's stored `jti`.
-- **Writer:** smo-management (on member removal, token revoke) and runtara (on
-  local `rt_*` key revoke).
+- **Key:** `{tenant}:token:revoked:{jti}` where `{jti}` is the token's `jti`
+  claim (JWT) or the API key's stored `jti`.
+- **Writer:** the control plane (on member removal, token revoke) and runtara
+  (on local `rt_*` key revoke).
 - **Reader:** runtara (every authenticated request that carries a `jti`).
 - **Value:** JSON object.
 
@@ -164,6 +166,51 @@ runtara reads it on every authenticated request (two `GET`s, sub-millisecond).
   record.
 - Presence of the key means *revoked*. runtara may use `EXISTS`/`GET`; the body
   is advisory (diagnostics only).
+
+### 3.3 Product events — `runtara:product_events:stream`
+
+One stream for every tenant. Each entry has one field, `data`, holding a JSON
+event whose `tenant_id` names the tenant it belongs to (plus `event_id`,
+`occurred_at`, `event_type`, `event_version`, actor and resource fields). The
+control plane consumes it with one consumer group and deduplicates by
+`event_id`. The stream is capped (`XADD MAXLEN ~`,
+`RUNTARA_PRODUCT_EVENTS_STREAM_MAXLEN`).
+
+### 3.4 Version 1 keys
+
+Contract version 1 assumed one Valkey per tenant and used unprefixed keys.
+runtara still reads them during the migration:
+
+- `member:{uid}` answers for the process's **primary** tenant only, and only
+  while `RUNTARA_AUTH_LEGACY_MEMBER_KEYS` is true (the default). A Valkey shared
+  by several processes **must** set it to `false`: the record names no tenant,
+  so it would answer for every process's primary tenant.
+- `token:revoked:{jti}` still revokes, in any tenant (a `jti` is unique, and a
+  revocation can only deny).
+
+Writers should move to the prefixed keys; once none writes version 1 keys,
+set `RUNTARA_AUTH_LEGACY_MEMBER_KEYS=false` everywhere.
+
+### 3.5 runtara's own keys
+
+These are runtara-internal (no other service reads or writes them), listed so a
+shared Valkey can be reasoned about. Each is scoped to its tenant:
+
+| Key | Type | Purpose |
+|---|---|---|
+| `{tenant}:rate_limit:{connection_id}` | hash | Connection token bucket (`tokens`, `last_refill`, counters) |
+| `{tenant}:rate_limit_learned:{connection_id}` | string | Provider-reported limit for the connection |
+| `{tenant}:compilation:queue` / `:pending` / `:requests` | list / set / hash | Compilation work queue, consumed only by processes serving the tenant |
+| `{tenant}:admission:reserved` | string | Admission counter, seeded from durable reservations at boot |
+| `runtara:compilation:progress:{tenant}:{workflow}:{version}` | hash | Compilation progress |
+| `runtara:triggers:{tenant}` | stream | Trigger events (prefix configurable) |
+| `runtara:mcp:sessions:{tenant}:{session}` | string | MCP session recovery (keyed by the process's primary tenant; SYN-781) |
+| `runtara:session:{<sha256 of tenant, session>}:*` | various | Channel session queues |
+| `queue:{tenant}:{session}` | list | Session input queue |
+
+The unprefixed `runtara:compilation:{queue,pending,requests}` and
+`runtara:admission:reserved:{tenant}` of earlier versions are drained (queue)
+or removed (counter) for the served tenants at boot.
 
 ---
 
@@ -290,7 +337,7 @@ permissions serialize as the **colon-style strings** above (`workflow:read`,
 `invocation_history:read`, …) via a custom serde implementation — not the default
 serde rename, which can't produce the underscore-in-resource segment. Roles
 serialize as their lowercase names (`owner`, `admin`, `member`, `viewer`),
-matching the `member:{uid}` value in §3. This keeps the wire form identical across
+matching the `{tenant}:member:{uid}` value in §3. This keeps the wire form identical across
 runtara code, the Valkey value, and the admin UI.
 
 ### Distribution
@@ -426,8 +473,8 @@ The rows below are marked with the lowest policy at which each takes effect.
 | Role denies the permission | `403 Forbidden` | `PERMISSION_DENIED` | `required` |
 | `sub` missing from the token | `401 Unauthorized` | `MISSING_SUBJECT` | `required` |
 | `jti` missing from the token | `401 Unauthorized` | `MISSING_JTI` | `required` |
-| `token:revoked:{jti}` present | `401 Unauthorized` | `TOKEN_REVOKED` | `required` |
-| `member:{sub}` missing in Valkey (not a member) | `403 Forbidden` | `NOT_A_MEMBER` | `required` |
+| `{tenant}:token:revoked:{jti}` present | `401 Unauthorized` | `TOKEN_REVOKED` | `required` |
+| `{tenant}:member:{sub}` missing in Valkey (not a member) | `403 Forbidden` | `NOT_A_MEMBER` | `required` |
 | Unknown/unparseable `role` value | `403 Forbidden` | `MALFORMED_MEMBER_RECORD` | `required` |
 | Valkey unreachable | `503 Service Unavailable`; loud alert | `AUTH_MEMBERSHIP_UNAVAILABLE` | `required` |
 
@@ -444,17 +491,17 @@ runtara request — no token reissue, no Auth0 hot-path call.
 
 | Action | smo-management writes | Effect in runtara |
 |---|---|---|
-| Remove user from tenant | delete `member:{sub}` **and** write `token:revoked:{jti}` for active sessions/keys | next request fails membership check (`403`); in-flight tokens also fail the denylist check |
-| Change role | overwrite `member:{sub}.role` | next request uses the new role |
-| Revoke API token | write `token:revoked:{jti}` with TTL | token rejected immediately |
+| Remove user from tenant | delete `{tenant}:member:{sub}` **and** write `{tenant}:token:revoked:{jti}` for active sessions/keys | next request fails membership check (`403`); in-flight tokens also fail the denylist check |
+| Change role | overwrite `{tenant}:member:{sub}.role` | next request uses the new role |
+| Revoke API token | write `{tenant}:token:revoked:{jti}` with TTL | token rejected immediately |
 | Auth0 session revoke | (Auth0 only) | separate; forces re-login across browsers |
 
 **Defense in depth on removal.** smo-management's `member:remove` follows three
 independent paths so that cache staleness, a missed message, or a partial Valkey
 write is caught by another layer:
 
-1. Delete `member:{sub}` — next request fails the membership check.
-2. Write `token:revoked:{jti}` for every active session/key of the user (TTL =
+1. Delete `{tenant}:member:{sub}` — next request fails the membership check.
+2. Write `{tenant}:token:revoked:{jti}` for every active session/key of the user (TTL =
    remaining token lifetime) — in-flight tokens fail the denylist check even
    before membership lookup.
 3. (Future, if an in-process cache is ever added) publish on
