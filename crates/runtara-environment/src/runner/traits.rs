@@ -525,6 +525,14 @@ pub enum RunExitReport {
         /// The host's account of the trap.
         reason: String,
     },
+    /// The runner lost the executor (its node or its link went away) and
+    /// cannot say how the guest ended; it may still be running. The run is
+    /// resumable: recovery revokes its lease, so anything the lost executor
+    /// still writes is fenced, and relaunches it from its checkpoints.
+    Lost {
+        /// What the runner observed.
+        reason: String,
+    },
 }
 
 /// Resource metrics collected from the instance execution.

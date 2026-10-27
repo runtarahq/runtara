@@ -27,6 +27,8 @@ struct FakeRun {
     tasks: Vec<(crate::TaskStart, Vec<u8>)>,
     task_done: bool,
     task_calls: Vec<String>,
+    /// The next checkpoint write finds another launch holding the run.
+    superseded_on_write: bool,
 }
 
 #[derive(Default)]
@@ -96,6 +98,12 @@ impl WorkflowApiBackend for FakeBackend {
         state: Vec<u8>,
     ) -> Result<CheckpointWrite, ApiError> {
         let mut run = self.run.lock().unwrap();
+        if run.superseded_on_write {
+            // As the host does: the store refuses the write and the launch
+            // is fenced from then on.
+            run.fenced = true;
+            return Err(ApiError::new(ErrorCode::Unavailable, "superseded"));
+        }
         let stored = !run.checkpoints.contains_key(id);
         let state = run
             .checkpoints
@@ -386,6 +394,20 @@ async fn a_fenced_launch_is_refused_everywhere() {
         assert_eq!(error_code(&body), "fenced");
     }
     assert!(backend.run.lock().unwrap().outcomes.is_empty());
+}
+
+#[tokio::test]
+async fn a_write_refused_for_another_owner_is_fenced_not_retryable() {
+    let backend = Arc::new(FakeBackend::default());
+    backend.run.lock().unwrap().superseded_on_write = true;
+    let app = app(backend.clone());
+    let (status, _, body) = send(&app, write("PUT", "/v1/checkpoints/c", "k1", "s")).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&body), "fenced");
+    let (status, _, body) =
+        send(&app, request("GET", "/v1/run").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&body), "fenced");
 }
 
 #[tokio::test]

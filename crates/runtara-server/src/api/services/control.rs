@@ -1342,7 +1342,7 @@ fn suspension_reason(row: &ControlInstance) -> Option<SuspensionReason> {
         Some("waiting_signal") => Some(SuspensionReason::WaitingSignal),
         Some("waiting_instances") => Some(SuspensionReason::WaitingInstances),
         Some("sleeping") => Some(SuspensionReason::Sleeping),
-        Some("shutdown_requested" | "environment_restart" | "park_failed") => {
+        Some("shutdown_requested" | "environment_restart" | "park_failed" | "executor_lost") => {
             Some(SuspensionReason::Shutdown)
         }
         _ => None,

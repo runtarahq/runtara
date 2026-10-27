@@ -864,6 +864,14 @@ impl WorkflowApiBackend for Backend {
         let Some(slot) = self.0.slot(binding) else {
             return Ok(LaunchState::Fenced);
         };
+        // Nor does one whose writes the store refused for another owner.
+        if slot
+            .runtime
+            .upgrade()
+            .is_some_and(|runtime| runtime.superseded())
+        {
+            return Ok(LaunchState::Fenced);
+        }
         let posted = slot
             .outcome
             .lock()

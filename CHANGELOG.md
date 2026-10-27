@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A runner can report an executor lost.** `RunExitReport::Lost` (for a
+  node or link that went away) hands the run to recovery instead of failing
+  it: recovery suspends it (`termination_reason = executor_lost`, a new value
+  added by store migration 052), which revokes its root lease, and relaunches
+  it from its checkpoints, under the crash-loop cap. A lost executor that
+  keeps running is stopped at its next durable write, and its workflow API
+  calls answer `fenced` (not a retryable `unavailable`) from then on.
+  `e2e/test_lost_executor_fenced.sh` loses a launch mid-run and checks the
+  run finishes once.
+
 - **The workflow runner is pluggable.** A host binary can boot the stock
   server with its own runner: `runtara_server::boot::run(ServerOptions {
   runner_factory })`, where the factory builds a `Runner` from the parts the

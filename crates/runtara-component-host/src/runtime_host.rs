@@ -209,6 +209,11 @@ pub trait RuntimeHost: Send + Sync {
         let _ = terminal;
         Ok(())
     }
+    /// Whether a durable write of this run was refused because another
+    /// execution now holds it. Its workflow API launch is fenced from then on.
+    fn superseded(&self) -> bool {
+        false
+    }
     /// Emit a custom event (`kind` becomes the event subtype).
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String>;
     /// Whether step-level debug instrumentation is enabled for this run.

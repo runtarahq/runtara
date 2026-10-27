@@ -60,6 +60,8 @@ pub struct PersistenceRuntimeHost {
     debug_mode: bool,
     /// Set once a cancel/shutdown is consumed (per-run, not process-global).
     cancelled: AtomicBool,
+    /// A durable write was refused because another execution holds the run.
+    superseded: AtomicBool,
     /// Signal-poll rate limiter state.
     last_signal_poll: std::sync::Mutex<Option<Instant>>,
     signal_poll_interval: Duration,
@@ -105,6 +107,7 @@ impl PersistenceRuntimeHost {
             debug_mode,
 
             cancelled: AtomicBool::new(false),
+            superseded: AtomicBool::new(false),
             last_signal_poll: std::sync::Mutex::new(None),
             signal_poll_interval: DEFAULT_SIGNAL_POLL_INTERVAL,
             sleep_interrupted: AtomicBool::new(false),
@@ -204,6 +207,7 @@ impl PersistenceRuntimeHost {
         let error = error.into();
         if is_superseded(&error) {
             tracing::warn!(instance_id = %self.instance_id, "Execution superseded; stopping the guest");
+            self.superseded.store(true, Ordering::SeqCst);
             self.cancelled.store(true, Ordering::SeqCst);
             if let Some(token) = &self.cancel_token {
                 token.store(true, Ordering::SeqCst);
@@ -490,6 +494,10 @@ const TERMINAL_WRITE_ATTEMPTS: u32 = 5;
 impl RuntimeHost for PersistenceRuntimeHost {
     fn trusted_launch(&self) -> runtara_component_host::trusted::TrustedLaunch {
         self.trusted_launch
+    }
+
+    fn superseded(&self) -> bool {
+        self.superseded.load(Ordering::SeqCst)
     }
 
     fn in_process_wait(&self) -> Option<Box<dyn std::any::Any + Send>> {

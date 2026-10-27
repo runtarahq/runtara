@@ -813,17 +813,33 @@ async fn guard_launch(
         Err(error) => return error_response(&error),
     };
     let is_run_read = request.method() == Method::GET && request.uri().path() == "/v1/run";
+    let fenced = || {
+        error_response(&ApiError::new(
+            ErrorCode::Fenced,
+            "this launch no longer holds the run's lease",
+        ))
+    };
     match state.backend.launch_state(&binding).await {
-        Ok(LaunchState::Active) => next.run(request).await,
+        Ok(LaunchState::Active) => {
+            let response = next.run(request).await;
+            // A write the store refused because another launch now holds the
+            // run fences this one: the guest must stop, not retry.
+            if response.status() == axum::http::StatusCode::SERVICE_UNAVAILABLE
+                && matches!(
+                    state.backend.launch_state(&binding).await,
+                    Ok(LaunchState::Fenced)
+                )
+            {
+                return fenced();
+            }
+            response
+        }
         Ok(LaunchState::Finished) if is_run_read => next.run(request).await,
         Ok(LaunchState::Finished) => error_response(&ApiError::new(
             ErrorCode::Finished,
             "the run already posted its outcome",
         )),
-        Ok(LaunchState::Fenced) => error_response(&ApiError::new(
-            ErrorCode::Fenced,
-            "this launch no longer holds the run's lease",
-        )),
+        Ok(LaunchState::Fenced) => fenced(),
         Err(error) => error_response(&error),
     }
 }

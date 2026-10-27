@@ -1711,6 +1711,11 @@ pub fn spawn_container_monitor(
                     {
                         crate::observed_exit::ObservedExit::unparked_suspend(error)
                     }
+                    Some(crate::runner::RunExitReport::Lost { reason })
+                        if !drain.is_draining() =>
+                    {
+                        crate::observed_exit::ObservedExit::lost(reason)
+                    }
                     report => {
                         // A run without a stderr file says why it trapped
                         // through its exit report.
