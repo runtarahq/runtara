@@ -1294,35 +1294,38 @@ pub async fn start_with(
         }
     });
 
-    let default_connection = match &object_model_database_url {
-        Some(object_model_database_url) => Some(
-            connections_facade
-                .ensure_default_connection(
-                    &tenant_id,
-                    "object_model",
-                    format!("Default Object Model Database ({})", tenant_id),
-                    "postgres".to_string(),
-                    serde_json::json!({ "database_url": object_model_database_url }),
-                )
-                .await,
-        ),
-        None => None,
-    };
-    match default_connection {
-        None => {}
-        Some(Ok(connection_id)) => {
-            tracing::info!(
-                tenant_id = %tenant_id,
-                connection_id = %connection_id,
-                "Default object_model connection is configured"
-            );
-        }
-        Some(Err(error)) => {
-            tracing::warn!(
-                tenant_id = %tenant_id,
-                error = ?error,
-                "Failed to auto-populate default object_model connection"
-            );
+    // Each served tenant gets the platform database as its default connection.
+    for tenant_id in config::served_tenants() {
+        let default_connection = match &object_model_database_url {
+            Some(object_model_database_url) => Some(
+                connections_facade
+                    .ensure_default_connection(
+                        tenant_id,
+                        "object_model",
+                        format!("Default Object Model Database ({})", tenant_id),
+                        "postgres".to_string(),
+                        serde_json::json!({ "database_url": object_model_database_url }),
+                    )
+                    .await,
+            ),
+            None => None,
+        };
+        match default_connection {
+            None => {}
+            Some(Ok(connection_id)) => {
+                tracing::info!(
+                    tenant_id = %tenant_id,
+                    connection_id = %connection_id,
+                    "Default object_model connection is configured"
+                );
+            }
+            Some(Err(error)) => {
+                tracing::warn!(
+                    tenant_id = %tenant_id,
+                    error = ?error,
+                    "Failed to auto-populate default object_model connection"
+                );
+            }
         }
     }
 
@@ -1483,15 +1486,17 @@ pub async fn start_with(
         .with_direct_compilation(
             api::services::compilation::direct_compilation_settings_from_config(),
         );
-        let tenant_id = config::tenant_id().to_string();
         tokio::spawn(async move {
-            let (restaged, failed) = service.restage_stale_workflow_agents(&tenant_id).await;
-            if restaged + failed > 0 {
-                tracing::info!(
-                    restaged,
-                    failed,
-                    "restaged workflow-agents for this lowering"
-                );
+            for tenant_id in config::served_tenants() {
+                let (restaged, failed) = service.restage_stale_workflow_agents(tenant_id).await;
+                if restaged + failed > 0 {
+                    tracing::info!(
+                        %tenant_id,
+                        restaged,
+                        failed,
+                        "restaged workflow-agents for this lowering"
+                    );
+                }
             }
         });
     }
@@ -1653,11 +1658,13 @@ pub async fn start_with(
         println!("  Trigger intake: {trigger_workers} worker(s), batch {trigger_batch_size}");
         // Keep per-worker bounds and export their aggregate capacity through OTEL.
         let trigger_permits = workers::trigger_worker::TriggerPermits::new(
-            trigger_workers,
+            trigger_workers * config::served_tenants().len(),
             workers::trigger_worker::trigger_concurrency(),
         );
-        for worker_index in 0..trigger_workers {
-            let trigger_worker_tenant_id = tenant_id.clone();
+        // Each served tenant's trigger stream gets its own consumers.
+        let served = config::served_tenants();
+        for worker_index in 0..trigger_workers * served.len() {
+            let trigger_worker_tenant_id = served[worker_index / trigger_workers].clone();
             let permits_for_worker = trigger_permits
                 .for_worker(worker_index)
                 .expect("a semaphore exists for every spawned trigger worker");
@@ -1835,33 +1842,38 @@ pub async fn start_with(
         }
     }
     if let (Some(connection), Some(client)) = (valkey_conn.clone(), runtime_client.clone()) {
-        let shutdown = shutdown_signal.clone();
-        let delivery_pool = pool.clone();
-        let delivery_tenant_id = tenant_id.clone();
-        shutdown_coordinator.spawn_intake(async move {
-            workers::session_delivery_worker::run(
-                connection,
-                client,
-                delivery_pool,
-                delivery_tenant_id,
-                shutdown,
-            )
-            .await;
-        });
+        for delivery_tenant_id in config::served_tenants().iter().cloned() {
+            let connection = connection.clone();
+            let client = client.clone();
+            let shutdown = shutdown_signal.clone();
+            let delivery_pool = pool.clone();
+            shutdown_coordinator.spawn_intake(async move {
+                workers::session_delivery_worker::run(
+                    connection,
+                    client,
+                    delivery_pool,
+                    delivery_tenant_id,
+                    shutdown,
+                )
+                .await;
+            });
+        }
     }
 
     // Cron does not publish to Valkey directly. Its durable enqueue remains
     // available during an outage, and the relay delivers it when connectivity
     // returns. Start after the shared engine exists so it uses the exact same
     // admission policy as HTTP, sessions, chat, and webhook sources.
-    {
+    for cron_tenant_id in config::served_tenants().iter().cloned() {
         let cron_pool = pool.clone();
         let cron_engine = Arc::clone(&execution_engine);
-        let cron_tenant_id = tenant_id.clone();
         let cron_shutdown = shutdown_signal.clone();
+        // Triggers no tenant owns run as the primary tenant, fired once.
+        let claims_untenanted = cron_tenant_id == tenant_id;
         shutdown_coordinator.spawn_intake(async move {
             let scheduler_config = workers::cron_scheduler::CronSchedulerConfig {
                 tenant_id: cron_tenant_id,
+                claims_untenanted,
                 check_interval_secs: 60,
             };
             workers::cron_scheduler::run(cron_pool, cron_engine, scheduler_config, cron_shutdown)

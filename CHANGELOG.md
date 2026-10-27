@@ -83,7 +83,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tenant only when that tenant is served (404 otherwise); the sync webhook
   finds the workflow among the served tenants. Product events from
   background work carry the work's tenant, and a run's `RUNTARA_TENANT_ID`
-  is its own tenant, not the process's. `e2e/test_served_tenants.sh`.
+  is its own tenant, not the process's. Each served tenant gets its own
+  trigger-stream consumers, cron scheduler (triggers no tenant owns run once,
+  as the primary tenant), session delivery, default object-model connection
+  and workflow-agent restage. Membership roles are read per tenant: the
+  primary tenant keeps `member:{user}`, another served tenant uses
+  `member:{tenant}:{user}`. `e2e/test_served_tenants.sh`.
 
 - **The platform object-model database is optional.** Without
   `OBJECT_MODEL_DATABASE_URL` the server has no default database and creates

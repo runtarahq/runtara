@@ -9,6 +9,10 @@
 #   2. API KEYS — the primary tenant's key works; a key of an unserved tenant
 #      is refused; a key of the served second tenant authenticates as that
 #      tenant and sees none of the primary tenant's workflows.
+#   3. SECOND TENANT'S WORK — as the second tenant: a workflow compiles, its
+#      HTTP trigger runs it through the second tenant's trigger stream, and
+#      its cron trigger fires; its runs are its own, and the primary tenant
+#      sees none of them.
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
 # environment) + docker (isolated Valkey) and the shared workflow components
@@ -74,8 +78,10 @@ trap cleanup EXIT
 
 API="http://127.0.0.1:${TEST_PORT_PUBLIC}/api/runtime"
 
+# Requests run as the primary tenant (local auth) unless AUTH carries a key.
+AUTH=()
 api_post() {
-    curl -sS --max-time "${3:-120}" -X POST -H "Content-Type: application/json" \
+    curl -sS --max-time "${3:-120}" -X POST -H "Content-Type: application/json" ${AUTH[@]+"${AUTH[@]}"} \
         ${2:+-d "$2"} "${API}$1"
 }
 
@@ -89,7 +95,7 @@ create_and_compile() {
     resp=$(api_post "/workflows/${wf_id}/update" "{\"executionGraph\": ${graph}}")
     [ "$(echo "${resp}" | jq -r '.success // false')" = "true" ] \
         || { print_error "update/validate failed for ${name}: ${resp}"; exit 1; }
-    version=$(curl -sS "${API}/workflows/${wf_id}/versions" \
+    version=$(curl -sS ${AUTH[@]+"${AUTH[@]}"} "${API}/workflows/${wf_id}/versions" \
         | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')
     resp=$(api_post "/workflows/${wf_id}/versions/${version}/compile" '{}' 900)
     [ "$(echo "${resp}" | jq -r '.success // false')" = "true" ] \
@@ -258,4 +264,30 @@ echo "${RESP}" | jq -e '(.data.content // .data // []) | length == 0' >/dev/null
     || { print_error "the primary tenant's key no longer sees its workflow"; exit 1; }
 echo "  primary key works; an unserved tenant's key is refused (403); the served second tenant sees only its own workflows ✓"
 
-print_success "served tenants: webhooks and API keys reach exactly the tenants this server serves, each its own"
+#-------------------------------------------------------------------------
+print_step "3. The second tenant's work runs, as the second tenant..."
+AUTH=(-H "Authorization: Bearer ${SECOND_KEY}")
+B_WF=$(create_and_compile "Answer B" "${GRAPH/\"Answer\"/\"Answer B\"}")
+RESP=$(api_post /triggers "{\"workflow_id\": \"${B_WF}\", \"trigger_type\": \"HTTP\", \"active\": true}")
+B_TRIGGER=$(echo "${RESP}" | jq -r '.data.id // .id // empty' 2>/dev/null || true)
+[ -n "${B_TRIGGER}" ] || { print_error "the second tenant's trigger create failed: ${RESP}"; exit 1; }
+RESP=$(api_post /triggers "{\"workflow_id\": \"${B_WF}\", \"trigger_type\": \"CRON\", \"active\": true, \"configuration\": {\"expression\": \"* * * * *\", \"timezone\": \"UTC\"}}")
+echo "${RESP}" | jq -e '.data.id // .id' >/dev/null 2>&1 || { print_error "the second tenant's cron create failed: ${RESP}"; exit 1; }
+AUTH=()
+CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{}' "${API}/events/http/${B_TRIGGER}/run")
+case "${CODE}" in 2??) ;; *) print_error "the second tenant's webhook answered ${CODE}"; exit 1 ;; esac
+# Runs land under the second tenant: the webhook's, then the cron's.
+b_runs() {
+    curl -sS -H "Authorization: Bearer ${SECOND_KEY}" "${API}/workflows/${B_WF}/instances?size=50" \
+        | jq '[(.data.content // .data // [])[] | select((.status // "") == "completed")] | length'
+}
+for _ in {1..60}; do [ "$(b_runs)" -ge 1 ] && break; sleep 1; done
+[ "$(b_runs)" -ge 1 ] || { print_error "the second tenant's webhook run did not complete"; tail -30 "${TEST_LOG}"; exit 1; }
+for _ in {1..150}; do [ "$(b_runs)" -ge 2 ] && break; sleep 1; done
+[ "$(b_runs)" -ge 2 ] || { print_error "the second tenant's cron trigger did not fire"; tail -30 "${TEST_LOG}"; exit 1; }
+[ "$(http_status "${API}/workflows/${B_WF}/instances")" = "404" ] \
+    || [ "$(curl -sS "${API}/workflows/${B_WF}/instances" | jq '(.data.content // .data // []) | length')" = "0" ] \
+    || { print_error "the primary tenant sees the second tenant's runs"; exit 1; }
+echo "  the second tenant's workflow compiled, its webhook and cron ran it as the second tenant; the primary sees none ✓"
+
+print_success "served tenants: webhooks, API keys, triggers and cron reach exactly the tenants this server serves, each its own"
