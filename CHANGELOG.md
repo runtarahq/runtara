@@ -38,8 +38,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dispatcher, agent catalog and entitlement allowlist load from that index
   instead of a directory listing. Without `RUNTARA_AGENT_COMPONENTS_DIR`, the
   server runs the release the store already holds. A record whose content is
-  missing or does not match its digest is refused. Compilation still reads
-  the components directory (`RUNTARA_DIRECT_WASM_COMPONENTS_DIR`).
+  missing or does not match its digest is refused.
+
+- **Workflows compile against the release.** The release is materialized for
+  composition under `<DATA_DIR>/releases/<index digest>`, every component
+  verified against the index, and the compiler reads its agents and shared
+  components there unless `RUNTARA_DIRECT_WASM_COMPONENTS_DIR` overrides it.
+  An image records `workflow.componentRelease` (the release and the digest of
+  its index) beside the digest of every component it was composed from, and
+  the release is part of the compile cache identity, so a new release
+  recompiles a workflow instead of reusing an artifact built from other
+  agent bytes.
 
 - **A runner can report an executor lost.** `RunExitReport::Lost` (for a
   node or link that went away) hands the run to recovery instead of failing

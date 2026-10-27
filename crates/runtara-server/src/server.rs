@@ -720,6 +720,27 @@ pub async fn start_with(
         };
     if let Some(release) = &release {
         config::install_release_agents(release.agents.iter().map(|agent| agent.id.clone()));
+        // Compilation composes from files: the release, materialized under
+        // the digest of its index, holds exactly the bytes the release pins.
+        let index = release.digest();
+        let dir = embedded_runtara::data_dir()
+            .join("releases")
+            .join(index.as_str());
+        if let Err(error) =
+            runtara_environment::artifacts::release::materialize(artifacts.as_ref(), release, &dir)
+                .await
+        {
+            eprintln!(
+                "❌ Materialize release {release_name} for compilation at {}: {error}",
+                dir.display()
+            );
+            std::process::exit(1);
+        }
+        config::install_component_release(config::ComponentRelease {
+            release: release_name.clone(),
+            index: index.to_string(),
+            dir,
+        });
     }
 
     // Load all env-derived configuration up front; fails fast on missing/invalid.

@@ -37,6 +37,14 @@ pub struct ReleaseIndex {
     pub components: Vec<ReleaseEntry>,
 }
 
+impl ReleaseIndex {
+    /// The digest of the index document: the content its manifest names,
+    /// which identifies exactly what the release holds.
+    pub fn digest(&self) -> Digest {
+        Digest::of(&serde_json::to_vec(self).expect("a release index serializes"))
+    }
+}
+
 /// A component read back from the store: its bytes and its metadata's exact
 /// bytes.
 #[derive(Clone, Debug)]
@@ -185,6 +193,60 @@ pub async fn read(
     })
 }
 
+/// Write the release's components into `dir` under the file names they were
+/// published from (`runtara_agent_<id>.wasm` and `.meta.json`, and each shared
+/// component's), for readers that compose from files. Every component is read
+/// and verified against the index first; the directory is assembled beside
+/// `dir` and renamed into place, so `dir` holds the whole release or is
+/// absent. A `dir` that already exists is kept: name it by the index digest.
+pub async fn materialize(
+    store: &dyn ArtifactStore,
+    index: &ReleaseIndex,
+    dir: &Path,
+) -> Result<(), ArtifactError> {
+    if tokio::fs::try_exists(dir).await? {
+        return Ok(());
+    }
+    let parent = dir
+        .parent()
+        .ok_or_else(|| release_error(format!("{} has no parent", dir.display())))?;
+    tokio::fs::create_dir_all(parent).await?;
+    let staging = parent.join(format!(".release-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir(&staging).await?;
+    let written = async {
+        let agents = index.agents.iter().map(|entry| {
+            let stem = format!("{AGENT_PREFIX}{}", entry.id.replace('-', "_"));
+            (entry, stem)
+        });
+        let components = index
+            .components
+            .iter()
+            .map(|entry| (entry, entry.id.clone()));
+        for (entry, stem) in agents.chain(components) {
+            let component = read(store, entry).await?;
+            tokio::fs::write(staging.join(format!("{stem}.wasm")), &component.wasm).await?;
+            tokio::fs::write(
+                staging.join(format!("{stem}.meta.json")),
+                component.manifest.metadata_bytes(),
+            )
+            .await?;
+        }
+        match tokio::fs::rename(&staging, dir).await {
+            // Another writer put the same release there first.
+            Err(_) if tokio::fs::try_exists(dir).await.unwrap_or(false) => {
+                let _ = tokio::fs::remove_dir_all(&staging).await;
+                Ok(())
+            }
+            other => other.map_err(ArtifactError::from),
+        }
+    }
+    .await;
+    if written.is_err() {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+    }
+    written
+}
+
 /// The bytes of `digest`, checked against it.
 async fn read_verified(
     store: &dyn ArtifactStore,
@@ -262,6 +324,34 @@ mod tests {
                 .unwrap(),
             published
         );
+        let stored = store
+            .get_manifest(&index_key("9.0.1").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.content, published.digest());
+
+        // Materialized, the release is the bundle's components, byte for byte.
+        let view_dir = tempfile::tempdir().unwrap();
+        let view = view_dir.path().join(published.digest().as_str());
+        materialize(&store, &published, &view).await.unwrap();
+        for name in [
+            "runtara_agent_azure_blob.wasm",
+            "runtara_agent_azure_blob.meta.json",
+            "runtara_agent_http.wasm",
+            "runtara_agent_http.meta.json",
+            "runtara_workflow_stdlib.wasm",
+            "runtara_workflow_stdlib.meta.json",
+        ] {
+            assert_eq!(
+                std::fs::read(view.join(name)).unwrap(),
+                std::fs::read(bundle_dir.path().join(name)).unwrap(),
+                "{name}"
+            );
+        }
+        assert!(!view.join("scratch.wasm").exists());
+        let left: Vec<_> = std::fs::read_dir(view_dir.path()).unwrap().collect();
+        assert_eq!(left.len(), 1, "no staging left behind: {left:?}");
     }
 
     #[tokio::test]

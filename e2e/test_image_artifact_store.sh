@@ -10,9 +10,10 @@
 #   3. IMPORT — on boot the server moves the bytes into the store, clears the
 #      path and removes the old directory; the workflow runs again.
 #   4. RELEASE — the components directory was published as the server's
-#      release: one record per agent and an index. A server booted with no
-#      components directory loads its agents from that release, serves them,
-#      runs one, and runs a workflow that calls one.
+#      release: one record per agent and an index, and the image records the
+#      release and the digests of the agents it was composed from. A server
+#      booted with no components directory loads its agents from that release,
+#      serves them, runs one, and compiles and runs a workflow that calls one.
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
 # environment) + docker (isolated Valkey) and the shared workflow components
@@ -148,7 +149,6 @@ start_server() {
     RUNTARA_CORE_HTTP_PORT="${TEST_CORE_HTTP_PORT}" \
     RUNTARA_ENV_HTTP_PORT="${TEST_ENV_HTTP_PORT}" \
     RUNTARA_AGENT_COMPONENTS_DIR="${AGENTS_DIR-${COMPONENTS_DIR}}" \
-    RUNTARA_DIRECT_WASM_COMPONENTS_DIR="${COMPONENTS_DIR}" \
     MAX_CONCURRENT_EXECUTIONS=40 \
     DATA_DIR="${TEST_DATA_DIR}" \
     RUST_LOG="warn,runtara_server=info" \
@@ -263,6 +263,15 @@ jq -e '.metadata.id == "crypto" and (.content | test("^[0-9a-f]{64}$"))' "${CRYP
 [ -f "${TEST_DATA_DIR}/artifacts/blobs/sha256/$(jq -r .content "${CRYPTO}")" ] \
     || { print_error "the crypto record names content that is not stored"; exit 1; }
 echo "  release ${RELEASE}: one record per agent (metadata + content digest), and an index ✓"
+METADATA=$(runtime_sql "SELECT metadata FROM images WHERE image_id = '${IMAGE_ID}'")
+INDEX_DIGEST=$(jq -r .content "${INDEX}")
+echo "${METADATA}" | jq -e --arg r "${RELEASE}" --arg i "${INDEX_DIGEST}" \
+    '.workflow.componentRelease == {release: $r, index: $i}' >/dev/null \
+    || { print_error "the image does not record release ${RELEASE} (${INDEX_DIGEST}): $(echo "${METADATA}" | jq -c .workflow.componentRelease)"; exit 1; }
+COMPOSED=$(echo "${METADATA}" | jq -r '[.workflow.directArtifact.agentComponents[] | select(.agentId == "crypto") | .wasm.sha256][0] // empty')
+[ "${COMPOSED#sha256:}" = "$(jq -r .content "${CRYPTO}")" ] \
+    || { print_error "the image composed crypto ${COMPOSED}, not the release's $(jq -r .content "${CRYPTO}")"; exit 1; }
+echo "  the image names the release and the crypto digest it was composed from ✓"
 
 kill "${SERVER_PID}"; wait "${SERVER_PID}" 2>/dev/null || true
 SERVER_PID=""
@@ -275,6 +284,8 @@ RESP=$(api_post "/agents/crypto/capabilities/hash/test" '{"input": {"data": "hel
 echo "${RESP}" | jq -e '.. | objects | select(has("hash")) | .hash == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"' >/dev/null \
     || { print_error "testing crypto from the release failed: ${RESP}"; exit 1; }
 run_echo
-echo "  with no components directory: agents loaded from the release, served, tested, and the workflow runs ✓"
+WF_ID=$(create_and_compile "Answer Again" "${GRAPH/\"Answer\"/\"Answer Again\"}")
+run_echo
+echo "  with no components directory: agents loaded from the release, served and tested; workflows compile and run ✓"
 
 print_success "artifact store: images name their workflow by digest, legacy images are imported at boot, and agents load from a release in the store"

@@ -207,13 +207,18 @@ impl Config {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .map(std::path::PathBuf::from);
-        // Workflows compile with the direct WASM emitter only. The component
-        // directory defaults to `agent_components_dir`.
+        // Workflows compile with the direct WASM emitter only, from the
+        // release this server runs (see `agent_release`) unless an explicit
+        // directory overrides it; without a release, from
+        // `agent_components_dir`.
         let direct_wasm_components_dir = direct_wasm_components_dir_from_raw(
             std::env::var(RUNTARA_DIRECT_WASM_COMPONENTS_DIR_ENV)
                 .ok()
                 .as_deref(),
-            agent_components_dir.as_deref(),
+            COMPONENT_RELEASE
+                .get()
+                .map(|release| release.dir.as_path())
+                .or(agent_components_dir.as_deref()),
         );
 
         let isolation_policy = isolation::IsolationPolicy::from_env()?;
@@ -370,6 +375,31 @@ fn parse_bool_or(name: &'static str, default: bool) -> Result<bool, ConfigError>
 }
 
 static RELEASE_AGENTS: OnceLock<BTreeSet<String>> = OnceLock::new();
+
+/// The platform release workflows compile against: its name, the digest of
+/// its index, and the directory it is materialized in for composition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComponentRelease {
+    pub release: String,
+    pub index: String,
+    pub dir: std::path::PathBuf,
+}
+
+static COMPONENT_RELEASE: OnceLock<ComponentRelease> = OnceLock::new();
+
+/// Record the release workflows compile against, before the config is
+/// loaded. Set once, at boot.
+pub fn install_component_release(release: ComponentRelease) {
+    let _ = COMPONENT_RELEASE.set(release);
+}
+
+/// The release compilation reads its components from: `None` before boot,
+/// and when `RUNTARA_DIRECT_WASM_COMPONENTS_DIR` overrides it.
+pub fn compile_component_release() -> Option<&'static ComponentRelease> {
+    let release = COMPONENT_RELEASE.get()?;
+    (CONFIG.get()?.direct_wasm_components_dir.as_deref() == Some(release.dir.as_path()))
+        .then_some(release)
+}
 
 /// Record the agents of the release this server runs, before the config is
 /// loaded; the entitlement allowlist is exactly these. Set once, at boot.

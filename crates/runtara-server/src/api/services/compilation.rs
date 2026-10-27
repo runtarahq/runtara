@@ -99,6 +99,15 @@ fn image_lowering_mode(image: &ImageSummary) -> Option<&str> {
         .and_then(|v| v.as_str())
 }
 
+/// The digest of the release index an image was composed from.
+fn image_component_release(image: &ImageSummary) -> Option<&str> {
+    image
+        .metadata
+        .as_ref()
+        .and_then(|m| m.pointer("/workflow/componentRelease/index"))
+        .and_then(|v| v.as_str())
+}
+
 fn image_compiler_mode(image: &ImageSummary) -> Option<&str> {
     image
         .metadata
@@ -166,7 +175,8 @@ fn image_binary_checksum(image: &ImageSummary) -> Option<&str> {
 /// Lowering belongs in the key because it changes the emitted artifact for an
 /// unchanged definition: a workflow compiled before store-freeing sleep was
 /// turned on would otherwise keep serving its blocking-sleep artifact forever,
-/// since nothing else about it changed.
+/// since nothing else about it changed. The component release belongs there
+/// for the same reason: new agent or stdlib bytes compose a different artifact.
 fn image_cache_hits(
     image: &ImageSummary,
     source_checksum: &str,
@@ -178,6 +188,8 @@ fn image_cache_hits(
         && image_compiler_mode(image) == Some(compiler_mode.as_str())
         && image_lowering_mode(image) == Some(crate::config::workflow_lowering_tag().as_str())
         && image_track_events(image) == Some(track_events)
+        && image_component_release(image)
+            == crate::config::compile_component_release().map(|release| release.index.as_str())
 }
 
 /// Whether `image` is the exact compiled artifact about to be registered.
@@ -206,11 +218,15 @@ fn workflow_compilation_fingerprint(
     let lowering_mode = crate::config::workflow_lowering_tag();
     let mut fingerprint = Sha256::new();
 
+    let component_release = crate::config::compile_component_release()
+        .map(|release| release.index.as_str())
+        .unwrap_or_default();
     for field in [
         source_checksum,
         runtara_workflows::TEMPLATE_MAJOR_VERSION,
         compiler_mode.as_str(),
         lowering_mode.as_str(),
+        component_release,
     ] {
         fingerprint.update(field.as_bytes());
         fingerprint.update([0]);
@@ -274,6 +290,15 @@ fn workflow_image_metadata(
             "reason": "none",
         },
     });
+
+    // Which platform release the agent and shared components came from; the
+    // digests of each are in `directArtifact`.
+    if let Some(release) = crate::config::compile_component_release() {
+        workflow["componentRelease"] = serde_json::json!({
+            "release": release.release,
+            "index": release.index,
+        });
+    }
 
     if let Some(direct_artifact) = direct_artifact {
         workflow["directWasm"]["entryAbi"] = serde_json::json!(direct_artifact.entry_abi);
