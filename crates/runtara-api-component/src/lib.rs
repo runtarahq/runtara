@@ -117,6 +117,29 @@ mod api {
     }
 
     /// A JSON text field of `error-info`, as [`json_text`] posted it.
+    /// A child run's outcome as the WIT carries it.
+    fn task_outcome(outcome: wire::TaskOutcome) -> tasks::TaskOutcome {
+        match outcome {
+            wire::TaskOutcome::Completed(bytes) => tasks::TaskOutcome::Completed(bytes),
+            wire::TaskOutcome::Failed(error) => tasks::TaskOutcome::Failed(types::ErrorInfo {
+                code: error.code,
+                message: error.message,
+                category: error.category,
+                severity: error.severity,
+                retryable: error.retryable,
+                retry_after_ms: error.retry_after_ms,
+                attributes: text(error.attributes),
+                details: text(error.details),
+            }),
+            wire::TaskOutcome::Suspended(wakes) => {
+                tasks::TaskOutcome::Suspended(wakes.into_iter().map(wit_wake).collect())
+            }
+            wire::TaskOutcome::Cancelled => tasks::TaskOutcome::Cancelled,
+            wire::TaskOutcome::TimedOut => tasks::TaskOutcome::TimedOut,
+            wire::TaskOutcome::Trapped(message) => tasks::TaskOutcome::Trapped(message),
+        }
+    }
+
     fn text(value: Option<serde_json::Value>) -> Option<String> {
         value.map(|value| match value {
             serde_json::Value::String(text) => text,
@@ -635,25 +658,19 @@ mod api {
         }
 
         async fn join(task_id: String) -> Result<tasks::TaskOutcome, ApiError> {
-            Ok(match sdk::task_join(&task_id).await.map_err(api_error)? {
-                wire::TaskOutcome::Completed(bytes) => tasks::TaskOutcome::Completed(bytes),
-                wire::TaskOutcome::Failed(error) => tasks::TaskOutcome::Failed(types::ErrorInfo {
-                    code: error.code,
-                    message: error.message,
-                    category: error.category,
-                    severity: error.severity,
-                    retryable: error.retryable,
-                    retry_after_ms: error.retry_after_ms,
-                    attributes: text(error.attributes),
-                    details: text(error.details),
-                }),
-                wire::TaskOutcome::Suspended(wakes) => {
-                    tasks::TaskOutcome::Suspended(wakes.into_iter().map(wit_wake).collect())
-                }
-                wire::TaskOutcome::Cancelled => tasks::TaskOutcome::Cancelled,
-                wire::TaskOutcome::TimedOut => tasks::TaskOutcome::TimedOut,
-                wire::TaskOutcome::Trapped(message) => tasks::TaskOutcome::Trapped(message),
-            })
+            Ok(task_outcome(
+                sdk::task_join(&task_id).await.map_err(api_error)?,
+            ))
+        }
+
+        async fn outcome(
+            task_id: String,
+            wait_ms: u64,
+        ) -> Result<Option<tasks::TaskOutcome>, ApiError> {
+            Ok(sdk::task_outcome(&task_id, wait_ms)
+                .await
+                .map_err(api_error)?
+                .map(task_outcome))
         }
 
         async fn request_cancel(task_id: String) -> Result<tasks::CancelStatus, ApiError> {

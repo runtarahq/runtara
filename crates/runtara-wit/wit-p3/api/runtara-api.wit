@@ -413,6 +413,9 @@ interface tasks {
     /// `GET /v1/tasks/{id}/outcome`, repeated until the task's execution was
     /// destroyed.
     join: async func(task-id: string) -> result<task-outcome, api-error>;
+    /// `GET /v1/tasks/{id}/outcome?waitMs=`, once: the outcome if the task
+    /// has ended within `wait-ms`, `none` while it still runs.
+    outcome: async func(task-id: string, wait-ms: u64) -> result<option<task-outcome>, api-error>;
     /// `POST /v1/tasks/{id}/cancel`.
     request-cancel: async func(task-id: string) -> result<cancel-status, api-error>;
     /// `DELETE /v1/tasks/{id}`: cancel and reap. Idempotent.
