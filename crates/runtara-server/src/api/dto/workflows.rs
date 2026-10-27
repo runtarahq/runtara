@@ -1,5 +1,5 @@
 /// Workflow-related DTOs
-use crate::types::{ExecutionStatus, MemoryTier, TerminationType};
+use crate::types::{ExecutionStatus, TerminationType};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
@@ -934,9 +934,10 @@ pub struct WorkflowDto {
     /// The highest version number that exists for this workflow
     #[serde(rename = "lastVersionNumber")]
     pub last_version_number: i32,
-    #[serde(default)]
-    #[serde(rename = "memoryTier")]
-    pub memory_tier: MemoryTier,
+    /// Linear memory a run of this version may use, in MiB.
+    #[serde(default = "default_memory_mb")]
+    #[serde(rename = "memoryMb")]
+    pub memory_mb: u32,
     /// Whether this version is compiled with step-event tracking instrumentation
     #[serde(default)]
     #[serde(rename = "trackEvents")]
@@ -1679,6 +1680,10 @@ pub struct RenameFolderResponse {
 // ============================================================================
 // Tests
 // ============================================================================
+
+fn default_memory_mb() -> u32 {
+    crate::types::DEFAULT_MEMORY_MB
+}
 
 #[cfg(test)]
 mod tests {

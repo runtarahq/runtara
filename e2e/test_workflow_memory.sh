@@ -1,14 +1,15 @@
 #!/bin/bash
-# E2E Test: a workflow's memory tier bounds its run, above a floor set at compile.
+# E2E Test: a workflow's memory (MiB) bounds its run, above a floor set at compile.
 #
-# The tier caps the sum of a run's linear memories. Compile records the floor
-# (what the composed workflow allocates when it starts) and refuses a tier
-# below it; a run that grows past its tier fails with a memory error.
+# The memory caps the sum of a run's linear memories. Compile records the
+# floor (what the composed workflow allocates when it starts) and refuses a
+# memory below it; a run that grows past its memory fails with a memory error.
 #
-#   1. pad-text, tier L, 1 KB    -> compiles, floor on the version, completes
-#   2. pad-text, tier S, 20 MB   -> compiles, the run fails: memory limit
-#   3. seven agents, tier S      -> compile refused with the floor named
-#      same graph, tier M        -> compiles and completes
+#   1. pad-text, 128 MiB, 1 KB      -> compiles, floor on the version, completes
+#   2. pad-text, tier S (8 MiB), 20 MB -> the deprecated preset still maps to
+#                                      MiB; the run fails: memory limit
+#   3. seven agents, 8 MiB          -> compile refused with the floor named
+#      same graph, 16 MiB           -> compiles and completes
 #
 # Usage:  ./e2e/test_workflow_memory_tier.sh
 #
@@ -147,10 +148,12 @@ create_workflow() {
     echo "${wf_id}"
 }
 
-# Save a new version with a tier; echo its version number.
+# Save a new version with a memory (a MiB number, or a quoted tier preset);
+# echo its version number.
 update_workflow() {
-    local resp
-    resp=$(api_post "/workflows/$1/update" "{\"executionGraph\": $2, \"memoryTier\": \"$3\"}")
+    local resp field=memoryMb
+    case "$3" in \"*) field=memoryTier ;; esac
+    resp=$(api_post "/workflows/$1/update" "{\"executionGraph\": $2, \"${field}\": $3}")
     [ "$(echo "${resp}" | jq -r '.success // false')" = "true" ] || { print_error "Update failed: ${resp}"; exit 1; }
     curl -sS "${API}/workflows/$1/versions" | jq -r '[.data[]?.versionNumber] | max'
 }
@@ -210,7 +213,7 @@ pad() {
 # ---------------------------------------------------------------------------
 print_step "Case 1: a small pad under tier L compiles and completes..."
 WF_PAD=$(create_workflow memory-tier-pad)
-V=$(update_workflow "${WF_PAD}" "$(pad 1000)" L)
+V=$(update_workflow "${WF_PAD}" "$(pad 1000)" 128)
 RESP=$(compile "${WF_PAD}" "${V}")
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "Compile failed: ${RESP}"; exit 1; }
 FLOOR=$(curl -sS "${API}/workflows/${WF_PAD}/versions" | jq -r --argjson v "${V}" '.data[] | select(.versionNumber == $v) | .memoryFloorBytes // empty')
@@ -219,14 +222,16 @@ echo "  memory floor: ${FLOOR} bytes"
 LIMIT=$(psql_quiet -d "${TEST_DB_RUNTIME}" -c \
     "SELECT metadata->'workflow'->>'memoryLimitBytes' FROM images ORDER BY created_at DESC LIMIT 1" | tr -d '[:space:]')
 echo "  image memory limit: ${LIMIT} bytes"
-[ "${LIMIT}" = "$((128 * 1024 * 1024))" ] || { print_error "The image records memory limit '${LIMIT}', not tier L"; exit 1; }
+[ "${LIMIT}" = "$((128 * 1024 * 1024))" ] || { print_error "The image records memory limit '${LIMIT}', not 128 MiB"; exit 1; }
+MEMORY=$(curl -sS "${API}/workflows/${WF_PAD}" | jq -r '.data.memoryMb // empty')
+[ "${MEMORY}" = 128 ] || { print_error "The workflow reports memoryMb '${MEMORY}', not 128"; exit 1; }
 OUT=$(run "${WF_PAD}")
 [ "${OUT%%|*}" = "completed" ] || { print_error "Expected completed, got ${OUT}"; exit 1; }
-print_success "Completed under tier L, floor ${FLOOR} bytes recorded ✓"
+print_success "Completed with 128 MiB, floor ${FLOOR} bytes recorded ✓"
 
 # ---------------------------------------------------------------------------
-print_step "Case 2: a 20 MB pad under tier S fails with a memory error..."
-V=$(update_workflow "${WF_PAD}" "$(pad 20000000)" S)
+print_step "Case 2: a 20 MB pad under the S preset fails with a memory error..."
+V=$(update_workflow "${WF_PAD}" "$(pad 20000000)" '"S"')
 RESP=$(compile "${WF_PAD}" "${V}")
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "Compile failed: ${RESP}"; exit 1; }
 OUT=$(run "${WF_PAD}")
@@ -236,7 +241,7 @@ echo "${OUT}" | grep -q "memory limit exceeded" || { print_error "The failure do
 print_success "Failed on its 8 MiB limit ✓"
 
 # ---------------------------------------------------------------------------
-print_step "Case 3: seven agents under tier S are refused at compile..."
+print_step "Case 3: seven agents with 8 MiB are refused at compile..."
 STEPS="["
 for spec in 'a text case-conversion {"text":"a","format":"uppercase"}' \
             'b transform coalesce {"values":[null,1]}' \
@@ -252,17 +257,17 @@ for spec in 'a text case-conversion {"text":"a","format":"uppercase"}' \
 done
 STEPS="${STEPS}]"
 WF_WIDE=$(create_workflow memory-tier-wide)
-V=$(update_workflow "${WF_WIDE}" "$(graph "${STEPS}")" S)
+V=$(update_workflow "${WF_WIDE}" "$(graph "${STEPS}")" 8)
 RESP=$(compile "${WF_WIDE}" "${V}")
 echo "  $(echo "${RESP}" | jq -c '{success, message, error}')"
-[ "$(echo "${RESP}" | jq -r '.success // false')" = "false" ] || { print_error "Compile under tier S succeeded: ${RESP}"; exit 1; }
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "false" ] || { print_error "Compile with 8 MiB succeeded: ${RESP}"; exit 1; }
 echo "${RESP}" | grep -q "below this workflow's memory floor" || { print_error "The refusal does not name the floor: ${RESP}"; exit 1; }
-V=$(update_workflow "${WF_WIDE}" "$(graph "${STEPS}")" M)
+V=$(update_workflow "${WF_WIDE}" "$(graph "${STEPS}")" 16)
 RESP=$(compile "${WF_WIDE}" "${V}")
-[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "Compile under tier M failed: ${RESP}"; exit 1; }
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "Compile with 16 MiB failed: ${RESP}"; exit 1; }
 OUT=$(run "${WF_WIDE}")
-[ "${OUT%%|*}" = "completed" ] || { print_error "Expected completed under tier M, got ${OUT}"; exit 1; }
-print_success "Refused under S with its floor named, ran under M ✓"
+[ "${OUT%%|*}" = "completed" ] || { print_error "Expected completed with 16 MiB, got ${OUT}"; exit 1; }
+print_success "Refused at 8 MiB with its floor named, ran at 16 MiB ✓"
 
 echo
-print_success "A workflow's memory tier bounds its run, above the floor compile records."
+print_success "A workflow's memory bounds its run, above the floor compile records."

@@ -9,7 +9,7 @@ use crate::api::dto::workflows::{
     Note, VersionSchemasResponse, WorkflowDto, WorkflowVersionInfoDto, graph_supports_chat,
     state_schema_from_definition,
 };
-use crate::types::MemoryTier;
+use crate::types::DEFAULT_MEMORY_MB;
 
 #[derive(sqlx::FromRow)]
 struct WorkflowVersionRow {
@@ -567,7 +567,7 @@ impl WorkflowRepository {
         workflow_id: &str,
         name: &str,
         description: &str,
-        memory_tier: MemoryTier,
+        memory_mb: u32,
         track_events: bool,
     ) -> Result<(), sqlx::Error> {
         let initial_definition = serde_json::json!({
@@ -582,7 +582,7 @@ impl WorkflowRepository {
 
         sqlx::query(
             r#"
-            INSERT INTO workflow_definitions (tenant_id, workflow_id, version, definition, file_size, memory_tier, track_events)
+            INSERT INTO workflow_definitions (tenant_id, workflow_id, version, definition, file_size, memory_mb, track_events)
             VALUES ($1, $2, 1, $3, $4, $5, $6)
             "#,
         )
@@ -590,7 +590,7 @@ impl WorkflowRepository {
         .bind(workflow_id)
         .bind(initial_definition)
         .bind(file_size as i32)
-        .bind(memory_tier as MemoryTier)
+        .bind(memory_mb as i32)
         .bind(track_events)
         .execute(&self.pool)
         .await?;
@@ -809,7 +809,7 @@ impl WorkflowRepository {
         let main_query = format!(
             r#"
             SELECT s.workflow_id, s.latest_version, s.current_version, s.created_at, s.updated_at,
-                   sd.memory_tier, sd.track_events,
+                   sd.memory_mb, sd.track_events,
                    sd.definition,
                    s.path, s.slug
             FROM workflows s
@@ -840,7 +840,7 @@ impl WorkflowRepository {
             Option<i32>,    // current_version
             DateTime<Utc>,  // created_at
             DateTime<Utc>,  // updated_at
-            Option<String>, // memory_tier
+            Option<i32>,    // memory_mb
             Option<bool>,   // track_events
             Option<Value>,  // definition (execution_graph)
             String,         // path
@@ -856,11 +856,7 @@ impl WorkflowRepository {
         let workflows = rows
             .iter()
             .map(|row| {
-                let memory_tier = row
-                    .5
-                    .as_ref()
-                    .and_then(|s| MemoryTier::parse(s))
-                    .unwrap_or_default();
+                let memory_mb = row.5.map_or(DEFAULT_MEMORY_MB, |mb| mb as u32);
                 let current_version = row.2.unwrap_or_else(|| row.1.unwrap_or(0));
 
                 // Extract name, description, schemas, variables, and execution_timeout from execution_graph
@@ -910,7 +906,7 @@ impl WorkflowRepository {
                     variables,
                     current_version_number: current_version,
                     last_version_number: row.1.unwrap_or(0),
-                    memory_tier,
+                    memory_mb,
                     track_events: row.6.unwrap_or(false),
                     notes: Vec::new(), // Empty for list view (no execution graph loaded)
                     path: row.8.clone(),
@@ -957,7 +953,7 @@ impl WorkflowRepository {
             Value,          // definition (execution_graph)
             DateTime<Utc>,  // created_at
             DateTime<Utc>,  // updated_at
-            String,         // memory_tier
+            i32,            // memory_mb
             bool,           // track_events
             Option<i32>,    // latest_version
             Option<i32>,    // current_version
@@ -965,7 +961,7 @@ impl WorkflowRepository {
             Option<String>, // slug
         )> = sqlx::query_as(
             r#"
-            SELECT sd.definition, sd.created_at, sd.updated_at, sd.memory_tier, sd.track_events,
+            SELECT sd.definition, sd.created_at, sd.updated_at, sd.memory_mb, sd.track_events,
                    s.latest_version, s.current_version, s.path, s.slug
             FROM workflow_definitions sd
             JOIN workflows s ON sd.tenant_id = s.tenant_id AND sd.workflow_id = s.workflow_id
@@ -980,7 +976,7 @@ impl WorkflowRepository {
         .await?;
 
         Ok(row.map(|r| {
-            let memory_tier = MemoryTier::parse(&r.3).unwrap_or_default();
+            let memory_mb = r.3 as u32;
             let current_version = r.6.unwrap_or_else(|| r.5.unwrap_or(0));
 
             // Extract name, description, schemas, variables, and execution_timeout from the definition (which is the execution_graph)
@@ -1030,7 +1026,7 @@ impl WorkflowRepository {
                 variables,
                 current_version_number: current_version,
                 last_version_number: r.5.unwrap_or(0),
-                memory_tier,
+                memory_mb,
                 track_events: r.4,
                 notes: Note::extract_from_execution_graph(&r.0),
                 path: r.7.clone(),
@@ -1135,16 +1131,16 @@ impl WorkflowRepository {
         Ok(row)
     }
 
-    /// Get workflow definition, memory tier, and track-events mode.
-    pub async fn get_definition_with_memory_tier(
+    /// Get workflow definition, memory (MiB), and track-events mode.
+    pub async fn get_definition_with_memory(
         &self,
         tenant_id: &str,
         workflow_id: &str,
         version: i32,
-    ) -> Result<Option<(Value, MemoryTier, bool)>, sqlx::Error> {
-        let row: Option<(Value, String, bool)> = sqlx::query_as(
+    ) -> Result<Option<(Value, u32, bool)>, sqlx::Error> {
+        let row: Option<(Value, i32, bool)> = sqlx::query_as(
             r#"
-            SELECT definition, memory_tier, track_events
+            SELECT definition, memory_mb, track_events
             FROM workflow_definitions
             WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3 AND deleted_at IS NULL
             "#,
@@ -1155,10 +1151,7 @@ impl WorkflowRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|r| {
-            let memory_tier = MemoryTier::parse(&r.1).unwrap_or_default();
-            (r.0, memory_tier, r.2)
-        }))
+        Ok(row.map(|r| (r.0, r.1 as u32, r.2)))
     }
 
     /// Check if a specific version exists
@@ -1842,19 +1835,19 @@ impl WorkflowRepository {
         tenant_id: &str,
         workflow_id: &str,
         definition: &Value,
-        memory_tier: Option<MemoryTier>,
+        memory_mb: Option<u32>,
         track_events: Option<bool>,
     ) -> Result<i32, sqlx::Error> {
         let definition_bytes = serde_json::to_vec(definition).unwrap_or_default();
         let file_size = definition_bytes.len() as i32;
 
-        // Get the next version number, current memory tier, and track-events value if not provided
-        let current: (i32, Option<String>, Option<bool>) = sqlx::query_as(
+        // Get the next version number, current memory, and track-events value if not provided
+        let current: (i32, Option<i32>, Option<bool>) = sqlx::query_as(
             r#"
             SELECT (COALESCE(MAX(version), 0) + 1)::INT as next_version,
-                   (SELECT memory_tier FROM workflow_definitions
+                   (SELECT memory_mb FROM workflow_definitions
                     WHERE tenant_id = $1 AND workflow_id = $2
-                    ORDER BY version DESC LIMIT 1) as current_memory_tier,
+                    ORDER BY version DESC LIMIT 1) as current_memory_mb,
                    (SELECT track_events FROM workflow_definitions
                     WHERE tenant_id = $1 AND workflow_id = $2
                     ORDER BY version DESC LIMIT 1) as current_track_events
@@ -1868,15 +1861,10 @@ impl WorkflowRepository {
         .await?;
 
         let next_version = current.0;
-        // Use provided memory tier or fall back to current tier or default
-        let tier = memory_tier
-            .or_else(|| {
-                current
-                    .1
-                    .as_ref()
-                    .and_then(|tier_str| MemoryTier::parse(tier_str))
-            })
-            .unwrap_or_default();
+        // Use provided memory or fall back to the current version's or the default
+        let memory_mb = memory_mb
+            .or(current.1.map(|mb| mb as u32))
+            .unwrap_or(DEFAULT_MEMORY_MB);
 
         // Use provided track_events or fall back to current value or default (true)
         let track_events_value = track_events.or(current.2).unwrap_or(true);
@@ -1884,7 +1872,7 @@ impl WorkflowRepository {
         // Insert new version
         sqlx::query(
             r#"
-            INSERT INTO workflow_definitions (tenant_id, workflow_id, version, definition, file_size, memory_tier, track_events)
+            INSERT INTO workflow_definitions (tenant_id, workflow_id, version, definition, file_size, memory_mb, track_events)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             "#,
         )
@@ -1893,7 +1881,7 @@ impl WorkflowRepository {
         .bind(next_version)
         .bind(definition)
         .bind(file_size)
-        .bind(tier as MemoryTier)
+        .bind(memory_mb as i32)
         .bind(track_events_value)
         .execute(&self.pool)
         .await?;
@@ -2190,9 +2178,9 @@ impl WorkflowRepository {
         };
 
         // Fetch the version definition to clone
-        let source_version: Option<(Value, i32, String, bool)> = sqlx::query_as(
+        let source_version: Option<(Value, i32, i32, bool)> = sqlx::query_as(
             r#"
-            SELECT definition, file_size, memory_tier, track_events
+            SELECT definition, file_size, memory_mb, track_events
             FROM workflow_definitions
             WHERE tenant_id = $1 AND workflow_id = $2 AND version = $3 AND deleted_at IS NULL
             "#,
@@ -2241,7 +2229,7 @@ impl WorkflowRepository {
         sqlx::query(
             r#"
             INSERT INTO workflow_definitions (
-                tenant_id, workflow_id, version, definition, file_size, memory_tier, track_events, created_at
+                tenant_id, workflow_id, version, definition, file_size, memory_mb, track_events, created_at
             )
             VALUES ($1, $2, 1, $3, $4, $5, $6, NOW())
             "#,
@@ -2250,7 +2238,7 @@ impl WorkflowRepository {
         .bind(new_workflow_id)
         .bind(&cloned_definition)
         .bind(cloned_size)
-        .bind(&source_version.2)
+        .bind(source_version.2)
         .bind(source_version.3)
         .execute(&mut *tx)
         .await?;

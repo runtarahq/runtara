@@ -9,7 +9,6 @@ import {
   ListStepTypesResponse,
   MoveWorkflowRequest,
   RenameFolderRequest,
-  MemoryTier,
   WorkflowInstanceDto,
 } from '@/generated/RuntaraRuntimeApi.ts';
 import { executionGraphToReactFlow } from '@/features/workflows/components/WorkflowEditor/CustomNodes/utils.tsx';
@@ -400,7 +399,7 @@ export async function getWorkflowWorkflow(
       rateLimitBudgetMs,
       durable,
       entryPoint,
-      memoryTier: workflowData.memoryTier,
+      memoryMb: workflowData.memoryMb,
       trackEvents: workflowData.trackEvents,
     },
     message: responseData?.message,
@@ -413,17 +412,17 @@ export async function updateWorkflow(
   newWorkflow: {
     id: string;
     data: ExecutionGraphDto; // name and description are now inside the execution graph
-    memoryTier?: MemoryTier | null;
+    memoryMb?: number | null;
     trackEvents?: boolean | null;
   }
 ) {
-  const { id, data, memoryTier, trackEvents } = newWorkflow;
+  const { id, data, memoryMb, trackEvents } = newWorkflow;
 
   const result = await RuntimeREST.api.updateWorkflowHandler(
     id,
     {
       executionGraph: data,
-      ...(memoryTier !== undefined ? { memoryTier } : {}),
+      ...(memoryMb !== undefined ? { memoryMb } : {}),
       ...(trackEvents !== undefined ? { trackEvents } : {}),
     },
     createAuthHeaders(token)

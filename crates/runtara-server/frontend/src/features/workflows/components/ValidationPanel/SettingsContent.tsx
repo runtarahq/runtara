@@ -33,7 +33,12 @@ import {
   SchemaFieldsEditor,
   SchemaField,
 } from '../WorkflowEditor/EditorSidebar/SchemaFieldsEditor';
-import type { MemoryTier } from '@/generated/RuntaraRuntimeApi';
+import { Button } from '@/shared/components/ui/button';
+import {
+  DEFAULT_MEMORY_MB,
+  MAX_MEMORY_MB,
+  MEMORY_PRESET_MIB,
+} from '@/features/workflows/utils/memory';
 
 type SettingsSection = 'general' | 'variables' | 'input' | 'output' | 'state';
 
@@ -92,7 +97,12 @@ const generalSchema = z.object({
     .max(86400, 'Budget cannot exceed 86400 seconds (24 hours)')
     .optional(),
   durableMode: z.enum(['default', 'true', 'false']),
-  memoryTier: z.enum(['default', 'S', 'M', 'L', 'XL']),
+  memoryMb: z.coerce
+    .number()
+    .int()
+    .min(1, 'Memory must be at least 1 MiB')
+    .max(MAX_MEMORY_MB, `Memory cannot exceed ${MAX_MEMORY_MB} MiB`)
+    .optional(),
   trackEvents: z.boolean(),
 });
 
@@ -112,13 +122,6 @@ function formValueToDurable(value: GeneralFormValues['durableMode']) {
 
 const AUTO_ENTRY_POINT = '__auto__';
 
-/** Linear memory each tier allows a run, in MiB (server `MemoryTier`). */
-const MEMORY_TIER_MIB: Record<MemoryTier, number> = {
-  S: 8,
-  M: 64,
-  L: 128,
-  XL: 256,
-};
 
 interface SettingsContentProps {
   workflow: WorkflowData;
@@ -242,8 +245,8 @@ function GeneralSection({
     memoryFloorBytes != null
       ? Math.ceil(memoryFloorBytes / (1024 * 1024))
       : null;
-  const belowFloor = (tier: MemoryTier) =>
-    memoryFloorMib != null && MEMORY_TIER_MIB[tier] < memoryFloorMib;
+  const belowFloor = (mib: number) =>
+    memoryFloorMib != null && mib < memoryFloorMib;
   const form = useForm<GeneralFormValues>({
     resolver: zodResolver(generalSchema),
     mode: 'onChange',
@@ -256,7 +259,7 @@ function GeneralSection({
         ? Math.round(workflow.rateLimitBudgetMs / 1000)
         : undefined,
       durableMode: durableToFormValue(workflow.durable),
-      memoryTier: workflow.memoryTier ?? 'default',
+      memoryMb: workflow.memoryMb ?? undefined,
       trackEvents: workflow.trackEvents ?? true,
     },
   });
@@ -272,7 +275,7 @@ function GeneralSection({
         ? Math.round(workflow.rateLimitBudgetMs / 1000)
         : undefined,
       durableMode: durableToFormValue(workflow.durable),
-      memoryTier: workflow.memoryTier ?? 'default',
+      memoryMb: workflow.memoryMb ?? undefined,
       trackEvents: workflow.trackEvents ?? true,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -312,10 +315,12 @@ function GeneralSection({
           rateLimitBudgetMs:
             budgetSeconds !== undefined ? budgetSeconds * 1000 : undefined,
           durable: formValueToDurable(values.durableMode ?? 'default'),
-          memoryTier:
-            values.memoryTier && values.memoryTier !== 'default'
-              ? (values.memoryTier as MemoryTier)
-              : null,
+          memoryMb: (() => {
+            const memory = values.memoryMb as unknown;
+            return memory !== undefined && memory !== ''
+              ? parseInt(String(memory), 10)
+              : null;
+          })(),
           trackEvents: values.trackEvents ?? true,
         });
       }
@@ -422,36 +427,50 @@ function GeneralSection({
 
           <FormField
             control={form.control}
-            name="memoryTier"
+            name="memoryMb"
             render={({ field }) => (
-              <FormItem className="w-40">
-                <FormLabel>Memory tier</FormLabel>
-                <Select
-                  value={field.value ?? 'default'}
-                  onValueChange={field.onChange}
-                  disabled={readOnly}
-                >
+              <FormItem>
+                <FormLabel>Memory (MiB)</FormLabel>
+                <div className="flex items-center gap-1">
                   <FormControl>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
+                    <Input
+                      {...field}
+                      className="w-24"
+                      type="number"
+                      min={memoryFloorMib ?? 1}
+                      max={MAX_MEMORY_MB}
+                      placeholder={String(DEFAULT_MEMORY_MB)}
+                      disabled={readOnly}
+                      value={field.value ?? ''}
+                    />
                   </FormControl>
-                  <SelectContent>
-                    <SelectItem value="default">Default</SelectItem>
-                    {(['S', 'M', 'L', 'XL'] as const).map((tier) => (
-                      <SelectItem
-                        key={tier}
-                        value={tier}
-                        disabled={belowFloor(tier)}
-                      >
-                        {tier} ({MEMORY_TIER_MIB[tier]} MiB)
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  {Object.entries(MEMORY_PRESET_MIB).map(([preset, mib]) => (
+                    <Button
+                      key={preset}
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      title={`${mib} MiB`}
+                      disabled={readOnly || belowFloor(mib)}
+                      onClick={() => field.onChange(mib)}
+                    >
+                      {preset}
+                    </Button>
+                  ))}
+                </div>
                 {memoryFloorMib != null && (
-                  <FormDescription>Needs {memoryFloorMib} MiB</FormDescription>
+                  <FormDescription>
+                    Needs at least {memoryFloorMib} MiB
+                  </FormDescription>
                 )}
+                {memoryFloorMib != null &&
+                  field.value != null &&
+                  String(field.value) !== '' &&
+                  belowFloor(Number(field.value)) && (
+                    <p className="text-xs text-destructive">
+                      Below this workflow's floor: it will not compile
+                    </p>
+                  )}
                 <FormMessage />
               </FormItem>
             )}

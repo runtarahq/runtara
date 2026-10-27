@@ -1100,8 +1100,12 @@ export interface ApiResponseWorkflowDto {
      * @format int32
      */
     lastVersionNumber: number;
-    /** Memory allocation tier for workflow execution */
-    memoryTier?: MemoryTier;
+    /**
+     * Linear memory a run of this version may use, in MiB.
+     * @format int32
+     * @min 0
+     */
+    memoryMb?: number;
     name: string;
     /** Visual notes/annotations for the workflow canvas */
     notes?: Note[];
@@ -1921,6 +1925,13 @@ export interface CreateSchemaResponse {
 
 export interface CreateWorkflowRequest {
   description: string;
+  /**
+   * Linear memory a run may use, in MiB (default 256).
+   * @format int32
+   * @min 0
+   */
+  memoryMb?: number | null;
+  /** Deprecated: a memory preset (S 8, M 64, L 128, XL 256 MiB). Use `memoryMb`. */
   memoryTier?: null | MemoryTier;
   name: string;
   /**
@@ -4807,6 +4818,13 @@ export interface UpdateWorkflowRequest {
    * Must include 'name' and optionally 'description' fields.
    */
   executionGraph: any;
+  /**
+   * Linear memory a run may use, in MiB (optional, keeps existing if not provided).
+   * @format int32
+   * @min 0
+   */
+  memoryMb?: number | null;
+  /** Deprecated: a memory preset (S 8, M 64, L 128, XL 256 MiB). Use `memoryMb`. */
   memoryTier?: null | MemoryTier;
   /** Enable step-event tracking for this workflow version (optional, keeps existing if not provided) */
   trackEvents?: boolean | null;
@@ -5208,8 +5226,12 @@ export interface WorkflowDto {
    * @format int32
    */
   lastVersionNumber: number;
-  /** Memory allocation tier for workflow execution */
-  memoryTier?: MemoryTier;
+  /**
+   * Linear memory a run of this version may use, in MiB.
+   * @format int32
+   * @min 0
+   */
+  memoryMb?: number;
   name: string;
   /** Visual notes/annotations for the workflow canvas */
   notes?: Note[];

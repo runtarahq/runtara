@@ -9,7 +9,18 @@ use crate::api::repositories::workflows::WorkflowRepository;
 use crate::api::services::webhook_manager::{WebhookManager, reconcile_channel_webhooks};
 use crate::api::utils::pagination::{normalize_page, normalize_page_size};
 use crate::api::utils::validation::is_valid_identifier;
-use crate::types::MemoryTier;
+use crate::types::{DEFAULT_MEMORY_MB, MAX_MEMORY_MB};
+
+/// A workflow's memory must be a whole number of MiB from 1 to
+/// [`MAX_MEMORY_MB`]; compiling checks it against the workflow's floor.
+fn validate_memory_mb(memory_mb: Option<u32>) -> Result<(), ServiceError> {
+    match memory_mb {
+        Some(mb) if mb == 0 || mb > MAX_MEMORY_MB => Err(ServiceError::ValidationError(format!(
+            "memoryMb must be between 1 and {MAX_MEMORY_MB} MiB"
+        ))),
+        _ => Ok(()),
+    }
+}
 use runtara_connections::ConnectionsFacade;
 use runtara_dsl::agent_meta::AgentCatalog;
 use runtara_workflows::validation::validate_workflow;
@@ -238,12 +249,14 @@ impl WorkflowService {
         tenant_id: &str,
         name: String,
         description: String,
-        memory_tier: Option<MemoryTier>,
+        memory_mb: Option<u32>,
         track_events: Option<bool>,
         created_by: &str,
         requested_slug: Option<String>,
         path: Option<String>,
     ) -> Result<WorkflowDto, ServiceError> {
+        validate_memory_mb(memory_mb)?;
+
         // Validation: name should not be empty
         if name.trim().is_empty() {
             return Err(ServiceError::ValidationError(
@@ -306,8 +319,7 @@ impl WorkflowService {
             .await
             .map_err(map_slug_db_error)?;
 
-        // Use provided memory tier or default to XL
-        let memory_tier = memory_tier.unwrap_or_default();
+        let memory_mb = memory_mb.unwrap_or(DEFAULT_MEMORY_MB);
 
         // Use provided track_events or default to true
         let track_events = track_events.unwrap_or(true);
@@ -319,7 +331,7 @@ impl WorkflowService {
                 &workflow_id,
                 &name,
                 &description,
-                memory_tier,
+                memory_mb,
                 track_events,
             )
             .await
@@ -351,7 +363,7 @@ impl WorkflowService {
             variables: serde_json::json!({}),
             current_version_number: 1,
             last_version_number: 1,
-            memory_tier,
+            memory_mb,
             track_events,
             notes: Vec::new(), // Empty notes for new workflow
             path,
@@ -645,9 +657,10 @@ impl WorkflowService {
         tenant_id: &str,
         workflow_id: &str,
         definition: Value,
-        memory_tier: Option<MemoryTier>,
+        memory_mb: Option<u32>,
         track_events: Option<bool>,
     ) -> Result<(i32, Vec<String>), ServiceError> {
+        validate_memory_mb(memory_mb)?;
         // Validate workflow ID format
         if !is_valid_identifier(workflow_id) {
             return Err(ServiceError::ValidationError(
@@ -869,13 +882,7 @@ impl WorkflowService {
         // Delegate to repository (name/description are now in execution graph)
         let version = self
             .repository
-            .update_workflow(
-                tenant_id,
-                workflow_id,
-                &definition,
-                memory_tier,
-                track_events,
-            )
+            .update_workflow(tenant_id, workflow_id, &definition, memory_mb, track_events)
             .await
             .map_err(|e| {
                 ServiceError::DatabaseError(format!("Failed to update workflow: {}", e))
@@ -1515,6 +1522,24 @@ impl std::error::Error for ServiceError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_is_a_whole_number_of_mib_within_bounds() {
+        assert!(validate_memory_mb(None).is_ok());
+        assert!(validate_memory_mb(Some(1)).is_ok());
+        assert!(validate_memory_mb(Some(MAX_MEMORY_MB)).is_ok());
+        assert!(validate_memory_mb(Some(0)).is_err());
+        assert!(validate_memory_mb(Some(MAX_MEMORY_MB + 1)).is_err());
+    }
+
+    #[test]
+    fn a_tier_is_a_memory_preset_and_memory_mb_wins() {
+        use crate::types::{MemoryTier, requested_memory_mb};
+        assert_eq!(requested_memory_mb(None, Some(MemoryTier::S)), Some(8));
+        assert_eq!(requested_memory_mb(None, Some(MemoryTier::XL)), Some(256));
+        assert_eq!(requested_memory_mb(Some(48), Some(MemoryTier::S)), Some(48));
+        assert_eq!(requested_memory_mb(None, None), None);
+    }
 
     // =========================================================================
     // Incremental patch validation

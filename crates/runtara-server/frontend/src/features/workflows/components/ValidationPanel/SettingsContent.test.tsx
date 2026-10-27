@@ -114,7 +114,7 @@ describe('SettingsContent state section', () => {
   });
 });
 
-describe('SettingsContent memory tier', () => {
+describe('SettingsContent memory', () => {
   it('states the compiled workflow memory floor', () => {
     render(
       <SettingsContent
@@ -123,11 +123,33 @@ describe('SettingsContent memory tier', () => {
         memoryFloorBytes={9 * 1024 * 1024 + 1}
       />
     );
-    expect(screen.getByText('Needs 10 MiB')).toBeInTheDocument();
+    expect(screen.getByText('Needs at least 10 MiB')).toBeInTheDocument();
+    // S (8 MiB) is below the floor; M (64 MiB) is not.
+    expect(screen.getByRole('button', { name: 'S' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'M' })).toBeEnabled();
   });
 
   it('says nothing when the floor is unknown', () => {
     render(<SettingsContent workflow={workflow()} onChange={vi.fn()} />);
     expect(screen.queryByText(/^Needs /)).not.toBeInTheDocument();
+  });
+
+  it('fills the memory from a preset', () => {
+    const onChange = vi.fn();
+    render(<SettingsContent workflow={workflow()} onChange={onChange} />);
+    fireEvent.click(screen.getByRole('button', { name: 'L' }));
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ memoryMb: 128 })
+    );
+  });
+
+  it('keeps the memory a workflow already has', () => {
+    render(
+      <SettingsContent
+        workflow={workflow({ memoryMb: 48 })}
+        onChange={vi.fn()}
+      />
+    );
+    expect(screen.getByRole('spinbutton', { name: /Memory/ })).toHaveValue(48);
   });
 });

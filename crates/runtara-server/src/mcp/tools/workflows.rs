@@ -342,7 +342,12 @@ pub struct UpdateWorkflowParams {
     pub execution_graph: serde_json::Value,
     #[serde(default)]
     #[schemars(
-        description = "Memory tier for the new version: S (8 MiB), M (64 MiB), L (128 MiB) or XL (256 MiB) of linear memory per run. Omit to keep the current tier. Compiling fails, naming the floor, when the workflow needs more than its tier."
+        description = "Linear memory per run for the new version, in MiB (1 to 65536). Omit to keep the current memory. Compiling fails, naming the floor, when the workflow needs more."
+    )]
+    pub memory_mb: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        description = "A memory preset instead of memory_mb: S (8 MiB), M (64 MiB), L (128 MiB) or XL (256 MiB). memory_mb wins when both are given."
     )]
     pub memory_tier: Option<String>,
 }
@@ -1137,10 +1142,15 @@ pub async fn update_workflow(
     let mut body = serde_json::json!({
         "executionGraph": execution_graph,
     });
-    if let Some(tier) = params.memory_tier {
-        let tier = crate::types::MemoryTier::parse(&tier)
-            .ok_or_else(|| err(format!("Unknown memory tier '{tier}': use S, M, L or XL")))?;
-        body["memoryTier"] = tier.as_str().into();
+    let tier = match params.memory_tier {
+        Some(tier) => Some(
+            crate::types::MemoryTier::parse(&tier)
+                .ok_or_else(|| err(format!("Unknown memory tier '{tier}': use S, M, L or XL")))?,
+        ),
+        None => None,
+    };
+    if let Some(memory_mb) = crate::types::requested_memory_mb(params.memory_mb, tier) {
+        body["memoryMb"] = memory_mb.into();
     }
     let result = api_post(
         server,

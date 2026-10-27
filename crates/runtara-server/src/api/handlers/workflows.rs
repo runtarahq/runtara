@@ -54,6 +54,11 @@ use crate::types::MemoryTier;
 pub struct CreateWorkflowRequest {
     pub name: String,
     pub description: String,
+    /// Linear memory a run may use, in MiB (default 256).
+    #[serde(default)]
+    #[serde(rename = "memoryMb")]
+    pub memory_mb: Option<u32>,
+    /// Deprecated: a memory preset (S 8, M 64, L 128, XL 256 MiB). Use `memoryMb`.
     #[serde(default)]
     #[serde(rename = "memoryTier")]
     pub memory_tier: Option<MemoryTier>,
@@ -83,6 +88,11 @@ pub struct UpdateWorkflowRequest {
     /// Must include 'name' and optionally 'description' fields.
     #[serde(rename = "executionGraph")]
     pub execution_graph: Value,
+    /// Linear memory a run may use, in MiB (optional, keeps existing if not provided).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "memoryMb")]
+    pub memory_mb: Option<u32>,
+    /// Deprecated: a memory preset (S 8, M 64, L 128, XL 256 MiB). Use `memoryMb`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "memoryTier")]
     pub memory_tier: Option<MemoryTier>,
@@ -190,7 +200,7 @@ pub async fn create_workflow_handler(
             &tenant_id,
             request.name,
             request.description,
-            request.memory_tier,
+            crate::types::requested_memory_mb(request.memory_mb, request.memory_tier),
             request.track_events,
             &user_id,
             request.slug,
@@ -350,7 +360,7 @@ pub async fn update_workflow_handler(
     // Collect referenced capabilities before the graph is moved into the service, so a
     // successful save can emit one `agent.capability_used` per distinct capability.
     let capabilities = collect_workflow_capabilities(&request.execution_graph);
-    let memory_tier = request.memory_tier;
+    let memory_mb = crate::types::requested_memory_mb(request.memory_mb, request.memory_tier);
     let track_events = request.track_events;
     let execution_graph = request.execution_graph_with_durable();
 
@@ -360,7 +370,7 @@ pub async fn update_workflow_handler(
             &tenant_id,
             &workflow_id,
             execution_graph,
-            memory_tier,
+            memory_mb,
             track_events,
         )
         .await

@@ -48,7 +48,7 @@ import {
   isAtBreakpoint,
   isWaitingSuspension,
 } from '@/features/workflows/utils/suspension';
-import { ExecutionStatus, MemoryTier } from '@/generated/RuntaraRuntimeApi';
+import { ExecutionStatus } from '@/generated/RuntaraRuntimeApi';
 
 import { useNavigationBlockerStore } from '@/shared/stores/navigationBlockerStore';
 import { UnsavedChangesDialog } from '@/shared/components/unsaved-changes-dialog';
@@ -83,6 +83,7 @@ import {
   writeCanvasDetail,
 } from '@/features/workflows/components/WorkflowEditor/editor-preferences';
 import type { CanvasDetailLevel } from '@/features/workflows/components/WorkflowEditor/CustomNodes/node-size';
+import { MEMORY_PRESET_MIB } from '@/features/workflows/utils/memory';
 
 type WorkflowVariable = {
   name: string;
@@ -184,7 +185,7 @@ export function Workflow() {
     rateLimitBudgetMs?: number;
     durable?: boolean | null;
     entryPoint?: string;
-    memoryTier?: MemoryTier | null;
+    memoryMb?: number | null;
     trackEvents?: boolean;
   }>({});
 
@@ -642,8 +643,8 @@ export function Workflow() {
               ...(savedStagedChanges.entryPoint !== undefined && {
                 entryPoint: savedStagedChanges.entryPoint,
               }),
-              ...(hasOwn(savedStagedChanges, 'memoryTier') && {
-                memoryTier: savedStagedChanges.memoryTier,
+              ...(hasOwn(savedStagedChanges, 'memoryMb') && {
+                memoryMb: savedStagedChanges.memoryMb,
               }),
               ...(savedStagedChanges.trackEvents !== undefined && {
                 trackEvents: savedStagedChanges.trackEvents,
@@ -1540,9 +1541,9 @@ export function Workflow() {
     const entryPoint = hasOwn(stagedWorkflowChanges, 'entryPoint')
       ? stagedWorkflowChanges.entryPoint
       : data.entryPoint;
-    const memoryTier = hasOwn(stagedWorkflowChanges, 'memoryTier')
-      ? stagedWorkflowChanges.memoryTier
-      : data.memoryTier;
+    const memoryMb = hasOwn(stagedWorkflowChanges, 'memoryMb')
+      ? stagedWorkflowChanges.memoryMb
+      : data.memoryMb;
     const trackEvents = hasOwn(stagedWorkflowChanges, 'trackEvents')
       ? stagedWorkflowChanges.trackEvents
       : data.trackEvents;
@@ -1624,7 +1625,7 @@ export function Workflow() {
           {
             id: workflowId!,
             data: executionGraph,
-            memoryTier,
+            memoryMb,
             trackEvents,
           },
           {
@@ -1960,9 +1961,9 @@ export function Workflow() {
     const exportName = stagedWorkflowChanges.name ?? data.name ?? '';
     const exportDescription =
       stagedWorkflowChanges.description ?? data.description ?? '';
-    const exportMemoryTier = hasOwn(stagedWorkflowChanges, 'memoryTier')
-      ? stagedWorkflowChanges.memoryTier
-      : data.memoryTier;
+    const exportMemoryMb = hasOwn(stagedWorkflowChanges, 'memoryMb')
+      ? stagedWorkflowChanges.memoryMb
+      : data.memoryMb;
     const exportTrackEvents = hasOwn(stagedWorkflowChanges, 'trackEvents')
       ? stagedWorkflowChanges.trackEvents
       : data.trackEvents;
@@ -1985,8 +1986,8 @@ export function Workflow() {
       const exportData = {
         name: exportName,
         description: exportDescription,
-        ...(exportMemoryTier !== undefined
-          ? { memoryTier: exportMemoryTier }
+        ...(exportMemoryMb !== undefined
+          ? { memoryMb: exportMemoryMb }
           : {}),
         ...(exportTrackEvents !== undefined
           ? { trackEvents: exportTrackEvents }
@@ -2106,8 +2107,11 @@ export function Workflow() {
         if (executionGraph.entryPoint !== undefined) {
           workflowChanges.entryPoint = executionGraph.entryPoint;
         }
-        if (parsed.memoryTier !== undefined) {
-          workflowChanges.memoryTier = parsed.memoryTier;
+        // Exports from before memory was a number carry a tier preset.
+        const importedMemoryMb =
+          parsed.memoryMb ?? MEMORY_PRESET_MIB[parsed.memoryTier as string];
+        if (importedMemoryMb !== undefined) {
+          workflowChanges.memoryMb = importedMemoryMb;
         }
         if (parsed.trackEvents !== undefined) {
           workflowChanges.trackEvents = parsed.trackEvents;
@@ -2256,9 +2260,9 @@ export function Workflow() {
         ? stagedWorkflowChanges.entryPoint
         : data.entryPoint,
       entryPointOptions,
-      memoryTier: hasOwn(stagedWorkflowChanges, 'memoryTier')
-        ? stagedWorkflowChanges.memoryTier
-        : data.memoryTier,
+      memoryMb: hasOwn(stagedWorkflowChanges, 'memoryMb')
+        ? stagedWorkflowChanges.memoryMb
+        : data.memoryMb,
       trackEvents: hasOwn(stagedWorkflowChanges, 'trackEvents')
         ? stagedWorkflowChanges.trackEvents
         : data.trackEvents,
@@ -2276,7 +2280,7 @@ export function Workflow() {
       stagedWorkflowChanges.durable,
       stagedWorkflowChanges.entryPoint,
       entryPointOptions,
-      stagedWorkflowChanges.memoryTier,
+      stagedWorkflowChanges.memoryMb,
       stagedWorkflowChanges.trackEvents,
       data.name,
       data.description,
@@ -2288,7 +2292,7 @@ export function Workflow() {
       data.rateLimitBudgetMs,
       data.durable,
       data.entryPoint,
-      data.memoryTier,
+      data.memoryMb,
       data.trackEvents,
     ]
   );
