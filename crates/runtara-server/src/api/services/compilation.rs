@@ -1711,15 +1711,15 @@ impl CompilationService {
 
         // 3. Stage the composed artifact + synthesized meta.
         let (wasm_path, meta_path) =
-            crate::workflow_agents::stage(tenant_id, &slug, &result.wasm_path, &info).map_err(
-                |e| match e.kind() {
+            crate::workflow_agents::stage(tenant_id, &slug, &result.wasm_path, &info)
+                .await
+                .map_err(|e| match e.kind() {
                     // A reserved slug or metadata only built-ins may claim.
                     std::io::ErrorKind::InvalidInput => {
                         ServiceError::WorkflowAuthoringError(e.to_string())
                     }
                     _ => ServiceError::CompilationError(format!("Staging failed: {e}")),
-                },
-            )?;
+                })?;
 
         info!(
             %tenant_id, %workflow_id, version, %slug,

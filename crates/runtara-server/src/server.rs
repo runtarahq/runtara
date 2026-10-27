@@ -27,6 +27,7 @@ use crate::product_events;
 use crate::runtime_client;
 use crate::valkey;
 use crate::workers;
+use crate::workflow_agents;
 
 use api::services::agent_testing::AgentTestingService;
 
@@ -701,6 +702,18 @@ pub async fn start_with(
         artifacts: Some(artifacts.clone()),
         ..options
     };
+    // Published workflow-agents are records in the store; their staging dirs
+    // are a cache, rebuilt here before anything reads them.
+    workflow_agents::install_store(artifacts.clone());
+    match workflow_agents::sync_from_store().await {
+        Ok((imported, staged)) => println!(
+            "✓ Workflow-agents: {staged} staged from the artifact store ({imported} recorded from staging dirs)"
+        ),
+        Err(error) => {
+            eprintln!("❌ Restore published workflow-agents from the artifact store: {error}");
+            std::process::exit(1);
+        }
+    }
     let release_name = agent_release::release_name();
     let components_dir = std::env::var_os("RUNTARA_AGENT_COMPONENTS_DIR")
         .filter(|dir| !dir.to_string_lossy().trim().is_empty())

@@ -50,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recompiles a workflow instead of reusing an artifact built from other
   agent bytes.
 
+- **Published workflow-agents are records in the artifact store.** Publishing
+  records the composed `.wasm` and its `.meta.json` (byte for byte, with the
+  lowering it was built with) under
+  `tenants/<hex tenant>/workflow-agents/<slug>.json`, then writes the staging
+  dir, which is now a cache: at boot it is rebuilt from the records, so a
+  lost `DATA_DIR/workflow-agents` loses nothing, and agents staged before the
+  store are recorded from their files. Unpublishing removes the record first.
+
 - **A runner can report an executor lost.** `RunExitReport::Lost` (for a
   node or link that went away) hands the run to recovery instead of failing
   it: recovery suspends it (`termination_reason = executor_lost`, a new value

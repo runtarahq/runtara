@@ -163,6 +163,14 @@ pub trait ArtifactStore: Send + Sync {
     /// The manifest under `key`, or `None`. A manifest whose content is not
     /// stored is refused, never half-loaded.
     async fn get_manifest(&self, key: &str) -> Result<Option<Manifest>, ArtifactError>;
+
+    /// The keys of every manifest under `prefix` (a `/`-terminated key
+    /// prefix, or empty for all), sorted.
+    async fn list_manifests(&self, prefix: &str) -> Result<Vec<String>, ArtifactError>;
+
+    /// Remove the manifest under `key`; `false` when there was none. Its
+    /// content stays: other records may name it.
+    async fn delete_manifest(&self, key: &str) -> Result<bool, ArtifactError>;
 }
 
 /// Artifacts as files under a root directory: `blobs/sha256/<digest>`.
@@ -282,6 +290,48 @@ impl ArtifactStore for FilesystemArtifactStore {
         }
         Ok(Some(manifest))
     }
+
+    async fn list_manifests(&self, prefix: &str) -> Result<Vec<String>, ArtifactError> {
+        let root = self.root.join("manifests");
+        let mut keys = Vec::new();
+        let mut pending = vec![root.clone()];
+        while let Some(dir) = pending.pop() {
+            let mut entries = match tokio::fs::read_dir(&dir).await {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if entry.file_type().await?.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let Ok(relative) = path.strip_prefix(&root) else {
+                    continue;
+                };
+                let key = relative
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                // Uploads in flight are not keys.
+                if key.starts_with(prefix) && validate_manifest_key(&key).is_ok() {
+                    keys.push(key);
+                }
+            }
+        }
+        keys.sort();
+        Ok(keys)
+    }
+
+    async fn delete_manifest(&self, key: &str) -> Result<bool, ArtifactError> {
+        match tokio::fs::remove_file(self.manifest(key)?).await {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
 }
 
 pub mod release;
@@ -368,6 +418,23 @@ pub mod test_support {
             super::validate_manifest_key(key)?;
             Ok(self.manifests.lock().unwrap().get(key).cloned())
         }
+
+        async fn list_manifests(&self, prefix: &str) -> Result<Vec<String>, ArtifactError> {
+            let mut keys: Vec<String> = self
+                .manifests
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|key| key.starts_with(prefix))
+                .cloned()
+                .collect();
+            keys.sort();
+            Ok(keys)
+        }
+
+        async fn delete_manifest(&self, key: &str) -> Result<bool, ArtifactError> {
+            Ok(self.manifests.lock().unwrap().remove(key).is_some())
+        }
     }
 }
 
@@ -446,6 +513,24 @@ mod tests {
             meta,
             "metadata keeps its exact bytes"
         );
+
+        store.put(b"other").await.unwrap();
+        let other = Manifest::new(Digest::of(b"other"), b"{}").unwrap();
+        store
+            .put_manifest("agents/zeta/2.json", &other)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.list_manifests("agents/").await.unwrap(),
+            ["agents/http/1.json", "agents/zeta/2.json"]
+        );
+        assert_eq!(
+            store.list_manifests("agents/zeta/").await.unwrap(),
+            ["agents/zeta/2.json"]
+        );
+        assert!(store.delete_manifest("agents/zeta/2.json").await.unwrap());
+        assert!(!store.delete_manifest("agents/zeta/2.json").await.unwrap());
+        assert!(store.exists(&other.content).await.unwrap(), "content stays");
 
         // Content lost from under its manifest: refused, not served.
         store.delete(&missing.content).await.unwrap();

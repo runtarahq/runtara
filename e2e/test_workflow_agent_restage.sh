@@ -3,11 +3,14 @@
 #
 #   1. PUBLISH — `nap` (a durable Delay) is published as a workflow-agent; its
 #      staged artifact records the lowering it was built with.
-#   2. UPGRADE — the server stops, and the record is rewritten as an older
-#      lowering's (what a new server binary sees after an upgrade).
+#   2. UPGRADE — the server stops, and nap's record in the artifact store is
+#      rewritten as an older lowering's (what a new server binary sees after
+#      an upgrade).
 #   3. RESTAGE — on boot the server republishes `nap` from its version: the
-#      record is this lowering's again and the artifact is rebuilt.
+#      record is this lowering's again.
 #   4. CALL — a parent calling `nap` compiles and completes.
+#   5. RESTORE — with the staging dir deleted, a restart rebuilds it from the
+#      store and a parent compiles against nap again.
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
 # environment) + docker (isolated Valkey) and the shared workflow components
@@ -214,31 +217,31 @@ echo "  nap published; its version parks ✓"
 LOWERING=$(find "${TEST_DATA_DIR}" -name 'runtara_agent_nap.lowering' | head -1)
 [ -n "${LOWERING}" ] || { print_error "the staged agent records no lowering"; exit 1; }
 CURRENT_LOWERING=$(cat "${LOWERING}")
-WASM="${LOWERING%.lowering}.wasm"
-echo "  the staged artifact records its lowering ✓"
+RECORD=$(find "${TEST_DATA_DIR}/artifacts/manifests/tenants" -path '*/workflow-agents/nap.json' | head -1)
+[ -n "${RECORD}" ] || { print_error "nap has no record in the artifact store"; exit 1; }
+jq -e --arg l "${CURRENT_LOWERING}" '.metadata.lowering == $l and .metadata.meta.id == "nap"' "${RECORD}" >/dev/null \
+    || { print_error "nap's record is not its lowering and metadata: $(head -c 300 "${RECORD}")"; exit 1; }
+echo "  the published agent is a store record with its lowering, staged from it ✓"
 
 #-------------------------------------------------------------------------
 print_step "2. Stop the server and age the staged artifact..."
 kill "${SERVER_PID}"; wait "${SERVER_PID}" 2>/dev/null || true
 SERVER_PID=""
-printf 'an-older-lowering' > "${LOWERING}"
-touch -t 202001010000 "${WASM}"
+jq -c '.metadata.lowering = "an-older-lowering"' "${RECORD}" > "${RECORD}.tmp" && mv "${RECORD}.tmp" "${RECORD}"
 echo "  recorded lowering rewritten as an older one"
 
 #-------------------------------------------------------------------------
 print_step "3. Restart: the server restages nap..."
 start_server
 for _ in {1..120}; do
-    [ "$(cat "${LOWERING}")" = "${CURRENT_LOWERING}" ] && break
+    [ "$(jq -r .metadata.lowering "${RECORD}")" = "${CURRENT_LOWERING}" ] && break
     sleep 1
 done
-[ "$(cat "${LOWERING}")" = "${CURRENT_LOWERING}" ] \
+[ "$(jq -r .metadata.lowering "${RECORD}")" = "${CURRENT_LOWERING}" ] \
+    && [ "$(cat "${LOWERING}")" = "${CURRENT_LOWERING}" ] \
     || { print_error "nap was not restaged: $(grep -i restage "${TEST_LOG}" | tail -5)"; exit 1; }
 grep -q "restaged workflow-agent for this lowering" "${TEST_LOG}" \
     || { print_error "the server did not log the restage"; exit 1; }
-AFTER_MTIME=$(stat -f %m "${WASM}")
-[ "${AFTER_MTIME}" -gt "$(date -j -f %Y%m%d%H%M 202001010000 +%s)" ] \
-    || { print_error "the artifact was not rebuilt"; exit 1; }
 echo "  nap republished at boot; its record is this lowering's again ✓"
 
 #-------------------------------------------------------------------------
@@ -278,4 +281,27 @@ RESP=$(curl -sS "${API}/workflows/instances/${PARENT}")
     || { print_error "the parent ended '${STATUS}': $(echo "${RESP}" | jq -c '.data.error // .data.outputs')"; tail -40 "${TEST_LOG}"; exit 1; }
 echo "  the parent completed with nap's output ✓"
 
-print_success "workflow-agent restage: an agent staged by an older lowering is republished at boot and callable"
+#-------------------------------------------------------------------------
+print_step "5. Delete the staging dir; a restart restores it from the store..."
+kill "${SERVER_PID}"; wait "${SERVER_PID}" 2>/dev/null || true
+SERVER_PID=""
+rm -rf "${TEST_DATA_DIR}/workflow-agents"
+start_server
+[ -f "${LOWERING}" ] && [ -f "${LOWERING%.lowering}.wasm" ] \
+    || { print_error "nap was not restored from the store"; exit 1; }
+AGAIN_GRAPH="${PARENT_GRAPH/\"Call Nap\"/\"Call Nap Again\"}"
+AGAIN_ID=$(create_and_compile "Call Nap Again" "${AGAIN_GRAPH}")
+RESP=$(api_post "/workflows/${AGAIN_ID}/execute" '{"inputs": {"data": {}}}')
+AGAIN=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
+[ -n "${AGAIN}" ] || { print_error "execute failed: ${RESP}"; exit 1; }
+STATUS=""
+for _ in {1..120}; do
+    STATUS=$(curl -sS "${API}/workflows/instances/${AGAIN}" | jq -r '.data.status // empty')
+    case "${STATUS}" in completed|failed|crashed|stopped|cancelled) break ;; esac
+    sleep 0.5
+done
+[ "${STATUS}" = "completed" ] \
+    || { print_error "the second parent ended '${STATUS}'"; tail -40 "${TEST_LOG}"; exit 1; }
+echo "  restored from the store; a new parent compiles against nap and completes ✓"
+
+print_success "workflow-agent restage: an agent staged by an older lowering is republished at boot and callable, and a lost staging dir is restored from the store"

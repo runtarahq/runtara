@@ -19,9 +19,18 @@
 //!
 //! The overlay is read per call (a few small JSON files) rather than cached —
 //! publishes take effect immediately with no invalidation machinery.
+//!
+//! The artifact store is the source of truth: each published agent is one
+//! record, `tenants/<hex tenant>/workflow-agents/<slug snake>.json`, whose
+//! content is the `.wasm` and whose metadata holds the lowering it was built
+//! with and the `.meta.json`'s exact bytes. The staging dir is a cache of
+//! those records, written after them and rebuilt from them at boot
+//! ([`sync_from_store`]), so a lost data dir loses nothing.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+use runtara_environment::artifacts::{ArtifactStore, Manifest};
 
 use runtara_dsl::agent_meta::{AgentCatalog, AgentInfo, CONTROL_AGENT_ID, canonical_agent_id};
 
@@ -38,6 +47,211 @@ pub fn folds_onto_reserved_agent(id: &str) -> bool {
 /// through its `suspended` outcome instead, which its caller forwards.
 fn claims_host_execution_mode(info: &AgentInfo) -> bool {
     info.capabilities.iter().any(|c| c.trusted || c.suspends)
+}
+
+static STORE: OnceLock<Arc<dyn ArtifactStore>> = OnceLock::new();
+
+/// Keep published workflow-agents in `store`, the server's artifact store.
+/// Set once, at boot; until then the default store under `DATA_DIR` is used.
+pub fn install_store(store: Arc<dyn ArtifactStore>) {
+    let _ = STORE.set(store);
+}
+
+fn store() -> Arc<dyn ArtifactStore> {
+    STORE.get().cloned().unwrap_or_else(|| {
+        Arc::new(runtara_environment::image_registry::default_artifact_store(
+            &data_dir(),
+        ))
+    })
+}
+
+/// A published workflow-agent's record metadata.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StagedRecord {
+    /// The lowering it was built with; empty when unknown.
+    lowering: String,
+    /// The `.meta.json`, byte for byte.
+    meta: Box<serde_json::value::RawValue>,
+}
+
+fn tenant_prefix(tenant_id: &str) -> String {
+    format!(
+        "tenants/{}/workflow-agents/",
+        hex::encode(tenant_id.as_bytes())
+    )
+}
+
+fn record_key(tenant_id: &str, snake: &str) -> std::io::Result<String> {
+    let key = format!("{}{snake}.json", tenant_prefix(tenant_id));
+    runtara_environment::artifacts::validate_manifest_key(&key).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("workflow-agent slug `{snake}` is not a valid artifact name"),
+        )
+    })?;
+    Ok(key)
+}
+
+fn store_error(error: runtara_environment::artifacts::ArtifactError) -> std::io::Error {
+    std::io::Error::other(error.to_string())
+}
+
+/// Record a staged agent in the store: content first, then its record.
+async fn put_record(
+    tenant_id: &str,
+    snake: &str,
+    wasm: &[u8],
+    meta: &[u8],
+    lowering: &str,
+) -> std::io::Result<()> {
+    let key = record_key(tenant_id, snake)?;
+    let store = store();
+    let content = store.put(wasm).await.map_err(store_error)?;
+    let record = serde_json::to_vec(&StagedRecord {
+        lowering: lowering.to_owned(),
+        meta: serde_json::value::RawValue::from_string(
+            String::from_utf8(meta.to_vec())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+    })
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let manifest = Manifest::new(content, &record)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    store
+        .put_manifest(&key, &manifest)
+        .await
+        .map_err(store_error)
+}
+
+/// Write a staged agent's cache files: sidecar first, then the `.wasm`, then
+/// its lowering (none when unknown, which makes it stale).
+fn write_staged_files(
+    tenant_id: &str,
+    snake: &str,
+    wasm: &[u8],
+    meta: &[u8],
+    lowering: &str,
+) -> std::io::Result<(PathBuf, PathBuf)> {
+    let dir = staging_dir(tenant_id);
+    std::fs::create_dir_all(&dir)?;
+    let wasm_path = dir.join(format!("runtara_agent_{snake}.wasm"));
+    let meta_path = dir.join(format!("runtara_agent_{snake}.meta.json"));
+    let lowering_path = dir.join(format!("runtara_agent_{snake}.lowering"));
+    // Sidecar FIRST: the compose-time stale-artifact gate reasons from the
+    // sidecar's tags, so a crash mid-stage must never leave a `.wasm` without
+    // its `.meta.json` (a wasm-only stage would hit the gate's anomalous
+    // missing-sidecar branch and fail parent compiles until re-published).
+    std::fs::write(&meta_path, meta)?;
+    std::fs::write(&wasm_path, wasm)?;
+    // Last: an artifact with no record of its lowering is restaged.
+    if lowering.is_empty() {
+        match std::fs::remove_file(&lowering_path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    } else {
+        std::fs::write(&lowering_path, lowering)?;
+    }
+    Ok((wasm_path, meta_path))
+}
+
+/// Make every tenant's staging dir hold exactly what the store records: a
+/// staged agent with no record (staged before the store) is recorded first,
+/// then every record is written to its tenant's dir. Run at boot, before
+/// anything reads the staging dirs.
+pub async fn sync_from_store() -> std::io::Result<(usize, usize)> {
+    let store = store();
+    let mut imported = 0;
+    // Staged before the store: record them.
+    if let Ok(tenants) = std::fs::read_dir(data_dir().join("workflow-agents")) {
+        for tenant in tenants.flatten() {
+            let Some(tenant_id) = tenant.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Ok(entries) = std::fs::read_dir(tenant.path()) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(snake) = name
+                    .to_str()
+                    .and_then(|n| n.strip_prefix("runtara_agent_"))
+                    .and_then(|n| n.strip_suffix(".meta.json"))
+                    .map(str::to_owned)
+                else {
+                    continue;
+                };
+                let key = record_key(&tenant_id, &snake)?;
+                if store
+                    .get_manifest(&key)
+                    .await
+                    .map_err(store_error)?
+                    .is_some()
+                {
+                    continue;
+                }
+                let dir = tenant.path();
+                let (Ok(meta), Ok(wasm)) = (
+                    std::fs::read(dir.join(format!("runtara_agent_{snake}.meta.json"))),
+                    std::fs::read(dir.join(format!("runtara_agent_{snake}.wasm"))),
+                ) else {
+                    tracing::warn!(tenant = %tenant_id, agent = %snake, "staged workflow-agent is missing its .wasm or .meta.json; not recorded");
+                    continue;
+                };
+                let lowering =
+                    std::fs::read_to_string(dir.join(format!("runtara_agent_{snake}.lowering")))
+                        .unwrap_or_default();
+                put_record(&tenant_id, &snake, &wasm, &meta, &lowering).await?;
+                imported += 1;
+            }
+        }
+    }
+    // The store is the truth: write every record to its staging dir.
+    let mut written = 0;
+    for key in store
+        .list_manifests("tenants/")
+        .await
+        .map_err(store_error)?
+    {
+        let Some((tenant_hex, snake)) = key
+            .strip_prefix("tenants/")
+            .and_then(|rest| rest.split_once("/workflow-agents/"))
+            .and_then(|(tenant, file)| Some((tenant, file.strip_suffix(".json")?)))
+        else {
+            continue;
+        };
+        let Some(tenant_id) = hex::decode(tenant_hex)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+        else {
+            continue;
+        };
+        let manifest = match store.get_manifest(&key).await {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(%key, %error, "unreadable workflow-agent record; not staged");
+                continue;
+            }
+        };
+        let Ok(record) = serde_json::from_slice::<StagedRecord>(manifest.metadata_bytes()) else {
+            tracing::warn!(%key, "malformed workflow-agent record; not staged");
+            continue;
+        };
+        let Some(wasm) = store.get(&manifest.content).await.map_err(store_error)? else {
+            continue;
+        };
+        write_staged_files(
+            &tenant_id,
+            snake,
+            &wasm,
+            record.meta.get().as_bytes(),
+            &record.lowering,
+        )?;
+        written += 1;
+    }
+    Ok((imported, written))
 }
 
 /// Per-tenant staging dir for published workflow-agents.
@@ -161,9 +375,14 @@ pub fn published_agent_ids(tenant_id: &str) -> std::collections::HashSet<String>
 /// workflow that no longer exists. Parents that already composed it keep
 /// their baked copy (composition embeds bytes), exactly like a removed
 /// native agent.
-pub fn unstage(tenant_id: &str, slug: &str) -> std::io::Result<()> {
+pub async fn unstage(tenant_id: &str, slug: &str) -> std::io::Result<()> {
     let dir = staging_dir(tenant_id);
     let snake = slug.replace('-', "_");
+    // The record first: a cache file without one is gone at the next boot.
+    store()
+        .delete_manifest(&record_key(tenant_id, &snake)?)
+        .await
+        .map_err(store_error)?;
     for name in [
         format!("runtara_agent_{snake}.wasm"),
         format!("runtara_agent_{snake}.meta.json"),
@@ -178,9 +397,10 @@ pub fn unstage(tenant_id: &str, slug: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Stage a published workflow-agent: copy the composed `.wasm` and write the
-/// synthesized `.meta.json` sidecar. Returns `(wasm_path, meta_path)`.
-pub fn stage(
+/// Stage a published workflow-agent: record the composed `.wasm` and the
+/// synthesized `.meta.json` in the store, then write them to the staging dir.
+/// Returns `(wasm_path, meta_path)`.
+pub async fn stage(
     tenant_id: &str,
     slug: &str,
     composed_wasm: &std::path::Path,
@@ -198,25 +418,13 @@ pub fn stage(
             format!("workflow-agent id `{slug}` is reserved for a built-in agent"),
         ));
     }
-    let dir = staging_dir(tenant_id);
-    std::fs::create_dir_all(&dir)?;
     let snake = slug.replace('-', "_");
-    let wasm_path = dir.join(format!("runtara_agent_{snake}.wasm"));
-    let meta_path = dir.join(format!("runtara_agent_{snake}.meta.json"));
-    // Sidecar FIRST: the compose-time stale-artifact gate reasons from the
-    // sidecar's tags, so a crash mid-stage must never leave a `.wasm` without
-    // its `.meta.json` (a wasm-only stage would hit the gate's anomalous
-    // missing-sidecar branch and fail parent compiles until re-published).
-    let meta_json = serde_json::to_vec_pretty(info)
+    let meta = serde_json::to_vec_pretty(info)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&meta_path, meta_json)?;
-    std::fs::copy(composed_wasm, &wasm_path)?;
-    // Last: an artifact with no record of its lowering is restaged.
-    std::fs::write(
-        dir.join(format!("runtara_agent_{snake}.lowering")),
-        crate::config::workflow_lowering_tag(),
-    )?;
-    Ok((wasm_path, meta_path))
+    let wasm = std::fs::read(composed_wasm)?;
+    let lowering = crate::config::workflow_lowering_tag();
+    put_record(tenant_id, &snake, &wasm, &meta, &lowering).await?;
+    write_staged_files(tenant_id, &snake, &wasm, &meta, &lowering)
 }
 
 /// A staged workflow-agent that was built by another lowering than this
@@ -314,7 +522,7 @@ mod tests {
         // `stage` leaves slug reservation to the publish path, so a stale
         // publication can still carry a built-in's id.
         for id in ["s3-storage", "tenant-safe"] {
-            stage(TENANT, id, &wasm, &info(id)).unwrap();
+            stage(TENANT, id, &wasm, &info(id)).await.unwrap();
         }
         let base = Arc::new(AgentCatalog::from_agents(vec![info("s3-storage")]));
 
@@ -340,7 +548,7 @@ mod tests {
         let waits = data_dir.path().join("waits.wasm");
         std::fs::write(&waits, b"\0asm[cancellable][waitable-set-wait]").unwrap();
 
-        stage(TENANT, "fresh", &wasm, &info("fresh")).unwrap();
+        stage(TENANT, "fresh", &wasm, &info("fresh")).await.unwrap();
         let published = runtara_dsl::agent_meta::with_workflow_run(
             info("relowered"),
             runtara_dsl::agent_meta::WorkflowRunTarget {
@@ -349,12 +557,16 @@ mod tests {
                 parks: false,
             },
         );
-        stage(TENANT, "relowered", &wasm, &published).unwrap();
+        stage(TENANT, "relowered", &wasm, &published).await.unwrap();
         let dir = staging_dir(TENANT);
         std::fs::write(dir.join("runtara_agent_relowered.lowering"), "older").unwrap();
-        stage(TENANT, "unrecorded", &wasm, &info("unrecorded")).unwrap();
+        stage(TENANT, "unrecorded", &wasm, &info("unrecorded"))
+            .await
+            .unwrap();
         std::fs::remove_file(dir.join("runtara_agent_unrecorded.lowering")).unwrap();
-        stage(TENANT, "waits", &waits, &info("waits")).unwrap();
+        stage(TENANT, "waits", &waits, &info("waits"))
+            .await
+            .unwrap();
 
         let mut stale = stale_agents(TENANT, &lowering);
         stale.sort_by(|a, b| a.slug.cmp(&b.slug));
@@ -363,12 +575,73 @@ mod tests {
         assert_eq!(stale[0].published, Some(("wf-1".to_string(), 3)));
         assert_eq!(stale[1].published, None);
 
-        unstage(TENANT, "relowered").unwrap();
+        unstage(TENANT, "relowered").await.unwrap();
         assert!(!dir.join("runtara_agent_relowered.lowering").exists());
     }
 
-    #[test]
-    fn publication_rejects_suspension_and_reserved_ids_before_writing_any_files() {
+    /// The store is the truth: a lost staging dir is rebuilt from the records,
+    /// and an agent staged before the store is recorded from its files.
+    #[tokio::test]
+    async fn staging_dirs_are_rebuilt_from_the_store_and_legacy_agents_recorded() {
+        // No other test uses these tenants.
+        const TENANT: &str = "store-sync-tenant";
+        const LEGACY: &str = "Legacy Tenant";
+        let _env = crate::test_env::ENV_MUTEX.lock().await;
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set("DATA_DIR", data_dir.path().to_str().unwrap());
+        let wasm = data_dir.path().join("agent.wasm");
+        std::fs::write(&wasm, b"\0asm published").unwrap();
+        stage(TENANT, "kept", &wasm, &info("kept")).await.unwrap();
+        let meta = std::fs::read(staging_dir(TENANT).join("runtara_agent_kept.meta.json")).unwrap();
+        stage(TENANT, "dropped", &wasm, &info("dropped"))
+            .await
+            .unwrap();
+        unstage(TENANT, "dropped").await.unwrap();
+
+        // Staged before the store: files only, no record.
+        let legacy = staging_dir(LEGACY);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("runtara_agent_old.wasm"), b"\0asm old").unwrap();
+        std::fs::write(
+            legacy.join("runtara_agent_old.meta.json"),
+            serde_json::to_vec(&info("old")).unwrap(),
+        )
+        .unwrap();
+
+        std::fs::remove_dir_all(staging_dir(TENANT)).unwrap();
+        assert_eq!(sync_from_store().await.unwrap(), (1, 2));
+
+        let dir = staging_dir(TENANT);
+        assert_eq!(
+            std::fs::read(dir.join("runtara_agent_kept.wasm")).unwrap(),
+            b"\0asm published"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("runtara_agent_kept.meta.json")).unwrap(),
+            meta
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("runtara_agent_kept.lowering")).unwrap(),
+            crate::config::workflow_lowering_tag()
+        );
+        assert!(
+            !dir.join("runtara_agent_dropped.wasm").exists(),
+            "unstaged stays gone"
+        );
+        assert_eq!(
+            published_agent_ids(LEGACY).into_iter().collect::<Vec<_>>(),
+            ["old"]
+        );
+        assert!(
+            !legacy.join("runtara_agent_old.lowering").exists(),
+            "an unknown lowering stays unknown, so it is restaged"
+        );
+        assert_eq!(sync_from_store().await.unwrap(), (0, 2), "recorded once");
+    }
+
+    #[tokio::test]
+    async fn publication_rejects_suspension_and_reserved_ids_before_writing_any_files() {
         let mut parks = info("tenant-waiter");
         parks.capabilities[0].suspends = true;
         let err = stage(
@@ -377,6 +650,7 @@ mod tests {
             std::path::Path::new("no-source-needed"),
             &parks,
         )
+        .await
         .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("suspending"));
@@ -387,6 +661,7 @@ mod tests {
             std::path::Path::new("no-source-needed"),
             &info("control"),
         )
+        .await
         .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("reserved"));
@@ -407,8 +682,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn publication_rejects_trust_before_writing_any_files() {
+    #[tokio::test]
+    async fn publication_rejects_trust_before_writing_any_files() {
         let mut spoof = info("tenant-signer");
         spoof.capabilities[0].trusted = true;
         let err = stage(
@@ -417,6 +692,7 @@ mod tests {
             std::path::Path::new("no-source-needed"),
             &spoof,
         )
+        .await
         .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("trusted"));

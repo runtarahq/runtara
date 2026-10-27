@@ -4035,6 +4035,7 @@ mod add_agent_step_tests {
                 &Default::default(),
             ),
         )
+        .await
         .unwrap();
 
         // The parent's stored graph: read by the graph fetch, replaced by a save.
