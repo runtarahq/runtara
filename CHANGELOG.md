@@ -95,6 +95,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tenant. `e2e/test_served_tenants.sh` serves two tenants from one process
   and checks neither reads the other's workflows, versions or runs.
 
+- **A workspace the user does not belong to says so.** Signed in with a
+  token that names no tenant, opening `/ui/{tenant}/` for a workspace the
+  user is not a member of shows "No access" with the workspaces they do
+  belong to, instead of the app with every request refused. A failed
+  `/me/tenants` lookup is no longer read as membership of nothing.
+
 - **MCP sessions belong to their tenant.** The Valkey session-recovery
   record is kept under the tenant of the request that made the session
   (`runtara:mcp:sessions:{tenant}:{session}`), so after a restart a request

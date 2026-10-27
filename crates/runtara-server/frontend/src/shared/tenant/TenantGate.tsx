@@ -4,22 +4,39 @@ import logoIcon from '@/assets/logo/runtara-logo-icon.svg';
 import { Button } from '@/shared/components/ui/button';
 import { Loader } from '@/shared/components/loader.tsx';
 import { mountReturnPath } from '@/shared/config/oidcConfig';
-import { chooseTenant, tenantHome, useMyTenants } from './myTenants';
+import {
+  chooseTenant,
+  tenantHome,
+  type MyTenant,
+  type TenantChoice,
+} from './myTenants';
 
 /**
- * Shown to a user signed in with a token that names no tenant, at the bare
- * mount: sends them to their only tenant, or lets them pick one.
+ * Shown to a user signed in with a token that names no tenant: at the bare
+ * mount it sends them to their only tenant or lets them pick one; at a
+ * workspace they do not belong to (`deniedTenant`) it says so and offers
+ * the ones they do, never moving them silently.
  */
-export function TenantGate() {
+export function TenantGate({
+  tenants,
+  deniedTenant,
+}: {
+  tenants: MyTenant[] | null;
+  deniedTenant?: string;
+}) {
   const { signoutRedirect } = useAuth();
-  const tenants = useMyTenants();
-  const choice = tenants === null ? null : chooseTenant(tenants);
+  const chosen = tenants === null ? null : chooseTenant(tenants);
+  const choice: TenantChoice | null =
+    deniedTenant && chosen?.kind === 'redirect'
+      ? { kind: 'pick', tenants: tenants ?? [] }
+      : chosen;
 
+  const redirectTo = choice?.kind === 'redirect' ? choice.id : null;
   useEffect(() => {
-    if (choice?.kind === 'redirect') {
-      window.location.replace(tenantHome(mountReturnPath, choice.id));
+    if (redirectTo) {
+      window.location.replace(tenantHome(mountReturnPath, redirectTo));
     }
-  }, [choice]);
+  }, [redirectTo]);
 
   if (choice === null || choice.kind === 'redirect') {
     return <Loader />;
@@ -34,9 +51,13 @@ export function TenantGate() {
         <div className="rounded-lg border bg-card px-8 py-8 text-left shadow-sm">
           {choice.kind === 'pick' ? (
             <>
-              <h1 className="mb-1 text-lg font-semibold">Choose a workspace</h1>
+              <h1 className="mb-1 text-lg font-semibold">
+                {deniedTenant ? 'No access' : 'Choose a workspace'}
+              </h1>
               <p className="mb-6 text-sm text-muted-foreground">
-                You are a member of several workspaces on this server.
+                {deniedTenant
+                  ? `You are not a member of the workspace ${deniedTenant}. Open one of yours instead.`
+                  : 'You are a member of several workspaces on this server.'}
               </p>
               <ul className="flex flex-col gap-2">
                 {choice.tenants.map((tenant) => (

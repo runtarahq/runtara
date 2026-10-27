@@ -29,9 +29,18 @@ export function tenantHome(mountPath: string, tenant: string): string {
   return `${mount}${encodeURIComponent(tenant)}/`;
 }
 
+/** Whether the user may open `tenant`; `null` until that is known. */
+export function canOpen(
+  tenants: MyTenant[] | null,
+  tenant: string
+): boolean | null {
+  return tenants === null ? null : tenants.some((t) => t.id === tenant);
+}
+
 /**
- * The tenants the signed-in user may act in, or `null` while loading (and
- * outside OIDC, where the server's own tenant is the only one).
+ * The tenants the signed-in user may act in. `null` while loading, outside
+ * OIDC (where the server's own tenant is the only one), and when the lookup
+ * failed, so a failure is never read as "a member of nothing".
  */
 export function useMyTenants(): MyTenant[] | null {
   const auth = useAuth();
@@ -50,7 +59,7 @@ export function useMyTenants(): MyTenant[] | null {
         if (!cancelled) setTenants(res.data?.tenants ?? []);
       })
       .catch(() => {
-        if (!cancelled) setTenants([]);
+        if (!cancelled) setTenants(null);
       });
     return () => {
       cancelled = true;
