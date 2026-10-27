@@ -4687,6 +4687,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtara-runner-delegate"
+version = "9.0.1"
+dependencies = [
+ "async-trait",
+ "runtara-environment",
+ "runtara-server",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "runtara-server"
 version = "9.0.1"
 dependencies = [

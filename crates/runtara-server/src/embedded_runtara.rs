@@ -46,6 +46,8 @@ pub struct EmbeddedRuntaraConfig {
     pub execution_timeout_policy: ExecutionTimeoutPolicy,
     /// Runtime approvals for previously compiled isolation artifacts.
     pub isolation_policy: Option<Arc<crate::config::isolation::IsolationPolicy>>,
+    /// Builds the workflow runner; `None` is the embedded engine.
+    pub runner_factory: Option<runtara_environment::runner::RunnerFactory>,
 }
 
 /// Handle to the running embedded Runtara servers.
@@ -128,23 +130,27 @@ impl EmbeddedRuntara {
         // Create the workflow runner. Workflows are compiled to wasm32-wasip2
         // and executed on the embedded in-process engine; they reach core
         // through host imports, so no core address enters a guest.
+        let parts = runtara_environment::runner::RunnerParts {
+            persistence: persistence.clone(),
+            event_observer,
+            scoped_agents: config
+                .isolation_policy
+                .as_ref()
+                .map(|policy| policy.runner_config()),
+            services: runtara_environment::runner::HostServices {
+                trusted,
+                control_host,
+                instance_waits,
+                connections: Some(connections),
+                database: Some(database),
+                outbound_http: Some(outbound_http),
+            },
+        };
         let runner: Arc<dyn runtara_environment::runner::Runner> =
-            runtara_environment::runner::build_runner_configured(
-                persistence.clone(),
-                event_observer,
-                config
-                    .isolation_policy
-                    .as_ref()
-                    .map(|policy| policy.runner_config()),
-                runtara_environment::runner::HostServices {
-                    trusted,
-                    control_host,
-                    instance_waits,
-                    connections: Some(connections),
-                    database: Some(database),
-                    outbound_http: Some(outbound_http),
-                },
-            )
+            match config.runner_factory.as_ref() {
+                Some(factory) => factory(parts),
+                None => runtara_environment::runner::build_embedded_runner(parts),
+            }
             .map_err(|e| anyhow::anyhow!("build workflow runner: {e}"))?;
         info!(
             runner_type = runner.runner_type(),
@@ -336,6 +342,7 @@ pub async fn maybe_start_embedded(
     outbound_http: Arc<dyn runtara_component_host::OutboundHttpHost>,
     execution_timeout_policy: ExecutionTimeoutPolicy,
     event_observer: Option<Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>>,
+    runner_factory: Option<runtara_environment::runner::RunnerFactory>,
 ) -> Result<Option<EmbeddedRuntara>, Box<dyn std::error::Error + Send + Sync>> {
     let embedded_enabled = std::env::var("RUNTARA_EMBEDDED")
         .map(|v| v.to_lowercase() != "false" && v != "0")
@@ -409,6 +416,7 @@ pub async fn maybe_start_embedded(
         core_overrides,
         execution_timeout_policy,
         isolation_policy: crate::config::isolation_policy(),
+        runner_factory,
     };
 
     let runtara = EmbeddedRuntara::start(

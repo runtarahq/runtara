@@ -124,7 +124,8 @@
 //! `RUNTARA_SDK_BACKEND`,
 //! `RUNTARA_INSTANCE_MEMORY_MAX_BYTES`, `RUNTARA_MAX_CONCURRENT_RUNS`,
 //! `RUNTARA_PREPARATION_CONCURRENCY`, `RUNTARA_PRECOMPILE_CHILD_CONCURRENCY`.
-//! `RUNTARA_RUNNER` is accepted and ignored with a warning.
+//! A host that runs workflows elsewhere supplies its own runner
+//! ([`runner::RunnerFactory`]).
 //!
 //! Background workers: the `RUNTARA_{RUN_DIR,DB,IMAGE}_CLEANUP_*` families,
 //! `RUNTARA_EVENT_DEBUG_RETENTION_HOURS`, `RUNTARA_AUTO_RECOVER` and

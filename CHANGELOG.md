@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The workflow runner is pluggable.** A host binary can boot the stock
+  server with its own runner: `runtara_server::boot::run(ServerOptions {
+  runner_factory })`, where the factory builds a `Runner` from the parts the
+  embedded one is built from (`runtara_environment::runner::RunnerParts`;
+  `build_embedded_runner` is the default). `runtara-runner-delegate` is an
+  out-of-tree runner delegating to the embedded one, with a
+  `runtara-server-delegating` binary the e2e suites run against.
+  `RUNTARA_RUNNER` is no longer read (it was ignored already).
+
 - **DSL 3.7.0: a step id an `onWait` graph shares with the graph around it is
   rejected (E152).** An `onWait` graph runs at its WaitForSignal step's
   position, so a step there with the id of a step around it, or of a step in

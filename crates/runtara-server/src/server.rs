@@ -666,7 +666,23 @@ async fn me_handler(
 /// 96 MB leaves headroom above the base64-encoded size of a 50 MB file.
 const TENANT_REQUEST_BODY_LIMIT_BYTES: usize = 96 * 1024 * 1024;
 
+/// How a host composes the server beyond its environment configuration.
+#[derive(Default, Clone)]
+pub struct ServerOptions {
+    /// Builds the workflow runner; `None` runs workflows on the embedded
+    /// in-process engine.
+    pub runner_factory: Option<runtara_environment::runner::RunnerFactory>,
+}
+
 pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    start_with(pool, ServerOptions::default()).await
+}
+
+/// [`start`], composed with `options`.
+pub async fn start_with(
+    pool: PgPool,
+    options: ServerOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Load all env-derived configuration up front; fails fast on missing/invalid.
     let server_config = config::Config::from_env()?;
 
@@ -1265,6 +1281,7 @@ pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
             workers::step_counter::StepCounter::new(metrics.meter().clone())
                 as Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>
         }),
+        options.runner_factory.clone(),
     )
     .await
     {

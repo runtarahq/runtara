@@ -3,6 +3,7 @@ pub mod audit;
 pub mod auth;
 pub mod authz;
 pub mod bind;
+pub mod boot;
 pub mod channels;
 pub mod compiler;
 pub mod config;
@@ -34,7 +35,7 @@ pub mod valkey;
 pub mod workers;
 pub mod workflow_agents;
 
-pub use server::{skip_migrations, start};
+pub use server::{ServerOptions, skip_migrations, start, start_with};
 
 // Link runtara_agents so the static metadata registry is available at runtime.
 extern crate runtara_agents;
