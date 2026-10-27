@@ -69,7 +69,8 @@ async fn exec(pool: &PgPool, sql: &str) {
     sqlx::query(sql)
         .execute(pool)
         .await
-        .unwrap_or_else(|error| panic!("{sql}: {error}"));
+        // The statement is not echoed: some carry a role's password.
+        .unwrap_or_else(|error| panic!("provisioning statement failed: {error}"));
 }
 
 /// The role statements from the compose/install init script, with this test's

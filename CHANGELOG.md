@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local path and delete by SHA-256 digest), with a filesystem store at
   `<DATA_DIR>/artifacts/blobs/sha256/<digest>` as the default. An image row
   records `binary_digest` instead of a path (environment migration
-  `20261027000000`, backfilled from the checksum every image recorded), and
+  `20261027000200`, backfilled from the checksum every image recorded), and
   `LaunchOptions` carries `workflow_digest`, which the runner resolves through
   its own store (`RunnerParts::artifacts`; a host supplies its own through
   `ServerOptions::artifacts`). Images with the same bytes share one artifact,

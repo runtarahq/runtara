@@ -2735,12 +2735,11 @@ mod tests {
             .unwrap();
 
         // Row-level security does not bind a superuser or a BYPASSRLS role,
-        // which the test database's own role may be: the scoped store logs in
-        // as a plain role made for this test.
+        // which the test database's own role may be: the scoped store acts as
+        // a plain role made for this test, switched to at connection start.
         let role = format!("rls_probe_{}", Uuid::new_v4().simple());
-        let secret = Uuid::new_v4().simple().to_string();
         for statement in [
-            format!("CREATE ROLE {role} LOGIN PASSWORD '{secret}' NOSUPERUSER NOBYPASSRLS"),
+            format!("CREATE ROLE {role} NOLOGIN NOSUPERUSER NOBYPASSRLS"),
             format!("GRANT USAGE ON SCHEMA public TO {role}"),
             format!(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {role}"
@@ -2752,7 +2751,7 @@ mod tests {
         let url = std::env::var("TEST_RUNTARA_DATABASE_URL").unwrap();
         let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
         let scoped = PostgresPersistence::for_tenant(
-            options.username(&role).password(&secret),
+            options.options([("role", role.as_str())]),
             &own_tenant,
             2,
         )

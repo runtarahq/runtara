@@ -25,7 +25,8 @@ required-features = ["db-integration-tests"]
 
 [[test]]
 name = "embedded_runner_test"
-required-features = ["db-integration-tests"]
+# Its workflow API runs need the built workflow components.
+required-features = ["scoped-workflow-integration-tests"]
 
 [dependencies]
 sha2 = { workspace = true }

@@ -1986,9 +1986,7 @@ export function Workflow() {
       const exportData = {
         name: exportName,
         description: exportDescription,
-        ...(exportMemoryMb !== undefined
-          ? { memoryMb: exportMemoryMb }
-          : {}),
+        ...(exportMemoryMb !== undefined ? { memoryMb: exportMemoryMb } : {}),
         ...(exportTrackEvents !== undefined
           ? { trackEvents: exportTrackEvents }
           : {}),

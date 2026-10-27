@@ -122,7 +122,6 @@ function formValueToDurable(value: GeneralFormValues['durableMode']) {
 
 const AUTO_ENTRY_POINT = '__auto__';
 
-
 interface SettingsContentProps {
   workflow: WorkflowData;
   onChange: (data: Partial<WorkflowData>) => void;

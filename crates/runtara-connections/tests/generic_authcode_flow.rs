@@ -183,7 +183,7 @@ async fn generic_authcode_full_flow_from_params() {
     );
     assert!(
         auth_url.contains("%2Fapi%2Foauth%2Ftenant_gen%2Fcallback"),
-        "the redirect URI names the connection's tenant: {auth_url}"
+        "the redirect URI names the connection's tenant"
     );
 
     // A state redeemed at another tenant's callback URL is refused, and spent:
