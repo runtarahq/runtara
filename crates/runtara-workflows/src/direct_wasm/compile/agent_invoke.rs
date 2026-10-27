@@ -216,6 +216,18 @@ fn emit_child_run(
     };
     call(body, false);
 
+    // Refused for capacity: park, and start again after the hint.
+    super::abi::load_retptr_tag(body);
+    body.instruction(&Instruction::I32Const(
+        super::api_shims::child_run::CAPACITY,
+    ));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    super::abi::push_retptr_i64_load(body, super::api_shims::child_run::RETRY_AFTER);
+    body.instruction(&Instruction::LocalSet(deadline));
+    emit_child_run_retry_park(body, indices, deadline);
+    body.instruction(&Instruction::End);
+
     // Pending: park on the wait, waking at its persisted deadline. A wait
     // that settled while the child still runs passed its deadline, unless
     // the child ended since; the second call tells which.
@@ -247,6 +259,33 @@ fn emit_child_run(
     body.instruction(&Instruction::End);
     body.instruction(&Instruction::End);
     emit_child_run_outcome(body, static_data);
+}
+
+/// Park until now plus the retry hint in `retry_after` (ms), clamped by an
+/// enclosing loop deadline: a child-run start refused for capacity is tried
+/// again on the relaunch.
+pub(super) fn emit_child_run_retry_park(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    retry_after: u32,
+) {
+    push_retptr_arg(body);
+    super::abi::emit_call_wide_result(body, indices.runtime_now_ms);
+    super::abi::return_if_retptr_error(body, indices);
+    super::abi::push_retptr_i64_load(body, super::DIRECT_RET_U64_OK_OFFSET);
+    body.instruction(&Instruction::LocalGet(retry_after));
+    body.instruction(&Instruction::I64Add);
+    body.instruction(&Instruction::LocalSet(retry_after));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::LocalSet(
+        super::DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+    ));
+    super::wait_instances::emit_park(
+        body,
+        indices,
+        super::DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+        retry_after,
+    );
 }
 
 /// Set `deadline` to the wait deadline of a child-run call: now plus the

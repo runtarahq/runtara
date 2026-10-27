@@ -353,6 +353,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the first branch parks.
   - Each call is a run with its own instance row, costing a launch instead
     of an in-process call.
+  - A start refused because the tenant's limit (or control's share of it)
+    is full is not an error: the caller parks for the refusal's retry hint
+    and starts the child again.
 
 - **Breaking: a workflow's memory now limits its runs, and it is a number.**
   A workflow version has a memory in MiB (`memoryMb`, 1 to 65536, 256 by

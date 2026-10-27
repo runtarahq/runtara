@@ -983,6 +983,10 @@ pub(super) mod child_run {
     /// Where an `unavailable` result keeps the API's message (ptr, len),
     /// past the error-info the step error is written into.
     pub(crate) const MESSAGE: u64 = 96;
+    /// The start was refused for capacity, retryably: the run parks and
+    /// starts it again after the hint (ms, a `u64` at [`RETRY_AFTER`]).
+    pub(crate) const CAPACITY: i32 = 7;
+    pub(crate) const RETRY_AFTER: u64 = 8;
 }
 
 /// `child-run(binding, input, path, attempt, deadline, settled, retptr)`:
@@ -1016,6 +1020,12 @@ fn emit_child_run_shim<'a>(
     let outcome_ty = api_result("tasks", "outcome")?;
     let register_ty = api_result("waits", "register")?;
     let message_of = |ty: &Type| layouts.offset(ty, &[Step::Err, Step::Field("message")]);
+    let start_code = layouts.offset(&start_ty, &[Step::Err, Step::Field("code")])?;
+    let start_retry = layouts.offset(&start_ty, &[Step::Err, Step::Field("retry-after-ms")])?;
+    let start_retry_value = layouts.offset(
+        &start_ty,
+        &[Step::Err, Step::Field("retry-after-ms"), Step::Some],
+    )?;
     let (start_message, outcome_message, register_message) = (
         message_of(&start_ty)?,
         message_of(&outcome_ty)?,
@@ -1088,6 +1098,27 @@ fn emit_child_run_shim<'a>(
         shim.i(Instruction::LocalGet(attempt))
             .i(Instruction::I32Const(scratch))
             .i(Instruction::Call(start));
+        // A full share with a hint is `capacity`: the caller parks and
+        // starts again. Without a hint it can never be met: `unavailable`.
+        shim.i(Instruction::I32Const(scratch))
+            .i(Instruction::I32Load8U(mem(0, 0)))
+            .i(Instruction::If(BlockType::Empty));
+        let (code_ptr, code_len) = (shim.local(5), shim.local(6));
+        shim.load_i32(start_code, code_ptr);
+        shim.load_i32(start_code + 4, code_len);
+        code_is(shim, code_ptr, code_len, "capacity");
+        shim.i(Instruction::I32Const(scratch))
+            .i(Instruction::I32Load8U(mem(start_retry, 0)))
+            .i(Instruction::I32And)
+            .i(Instruction::If(BlockType::Empty))
+            .i(Instruction::LocalGet(retptr))
+            .i(Instruction::I32Const(scratch))
+            .i(Instruction::I64Load(mem(start_retry_value, 3)))
+            .i(Instruction::I64Store(mem(child_run::RETRY_AFTER, 3)));
+        shim.store_const_u8(0, child_run::CAPACITY);
+        shim.i(Instruction::Return)
+            .i(Instruction::End)
+            .i(Instruction::End);
         unavailable_if_error(shim, start_message);
         shim.load_i32(id_at, id_ptr);
         shim.load_i32(id_at + 4, id_len);

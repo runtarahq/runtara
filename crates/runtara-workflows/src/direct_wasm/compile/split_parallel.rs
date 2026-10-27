@@ -795,6 +795,13 @@ pub(super) fn emit_parallel_split_items(
     }
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_PENDING_LOCAL));
+    if child_run.is_some() {
+        // No start refused for capacity yet.
+        body.instruction(&Instruction::I32Const(0));
+        body.instruction(&Instruction::LocalSet(
+            super::DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+        ));
+    }
     if child_run.is_none() {
         body.instruction(&Instruction::GlobalGet(0));
         super::cooperative_wait::emit_window_open(body);
@@ -975,6 +982,16 @@ pub(super) fn emit_parallel_split_items(
         // nothing new: each item finds its child again.
         body.instruction(&Instruction::LocalGet(DIRECT_PSPLIT_PENDING_LOCAL));
         body.instruction(&Instruction::If(BlockType::Empty));
+        body.instruction(&Instruction::LocalGet(
+            super::DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+        ));
+        body.instruction(&Instruction::If(BlockType::Empty));
+        super::agent_invoke::emit_child_run_retry_park(
+            body,
+            indices,
+            super::DIRECT_WAIT_DEADLINE_MS_LOCAL,
+        );
+        body.instruction(&Instruction::End);
         super::abi::emit_entry_suspend_return(body, indices);
         body.instruction(&Instruction::End);
     } else {
@@ -1310,6 +1327,28 @@ fn emit_child_run_launch(
         false,
     );
     super::agent_invoke::emit_child_run_outcome(body, static_data);
+    // A start refused for capacity is pending too, and the window parks no
+    // longer than its retry hint.
+    load_retptr_tag(body);
+    body.instruction(&Instruction::I32Const(
+        super::api_shims::child_run::CAPACITY,
+    ));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    super::abi::push_retptr_i64_load(body, super::api_shims::child_run::RETRY_AFTER);
+    body.instruction(&Instruction::LocalSet(super::DIRECT_WAIT_DEADLINE_MS_LOCAL));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::LocalSet(
+        super::DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+    ));
+    body.instruction(&Instruction::I32Const(super::DIRECT_RUN_RETPTR_OFFSET));
+    body.instruction(&Instruction::I32Const(super::api_shims::child_run::PENDING));
+    body.instruction(&Instruction::I32Store8(wasm_encoder::MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    }));
+    body.instruction(&Instruction::End);
     load_retptr_tag(body);
     body.instruction(&Instruction::I32Const(super::api_shims::child_run::PENDING));
     body.instruction(&Instruction::I32Eq);
