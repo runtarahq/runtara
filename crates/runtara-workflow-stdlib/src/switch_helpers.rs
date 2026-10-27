@@ -10,6 +10,7 @@
 use serde_json::Value;
 
 use crate::direct_json::apply_reference;
+use crate::reference_path::reference_segments;
 
 /// Process switch case output values, resolving reference-style mappings.
 ///
@@ -18,7 +19,7 @@ use crate::direct_json::apply_reference;
 ///   - `"reference"`: resolved against `source` exactly like any other mapping
 ///     reference — bracket and dotted paths, interned values, `default` and the
 ///     `type` hint all behave the same. A shape mismatch with no `default` is
-///     an error.
+///     an error. A path with no segments (`""`) resolves as absent.
 ///   - `"immediate"`: returns the `value` field directly
 /// - Other objects/arrays: recursively processed
 pub fn process_switch_output(output: &Value, source: &Value) -> Result<Value, String> {
@@ -28,7 +29,19 @@ pub fn process_switch_output(output: &Value, source: &Value) -> Result<Value, St
         Value::Object(map) => {
             if let (Some(value_type), Some(value)) = (map.get("valueType"), map.get("value")) {
                 match value_type.as_str() {
-                    Some("reference") => apply_reference(map, source),
+                    Some("reference") => {
+                        // The shared resolver reads a path with no segments as
+                        // the whole scope. The editor stores `""` as soon as an
+                        // output is switched to reference mode, so an unfinished
+                        // reference would emit every step's output. Resolve it
+                        // against an empty scope instead: like any absent
+                        // reference, it yields its `default` (through `type`) or
+                        // null.
+                        let unset = value
+                            .as_str()
+                            .is_some_and(|path| reference_segments(path).is_empty());
+                        apply_reference(map, if unset { &Value::Null } else { source })
+                    }
                     Some("immediate") => Ok(value.clone()),
                     _ => recurse_object(map, source),
                 }
@@ -171,6 +184,38 @@ mod tests {
             "valueType": "reference", "value": "data.present", "default": "fallback"
         });
         assert_eq!(resolve(&present, &source), json!("here"));
+    }
+
+    /// An unfinished reference (no path picked yet) must not emit the whole
+    /// workflow scope: it resolves like an absent one.
+    #[test]
+    fn test_output_reference_empty_path_resolves_as_absent() {
+        let source = json!({
+            "data": {"secret": "s"},
+            "steps": {"fetch": {"outputs": {"q": "found"}}}
+        });
+
+        for path in ["", ".", ".."] {
+            let output = json!({"valueType": "reference", "value": path});
+            assert_eq!(resolve(&output, &source), json!(null), "path {path:?}");
+        }
+
+        let with_default = json!({"valueType": "reference", "value": "", "default": "unset"});
+        assert_eq!(resolve(&with_default, &source), json!("unset"));
+
+        let typed_default = json!({
+            "valueType": "reference", "value": "", "default": "7", "type": "integer"
+        });
+        assert_eq!(resolve(&typed_default, &source), json!(7));
+
+        let nested = json!({
+            "picked": {"valueType": "reference", "value": "steps['fetch'].outputs.q"},
+            "unpicked": {"valueType": "reference", "value": ""}
+        });
+        assert_eq!(
+            resolve(&nested, &source),
+            json!({"picked": "found", "unpicked": null})
+        );
     }
 
     #[test]
