@@ -95,6 +95,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tenant. `e2e/test_served_tenants.sh` serves two tenants from one process
   and checks neither reads the other's workflows, versions or runs.
 
+- **Credentials can be sealed with each tenant's own keys.**
+  `ServerOptions::credential_cipher` lets a host supply the credential cipher
+  (boot and `reencrypt-connections` both use it; unset, the environment
+  keyring is built as before). `runtara_connections::TenantKeyedCipher` routes
+  each tenant to its own keyring and others to a default, so rotating one
+  tenant's key and running `reencrypt-connections --tenant-id` rewrites only
+  that tenant's rows (`tests/tenant_key_rotation.rs`, M7.4).
+
 - **A workspace the user does not belong to says so.** Signed in with a
   token that names no tenant, opening `/ui/{tenant}/` for a workspace the
   user is not a member of shows "No access" with the workspaces they do

@@ -73,7 +73,8 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
     // migrating or starting the server.
     if let Some(args) = reencrypt {
         crate::observability::init_cli_logging();
-        if let Err(msg) = crate::reencrypt::run(pool, args).await {
+        if let Err(msg) = crate::reencrypt::run(pool, args, options.credential_cipher.clone()).await
+        {
             eprintln!("❌ {msg}");
             std::process::exit(1);
         }

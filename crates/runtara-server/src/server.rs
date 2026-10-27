@@ -737,6 +737,12 @@ pub struct ServerOptions {
     /// environment (`RUNTARA_PRICING_TIER` and friends for the primary
     /// tenant, `RUNTARA_TENANT_ENTITLEMENTS_JSON` for the others).
     pub entitlements: Option<Arc<dyn config::EntitlementSource>>,
+    /// How connection credentials are sealed at rest; `None` builds the
+    /// AES-GCM keyring from `RUNTARA_CONNECTIONS_ENCRYPTION_KEY` and friends.
+    /// A host that keeps keys per tenant (for example unwrapped from a KMS)
+    /// supplies its own, such as a `runtara_connections::TenantKeyedCipher`;
+    /// every call names the tenant and connection it is for.
+    pub credential_cipher: Option<Arc<dyn runtara_connections::CredentialCipher>>,
 }
 
 pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -1170,12 +1176,15 @@ pub async fn start_with(
     // RUNTARA_REQUIRE_CREDENTIAL_ENCRYPTION or RUNTARA_ENV=production is set, in which
     // case a missing/invalid key hard-fails startup instead of silently degrading. See
     // runtara_connections::crypto::cipher_from_env for details.
-    let cipher = match runtara_connections::cipher_from_env() {
-        Ok(cipher) => cipher,
-        Err(e) => {
-            eprintln!("❌ {}", e);
-            std::process::exit(1);
-        }
+    let cipher = match options.credential_cipher.clone() {
+        Some(cipher) => cipher,
+        None => match runtara_connections::cipher_from_env() {
+            Ok(cipher) => cipher,
+            Err(e) => {
+                eprintln!("❌ {}", e);
+                std::process::exit(1);
+            }
+        },
     };
     // Fixed for the process lifetime — captured here for the `/health` readiness
     // response rather than threading connections-crate state through the public
