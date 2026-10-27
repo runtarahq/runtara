@@ -102,6 +102,27 @@ pub struct ObjectStoreManager {
     failures: Cache<StoreKey, String>,
     /// The most connection pools one tenant may hold open at once.
     tenant_pool_max: usize,
+    /// Pools being built, by tenant: counted with the held ones, under this
+    /// lock, so concurrent first requests cannot overshoot the limit.
+    building: std::sync::Mutex<std::collections::HashMap<String, usize>>,
+}
+
+/// A tenant's slot for a pool being built, released when the build ends.
+struct BuildSlot<'a> {
+    building: &'a std::sync::Mutex<std::collections::HashMap<String, usize>>,
+    tenant: String,
+}
+
+impl Drop for BuildSlot<'_> {
+    fn drop(&mut self) {
+        let mut building = self.building.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = building.get_mut(&self.tenant) {
+            *count -= 1;
+            if *count == 0 {
+                building.remove(&self.tenant);
+            }
+        }
+    }
 }
 
 /// Why a store is refused when the server has no default database.
@@ -125,6 +146,7 @@ impl ObjectStoreManager {
             pool_config: PoolConfig::default(),
             failures: build_failure_cache(),
             tenant_pool_max: DEFAULT_TENANT_POOL_MAX,
+            building: Default::default(),
         }
     }
 
@@ -172,6 +194,7 @@ impl ObjectStoreManager {
             pool_config: PoolConfig::default(),
             failures: build_failure_cache(),
             tenant_pool_max: DEFAULT_TENANT_POOL_MAX,
+            building: Default::default(),
         })
     }
 
@@ -188,21 +211,12 @@ impl ObjectStoreManager {
             tracing::debug!(key = ?key, "object-model store in failure cooldown; fast-failing");
             return Err(ObjectStoreError::Connection(cached_error));
         }
-        if let StoreKey::Url { tenant, .. } = &key
-            && !self.stores.contains_key(&key)
-        {
-            let held = self
-                .stores
-                .iter()
-                .filter(|(held, _)| matches!(held.as_ref(), StoreKey::Url { tenant: t, .. } if t == tenant))
-                .count();
-            if held >= self.tenant_pool_max {
-                return Err(ObjectStoreError::Connection(format!(
-                    "this tenant already holds {held} database connection pools, the limit \
-                     (OBJECT_MODEL_TENANT_POOL_MAX); unused ones close after they idle"
-                )));
+        let _slot = match &key {
+            StoreKey::Url { tenant, .. } if !self.stores.contains_key(&key) => {
+                Some(self.reserve_pool(tenant)?)
             }
-        }
+            _ => None,
+        };
 
         let pool_config = self.pool_config.clone();
         // try_get_with is single-flight: this closure runs only on a cache miss —
@@ -243,6 +257,32 @@ impl ObjectStoreManager {
                 Err(ObjectStoreError::Connection(message))
             }
         }
+    }
+
+    /// Reserve one of `tenant`'s pool slots for a build, or refuse when the
+    /// pools it holds and is building reach the limit.
+    fn reserve_pool(&self, tenant: &str) -> Result<BuildSlot<'_>, ObjectStoreError> {
+        let mut building = self.building.lock().unwrap_or_else(|e| e.into_inner());
+        let held = self
+            .stores
+            .iter()
+            .filter(
+                |(held, _)| matches!(held.as_ref(), StoreKey::Url { tenant: t, .. } if t == tenant),
+            )
+            .count();
+        let pending = building.get(tenant).copied().unwrap_or(0);
+        if held + pending >= self.tenant_pool_max {
+            return Err(ObjectStoreError::Connection(format!(
+                "this tenant already holds {} database connection pools, the limit \
+                 (OBJECT_MODEL_TENANT_POOL_MAX); unused ones close after they idle",
+                held + pending
+            )));
+        }
+        *building.entry(tenant.to_string()).or_default() += 1;
+        Ok(BuildSlot {
+            building: &self.building,
+            tenant: tenant.to_string(),
+        })
     }
 
     /// Get or create an ObjectStore for the given tenant
@@ -396,6 +436,31 @@ mod tests {
         assert!(
             error.to_string().contains("add a Postgres connection"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn concurrent_builds_cannot_overshoot_the_tenant_pool_limit() {
+        let manager = ObjectStoreManager::without_default_database().with_tenant_pool_max(2);
+        let first = manager.reserve_pool("t").expect("first slot");
+        let _second = manager.reserve_pool("t").expect("second slot");
+        // Two builds in flight hold the limit before either pool exists.
+        let refused = manager
+            .reserve_pool("t")
+            .err()
+            .expect("a third slot is refused");
+        assert!(
+            refused.to_string().contains("OBJECT_MODEL_TENANT_POOL_MAX"),
+            "{refused}"
+        );
+        assert!(
+            manager.reserve_pool("other").is_ok(),
+            "the limit is per tenant"
+        );
+        drop(first);
+        assert!(
+            manager.reserve_pool("t").is_ok(),
+            "a finished build frees its slot"
         );
     }
 }

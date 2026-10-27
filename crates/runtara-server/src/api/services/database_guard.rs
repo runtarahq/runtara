@@ -33,16 +33,30 @@ async fn admit_with(
     database_url: &str,
     allowlisted: impl Fn(&str) -> bool,
 ) -> Result<String, String> {
+    // Everything is read through the connector's own parser, so the guard
+    // checks the target the connection will actually dial.
     let options = sqlx::postgres::PgConnectOptions::from_str(database_url)
         .map_err(|_| "the database URL does not parse".to_string())?;
-    let host = options.get_host().to_owned();
-    if host.starts_with('/') {
+    // The authority is the only place a target may be named: the `host` and
+    // `hostaddr` parameters override it in the connector.
+    if let Ok(url) = url::Url::parse(database_url)
+        && url.query_pairs().any(|(key, _)| {
+            key.eq_ignore_ascii_case("host") || key.eq_ignore_ascii_case("hostaddr")
+        })
+    {
+        return Err(
+            "name the database host in the URL, not in a host or hostaddr parameter".to_string(),
+        );
+    }
+    if options.get_socket().is_some() {
         return Err("a database connection cannot use a local socket".to_string());
     }
+    let host = options.get_host().to_owned();
     if allowlisted(&host) {
         return Ok(database_url.to_owned());
     }
-    let addresses: Vec<IpAddr> = match host.parse::<IpAddr>() {
+    let literal = host.trim_start_matches('[').trim_end_matches(']');
+    let addresses: Vec<IpAddr> = match literal.parse::<IpAddr>() {
         Ok(ip) => vec![ip],
         Err(_) => tokio::net::lookup_host((host.as_str(), options.get_port()))
             .await
@@ -56,21 +70,29 @@ async fn admit_with(
     if let Some(private) = addresses.iter().find(|ip| is_private_ip(ip)) {
         return Err(format!(
             "host '{host}' resolves to {private}, a private, loopback or metadata address; \
-             database connections must reach a public address"
+             database connections must reach public addresses"
         ));
     }
-    if verifies_host_name(database_url) {
+    // Certificate verification needs the host name: checked, not pinned.
+    if matches!(
+        options.get_ssl_mode(),
+        sqlx::postgres::PgSslMode::VerifyFull
+    ) {
         return Ok(database_url.to_owned());
     }
-    pin(database_url, addresses[0])
-}
-
-/// Whether TLS verification needs the URL's host name (`sslmode=verify-full`).
-fn verifies_host_name(database_url: &str) -> bool {
-    url::Url::parse(database_url).is_ok_and(|url| {
-        url.query_pairs()
-            .any(|(key, value)| key == "sslmode" && value.eq_ignore_ascii_case("verify-full"))
-    })
+    let address = addresses[0];
+    let pinned = pin(database_url, address)?;
+    // The pinned URL must dial exactly the vetted address.
+    let dialed = sqlx::postgres::PgConnectOptions::from_str(&pinned)
+        .map_err(|_| "the pinned database URL does not parse".to_string())?;
+    let dialed_host = dialed
+        .get_host()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    if dialed.get_socket().is_some() || dialed_host.parse::<IpAddr>().ok() != Some(address) {
+        return Err("the database URL does not dial the vetted address".to_string());
+    }
+    Ok(pinned)
 }
 
 /// `database_url` with its host replaced by the vetted address.
@@ -103,7 +125,10 @@ mod tests {
             "postgres://u:p@169.254.169.254/db",
             "postgres://u:p@[::1]/db",
             "postgres://u:p@[::ffff:127.0.0.1]/db",
-            "postgres://u:p@db.internal/db?host=/var/run/postgresql",
+            "postgres://u:p@8.8.8.8/db?host=/var/run/postgresql",
+            "postgres://u:p@8.8.8.8/db?host=127.0.0.1",
+            "postgres://u:p@8.8.8.8/db?hostaddr=169.254.169.254",
+            "postgres://u:p@8.8.8.8/db?HOST=10.0.0.1",
         ] {
             assert!(admit_with(url, nothing_allowlisted).await.is_err(), "{url}");
         }
