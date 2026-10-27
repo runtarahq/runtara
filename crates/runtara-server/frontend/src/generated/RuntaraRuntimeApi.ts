@@ -1319,6 +1319,12 @@ export interface CapabilityInfo {
   tags?: string[];
   /** Host-enforced execution mode; never a workflow-controlled permission. */
   trusted?: boolean;
+  /**
+   * For a workflow-agent: the published workflow version it runs and
+   * whether that version may park. A caller runs one that may park as a
+   * child run of its own, not composed into its own Store.
+   */
+  workflowRun?: null | WorkflowRunTarget;
 }
 
 /** Request body for starting a chat session with an initial message */
@@ -5470,6 +5476,18 @@ export interface WorkflowMetricsHourlyResponse {
   data: WorkflowMetricsHourlyData;
   message: string;
   success: boolean;
+}
+
+/** The published workflow version a workflow-agent capability runs. */
+export interface WorkflowRunTarget {
+  /** The version has a path that parks (a durable wait or sleep). */
+  parks?: boolean;
+  /**
+   * @format int32
+   * @min 0
+   */
+  version: number;
+  workflowId: string;
 }
 
 export interface WorkflowRuntimeAction {

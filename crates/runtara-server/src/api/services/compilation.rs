@@ -1596,6 +1596,31 @@ impl CompilationService {
         .map_err(|e| ServiceError::CompilationError(format!("Agent publish failed: {e}")))?;
         drop(permit);
 
+        // A caller runs a workflow-agent that may park as a child run of its
+        // own: it needs the version it runs, and that version's root image.
+        let parks = result
+            .artifact_metadata
+            .workflow_agent_safety
+            .may_suspend_or_sleep;
+        let info = runtara_dsl::agent_meta::with_workflow_run(
+            info,
+            runtara_dsl::agent_meta::WorkflowRunTarget {
+                workflow_id: workflow_id.to_string(),
+                version: version as u32,
+                parks,
+            },
+        );
+        if parks {
+            self.compile_workflow(tenant_id, workflow_id, version, false)
+                .await
+                .map_err(|error| {
+                    ServiceError::CompilationError(format!(
+                        "the agent parks, so it runs as a child run of its own, \
+                         and compiling its run failed: {error}"
+                    ))
+                })?;
+        }
+
         // 3. Stage the composed artifact + synthesized meta.
         let (wasm_path, meta_path) =
             crate::workflow_agents::stage(tenant_id, &slug, &result.wasm_path, &info).map_err(

@@ -134,6 +134,7 @@ mod tests {
                 suspends: false,
                 known_errors: vec![],
                 tags: vec![],
+                workflow_run: None,
             }],
         };
         let catalog = AgentCatalog::from_agents(vec![slack]);

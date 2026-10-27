@@ -290,6 +290,37 @@ pub struct CapabilityInfo {
     /// Well-known tags: "memory:read", "memory:write".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// For a workflow-agent: the published workflow version it runs and
+    /// whether that version may park. A caller runs one that may park as a
+    /// child run of its own, not composed into its own Store.
+    #[serde(
+        default,
+        rename = "workflowRun",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workflow_run: Option<WorkflowRunTarget>,
+}
+
+/// The published workflow version a workflow-agent capability runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct WorkflowRunTarget {
+    #[serde(rename = "workflowId")]
+    pub workflow_id: String,
+    pub version: u32,
+    /// The version has a path that parks (a durable wait or sleep).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parks: bool,
+}
+
+/// `info` with its workflow-agent capability bound to the published version
+/// it runs.
+pub fn with_workflow_run(mut info: AgentInfo, target: WorkflowRunTarget) -> AgentInfo {
+    for capability in &mut info.capabilities {
+        capability.workflow_run = Some(target.clone());
+    }
+    info
 }
 
 /// API-compatible capability field info.
@@ -1521,6 +1552,7 @@ pub fn capability_to_api_with_types(
         suspends: cap.suspends,
         known_errors,
         tags: cap.tags.iter().map(|s| s.to_string()).collect(),
+        workflow_run: None,
     }
 }
 
@@ -2069,6 +2101,7 @@ pub fn workflow_agent_info(
             suspends: false,
             known_errors: Vec::new(),
             tags: vec![capability_tags::WORKFLOW_AGENT.to_string()],
+            workflow_run: None,
         }],
     }
 }
@@ -2605,6 +2638,7 @@ mod catalog_tests {
                 suspends: false,
                 known_errors: vec![],
                 tags: vec![],
+                workflow_run: None,
             }],
         }
     }
@@ -3466,6 +3500,7 @@ mod tests {
                 },
             ],
             tags: vec![],
+            workflow_run: None,
         };
 
         let json = serde_json::to_value(&info).unwrap();
@@ -3506,6 +3541,7 @@ mod tests {
             suspends: false,
             known_errors: vec![],
             tags: vec![],
+            workflow_run: None,
         };
 
         let json = serde_json::to_value(&info).unwrap();
