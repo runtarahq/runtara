@@ -46,8 +46,8 @@ fn check_bulk_size_entitlement(
     ctx: &AuthContext,
     source: crate::product_events::EventSource,
 ) -> Result<(), (StatusCode, Json<Value>)> {
-    let snapshot = crate::config::entitlements();
-    match crate::middleware::entitlement::bulk_size_decision(snapshot, requested) {
+    let snapshot = crate::config::entitlements_for(&ctx.org_id);
+    match crate::middleware::entitlement::bulk_size_decision(&snapshot, requested) {
         Ok(()) => Ok(()),
         Err(denial) => {
             denial.audit_log(snapshot.tenant_id.as_str());
@@ -202,7 +202,7 @@ pub async fn create_schema(
     // handler (not the service) so the new ENTITLEMENT_LIMIT_EXCEEDED outcome
     // doesn't need a new ServiceError variant and the 19 unrelated match
     // sites on object-model ServiceError don't move.
-    let snapshot = crate::config::entitlements();
+    let snapshot = crate::config::entitlements_for(&tenant_id);
     if let Some(cap) = snapshot.limits.max_object_schemas {
         match service
             .list_schemas(&tenant_id, 0, 0, params.connection_id.as_deref())

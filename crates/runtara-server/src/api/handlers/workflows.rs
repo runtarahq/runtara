@@ -2884,7 +2884,7 @@ pub async fn validate_graph_handler(
             // The save gate's allowlist walk over the whole closure, with the
             // tenant's published workflow-agents exempt.
             if let Err(denial) = crate::middleware::entitlement::walk_closure_for_agents(
-                crate::config::entitlements(),
+                &crate::config::entitlements_for(&tenant_id),
                 &workflow.execution_graph,
                 closure_children.iter().map(|c| &c.execution_graph),
                 &crate::workflow_agents::published_agent_ids(&tenant_id),

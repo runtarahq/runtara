@@ -33,7 +33,7 @@ pub async fn list_agents_handler(
     // Filter against the tenant's materialised allowlist so discovery matches
     // invocation: an agent the per-handler gates would deny must not appear
     // in the listing the SPA and MCP `list_agents` tool render from.
-    let allowlist = crate::config::entitlements().materialised_agents();
+    let allowlist = crate::config::entitlements_for(&tenant_id).materialised_agents();
     let mut agents = filter_agents_by_allowlist(service.list_agents(), &allowlist);
     // The tenant's published workflow-agents are its own workflows, not
     // licensed integrations: they are exempt from the allowlist, as on save.
@@ -75,7 +75,7 @@ pub async fn get_agent_handler(
 ) -> Result<Json<AgentInfo>, Response> {
     // Per-agent allowlist check. Surfaces AGENT_NOT_ENABLED with the same
     // stable code the workflow compile gate emits.
-    if let Err(err) = crate::config::entitlements().require_agent(&name) {
+    if let Err(err) = crate::config::entitlements_for(&tenant_id).require_agent(&name) {
         // A denied id may be one of this tenant's published workflow-agents,
         // which are exempt, as on save. None of them shares an id with a
         // built-in, so a built-in stays denied. Checking the allowlist first
@@ -115,7 +115,7 @@ pub async fn get_capability_handler(
 ) -> Result<Json<CapabilityInfo>, Response> {
     // Per-agent allowlist check, with the tenant's published workflow-agents
     // exempt as in `get_agent_handler`.
-    let capability = match crate::config::entitlements().require_agent(&name) {
+    let capability = match crate::config::entitlements_for(&tenant_id).require_agent(&name) {
         Ok(()) => service.get_capability(&name, &capability_id),
         Err(err) => match service.published_agent(&tenant_id, &name) {
             Some(agent) => AgentsService::capability_of(agent, &capability_id),
@@ -157,9 +157,12 @@ pub(crate) fn agent_lookup_routes() -> axum::Router {
         (status = 501, description = "Not implemented"),
     )
 )]
-pub async fn get_agent_connection_schema_handler(Path(name): Path<String>) -> Response {
+pub async fn get_agent_connection_schema_handler(
+    OrgId(tenant_id): OrgId,
+    Path(name): Path<String>,
+) -> Response {
     // Per-agent allowlist check.
-    if let Err(err) = crate::config::entitlements().require_agent(&name) {
+    if let Err(err) = crate::config::entitlements_for(&tenant_id).require_agent(&name) {
         return EntitlementDenial::from(err).into_response();
     }
     let response = serde_json::json!({

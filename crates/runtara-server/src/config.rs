@@ -8,7 +8,7 @@ use runtara_environment::execution_timeout::{
     DEFAULT_EXECUTION_TIMEOUT_SECS, ExecutionTimeoutPolicy, MAX_EXECUTION_TIMEOUT_SECS,
 };
 use std::collections::BTreeSet;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 const DEFAULT_MCP_ALLOWED_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
@@ -98,7 +98,11 @@ pub struct Config {
     /// builds so `cargo run` exits promptly; production release builds keep
     /// the full drain unless `RUNTARA_DEV_MODE=true` is set explicitly.
     pub dev_mode: bool,
+    /// The primary tenant's entitlements.
     pub entitlement_snapshot: EntitlementSnapshot,
+    /// Other served tenants' own entitlements (`RUNTARA_TENANT_ENTITLEMENTS_JSON`);
+    /// a served tenant without an entry has the primary's.
+    pub tenant_entitlements: std::collections::BTreeMap<String, Arc<EntitlementSnapshot>>,
 }
 
 /// Backing store for MCP Streamable HTTP session recovery.
@@ -300,6 +304,17 @@ impl Config {
                 .as_deref(),
             &registered_agents,
         )?;
+        let mut tenant_entitlements = tenant_entitlements_from_raw(
+            std::env::var("RUNTARA_TENANT_ENTITLEMENTS_JSON")
+                .ok()
+                .as_deref(),
+            &served_tenants,
+            &registered_agents,
+        )?;
+        // The primary's own entry, which every unlisted tenant shares.
+        tenant_entitlements
+            .entry(tenant_id.clone())
+            .or_insert_with(|| Arc::new(entitlement_snapshot.clone()));
 
         Ok(Self {
             tenant_id,
@@ -331,6 +346,7 @@ impl Config {
             mcp_session_ttl_seconds,
             dev_mode,
             entitlement_snapshot,
+            tenant_entitlements,
         })
     }
 }
@@ -869,11 +885,81 @@ pub fn dev_mode() -> bool {
     get().dev_mode
 }
 
-/// Resolved entitlement snapshot for the process's single tenant. Built once
-/// at startup by `Config::from_env()`; readers see the same value for the
-/// lifetime of the process.
+/// The primary tenant's entitlement snapshot, built once at startup by
+/// `Config::from_env()`. Work done for a tenant reads that tenant's with
+/// [`entitlements_for`]; this is for process-level decisions (boot logs, plan
+/// change detection, the SPA's inline config).
 pub fn entitlements() -> &'static EntitlementSnapshot {
     &get().entitlement_snapshot
+}
+
+/// Where each tenant's entitlements come from. The default reads them from
+/// the environment at boot; a host serving many tenants supplies its own
+/// (`ServerOptions::entitlements`).
+pub trait EntitlementSource: Send + Sync {
+    fn entitlements(&self, tenant: &str) -> Arc<EntitlementSnapshot>;
+}
+
+static ENTITLEMENT_SOURCE: OnceLock<Arc<dyn EntitlementSource>> = OnceLock::new();
+
+/// Read every tenant's entitlements from `source`. Set once, at boot.
+pub fn install_entitlement_source(source: Arc<dyn EntitlementSource>) {
+    let _ = ENTITLEMENT_SOURCE.set(source);
+}
+
+/// `tenant`'s entitlements: from the installed source, else the environment
+/// (its `RUNTARA_TENANT_ENTITLEMENTS_JSON` entry, else the primary's).
+pub fn entitlements_for(tenant: &str) -> Arc<EntitlementSnapshot> {
+    if let Some(source) = ENTITLEMENT_SOURCE.get() {
+        return source.entitlements(tenant);
+    }
+    let config = get();
+    config
+        .tenant_entitlements
+        .get(tenant)
+        .or_else(|| config.tenant_entitlements.get(&config.tenant_id))
+        .cloned()
+        .unwrap_or_else(|| Arc::new(config.entitlement_snapshot.clone()))
+}
+
+/// `RUNTARA_TENANT_ENTITLEMENTS_JSON`: an object of served tenant to
+/// `{"pricingTier", "entitlements", "overrides"}`, each optional and read as
+/// `RUNTARA_PRICING_TIER`, `RUNTARA_ENTITLEMENTS_JSON` and
+/// `RUNTARA_ENTITLEMENT_OVERRIDES_JSON` are for the primary.
+fn tenant_entitlements_from_raw(
+    raw: Option<&str>,
+    served_tenants: &[String],
+    registered_agents: &BTreeSet<String>,
+) -> Result<std::collections::BTreeMap<String, Arc<EntitlementSnapshot>>, ConfigError> {
+    let mut snapshots = std::collections::BTreeMap::new();
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(snapshots);
+    };
+    let entries: std::collections::BTreeMap<String, serde_json::Value> = serde_json::from_str(raw)
+        .map_err(|error| {
+            ConfigError::InvalidValue("RUNTARA_TENANT_ENTITLEMENTS_JSON", error.to_string())
+        })?;
+    for (tenant, entry) in entries {
+        if !served_tenants.contains(&tenant) {
+            return Err(ConfigError::InvalidValue(
+                "RUNTARA_TENANT_ENTITLEMENTS_JSON",
+                format!("{tenant} is not a served tenant"),
+            ));
+        }
+        let field = |name: &str| entry.get(name).filter(|value| !value.is_null());
+        let tier = field("pricingTier").and_then(serde_json::Value::as_str);
+        let entitlements = field("entitlements").map(serde_json::Value::to_string);
+        let overrides = field("overrides").map(serde_json::Value::to_string);
+        let snapshot = EntitlementSnapshot::parse_entitlements(
+            &tenant,
+            tier,
+            entitlements.as_deref(),
+            overrides.as_deref(),
+            registered_agents,
+        )?;
+        snapshots.insert(tenant, Arc::new(snapshot));
+    }
+    Ok(snapshots)
 }
 
 /// Whether source admission counting uses Valkey instead of the
@@ -1007,6 +1093,28 @@ mod tests {
         let policy = execution_timeout_policy_from_raw(Some("120"), Some("300")).unwrap();
         assert_eq!(policy.default_timeout().as_secs(), 120);
         assert_eq!(policy.maximum_timeout().as_secs(), 300);
+    }
+
+    #[test]
+    fn each_served_tenant_may_have_its_own_entitlements() {
+        let served = ["a".to_string(), "b".to_string()];
+        let agents = BTreeSet::new();
+        assert!(
+            tenant_entitlements_from_raw(None, &served, &agents)
+                .unwrap()
+                .is_empty()
+        );
+        let parsed = tenant_entitlements_from_raw(
+            Some(r#"{"b": {"overrides": {"limits": {"maxConcurrentExecutions": 1}}}}"#),
+            &served,
+            &agents,
+        )
+        .unwrap();
+        assert_eq!(parsed["b"].limits.max_concurrent_executions, Some(1));
+        assert!(
+            tenant_entitlements_from_raw(Some(r#"{"c": {}}"#), &served, &agents).is_err(),
+            "only served tenants"
+        );
     }
 
     #[test]

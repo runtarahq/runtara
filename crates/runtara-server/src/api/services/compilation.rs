@@ -691,7 +691,7 @@ pub async fn check_compile_agent_allowlist(
     let children = load_child_workflows(pool, tenant_id, workflow_id, version, &definition).await;
     let checked_children = children.as_ref().ok().cloned().unwrap_or_default();
     compile_agent_allowlist_decision(
-        crate::config::entitlements(),
+        &crate::config::entitlements_for(tenant_id),
         &definition,
         children,
         &crate::workflow_agents::published_agent_ids(tenant_id),

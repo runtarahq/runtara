@@ -130,7 +130,7 @@ pub async fn create_api_key(
     Source(source): Source,
     Json(request): Json<CreateApiKeyRequest>,
 ) -> (StatusCode, Json<Value>) {
-    let snapshot = crate::config::entitlements();
+    let snapshot = crate::config::entitlements_for(&tenant_id);
     match sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM public.api_keys WHERE org_id = $1 AND is_revoked = false",
     )

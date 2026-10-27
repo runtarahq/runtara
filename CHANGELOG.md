@@ -95,6 +95,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tenant. `e2e/test_served_tenants.sh` serves two tenants from one process
   and checks neither reads the other's workflows, versions or runs.
 
+- **Entitlements are per tenant.** Every entitlement check (features,
+  agents, limits, API keys, SQL, trusted calls, concurrent executions, bulk
+  sizes) reads the tenant it acts for through
+  `config::entitlements_for(tenant)`. The default source is the environment:
+  the primary tenant's `RUNTARA_PRICING_TIER` / `RUNTARA_ENTITLEMENTS_JSON` /
+  `RUNTARA_ENTITLEMENT_OVERRIDES_JSON` as before, and for another served
+  tenant its entry in `RUNTARA_TENANT_ENTITLEMENTS_JSON`
+  (`{"<tenant>": {"pricingTier", "entitlements", "overrides"}}`), else the
+  primary's. A host supplies its own through `ServerOptions::entitlements`
+  (`config::EntitlementSource`). `GET /entitlements` answers for the caller's
+  tenant.
+
 - **The platform object-model database is optional.** Without
   `OBJECT_MODEL_DATABASE_URL` the server has no default database and creates
   no default `object_model` connection. The object model, SQL steps, CSV

@@ -272,6 +272,7 @@ fn init_config() {
                     &Default::default(),
                 )
                 .unwrap(),
+            tenant_entitlements: Default::default(),
         });
     });
 }

@@ -18,7 +18,7 @@ impl NativeDatabase {
         tenant: &str,
         connection: &str,
     ) -> Result<Arc<ObjectStore>, DatabaseError> {
-        authorize(crate::config::entitlements(), tenant, connection)?;
+        authorize(&crate::config::entitlements_for(tenant), tenant, connection)?;
         let unavailable = || DatabaseError {
             code: "DATABASE_CONNECTION_UNAVAILABLE".into(),
             message: "Database connection is unavailable".into(),

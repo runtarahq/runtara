@@ -768,7 +768,7 @@ impl ExecutionEngine {
         self.concurrent_execution_decision(tenant_id).await?;
         self.reservations_for(tenant_id)
             .fetch_add(1, Ordering::SeqCst);
-        Ok(self.effective_concurrency_cap())
+        Ok(self.effective_concurrency_cap(tenant_id))
     }
 
     /// Hand back an optimistic local reservation taken during admission.
@@ -802,8 +802,8 @@ impl ExecutionEngine {
         )
     }
 
-    fn effective_concurrency_cap(&self) -> u64 {
-        let snapshot = crate::config::entitlements();
+    fn effective_concurrency_cap(&self, tenant_id: &str) -> u64 {
+        let snapshot = crate::config::entitlements_for(tenant_id);
         crate::middleware::entitlement::effective_limit(
             crate::config::raw_max_concurrent_executions(),
             snapshot.limits.max_concurrent_executions,
@@ -814,11 +814,11 @@ impl ExecutionEngine {
         &self,
         tenant_id: &str,
     ) -> Result<(), crate::entitlement_error::EntitlementDenial> {
-        let snapshot = crate::config::entitlements();
-        let cap = self.effective_concurrency_cap();
+        let snapshot = crate::config::entitlements_for(tenant_id);
+        let cap = self.effective_concurrency_cap(tenant_id);
         let active = self.active_execution_count(tenant_id, cap);
         crate::middleware::entitlement::concurrent_executions_decision(
-            snapshot,
+            &snapshot,
             active,
             crate::config::raw_max_concurrent_executions(),
         )
@@ -2680,7 +2680,7 @@ impl ExecutionEngine {
                 .recompile_image(tenant_id, workflow_id, version, image_id)
                 .await);
         };
-        image_agents_decision(crate::config::entitlements(), &agents, || {
+        image_agents_decision(&crate::config::entitlements_for(tenant_id), &agents, || {
             crate::workflow_agents::published_agent_ids(tenant_id)
         })
         .map_err(|denial| {
@@ -3209,7 +3209,7 @@ mod tests {
             .concurrency_counts
             .insert(tenant.clone(), (Instant::now(), 0));
 
-        let cap = engine.effective_concurrency_cap();
+        let cap = engine.effective_concurrency_cap(&tenant);
         for granted in 1..=3u64 {
             engine
                 .try_admit_locally(&tenant)

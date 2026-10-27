@@ -677,6 +677,10 @@ pub struct ServerOptions {
     /// Where workflow artifacts are kept; `None` keeps them as files under
     /// `<DATA_DIR>/artifacts`.
     pub artifacts: Option<Arc<dyn runtara_environment::artifacts::ArtifactStore>>,
+    /// Where each tenant's entitlements come from; `None` reads them from the
+    /// environment (`RUNTARA_PRICING_TIER` and friends for the primary
+    /// tenant, `RUNTARA_TENANT_ENTITLEMENTS_JSON` for the others).
+    pub entitlements: Option<Arc<dyn config::EntitlementSource>>,
 }
 
 pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -710,6 +714,10 @@ pub async fn start_with(
     pool: PgPool,
     options: ServerOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(source) = options.entitlements.clone() {
+        config::install_entitlement_source(source);
+    }
+
     // Every artifact lives in one store, shared with Environment and its
     // runner. The platform components this server runs are a release in it:
     // published from the components directory when one is set, and the

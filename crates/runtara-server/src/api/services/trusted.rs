@@ -18,8 +18,11 @@ impl TrustedCredentials for BuiltinTrustedCredentials {
         connection: &str,
         allowed: &[String],
     ) -> Result<TrustedContext, String> {
-        crate::middleware::entitlement::agent_decision(crate::config::entitlements(), agent)
-            .map_err(|_| error("AGENT_NOT_ENABLED", "Agent is not enabled"))?;
+        crate::middleware::entitlement::agent_decision(
+            &crate::config::entitlements_for(tenant),
+            agent,
+        )
+        .map_err(|_| error("AGENT_NOT_ENABLED", "Agent is not enabled"))?;
         let conn = self
             .0
             .get_with_parameters_for_types(connection, tenant, allowed)

@@ -20,8 +20,10 @@ use crate::middleware::tenant_auth::OrgId;
     ),
     security(("bearer_auth" = []))
 )]
-pub async fn get_entitlements_handler(OrgId(_tenant_id): OrgId) -> Json<EntitlementsDto> {
-    Json(EntitlementsDto::from(crate::config::entitlements()))
+pub async fn get_entitlements_handler(OrgId(tenant_id): OrgId) -> Json<EntitlementsDto> {
+    Json(EntitlementsDto::from(&*crate::config::entitlements_for(
+        &tenant_id,
+    )))
 }
 
 #[cfg(test)]

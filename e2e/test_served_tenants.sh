@@ -15,6 +15,9 @@
 #      sees none of them.
 #   4. NO CROSS-TENANT READS — neither tenant reads the other's workflow,
 #      versions or runs by id.
+#   5. OWN LIMITS — the second tenant is limited to one workflow
+#      (RUNTARA_TENANT_ENTITLEMENTS_JSON): its second is refused while the
+#      primary tenant still creates more, and each reads its own entitlements.
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
 # environment) + docker (isolated Valkey) and the shared workflow components
@@ -147,6 +150,7 @@ start_server() {
     RUNTARA_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_RUNTIME}" \
     TENANT_ID="${TENANT}" \
     RUNTARA_SERVED_TENANTS="${SECOND_TENANT}" \
+    RUNTARA_TENANT_ENTITLEMENTS_JSON="{\"${SECOND_TENANT}\": {\"overrides\": {\"limits\": {\"maxWorkflows\": 1}}}}" \
     SERVER_HOST=127.0.0.1 \
     SERVER_PORT="${TEST_PORT_PUBLIC}" \
     RUNTARA_CORE_PORT="${TEST_CORE_PORT}" \
@@ -310,4 +314,17 @@ for path in "/workflows/${B_WF}" "/workflows/${B_WF}/versions"; do
 done
 echo "  neither tenant reads the other's workflow, versions or runs by id ✓"
 
-print_success "served tenants: webhooks, API keys, triggers and cron reach exactly the tenants this server serves, each its own"
+#-------------------------------------------------------------------------
+print_step "5. Each tenant enforces its own limits..."
+curl -sS -H "Authorization: Bearer ${SECOND_KEY}" "${API}/entitlements" | jq -e '.. | objects | select(has("maxWorkflows")) | .maxWorkflows == 1' >/dev/null \
+    || { print_error "the second tenant does not read its own entitlements"; exit 1; }
+curl -sS "${API}/entitlements" | jq -e '[.. | objects | select(has("maxWorkflows")) | .maxWorkflows] | all(. != 1)' >/dev/null \
+    || { print_error "the primary tenant reads the second tenant's limits"; exit 1; }
+CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${SECOND_KEY}" \
+    -H "Content-Type: application/json" -d '{"name":"One too many","description":"limit"}' "${API}/workflows/create")
+[ "${CODE}" = "403" ] || { print_error "the second tenant's second workflow answered ${CODE}, not 403"; exit 1; }
+RESP=$(api_post /workflows/create '{"name":"Primary again","description":"limit"}')
+echo "${RESP}" | jq -e '.data.id' >/dev/null || { print_error "the primary tenant could not create another workflow: ${RESP}"; exit 1; }
+echo "  the second tenant is held to one workflow; the primary is not; each reads its own entitlements ✓"
+
+print_success "served tenants: webhooks, API keys, triggers and cron reach exactly the tenants this server serves, each its own, under its own limits"

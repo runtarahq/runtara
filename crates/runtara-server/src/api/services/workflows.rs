@@ -284,7 +284,7 @@ impl WorkflowService {
 
         // Count-before-create against `maxWorkflows`. Counts non-deleted
         // workflow rows for this tenant.
-        let snapshot = crate::config::entitlements();
+        let snapshot = crate::config::entitlements_for(tenant_id);
         if let Some(cap) = snapshot.limits.max_workflows {
             let current: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM workflows WHERE tenant_id = $1 AND deleted_at IS NULL",
@@ -807,7 +807,7 @@ impl WorkflowService {
         // surfaced with AGENT_NOT_ENABLED rather than as a generic workflow
         // validation error.
         crate::middleware::entitlement::walk_closure_for_agents(
-            crate::config::entitlements(),
+            &crate::config::entitlements_for(tenant_id),
             &workflow.execution_graph,
             closure_children.iter().map(|c| &c.execution_graph),
             &crate::workflow_agents::published_agent_ids(tenant_id),
@@ -947,7 +947,7 @@ impl WorkflowService {
         // incremental graph patches, so a forbidden agent can never be
         // persisted into the version row.
         crate::middleware::entitlement::walk_graph_for_agents(
-            crate::config::entitlements(),
+            &crate::config::entitlements_for(tenant_id),
             &workflow.execution_graph,
             &crate::workflow_agents::published_agent_ids(tenant_id),
         )
@@ -1120,7 +1120,7 @@ impl WorkflowService {
         created_by: &str,
     ) -> Result<(String, i32), ServiceError> {
         // Clones count toward `maxWorkflows` like fresh creates.
-        let snapshot = crate::config::entitlements();
+        let snapshot = crate::config::entitlements_for(tenant_id);
         if let Some(cap) = snapshot.limits.max_workflows {
             let current: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM workflows WHERE tenant_id = $1 AND deleted_at IS NULL",
