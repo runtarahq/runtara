@@ -92,6 +92,7 @@ impl Harness {
                 skip_cert_verification: false,
             },
             self.persistence.clone(),
+            artifacts().clone(),
         )?
         .with_in_process_precompiler_for_tests()
         .with_instance_wait_host(self.waits.clone())?)
@@ -128,8 +129,7 @@ impl Harness {
             launch_id: format!("launch-{id}-{}", Uuid::new_v4()),
             instance_id: id.to_owned(),
             tenant_id: self.tenant.clone(),
-            wasm_path: wasm_path.to_owned(),
-            expected_workflow_checksum: None,
+            workflow_digest: artifacts().add(wasm_path),
             preparation_attempt: None,
             preparation_deadline: None,
             input: json!({}),
@@ -306,4 +306,12 @@ async fn a_wait_on_a_run_that_is_not_a_child_fails_the_step() -> anyhow::Result<
         );
     }
     Ok(())
+}
+
+/// Where this binary's launches find the components they wrote.
+fn artifacts() -> &'static std::sync::Arc<runtara_artifact_store::test_support::FileMapStore> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Arc<runtara_artifact_store::test_support::FileMapStore>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(Default::default)
 }

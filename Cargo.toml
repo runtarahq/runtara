@@ -46,6 +46,8 @@ members = [
     "crates/runtara-component-host",
     # An out-of-tree workflow runner delegating to the embedded one (M3.1).
     "crates/runtara-runner-delegate",
+    # Content-addressed artifact storage (M3.2).
+    "crates/runtara-artifact-store",
     # Every workflow agent component; scripts/build-agent-components.sh builds
     # each crate it finds here.
     "crates/agents/*",

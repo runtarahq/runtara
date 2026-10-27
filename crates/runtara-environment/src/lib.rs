@@ -276,6 +276,9 @@ pub mod runtime;
 /// the native replacement for the composed guest runtime's HTTP loopback.
 pub mod runtime_host;
 
+/// Content-addressed artifact storage: images name their workflow artifact by
+/// digest and runners read it from the store.
+pub use runtara_artifact_store as artifacts;
 /// The workflow API served to runs of the embedded runner.
 /// The in-process workflow API now lives in the component host.
 pub use runtara_component_host::api_launches as workflow_api;

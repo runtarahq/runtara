@@ -168,6 +168,7 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
                 skip_cert_verification: false,
             },
             persistence.clone(),
+            artifacts().clone(),
         )?
         .with_in_process_precompiler_for_tests()
         .with_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))?,
@@ -227,8 +228,7 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
             launch_id: format!("launch-{id}"),
             instance_id: id.clone(),
             tenant_id: "stop-test".into(),
-            wasm_path: compiled.wasm_path.clone(),
-            expected_workflow_checksum: None,
+            workflow_digest: artifacts().add(&compiled.wasm_path),
             preparation_attempt: None,
             preparation_deadline: None,
             input: json!({}),
@@ -366,4 +366,12 @@ async fn grace_aborts_emitted_workflow_waiting_for_stalled_cancellation_callback
 #[tokio::test(flavor = "multi_thread")]
 async fn grace_closes_original_partial_body_and_stalled_cleanup_io() -> anyhow::Result<()> {
     cancel_hanging_http(true, Cleanup::Stalled).await
+}
+
+/// Where this binary's launches find the components they wrote.
+fn artifacts() -> &'static std::sync::Arc<runtara_artifact_store::test_support::FileMapStore> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Arc<runtara_artifact_store::test_support::FileMapStore>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(Default::default)
 }

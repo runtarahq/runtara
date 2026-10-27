@@ -222,6 +222,8 @@ pub struct EmbeddedWasmRunner {
     scoped_agents: Option<Arc<ScopedAgentRunnerConfig>>,
     limits: WorkflowLimits,
     persistence: Arc<dyn Persistence>,
+    /// Where launches' workflow artifacts are read from, by digest.
+    artifacts: Arc<dyn runtara_artifact_store::ArtifactStore>,
     executor: Arc<WorkflowExecutor>,
     tasks: TaskRegistry,
     /// Exit facts a run's task left for its monitor, by handle id.
@@ -287,10 +289,13 @@ struct EmbeddedPreparedLaunch {
 /// over a private pipe and links it without a filesystem read.
 #[async_trait]
 trait ComponentPrecompiler: Send + Sync {
+    /// Prepare the workflow at `wasm_path`, a local file holding the
+    /// launch's workflow artifact.
     async fn prepare(
         &self,
         executor: &WorkflowExecutor,
         options: &LaunchOptions,
+        wasm_path: &Path,
     ) -> Result<PreparedWorkflow>;
 }
 
@@ -342,6 +347,7 @@ impl ChildComponentPrecompiler {
     async fn exchange(
         &self,
         options: &LaunchOptions,
+        wasm_path: &Path,
     ) -> Result<(PrecompileRequest, PrecompileResponse)> {
         let deadline = options
             .preparation_deadline
@@ -365,10 +371,9 @@ impl ChildComponentPrecompiler {
             .as_ref()
             .map(|metrics| metrics.hold("precompile"));
         let nonce = precompile_nonce()?;
-        let request =
-            PrecompileRequest::for_artifact(nonce, &options.wasm_path).map_err(|error| {
-                RunnerError::StartFailed(format!("build precompile request: {error:#}"))
-            })?;
+        let request = PrecompileRequest::for_artifact(nonce, wasm_path).map_err(|error| {
+            RunnerError::StartFailed(format!("build precompile request: {error:#}"))
+        })?;
         let program = self.worker_program()?;
         let mut command = Command::new(&program);
         command
@@ -427,7 +432,7 @@ impl ChildComponentPrecompiler {
                     // preserve that bounded diagnostic rather than reducing it
                     // to a platform-specific exit status.
                     return Err(match validate_precompile_response(&request, &response) {
-                        Err(error) => map_precompile_error(&options.wasm_path, error),
+                        Err(error) => map_precompile_error(wasm_path, error),
                         Ok(_) => RunnerError::StartFailed(format!(
                             "precompile worker exited with unexpected status {status}"
                         )),
@@ -455,20 +460,21 @@ impl ComponentPrecompiler for ChildComponentPrecompiler {
         &self,
         executor: &WorkflowExecutor,
         options: &LaunchOptions,
+        wasm_path: &Path,
     ) -> Result<PreparedWorkflow> {
         // A prepared artifact for this exact image may already be linked in
         // this process. Reusing it skips a process spawn and a full component
         // compile that are otherwise paid on every launch of the same
         // workflow. The cache still hands back the digest recorded when the
         // artifact was verified, so the checksum fence below runs unchanged.
-        if let Some((cached, source_digest)) = executor.cached_prepared(&options.wasm_path).await {
+        if let Some((cached, source_digest)) = executor.cached_prepared(wasm_path).await {
             validate_expected_workflow_checksum(options, source_digest)?;
             return Ok(cached);
         }
 
-        let (request, response) = self.exchange(options).await?;
+        let (request, response) = self.exchange(options, wasm_path).await?;
         let source_digest = validate_precompile_response(&request, &response)
-            .map_err(|error| map_precompile_error(&options.wasm_path, error))?
+            .map_err(|error| map_precompile_error(wasm_path, error))?
             .source_digest();
         validate_expected_workflow_checksum(options, source_digest)?;
         // SAFETY: `response` was read from the private stdout pipe of the
@@ -478,7 +484,7 @@ impl ComponentPrecompiler for ChildComponentPrecompiler {
         let component = unsafe {
             deserialize_trusted_precompiled_package(executor.engine(), &request, &response)
         }
-        .map_err(|error| map_precompile_error(&options.wasm_path, error))?;
+        .map_err(|error| map_precompile_error(wasm_path, error))?;
         let workflow = executor
             .prepare_precompiled_package(component)
             .await
@@ -486,7 +492,7 @@ impl ComponentPrecompiler for ChildComponentPrecompiler {
                 RunnerError::StartFailed(format!("link precompiled workflow: {error:#}"))
             })?;
         executor
-            .cache_prepared(&options.wasm_path, source_digest, &workflow)
+            .cache_prepared(wasm_path, source_digest, &workflow)
             .await;
         Ok(workflow)
     }
@@ -509,9 +515,10 @@ impl ComponentPrecompiler for InProcessTestComponentPrecompiler {
         &self,
         executor: &WorkflowExecutor,
         options: &LaunchOptions,
+        wasm_path: &Path,
     ) -> Result<PreparedWorkflow> {
-        let request = PrecompileRequest::for_artifact(precompile_nonce()?, &options.wasm_path)
-            .map_err(|error| {
+        let request =
+            PrecompileRequest::for_artifact(precompile_nonce()?, wasm_path).map_err(|error| {
                 RunnerError::StartFailed(format!("build test precompile request: {error:#}"))
             })?;
         let worker_request = request.clone();
@@ -521,9 +528,9 @@ impl ComponentPrecompiler for InProcessTestComponentPrecompiler {
         })
         .await
         .map_err(|error| RunnerError::Other(format!("test precompile worker panicked: {error}")))?
-        .map_err(|error| map_precompile_error(&options.wasm_path, error))?;
+        .map_err(|error| map_precompile_error(wasm_path, error))?;
         let source_digest = validate_precompile_response(&request, &response)
-            .map_err(|error| map_precompile_error(&options.wasm_path, error))?
+            .map_err(|error| map_precompile_error(wasm_path, error))?
             .source_digest();
         validate_expected_workflow_checksum(options, source_digest)?;
         // SAFETY: this test helper invokes the same component-host precompile
@@ -532,7 +539,7 @@ impl ComponentPrecompiler for InProcessTestComponentPrecompiler {
         let component = unsafe {
             deserialize_trusted_precompiled_package(executor.engine(), &request, &response)
         }
-        .map_err(|error| map_precompile_error(&options.wasm_path, error))?;
+        .map_err(|error| map_precompile_error(wasm_path, error))?;
         let workflow = executor
             .prepare_precompiled_package(component)
             .await
@@ -656,7 +663,11 @@ fn compute_occupancy(limit: usize, available: usize) -> RunnerOccupancy {
 
 impl EmbeddedWasmRunner {
     /// Build the runner with its own engine + epoch ticker.
-    pub fn new(config: WorkflowRunnerConfig, persistence: Arc<dyn Persistence>) -> Result<Self> {
+    pub fn new(
+        config: WorkflowRunnerConfig,
+        persistence: Arc<dyn Persistence>,
+        artifacts: Arc<dyn runtara_artifact_store::ArtifactStore>,
+    ) -> Result<Self> {
         let engine = build_engine(&EngineConfig::default())
             .map_err(|e| RunnerError::Other(format!("build wasmtime engine: {e:#}")))?;
         spawn_epoch_ticker(Arc::clone(&engine));
@@ -705,6 +716,7 @@ impl EmbeddedWasmRunner {
             run_limit,
             metrics,
             persistence,
+            artifacts,
             executor: Arc::new(executor),
             tasks: Arc::new(Mutex::new(HashMap::new())),
             exit_reports: Arc::new(Mutex::new(HashMap::new())),
@@ -978,10 +990,24 @@ impl EmbeddedWasmRunner {
     /// omitted for durable prepared launches: reopening either file in the
     /// parent would reintroduce an unkillable filesystem operation before a
     /// guest permit.
+    /// A local file holding the launch's workflow artifact.
+    async fn workflow_path(&self, options: &LaunchOptions) -> Result<PathBuf> {
+        let digest = &options.workflow_digest;
+        self.artifacts
+            .local_path(digest)
+            .await
+            .map_err(|error| RunnerError::StartFailed(format!("read workflow artifact: {error}")))?
+            .ok_or_else(|| RunnerError::BinaryNotFound(format!("workflow artifact {digest}")))
+    }
+
     async fn prepare_embedded_launch(&self, options: &LaunchOptions) -> Result<PreparedLaunch> {
         let preparation_slot = self.try_take_preparation_slot()?;
         // Preparation refuses a component without the workflow entry.
-        let workflow = self.precompiler.prepare(&self.executor, options).await?;
+        let wasm_path = self.workflow_path(options).await?;
+        let workflow = self
+            .precompiler
+            .prepare(&self.executor, options, &wasm_path)
+            .await?;
 
         scoped::admit(&workflow, &self.executor, self.scoped_agents.as_deref())?;
 
@@ -1122,21 +1148,16 @@ fn map_precompile_error(wasm_path: &Path, error: anyhow::Error) -> RunnerError {
     }
 }
 
-/// Match the child-read digest to the immutable direct-workflow metadata.
-///
-/// When the image metadata records a checksum it is the source-of-truth
-/// identity, and a changed file is terminalized before it reaches a guest
-/// permit. Images registered without one have nothing to compare.
+/// Match the digest of the bytes the child read to the launch's artifact
+/// digest, so bytes that changed under their address are terminalized before
+/// they reach a guest permit.
 fn validate_expected_workflow_checksum(
     options: &LaunchOptions,
     actual: [u8; PRECOMPILE_NONCE_BYTES],
 ) -> Result<()> {
-    let Some(expected) = options.expected_workflow_checksum.as_deref() else {
-        return Ok(());
-    };
-    let expected = expected.strip_prefix("sha256:").unwrap_or(expected);
+    let expected = options.workflow_digest.as_str();
     let actual = hex_digest(actual);
-    if expected.len() != actual.len() || !expected.eq_ignore_ascii_case(&actual) {
+    if expected != actual {
         return Err(RunnerError::StartFailed(format!(
             "generated workflow artifact digest does not match immutable image metadata (expected {expected}, got {actual})"
         )));
@@ -1972,7 +1993,7 @@ impl Runner for EmbeddedWasmRunner {
 
         info!(
             instance_id = %options.instance_id,
-            wasm = %options.wasm_path.display(),
+            workflow = %options.workflow_digest,
             "Launched embedded workflow run (detached)"
         );
 
@@ -2433,14 +2454,16 @@ mod tests {
                 skip_cert_verification: false,
             },
             Arc::new(runtara_core::persistence::memory::InMemoryPersistence::new()),
+            Arc::new(runtara_artifact_store::FilesystemArtifactStore::new(
+                std::env::temp_dir().join("runtara-unused-artifacts"),
+            )),
         )
         .expect("runner builds");
         let mut options = super::LaunchOptions {
             launch_id: "launch-env".into(),
             instance_id: "instance-env".into(),
             tenant_id: "tenant-env".into(),
-            wasm_path: std::path::PathBuf::from("/unused/workflow.wasm"),
-            expected_workflow_checksum: None,
+            workflow_digest: runtara_artifact_store::Digest::of(b"workflow"),
             preparation_attempt: None,
             preparation_deadline: None,
             input: serde_json::Value::Null,

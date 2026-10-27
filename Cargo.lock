@@ -4467,6 +4467,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtara-artifact-store"
+version = "9.0.1"
+dependencies = [
+ "async-trait",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "runtara-component-host"
 version = "9.0.1"
 dependencies = [
@@ -4610,6 +4622,7 @@ dependencies = [
  "reqwest 0.12.28",
  "runtara-agent-suspension",
  "runtara-agent-trusted",
+ "runtara-artifact-store",
  "runtara-component-host",
  "runtara-core",
  "runtara-database-contract",
@@ -4737,6 +4750,7 @@ dependencies = [
  "runtara-agent-trusted",
  "runtara-agents",
  "runtara-ai",
+ "runtara-artifact-store",
  "runtara-component-host",
  "runtara-connections",
  "runtara-control-contract",

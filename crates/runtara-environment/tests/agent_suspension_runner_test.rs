@@ -172,6 +172,7 @@ impl Harness {
                 skip_cert_verification: false,
             },
             self.persistence.clone(),
+            artifacts().clone(),
         )
         .unwrap()
         .with_in_process_precompiler_for_tests()
@@ -226,8 +227,7 @@ impl Harness {
             launch_id: format!("launch-{}", uuid::Uuid::new_v4()),
             instance_id: id.to_owned(),
             tenant_id: self.tenant.clone(),
-            wasm_path: wasm.to_owned(),
-            expected_workflow_checksum: None,
+            workflow_digest: artifacts().add(wasm),
             preparation_attempt: None,
             preparation_deadline: None,
             input: json!({}),
@@ -519,4 +519,12 @@ async fn a_park_that_never_commits_is_recovered_and_resumes_from_the_continuatio
     let output: Value = serde_json::from_slice(done.output.as_deref().unwrap()).unwrap();
     assert_eq!(output, json!({"plain": "capabilities", "pause": "paused"}));
     assert_eq!(h.continuations_of(&run).await, 0);
+}
+
+/// Where this binary's launches find the components they wrote.
+fn artifacts() -> &'static std::sync::Arc<runtara_artifact_store::test_support::FileMapStore> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Arc<runtara_artifact_store::test_support::FileMapStore>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(Default::default)
 }

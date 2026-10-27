@@ -74,7 +74,7 @@ async fn harness() -> Harness {
         default_timeout: Duration::from_secs(30),
         skip_cert_verification: false,
     };
-    let runner = EmbeddedWasmRunner::new(config, Arc::clone(&persistence))
+    let runner = EmbeddedWasmRunner::new(config, Arc::clone(&persistence), artifacts().clone())
         .expect("embedded runner")
         // The integration binary is not `runtara-server`, so it cannot serve
         // the production hidden precompile-child command. Opt in explicitly
@@ -316,8 +316,7 @@ fn options(instance_id: &str, wasm_path: &Path) -> LaunchOptions {
         launch_id: format!("launch-{instance_id}"),
         instance_id: instance_id.to_string(),
         tenant_id: "embedded-test".to_string(),
-        wasm_path: wasm_path.to_path_buf(),
-        expected_workflow_checksum: None,
+        workflow_digest: artifacts().add(wasm_path),
         preparation_attempt: None,
         preparation_deadline: None,
         input: serde_json::Value::Null,
@@ -1416,6 +1415,7 @@ mod workflow_api_connections {
                 skip_cert_verification: false,
             },
             Arc::clone(&h.persistence),
+            artifacts().clone(),
         )
         .unwrap()
         .with_in_process_precompiler_for_tests()
@@ -1692,6 +1692,7 @@ mod workflow_api_control {
                 skip_cert_verification: false,
             },
             Arc::clone(&h.persistence),
+            artifacts().clone(),
         )
         .unwrap()
         .with_in_process_precompiler_for_tests()
@@ -1822,6 +1823,7 @@ mod workflow_api_trusted {
                 skip_cert_verification: false,
             },
             Arc::clone(&h.persistence),
+            artifacts().clone(),
         )
         .unwrap()
         .with_in_process_precompiler_for_tests()
@@ -2070,4 +2072,12 @@ async fn workflows_compiled_for_the_workflow_api_end_as_expected() {
         }
     }
     assert_eq!(h.runner.workflow_api_launches().serving(), 0);
+}
+
+/// Where this binary's launches find the components they wrote.
+fn artifacts() -> &'static std::sync::Arc<runtara_artifact_store::test_support::FileMapStore> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Arc<runtara_artifact_store::test_support::FileMapStore>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(Default::default)
 }

@@ -438,15 +438,10 @@ pub struct LaunchOptions {
     pub instance_id: String,
     /// Tenant ID
     pub tenant_id: String,
-    /// Path to the image's composed `workflow.wasm`. It must export the
-    /// workflow entry; preparation refuses it otherwise.
-    pub wasm_path: std::path::PathBuf,
-    /// Immutable source checksum for a generated direct workflow image.
-    ///
-    /// The killable precompiler calculates a digest of the bytes it read and
-    /// the runner compares it to this value before deserializing its output.
-    /// Images registered without a recorded checksum leave it unset.
-    pub expected_workflow_checksum: Option<String>,
+    /// Digest of the image's composed `workflow.wasm` in the artifact store.
+    /// The runner fetches it from its store, and refuses bytes whose digest
+    /// differs or a component without the workflow entry.
+    pub workflow_digest: runtara_artifact_store::Digest,
     /// Durable preparation claim incarnation, when this came from the launch
     /// queue. It distinguishes an old timed-out compiler from a later claim
     /// with the same launch id and dispatcher owner.
@@ -879,8 +874,7 @@ mod prepared_launch_tests {
             launch_id: launch_id.to_string(),
             instance_id: "instance-1".to_string(),
             tenant_id: "tenant-1".to_string(),
-            wasm_path: std::path::PathBuf::from("/nonexistent.wasm"),
-            expected_workflow_checksum: None,
+            workflow_digest: runtara_artifact_store::Digest::of(b"workflow"),
             preparation_attempt: None,
             preparation_deadline: None,
             input: serde_json::Value::Null,

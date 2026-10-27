@@ -6,6 +6,7 @@
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     runtara_server::boot::run(runtara_server::ServerOptions {
         runner_factory: Some(runtara_runner_delegate::factory()),
+        ..Default::default()
     })
     .await
 }

@@ -297,6 +297,8 @@ opentelemetry_sdk = { version = "0.32", features = ["metrics", "testing"] }
 # The instance HTTP router in `core_runtime` drives runtara-core's handlers, so
 # its tests need core's in-memory Persistence mock.
 runtara-core = { path = "../runtara-core", features = ["test-support"] }
+# Tests launch components from where they wrote them.
+runtara-artifact-store = { path = "../runtara-artifact-store", features = ["test-support"] }
 wiremock = "0.6"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }

@@ -78,12 +78,15 @@ impl Harness {
         let dispatcher = ComponentDispatcherService::from_dir(&components()).await?;
         let native = Arc::new(NativeControl::new(Some(tenant.clone())));
         let runtime = Arc::new(RuntimeClient::new(
-            Arc::new(EnvironmentHandlerState::new(
-                pool.clone(),
-                persistence.clone(),
-                Arc::new(MockRunner::new()),
-                std::env::temp_dir(),
-            )),
+            Arc::new(
+                EnvironmentHandlerState::new(
+                    pool.clone(),
+                    persistence.clone(),
+                    Arc::new(MockRunner::new()),
+                    std::env::temp_dir(),
+                )
+                .with_artifacts(artifacts().clone()),
+            ),
             RuntimeClientConfig::new(Default::default()),
         ));
         native.install(runtime.clone());
@@ -163,8 +166,7 @@ impl Harness {
             launch_id: format!("launch-{id}-{}", Uuid::new_v4()),
             instance_id: id.to_owned(),
             tenant_id: self.tenant.clone(),
-            wasm_path: wasm_path.to_owned(),
-            expected_workflow_checksum: None,
+            workflow_digest: artifacts().add(wasm_path),
             preparation_attempt: None,
             preparation_deadline: None,
             input: json!({}),
@@ -229,6 +231,7 @@ fn runner(
             skip_cert_verification: false,
         },
         persistence.clone(),
+        artifacts().clone(),
     )?
     .with_in_process_precompiler_for_tests()
     .with_control_host(control)?)
@@ -457,13 +460,13 @@ async fn a_composed_control_start_launches_a_real_child() -> anyhow::Result<()> 
     // Registered as a compile registers it: with the agents it was composed
     // with (none), which a launch checks against the allowlist.
     sqlx::query(
-        "INSERT INTO images (image_id, tenant_id, name, binary_path, metadata) \
+        "INSERT INTO images (image_id, tenant_id, name, binary_digest, metadata) \
          VALUES ($1,$2,$3,$4,$5)",
     )
     .bind(&image)
     .bind(&tenant)
     .bind(format!("{child_workflow}:1@fixture"))
-    .bind(child_wasm.to_string_lossy().as_ref())
+    .bind(artifacts().add(&child_wasm).as_str())
     .bind(json!({"workflow": {"directArtifact": {"agentComponents": []}}}))
     .execute(&harness.pool)
     .await?;
@@ -766,4 +769,12 @@ fn init_config_once() {
             );
         }
     });
+}
+
+/// Where this binary's launches find the components they wrote.
+fn artifacts() -> &'static std::sync::Arc<runtara_artifact_store::test_support::FileMapStore> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Arc<runtara_artifact_store::test_support::FileMapStore>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(Default::default)
 }

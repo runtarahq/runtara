@@ -48,6 +48,9 @@ pub struct EmbeddedRuntaraConfig {
     pub isolation_policy: Option<Arc<crate::config::isolation::IsolationPolicy>>,
     /// Builds the workflow runner; `None` is the embedded engine.
     pub runner_factory: Option<runtara_environment::runner::RunnerFactory>,
+    /// Where workflow artifacts are kept, shared by the image registry and
+    /// the runner.
+    pub artifacts: Arc<dyn runtara_environment::artifacts::ArtifactStore>,
 }
 
 /// Handle to the running embedded Runtara servers.
@@ -145,6 +148,7 @@ impl EmbeddedRuntara {
                 database: Some(database),
                 outbound_http: Some(outbound_http),
             },
+            artifacts: config.artifacts.clone(),
         };
         let runner: Arc<dyn runtara_environment::runner::Runner> =
             match config.runner_factory.as_ref() {
@@ -166,6 +170,7 @@ impl EmbeddedRuntara {
             .runner(runner)
             .core_persistence(persistence.clone())
             .data_dir(config.data_dir)
+            .artifacts(config.artifacts)
             .execution_timeout_policy(config.execution_timeout_policy)
             .build()?
             .start()
@@ -342,7 +347,7 @@ pub async fn maybe_start_embedded(
     outbound_http: Arc<dyn runtara_component_host::OutboundHttpHost>,
     execution_timeout_policy: ExecutionTimeoutPolicy,
     event_observer: Option<Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>>,
-    runner_factory: Option<runtara_environment::runner::RunnerFactory>,
+    options: crate::server::ServerOptions,
 ) -> Result<Option<EmbeddedRuntara>, Box<dyn std::error::Error + Send + Sync>> {
     let embedded_enabled = std::env::var("RUNTARA_EMBEDDED")
         .map(|v| v.to_lowercase() != "false" && v != "0")
@@ -410,13 +415,18 @@ pub async fn maybe_start_embedded(
     // never over the network.
     let config = EmbeddedRuntaraConfig {
         pool,
-        data_dir,
         core_http_bind_addr: core_instance_api
             .then(|| SocketAddr::from(([127, 0, 0, 1], core_http_port))),
         core_overrides,
         execution_timeout_policy,
         isolation_policy: crate::config::isolation_policy(),
-        runner_factory,
+        artifacts: options.artifacts.unwrap_or_else(|| {
+            Arc::new(runtara_environment::image_registry::default_artifact_store(
+                &data_dir,
+            ))
+        }),
+        runner_factory: options.runner_factory,
+        data_dir,
     };
 
     let runtara = EmbeddedRuntara::start(

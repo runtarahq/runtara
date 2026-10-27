@@ -35,8 +35,9 @@ use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
 use crate::error::Result;
-use crate::image_registry::ImageRegistry;
+use crate::image_registry::{ImageRegistry, default_artifact_store};
 use crate::periodic::PeriodicLoop;
+use runtara_artifact_store::ArtifactStore;
 
 /// Configuration for the image cleanup worker.
 #[derive(Debug, Clone)]
@@ -103,6 +104,9 @@ impl ImageCleanupWorkerConfig {
 pub struct ImageCleanupWorker {
     pool: PgPool,
     config: ImageCleanupWorkerConfig,
+    /// Where the images' artifacts are kept; a deleted image's artifact is
+    /// released here once no other image names it.
+    artifacts: Arc<dyn ArtifactStore>,
     shutdown: Arc<Notify>,
 }
 
@@ -111,9 +115,17 @@ impl ImageCleanupWorker {
     pub fn new(pool: PgPool, config: ImageCleanupWorkerConfig) -> Self {
         Self {
             pool,
+            artifacts: Arc::new(default_artifact_store(&config.data_dir)),
             config,
             shutdown: Arc::new(Notify::new()),
         }
+    }
+
+    /// Release artifacts from `artifacts` instead of the default store under
+    /// the data directory.
+    pub fn with_artifacts(mut self, artifacts: Arc<dyn ArtifactStore>) -> Self {
+        self.artifacts = artifacts;
+        self
     }
 
     /// Get a handle that can be used to signal shutdown.
@@ -172,10 +184,9 @@ impl ImageCleanupWorker {
         Ok(())
     }
 
-    /// Phase 1: Clean up image directories on disk that have no corresponding DB record.
-    ///
-    /// These orphans are created when `ImageRegistry::register()` upserts on
-    /// `(tenant_id, name)` with a new `image_id` — the old directory is left behind.
+    /// Phase 1: Clean up legacy `images/<id>` directories on disk that have no
+    /// corresponding DB record. Artifacts live in the artifact store now; these
+    /// are left from before, by an upsert that replaced the row's `image_id`.
     async fn cleanup_orphaned_directories(&self) -> u64 {
         let images_dir = self.config.data_dir.join("images");
 
@@ -292,7 +303,7 @@ impl ImageCleanupWorker {
         let mut cleaned = 0u64;
         for (image_id, tenant_id, name) in &stale_images {
             // Delete from DB (CASCADE handles instance_images)
-            if let Err(e) = images.delete(image_id).await {
+            if let Err(e) = images.delete(image_id, self.artifacts.as_ref()).await {
                 warn!(
                     image_id = %image_id,
                     error = %e,
@@ -301,7 +312,7 @@ impl ImageCleanupWorker {
                 continue;
             }
 
-            // Delete disk directory
+            // A legacy image directory, if this image still had one.
             let image_dir = self.config.data_dir.join("images").join(image_id);
             if let Err(e) = tokio::fs::remove_dir_all(&image_dir).await
                 && e.kind() != std::io::ErrorKind::NotFound

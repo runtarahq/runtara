@@ -301,7 +301,7 @@ impl Clone for LaunchDispatcher {
             pool: self.pool.clone(),
             persistence: self.persistence.clone(),
             runner: self.runner.clone(),
-            image_registry: ImageRegistry::new(self.pool.clone()),
+            image_registry: self.image_registry.clone(),
             instances: InstanceRepository::new(self.pool.clone()),
             execution_timeout_policy: self.execution_timeout_policy,
             config: self.config.clone(),
@@ -817,7 +817,7 @@ impl LaunchDispatcher {
                     launch_id: handle.launch_id.clone(),
                     instance_id: handle.instance_id.clone(),
                     tenant_id: handle.tenant_id.clone(),
-                    binary_path: options.wasm_path.to_string_lossy().into_owned(),
+                    binary_path: format!("sha256:{}", options.workflow_digest),
                     started_at: handle.started_at,
                     timeout_seconds: Some(
                         i64::try_from(options.timeout.as_secs())
@@ -1222,7 +1222,7 @@ impl LaunchDispatcher {
             .map_err(|error| format!("failed to read image: {error}"))?
             .ok_or_else(|| "launch image no longer exists".to_string())?;
         self.validate_image(&image, launch)?;
-        let expected_workflow_checksum = Some(image.workflow_binary_checksum()?.to_owned());
+        let workflow_digest = image.artifact_digest()?;
         let memory_limit_bytes = image.workflow_memory_limit_bytes();
         let timeout = self
             .execution_timeout_policy
@@ -1240,8 +1240,7 @@ impl LaunchDispatcher {
             launch_id: launch.launch_id.clone(),
             instance_id: launch.instance_id.clone(),
             tenant_id: launch.tenant_id.clone(),
-            wasm_path: image.binary_path.into(),
-            expected_workflow_checksum,
+            workflow_digest,
             preparation_attempt: Some(launch.attempt_count),
             preparation_deadline,
             input,

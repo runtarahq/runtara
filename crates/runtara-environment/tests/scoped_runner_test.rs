@@ -204,6 +204,7 @@ impl Harness {
                 skip_cert_verification: false,
             },
             self.persistence.clone(),
+            artifacts().clone(),
         )
         .unwrap()
         .with_in_process_precompiler_for_tests();
@@ -236,8 +237,7 @@ impl Harness {
             launch_id: format!("launch-{id}"),
             instance_id: id,
             tenant_id: "scoped-runner-test".into(),
-            wasm_path: wasm.to_owned(),
-            expected_workflow_checksum: None,
+            workflow_digest: artifacts().add(wasm),
             preparation_attempt: None,
             preparation_deadline: None,
             input: json!({}),
@@ -2504,4 +2504,12 @@ async fn an_agent_result_keeps_the_child_rows_of_an_on_wait_step_with_its_id() {
             "{backend}: the onWait child never ran again"
         );
     }
+}
+
+/// Where this binary's launches find the components they wrote.
+fn artifacts() -> &'static std::sync::Arc<runtara_artifact_store::test_support::FileMapStore> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Arc<runtara_artifact_store::test_support::FileMapStore>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(Default::default)
 }

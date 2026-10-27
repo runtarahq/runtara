@@ -21,7 +21,9 @@ use crate::container_registry::ContainerRegistry;
 use crate::db;
 use crate::error::Result;
 use crate::execution_timeout::ExecutionTimeoutPolicy;
-use crate::image_registry::{ImageBuilder, ImageRegistry, inspect_current_workflow_image};
+use crate::image_registry::{
+    ImageBuilder, ImageRegistry, default_artifact_store, inspect_current_workflow_image,
+};
 use crate::instance_repository::InstanceRepository;
 use crate::launch_dispatcher::{DEFAULT_LAUNCH_QUEUE_TIMEOUT, LaunchLifecycleObservers};
 use crate::launch_queue::{
@@ -29,6 +31,7 @@ use crate::launch_queue::{
     LaunchKind, LaunchRepository, LaunchState, SINGLE_INSTANCE_ACTIVE, SINGLE_INSTANCE_LAUNCH_ENV,
 };
 use crate::runner::{Runner, RunnerHandle, StartGate, StartGateOutcome};
+use runtara_artifact_store::ArtifactStore;
 
 /// Shared drain state for the environment runtime.
 ///
@@ -68,9 +71,8 @@ impl DrainController {
 
 /// Convert a path to absolute if it's relative.
 ///
-/// This is critical for paths stored in DB (like `binary_path`) - they must be
-/// absolute so the runner can find them regardless of the current working
-/// directory at launch time.
+/// The data directory roots the default artifact store and per-run files, so
+/// it must not move with the current working directory.
 fn ensure_absolute_path(path: PathBuf) -> PathBuf {
     if path.is_absolute() {
         path
@@ -127,6 +129,9 @@ pub struct EnvironmentHandlerState {
     pub runner: Arc<dyn Runner>,
     /// Data directory for images and instance I/O.
     pub data_dir: PathBuf,
+    /// Where images' workflow artifacts are kept, by digest. The runner reads
+    /// launches' artifacts from the same store.
+    pub artifacts: Arc<dyn ArtifactStore>,
     /// Request timeout for database operations.
     pub request_timeout: Duration,
     /// Bounded active-execution timeout policy shared with the server.
@@ -177,19 +182,28 @@ impl EnvironmentHandlerState {
         runner: Arc<dyn Runner>,
         data_dir: PathBuf,
     ) -> Self {
+        let data_dir = ensure_absolute_path(data_dir);
         Self {
             pool,
             persistence,
             start_time: std::time::Instant::now(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             runner,
-            data_dir: ensure_absolute_path(data_dir),
+            artifacts: Arc::new(default_artifact_store(&data_dir)),
+            data_dir,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             execution_timeout_policy: ExecutionTimeoutPolicy::default(),
             drain: DrainController::new(),
             launch_notifier: Arc::new(tokio::sync::Notify::new()),
             lifecycle_observers: LaunchLifecycleObservers::default(),
         }
+    }
+
+    /// Keep images' workflow artifacts in `artifacts` instead of the default
+    /// store under the data directory.
+    pub fn with_artifacts(mut self, artifacts: Arc<dyn ArtifactStore>) -> Self {
+        self.artifacts = artifacts;
+        self
     }
 
     /// Set the request timeout for database operations.
@@ -587,8 +601,6 @@ pub async fn handle_start_instance(
         ));
     }
 
-    let wasm_path = PathBuf::from(&image.binary_path);
-
     // Generate or use provided instance ID
     let instance_id = request
         .instance_id
@@ -606,10 +618,14 @@ pub async fn handle_start_instance(
     // is the artifact check, because an already-accepted start does not depend
     // on the wasm still being on disk.
 
-    // Validate the filesystem half of the image registration before writing
+    // Validate the artifact half of the image registration before writing
     // any instance state. Otherwise a stale image row creates a failed instance
     // and the trigger retry collides with that row after recompilation.
-    if !wasm_path.is_file() {
+    let artifact_present = match image.artifact_digest() {
+        Ok(digest) => state.artifacts.exists(&digest).await.unwrap_or(false),
+        Err(_) => false,
+    };
+    if !artifact_present {
         // A replay of an already-accepted start is still answered from the
         // existing row: it was accepted when the artifact was present, and
         // losing the file afterwards must not turn a duplicate into an error.
@@ -626,13 +642,13 @@ pub async fn handle_start_instance(
         }
         warn!(
             image_id = %request.image_id,
-            binary_path = %wasm_path.display(),
+            digest = ?image.binary_digest,
             "Registered image artifact is missing"
         );
         return Ok(StartInstanceResponse::rejected(
             StartRejection::ImageNotRunnable {
                 image_id: request.image_id.clone(),
-                detail: "registered artifact is missing from disk".to_string(),
+                detail: "registered artifact is missing from the artifact store".to_string(),
             },
         ));
     }
@@ -642,22 +658,23 @@ pub async fn handle_start_instance(
     // or consuming admission while it waits. The same read finds the steps
     // whose child checkpoint namespace another step may share, which the run
     // records so that collapsing a result keeps those namespaces.
-    let shared_child_steps = match inspect_current_workflow_image(&image).await {
-        Ok(shared) => shared,
-        Err(error) => {
-            warn!(
-                image_id = %request.image_id,
-                error = %error,
-                "Refusing workflow image without the workflow entry"
-            );
-            return Ok(StartInstanceResponse::rejected(
-                StartRejection::ImageNotRunnable {
-                    image_id: request.image_id.clone(),
-                    detail: error.to_string(),
-                },
-            ));
-        }
-    };
+    let shared_child_steps =
+        match inspect_current_workflow_image(&image, state.artifacts.as_ref()).await {
+            Ok(shared) => shared,
+            Err(error) => {
+                warn!(
+                    image_id = %request.image_id,
+                    error = %error,
+                    "Refusing workflow image without the workflow entry"
+                );
+                return Ok(StartInstanceResponse::rejected(
+                    StartRejection::ImageNotRunnable {
+                        image_id: request.image_id.clone(),
+                        detail: error.to_string(),
+                    },
+                ));
+            }
+        };
     if shared_child_steps.steps().is_none() {
         warn!(
             image_id = %request.image_id,
@@ -2572,19 +2589,17 @@ impl std::fmt::Display for StoreImageError {
 
 impl std::error::Error for StoreImageError {}
 
-/// Write an uploaded image artifact to disk and register (or replace) its row.
+/// Store an uploaded image artifact and register (or replace) its row.
 ///
-/// The database claim comes before filesystem work so all concurrent writers
-/// resolve the same image ID.  The binary is uploaded to a private temporary
-/// file and renamed only after it is complete, so a launch never observes a
-/// partially written artifact.
+/// The name claim comes first so all concurrent writers resolve the same
+/// image ID. The bytes go to the artifact store under their digest, which a
+/// reader sees whole or not at all, and the row records that digest.
 pub async fn handle_store_image(
     state: &EnvironmentHandlerState,
     params: StoreImageParams,
     binary: &[u8],
 ) -> std::result::Result<String, StoreImageError> {
     use sha2::{Digest, Sha256};
-    use std::io::Write;
 
     // Every image records the checksum of its exact bytes, which durable
     // preparation compares to what it reads before running them.
@@ -2603,60 +2618,13 @@ pub async fn handle_store_image(
 
     let image_registry = ImageRegistry::new(state.pool.clone());
     let candidate_image_id = uuid::Uuid::new_v4().to_string();
-    let candidate_binary_path = state
-        .data_dir
-        .join("images")
-        .join(&candidate_image_id)
-        .join("binary");
     let name_claim = image_registry
-        .claim_name(
-            &params.tenant_id,
-            &params.name,
-            &candidate_image_id,
-            &candidate_binary_path.to_string_lossy(),
-        )
+        .claim_name(&params.tenant_id, &params.name, &candidate_image_id)
         .await
         .map_err(|e| StoreImageError::Lookup(format!("Failed to claim image name: {e}")))?;
     let image_id = name_claim.image_id;
 
-    let images_dir = state.data_dir.join("images").join(&image_id);
-    let binary_path = images_dir.join("binary");
-
-    if let Err(e) = std::fs::create_dir_all(&images_dir) {
-        error!(error = %e, "Failed to create image directory");
-        return Err(StoreImageError::Io(format!(
-            "Failed to create image directory: {}",
-            e
-        )));
-    }
-
-    let temporary_binary_path = images_dir.join(format!(".binary-upload-{}", uuid::Uuid::new_v4()));
-    if let Err(e) = std::fs::File::create(&temporary_binary_path).and_then(|mut file| {
-        file.write_all(binary)?;
-        file.sync_all()
-    }) {
-        error!(error = %e, "Failed to write binary");
-        let _ = std::fs::remove_file(&temporary_binary_path);
-        return Err(StoreImageError::Io(format!(
-            "Failed to write binary: {}",
-            e
-        )));
-    }
-    if let Err(e) = std::fs::rename(&temporary_binary_path, &binary_path) {
-        error!(error = %e, "Failed to finalize binary upload");
-        let _ = std::fs::remove_file(&temporary_binary_path);
-        return Err(StoreImageError::Io(format!(
-            "Failed to finalize binary upload: {}",
-            e
-        )));
-    }
-
-    let mut builder = ImageBuilder::new(
-        &params.tenant_id,
-        &params.name,
-        binary_path.to_string_lossy(),
-    )
-    .image_id(&image_id);
+    let mut builder = ImageBuilder::new(&params.tenant_id, &params.name).image_id(&image_id);
     if let Some(desc) = &params.description {
         builder = builder.description(desc);
     }
@@ -2666,7 +2634,10 @@ pub async fn handle_store_image(
 
     let image = builder.build();
 
-    if let Err(e) = image_registry.register(&image).await {
+    if let Err(e) = image_registry
+        .register(&image, binary, state.artifacts.as_ref())
+        .await
+    {
         return Err(StoreImageError::Register(format!(
             "Failed to register image: {}",
             e
@@ -3008,7 +2979,7 @@ mod tests {
             tenant_id: "tenant-1".to_string(),
             name: "test-image".to_string(),
             description: None,
-            binary_path: "/tmp/binary".to_string(),
+            binary_digest: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             metadata,

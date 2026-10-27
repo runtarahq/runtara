@@ -1,0 +1,24 @@
+[package]
+name = "runtara-artifact-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Content-addressed storage for runtara's artifacts: workflow images, agents and shared components, addressed by the SHA-256 of their bytes"
+publish = false
+
+[features]
+# `test_support::FileMapStore`: artifacts that are files where they already are.
+test-support = []
+
+[dependencies]
+async-trait = "0.1"
+sha2 = { workspace = true }
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "rt"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["fs", "io-util", "rt", "macros"] }

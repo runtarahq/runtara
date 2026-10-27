@@ -13,6 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Workflow images live in a content-addressed artifact store.** A new
+  `runtara-artifact-store` crate defines `ArtifactStore` (put, get, exists,
+  local path and delete by SHA-256 digest), with a filesystem store at
+  `<DATA_DIR>/artifacts/blobs/sha256/<digest>` as the default. An image row
+  records `binary_digest` instead of a path (environment migration
+  `20261027000000`, backfilled from the checksum every image recorded), and
+  `LaunchOptions` carries `workflow_digest`, which the runner resolves through
+  its own store (`RunnerParts::artifacts`; a host supplies its own through
+  `ServerOptions::artifacts`). Images with the same bytes share one artifact,
+  released when the last image naming it is deleted. On boot, images stored
+  the old way (`images/<id>/binary`) are moved into the store, except a file
+  whose bytes no longer match the checksum its image recorded.
+  `e2e/test_image_artifact_store.sh` covers both.
+
 - **A runner can report an executor lost.** `RunExitReport::Lost` (for a
   node or link that went away) hands the run to recovery instead of failing
   it: recovery suspends it (`termination_reason = executor_lost`, a new value

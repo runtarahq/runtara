@@ -240,6 +240,7 @@ impl Harness {
                 skip_cert_verification: false,
             },
             self.persistence.clone(),
+            artifacts().clone(),
         )
         .unwrap()
         .with_in_process_precompiler_for_tests()
@@ -285,8 +286,7 @@ impl Harness {
             launch_id: format!("launch-{}", uuid::Uuid::new_v4()),
             instance_id: id.to_owned(),
             tenant_id: self.tenant.clone(),
-            wasm_path: wasm.to_owned(),
-            expected_workflow_checksum: None,
+            workflow_digest: artifacts().add(wasm),
             preparation_attempt: None,
             preparation_deadline: None,
             input: json!({}),
@@ -742,4 +742,12 @@ async fn a_workflow_api_run_parks_on_its_wait_and_resumes_when_children_finish()
         0,
         "the probe released the settled wait"
     );
+}
+
+/// Where this binary's launches find the components they wrote.
+fn artifacts() -> &'static std::sync::Arc<runtara_artifact_store::test_support::FileMapStore> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Arc<runtara_artifact_store::test_support::FileMapStore>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(Default::default)
 }

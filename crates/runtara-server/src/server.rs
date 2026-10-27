@@ -672,6 +672,9 @@ pub struct ServerOptions {
     /// Builds the workflow runner; `None` runs workflows on the embedded
     /// in-process engine.
     pub runner_factory: Option<runtara_environment::runner::RunnerFactory>,
+    /// Where workflow artifacts are kept; `None` keeps them as files under
+    /// `<DATA_DIR>/artifacts`.
+    pub artifacts: Option<Arc<dyn runtara_environment::artifacts::ArtifactStore>>,
 }
 
 pub async fn start(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -1281,7 +1284,7 @@ pub async fn start_with(
             workers::step_counter::StepCounter::new(metrics.meter().clone())
                 as Arc<dyn runtara_core::instance_handlers::InstanceEventObserver>
         }),
-        options.runner_factory.clone(),
+        options.clone(),
     )
     .await
     {
