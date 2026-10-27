@@ -75,9 +75,6 @@ pub async fn capture_http_event(
     Query(metadata): Query<crate::api::dto::workflows::RunLabelQuery>,
     request: Request,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
-    // Events are webhook endpoints — tenant is implicit (single-tenant runtime)
-    let tenant_id = crate::config::tenant_id().to_string();
-
     // Extract parts from request
     let (parts, body) = request.into_parts();
     let method = parts.method.clone();
@@ -129,9 +126,17 @@ pub async fn capture_http_event(
 
     // Look up the trigger
     let trigger_repo = TriggerRepository::new(pool.clone());
-    let trigger = match trigger_repo.get_by_id(&trigger_id, Some(&tenant_id)).await {
-        Ok(Some(t)) => t,
-        Ok(None) => {
+    // A webhook is unauthenticated: its tenant is its trigger's, and only a
+    // tenant this process serves.
+    let trigger = match trigger_repo.get_by_id(&trigger_id, None).await {
+        Ok(Some(t))
+            if crate::config::is_served_tenant(
+                t.tenant_id.as_deref().unwrap_or(crate::config::tenant_id()),
+            ) =>
+        {
+            t
+        }
+        Ok(_) => {
             tracing::debug!("Trigger '{}' not found", trigger_id);
             let error_response = json!({
                 "success": false,
@@ -149,6 +154,10 @@ pub async fn capture_http_event(
             return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)));
         }
     };
+    let tenant_id = trigger
+        .tenant_id
+        .clone()
+        .unwrap_or_else(|| crate::config::tenant_id().to_string());
 
     // Verify webhook signature if the trigger has a linked connection.
     if let Some(ref body_bytes) = raw_body_bytes

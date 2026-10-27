@@ -61,7 +61,8 @@ impl AuthProvider for OidcProvider {
             .org_id
             .expect("org_id presence validated in validate_token");
 
-        if org_id != self.tenant_id {
+        // A token for a tenant this process does not serve is refused.
+        if org_id != self.tenant_id && !crate::config::is_served_tenant(&org_id) {
             return Err(AuthError::TenantMismatch(org_id));
         }
 

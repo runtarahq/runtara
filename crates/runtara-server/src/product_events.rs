@@ -148,6 +148,8 @@ pub struct ProductEvent {
 }
 
 impl ProductEvent {
+    /// An event for the process's primary tenant. Work that belongs to a
+    /// tenant (a run, a trigger, a compile) uses [`ProductEvent::for_tenant`].
     pub fn new(event_type: EventType) -> Self {
         Self {
             event_id: Uuid::new_v4(),
@@ -167,6 +169,13 @@ impl ProductEvent {
         }
     }
 
+    /// An event for `tenant`'s work.
+    pub fn for_tenant(event_type: EventType, tenant: &str) -> Self {
+        let mut event = Self::new(event_type);
+        event.tenant_id = tenant.to_owned();
+        event
+    }
+
     /// Build an event for an authenticated request, deriving tenant + actor from the
     /// caller's `AuthContext`. Tenant is `org_id`; `user_id` is always the human (for an
     /// API key that is the key's `issuing_user_id`, already resolved at auth time). When a
@@ -174,7 +183,7 @@ impl ProductEvent {
     /// is the user themselves. Use this in HTTP handlers; use `new` + `no_user_actor` for
     /// worker/trigger events that have no caller.
     pub fn from_auth(event_type: EventType, ctx: &AuthContext) -> Self {
-        let mut event = Self::new(event_type);
+        let mut event = Self::for_tenant(event_type, &ctx.org_id);
         event.user_id = Some(ctx.user_id.clone());
         match ctx.auth_method {
             AuthMethod::ApiKey => {

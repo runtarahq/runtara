@@ -232,6 +232,7 @@ fn init_config() {
         // explicitly rather than mutating environment variables after Tokio starts.
         runtara_server::config::init(runtara_server::config::Config {
             tenant_id: "session-test".into(),
+            served_tenants: vec!["session-test".into()],
             max_concurrent_executions: 100,
             execution_timeout_policy: Default::default(),
             checkpoint_ttl_hours: 48,

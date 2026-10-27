@@ -75,6 +75,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns none), for readers such as fleet nodes that must not hold the
   store's credentials.
 
+- **A server serves an explicit set of tenants.** `TENANT_ID` is the primary
+  tenant and `RUNTARA_SERVED_TENANTS` (comma-separated) adds more; one by
+  default. Requests and work for any other tenant are refused: an OIDC token
+  or an API key whose org is not served gets 403 (an API key's org was not
+  checked before), and an HTTP trigger webhook runs under its trigger's own
+  tenant only when that tenant is served (404 otherwise); the sync webhook
+  finds the workflow among the served tenants. Product events from
+  background work carry the work's tenant, and a run's `RUNTARA_TENANT_ID`
+  is its own tenant, not the process's. `e2e/test_served_tenants.sh`.
+
 - **The platform object-model database is optional.** Without
   `OBJECT_MODEL_DATABASE_URL` the server has no default database and creates
   no default `object_model` connection. The object model, SQL steps, CSV

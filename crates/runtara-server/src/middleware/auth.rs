@@ -40,6 +40,12 @@ pub async fn authenticate(
             Ok(key) => key,
             Err(response) => return response,
         };
+        // A key is its tenant's: one issued for a tenant this process does not
+        // serve authenticates nobody here.
+        if !crate::config::is_served_tenant(&api_key.org_id) {
+            return crate::auth::provider::AuthError::TenantMismatch(api_key.org_id)
+                .into_http_response();
+        }
         let mut auth_context = api_key_context(&api_key);
         // The key inherits the issuing user's current role from Valkey and is
         // subject to the same revocation denylist.

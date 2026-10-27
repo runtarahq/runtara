@@ -28,6 +28,9 @@ const RUNTARA_MAX_EXECUTION_TIMEOUT_SECS_ENV: &str = "RUNTARA_MAX_EXECUTION_TIME
 pub struct Config {
     /// Tenant ID for all API operations (required).
     pub tenant_id: String,
+    /// Every tenant this process serves: `tenant_id` first, then those
+    /// `RUNTARA_SERVED_TENANTS` adds (comma-separated). One by default.
+    pub served_tenants: Vec<String>,
     /// Maximum number of concurrent workflow executions.
     pub max_concurrent_executions: usize,
     /// One bounded policy shared by workflow validation, the runtime client,
@@ -130,6 +133,8 @@ impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         let tenant_id =
             std::env::var("TENANT_ID").map_err(|_| ConfigError::Missing("TENANT_ID"))?;
+        let served_tenants =
+            served_tenants_from_raw(&tenant_id, std::env::var("RUNTARA_SERVED_TENANTS").ok());
 
         let max_concurrent_executions: usize = parse_usize_or(
             "MAX_CONCURRENT_EXECUTIONS",
@@ -298,6 +303,7 @@ impl Config {
 
         Ok(Self {
             tenant_id,
+            served_tenants,
             max_concurrent_executions,
             execution_timeout_policy,
             checkpoint_ttl_hours,
@@ -668,6 +674,28 @@ pub fn tenant_id() -> &'static str {
     &get().tenant_id
 }
 
+/// Every tenant this process serves, the primary ([`tenant_id`]) first.
+pub fn served_tenants() -> &'static [String] {
+    &get().served_tenants
+}
+
+/// Whether this process serves `tenant`. Requests and work for any other
+/// tenant are refused.
+pub fn is_served_tenant(tenant: &str) -> bool {
+    try_get().is_some_and(|config| config.served_tenants.iter().any(|served| served == tenant))
+}
+
+fn served_tenants_from_raw(primary: &str, extra: Option<String>) -> Vec<String> {
+    let mut tenants = vec![primary.to_owned()];
+    for tenant in extra.iter().flat_map(|raw| raw.split(',')) {
+        let tenant = tenant.trim();
+        if !tenant.is_empty() && !tenants.iter().any(|served| served == tenant) {
+            tenants.push(tenant.to_owned());
+        }
+    }
+    tenants
+}
+
 /// Get the tenant ID, or `None` when the global config hasn't been
 /// initialised yet. Use this from code paths that may run before
 /// [`init`] — for example, structured-log call sites that want to
@@ -979,6 +1007,15 @@ mod tests {
         let policy = execution_timeout_policy_from_raw(Some("120"), Some("300")).unwrap();
         assert_eq!(policy.default_timeout().as_secs(), 120);
         assert_eq!(policy.maximum_timeout().as_secs(), 300);
+    }
+
+    #[test]
+    fn served_tenants_start_with_the_primary_and_add_the_listed_ones_once() {
+        assert_eq!(served_tenants_from_raw("a", None), ["a"]);
+        assert_eq!(
+            served_tenants_from_raw("a", Some(" b, a ,,c,b ".into())),
+            ["a", "b", "c"]
+        );
     }
 
     #[test]

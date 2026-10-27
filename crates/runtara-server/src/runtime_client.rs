@@ -594,8 +594,7 @@ impl RuntimeClient {
         // environment (set by an unsafe env::set_var in server startup) —
         // passing them explicitly through StartInstanceOptions removes that
         // race-prone pattern and makes the workflow ABI typed.
-        let server_config = crate::config::get();
-        options = options.with_env_var("RUNTARA_TENANT_ID", &server_config.tenant_id);
+        options = options.with_env_var("RUNTARA_TENANT_ID", tenant_id);
 
         // Debug mode (pause at breakpoints)
         if debug {

@@ -1108,7 +1108,7 @@ impl ExecutionEngine {
                 if let ExecutionError::EntitlementDenied(denial) = &error {
                     crate::product_events::emit_quota_exceeded(
                         &self.events,
-                        ProductEvent::new(EventType::QuotaExceeded)
+                        ProductEvent::for_tenant(EventType::QuotaExceeded, req.tenant_id)
                             .no_user_actor("execution_engine", ActorType::System)
                             .resource(req.workflow_id, "workflow")
                             .source(EventSource::Worker),
@@ -1408,9 +1408,11 @@ impl ExecutionEngine {
         // is `worker` (engine-emitted).
         if matches!(result, Ok(DetachedExecution::Started(_))) {
             let actor = match event.trigger_id() {
-                Some(trigger_id) => ProductEvent::new(EventType::ExecutionStarted)
-                    .no_user_actor(trigger_id, ActorType::Trigger),
-                None => ProductEvent::new(EventType::ExecutionStarted)
+                Some(trigger_id) => {
+                    ProductEvent::for_tenant(EventType::ExecutionStarted, &event.tenant_id)
+                        .no_user_actor(trigger_id, ActorType::Trigger)
+                }
+                None => ProductEvent::for_tenant(EventType::ExecutionStarted, &event.tenant_id)
                     .no_user_actor("execution_engine", ActorType::System),
             };
             self.events.emit(
@@ -1436,6 +1438,7 @@ impl ExecutionEngine {
             let version = event.version;
             let instance_id = instance_id.clone();
             let trigger_id = event.trigger_id().map(|s| s.to_string());
+            let tenant_id = event.tenant_id.clone();
             const ANALYTICS_POLL_INTERVAL: Duration = Duration::from_secs(2);
             tokio::spawn(async move {
                 // Wait one interval before the first look. The run was started
@@ -1478,10 +1481,9 @@ impl ExecutionEngine {
                     }
                 };
                 let actor = match trigger_id {
-                    Some(trigger_id) => {
-                        ProductEvent::new(event_type).no_user_actor(trigger_id, ActorType::Trigger)
-                    }
-                    None => ProductEvent::new(event_type)
+                    Some(trigger_id) => ProductEvent::for_tenant(event_type, &tenant_id)
+                        .no_user_actor(trigger_id, ActorType::Trigger),
+                    None => ProductEvent::for_tenant(event_type, &tenant_id)
                         .no_user_actor("execution_engine", ActorType::System),
                 };
                 events.emit(
