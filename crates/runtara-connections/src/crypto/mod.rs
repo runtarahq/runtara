@@ -42,5 +42,8 @@ pub mod cipher;
 pub mod factory;
 pub mod noop;
 
-pub use cipher::{CipherError, CredentialCipher, ENVELOPE_ALG, ENVELOPE_VERSION};
+pub use cipher::{
+    BOUND_ENVELOPE_VERSION, CipherContext, CipherError, CredentialCipher, ENVELOPE_ALG,
+    ENVELOPE_VERSION,
+};
 pub use factory::{ENCRYPTION_KEY_ENV, cipher_from_env};

@@ -9,6 +9,30 @@ use serde_json::Value;
 /// Envelope schema version. Bump when changing the envelope format.
 pub const ENVELOPE_VERSION: u32 = 1;
 
+/// The envelope that binds a credential to its tenant and connection
+/// (associated data, see [`CipherContext`]). New writes use it; version 1
+/// envelopes still decrypt, unbound, until re-encrypted.
+pub const BOUND_ENVELOPE_VERSION: u32 = 2;
+
+/// What a stored credential belongs to. Its ciphertext is bound to both, so
+/// one moved to another connection or tenant does not decrypt.
+#[derive(Debug, Clone, Copy)]
+pub struct CipherContext<'a> {
+    pub tenant_id: &'a str,
+    pub connection_id: &'a str,
+}
+
+impl CipherContext<'_> {
+    /// The associated data authenticated with the ciphertext.
+    pub fn aad(&self) -> Vec<u8> {
+        format!(
+            "runtara:connection:v2\0{}\0{}",
+            self.tenant_id, self.connection_id
+        )
+        .into_bytes()
+    }
+}
+
 /// Algorithm identifier stored in the envelope. Used for forward-compat so a
 /// future cipher (XChaCha20-Poly1305, KMS-wrapped DEK, etc.) can coexist with
 /// existing AES-GCM data.
@@ -49,13 +73,13 @@ pub trait CredentialCipher: Send + Sync {
     /// storing in the `connection_parameters` JSONB column.
     ///
     /// A fresh random nonce must be generated for every call — never reuse.
-    fn encrypt(&self, plaintext: &Value) -> Result<Value, CipherError>;
+    fn encrypt(&self, plaintext: &Value, context: &CipherContext) -> Result<Value, CipherError>;
 
     /// Decrypt an envelope JSON value. If the input is not a recognized
     /// envelope (no `"v"` + `"alg"` fields), return it unchanged — this
     /// supports the gradual-rollout workflow where existing rows are still
     /// plaintext.
-    fn decrypt(&self, stored: &Value) -> Result<Value, CipherError>;
+    fn decrypt(&self, stored: &Value, context: &CipherContext) -> Result<Value, CipherError>;
 
     /// Identifier for the key currently in use. Stored in the envelope's
     /// `"kid"` field to support key rotation (decrypt uses the key named in

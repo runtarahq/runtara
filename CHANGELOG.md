@@ -95,6 +95,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tenant. `e2e/test_served_tenants.sh` serves two tenants from one process
   and checks neither reads the other's workflows, versions or runs.
 
+- **Connection credentials are bound to their tenant and connection.** New
+  writes store a version 2 envelope whose AES-256-GCM associated data is the
+  tenant and connection id, so a ciphertext copied to another connection or
+  tenant does not decrypt; version 1 envelopes still decrypt, unbound, until
+  `runtara-server reencrypt-connections` rewrites them. The cipher is a
+  keyring: the current key (`RUNTARA_CONNECTIONS_ENCRYPTION_KEY`, `_KEY_ID`)
+  encrypts, and retired keys (`RUNTARA_CONNECTIONS_RETIRED_KEYS`,
+  `kid:base64,…`) still decrypt the envelopes that name them, so a key is
+  rotated by adding the new one, re-encrypting, then dropping the old.
+  `e2e/test_credential_binding.sh`.
+
 - **Every instance-scoped table records its tenant.** Store migration 053
   adds `tenant_id` to checkpoints, events, signals, state, waits, leases,
   attempts, continuations and control receipts, and environment migration

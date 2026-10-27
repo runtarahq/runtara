@@ -30,6 +30,11 @@ pub const ENCRYPTION_KEY_ID_ENV: &str = "RUNTARA_CONNECTIONS_ENCRYPTION_KEY_ID";
 /// [`cipher_from_env`] refuses to fall back to [`NoOpCipher`] and returns an
 /// error instead — plaintext-at-rest becomes a boot failure rather than a
 /// log line.
+/// Retired keys that still decrypt (`kid:base64,kid:base64`), kept until
+/// `runtara-server reencrypt-connections` has moved every credential to the
+/// current key.
+pub const RETIRED_KEYS_ENV: &str = "RUNTARA_CONNECTIONS_RETIRED_KEYS";
+
 pub const REQUIRE_ENCRYPTION_ENV: &str = "RUNTARA_REQUIRE_CREDENTIAL_ENCRYPTION";
 
 /// Deployment-environment signal this crate understands. `RUNTARA_ENV=production`
@@ -97,7 +102,22 @@ pub fn cipher_from_env() -> Result<Arc<dyn CredentialCipher>, String> {
     let key_material = Zeroizing::new(key_b64);
     let key_id = std::env::var(ENCRYPTION_KEY_ID_ENV).unwrap_or_else(|_| "env".to_string());
 
-    match AesGcmCipher::from_base64_key(&key_material, &key_id) {
+    let built = AesGcmCipher::from_base64_key(&key_material, &key_id).and_then(|cipher| {
+        let retired = Zeroizing::new(std::env::var(RETIRED_KEYS_ENV).unwrap_or_default());
+        retired
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .try_fold(cipher, |cipher, entry| {
+                let (retired_id, retired_key) = entry.split_once(':').ok_or_else(|| {
+                    super::cipher::CipherError::InvalidKey(format!(
+                        "{RETIRED_KEYS_ENV} entries are kid:base64"
+                    ))
+                })?;
+                cipher.with_retired_base64_key(retired_key, retired_id)
+            })
+    });
+    match built {
         Ok(cipher) => {
             tracing::info!(
                 key_id = %key_id,
