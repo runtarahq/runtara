@@ -70,6 +70,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   components directory loads its agents from the bucket, and compiles and
   runs workflows there (`e2e/test_object_store.sh`, against MinIO). TLS is
   rustls on ring, so no C crypto build is added.
+  `ArtifactStore::presigned_get` signs a credential-free GET URL for an
+  artifact's content on S3, GCS and Azure stores (the filesystem store
+  returns none), for readers such as fleet nodes that must not hold the
+  store's credentials.
 
 - **The platform object-model database is optional.** Without
   `OBJECT_MODEL_DATABASE_URL` the server has no default database and creates
@@ -79,8 +83,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   needed. Tenant database connections pass an address guard, enforced by
   default without a platform database (`RUNTARA_DATABASE_CONNECTION_GUARD`):
   loopback, private, metadata and local-socket addresses are refused before
-  anything connects (allowlist: `RUNTARA_PROXY_ALLOWED_HOSTS`), and the
-  connection is pinned to the vetted address. `OBJECT_MODEL_TENANT_POOL_MAX`
+  anything connects (allowlist: `RUNTARA_PROXY_ALLOWED_HOSTS`), a URL that
+  names its target in a `host` or `hostaddr` parameter is refused, and the
+  connection is pinned to the vetted address, checked by re-parsing it the
+  way the connector does. `OBJECT_MODEL_TENANT_POOL_MAX`
   (default 16) caps the pools one tenant's connections hold open. With the
   variable set, behaviour is unchanged. `e2e/test_optional_platform_db.sh`.
 

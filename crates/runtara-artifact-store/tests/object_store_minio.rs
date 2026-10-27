@@ -155,6 +155,35 @@ async fn a_bucket_holds_content_records_and_releases() {
         b"http"
     );
 
+    // A presigned URL fetches the content with no credentials, until it expires.
+    let url = store
+        .presigned_get(&digest, std::time::Duration::from_secs(60))
+        .await
+        .unwrap()
+        .expect("an S3 store signs URLs");
+    assert!(url.contains("/tenant-a/blobs/sha256/"), "{url}");
+    let fetched = reqwest::get(&url).await.unwrap();
+    assert!(fetched.status().is_success(), "{}", fetched.status());
+    assert_eq!(Digest::of(&fetched.bytes().await.unwrap()), digest);
+    let short = store
+        .presigned_get(&digest, std::time::Duration::from_secs(1))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert_eq!(
+        reqwest::get(&short).await.unwrap().status().as_u16(),
+        403,
+        "expired"
+    );
+    assert_eq!(
+        store
+            .presigned_get(&Digest::of(b"absent"), std::time::Duration::from_secs(60))
+            .await
+            .unwrap(),
+        None
+    );
+
     assert!(store.delete_manifest("agents/http/1.json").await.unwrap());
     assert!(store.delete(&digest).await.unwrap());
     assert!(!store.exists(&digest).await.unwrap());

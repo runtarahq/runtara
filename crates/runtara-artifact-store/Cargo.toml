@@ -34,7 +34,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", features = ["fs", "io-util", "rt", "macros"] }
+# The MinIO test fetches presigned URLs over plain HTTP.
+reqwest = { version = "0.13", default-features = false }
+tokio = { version = "1", features = ["fs", "io-util", "rt", "macros", "time"] }
 
 [[test]]
 name = "object_store_minio"

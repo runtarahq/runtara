@@ -15,7 +15,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+use object_store::signer::Signer;
+use object_store::{ObjectStore, ObjectStoreExt, ObjectStoreScheme, PutPayload};
 
 use crate::{ArtifactError, ArtifactStore, Digest, Manifest, validate_manifest_key};
 
@@ -24,6 +25,10 @@ use crate::{ArtifactError, ArtifactStore, Digest, Manifest, validate_manifest_ke
 pub struct ObjectArtifactStore {
     store: Arc<dyn ObjectStore>,
     cache: PathBuf,
+    /// Signs GET URLs for content, when the provider can; paths it signs are
+    /// in the bucket, so they carry `prefix`.
+    signer: Option<Arc<dyn Signer>>,
+    prefix: Path,
 }
 
 /// The environment variables `from_url` reads options from: the standard
@@ -44,6 +49,8 @@ impl ObjectArtifactStore {
         Self {
             store,
             cache: cache.into(),
+            signer: None,
+            prefix: Path::default(),
         }
     }
 
@@ -72,14 +79,64 @@ impl ObjectArtifactStore {
         let parsed = url::Url::parse(url).map_err(|error| {
             ArtifactError::Store(format!("artifact store URL {url:?}: {error}"))
         })?;
-        let (store, prefix) =
-            object_store::parse_url_opts(&parsed, options).map_err(store_error)?;
-        let store: Arc<dyn ObjectStore> = if prefix.as_ref().is_empty() {
-            Arc::from(store)
-        } else {
-            Arc::new(object_store::prefix::PrefixStore::new(store, prefix))
+        let options: Vec<(String, String)> = options.into_iter().collect();
+        let (scheme, prefix) = ObjectStoreScheme::parse(&parsed)
+            .map_err(|error| ArtifactError::Store(error.to_string()))?;
+        // The cloud stores are built here, not by `parse_url_opts`, to keep
+        // them as signers too.
+        let (store, signer): (Arc<dyn ObjectStore>, Option<Arc<dyn Signer>>) = match scheme {
+            ObjectStoreScheme::AmazonS3 => {
+                let mut builder = object_store::aws::AmazonS3Builder::new().with_url(url);
+                for (key, value) in &options {
+                    if let Ok(key) = key.parse() {
+                        builder = builder.with_config(key, value);
+                    }
+                }
+                let store = Arc::new(builder.build().map_err(store_error)?);
+                (store.clone(), Some(store))
+            }
+            ObjectStoreScheme::GoogleCloudStorage => {
+                let mut builder = object_store::gcp::GoogleCloudStorageBuilder::new().with_url(url);
+                for (key, value) in &options {
+                    if let Ok(key) = key.parse() {
+                        builder = builder.with_config(key, value);
+                    }
+                }
+                let store = Arc::new(builder.build().map_err(store_error)?);
+                (store.clone(), Some(store))
+            }
+            ObjectStoreScheme::MicrosoftAzure => {
+                let mut builder = object_store::azure::MicrosoftAzureBuilder::new().with_url(url);
+                for (key, value) in &options {
+                    if let Ok(key) = key.parse() {
+                        builder = builder.with_config(key, value);
+                    }
+                }
+                let store = Arc::new(builder.build().map_err(store_error)?);
+                (store.clone(), Some(store))
+            }
+            _ => {
+                let (store, _) =
+                    object_store::parse_url_opts(&parsed, options).map_err(store_error)?;
+                (Arc::from(store), None)
+            }
         };
-        Ok(Self::new(store, cache))
+        let prefix =
+            Path::parse(prefix).map_err(|error| ArtifactError::Store(error.to_string()))?;
+        let store: Arc<dyn ObjectStore> = if prefix.as_ref().is_empty() {
+            store
+        } else {
+            Arc::new(object_store::prefix::PrefixStore::new(
+                store,
+                prefix.clone(),
+            ))
+        };
+        Ok(Self {
+            store,
+            cache: cache.into(),
+            signer,
+            prefix,
+        })
     }
 
     fn blob(digest: &Digest) -> Path {
@@ -188,6 +245,30 @@ impl ArtifactStore for ObjectArtifactStore {
             _ => {}
         }
         Ok(present)
+    }
+
+    async fn presigned_get(
+        &self,
+        digest: &Digest,
+        ttl: std::time::Duration,
+    ) -> Result<Option<String>, ArtifactError> {
+        let Some(signer) = &self.signer else {
+            return Ok(None);
+        };
+        if !self.exists(digest).await? {
+            return Ok(None);
+        }
+        let blob = Self::blob(digest);
+        let path = if self.prefix.as_ref().is_empty() {
+            blob
+        } else {
+            Path::from(format!("{}/{blob}", self.prefix))
+        };
+        let url = signer
+            .signed_url(object_store::signer::Method::GET, &path, ttl)
+            .await
+            .map_err(store_error)?;
+        Ok(Some(url.to_string()))
     }
 
     async fn put_manifest(&self, key: &str, manifest: &Manifest) -> Result<(), ArtifactError> {

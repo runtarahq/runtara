@@ -158,6 +158,19 @@ pub trait ArtifactStore: Send + Sync {
     /// knowing that nothing references it any more.
     async fn delete(&self, digest: &Digest) -> Result<bool, ArtifactError>;
 
+    /// A URL that fetches the artifact's content with no credentials, valid
+    /// for `ttl`, for a reader that must not hold the store's (a fleet node).
+    /// `None` when the store cannot sign URLs (a filesystem) or the artifact is
+    /// not stored. The reader still verifies the bytes against the digest.
+    async fn presigned_get(
+        &self,
+        digest: &Digest,
+        ttl: std::time::Duration,
+    ) -> Result<Option<String>, ArtifactError> {
+        let _ = (digest, ttl);
+        Ok(None)
+    }
+
     /// Record `manifest` under `key`, replacing what was there. Refused when
     /// its content is not stored: content first, then the manifest.
     async fn put_manifest(&self, key: &str, manifest: &Manifest) -> Result<(), ArtifactError>;
