@@ -34,8 +34,15 @@ pub enum AuthzValkeyError {
 }
 
 /// Valkey key for a member's role record.
-fn member_key(user_id: &str) -> String {
-    format!("member:{user_id}")
+/// The member record of `user_id` in `tenant`. The primary tenant keeps the
+/// original `member:{user_id}`; every other served tenant's records are
+/// prefixed with it, so one tenant's role never answers for another.
+fn member_key(tenant: &str, user_id: &str) -> String {
+    if crate::config::try_tenant_id().is_none_or(|primary| primary == tenant) {
+        format!("member:{user_id}")
+    } else {
+        format!("member:{tenant}:{user_id}")
+    }
 }
 
 /// Valkey key for a token-revocation denylist entry.
@@ -61,17 +68,19 @@ fn parse_member_record(raw: &str) -> Result<Role, AuthzValkeyError> {
         .map_err(|e| AuthzValkeyError::Parse(e.to_string()))
 }
 
-/// Read the caller's role for this tenant from `member:{user_id}`.
+/// Read the caller's role in `tenant` (`member:{user_id}` for the primary
+/// tenant, `member:{tenant}:{user_id}` for any other served one).
 ///
 /// Returns `Ok(None)` when the key is absent — the user is not a member of this tenant.
 /// Returns `Err` if Valkey is unreachable or the stored record is malformed; the caller
 /// fails the request closed in both cases.
 pub async fn get_member_role(
     manager: &ConnectionManager,
+    tenant: &str,
     user_id: &str,
 ) -> Result<Option<Role>, AuthzValkeyError> {
     let mut conn = manager.clone();
-    let raw: Option<String> = conn.get(member_key(user_id)).await?;
+    let raw: Option<String> = conn.get(member_key(tenant, user_id)).await?;
     match raw {
         None => Ok(None),
         Some(raw) => parse_member_record(&raw).map(Some),
@@ -123,7 +132,13 @@ mod tests {
 
     #[test]
     fn keys_follow_contract() {
-        assert_eq!(member_key("auth0|abc"), "member:auth0|abc");
+        crate::config::init_for_test();
+        let primary = crate::config::tenant_id();
+        assert_eq!(member_key(primary, "auth0|abc"), "member:auth0|abc");
+        assert_eq!(
+            member_key("tenant-b", "auth0|abc"),
+            "member:tenant-b:auth0|abc"
+        );
         assert_eq!(revoked_token_key("jti-1"), "token:revoked:jti-1");
     }
 

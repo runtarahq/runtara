@@ -170,9 +170,13 @@ async fn enforce_api_key_membership(
     }
 
     let started = std::time::Instant::now();
-    let outcome =
-        resolve_api_key_membership(auth_state, api_key.jti.as_deref(), &api_key.issuing_user_id)
-            .await;
+    let outcome = resolve_api_key_membership(
+        auth_state,
+        api_key.jti.as_deref(),
+        &api_key.org_id,
+        &api_key.issuing_user_id,
+    )
+    .await;
     record_lookup_duration(started, ctx.auth_method.as_str(), outcome.is_ok());
     match outcome {
         Ok(role) => {
@@ -209,6 +213,7 @@ fn record_lookup_duration(started: std::time::Instant, auth_method: &'static str
 async fn resolve_api_key_membership(
     auth_state: &AuthState,
     jti: Option<&str>,
+    tenant: &str,
     issuing_user_id: &str,
 ) -> Result<Option<Role>, MembershipDenial> {
     let Some(manager) = auth_state.valkey.as_ref() else {
@@ -225,7 +230,7 @@ async fn resolve_api_key_membership(
         }
     }
 
-    match get_member_role(manager, issuing_user_id).await {
+    match get_member_role(manager, tenant, issuing_user_id).await {
         Ok(Some(role)) => Ok(Some(role)),
         Ok(None) => Err(MembershipDenial::NotAMember),
         Err(AuthzValkeyError::Parse(detail)) => Err(MembershipDenial::MalformedRecord(detail)),
@@ -419,7 +424,7 @@ async fn resolve_membership(
         Err(e) => return Err(MembershipDenial::ValkeyUnavailable(e.to_string())),
     }
 
-    match get_member_role(manager, &ctx.user_id).await {
+    match get_member_role(manager, &ctx.org_id, &ctx.user_id).await {
         Ok(Some(role)) => Ok(Some(role)),
         Ok(None) => Err(MembershipDenial::NotAMember),
         Err(AuthzValkeyError::Parse(detail)) => Err(MembershipDenial::MalformedRecord(detail)),

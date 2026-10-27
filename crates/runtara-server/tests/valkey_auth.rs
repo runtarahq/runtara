@@ -57,7 +57,9 @@ async fn get_member_role_reads_each_role() {
         let mut conn = manager.clone();
         let _: () = conn.set(&key, &value).await.expect("set member");
 
-        let got = get_member_role(&manager, &uid).await.expect("read role");
+        let got = get_member_role(&manager, "primary", &uid)
+            .await
+            .expect("read role");
         assert_eq!(got, Some(role));
 
         let _: () = conn.del(&key).await.expect("cleanup");
@@ -70,7 +72,9 @@ async fn get_member_role_absent_is_none() {
     let manager = fresh_manager(&url).await;
 
     let uid = unique("auth0|missing");
-    let got = get_member_role(&manager, &uid).await.expect("read role");
+    let got = get_member_role(&manager, "primary", &uid)
+        .await
+        .expect("read role");
     assert_eq!(got, None, "absent member key must read as not-a-member");
 }
 
@@ -88,7 +92,7 @@ async fn get_member_role_malformed_fails_closed() {
         .expect("set");
 
     assert!(
-        get_member_role(&manager, &uid).await.is_err(),
+        get_member_role(&manager, "primary", &uid).await.is_err(),
         "unknown role must surface an error, not a default"
     );
 
