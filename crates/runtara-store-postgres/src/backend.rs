@@ -927,8 +927,24 @@ impl Persistence for PostgresPersistence {
         command_id: &str,
         signal_type: CoreSignalType,
     ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
+        self.apply_owned_lifecycle_command(instance_id, command_id, signal_type, None)
+            .await
+    }
+
+    async fn apply_owned_lifecycle_command(
+        &self,
+        instance_id: &str,
+        command_id: &str,
+        signal_type: CoreSignalType,
+        owner: runtara_core::persistence::ExecutionWriter<'_>,
+    ) -> Result<runtara_core::lifecycle::Decision, CoreError> {
         use runtara_core::lifecycle::{self, Decision, Receipt};
         let mut tx = self.pool.begin().await.db()?;
+        // An owned acknowledgement applies only while its execution holds
+        // the run (an unowned one, from the control plane, is not fenced).
+        if owner.is_some() {
+            crate::root_owner::admit_row_writer(&mut tx, instance_id, owner).await?;
+        }
         let status = crate::lifecycle::lock_instance(&mut tx, instance_id).await?;
         let ids = [instance_id.to_owned()];
         let commands = crate::lifecycle::lock_commands(&mut tx, &ids).await?;

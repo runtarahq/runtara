@@ -214,6 +214,12 @@ pub trait RuntimeHost: Send + Sync {
     fn superseded(&self) -> bool {
         false
     }
+    /// Whether this run's execution still holds the run, read durably: false
+    /// once recovery revoked its lease or another launch holds it. A host
+    /// without a lease always holds its run.
+    async fn holds_run(&self) -> bool {
+        true
+    }
     /// Emit a custom event (`kind` becomes the event subtype).
     async fn custom_event(&self, kind: String, payload: Vec<u8>) -> Result<(), String>;
     /// Whether step-level debug instrumentation is enabled for this run.

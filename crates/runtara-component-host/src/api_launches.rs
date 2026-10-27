@@ -908,6 +908,15 @@ impl WorkflowApiBackend for Backend {
         outcome: PostedOutcome,
     ) -> Result<(), ApiError> {
         let slot = self.0.slot(binding).ok_or_else(not_serving)?;
+        // A launch that lost the run must not be told its outcome was taken.
+        if let Some(runtime) = slot.runtime.upgrade()
+            && !runtime.holds_run().await
+        {
+            return Err(ApiError::new(
+                ErrorCode::Fenced,
+                "this launch no longer holds the run's lease",
+            ));
+        }
         let mut outcome = outcome;
         if let PostedOutcome::Suspended(suspension) = &mut outcome {
             for wait_id in slot
@@ -1899,6 +1908,98 @@ mod tests {
             backend.launch_state(&binding(1)).await.unwrap(),
             LaunchState::Fenced
         );
+        assert_eq!(launches.finish("launch-1"), None);
+    }
+
+    /// A runtime that lost its run's lease, as recovery leaves one.
+    struct LostRun;
+
+    #[async_trait]
+    impl RuntimeHost for LostRun {
+        async fn holds_run(&self) -> bool {
+            false
+        }
+        fn instance_id(&self) -> Result<String, String> {
+            unreachable!()
+        }
+        async fn custom_event(&self, _: String, _: Vec<u8>) -> Result<(), String> {
+            unreachable!()
+        }
+        fn debug_mode_enabled(&self) -> Result<bool, String> {
+            unreachable!()
+        }
+        async fn breakpoint_pause(&self) -> Result<(), String> {
+            unreachable!()
+        }
+        async fn heartbeat(&self) -> Result<(), String> {
+            unreachable!()
+        }
+        async fn poll_signal(
+            &self,
+        ) -> Result<Option<crate::runtime_host::RuntimeSignalInfo>, String> {
+            unreachable!()
+        }
+        async fn is_cancelled(&self) -> Result<bool, String> {
+            unreachable!()
+        }
+        async fn check_signals(&self) -> Result<bool, String> {
+            unreachable!()
+        }
+        async fn poll_custom_signal(&self, _: String) -> Result<Option<Vec<u8>>, String> {
+            unreachable!()
+        }
+        async fn get_checkpoint(&self, _: String) -> Result<Option<Vec<u8>>, String> {
+            unreachable!()
+        }
+        async fn checkpoint(
+            &self,
+            _: String,
+            _: Vec<u8>,
+        ) -> Result<crate::runtime_host::RuntimeCheckpointResult, String> {
+            unreachable!()
+        }
+        async fn handle_checkpoint_signal(&self, _: String, _: String) -> Result<bool, String> {
+            unreachable!()
+        }
+        async fn record_retry_attempt(
+            &self,
+            _: String,
+            _: u32,
+            _: Option<String>,
+        ) -> Result<(), String> {
+            unreachable!()
+        }
+        async fn durable_sleep_checkpoint(
+            &self,
+            _: String,
+            _: Vec<u8>,
+            _: u64,
+        ) -> Result<(), String> {
+            unreachable!()
+        }
+    }
+
+    /// A launch that lost its run is told its outcome was fenced, and the
+    /// outcome is not taken for the run.
+    #[tokio::test]
+    async fn an_outcome_from_a_launch_that_lost_its_run_is_fenced() {
+        let launches = Arc::new(ApiLaunches::default());
+        let backend = Backend(launches.clone());
+        let runtime: Arc<dyn RuntimeHost> = Arc::new(LostRun);
+        launches
+            .begin(
+                binding(1),
+                info(),
+                Vec::new(),
+                Arc::downgrade(&runtime),
+                controls(),
+            )
+            .unwrap();
+        let error = backend
+            .post_outcome(&binding(1), PostedOutcome::Completed(b"out".to_vec()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Fenced, "{error:?}");
         assert_eq!(launches.finish("launch-1"), None);
     }
 

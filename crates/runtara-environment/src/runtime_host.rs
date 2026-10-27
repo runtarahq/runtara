@@ -371,19 +371,34 @@ impl PersistenceRuntimeHost {
     }
 
     /// Apply only the command the guest actually observed.
+    /// An execution that no longer holds the run cannot apply it.
     async fn ack_signal(&self, signal_type: SignalType, command_id: &str) -> Result<bool, String> {
-        handle_signal_ack_decision(
-            &self.state,
-            SignalAck {
-                command_id: command_id.to_owned(),
-                instance_id: self.instance_id.clone(),
-                signal_type: signal_type as i32,
-                acknowledged: true,
-            },
-        )
-        .await
-        .map(|decision| decision.accepted())
-        .map_err(Self::err)
+        let owner = self.root_lease.get().cloned();
+        let Some(owner) = owner else {
+            return handle_signal_ack_decision(
+                &self.state,
+                SignalAck {
+                    command_id: command_id.to_owned(),
+                    instance_id: self.instance_id.clone(),
+                    signal_type: signal_type as i32,
+                    acknowledged: true,
+                },
+            )
+            .await
+            .map(|decision| decision.accepted())
+            .map_err(Self::err);
+        };
+        self.state
+            .persistence
+            .apply_owned_lifecycle_command(
+                &self.instance_id,
+                command_id,
+                signal_type.into(),
+                Some(&owner),
+            )
+            .await
+            .map(|decision| decision.accepted())
+            .map_err(|error| self.write_err(error))
     }
 
     /// Record a suspended instance event
@@ -498,6 +513,32 @@ impl RuntimeHost for PersistenceRuntimeHost {
 
     fn superseded(&self) -> bool {
         self.superseded.load(Ordering::SeqCst)
+    }
+
+    async fn holds_run(&self) -> bool {
+        if self.superseded.load(Ordering::SeqCst) {
+            return false;
+        }
+        let (Some(owner), Some(fences)) = (
+            self.root_lease.get(),
+            self.state.persistence.invocation_fences(),
+        ) else {
+            return true;
+        };
+        // A failed read is not proof of loss: the terminal write still fences.
+        let holds = match fences
+            .get_invocation_lease(&owner.tenant_id, &owner.instance_id)
+            .await
+        {
+            Ok(Some(state)) => state.active && state.lease == *owner,
+            Ok(None) => false,
+            Err(_) => true,
+        };
+        if !holds {
+            tracing::warn!(instance_id = %self.instance_id, "Execution no longer holds the run");
+            self.superseded.store(true, Ordering::SeqCst);
+        }
+        holds
     }
 
     fn in_process_wait(&self) -> Option<Box<dyn std::any::Any + Send>> {

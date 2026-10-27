@@ -1030,7 +1030,21 @@ impl Persistence for InMemoryPersistence {
         command_id: &str,
         signal_type: crate::domain::SignalType,
     ) -> Result<Decision, CoreError> {
+        self.apply_owned_lifecycle_command(instance_id, command_id, signal_type, None)
+            .await
+    }
+
+    async fn apply_owned_lifecycle_command(
+        &self,
+        instance_id: &str,
+        command_id: &str,
+        signal_type: crate::domain::SignalType,
+        owner: crate::persistence::ExecutionWriter<'_>,
+    ) -> Result<Decision, CoreError> {
         let mut store = self.store.lock().unwrap();
+        if owner.is_some() {
+            store.admit_writer(instance_id, owner)?;
+        }
         let status = store.instance_mut(instance_id)?.status;
         let decision = lifecycle::acknowledge(
             status,

@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `e2e/test_lost_executor_fenced.sh` loses a launch mid-run and checks the
   run finishes once.
 
+- **A stale executor cannot acknowledge a command or post an outcome.**
+  Lifecycle acks (pause, cancel, shutdown) are admitted by the run's root
+  lease like every other guest write (`Persistence::apply_owned_lifecycle_command`,
+  with a conformance case), so a superseded launch leaves the command pending
+  for the launch that holds the run. `POST /v1/run/outcome` reads the lease
+  first and answers `fenced` to a launch that lost it.
+
 - **The workflow runner is pluggable.** A host binary can boot the stock
   server with its own runner: `runtara_server::boot::run(ServerOptions {
   runner_factory })`, where the factory builds a `Runner` from the parts the

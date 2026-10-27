@@ -1219,6 +1219,22 @@ pub trait Persistence: Send + Sync {
         signal_type: SignalType,
     ) -> Result<crate::lifecycle::Decision, CoreError>;
 
+    /// [`Self::apply_lifecycle_command`], acknowledged by the execution
+    /// `owner` names: refused as [`CoreError::Superseded`] unless it still
+    /// holds the run, so a lost executor cannot pause or cancel for its
+    /// replacement.
+    async fn apply_owned_lifecycle_command(
+        &self,
+        instance_id: &str,
+        command_id: &str,
+        signal_type: SignalType,
+        owner: ExecutionWriter<'_>,
+    ) -> Result<crate::lifecycle::Decision, CoreError> {
+        unfenced_default(owner, "apply_owned_lifecycle_command")?;
+        self.apply_lifecycle_command(instance_id, command_id, signal_type)
+            .await
+    }
+
     /// Evaluate the core parking guard and commit suspension metadata and its
     /// deadline atomically. A concurrent terminal transition cannot be overwritten.
     async fn park_instance(
