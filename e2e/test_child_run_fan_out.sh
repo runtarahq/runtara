@@ -13,6 +13,9 @@
 #   3. JOIN — every wake replays the Split, which finds the same ten children
 #      (no duplicates), and the parent completes once all ten have ended,
 #      with each item's result in order.
+#   4. BRANCHES — a fan-out of two branches, each calling `maybe-sleep` to
+#      sleep, starts both children before parking on the first, and finds
+#      the same two when it completes.
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
 # environment) + docker (isolated Valkey) and the shared workflow components
@@ -365,4 +368,77 @@ echo "${FINAL}" | jq -e 'length == 10 and all(.[]; .status == "completed")' >/de
     || { print_error "replays must find the same ten children, all completed: ${FINAL}"; exit 1; }
 echo "  replays found the same ten children (no duplicates), all completed ✓"
 
-print_success "child-run fan-out: ten children started at once, five finished while five slept, the parent parked and completed with every result"
+#-------------------------------------------------------------------------
+print_step "4. Parallel branches start their children together..."
+BRANCH_GRAPH='{
+  "name": "Branch Maybe Sleep",
+  "durable": true,
+  "steps": {
+    "start": { "stepType": "Log", "id": "start", "message": "fan out" },
+    "first": {
+      "stepType": "Agent", "id": "first", "agentId": "maybe-sleep", "capabilityId": "run",
+      "maxRetries": 0,
+      "inputMapping": {
+        "item": { "valueType": "immediate", "value": 1 },
+        "sleep": { "valueType": "immediate", "value": true }
+      }
+    },
+    "second": {
+      "stepType": "Agent", "id": "second", "agentId": "maybe-sleep", "capabilityId": "run",
+      "maxRetries": 0,
+      "inputMapping": {
+        "item": { "valueType": "immediate", "value": 2 },
+        "sleep": { "valueType": "immediate", "value": true }
+      }
+    },
+    "finish": {
+      "stepType": "Finish",
+      "id": "finish",
+      "inputMapping": {
+        "first": { "valueType": "reference", "value": "steps.first.outputs.item" },
+        "second": { "valueType": "reference", "value": "steps.second.outputs.item" }
+      }
+    }
+  },
+  "entryPoint": "start",
+  "executionPlan": [
+    { "fromStep": "start", "toStep": "first" },
+    { "fromStep": "start", "toStep": "second" },
+    { "fromStep": "first", "toStep": "finish" },
+    { "fromStep": "second", "toStep": "finish" }
+  ],
+  "variables": {},
+  "inputSchema": {},
+  "outputSchema": {}
+}'
+BRANCH_ID=$(create_and_compile "Branch Maybe Sleep" "${BRANCH_GRAPH}")
+RESP=$(api_post "/workflows/${BRANCH_ID}/execute" '{"inputs": {"data": {}}}')
+PARENT=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
+[ -n "${PARENT}" ] || { print_error "branch parent execute failed: ${RESP}"; exit 1; }
+# Both children exist while the first still sleeps: the second branch did not
+# wait for the first one's child to end before starting its own.
+SNAPSHOT=""
+for _ in {1..20}; do
+    SNAPSHOT=$(children_of "${PARENT}")
+    [ "$(echo "${SNAPSHOT}" | jq 'length')" = "2" ] && break
+    sleep 0.5
+done
+echo "${SNAPSHOT}" | jq -e 'length == 2 and all(.[]; .status != "completed")' >/dev/null \
+    || { print_error "both branch children must run at once: ${SNAPSHOT}"; tail -60 "${TEST_LOG}"; exit 1; }
+echo "  both branch children started before either ended: $(echo "${SNAPSHOT}" | jq -c '[.[].status]') ✓"
+for _ in {1..90}; do
+    RESP=$(curl -sS "${API}/workflows/instances/${PARENT}")
+    PARENT_STATUS=$(echo "${RESP}" | jq -r '.data.status // empty')
+    case "${PARENT_STATUS}" in completed|failed|crashed|stopped) break ;; esac
+    sleep 1
+done
+[ "${PARENT_STATUS}" = "completed" ] \
+    || { print_error "the branch parent ended '${PARENT_STATUS}': $(echo "${RESP}" | jq -c '.data.error // empty')"; tail -60 "${TEST_LOG}"; exit 1; }
+echo "${RESP}" | jq -e '.data.outputs.first == 1 and .data.outputs.second == 2' >/dev/null \
+    || { print_error "the branch parent must return both results: $(echo "${RESP}" | jq -c '.data.outputs')"; exit 1; }
+FINAL=$(children_of "${PARENT}")
+echo "${FINAL}" | jq -e 'length == 2 and all(.[]; .status == "completed")' >/dev/null \
+    || { print_error "the branches must find the two children they started, both completed: ${FINAL}"; exit 1; }
+echo "  completed with both results; still exactly two children ✓"
+
+print_success "child-run fan-out: ten children started at once, five finished while five slept, the parent parked and completed with every result; parallel branches started their children together"

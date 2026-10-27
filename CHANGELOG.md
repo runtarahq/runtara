@@ -341,6 +341,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     before such code starts its clock at once rather than at the guest's
     next yield.
 
+- **A workflow-agent that can park runs as a child run of its own.** Before,
+  a sleeping or waiting workflow-agent parked its whole calling tree; now its
+  caller parks on a wait for it, and the caller's other children keep going.
+  - Publishing records whether the version parks. Agents published before
+    this release stay composed into their caller until republished.
+  - The step's `timeoutMs` is the child's deadline: past it the caller
+    wakes, cancels the child and fails the step with `AGENT_TIMEOUT`.
+  - A parallel Split starts up to 15 such children per window, then parks.
+    Parallel branches headed by such calls start all their children before
+    the first branch parks.
+  - Each call is a run with its own instance row, costing a launch instead
+    of an in-process call.
+
 - **Breaking: a workflow's memory now limits its runs, and it is a number.**
   A workflow version has a memory in MiB (`memoryMb`, 1 to 65536, 256 by
   default), which caps the sum of a run's linear memories; each child Store

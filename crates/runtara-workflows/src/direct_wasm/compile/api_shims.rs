@@ -721,18 +721,18 @@ pub(super) fn emit_runtime_shims(
     // error string or the `list<u8>` at 4. A helper without a result takes no
     // result pointer.
     const NATIVE_PAYLOAD: u64 = 4;
-    let mut native = |params: usize,
+    let mut native = |params: &[WasmType],
                       returns: bool,
                       body: &mut dyn FnMut(&mut Shim) -> Result<(), DirectCompileError>|
      -> Result<u32, DirectCompileError> {
-        let mut shim = Shim::new(params, scratch, &layouts);
+        let mut shim = Shim::new(params.len(), scratch, &layouts);
         if !returns {
             shim.retptr = u32::MAX;
         }
         body(&mut shim)?;
         let index = imported_function_count + *next_defined_function;
         *next_defined_function += 1;
-        functions.function(push_core_type(types, type_count, &vec![I32; params], &[]));
+        functions.function(push_core_type(types, type_count, params, &[]));
         code.function(&if returns {
             shim.finish()
         } else {
@@ -768,7 +768,7 @@ pub(super) fn emit_runtime_shims(
         // A refused enter, or one whose operation cannot be entered, is the
         // step error the emitter lays out: no operation is entered.
         // `enter(checkpoint-key, attempt, load, retptr)`.
-        let enter_index = native(5, true, &mut |shim| {
+        let enter_index = native(&[I32; 5], true, &mut |shim| {
             set_cell(shim, cell, OPERATION_STATE, 0);
             shim.call(enter, &[0, 1, 2, 3], true);
             shim.on_error_return(&enter_ty, NATIVE_PAYLOAD)?;
@@ -807,7 +807,7 @@ pub(super) fn emit_runtime_shims(
         // is the step error; failing to keep the continuation fails the run,
         // since a lost one would re-run the operation from scratch.
         // `suspend(state, wakes, retptr)`.
-        let suspend_index = native(5, true, &mut |shim| {
+        let suspend_index = native(&[I32; 5], true, &mut |shim| {
             let old_err = NATIVE_PAYLOAD;
             let refuse = |shim: &mut Shim| {
                 shim.store_const_u8(0, 1);
@@ -850,7 +850,7 @@ pub(super) fn emit_runtime_shims(
         // operation's wait and discarding its continuation. It keeps the id
         // for `release`; a refused enter left nothing to leave.
         // `exit(failed)`.
-        let exit_index = native(1, false, &mut |shim| {
+        let exit_index = native(&[I32; 1], false, &mut |shim| {
             cell_state(shim, cell);
             shim.i(Instruction::I32Const(ENTERED))
                 .i(Instruction::I32Eq)
@@ -871,7 +871,7 @@ pub(super) fn emit_runtime_shims(
         // the old one it cannot fail: a continuation left behind goes with
         // the instance.
         // `release(checkpoint-key)`.
-        let release_index = native(2, false, &mut |shim| {
+        let release_index = native(&[I32; 2], false, &mut |shim| {
             cell_state(shim, cell);
             shim.i(Instruction::If(BlockType::Empty))
                 .i(Instruction::I32Const(id))
@@ -910,14 +910,14 @@ pub(super) fn emit_runtime_shims(
         let register = import("waits.register", &[P, L, P, L, P])?;
         let release = import("waits.release", &[P, L, P])?;
         // `register(key, request, retptr)`.
-        let register_index = native(5, true, &mut |shim| {
+        let register_index = native(&[I32; 5], true, &mut |shim| {
             shim.call(register, &[0, 1, 2, 3], true);
             shim.on_error_return_json(&register_ty, NATIVE_PAYLOAD, stdlib)?;
             native_list(shim, &register_ty)
         })?;
         // `release(key)` cannot fail: the result is already checkpointed,
         // and a settled wait left behind goes with the instance.
-        let release_index = native(2, false, &mut |shim| {
+        let release_index = native(&[I32; 2], false, &mut |shim| {
             shim.call(release, &[0, 1], true);
             Ok(())
         })?;
@@ -931,11 +931,11 @@ pub(super) fn emit_runtime_shims(
         let set = import("state.set", &[P, L, P, L, P])?;
         let get = import("state.get", &[P, L, P])?;
         // `set(key, patch, retptr)` and `get(key, retptr)`.
-        let set_index = native(5, true, &mut |shim| {
+        let set_index = native(&[I32; 5], true, &mut |shim| {
             shim.call(set, &[0, 1, 2, 3], true);
             shim.on_error_return_json(&set_ty, NATIVE_PAYLOAD, stdlib)
         })?;
-        let get_index = native(3, true, &mut |shim| {
+        let get_index = native(&[I32; 3], true, &mut |shim| {
             shim.call(get, &[0, 1], true);
             shim.on_error_return_json(&get_ty, NATIVE_PAYLOAD, stdlib)?;
             native_list(shim, &get_ty)
@@ -958,11 +958,12 @@ pub(super) fn emit_runtime_shims(
 }
 
 /// Bytes after the operation cell where the `child-run` helper builds its
-/// wait request, `{"instanceIds":["<task id>"],"mode":"all"}`; the heap starts after them
-/// when a child run exists.
-pub(super) const CHILD_RUN_REQUEST_BYTES: i32 = 176;
+/// wait request, `{"instanceIds":["<task id>"],"mode":"all","deadlineMs":n}`;
+/// the heap starts after them when a child run exists.
+pub(super) const CHILD_RUN_REQUEST_BYTES: i32 = 216;
 const CHILD_RUN_REQUEST_PREFIX: &[u8] = br#"{"instanceIds":[""#;
-const CHILD_RUN_REQUEST_SUFFIX: &[u8] = br#""],"mode":"all"}"#;
+const CHILD_RUN_REQUEST_SUFFIX: &[u8] = br#""],"mode":"all""#;
+const CHILD_RUN_REQUEST_DEADLINE: &[u8] = br#","deadlineMs":"#;
 
 /// What `child-run` leaves at its result pointer: the tag, then the payload
 /// at 8, where the composed Agent invoke leaves its normalized result.
@@ -984,18 +985,20 @@ pub(super) mod child_run {
     pub(crate) const MESSAGE: u64 = 96;
 }
 
-/// `child-run(binding, input, path, attempt, retptr)`: start the child run of
-/// `binding` for this call site (a replay finds the same child), read its
-/// outcome without waiting, and, while it still runs, register a wait on it
-/// under `path` so the run can park. An ended child's task and wait are
-/// released.
+/// `child-run(binding, input, path, attempt, deadline, settled, retptr)`:
+/// start the child run of `binding` for this call site (a replay finds the
+/// same child) and read its outcome without waiting. While it still runs,
+/// register a wait on it under `path`, with `deadline` (ms since the epoch,
+/// 0 for none), and answer `pending` with the wait's read at 8 so the run can
+/// park; with `settled` (the wait's deadline passed) cancel it instead and
+/// answer `timed-out`. An ended child's task and wait are released.
 /// Looks up an imported `runtara:api` function by `interface.function`,
 /// checking its core signature.
 type ImportLookup<'a> = dyn Fn(&str, &[WasmType]) -> Result<&'a ApiImport, DirectCompileError> + 'a;
-/// Defines a helper with `n` i32 params (its result pointer last when it
+/// Defines a helper with these params (its result pointer last when it
 /// returns) and the body the callback writes; answers its function index.
 type DefineNative<'d> = dyn FnMut(
-        usize,
+        &[WasmType],
         bool,
         &mut dyn FnMut(&mut Shim) -> Result<(), DirectCompileError>,
     ) -> Result<u32, DirectCompileError>
@@ -1033,9 +1036,14 @@ fn emit_child_run_shim<'a>(
     let error_at = layouts.offset(&outcome_ty, &[Step::Ok, Step::Some, Step::Case("failed")])?;
     // The composed invoke's `error-info`, which this one copies over.
     const ERROR_INFO_BYTES: i32 = 80;
+    let read_at = layouts.offset(&register_ty, &[Step::Ok])?;
+    // `"deadlineMs":` takes up to 20 digits, and `}` closes the request.
     let id_max = CHILD_RUN_REQUEST_BYTES
-        - (CHILD_RUN_REQUEST_PREFIX.len() + CHILD_RUN_REQUEST_SUFFIX.len()) as i32;
-    native(8, true, &mut |shim| {
+        - (CHILD_RUN_REQUEST_PREFIX.len()
+            + CHILD_RUN_REQUEST_SUFFIX.len()
+            + CHILD_RUN_REQUEST_DEADLINE.len()
+            + 21) as i32;
+    native(&[P, L, P, L, P, L, I32, I64, I32, P], true, &mut |shim| {
         let scratch = shim.scratch;
         let retptr = shim.retptr;
         let [id_ptr, id_len, tag] = [0, 1, 2].map(|n| shim.local(n));
@@ -1052,6 +1060,17 @@ fn emit_child_run_shim<'a>(
             shim.store_i32(child_run::MESSAGE + 4, len);
             shim.store_const_u8(0, child_run::UNAVAILABLE);
             shim.i(Instruction::Return).i(Instruction::End);
+        };
+        // The task (cancelling a child that still runs) and its wait go.
+        let release_both = |shim: &mut Shim| {
+            shim.i(Instruction::LocalGet(id_ptr))
+                .i(Instruction::LocalGet(id_len))
+                .i(Instruction::I32Const(scratch))
+                .i(Instruction::Call(release));
+            shim.i(Instruction::LocalGet(4))
+                .i(Instruction::LocalGet(5))
+                .i(Instruction::I32Const(scratch))
+                .i(Instruction::Call(wait_release));
         };
 
         // start(binding, workflow, input, {path, attempt})
@@ -1081,11 +1100,20 @@ fn emit_child_run_shim<'a>(
             .i(Instruction::Call(outcome));
         unavailable_if_error(shim, outcome_message);
 
-        // Still running: register(path, {"instanceIds":[id]}) and park.
+        // Still running. On a settled wait the deadline passed: the child is
+        // cancelled and the call timed out.
         shim.load_u8(ended_at, tag);
         shim.i(Instruction::LocalGet(tag))
             .i(Instruction::I32Eqz)
             .i(Instruction::If(BlockType::Empty));
+        shim.i(Instruction::LocalGet(8))
+            .i(Instruction::If(BlockType::Empty));
+        release_both(shim);
+        shim.store_const_u8(0, child_run::TIMED_OUT);
+        shim.i(Instruction::Return).i(Instruction::End);
+
+        // Otherwise register(path, {"instanceIds":[id],"mode":"all",
+        // "deadlineMs"?}) and leave its read for the caller.
         shim.i(Instruction::LocalGet(id_len))
             .i(Instruction::I32Const(id_max))
             .i(Instruction::I32GtU)
@@ -1094,37 +1122,44 @@ fn emit_child_run_shim<'a>(
         shim.store_i32(child_run::MESSAGE + 4, id_len);
         shim.store_const_u8(0, child_run::UNAVAILABLE);
         shim.i(Instruction::Return).i(Instruction::End);
-        for (n, byte) in CHILD_RUN_REQUEST_PREFIX.iter().enumerate() {
-            shim.i(Instruction::I32Const(request + n as i32))
-                .i(Instruction::I32Const(i32::from(*byte)))
-                .i(Instruction::I32Store8(mem(0, 0)));
-        }
-        let id_at_request = request + CHILD_RUN_REQUEST_PREFIX.len() as i32;
-        shim.i(Instruction::I32Const(id_at_request))
+        let cursor = shim.local(7);
+        shim.i(Instruction::I32Const(request))
+            .i(Instruction::LocalSet(cursor));
+        write_bytes(shim, cursor, CHILD_RUN_REQUEST_PREFIX);
+        shim.i(Instruction::LocalGet(cursor))
             .i(Instruction::LocalGet(id_ptr))
             .i(Instruction::LocalGet(id_len))
             .i(Instruction::MemoryCopy {
                 src_mem: 0,
                 dst_mem: 0,
-            });
-        for (n, byte) in CHILD_RUN_REQUEST_SUFFIX.iter().enumerate() {
-            shim.i(Instruction::I32Const(id_at_request))
-                .i(Instruction::LocalGet(id_len))
-                .i(Instruction::I32Add)
-                .i(Instruction::I32Const(i32::from(*byte)))
-                .i(Instruction::I32Store8(mem(n as u64, 0)));
-        }
+            })
+            .i(Instruction::LocalGet(cursor))
+            .i(Instruction::LocalGet(id_len))
+            .i(Instruction::I32Add)
+            .i(Instruction::LocalSet(cursor));
+        write_bytes(shim, cursor, CHILD_RUN_REQUEST_SUFFIX);
+        shim.i(Instruction::LocalGet(7))
+            .i(Instruction::I64Eqz)
+            .i(Instruction::I32Eqz)
+            .i(Instruction::If(BlockType::Empty));
+        write_bytes(shim, cursor, CHILD_RUN_REQUEST_DEADLINE);
+        write_decimal(shim, cursor, 7);
+        shim.i(Instruction::End);
+        write_bytes(shim, cursor, b"}");
         shim.i(Instruction::LocalGet(4))
             .i(Instruction::LocalGet(5))
             .i(Instruction::I32Const(request))
-            .i(Instruction::LocalGet(id_len))
-            .i(Instruction::I32Const(
-                (CHILD_RUN_REQUEST_PREFIX.len() + CHILD_RUN_REQUEST_SUFFIX.len()) as i32,
-            ))
-            .i(Instruction::I32Add)
+            .i(Instruction::LocalGet(cursor))
+            .i(Instruction::I32Const(request))
+            .i(Instruction::I32Sub)
             .i(Instruction::I32Const(scratch))
             .i(Instruction::Call(register));
         unavailable_if_error(shim, register_message);
+        let (ptr, len) = (shim.local(3), shim.local(4));
+        shim.load_i32(read_at, ptr);
+        shim.load_i32(read_at + 4, len);
+        shim.store_i32(8, ptr);
+        shim.store_i32(12, len);
         shim.store_const_u8(0, child_run::PENDING);
         shim.i(Instruction::Return).i(Instruction::End);
 
@@ -1172,18 +1207,69 @@ fn emit_child_run_shim<'a>(
             .i(Instruction::LocalSet(tag))
             .i(Instruction::End)
             .i(Instruction::End);
-        shim.i(Instruction::LocalGet(id_ptr))
-            .i(Instruction::LocalGet(id_len))
-            .i(Instruction::I32Const(scratch))
-            .i(Instruction::Call(release));
-        shim.i(Instruction::LocalGet(4))
-            .i(Instruction::LocalGet(5))
-            .i(Instruction::I32Const(scratch))
-            .i(Instruction::Call(wait_release));
+        release_both(shim);
         shim.store_u8(0, tag);
         shim.i(Instruction::Return);
         Ok(())
     })
+}
+
+/// Store `bytes` at `cursor`, advancing it.
+fn write_bytes(shim: &mut Shim, cursor: u32, bytes: &[u8]) {
+    for (n, byte) in bytes.iter().enumerate() {
+        shim.i(Instruction::LocalGet(cursor))
+            .i(Instruction::I32Const(i32::from(*byte)))
+            .i(Instruction::I32Store8(mem(n as u64, 0)));
+    }
+    shim.i(Instruction::LocalGet(cursor))
+        .i(Instruction::I32Const(bytes.len() as i32))
+        .i(Instruction::I32Add)
+        .i(Instruction::LocalSet(cursor));
+}
+
+/// Store the i64 `value` local (consumed) in decimal at `cursor`, advancing
+/// it.
+fn write_decimal(shim: &mut Shim, cursor: u32, value: u32) {
+    let rest = shim.tmp_i64;
+    // Advance past the digits, then write them backwards.
+    shim.i(Instruction::LocalGet(value))
+        .i(Instruction::LocalSet(rest))
+        .i(Instruction::Loop(BlockType::Empty))
+        .i(Instruction::LocalGet(cursor))
+        .i(Instruction::I32Const(1))
+        .i(Instruction::I32Add)
+        .i(Instruction::LocalSet(cursor))
+        .i(Instruction::LocalGet(rest))
+        .i(Instruction::I64Const(10))
+        .i(Instruction::I64DivU)
+        .i(Instruction::LocalTee(rest))
+        .i(Instruction::I64Eqz)
+        .i(Instruction::I32Eqz)
+        .i(Instruction::BrIf(0))
+        .i(Instruction::End);
+    let at = shim.local(8);
+    shim.i(Instruction::LocalGet(cursor))
+        .i(Instruction::LocalSet(at))
+        .i(Instruction::Loop(BlockType::Empty))
+        .i(Instruction::LocalGet(at))
+        .i(Instruction::I32Const(1))
+        .i(Instruction::I32Sub)
+        .i(Instruction::LocalTee(at))
+        .i(Instruction::LocalGet(value))
+        .i(Instruction::I64Const(10))
+        .i(Instruction::I64RemU)
+        .i(Instruction::I32WrapI64)
+        .i(Instruction::I32Const(i32::from(b'0')))
+        .i(Instruction::I32Add)
+        .i(Instruction::I32Store8(mem(0, 0)))
+        .i(Instruction::LocalGet(value))
+        .i(Instruction::I64Const(10))
+        .i(Instruction::I64DivU)
+        .i(Instruction::LocalTee(value))
+        .i(Instruction::I64Eqz)
+        .i(Instruction::I32Eqz)
+        .i(Instruction::BrIf(0))
+        .i(Instruction::End);
 }
 
 fn set_cell(shim: &mut Shim, cell: i32, offset: u64, value: i32) {

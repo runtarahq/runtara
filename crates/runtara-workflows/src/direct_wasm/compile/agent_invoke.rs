@@ -200,21 +200,87 @@ fn emit_child_run(
         key_ptr,
         key_len,
     );
-    emit_child_run_call(
+    let deadline = super::DIRECT_WAIT_DEADLINE_MS_LOCAL;
+    emit_child_run_deadline(body, indices, static_data, agent_id, deadline);
+    let call = |body: &mut WasmFunction, settled: bool| {
+        emit_child_run_call(
+            body,
+            indices,
+            binding,
+            (input_ptr_local, input_len_local),
+            (key_ptr, key_len),
+            attempt_local,
+            Some(deadline),
+            settled,
+        );
+    };
+    call(body, false);
+
+    // Pending: park on the wait, waking at its persisted deadline. A wait
+    // that settled while the child still runs passed its deadline, unless
+    // the child ended since; the second call tells which.
+    super::abi::load_retptr_tag(body);
+    body.instruction(&Instruction::I32Const(super::api_shims::child_run::PENDING));
+    body.instruction(&Instruction::I32Eq);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    push_retptr_i32_load(body, 8);
+    push_retptr_i32_load(body, 12);
+    push_retptr_arg(body);
+    super::abi::emit_call_wide_result(body, indices.stdlib_wait_instances_state);
+    super::abi::return_if_retptr_error(body, indices);
+    super::abi::push_retptr_u8_load(body, super::wait_instances::PROGRESS_PENDING_OFFSET);
+    body.instruction(&Instruction::If(BlockType::Empty));
+    super::abi::push_retptr_u8_load(body, super::wait_instances::PROGRESS_DEADLINE_TAG_OFFSET);
+    body.instruction(&Instruction::LocalSet(
+        super::DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+    ));
+    super::abi::push_retptr_i64_load(body, super::wait_instances::PROGRESS_DEADLINE_VALUE_OFFSET);
+    body.instruction(&Instruction::LocalSet(deadline));
+    super::wait_instances::emit_park(
         body,
         indices,
-        binding,
-        (input_ptr_local, input_len_local),
-        (key_ptr, key_len),
-        attempt_local,
+        super::DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+        deadline,
     );
-    emit_child_run_outcome(body, indices, static_data, true);
+    body.instruction(&Instruction::Else);
+    call(body, true);
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::End);
+    emit_child_run_outcome(body, static_data);
+}
+
+/// Set `deadline` to the wait deadline of a child-run call: now plus the
+/// step's timeout, or 0 without one. The host keeps the first registration's
+/// deadline, so a replay's later one reads back the first.
+pub(super) fn emit_child_run_deadline(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    agent_id: u32,
+    deadline: u32,
+) {
+    match static_data.agent_timeout(agent_id) {
+        Some(timeout_ms) => {
+            push_retptr_arg(body);
+            super::abi::emit_call_wide_result(body, indices.runtime_now_ms);
+            super::abi::return_if_retptr_error(body, indices);
+            super::abi::push_retptr_i64_load(body, super::DIRECT_RET_U64_OK_OFFSET);
+            body.instruction(&Instruction::I64Const(timeout_ms as i64));
+            body.instruction(&Instruction::I64Add);
+        }
+        None => {
+            body.instruction(&Instruction::I64Const(0));
+        }
+    }
+    body.instruction(&Instruction::LocalSet(deadline));
 }
 
 /// Call the `child-run` helper for one call site: `path` is its durable key,
 /// and the attempt is the retry attempt, or 1 for a step that never retries
 /// (whatever an earlier step left in the attempt local must not name a
-/// different child on a replay).
+/// different child on a replay). `deadline` (ms since the epoch) goes on
+/// the wait; `settled` times out a child that still runs.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_child_run_call(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
@@ -222,6 +288,8 @@ pub(super) fn emit_child_run_call(
     (input_ptr, input_len): (u32, u32),
     (path_ptr, path_len): (u32, u32),
     attempt_local: Option<u32>,
+    deadline_local: Option<u32>,
+    settled: bool,
 ) {
     push_segment_args(body, binding);
     body.instruction(&Instruction::LocalGet(input_ptr));
@@ -232,6 +300,11 @@ pub(super) fn emit_child_run_call(
         Some(local) => body.instruction(&Instruction::LocalGet(local)),
         None => body.instruction(&Instruction::I32Const(1)),
     };
+    match deadline_local {
+        Some(local) => body.instruction(&Instruction::LocalGet(local)),
+        None => body.instruction(&Instruction::I64Const(0)),
+    };
+    body.instruction(&Instruction::I32Const(i32::from(settled)));
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(
         indices
@@ -242,76 +315,59 @@ pub(super) fn emit_child_run_call(
 
 /// Turn a `child-run` result into the normalized `result<list<u8>,
 /// error-info>` an invoke leaves: an ended child that did not complete or
-/// fail becomes its step error. With `park`, a pending child parks the run
-/// (its wait is registered: the host attaches it to the suspension);
-/// without, the pending tag stays for the caller to read.
-pub(super) fn emit_child_run_outcome(
-    body: &mut WasmFunction,
-    indices: &DirectCoreFunctionIndices,
-    static_data: &DirectCoreStaticData,
-    park: bool,
-) {
+/// fail becomes its step error. The pending tag stays for the caller to
+/// read.
+pub(super) fn emit_child_run_outcome(body: &mut WasmFunction, static_data: &DirectCoreStaticData) {
     use super::api_shims::child_run;
     let errors = static_data
         .child_run_errors
         .as_ref()
         .expect("a child-run call lays out its errors");
-    for (tag, then) in [
-        (child_run::PENDING, None),
+    for (tag, (segment, fields)) in [
         (
             child_run::CANCELLED,
-            Some((
+            (
                 &errors[0],
                 crate::direct_wasm::static_data::CHILD_RUN_CANCELLED_FIELDS,
-            )),
+            ),
         ),
         (
             child_run::TRAPPED,
-            Some((
+            (
                 &errors[1],
                 crate::direct_wasm::static_data::CHILD_RUN_TRAPPED_FIELDS,
-            )),
+            ),
         ),
         (
             child_run::UNAVAILABLE,
-            Some((
+            (
                 &errors[2],
                 crate::direct_wasm::static_data::CHILD_RUN_UNAVAILABLE_FIELDS,
-            )),
+            ),
         ),
     ] {
-        if then.is_none() && !park {
-            continue;
-        }
         super::abi::load_retptr_tag(body);
         body.instruction(&Instruction::I32Const(tag));
         body.instruction(&Instruction::I32Eq);
         body.instruction(&Instruction::If(BlockType::Empty));
-        match then {
-            // Its wait is registered: the host attaches it to the suspension.
-            None => super::abi::emit_entry_suspend_return(body, indices),
-            Some((segment, fields)) => {
-                // `unavailable` keeps the API's message past the error-info,
-                // which `error_info` leaves alone.
-                let message = (tag == child_run::UNAVAILABLE).then_some(child_run::MESSAGE);
-                super::agent_deadline::error_info(body, segment.offset, fields);
-                if let Some(message) = message {
-                    // The error-info's message (ptr, len at 16).
-                    for (from, to) in [(message, 16u64), (message + 4, 20)] {
-                        body.instruction(&Instruction::I32Const(0));
-                        body.instruction(&Instruction::I32Const(0));
-                        body.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
-                            offset: from,
-                            align: 2,
-                            memory_index: 0,
-                        }));
-                        body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
-                            offset: to,
-                            align: 2,
-                            memory_index: 0,
-                        }));
-                    }
-                }
+        super::agent_deadline::error_info(body, segment.offset, fields);
+        // `unavailable` keeps the API's message past the error-info, which
+        // `error_info` leaves alone: it becomes the error-info's message
+        // (ptr, len at 16).
+        if tag == child_run::UNAVAILABLE {
+            for (from, to) in [(child_run::MESSAGE, 16u64), (child_run::MESSAGE + 4, 20)] {
+                body.instruction(&Instruction::I32Const(0));
+                body.instruction(&Instruction::I32Const(0));
+                body.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                    offset: from,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                body.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+                    offset: to,
+                    align: 2,
+                    memory_index: 0,
+                }));
             }
         }
         body.instruction(&Instruction::End);

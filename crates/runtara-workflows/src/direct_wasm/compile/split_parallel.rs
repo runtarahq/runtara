@@ -1306,8 +1306,10 @@ fn emit_child_run_launch(
         (output_ptr_local, output_len_local),
         (DIRECT_SPLIT_ITEM_PTR_LOCAL, DIRECT_SPLIT_ITEM_LEN_LOCAL),
         None,
+        None,
+        false,
     );
-    super::agent_invoke::emit_child_run_outcome(body, indices, static_data, false);
+    super::agent_invoke::emit_child_run_outcome(body, static_data);
     load_retptr_tag(body);
     body.instruction(&Instruction::I32Const(super::api_shims::child_run::PENDING));
     body.instruction(&Instruction::I32Eq);

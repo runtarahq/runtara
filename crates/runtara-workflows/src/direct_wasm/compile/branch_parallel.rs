@@ -1269,6 +1269,20 @@ pub(super) fn emit_parallel_branches(
         } else {
             // Sequential fallback: the exact linearised instruction stream — each
             // branch's FULL chain in order (no window, no memo), then the merge.
+            // Child runs that head their branches start first, together, so a
+            // branch that parks on its child does not hold its siblings' back.
+            emit_child_run_prestart(
+                body,
+                indices,
+                static_data,
+                &rest,
+                source_ptr_local,
+                source_len_local,
+                output_ptr_local,
+                output_len_local,
+                route_ptr_local,
+                route_len_local,
+            );
             for branch in &rest {
                 emit_run_plan_mapping(
                     body,
@@ -1320,6 +1334,116 @@ pub(super) fn emit_parallel_branches(
         failure_target,
         handled_target,
     );
+}
+
+/// The child-run Agents that head their branches, when two or more do: a
+/// head that never retries and has no breakpoint, so its call site starts
+/// the child it will read (attempt 1) with nothing to pause for first.
+fn child_run_heads<'a>(
+    static_data: &DirectCoreStaticData,
+    branches: &'a [DirectRunPlan],
+) -> Vec<BranchAgent<'a>> {
+    let heads: Vec<BranchAgent<'a>> = branches
+        .iter()
+        .filter(|branch| matches!(branch, DirectRunPlan::Agent { .. }))
+        .map(branch_agent)
+        .filter(|head| {
+            static_data.agent_child_run(head.agent_id).is_some()
+                && head.max_retries == 0
+                && !head.breakpoint
+        })
+        .collect();
+    if heads.len() < 2 { Vec::new() } else { heads }
+}
+
+/// Start the child run of every branch's child-run head before the branches
+/// run in turn. Each start is the call site's own (its durable key, attempt
+/// 1 and deadline), so the branch's call later finds the same child and
+/// reads its outcome; one that already ended is released here and read
+/// there. A head whose result is checkpointed, or whose input does not
+/// prepare, is left to its branch, which reports any error.
+#[allow(clippy::too_many_arguments)]
+fn emit_child_run_prestart(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    branches: &[DirectRunPlan],
+    source_ptr_local: u32,
+    source_len_local: u32,
+    input_ptr_local: u32,
+    input_len_local: u32,
+    scratch_ptr_local: u32,
+    scratch_len_local: u32,
+) {
+    let (key_ptr, key_len) = (
+        super::DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL,
+        super::DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL,
+    );
+    let deadline = super::DIRECT_WAIT_DEADLINE_MS_LOCAL;
+    for head in child_run_heads(static_data, branches) {
+        let binding = static_data
+            .agent_child_run(head.agent_id)
+            .expect("a child-run head has a binding");
+        body.instruction(&Instruction::Block(BlockType::Empty)); // $skip
+        let skip_on_error = |body: &mut WasmFunction| {
+            load_retptr_tag(body);
+            body.instruction(&Instruction::BrIf(0));
+        };
+
+        // key = agent-cache-key(agent, source); it ignores `source.steps`, so
+        // it is the key the branch computes after its siblings ran.
+        body.instruction(&Instruction::I32Const(head.agent_id as i32));
+        body.instruction(&Instruction::LocalGet(source_ptr_local));
+        body.instruction(&Instruction::LocalGet(source_len_local));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_agent_cache_key));
+        skip_on_error(body);
+        load_retptr_list(body, key_ptr, key_len);
+        if head.durable_checkpoint {
+            body.instruction(&Instruction::LocalGet(key_ptr));
+            body.instruction(&Instruction::LocalGet(key_len));
+            super::checkpoint::emit_get_checkpoint(body, indices);
+            emit_get_checkpoint_has_value(body);
+            body.instruction(&Instruction::BrIf(0)); // HIT -> done before
+        }
+
+        // input = apply-mapping(mapping, source), validated as the branch will.
+        body.instruction(&Instruction::I32Const(head.input_mapping_id as i32));
+        body.instruction(&Instruction::LocalGet(source_ptr_local));
+        body.instruction(&Instruction::LocalGet(source_len_local));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_apply_mapping));
+        skip_on_error(body);
+        load_retptr_list(body, input_ptr_local, input_len_local);
+        body.instruction(&Instruction::I32Const(head.agent_id as i32));
+        body.instruction(&Instruction::LocalGet(input_ptr_local));
+        body.instruction(&Instruction::LocalGet(input_len_local));
+        push_retptr_arg(body);
+        body.instruction(&Instruction::Call(indices.stdlib_agent_validate_input));
+        skip_on_error(body);
+        load_retptr_list(body, scratch_ptr_local, scratch_len_local);
+        body.instruction(&Instruction::LocalGet(scratch_len_local));
+        body.instruction(&Instruction::BrIf(0));
+
+        super::agent_invoke::emit_child_run_deadline(
+            body,
+            indices,
+            static_data,
+            head.agent_id,
+            deadline,
+        );
+        super::agent_invoke::emit_child_run_call(
+            body,
+            indices,
+            binding,
+            (input_ptr_local, input_len_local),
+            (key_ptr, key_len),
+            None,
+            Some(deadline),
+            false,
+        );
+        body.instruction(&Instruction::End);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

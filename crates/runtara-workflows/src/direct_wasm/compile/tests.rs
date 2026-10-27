@@ -10969,6 +10969,124 @@ fn direct_compile_parallel_split_starts_child_runs() {
     assert!(!has("-par1"), "no phantom pool member");
 }
 
+/// A child-run step with a timeout reads the clock for its wait's deadline
+/// and parks on the persisted one; the artifact validates.
+#[test]
+fn direct_compile_child_run_step_with_timeout_validates() {
+    let info = runtara_dsl::agent_meta::with_workflow_run(
+        runtara_dsl::agent_meta::workflow_agent_info(
+            "maybe-sleep",
+            "maybe-sleep",
+            "fixture",
+            &HashMap::new(),
+            &HashMap::new(),
+        ),
+        runtara_dsl::agent_meta::WorkflowRunTarget {
+            workflow_id: "wf-maybe-sleep".to_string(),
+            version: 2,
+            parks: true,
+        },
+    );
+    let catalog = runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![info]);
+    let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "durable": true,
+        "entryPoint": "call",
+        "steps": {
+            "call": {"id": "call", "stepType": "Agent", "agentId": "maybe-sleep",
+                "capabilityId": "run", "maxRetries": 0, "timeout": 2000,
+                "inputMapping": {"x": {"valueType": "reference", "value": "data.x"}}},
+            "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
+                "result": {"valueType": "reference", "value": "steps.call.outputs"}}}
+        },
+        "executionPlan": [{"fromStep": "call", "toStep": "finish"}]
+    }))
+    .expect("graph");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "child-run-timeout".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: Some(std::sync::Arc::new(catalog)),
+        agent_slug: None,
+    })
+    .expect("a timed child-run step compiles");
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
+        .validate_all(&wasm)
+        .expect("the artifact validates");
+}
+
+/// Parallel branches headed by child runs start their children together:
+/// the fan-out lowers sequentially with a prestart of every head, and the
+/// artifact validates.
+#[test]
+fn direct_compile_parallel_branches_prestart_child_runs() {
+    let info = runtara_dsl::agent_meta::with_workflow_run(
+        runtara_dsl::agent_meta::workflow_agent_info(
+            "maybe-sleep",
+            "maybe-sleep",
+            "fixture",
+            &HashMap::new(),
+            &HashMap::new(),
+        ),
+        runtara_dsl::agent_meta::WorkflowRunTarget {
+            workflow_id: "wf-maybe-sleep".to_string(),
+            version: 2,
+            parks: true,
+        },
+    );
+    let catalog = runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![info]);
+    let call = |item: u32| {
+        serde_json::json!({"stepType": "Agent", "agentId": "maybe-sleep",
+            "capabilityId": "run", "maxRetries": 0, "timeoutMs": 60000,
+            "inputMapping": {"item": {"valueType": "immediate", "value": item}}})
+    };
+    let mut first = call(1);
+    first["id"] = "first".into();
+    let mut second = call(2);
+    second["id"] = "second".into();
+    let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "durable": true,
+        "entryPoint": "start",
+        "steps": {
+            "start": {"id": "start", "stepType": "Log", "message": "fan out"},
+            "first": first,
+            "second": second,
+            "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
+                "a": {"valueType": "reference", "value": "steps.first.outputs"},
+                "b": {"valueType": "reference", "value": "steps.second.outputs"}}}
+        },
+        "executionPlan": [
+            {"fromStep": "start", "toStep": "first"},
+            {"fromStep": "start", "toStep": "second"},
+            {"fromStep": "first", "toStep": "finish"},
+            {"fromStep": "second", "toStep": "finish"}
+        ]
+    }))
+    .expect("graph");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "branch-child-runs".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: Some(std::sync::Arc::new(catalog)),
+        agent_slug: None,
+    })
+    .expect("parallel child-run branches compile");
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
+        .validate_all(&wasm)
+        .expect("the artifact validates");
+}
+
 /// Sequential scheduling also uses standard async calls so an individual
 /// operation can cooperate with cancellation.
 #[test]
