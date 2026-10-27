@@ -330,10 +330,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     agent SDK. A component that imports any of the interfaces above is
     refused when a workflow is compiled against it, and at load.
 
-- **Wasmtime 49 (from 46).** Agents and workflows need no rebuild: the WASI
-  0.3 interfaces are unchanged. Wasmtime 50 is held back: it drops the
-  `cancellable` waits that published workflow-agents use to see their
-  caller's cancel (component-model #716).
+- **Wasmtime 50 (from 46).** The WASI 0.3 interfaces are unchanged, so agents
+  need no rebuild. Wasmtime 50 drops the `cancellable` waits
+  (component-model #716): only the event loop of a callback-lifted export
+  delivers a caller's cancel.
+  - Published workflow-agents are now lifted async with a callback. The
+    emitted body is unchanged; the compiler instruments it so that each wait
+    returns to the event loop and resumes where it stopped. Workflow-agents
+    published before this release must be republished: their artifacts use
+    `cancellable` waits that Wasmtime 50 refuses to load, and compiling a
+    workflow that calls one says so.
   - Raw `wasi:http@0.2` stays denied; `wasi:http@0.3` reaches only the
     workflow API.
   - A workflow API request is now served on a task of its own, so it makes

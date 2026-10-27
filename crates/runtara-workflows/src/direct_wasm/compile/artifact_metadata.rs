@@ -301,6 +301,26 @@ pub(super) fn resolve_shared_component_dependencies(
         .collect()
 }
 
+/// A workflow-agent published before the callback lift (SYN-770) waits with
+/// `cancellable` builtins, which the runtime no longer loads: compose it and
+/// its caller would fail at launch. Ask for a republish instead.
+fn reject_cancellable_waits(
+    wasm: &Path,
+    component: &DirectAgentComponentRequirement,
+) -> Result<(), DirectCompileError> {
+    let bytes = std::fs::read(wasm)?;
+    let marker = b"[cancellable]";
+    if bytes.windows(marker.len()).any(|window| window == marker) {
+        return Err(DirectCompileError::Component(format!(
+            "workflow-agent `{}` was published before this runtime and waits with \
+             `cancellable` builtins it no longer loads; republish it \
+             (POST /workflows/<id>/publish-agent) and recompile",
+            component.agent_id
+        )));
+    }
+    Ok(())
+}
+
 /// `workflow_agents` names the agents the emitted code treats as
 /// workflow-agents (see `DirectWorkflowManifest::workflow_agent_ids`). Their
 /// invokes re-raise the reserved park and suspend codes, so each one must
@@ -368,6 +388,9 @@ pub(super) fn resolve_agent_component_dependencies(
                     component.agent_id,
                     dir.display()
                 )));
+            }
+            if kind == AgentImportKind::StagedWorkflowAgent {
+                reject_cancellable_waits(&dir.join(&component.bundle_wasm_filename), component)?;
             }
             let resolved = resolve_component_dependency(
                 dir,
@@ -883,6 +906,27 @@ pub(crate) fn initial_memory_bytes(wasm: &[u8]) -> Result<u64, DirectCompileErro
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_workflow_agent_with_cancellable_waits_must_be_republished() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let component = DirectAgentComponentRequirement {
+            agent_id: "old-agent".into(),
+            package: "runtara:agent-old-agent".into(),
+            package_with_version: "runtara:agent-old-agent@1.0.0".into(),
+            bundle_wasm_filename: "runtara_agent_old_agent.wasm".into(),
+            bundle_meta_filename: "runtara_agent_old_agent.meta.json".into(),
+            cas_wasm_filename: "runtara-agent-old-agent.wasm".into(),
+        };
+        let wasm = dir.path().join(&component.bundle_wasm_filename);
+        std::fs::write(&wasm, b"\0asm..[cancellable][waitable-set-wait]..").unwrap();
+        let error = super::reject_cancellable_waits(&wasm, &component)
+            .expect_err("an artifact with cancellable waits is refused")
+            .to_string();
+        assert!(error.contains("republish"), "{error}");
+        std::fs::write(&wasm, b"\0asm..[async-lift]..[waitable-set-wait]..").unwrap();
+        super::reject_cancellable_waits(&wasm, &component).expect("a lifted artifact is fine");
+    }
+
     use super::*;
 
     #[test]
