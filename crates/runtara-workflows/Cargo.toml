@@ -69,7 +69,9 @@ wasmparser = { version = "0.247", optional = true }
 runtara-core = { path = "../runtara-core", features = ["test-support"] }
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 runtara-database-contract = { path = "../runtara-database-contract" }
-wat = "1.253"
+# Pinned with Wasmtime 49: wat 1.259+ refuses the `cancellable` option its
+# component model still uses (component-model#716, SYN-770).
+wat = "=1.258.3"
 anyhow = "1"
 runtara-agent-trusted = { path = "../runtara-agent-trusted" }
 # Execute emitted retry predicates at u32 boundaries without billions of invocations.
