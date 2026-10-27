@@ -162,7 +162,7 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
         binding: &Binding,
         start: crate::TaskStart,
         input: Vec<u8>,
-    ) -> Result<String, ApiError> {
+    ) -> Result<crate::TaskStarted, ApiError> {
         let _ = (binding, start, input);
         Err(unsupported_service("tasks"))
     }

@@ -178,10 +178,13 @@ impl WorkflowApiBackend for FakeBackend {
         _: &Binding,
         start: crate::TaskStart,
         input: Vec<u8>,
-    ) -> Result<String, ApiError> {
+    ) -> Result<crate::TaskStarted, ApiError> {
         let mut run = self.run.lock().unwrap();
         run.tasks.push((start, input));
-        Ok(format!("task-{}", run.tasks.len()))
+        Ok(crate::TaskStarted {
+            task_id: format!("task-{}", run.tasks.len()),
+            instance_id: None,
+        })
     }
     async fn task_outcome(
         &self,

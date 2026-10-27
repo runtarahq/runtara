@@ -391,6 +391,155 @@ impl Backend {
             .ok_or_else(|| task_error(crate::execution_host::ExecutionError::InvalidTask))
     }
 
+    /// Whether `task_id` is a task this launch runs in process. Any other id
+    /// is a child run of the launch's instance, read from persistence.
+    fn is_live_task(&self, binding: &Binding, task_id: &str) -> Result<bool, ApiError> {
+        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
+        let tasks = slot.tasks.lock().expect("launch tasks poisoned");
+        Ok(tasks.live.contains_key(task_id))
+    }
+
+    /// The control host and the authority a child run of `binding`'s run is
+    /// started and cancelled under. `operation` names the call site.
+    fn child_control(
+        &self,
+        binding: &Binding,
+        operation: Option<String>,
+    ) -> Result<(Arc<dyn ControlHost>, ControlAuthority), ApiError> {
+        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
+        if slot.standalone.is_some() {
+            return Err(ApiError::new(
+                ErrorCode::Denied,
+                "child runs are not available in this context",
+            ));
+        }
+        let host = self.0.control.get().cloned().ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::Denied,
+                "child runs are not available in this context",
+            )
+        })?;
+        Ok((
+            host,
+            ControlAuthority {
+                tenant: binding.tenant_id.clone(),
+                caller: Some(binding.instance_id.clone()),
+                operation,
+            },
+        ))
+    }
+
+    /// Start (or, on a replay of the same call, find again) a child run.
+    async fn start_child_run(
+        &self,
+        binding: &Binding,
+        child: ChildRunBinding,
+        start: runtara_workflow_api::TaskStart,
+        input: Vec<u8>,
+    ) -> Result<runtara_workflow_api::TaskStarted, ApiError> {
+        if start.entry != runtara_workflow_api::TaskEntry::Workflow {
+            return Err(ApiError::new(
+                ErrorCode::Invalid,
+                "a workflow child run takes the `workflow` entry",
+            ));
+        }
+        let data: serde_json::Value = serde_json::from_slice(&input)
+            .map_err(|error| ApiError::new(ErrorCode::Invalid, format!("child input: {error}")))?;
+        // The child runs with the envelope every root run gets.
+        let input = serde_json::to_vec(&serde_json::json!({"data": data, "variables": {}}))
+            .expect("a JSON value serializes");
+        let (host, authority) =
+            self.child_control(binding, Some(child_operation(&start.context)))?;
+        let started = host
+            .start(
+                &authority,
+                control_host::StartRequest {
+                    workflow_id: child.workflow_id,
+                    version: child.version,
+                    input,
+                    run_label: None,
+                    parent_close_policy: control_host::ParentClosePolicy::Cancel,
+                },
+            )
+            .await
+            .map_err(|error| control_host::json::api_error(&error))?;
+        Ok(runtara_workflow_api::TaskStarted {
+            task_id: started.instance_id.clone(),
+            instance_id: Some(started.instance_id),
+        })
+    }
+
+    /// A child run's outcome once it has ended, waiting up to `wait_ms`.
+    async fn child_run_outcome(
+        &self,
+        binding: &Binding,
+        task_id: &str,
+        wait_ms: u64,
+    ) -> Result<Option<runtara_workflow_api::TaskOutcome>, ApiError> {
+        use control_host::InstanceStatus;
+        let (host, authority) = self.child_control(binding, None)?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+        loop {
+            let detail = host
+                .get(&authority, task_id.to_owned())
+                .await
+                .map_err(|error| control_host::json::api_error(&error))?;
+            if detail.instance.parent_instance_id.as_deref() != Some(binding.instance_id.as_str()) {
+                return Err(task_error(
+                    crate::execution_host::ExecutionError::InvalidTask,
+                ));
+            }
+            let ended = match detail.instance.status {
+                InstanceStatus::Completed => Some(child_completed(detail.terminal)),
+                InstanceStatus::Failed => Some(child_failed(
+                    detail.instance.termination_reason.as_deref(),
+                    detail.terminal,
+                )),
+                InstanceStatus::Cancelled | InstanceStatus::NotStarted => {
+                    Some(runtara_workflow_api::TaskOutcome::Cancelled)
+                }
+                InstanceStatus::Queued
+                | InstanceStatus::Pending
+                | InstanceStatus::Running
+                | InstanceStatus::Suspended => None,
+            };
+            let now = tokio::time::Instant::now();
+            if ended.is_some() || now >= deadline {
+                return Ok(ended);
+            }
+            tokio::time::sleep((deadline - now).min(CHILD_RUN_POLL)).await;
+        }
+    }
+
+    /// Request that a child run stop.
+    async fn cancel_child_run(
+        &self,
+        binding: &Binding,
+        task_id: &str,
+    ) -> Result<runtara_workflow_api::CancelStatus, ApiError> {
+        let (host, authority) =
+            self.child_control(binding, Some(format!("task-cancel:{task_id}")))?;
+        let result = host
+            .cancel(
+                &authority,
+                control_host::CancelRequest {
+                    instance_id: task_id.to_owned(),
+                    reason: Some("cancelled by its parent".into()),
+                    grace_ms: None,
+                },
+            )
+            .await
+            .map_err(|error| control_host::json::api_error(&error))?;
+        use control_host::CommandOutcome;
+        Ok(match result.outcome {
+            CommandOutcome::Requested | CommandOutcome::Applied => {
+                runtara_workflow_api::CancelStatus::Requested
+            }
+            CommandOutcome::Unchanged => runtara_workflow_api::CancelStatus::AlreadyRequested,
+            CommandOutcome::AlreadyTerminal => runtara_workflow_api::CancelStatus::AlreadyTerminal,
+        })
+    }
+
     /// The runtime host of `binding`'s launch, while the launch is served.
     fn runtime(&self, binding: &Binding) -> Result<Arc<dyn RuntimeHost>, ApiError> {
         self.0
@@ -533,6 +682,93 @@ impl Backend {
                 instance: binding.instance_id.clone(),
             },
         ))
+    }
+}
+
+/// How often a join re-reads a child run that has not ended.
+const CHILD_RUN_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// A `/v1/tasks` binding naming a workflow to run as a child run of its own:
+/// `workflow:<workflow id>` or `workflow:<workflow id>@<version>`.
+struct ChildRunBinding {
+    workflow_id: String,
+    version: Option<u32>,
+}
+
+impl ChildRunBinding {
+    fn parse(binding: &str) -> Result<Option<Self>, ApiError> {
+        let Some(rest) = binding.strip_prefix("workflow:") else {
+            return Ok(None);
+        };
+        let invalid = || ApiError::new(ErrorCode::Invalid, format!("child binding `{binding}`"));
+        let (workflow_id, version) = match rest.split_once('@') {
+            Some((id, version)) => (id, Some(version.parse().map_err(|_| invalid())?)),
+            None => (rest, None),
+        };
+        if workflow_id.is_empty() {
+            return Err(invalid());
+        }
+        Ok(Some(Self {
+            workflow_id: workflow_id.to_owned(),
+            version,
+        }))
+    }
+}
+
+/// The operation a child run is started under: one per call site and
+/// attempt, so a replay of the parent reaching the same call finds the child
+/// it started before, and a retry (a new attempt) starts a new one.
+fn child_operation(context: &runtara_workflow_api::TaskContext) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"task\0");
+    digest.update(context.path.as_bytes());
+    digest.update(b"\0");
+    digest.update(context.attempt.to_be_bytes());
+    let digest = digest.finalize();
+    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("task:{hex}")
+}
+
+/// A completed child run's output, as the composed call returned it.
+fn child_completed(terminal: control_host::TerminalResult) -> runtara_workflow_api::TaskOutcome {
+    match terminal.output {
+        Some(output) => runtara_workflow_api::TaskOutcome::Completed(output),
+        None if terminal.output_omitted => runtara_workflow_api::TaskOutcome::Failed(child_error(
+            "CHILD_OUTPUT_TOO_LARGE",
+            "the child run's output is over the cap",
+        )),
+        None => runtara_workflow_api::TaskOutcome::Completed(b"null".to_vec()),
+    }
+}
+
+/// A failed child run's error, as its own `error-info` when it posted one.
+fn child_failed(
+    termination_reason: Option<&str>,
+    terminal: control_host::TerminalResult,
+) -> runtara_workflow_api::TaskOutcome {
+    if termination_reason.is_some_and(|reason| reason.contains("timeout")) {
+        return runtara_workflow_api::TaskOutcome::TimedOut;
+    }
+    let error = terminal.error.as_deref().map(|bytes| {
+        serde_json::from_slice::<runtara_workflow_api::ErrorInfo>(bytes)
+            .unwrap_or_else(|_| child_error("CHILD_FAILED", &String::from_utf8_lossy(bytes)))
+    });
+    runtara_workflow_api::TaskOutcome::Failed(
+        error.unwrap_or_else(|| child_error("CHILD_FAILED", "the child run failed")),
+    )
+}
+
+fn child_error(code: &str, message: &str) -> runtara_workflow_api::ErrorInfo {
+    runtara_workflow_api::ErrorInfo {
+        code: code.to_owned(),
+        message: message.to_owned(),
+        category: "permanent".into(),
+        severity: "error".into(),
+        retryable: false,
+        retry_after_ms: None,
+        attributes: None,
+        details: None,
     }
 }
 
@@ -806,7 +1042,10 @@ impl WorkflowApiBackend for Backend {
         binding: &Binding,
         start: runtara_workflow_api::TaskStart,
         input: Vec<u8>,
-    ) -> Result<String, ApiError> {
+    ) -> Result<runtara_workflow_api::TaskStarted, ApiError> {
+        if let Some(child) = ChildRunBinding::parse(&start.binding)? {
+            return self.start_child_run(binding, child, start, input).await;
+        }
         let slot = self.0.slot(binding).ok_or_else(not_serving)?;
         let execution = slot
             .controls
@@ -837,7 +1076,10 @@ impl WorkflowApiBackend for Backend {
         tasks.next += 1;
         let id = format!("task-{}", tasks.next);
         tasks.live.insert(id.clone(), Arc::new(handle));
-        Ok(id)
+        Ok(runtara_workflow_api::TaskStarted {
+            task_id: id,
+            instance_id: None,
+        })
     }
 
     async fn task_outcome(
@@ -846,6 +1088,9 @@ impl WorkflowApiBackend for Backend {
         task_id: &str,
         wait_ms: u64,
     ) -> Result<Option<runtara_workflow_api::TaskOutcome>, ApiError> {
+        if !self.is_live_task(binding, task_id)? {
+            return self.child_run_outcome(binding, task_id, wait_ms).await;
+        }
         let task = self.task(binding, task_id)?;
         match tokio::time::timeout(std::time::Duration::from_millis(wait_ms), task.join()).await {
             Ok(outcome) => outcome
@@ -861,6 +1106,9 @@ impl WorkflowApiBackend for Backend {
         task_id: &str,
     ) -> Result<runtara_workflow_api::CancelStatus, ApiError> {
         use crate::execution_host::CancelStatus;
+        if !self.is_live_task(binding, task_id)? {
+            return self.cancel_child_run(binding, task_id).await;
+        }
         Ok(
             match self
                 .task(binding, task_id)?
@@ -879,6 +1127,14 @@ impl WorkflowApiBackend for Backend {
     }
 
     async fn release_task(&self, binding: &Binding, task_id: &str) -> Result<(), ApiError> {
+        if !self.is_live_task(binding, task_id)? {
+            // A child run that is still going is cancelled; a finished one
+            // needs nothing.
+            if self.child_run_outcome(binding, task_id, 0).await?.is_none() {
+                self.cancel_child_run(binding, task_id).await?;
+            }
+            return Ok(());
+        }
         let slot = self.0.slot(binding).ok_or_else(not_serving)?;
         let task = slot
             .tasks
@@ -1773,7 +2029,8 @@ mod tests {
         let id = backend
             .start_task(&binding(1), start("a"), b"in".to_vec())
             .await
-            .unwrap();
+            .unwrap()
+            .task_id;
         started.notified().await;
         assert_eq!(
             backend.task_outcome(&binding(1), &id, 0).await.unwrap(),
@@ -1797,7 +2054,8 @@ mod tests {
         let live = backend
             .start_task(&binding(1), start("b"), Vec::new())
             .await
-            .unwrap();
+            .unwrap()
+            .task_id;
         assert_ne!(live, id);
         started.notified().await;
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
@@ -1825,5 +2083,285 @@ mod tests {
             .unwrap();
         let error = backend.alarm(&binding, 10).await.unwrap_err();
         assert_eq!(error.code, ErrorCode::Denied);
+    }
+
+    /// A child's parent, status, termination reason and result.
+    type ChildRun = (
+        String,
+        control_host::InstanceStatus,
+        Option<String>,
+        control_host::TerminalResult,
+    );
+
+    /// A control host whose children live in memory, started once per
+    /// operation the way the server's durable admission does.
+    #[derive(Default)]
+    struct Children {
+        by_operation: Mutex<HashMap<String, String>>,
+        runs: Mutex<HashMap<String, ChildRun>>,
+        starts: Mutex<Vec<(ControlAuthority, control_host::StartRequest)>>,
+        cancels: Mutex<Vec<String>>,
+    }
+
+    impl Children {
+        fn end(
+            &self,
+            id: &str,
+            status: control_host::InstanceStatus,
+            reason: Option<&str>,
+            output: Option<&[u8]>,
+            error: Option<&[u8]>,
+        ) {
+            let mut runs = self.runs.lock().unwrap();
+            let run = runs.get_mut(id).unwrap();
+            run.1 = status;
+            run.2 = reason.map(str::to_owned);
+            run.3.output = output.map(<[u8]>::to_vec);
+            run.3.error = error.map(<[u8]>::to_vec);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ControlHost for Children {
+        async fn start(
+            &self,
+            authority: &ControlAuthority,
+            request: control_host::StartRequest,
+        ) -> Result<control_host::StartResult, control_host::ControlError> {
+            self.starts
+                .lock()
+                .unwrap()
+                .push((authority.clone(), request.clone()));
+            let operation = authority.operation.clone().unwrap();
+            let mut by_operation = self.by_operation.lock().unwrap();
+            let replayed = by_operation.contains_key(&operation);
+            let next = by_operation.len() + 1;
+            let id = by_operation
+                .entry(operation)
+                .or_insert_with(|| format!("child-{next}"))
+                .clone();
+            self.runs
+                .lock()
+                .unwrap()
+                .entry(id.clone())
+                .or_insert_with(|| {
+                    (
+                        authority.caller.clone().unwrap(),
+                        control_host::InstanceStatus::Running,
+                        None,
+                        control_host::TerminalResult {
+                            output: None,
+                            output_bytes: None,
+                            output_omitted: false,
+                            error: None,
+                            error_omitted: false,
+                        },
+                    )
+                });
+            Ok(control_host::StartResult {
+                instance_id: id,
+                workflow_id: request.workflow_id,
+                version: request.version.unwrap_or(1),
+                run_label: None,
+                replayed,
+            })
+        }
+
+        async fn get(
+            &self,
+            _: &ControlAuthority,
+            instance_id: String,
+        ) -> Result<control_host::InstanceDetail, control_host::ControlError> {
+            let runs = self.runs.lock().unwrap();
+            let (parent, status, reason, terminal) = runs.get(&instance_id).cloned().unwrap();
+            Ok(control_host::InstanceDetail {
+                instance: control_host::InstanceSummary {
+                    instance_id,
+                    workflow_id: "wf-child".into(),
+                    version: Some(3),
+                    run_label: None,
+                    parent_instance_id: Some(parent),
+                    status,
+                    suspension_reason: None,
+                    termination_reason: reason,
+                    created_at_ms: 0,
+                    started_at_ms: None,
+                    finished_at_ms: None,
+                },
+                terminal,
+            })
+        }
+
+        async fn cancel(
+            &self,
+            _: &ControlAuthority,
+            request: control_host::CancelRequest,
+        ) -> Result<control_host::CommandResult, control_host::ControlError> {
+            self.cancels
+                .lock()
+                .unwrap()
+                .push(request.instance_id.clone());
+            Ok(control_host::CommandResult {
+                instance_id: request.instance_id,
+                outcome: control_host::CommandOutcome::Requested,
+                replayed: false,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_workflow_child_is_a_run_of_its_own_found_again_on_replay() {
+        use control_host::InstanceStatus;
+        use runtara_workflow_api::{TaskContext, TaskEntry, TaskOutcome, TaskStart};
+        let launches = Arc::new(ApiLaunches::default());
+        let children = Arc::new(Children::default());
+        launches.set_control_host(children.clone()).unwrap();
+        let backend = Backend(launches.clone());
+        launches
+            .begin(binding(1), info(), Vec::new(), no_runtime(), controls())
+            .unwrap();
+        let start = |path: &str, attempt: u64| TaskStart {
+            binding: "workflow:wf-child@3".into(),
+            entry: TaskEntry::Workflow,
+            context: TaskContext {
+                path: path.into(),
+                attempt,
+            },
+        };
+
+        let first = backend
+            .start_task(&binding(1), start("step-a", 1), br#"{"x":1}"#.to_vec())
+            .await
+            .unwrap();
+        assert_eq!(first.instance_id.as_deref(), Some(first.task_id.as_str()));
+        {
+            let starts = children.starts.lock().unwrap();
+            let (authority, request) = &starts[0];
+            assert_eq!(authority.caller.as_deref(), Some("instance-1"));
+            assert_eq!(request.workflow_id, "wf-child");
+            assert_eq!(request.version, Some(3));
+            assert_eq!(
+                request.parent_close_policy,
+                control_host::ParentClosePolicy::Cancel
+            );
+            let envelope: serde_json::Value = serde_json::from_slice(&request.input).unwrap();
+            assert_eq!(
+                envelope,
+                serde_json::json!({"data": {"x": 1}, "variables": {}})
+            );
+        }
+        // A replay of the parent reaching the same call finds the same child;
+        // another call site or a retry starts a new one.
+        let again = backend
+            .start_task(&binding(1), start("step-a", 1), br#"{"x":1}"#.to_vec())
+            .await
+            .unwrap();
+        assert_eq!(again.task_id, first.task_id);
+        let sibling = backend
+            .start_task(&binding(1), start("step-b", 1), b"{}".to_vec())
+            .await
+            .unwrap();
+        let retry = backend
+            .start_task(&binding(1), start("step-a", 2), b"{}".to_vec())
+            .await
+            .unwrap();
+        assert_ne!(sibling.task_id, first.task_id);
+        assert_ne!(retry.task_id, first.task_id);
+
+        // A running child has no outcome yet; an ended one answers with its
+        // own output, error or end.
+        assert_eq!(
+            backend
+                .task_outcome(&binding(1), &first.task_id, 0)
+                .await
+                .unwrap(),
+            None
+        );
+        children.end(
+            &first.task_id,
+            InstanceStatus::Completed,
+            Some("completed"),
+            Some(br#"{"y":2}"#),
+            None,
+        );
+        assert_eq!(
+            backend
+                .task_outcome(&binding(1), &first.task_id, 1_000)
+                .await
+                .unwrap(),
+            Some(TaskOutcome::Completed(br#"{"y":2}"#.to_vec()))
+        );
+        let failure = br#"{"code":"BOOM","message":"no","category":"permanent","severity":"error","retryable":false}"#;
+        children.end(
+            &sibling.task_id,
+            InstanceStatus::Failed,
+            Some("application_error"),
+            None,
+            Some(failure),
+        );
+        match backend
+            .task_outcome(&binding(1), &sibling.task_id, 0)
+            .await
+            .unwrap()
+        {
+            Some(TaskOutcome::Failed(error)) => assert_eq!(error.code, "BOOM"),
+            other => panic!("{other:?}"),
+        }
+        children.end(
+            &retry.task_id,
+            InstanceStatus::Failed,
+            Some("execution_timeout"),
+            None,
+            None,
+        );
+        assert_eq!(
+            backend
+                .task_outcome(&binding(1), &retry.task_id, 0)
+                .await
+                .unwrap(),
+            Some(TaskOutcome::TimedOut)
+        );
+
+        // Releasing a finished child does nothing; a live one is cancelled.
+        backend
+            .release_task(&binding(1), &first.task_id)
+            .await
+            .unwrap();
+        assert!(children.cancels.lock().unwrap().is_empty());
+        let live = backend
+            .start_task(&binding(1), start("step-c", 1), b"{}".to_vec())
+            .await
+            .unwrap();
+        backend
+            .release_task(&binding(1), &live.task_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            *children.cancels.lock().unwrap(),
+            vec![live.task_id.clone()]
+        );
+
+        // Another run's child is not this run's task.
+        children
+            .runs
+            .lock()
+            .unwrap()
+            .get_mut(&live.task_id)
+            .unwrap()
+            .0 = "instance-2".into();
+        let error = backend
+            .task_outcome(&binding(1), &live.task_id, 0)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code.as_str(), "invalid-task");
+
+        // A workflow child takes the `workflow` entry.
+        let mut wrong = start("step-d", 1);
+        wrong.entry = TaskEntry::Capability("run".into());
+        let error = backend
+            .start_task(&binding(1), wrong, b"{}".to_vec())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Invalid);
     }
 }

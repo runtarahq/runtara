@@ -38,6 +38,10 @@ pub struct TaskContext {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskStarted {
     pub task_id: String,
+    /// The child's run, for a child that is a run of its own (entry
+    /// `workflow`): the same id as `task_id`, which a parent can wait on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
 }
 
 /// A terminal child run, published only after its execution was destroyed.

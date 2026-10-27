@@ -27,11 +27,11 @@ pub(super) async fn post_task(
     let input = to_bytes(request.into_body(), state.caps.request_body_bytes)
         .await
         .map_err(|_| ApiError::new(ErrorCode::TooLarge, "task input is over the cap"))?;
-    let task_id = state
+    let started: TaskStarted = state
         .backend
         .start_task(&binding, start, input.to_vec())
         .await?;
-    Ok((StatusCode::OK, axum::Json(TaskStarted { task_id })).into_response())
+    Ok((StatusCode::OK, axum::Json(started)).into_response())
 }
 
 #[derive(Deserialize)]
