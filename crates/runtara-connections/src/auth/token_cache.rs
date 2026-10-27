@@ -261,7 +261,7 @@ pub(crate) async fn resolve_deferred_auth(
             // Emitted on every actual refresh (connection-health signal), regardless of outcome.
             crate::events::emit(
                 events,
-                tenant_id,
+                Some(tenant_id),
                 crate::events::ConnectionLifecycleEvent::TokenRefreshed {
                     connection_id: connection_id.to_string(),
                     integration: integration.to_string(),
@@ -1000,8 +1000,8 @@ mod tests {
     }
 
     impl crate::events::ConnectionEventSink for RecordingSink {
-        fn emit(&self, tenant_id: &str, event: crate::events::ConnectionLifecycleEvent) {
-            assert_eq!(tenant_id, "tenant-1");
+        fn emit(&self, tenant_id: Option<&str>, event: crate::events::ConnectionLifecycleEvent) {
+            assert_eq!(tenant_id, Some("tenant-1"));
             self.events.lock().unwrap().push(event);
         }
     }

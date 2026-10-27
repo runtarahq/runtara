@@ -21,7 +21,8 @@
 #   6. OAUTH AND CONNECTION EVENTS — the second tenant's authorize URL
 #      redirects to its own callback path; that state is refused at the
 #      primary tenant's callback and is spent; its connection.created product
-#      event carries the second tenant.
+#      event carries the second tenant, and a failed callback's event is not
+#      filed under the tenant named in its URL.
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
 # environment) + docker (isolated Valkey) and the shared workflow components
@@ -349,6 +350,9 @@ curl -sS "${CALLBACK}/${TENANT}/callback?state=${STATE}&code=c1" | grep -q "Inva
     || { print_error "the primary tenant's callback accepted the second tenant's state"; exit 1; }
 curl -sS "${CALLBACK}/${SECOND_TENANT}/callback?state=${STATE}&code=c1" | grep -q "Invalid or expired authorization" \
     || { print_error "a state refused at the wrong callback was not spent"; exit 1; }
+# A failed callback names no tenant it could prove: its event is not filed
+# under the tenant in its path.
+curl -sS -o /dev/null "${CALLBACK}/not-a-served-tenant/callback?error=access_denied"
 EVENT_TENANT=""
 for _ in {1..10}; do
     EVENT_TENANT=$(docker exec "${VALKEY_CONTAINER}" valkey-cli --raw XRANGE runtara:product_events:stream - + \
@@ -358,6 +362,15 @@ for _ in {1..10}; do
 done
 [ "${EVENT_TENANT}" = "${SECOND_TENANT}" ] \
     || { print_error "the second tenant's connection.created event names '${EVENT_TENANT}'"; exit 1; }
-echo "  the redirect names the second tenant; its state is refused at the primary's callback and spent; its connection event is its own ✓"
+FAILED_TENANT=""
+for _ in {1..10}; do
+    FAILED_TENANT=$(docker exec "${VALKEY_CONTAINER}" valkey-cli --raw XRANGE runtara:product_events:stream - + \
+        | grep '^{' | jq -r 'select(.event_type == "connection.oauth_failed" and (.properties.reason | startswith("access_denied"))) | .tenant_id' | head -1)
+    [ -n "${FAILED_TENANT}" ] && break
+    sleep 1
+done
+[ "${FAILED_TENANT}" = "${TENANT}" ] \
+    || { print_error "a failed callback's event was filed under '${FAILED_TENANT}', not the primary tenant"; exit 1; }
+echo "  the redirect names the second tenant; its state is refused at the primary's callback and spent; its connection event is its own; a failed callback's path tenant is not trusted ✓"
 
 print_success "served tenants: webhooks, API keys, triggers, cron, OAuth callbacks and connection events reach exactly the tenants this server serves, each its own, under its own limits"

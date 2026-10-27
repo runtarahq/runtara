@@ -509,8 +509,19 @@ impl ConnectionEventBridge {
 }
 
 impl runtara_connections::events::ConnectionEventSink for ConnectionEventBridge {
-    fn emit(&self, tenant_id: &str, event: runtara_connections::events::ConnectionLifecycleEvent) {
+    fn emit(
+        &self,
+        tenant_id: Option<&str>,
+        event: runtara_connections::events::ConnectionLifecycleEvent,
+    ) {
         use runtara_connections::events::ConnectionLifecycleEvent as Lifecycle;
+
+        // An event with no established tenant (an unauthenticated callback that
+        // failed before its state matched) belongs to the process's primary.
+        let tenant_id = match tenant_id {
+            Some(tenant) => tenant,
+            None => crate::config::tenant_id(),
+        };
 
         let product_event = match event {
             Lifecycle::Created {
@@ -733,24 +744,24 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         let bridge = ConnectionEventBridge::new(ProductEventSink::new(tx));
         bridge.emit(
-            "tenant-b",
+            Some("tenant-b"),
             ConnectionLifecycleEvent::Created {
                 connection_id: "conn-1".to_string(),
                 integration: Some("hubspot".to_string()),
             },
         );
         bridge.emit(
-            "tenant-c",
-            ConnectionLifecycleEvent::OAuthFailed {
-                reason: "invalid_state".to_string(),
+            Some("tenant-c"),
+            ConnectionLifecycleEvent::OAuthCompleted {
+                connection_id: "conn-2".to_string(),
             },
         );
         let created = rx.try_recv().expect("created event");
         assert_eq!(created.event_type, EventType::ConnectionCreated);
         assert_eq!(created.tenant_id, "tenant-b");
         assert_eq!(created.resource_id.as_deref(), Some("conn-1"));
-        let failed = rx.try_recv().expect("failed event");
-        assert_eq!(failed.tenant_id, "tenant-c");
+        let completed = rx.try_recv().expect("completed event");
+        assert_eq!(completed.tenant_id, "tenant-c");
     }
 
     // ---- emit_quota_exceeded: only fires for LimitExceeded ----

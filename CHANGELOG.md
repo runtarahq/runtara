@@ -101,7 +101,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tenant's URL is refused and spent. Connection lifecycle product events
   (created, deleted, OAuth started/completed/failed, token refreshed) carry
   the connection's tenant instead of the process's primary tenant:
-  `ConnectionEventSink::emit` now receives the tenant, and
+  `ConnectionEventSink::emit` now receives it (`None` for a callback that
+  failed before its state matched, which the server files under its primary
+  tenant rather than trust the URL), and
   `provider_auth::resolve_connection_auth` takes it.
 
 - **Connection credentials are bound to their tenant and connection.** New

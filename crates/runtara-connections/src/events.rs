@@ -44,8 +44,10 @@ pub enum ConnectionLifecycleEvent {
 /// Implementations MUST be non-blocking and best-effort — emitting an analytics event must
 /// never fail or slow the connection operation it observes.
 pub trait ConnectionEventSink: Send + Sync {
-    /// `tenant_id` is the tenant the connection belongs to.
-    fn emit(&self, tenant_id: &str, event: ConnectionLifecycleEvent);
+    /// `tenant_id` is the tenant the connection belongs to, or `None` when the
+    /// event comes from an unauthenticated edge that has not established one
+    /// (a failed OAuth callback before its state is matched).
+    fn emit(&self, tenant_id: Option<&str>, event: ConnectionLifecycleEvent);
 }
 
 /// Optional, cloneable handle stored in the connections config/state. `None` disables
@@ -53,7 +55,7 @@ pub trait ConnectionEventSink: Send + Sync {
 pub type ConnectionEvents = Option<Arc<dyn ConnectionEventSink>>;
 
 /// Emit `event` through `events` if a sink is configured; a no-op otherwise.
-pub fn emit(events: &ConnectionEvents, tenant_id: &str, event: ConnectionLifecycleEvent) {
+pub fn emit(events: &ConnectionEvents, tenant_id: Option<&str>, event: ConnectionLifecycleEvent) {
     if let Some(sink) = events {
         sink.emit(tenant_id, event);
     }
