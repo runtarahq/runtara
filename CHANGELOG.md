@@ -645,7 +645,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not a string and a `type` hint that cannot coerce the value. A reference
   with an empty path, which the editor stores until a path is picked, still
   gives its `default` or null. A workflow picks this up when it is next
-  compiled.
+  compiled. The Switch editor now keeps a reference output's `type` and
+  `default` when the output, or another field beside it, is edited, and
+  shows the fallback field for a reference output.
 - **The step editor shows an object or list stored as a plain value as that
   value.** An Agent input saved through MCP or the API as
   `{valueType: "immediate", value: {...}}`, such as an Object Model query

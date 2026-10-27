@@ -28,7 +28,18 @@ export const SWITCH_OUTPUT_MODES: readonly SwitchOutputMode[] = [
   'composite',
 ];
 
-export interface SwitchOutputValue {
+/**
+ * A reference's optional `type` and `default`, which the runtime honours.
+ * The editor carries them as `typeHint` / `defaultValue`, the names the other
+ * mapping editors use (see utils/mapping-serialization.ts), and writes them
+ * back unchanged so an edit elsewhere in the output does not drop them.
+ */
+type ReferenceExtras = {
+  typeHint?: string;
+  defaultValue?: unknown;
+};
+
+export interface SwitchOutputValue extends ReferenceExtras {
   mode: SwitchOutputMode;
   /** Scalar/path for immediate and reference; the structure for composite. */
   value: unknown;
@@ -36,6 +47,25 @@ export interface SwitchOutputValue {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function readReferenceExtras(stored: Record<string, unknown>): ReferenceExtras {
+  const extras: ReferenceExtras = {};
+  if (typeof stored.type === 'string') extras.typeHint = stored.type;
+  if (stored.default !== undefined) extras.defaultValue = stored.default;
+  return extras;
+}
+
+function referenceWrapper(
+  path: unknown,
+  { typeHint, defaultValue }: ReferenceExtras
+): Record<string, unknown> {
+  return {
+    valueType: 'reference',
+    value: typeof path === 'string' ? path : '',
+    ...(typeHint !== undefined ? { type: typeHint } : {}),
+    ...(defaultValue !== undefined ? { default: defaultValue } : {}),
+  };
 }
 
 /**
@@ -46,11 +76,12 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * `{queue: "web-team"}` opens as one immediate field instead of an
  * "Unknown type" error.
  */
-type EditorEntry = { valueType: string; value: unknown; typeHint?: string };
+type EditorEntry = { valueType: string; value: unknown } & ReferenceExtras;
 
-function isRuntimeWrapper(
-  value: unknown
-): value is { valueType: 'reference' | 'immediate'; value: unknown } {
+function isRuntimeWrapper(value: unknown): value is {
+  valueType: 'reference' | 'immediate';
+  value: unknown;
+} & Record<string, unknown> {
   return (
     isPlainObject(value) &&
     (value.valueType === 'reference' || value.valueType === 'immediate') &&
@@ -105,6 +136,7 @@ function toEditorEntry(stored: unknown): EditorEntry {
       ? {
           valueType: 'reference',
           value: typeof stored.value === 'string' ? stored.value : '',
+          ...readReferenceExtras(stored),
         }
       : immediateEntry(stored.value);
   }
@@ -139,12 +171,9 @@ function fromEditorEntry(entry: unknown): unknown {
   if (!isPlainObject(entry) || typeof entry.valueType !== 'string') {
     return entry;
   }
-  const { valueType, value, typeHint } = entry as EditorEntry;
+  const { valueType, value, typeHint, defaultValue } = entry as EditorEntry;
   if (valueType === 'reference') {
-    return {
-      valueType: 'reference',
-      value: typeof value === 'string' ? value : '',
-    };
+    return referenceWrapper(value, { typeHint, defaultValue });
   }
   if (valueType === 'composite') return mapStructure(value, fromEditorEntry);
   if (valueType === 'immediate') {
@@ -165,6 +194,7 @@ export function readSwitchOutput(output: unknown): SwitchOutputValue {
       return {
         mode: 'reference',
         value: typeof output.value === 'string' ? output.value : '',
+        ...readReferenceExtras(output),
       };
     }
     return { mode: 'immediate', value: output.value ?? '' };
@@ -186,12 +216,14 @@ export function readSwitchOutput(output: unknown): SwitchOutputValue {
  * stores, so editing an unrelated case does not rewrite this one. Composite
  * entries are unwrapped back to plain structure for the same reason.
  */
-export function writeSwitchOutput({ mode, value }: SwitchOutputValue): unknown {
+export function writeSwitchOutput({
+  mode,
+  value,
+  typeHint,
+  defaultValue,
+}: SwitchOutputValue): unknown {
   if (mode === 'reference') {
-    return {
-      valueType: 'reference',
-      value: typeof value === 'string' ? value : '',
-    };
+    return referenceWrapper(value, { typeHint, defaultValue });
   }
   if (mode === 'composite') {
     return isPlainObject(value) || Array.isArray(value)
