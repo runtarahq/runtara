@@ -9,4 +9,4 @@ mod session_store;
 pub mod tools;
 
 pub use server::create_mcp_router;
-pub use session_store::ValkeyMcpSessionStore;
+pub use session_store::{ValkeyMcpSessionStore, scope_session_tenant};

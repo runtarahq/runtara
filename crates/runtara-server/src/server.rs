@@ -2653,6 +2653,9 @@ pub async fn start_with(
         config::mcp_allowed_hosts().to_vec(),
         mcp_session_store,
     )
+    // Innermost, after auth: MCP session state is kept under the caller's
+    // tenant (see `mcp::scope_session_tenant`).
+    .layer(from_fn(crate::mcp::scope_session_tenant))
     // Apply the `mcp` entitlement gate at the transport entry. Disabling
     // the feature short-circuits with 403 ENTITLEMENT_REQUIRED before any
     // MCP tool handler is reached. Per-tool gates also exist as a second

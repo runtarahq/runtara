@@ -212,7 +212,7 @@ shared Valkey can be reasoned about. Each is scoped to its tenant:
 | `{tenant}:admission:reserved` | string | Admission counter, seeded from durable reservations at boot |
 | `runtara:compilation:progress:{tenant}:{workflow}:{version}` | hash | Compilation progress |
 | `runtara:triggers:{tenant}` | stream | Trigger events (prefix configurable) |
-| `runtara:mcp:sessions:{tenant}:{session}` | string | MCP session recovery (keyed by the process's primary tenant; SYN-781) |
+| `runtara:mcp:sessions:{tenant}:{session}` | string | MCP session recovery, under the tenant of the request that made it; another tenant's request cannot restore it |
 | `runtara:session:{<sha256 of tenant, session>}:*` | various | Channel session queues |
 | `queue:{tenant}:{session}` | list | Session input queue |
 

@@ -95,6 +95,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tenant. `e2e/test_served_tenants.sh` serves two tenants from one process
   and checks neither reads the other's workflows, versions or runs.
 
+- **MCP sessions belong to their tenant.** The Valkey session-recovery
+  record is kept under the tenant of the request that made the session
+  (`runtara:mcp:sessions:{tenant}:{session}`), so after a restart a request
+  authenticated for another tenant cannot restore it. A layer inside MCP auth
+  binds the request's tenant for the store (SYN-781).
+
 - **A missing connection is named by its id.** The guest-facing connection
   resolver answers `CONNECTION_NOT_FOUND` with "Connection '<id>' not found",
   echoing the id the workflow asked for and still nothing else

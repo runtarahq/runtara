@@ -23,6 +23,9 @@
 #      primary tenant's callback and is spent; its connection.created product
 #      event carries the second tenant, and a failed callback's event is not
 #      filed under the tenant named in its URL.
+#   7. MCP SESSIONS — the second tenant's MCP session is kept under its own
+#      tenant; after a restart, restoring it with the primary tenant's
+#      credentials fails, while its owner restores it.
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
 # environment) + docker (isolated Valkey) and the shared workflow components
@@ -372,5 +375,45 @@ done
 [ "${FAILED_TENANT}" = "${TENANT}" ] \
     || { print_error "a failed callback's event was filed under '${FAILED_TENANT}', not the primary tenant"; exit 1; }
 echo "  the redirect names the second tenant; its state is refused at the primary's callback and spent; its connection event is its own; a failed callback's path tenant is not trusted ✓"
+
+#-------------------------------------------------------------------------
+print_step "7. An MCP session is kept, and restored, under its own tenant..."
+MCP_URL="http://127.0.0.1:${TEST_PORT_PUBLIC}/mcp"
+MCP_HEADERS="${TEST_DATA_DIR}/mcp_headers"
+# POST a JSON-RPC message as AUTH (empty = the primary tenant); echo the HTTP
+# status and keep the response headers.
+mcp_status() {
+    curl -sS -o "${TEST_DATA_DIR}/mcp_body" -w '%{http_code}' --max-time 60 -D "${MCP_HEADERS}" \
+        -X POST "${MCP_URL}" -H "Content-Type: application/json" \
+        -H "Accept: application/json, text/event-stream" ${AUTH[@]+"${AUTH[@]}"} \
+        ${MCP_SESSION:+-H "Mcp-Session-Id: ${MCP_SESSION}"} -d "$1"
+}
+MCP_SESSION=""
+AUTH=(-H "Authorization: Bearer ${SECOND_KEY}")
+CODE=$(mcp_status '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"served-tenants-e2e","version":"1"}}}')
+MCP_SESSION=$(grep -i '^mcp-session-id:' "${MCP_HEADERS}" | head -1 | cut -d' ' -f2 | tr -d '\r\n' || true)
+[ "${CODE}" = "200" ] && [ -n "${MCP_SESSION}" ] \
+    || { print_error "the second tenant's MCP initialize answered ${CODE}: $(head -c 300 "${TEST_DATA_DIR}/mcp_body")"; exit 1; }
+mcp_status '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
+valkey_cli() { docker exec "${VALKEY_CONTAINER}" valkey-cli --raw "$@"; }
+[ "$(valkey_cli EXISTS "runtara:mcp:sessions:${SECOND_TENANT}:${MCP_SESSION}")" = "1" ] \
+    || { print_error "the session is not kept under the second tenant"; exit 1; }
+[ "$(valkey_cli EXISTS "runtara:mcp:sessions:${TENANT}:${MCP_SESSION}")" = "0" ] \
+    || { print_error "the session is kept under the primary tenant"; exit 1; }
+
+# A restart drops the in-memory session, so the next request must restore it
+# from Valkey, under the requesting tenant.
+kill "${SERVER_PID}"; wait "${SERVER_PID}" 2>/dev/null || true
+start_server
+LIST='{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+AUTH=()
+CODE=$(mcp_status "${LIST}")
+case "${CODE}" in 2??) print_error "the primary tenant restored the second tenant's MCP session (${CODE})"; exit 1 ;; esac
+AUTH=(-H "Authorization: Bearer ${SECOND_KEY}")
+CODE=$(mcp_status "${LIST}")
+[ "${CODE}" = "200" ] && grep -q '"tools"' "${TEST_DATA_DIR}/mcp_body" \
+    || { print_error "the second tenant could not restore its own MCP session (${CODE}): $(head -c 300 "${TEST_DATA_DIR}/mcp_body")"; exit 1; }
+AUTH=()
+echo "  the session is kept under the second tenant; after a restart the primary is refused it and its owner restores it ✓"
 
 print_success "served tenants: webhooks, API keys, triggers, cron, OAuth callbacks and connection events reach exactly the tenants this server serves, each its own, under its own limits"
