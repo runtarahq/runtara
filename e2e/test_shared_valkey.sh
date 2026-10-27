@@ -14,6 +14,12 @@
 #      through the shared Valkey; every compile and run completes.
 #   4. KEYS — each tenant's compilation queue and admission counter live
 #      under its own prefix, and the unprefixed ones are gone.
+#   5. TENANT FROM THE REQUEST (M6.2) — server A also serves A2. A token with
+#      no `org_id` acts for the tenant its path names (`/api/runtime/{t}/…`),
+#      authorized by membership there; `/api/runtime/me/tenants` lists where
+#      the user may act; each tenant shows only its own data; a non-member
+#      and a token naming another tenant are refused; a tenant-less path acts
+#      for the primary as before.
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
 # environment), docker (one Valkey), python3, openssl, and the shared workflow
@@ -35,6 +41,7 @@ POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-${PGPASSWORD:-}}"
 
 TENANT_A="shared_valkey_a"
 TENANT_B="shared_valkey_b"
+TENANT_A2="shared_valkey_a2"
 DB_PREFIX="shared_valkey_e2e_$$"
 TEST_VALKEY_PORT="${TEST_VALKEY_PORT:-16590}"
 MOCK_PORT="${MOCK_PORT:-17990}"
@@ -75,6 +82,17 @@ trap cleanup EXIT
 
 valkey() { docker exec "${VALKEY_CONTAINER}" valkey-cli --raw "$@"; }
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+# A signed OIDC token for `sub` and `jti` that names no tenant.
+tenantless_token() {
+    local sub="$1" jti="$2" now header claims signing sig
+    now=$(date +%s)
+    header='{"alg":"RS256","typ":"JWT","kid":"'"${KID}"'"}'
+    claims='{"iss":"'"${ISSUER}"'","sub":"'"${sub}"'","jti":"'"${jti}"'","iat":'"${now}"',"exp":'"$((now + 3600))"'}'
+    signing="$(printf '%s' "${header}" | b64url).$(printf '%s' "${claims}" | b64url)"
+    sig=$(printf '%s' "${signing}" | openssl dgst -sha256 -sign "${TEST_DATA_DIR}/key.pem" -binary | b64url)
+    printf '%s.%s' "${signing}" "${sig}"
+}
 
 # A signed OIDC token for `tenant` (org_id), `sub` and `jti`.
 token() {
@@ -138,13 +156,14 @@ for db in a_server a_runtime b_server b_runtime; do
 done
 
 start_server() {
-    local name="$1" tenant="$2" port="$3" base="$4" db
+    local name="$1" tenant="$2" port="$3" base="$4" served="${5:-}" db
     db=$(echo "${name}" | tr 'AB' 'ab')
     print_step "Starting server ${name} (tenant ${tenant}) on :${port}..."
     RUNTARA_SERVER_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DB_PREFIX}_${db}_server" \
     OBJECT_MODEL_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DB_PREFIX}_${db}_server" \
     RUNTARA_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DB_PREFIX}_${db}_runtime" \
     TENANT_ID="${tenant}" \
+    RUNTARA_SERVED_TENANTS="${served}" \
     SERVER_HOST=127.0.0.1 \
     SERVER_PORT="${port}" \
     RUNTARA_CORE_PORT="$((base + 1))" \
@@ -175,7 +194,7 @@ start_server() {
     done
     echo "  server ${name} up (PID ${pid})"
 }
-start_server A "${TENANT_A}" 17951 18950
+start_server A "${TENANT_A}" 17951 18950 "${TENANT_A2}"
 start_server B "${TENANT_B}" 17952 18960
 
 #-------------------------------------------------------------------------
@@ -264,4 +283,38 @@ LEFT=$(valkey --scan --pattern 'runtara:compilation:*' | grep -v '^runtara:compi
 [ -z "${LEFT}" ] || { print_error "unprefixed keys remain: ${LEFT}"; exit 1; }
 echo "  per-tenant admission counters back at 0, no compilation pending, no unprefixed queue or counter keys ✓"
 
-print_success "shared Valkey: two tenants' servers share one Valkey without reading each other's membership, revocations, queues or counters"
+#-------------------------------------------------------------------------
+print_step "5. A token naming no tenant acts for the tenant its path names..."
+A="http://127.0.0.1:17951/api/runtime"
+get() { curl -sS -H "Authorization: Bearer $1" "$2"; }
+code() { curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $1" "$2"; }
+valkey SET "${TENANT_A2}:member:user-1" '{"role":"admin","updated_at":"2026-10-27T00:00:00Z"}' >/dev/null
+valkey SET "${TENANT_A}:member:user-2" '{"role":"viewer","updated_at":"2026-10-27T00:00:00Z"}' >/dev/null
+U1=$(tenantless_token "user-1" "jti-u1")
+U2=$(tenantless_token "user-2" "jti-u2")
+
+MINE=$(get "${U1}" "${A}/me/tenants" | jq -c '[.tenants[] | [.id, .role]] | sort')
+[ "${MINE}" = "[[\"${TENANT_A}\",\"owner\"],[\"${TENANT_A2}\",\"admin\"]]" ] \
+    || { print_error "user-1's tenants on A: ${MINE}"; exit 1; }
+MINE=$(get "${U2}" "${A}/me/tenants" | jq -c '[.tenants[].id]')
+[ "${MINE}" = "[\"${TENANT_A}\"]" ] || { print_error "user-2's tenants on A: ${MINE}"; exit 1; }
+
+count_in() { get "$1" "${A}${2:+/$2}/workflows" | jq '[.data.content // .data // [] | .[]?] | length'; }
+[ "$(count_in "${U1}" "${TENANT_A}")" = "4" ] || { print_error "user-1 does not see A's four workflows"; exit 1; }
+[ "$(count_in "${U1}" "${TENANT_A2}")" = "0" ] || { print_error "A2 shows another tenant's workflows"; exit 1; }
+RESP=$(curl -sS -X POST -H "Authorization: Bearer ${U1}" -H "Content-Type: application/json" \
+    -d '{"name":"Only in A2","description":"switch"}' "${A}/${TENANT_A2}/workflows/create")
+echo "${RESP}" | jq -e '.data.id' >/dev/null || { print_error "user-1 could not create in A2: ${RESP}"; exit 1; }
+[ "$(count_in "${U1}" "${TENANT_A2}")" = "1" ] || { print_error "A2 does not show its own workflow"; exit 1; }
+[ "$(count_in "${U1}" "${TENANT_A}")" = "4" ] || { print_error "A shows A2's workflow"; exit 1; }
+
+[ "$(code "${U2}" "${A}/${TENANT_A2}/workflows")" = "403" ] || { print_error "a non-member reached A2"; exit 1; }
+[ "$(code "${TOKEN_A}" "${A}/${TENANT_A2}/workflows")" = "403" ] \
+    || { print_error "a token naming A acted in A2"; exit 1; }
+[ "$(code "${U1}" "${A}/${TENANT_B}/workflows")" = "404" ] \
+    || { print_error "a tenant A does not serve was routed"; exit 1; }
+[ "$(count_in "${U1}" "")" = "4" ] || { print_error "a tenant-less path did not act for the primary"; exit 1; }
+[ "$(code "${TOKEN_A}" "${A}/workflows")" = "200" ] || { print_error "a token naming its tenant no longer works"; exit 1; }
+echo "  one user switches between A and A2 by path and sees only each one's data; non-members and other tenants' tokens are refused ✓"
+
+print_success "shared Valkey: two tenants' servers share one Valkey without reading each other's membership, revocations, queues or counters, and a tenant-less token acts where its path and membership say"

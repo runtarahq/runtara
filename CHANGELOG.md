@@ -95,6 +95,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tenant. `e2e/test_served_tenants.sh` serves two tenants from one process
   and checks neither reads the other's workflows, versions or runs.
 
+- **The request names the tenant; membership authorizes it.** A path
+  `/api/runtime/{tenant}/…` or `/mcp/{tenant}` naming a served tenant is routed
+  as the tenant-less path, for that tenant (the SPA's org-prefixed URLs now work
+  without a gateway stripping them). With `RUNTARA_AUTH_MEMBERSHIP_POLICY=required`,
+  an OIDC token no longer needs an `org_id` claim: it acts for the tenant the
+  request names (else the primary), authorized by `{tenant}:member:{sub}` there.
+  A token or API key bound to one tenant is refused under another's path. New
+  `GET /api/runtime/me/tenants` lists where the caller may act, with the role.
+  Under any other policy `org_id` is still required, so existing deployments
+  behave as before. The JWT issuer is recorded on the auth context.
+
 - **One Valkey can serve many tenants.** Every key a server uses names its
   tenant: membership `{tenant}:member:{uid}`, revocation
   `{tenant}:token:revoked:{jti}`, connection rate limits

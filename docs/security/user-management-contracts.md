@@ -82,12 +82,12 @@ below.
 | Claim | Required | Source | Used by runtara for |
 |---|---|---|---|
 | `sub` | yes² | Auth0 | User identity; key for `{tenant}:member:{sub}` lookup. |
-| `org_id` | yes | Auth0 Organization id | Tenant id. Must equal the request's `TENANT_ID`; mismatch → `403`. |
+| `org_id` | yes³ | Auth0 Organization id | Tenant id. Must be a tenant the process serves and, when the request names a tenant, that one; mismatch → `403`. |
 | `jti` | yes¹ | Auth0 Action | Token identity; key for `{tenant}:token:revoked:{jti}` lookup. |
 | `email` | no | Auth0 | `/me` response only. |
 | `name` | no | Auth0 | `/me` response only. |
 | `tenant_slug` | no | smo-management → Auth0 org metadata | `/me` response only. **Not** used for routing — `org_id` is the tenant key everywhere internally. |
-| `iss` | yes | Auth0 | Validated against `OAUTH2_ISSUER`. |
+| `iss` | yes | Auth0 | Validated against `OAUTH2_ISSUER`. With `sub` it is the caller's identity; a deployment trusts one issuer, so membership keys carry `sub` alone. |
 | `aud` | conditional | Auth0 | Validated against `OAUTH2_AUDIENCE` when configured. The MCP provider has its own `OAUTH2_MCP_AUDIENCE`; setting `RUNTARA_MCP_REQUIRE_AUDIENCE` additionally rejects tokens that omit `aud` entirely. |
 | `exp` | yes | Auth0 | Standard expiry validation. |
 
@@ -99,6 +99,14 @@ validator checks only `org_id` (and `jti` when `RUNTARA_AUTH_REQUIRE_JTI` is
 set). A token without `sub` authenticates with an empty `user_id` and is
 rejected only once the membership policy is `logging`/`required` (§7), which
 denies it as `MISSING_SUBJECT`.
+
+³ Optional when the membership policy is `required`. A token without `org_id`
+acts for the tenant the request names — the `/api/runtime/{tenant}/…` path
+segment, or `/mcp/{tenant}` — or, naming none, the process's primary tenant, and
+`{tenant}:member:{sub}` there is what authorizes it. Under `disabled` or
+`logging` the claim stays required: nothing else would bind the token to a
+tenant. `GET /api/runtime/me/tenants` lists the served tenants where the caller
+is a member (with the role), so a client can pick one.
 
 The structured auth span carries `tenant_id`, `user_id`, `auth_method`, `role`
 and `jti` — **not** `email`, `name` or `tenant_slug`, which reach nothing but

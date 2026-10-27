@@ -657,6 +657,62 @@ async fn me_handler(
     }))
 }
 
+/// The tenants this process serves that the caller may act in, with their role in each.
+///
+/// A JWT under membership enforcement is listed in every served tenant whose
+/// `{tenant}:member:{sub}` names it and whose denylist does not revoke the token; the SPA
+/// uses this to pick and switch tenants. Every other credential (an API key, the
+/// self-hosted modes, membership off) is bound to the one tenant it authenticated for.
+async fn my_tenants_handler(
+    auth_state: crate::auth::AuthState,
+    auth: crate::auth::AuthContext,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let by_membership = auth.auth_method == crate::auth::AuthMethod::Jwt
+        && auth_state.membership_policy != crate::auth::MembershipPolicy::Disabled;
+    if !by_membership {
+        return Json(serde_json::json!({
+            "tenants": [{ "id": auth.org_id, "role": auth.role.map(|r| r.as_str()) }],
+        }))
+        .into_response();
+    }
+    let Some(manager) = auth_state.valkey.as_ref() else {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Membership unavailable" })),
+        )
+            .into_response();
+    };
+
+    let mut tenants = Vec::new();
+    for tenant in config::served_tenants() {
+        let lookup = async {
+            if let Some(jti) = auth.jti.as_deref()
+                && crate::valkey::auth::token_is_revoked(manager, tenant, jti).await?
+            {
+                return Ok(None);
+            }
+            crate::valkey::auth::get_member_role(manager, tenant, &auth.user_id).await
+        };
+        match lookup.await {
+            Ok(Some(role)) => {
+                tenants.push(serde_json::json!({ "id": tenant, "role": role.as_str() }));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(tenant_id = %tenant, %error, "membership lookup failed");
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({ "error": "Membership unavailable" })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    Json(serde_json::json!({ "tenants": tenants })).into_response()
+}
+
 /// Maximum request body size for tenant-scoped API routes.
 ///
 /// File inputs (workflow `file` fields, CSV imports) travel as base64-encoded
@@ -2654,12 +2710,30 @@ pub async fn start_with(
             crate::middleware::auth::authenticate,
         ));
 
+    // `/me/tenants` — where the caller may act. Authenticated without the membership
+    // check of the tenant the request resolves to: it checks every served tenant itself.
+    let my_tenants_routes = Router::new()
+        .route(
+            "/api/runtime/me/tenants",
+            get({
+                let auth_state = auth_state.clone();
+                move |axum::Extension(auth): axum::Extension<crate::auth::AuthContext>| {
+                    my_tenants_handler(auth_state.clone(), auth)
+                }
+            }),
+        )
+        .route_layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth::authenticate_identity,
+        ));
+
     let public_app = Router::new()
         .merge(tenant_routes)
         .nest("/api/runtime", connections_tenant_routes)
         .nest("/api/oauth", oauth_callback_routes)
         .merge(object_model_routes)
         .merge(me_routes)
+        .merge(my_tenants_routes)
         .merge(public_routes)
         .merge(event_routes)
         .merge(channel_routes)
@@ -2794,8 +2868,19 @@ pub async fn start_with(
     // this listener: agent calls are in-process host imports and the embedded
     // core stays up until the drain below finishes.
     let public_shutdown = shutdown_signal.clone();
-    let public_server = axum::serve(public_listener, public_app)
-        .with_graceful_shutdown(async move { public_shutdown.wait().await });
+    // A served tenant's path segment is stripped before routing (see
+    // `middleware::tenant_path`), so it wraps the finished router.
+    let public_app = tower::Layer::layer(
+        &tower::util::MapRequestLayer::new(
+            crate::middleware::tenant_path::strip_tenant_segment::<axum::body::Body>,
+        ),
+        public_app,
+    );
+    let public_server = axum::serve(
+        public_listener,
+        axum::ServiceExt::<axum::extract::Request>::into_make_service(public_app),
+    )
+    .with_graceful_shutdown(async move { public_shutdown.wait().await });
 
     // Install SIGINT / SIGTERM handlers that flip the shutdown flag. Runs
     // concurrently with the server — exiting is driven by the flag, not by

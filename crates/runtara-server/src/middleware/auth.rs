@@ -27,12 +27,37 @@ use crate::valkey::auth::{AuthzValkeyError, get_member_role, token_is_revoked};
 /// construction, so there is nothing to mismatch.
 pub async fn authenticate(
     State(auth_state): State<AuthState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    authenticate_with(auth_state, request, next, true).await
+}
+
+/// Authenticate the caller without checking membership in the tenant the request
+/// resolves to. Only for routes that answer about the caller across tenants
+/// (`GET /api/runtime/me/tenants`) and check membership themselves.
+pub async fn authenticate_identity(
+    State(auth_state): State<AuthState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    authenticate_with(auth_state, request, next, false).await
+}
+
+async fn authenticate_with(
+    auth_state: AuthState,
     mut request: Request,
     next: Next,
+    enforce_membership_here: bool,
 ) -> Response {
     if let Some(ctx) = request.extensions().get::<AuthContext>().cloned() {
         return next.run(request).instrument(auth_span(&ctx)).await;
     }
+
+    let requested_tenant = request
+        .extensions()
+        .get::<crate::middleware::tenant_path::RequestedTenant>()
+        .map(|requested| requested.0.clone());
 
     // Fast path: RUNTARA-issued API key. Works in every provider mode.
     if let Some(token) = api_key_token(request.headers()) {
@@ -46,11 +71,17 @@ pub async fn authenticate(
             return crate::auth::provider::AuthError::TenantMismatch(api_key.org_id)
                 .into_http_response();
         }
+        // …and acts only there, whatever tenant the path names.
+        if let Some(requested) = requested_tenant.filter(|t| *t != api_key.org_id) {
+            return crate::auth::provider::AuthError::TenantMismatch(requested)
+                .into_http_response();
+        }
         let mut auth_context = api_key_context(&api_key);
         // The key inherits the issuing user's current role from Valkey and is
         // subject to the same revocation denylist.
-        if let Err(response) =
-            enforce_api_key_membership(&auth_state, &api_key, &mut auth_context).await
+        if enforce_membership_here
+            && let Err(response) =
+                enforce_api_key_membership(&auth_state, &api_key, &mut auth_context).await
         {
             return response;
         }
@@ -60,7 +91,11 @@ pub async fn authenticate(
     }
 
     // Delegate everything else to the configured provider.
-    let mut auth_context = match auth_state.provider.authenticate(request.headers()).await {
+    let mut auth_context = match auth_state
+        .provider
+        .authenticate(request.headers(), requested_tenant.as_deref())
+        .await
+    {
         Ok(ctx) => ctx,
         Err(e) => return e.into_http_response(),
     };
@@ -68,7 +103,9 @@ pub async fn authenticate(
     // Resolve per-tenant membership + token revocation from Valkey, attaching the
     // caller's role. Governed by `membership_policy`; fails the request closed under
     // `Required`.
-    if let Err(response) = enforce_membership(&auth_state, &mut auth_context).await {
+    if enforce_membership_here
+        && let Err(response) = enforce_membership(&auth_state, &mut auth_context).await
+    {
         return response;
     }
 
@@ -453,6 +490,7 @@ mod tests {
         async fn authenticate(
             &self,
             _headers: &axum::http::HeaderMap,
+            _requested_tenant: Option<&str>,
         ) -> Result<AuthContext, AuthError> {
             Err(AuthError::InvalidToken)
         }

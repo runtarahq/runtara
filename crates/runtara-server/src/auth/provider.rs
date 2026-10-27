@@ -84,7 +84,13 @@ impl AuthError {
 /// responsible for the in-process bypass and the API-key fast path.
 #[async_trait]
 pub trait AuthProvider: Send + Sync {
-    async fn authenticate(&self, headers: &HeaderMap) -> Result<AuthContext, AuthError>;
+    /// `requested_tenant` is the tenant the request names (`/api/runtime/{tenant}/…`,
+    /// `/mcp/{tenant}`), always one this process serves; `None` when it names none.
+    async fn authenticate(
+        &self,
+        headers: &HeaderMap,
+        requested_tenant: Option<&str>,
+    ) -> Result<AuthContext, AuthError>;
 
     fn kind(&self) -> AuthProviderKind;
 }
@@ -147,6 +153,10 @@ impl AuthProviders {
         let require_jti = std::env::var("RUNTARA_AUTH_REQUIRE_JTI")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
+        // A token need not name its tenant only where membership authorizes every
+        // request: without it, a token from this issuer would reach any served tenant.
+        let require_org_id = crate::auth::MembershipPolicy::from_env(AuthProviderKind::Oidc, true)
+            != crate::auth::MembershipPolicy::Required;
         // Opt-in strict MCP audience enforcement (SYN-523). Default OFF so existing
         // deployments keep today's lax behavior: audience validation is simply skipped
         // when OAUTH2_MCP_AUDIENCE is unset. When the flag is set, an unset audience is
@@ -187,6 +197,7 @@ impl AuthProviders {
                 // The API path never requires `aud` to be present; SYN-522 strict mode
                 // is MCP-only. Keep this byte-identical to pre-SYN-522 behavior.
                 require_audience_present: false,
+                require_org_id,
             },
             jwks_cache.clone(),
             tenant_id.clone(),
@@ -202,6 +213,7 @@ impl AuthProviders {
                 // (which already forced OAUTH2_MCP_AUDIENCE to be Some above), reject a
                 // token that omits `aud`. Default off keeps today's lax pass-through.
                 require_audience_present: require_mcp_audience,
+                require_org_id,
             },
             jwks_cache.clone(),
             tenant_id,

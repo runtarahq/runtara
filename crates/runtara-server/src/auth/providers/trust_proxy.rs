@@ -30,7 +30,15 @@ impl TrustProxyProvider {
 
 #[async_trait]
 impl AuthProvider for TrustProxyProvider {
-    async fn authenticate(&self, headers: &HeaderMap) -> Result<AuthContext, AuthError> {
+    async fn authenticate(
+        &self,
+        headers: &HeaderMap,
+        requested_tenant: Option<&str>,
+    ) -> Result<AuthContext, AuthError> {
+        // Self-hosted modes act for their configured tenant only.
+        if let Some(requested) = requested_tenant.filter(|t| *t != self.tenant_id) {
+            return Err(AuthError::TenantMismatch(requested.to_owned()));
+        }
         let user_id = headers
             .get(&self.user_header)
             .and_then(|v| v.to_str().ok())
@@ -61,7 +69,7 @@ mod tests {
         let provider = TrustProxyProvider::new("org_123".into(), "x-forwarded-user".into());
         let mut headers = HeaderMap::new();
         headers.insert("X-Forwarded-User", "alice".parse().unwrap());
-        let ctx = provider.authenticate(&headers).await.unwrap();
+        let ctx = provider.authenticate(&headers, None).await.unwrap();
         assert_eq!(ctx.user_id, "alice");
         assert_eq!(ctx.org_id, "org_123");
         assert_eq!(ctx.auth_method, AuthMethod::Unauthenticated);
@@ -75,7 +83,10 @@ mod tests {
     #[tokio::test]
     async fn falls_back_to_proxy_when_header_absent() {
         let provider = TrustProxyProvider::new("org_123".into(), "x-forwarded-user".into());
-        let ctx = provider.authenticate(&HeaderMap::new()).await.unwrap();
+        let ctx = provider
+            .authenticate(&HeaderMap::new(), None)
+            .await
+            .unwrap();
         assert_eq!(ctx.user_id, "proxy");
     }
 
@@ -86,7 +97,7 @@ mod tests {
         headers.insert("x-auth-request-user", "bob".parse().unwrap());
         // Default header name must NOT be consulted when a custom one is configured.
         headers.insert("x-forwarded-user", "attacker".parse().unwrap());
-        let ctx = provider.authenticate(&headers).await.unwrap();
+        let ctx = provider.authenticate(&headers, None).await.unwrap();
         assert_eq!(ctx.user_id, "bob");
     }
 
