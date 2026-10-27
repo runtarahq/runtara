@@ -238,6 +238,7 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
             prepersisted_input: None,
             launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         })
         .await?;
     let registry = ContainerRegistry::new(pool.clone());

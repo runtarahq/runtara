@@ -1003,6 +1003,12 @@ pub struct WorkflowVersionInfoDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "packageSize")]
     pub package_size: Option<i32>,
+    /// Linear memory the compiled workflow allocates when it starts, in
+    /// bytes: its memory tier must be at least this. Null if the version
+    /// isn't compiled or was compiled before the floor was recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "memoryFloorBytes")]
+    pub memory_floor_bytes: Option<i64>,
     /// Raw compilation status from `workflow_compilations.compilation_status`.
     /// `"success"`, `"failed"`, or `"pending"`. Null when the worker has
     /// never written a row for this version (brand-new save). Lets the UI

@@ -1098,6 +1098,7 @@ async fn running_stop_fixture(
             prepersisted_input: None,
             launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         })
         .await
         .unwrap();
@@ -2237,6 +2238,7 @@ async fn test_spawn_container_monitor_timeout_enforcement() {
             prepersisted_input: None,
             launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         })
         .await
         .expect("Failed to launch detached");
@@ -2349,6 +2351,7 @@ async fn test_spawn_container_monitor_no_timeout_on_quick_completion() {
             prepersisted_input: None,
             launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         })
         .await
         .expect("Failed to launch detached");
@@ -2446,6 +2449,7 @@ async fn test_spawn_container_monitor_timeout_race_condition() {
             prepersisted_input: None,
             launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         })
         .await
         .expect("Failed to launch detached");
@@ -2656,6 +2660,7 @@ async fn test_wait_for_exit_default_impl_returns_on_not_running() {
             prepersisted_input: None,
             launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         })
         .await
         .expect("Failed to launch detached");

@@ -1223,6 +1223,7 @@ impl LaunchDispatcher {
             .ok_or_else(|| "launch image no longer exists".to_string())?;
         self.validate_image(&image, launch)?;
         let expected_workflow_checksum = Some(image.workflow_binary_checksum()?.to_owned());
+        let memory_limit_bytes = image.workflow_memory_limit_bytes();
         let timeout = self
             .execution_timeout_policy
             .resolve_persisted(binding.timeout_seconds)
@@ -1252,6 +1253,7 @@ impl LaunchDispatcher {
             prepersisted_input: None,
             launch_kind: launch.kind,
             start_gate: None,
+            memory_limit_bytes,
         })
     }
 

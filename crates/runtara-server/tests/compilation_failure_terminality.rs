@@ -533,6 +533,7 @@ async fn record_pinned_artifact(
             compiler_mode: "direct-wasm",
             track_events: false,
             trusted_pins: &pins,
+            memory_floor_bytes: None,
         })
         .await
         .expect("recording the pinned artifact must succeed")
@@ -1107,6 +1108,7 @@ async fn recording_a_rebuilt_artifact_clears_the_previous_image_until_registrati
         compiler_mode: "direct-wasm",
         track_events: false,
         trusted_pins: &[],
+        memory_floor_bytes: None,
     })
     .await
     .expect("recording the rebuilt artifact must succeed");
@@ -1179,6 +1181,7 @@ async fn superseded_completion_cannot_replace_a_newer_ready_artifact() {
             compiler_mode: "direct-wasm",
             track_events: false,
             trusted_pins: &[],
+            memory_floor_bytes: None,
         })
         .await
         .expect("stale success check must succeed");
@@ -1337,6 +1340,7 @@ async fn failed_registration_replaces_an_unregistered_current_success() {
             compiler_mode: "direct-wasm",
             track_events: false,
             trusted_pins: &[],
+            memory_floor_bytes: None,
         })
         .await
         .expect("current success must be recorded")

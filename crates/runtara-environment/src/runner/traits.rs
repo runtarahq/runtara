@@ -483,6 +483,10 @@ pub struct LaunchOptions {
     /// or invokes the guest. Direct/legacy callers leave this unset; durable
     /// dispatchers always provide one.
     pub start_gate: Option<StartGate>,
+    /// The workflow's memory setting, in bytes: a cap on the sum of the
+    /// guest's linear memories. The runner's own ceiling still applies;
+    /// `None` leaves only that ceiling.
+    pub memory_limit_bytes: Option<u64>,
 }
 
 /// Handle for a launched instance (detached execution).
@@ -514,6 +518,12 @@ pub enum RunExitReport {
     SuspendNotParked {
         /// The last park error.
         error: String,
+    },
+    /// The guest trapped without posting an outcome; `reason` says why (its
+    /// memory limit, for example). The run is a crash with this reason.
+    Trapped {
+        /// The host's account of the trap.
+        reason: String,
     },
 }
 
@@ -872,6 +882,7 @@ mod prepared_launch_tests {
             prepersisted_input: None,
             launch_kind: crate::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         }
     }
 

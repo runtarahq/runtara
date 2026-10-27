@@ -468,6 +468,7 @@ async fn failed_input_abandonment_is_closed_by_production_exit_monitor() {
             prepersisted_input: None,
             launch_kind: crate::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         })
         .await
         .unwrap();

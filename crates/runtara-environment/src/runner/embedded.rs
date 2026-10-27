@@ -916,7 +916,7 @@ impl EmbeddedWasmRunner {
                 stderr,
                 timeout,
                 cancel,
-                limits: self.limits.clone(),
+                limits: launch_limits(&self.limits, options.memory_limit_bytes),
                 runtime: Some(runtime.clone()),
             },
             runtime,
@@ -1187,6 +1187,17 @@ fn warn_if_run_bound_exceeds_memory(permits: usize) {
              be killed. Each live guest holds a wasmtime store."
         );
     }
+}
+
+/// The runner's limits narrowed by the workflow's memory setting, which never
+/// raises the runner's ceiling.
+fn launch_limits(ceiling: &WorkflowLimits, memory_limit_bytes: Option<u64>) -> WorkflowLimits {
+    let mut limits = ceiling.clone();
+    if let Some(setting) = memory_limit_bytes {
+        let setting = usize::try_from(setting).unwrap_or(usize::MAX);
+        limits.max_memory_bytes = limits.max_memory_bytes.min(setting);
+    }
+    limits
 }
 
 fn limits_from_env() -> WorkflowLimits {
@@ -1905,6 +1916,16 @@ impl Runner for EmbeddedWasmRunner {
                 }
                 InvokeExit::Trapped { reason } => {
                     error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
+                    // A durable launch has no stderr file to carry the reason.
+                    exit_reports
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(
+                            invocation_owner.clone(),
+                            RunExitReport::Trapped {
+                                reason: reason.clone(),
+                            },
+                        );
                 }
                 InvokeExit::Timeout => {
                     warn!(instance_id = %instance_id, "Embedded workflow run timed out");
@@ -2042,9 +2063,10 @@ impl Runner for EmbeddedWasmRunner {
 #[cfg(test)]
 mod tests {
     use super::{
-        InstanceTask, RunSlot, TaskCompletionGuard, TaskRegistry, compute_occupancy,
+        InstanceTask, RunSlot, TaskCompletionGuard, TaskRegistry, compute_occupancy, launch_limits,
         remove_task_if_current,
     };
+    use runtara_component_host::WorkflowLimits;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -2057,6 +2079,18 @@ mod tests {
             finished: AtomicBool::new(false),
             done: tokio::sync::Notify::new(),
         })
+    }
+
+    #[test]
+    fn workflow_memory_setting_narrows_but_never_raises_the_ceiling() {
+        let ceiling = WorkflowLimits {
+            max_memory_bytes: 1024,
+            max_table_elements: 10,
+        };
+        assert_eq!(launch_limits(&ceiling, None).max_memory_bytes, 1024);
+        assert_eq!(launch_limits(&ceiling, Some(512)).max_memory_bytes, 512);
+        assert_eq!(launch_limits(&ceiling, Some(4096)).max_memory_bytes, 1024);
+        assert_eq!(launch_limits(&ceiling, Some(512)).max_table_elements, 10);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2416,6 +2450,7 @@ mod tests {
             prepersisted_input: None,
             launch_kind: crate::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         };
         let env = runner.merged_env(&options);
         assert!(!env.contains_key(super::common::RUNTIME_URL_ENV), "{env:?}");

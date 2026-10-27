@@ -1031,6 +1031,13 @@ export interface ApiResponseVecWorkflowVersionInfoDto {
     /** Whether this is the current/active version used for execution */
     isActive: boolean;
     /**
+     * Linear memory the compiled workflow allocates when it starts, in
+     * bytes: its memory tier must be at least this. Null if the version
+     * isn't compiled or was compiled before the floor was recorded.
+     * @format int64
+     */
+    memoryFloorBytes?: number | null;
+    /**
      * Size of the generated workflow-logic crate source files in bytes
      * (Cargo.toml + src/lib.rs + wit/world.wit + workflow.wac). Useful for
      * gauging how large the codegen output is for a workflow. Null when
@@ -5600,6 +5607,13 @@ export interface WorkflowVersionInfoDto {
   errorMessage?: string | null;
   /** Whether this is the current/active version used for execution */
   isActive: boolean;
+  /**
+   * Linear memory the compiled workflow allocates when it starts, in
+   * bytes: its memory tier must be at least this. Null if the version
+   * isn't compiled or was compiled before the floor was recorded.
+   * @format int64
+   */
+  memoryFloorBytes?: number | null;
   /**
    * Size of the generated workflow-logic crate source files in bytes
    * (Cargo.toml + src/lib.rs + wit/world.wit + workflow.wac). Useful for

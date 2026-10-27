@@ -1852,6 +1852,7 @@ async fn owned_mock_execution(
             prepersisted_input: None,
             launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         })
         .await
         .unwrap();

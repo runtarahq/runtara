@@ -80,9 +80,10 @@ fn prepared_cache_enabled() -> bool {
 /// Per-instance resource limits applied to the guest `Store`.
 #[derive(Clone, Debug)]
 pub struct WorkflowLimits {
-    /// Cap on any single guest linear memory, in bytes. A composed component
-    /// carries one memory per inner core module, so this bounds each, not
-    /// their sum. Growth beyond the cap fails the grow in-guest (OOM trap).
+    /// Cap on the guest's linear memory, in bytes: the sum over every memory
+    /// in the Store (a composed component carries one per inner core module),
+    /// counting their initial sizes. Growth beyond the cap fails the grow
+    /// in-guest (OOM trap).
     pub max_memory_bytes: usize,
     /// Cap on elements in any single guest table.
     pub max_table_elements: usize,
@@ -255,22 +256,27 @@ enum Termination {
 struct WorkflowLimiter {
     max_memory_bytes: usize,
     max_table_elements: usize,
+    /// Linear memory the Store holds now, summed over its memories.
+    memory_bytes: usize,
     memory_peak_bytes: u64,
     denied_memory_grow: bool,
 }
 
 impl wasmtime::ResourceLimiter for WorkflowLimiter {
+    // Also called for each memory's initial allocation (`current` is 0).
     fn memory_growing(
         &mut self,
-        _current: usize,
+        current: usize,
         desired: usize,
         _maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
-        if desired > self.max_memory_bytes {
+        let total = (self.memory_bytes - current).saturating_add(desired);
+        if total > self.max_memory_bytes {
             self.denied_memory_grow = true;
             return Ok(false);
         }
-        self.memory_peak_bytes = self.memory_peak_bytes.max(desired as u64);
+        self.memory_bytes = total;
+        self.memory_peak_bytes = self.memory_peak_bytes.max(total as u64);
         Ok(true)
     }
 
@@ -1177,6 +1183,7 @@ impl WorkflowExecutor {
             limiter: WorkflowLimiter {
                 max_memory_bytes: spec.limits.max_memory_bytes,
                 max_table_elements: spec.limits.max_table_elements,
+                memory_bytes: 0,
                 memory_peak_bytes: 0,
                 denied_memory_grow: false,
             },
@@ -1517,6 +1524,7 @@ impl WorkflowExecutor {
             limiter: WorkflowLimiter {
                 max_memory_bytes: limits.max_memory_bytes,
                 max_table_elements: limits.max_table_elements,
+                memory_bytes: 0,
                 memory_peak_bytes: 0,
                 denied_memory_grow: false,
             },
@@ -1586,7 +1594,7 @@ pub enum InvokeExit {
 #[derive(Debug)]
 pub struct InvokeRunResult {
     pub exit: InvokeExit,
-    /// Largest single guest linear memory observed, in bytes. Exact (from the
+    /// Largest total guest linear memory observed, in bytes. Exact (from the
     /// resource limiter), not an RSS sample.
     pub memory_peak_bytes: u64,
     pub duration: Duration,
@@ -1620,6 +1628,7 @@ mod tests {
         WorkflowLimiter {
             max_memory_bytes: max_memory,
             max_table_elements: 1000,
+            memory_bytes: 0,
             memory_peak_bytes: 0,
             denied_memory_grow: false,
         }
@@ -1637,10 +1646,22 @@ mod tests {
     #[test]
     fn limiter_denies_growth_over_cap_and_records_oom() {
         let mut l = limiter(1024);
+        assert!(l.memory_growing(0, 512, None).unwrap());
         assert!(!l.memory_growing(512, 2048, None).unwrap());
         assert!(l.denied_memory_grow);
         // Peak only tracks granted growth.
-        assert_eq!(l.memory_peak_bytes, 0);
+        assert_eq!(l.memory_peak_bytes, 512);
+    }
+
+    #[test]
+    fn limiter_caps_the_sum_of_memories() {
+        let mut l = limiter(1024);
+        assert!(l.memory_growing(0, 512, None).unwrap());
+        assert!(l.memory_growing(0, 256, None).unwrap());
+        assert!(l.memory_growing(256, 512, None).unwrap());
+        assert_eq!(l.memory_peak_bytes, 1024);
+        assert!(!l.memory_growing(512, 768, None).unwrap());
+        assert!(l.denied_memory_grow);
     }
 
     #[test]

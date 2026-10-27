@@ -113,3 +113,21 @@ describe('SettingsContent state section', () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe('SettingsContent memory tier', () => {
+  it('states the compiled workflow memory floor', () => {
+    render(
+      <SettingsContent
+        workflow={workflow()}
+        onChange={vi.fn()}
+        memoryFloorBytes={9 * 1024 * 1024 + 1}
+      />
+    );
+    expect(screen.getByText('Needs 10 MiB')).toBeInTheDocument();
+  });
+
+  it('says nothing when the floor is unknown', () => {
+    render(<SettingsContent workflow={workflow()} onChange={vi.fn()} />);
+    expect(screen.queryByText(/^Needs /)).not.toBeInTheDocument();
+  });
+});

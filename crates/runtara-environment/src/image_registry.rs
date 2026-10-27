@@ -50,6 +50,15 @@ impl Image {
             .filter(|checksum| !checksum.is_empty())
             .ok_or_else(|| "workflow image is missing its immutable binary checksum".to_string())
     }
+
+    /// The workflow's memory setting compiled into the image's `workflow`
+    /// metadata envelope, in bytes; `None` for an image without one.
+    pub fn workflow_memory_limit_bytes(&self) -> Option<u64> {
+        self.metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pointer("/workflow/memoryLimitBytes"))
+            .and_then(serde_json::Value::as_u64)
+    }
 }
 
 /// Reject an image that does not export the workflow entry

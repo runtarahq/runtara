@@ -33,6 +33,7 @@ struct WorkflowVersionRow {
     compiled_template_major: Option<String>,
     compiled_lowering_mode: Option<String>,
     compiled_trusted_pins: Option<Vec<String>>,
+    memory_floor_bytes: Option<i64>,
     definition: Value,
 }
 
@@ -185,6 +186,8 @@ pub struct CompilationSuccessRecord<'a> {
     /// Trusted built-in versions the artifact pins; see
     /// `NativeCompilationResult::trusted_pins`.
     pub trusted_pins: &'a [String],
+    /// Linear memory the artifact allocates when instantiated, if known.
+    pub memory_floor_bytes: Option<i64>,
 }
 
 /// The exact artifact identity to attach after Environment has accepted it.
@@ -240,8 +243,8 @@ impl CompilationWriteGuard<'_> {
         sqlx::query(
             r#"
             INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum, runtara_version, source_checksum, package_size, compiler_mode, track_events, template_major, lowering_mode, trusted_pins)
-            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum, runtara_version, source_checksum, package_size, compiler_mode, track_events, template_major, lowering_mode, trusted_pins, memory_floor_bytes)
+            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             ON CONFLICT (tenant_id, workflow_id, version)
             DO UPDATE SET
                 compiled_at = NOW(),
@@ -262,7 +265,8 @@ impl CompilationWriteGuard<'_> {
                 track_events = $11,
                 template_major = $12,
                 lowering_mode = $13,
-                trusted_pins = $14
+                trusted_pins = $14,
+                memory_floor_bytes = $15
             "#,
         )
         .bind(record.tenant_id)
@@ -279,6 +283,7 @@ impl CompilationWriteGuard<'_> {
         .bind(runtara_workflows::TEMPLATE_MAJOR_VERSION)
         .bind(&lowering_mode)
         .bind(record.trusted_pins)
+        .bind(record.memory_floor_bytes)
         .execute(&mut *self.transaction)
         .await?;
 
@@ -1214,6 +1219,7 @@ impl WorkflowRepository {
                 sc.template_major AS compiled_template_major,
                 sc.lowering_mode AS compiled_lowering_mode,
                 sc.trusted_pins AS compiled_trusted_pins,
+                sc.memory_floor_bytes,
                 sd.definition
             FROM workflow_definitions sd
             LEFT JOIN workflow_compilations sc
@@ -1272,6 +1278,11 @@ impl WorkflowRepository {
                     },
                     wasm_size: if is_compiled { row.wasm_size } else { None },
                     package_size: if is_compiled { row.package_size } else { None },
+                    memory_floor_bytes: if is_compiled {
+                        row.memory_floor_bytes
+                    } else {
+                        None
+                    },
                     compilation_status,
                     error_message: row.error_message.clone(),
                 }

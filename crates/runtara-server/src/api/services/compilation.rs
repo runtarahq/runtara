@@ -13,6 +13,7 @@ use crate::api::repositories::workflows::{
 use crate::compiler::child_workflows::load_child_workflows;
 use crate::runtime_client::RuntimeClient;
 use crate::runtime_types::{ImageSummary, RegisterImageStreamOptions};
+use crate::types::MemoryTier;
 use crate::valkey::compilation_progress::{CompilationStage, ProgressReporter};
 use opentelemetry::KeyValue;
 use redis::aio::ConnectionManager;
@@ -119,6 +120,35 @@ fn image_track_events(image: &ImageSummary) -> Option<bool> {
         .as_ref()
         .and_then(|m| m.pointer("/workflow/trackEvents"))
         .and_then(|v| v.as_bool())
+}
+
+/// The memory setting an image was registered with, in bytes. A launch
+/// enforces it; an image without one runs under the runner's ceiling only.
+fn image_memory_limit_bytes(image: &ImageSummary) -> Option<u64> {
+    image
+        .metadata
+        .as_ref()
+        .and_then(|m| m.pointer("/workflow/memoryLimitBytes"))
+        .and_then(|v| v.as_u64())
+}
+
+/// Refuse a memory setting below what the composed workflow allocates when
+/// it is instantiated: such a workflow could never start.
+fn check_memory_floor(
+    memory_tier: MemoryTier,
+    floor_bytes: Option<u64>,
+) -> Result<(), ServiceError> {
+    let limit = memory_tier.total_memory_bytes() as u64;
+    match floor_bytes {
+        Some(floor) if floor > limit => Err(ServiceError::WorkflowAuthoringError(format!(
+            "Memory tier {} ({} MiB) is below this workflow's memory floor of {} MiB; \
+             choose a larger tier",
+            memory_tier.as_str(),
+            limit.div_ceil(1024 * 1024),
+            floor.div_ceil(1024 * 1024),
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// SHA-256 of the exact uploaded workflow binary.
@@ -306,6 +336,8 @@ struct WorkflowImageRegistration<'a> {
     version: u32,
     source_checksum: &'a str,
     track_events: bool,
+    /// The version's memory setting, recorded on the image for its launches.
+    memory_limit_bytes: u64,
 }
 
 /// The exact workflow source a compilation attempt consumes.
@@ -318,6 +350,7 @@ pub(crate) struct CompilationSource {
     pub(crate) definition: serde_json::Value,
     pub(crate) source_checksum: String,
     pub(crate) track_events: bool,
+    pub(crate) memory_tier: MemoryTier,
 }
 
 /// Direct WASM compilation settings.
@@ -853,9 +886,9 @@ impl CompilationService {
         workflow_id: &str,
         version: i32,
     ) -> Result<CompilationSource, ServiceError> {
-        let (definition, track_events) = self
+        let (definition, memory_tier, track_events) = self
             .repository
-            .get_definition_with_track_events(tenant_id, workflow_id, version)
+            .get_definition_with_memory_tier(tenant_id, workflow_id, version)
             .await
             .map_err(|e| ServiceError::DatabaseError(format!("Failed to fetch definition: {e}")))?
             .ok_or_else(|| {
@@ -868,6 +901,7 @@ impl CompilationService {
             source_checksum: workflow_definition_checksum(&definition),
             definition,
             track_events,
+            memory_tier,
         })
     }
 
@@ -938,7 +972,9 @@ impl CompilationService {
             definition,
             source_checksum,
             track_events,
+            memory_tier,
         } = source;
+        let memory_limit_bytes = memory_tier.total_memory_bytes() as u64;
 
         let version_u32 = version as u32;
 
@@ -1186,6 +1222,16 @@ impl CompilationService {
             }
             return Err(error);
         }
+        let floor = direct_artifact_metadata_for_image(&result)
+            .await
+            .and_then(|metadata| metadata.memory_floor_bytes);
+        let memory_floor_bytes = floor.and_then(|floor| i64::try_from(floor).ok());
+        if let Err(error) = check_memory_floor(memory_tier, floor) {
+            if let Some(r) = &progress_reporter {
+                r.clear().await;
+            }
+            return Err(error);
+        }
 
         // 7. Lock the source through registration. Image names are immutable
         // per artifact identity, but the source lock still prevents an old
@@ -1233,6 +1279,7 @@ impl CompilationService {
                 compiler_mode: result.compiler_mode.as_str(),
                 track_events,
                 trusted_pins: &result.trusted_pins,
+                memory_floor_bytes,
             })
             .await
             .map_err(|e| {
@@ -1264,6 +1311,7 @@ impl CompilationService {
             version: version_u32,
             source_checksum: &source_checksum,
             track_events,
+            memory_limit_bytes,
         };
         let image_name = workflow_image_name(
             registration.workflow_id,
@@ -1292,7 +1340,8 @@ impl CompilationService {
                     result.compiler_mode,
                     track_events,
                     &result.binary_checksum,
-                ) && image_agent_ids(&existing_image).is_some()
+                ) && image_memory_limit_bytes(&existing_image) == Some(memory_limit_bytes)
+                    && image_agent_ids(&existing_image).is_some()
                     && self
                         .artifact_present_for_reuse(client, &existing_image.image_id)
                         .await =>
@@ -1702,14 +1751,19 @@ impl CompilationService {
                     registration.workflow_id, registration.version
                 ))
                 .with_sha256(&compilation_result.binary_checksum)
-                .with_metadata(workflow_image_metadata(
-                    compilation_result,
-                    registration.workflow_id,
-                    registration.version,
-                    registration.source_checksum,
-                    registration.track_events,
-                    direct_artifact.as_ref(),
-                ));
+                .with_metadata({
+                    let mut metadata = workflow_image_metadata(
+                        compilation_result,
+                        registration.workflow_id,
+                        registration.version,
+                        registration.source_checksum,
+                        registration.track_events,
+                        direct_artifact.as_ref(),
+                    );
+                    metadata["workflow"]["memoryLimitBytes"] =
+                        registration.memory_limit_bytes.into();
+                    metadata
+                });
 
         // Open the binary file for streaming
         let file = tokio::fs::File::open(&binary_path).await.map_err(|e| {
@@ -2293,6 +2347,20 @@ mod tests {
     }
 
     #[test]
+    fn memory_tier_below_the_workflow_floor_is_refused() {
+        let mib = 1024 * 1024;
+        let refused = check_memory_floor(MemoryTier::S, Some(9 * mib)).unwrap_err();
+        assert!(
+            matches!(&refused, ServiceError::WorkflowAuthoringError(message)
+                if message.contains("memory floor of 9 MiB")),
+            "{refused:?}"
+        );
+        assert!(check_memory_floor(MemoryTier::S, Some(8 * mib)).is_ok());
+        assert!(check_memory_floor(MemoryTier::M, Some(9 * mib)).is_ok());
+        assert!(check_memory_floor(MemoryTier::S, None).is_ok());
+    }
+
+    #[test]
     fn workflow_image_metadata_records_lowering_mode() {
         let result = NativeCompilationResult {
             binary_path: "/tmp/workflow.wasm".into(),
@@ -2505,6 +2573,7 @@ mod tests {
             support_report_checksum: "support-sha256".to_string(),
             workflow_logic_wasm: wasm("workflow-logic.wasm", "logic-sha256"),
             composed_wasm: Some(wasm("workflow.wasm", "composed-sha256")),
+            memory_floor_bytes: None,
             isolation: None,
             isolation_selection: None,
             shared_components: vec![DirectComponentDependencyMetadata {

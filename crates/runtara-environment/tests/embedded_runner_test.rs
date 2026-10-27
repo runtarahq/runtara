@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use runtara_core::persistence::Persistence;
 use runtara_environment::runner::{
-    EmbeddedWasmRunner, LaunchOptions, Result as RunnerResult, Runner, RunnerError, StartGate,
-    StartGateConfirmation, WorkflowRunnerConfig,
+    EmbeddedWasmRunner, LaunchOptions, Result as RunnerResult, RunExitReport, Runner, RunnerError,
+    StartGate, StartGateConfirmation, WorkflowRunnerConfig,
 };
 use runtara_store_postgres::PostgresPersistence;
 use uuid::Uuid;
@@ -327,6 +327,32 @@ fn options(instance_id: &str, wasm_path: &Path) -> LaunchOptions {
         prepersisted_input: None,
         launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
         start_gate: None,
+        memory_limit_bytes: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_over_its_memory_setting_reports_the_limit() {
+    let h = harness().await;
+    let id = unique("memory-setting");
+    let wasm = write_component(h.dir.path(), "ok.wasm", &run_ok());
+    seed_detached_instance(&h, &id).await;
+    let mut launch = options(&id, &wasm);
+    // Below the guest's one initial page.
+    launch.memory_limit_bytes = Some(1024);
+    let handle = h.runner.try_launch_detached(&launch).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(10)),
+    )
+    .await
+    .unwrap();
+    match h.runner.take_exit_report(&handle).await {
+        Some(RunExitReport::Trapped { reason }) => assert!(
+            reason.contains("memory limit exceeded (1024 bytes)"),
+            "{reason}"
+        ),
+        other => panic!("expected a trap report, got {other:?}"),
     }
 }
 

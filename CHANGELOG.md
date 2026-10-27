@@ -330,6 +330,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     agent SDK. A component that imports any of the interfaces above is
     refused when a workflow is compiled against it, and at load.
 
+- **Breaking: a workflow's memory tier now limits its runs.** The tier (S 8
+  MiB, M 64 MiB, L 128 MiB, XL 256 MiB; XL by default) was stored but never
+  applied. It now caps the sum of a run's linear memories, and each child
+  Store of an isolated or scoped agent gets the same cap. A run that grows
+  past it fails with "workflow trapped: guest memory limit exceeded".
+  - Compiling records the workflow's memory floor, what it allocates when
+    it starts, and refuses a tier below it ("below this workflow's memory
+    floor of N MiB"). The editor shows the floor beside the tier and
+    disables the tiers below it; MCP `update_workflow` takes `memory_tier`.
+  - `RUNTARA_INSTANCE_MEMORY_MAX_BYTES` stays the operator ceiling (1 GiB
+    by default), now for the sum of a run's memories rather than for each
+    memory. A tier never raises it.
+  - A workflow running at S, M or L that needs more fails where it ran
+    before: raise its tier. A version compiled before this release runs
+    under the ceiling alone until it is recompiled.
+
 - **BREAKING: a Telegram Channel trigger that holds no webhook secret
   rejects inbound calls (401) instead of accepting them unauthenticated.**
   Since 9.0.0 runtara stores a webhook's secret before it calls Telegram, so

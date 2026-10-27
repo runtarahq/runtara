@@ -63,6 +63,10 @@ pub struct DirectArtifactMetadata {
     pub workflow_logic_wasm: DirectArtifactFileMetadata,
     /// Final statically composed `workflow.wasm`, when composition has run.
     pub composed_wasm: Option<DirectArtifactFileMetadata>,
+    /// Linear memory the composed workflow allocates when it is instantiated,
+    /// in bytes: the floor of its memory setting. Absent until composition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_floor_bytes: Option<u64>,
     /// Shared stdlib/runtime components required for static composition.
     pub shared_components: Vec<DirectComponentDependencyMetadata>,
     /// Agent components required for static composition.
@@ -217,6 +221,7 @@ pub(super) fn initial_artifact_metadata(
             size_bytes: input.workflow_logic_size as u64,
         },
         composed_wasm: None,
+        memory_floor_bytes: None,
         isolation: None,
         isolation_selection: None,
         shared_components: input
@@ -736,9 +741,175 @@ pub(super) fn write_artifact_metadata(
     Ok(())
 }
 
+/// Linear memory a component allocates when it is instantiated, in bytes: the
+/// initial size of every memory of every core instance it creates, through
+/// nested components too. A module or component instantiated twice (a parallel
+/// Split's pooled agents) counts twice; imported memories are not counted.
+pub(crate) fn initial_memory_bytes(wasm: &[u8]) -> Result<u64, DirectCompileError> {
+    use wasmparser::{
+        ComponentAlias, ComponentExternalKind, ComponentInstance, ComponentOuterAliasKind,
+        ComponentTypeRef, Encoding, Instance, Payload,
+    };
+
+    /// A module or component being read. `modules` and `components` hold
+    /// what instantiating each index allocates; `bytes` is what instantiating
+    /// this one allocates.
+    #[derive(Default)]
+    struct Frame {
+        component: bool,
+        modules: Vec<u64>,
+        components: Vec<u64>,
+        bytes: u64,
+    }
+    fn at(space: &[u64], index: u32) -> u64 {
+        space.get(index as usize).copied().unwrap_or(0)
+    }
+    let read = |error: wasmparser::BinaryReaderError| {
+        DirectCompileError::Component(format!("failed to read composed workflow: {error}"))
+    };
+
+    let mut stack: Vec<Frame> = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+        match payload.map_err(read)? {
+            Payload::Version { encoding, .. } => stack.push(Frame {
+                component: encoding == Encoding::Component,
+                ..Frame::default()
+            }),
+            Payload::End(_) => {
+                let done = stack.pop().unwrap_or_default();
+                let Some(parent) = stack.last_mut() else {
+                    return Ok(done.bytes);
+                };
+                if done.component {
+                    parent.components.push(done.bytes);
+                } else {
+                    parent.modules.push(done.bytes);
+                }
+            }
+            Payload::MemorySection(memories) => {
+                let frame = stack.last_mut().expect("inside a module");
+                for memory in memories {
+                    let memory = memory.map_err(read)?;
+                    let page = 1u64 << memory.page_size_log2.unwrap_or(16);
+                    frame.bytes = frame
+                        .bytes
+                        .saturating_add(memory.initial.saturating_mul(page));
+                }
+            }
+            Payload::InstanceSection(instances) => {
+                let frame = stack.last_mut().expect("inside a component");
+                for instance in instances {
+                    if let Instance::Instantiate { module_index, .. } = instance.map_err(read)? {
+                        frame.bytes = frame.bytes.saturating_add(at(&frame.modules, module_index));
+                    }
+                }
+            }
+            Payload::ComponentInstanceSection(instances) => {
+                let frame = stack.last_mut().expect("inside a component");
+                for instance in instances {
+                    if let ComponentInstance::Instantiate {
+                        component_index, ..
+                    } = instance.map_err(read)?
+                    {
+                        frame.bytes = frame
+                            .bytes
+                            .saturating_add(at(&frame.components, component_index));
+                    }
+                }
+            }
+            Payload::ComponentAliasSection(aliases) => {
+                for alias in aliases {
+                    let (kind, value) = match alias.map_err(read)? {
+                        ComponentAlias::Outer { kind, count, index } => {
+                            let outer = stack
+                                .len()
+                                .checked_sub(1 + count as usize)
+                                .map(|depth| &stack[depth]);
+                            match kind {
+                                ComponentOuterAliasKind::CoreModule => {
+                                    (Some(false), outer.map_or(0, |f| at(&f.modules, index)))
+                                }
+                                ComponentOuterAliasKind::Component => {
+                                    (Some(true), outer.map_or(0, |f| at(&f.components, index)))
+                                }
+                                _ => (None, 0),
+                            }
+                        }
+                        ComponentAlias::InstanceExport { kind, .. } => match kind {
+                            ComponentExternalKind::Module => (Some(false), 0),
+                            ComponentExternalKind::Component => (Some(true), 0),
+                            _ => (None, 0),
+                        },
+                        ComponentAlias::CoreInstanceExport { .. } => (None, 0),
+                    };
+                    let frame = stack.last_mut().expect("inside a component");
+                    match kind {
+                        Some(false) => frame.modules.push(value),
+                        Some(true) => frame.components.push(value),
+                        None => {}
+                    }
+                }
+            }
+            Payload::ComponentImportSection(imports) => {
+                let frame = stack.last_mut().expect("inside a component");
+                for import in imports {
+                    match import.map_err(read)?.ty {
+                        ComponentTypeRef::Module(_) => frame.modules.push(0),
+                        ComponentTypeRef::Component(_) => frame.components.push(0),
+                        _ => {}
+                    }
+                }
+            }
+            Payload::ComponentExportSection(exports) => {
+                let frame = stack.last_mut().expect("inside a component");
+                for export in exports {
+                    let export = export.map_err(read)?;
+                    match export.kind {
+                        ComponentExternalKind::Module => {
+                            frame.modules.push(at(&frame.modules, export.index))
+                        }
+                        ComponentExternalKind::Component => {
+                            frame.components.push(at(&frame.components, export.index))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(stack.pop().map_or(0, |frame| frame.bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initial_memory_counts_every_instantiation() {
+        let wasm = wat::parse_str(
+            r#"(component
+                (core module $a (memory 2) (memory 1))
+                (core module $b (import "a" "m" (memory 5)))
+                (core module $unused (memory 100))
+                (component $c
+                  (core module $m (memory 3))
+                  (core instance (instantiate $m)))
+                (core instance $a1 (instantiate $a))
+                (core instance (instantiate $a))
+                (core instance (instantiate $b
+                  (with "a" (instance (export "m" (memory $a1 "memory"))))))
+                (instance (instantiate $c))
+                (instance (instantiate $c)))"#,
+        );
+        let wasm = match wasm {
+            Ok(wasm) => wasm,
+            Err(error) => panic!("{error}"),
+        };
+        // $a twice (3 pages each), $c twice (3 pages each); $b imports its
+        // memory and $unused is never instantiated.
+        assert_eq!(initial_memory_bytes(&wasm).unwrap(), 12 * 65_536);
+    }
 
     #[test]
     fn import_classification_ignores_nested_components_but_scans_later_root_sections() {

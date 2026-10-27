@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils';
 import {
   Form,
   FormControl,
+  FormDescription,
   FormField,
   FormItem,
   FormLabel,
@@ -111,16 +112,27 @@ function formValueToDurable(value: GeneralFormValues['durableMode']) {
 
 const AUTO_ENTRY_POINT = '__auto__';
 
+/** Linear memory each tier allows a run, in MiB (server `MemoryTier`). */
+const MEMORY_TIER_MIB: Record<MemoryTier, number> = {
+  S: 8,
+  M: 64,
+  L: 128,
+  XL: 256,
+};
+
 interface SettingsContentProps {
   workflow: WorkflowData;
   onChange: (data: Partial<WorkflowData>) => void;
   readOnly?: boolean;
+  /** Linear memory the compiled workflow allocates when it starts. */
+  memoryFloorBytes?: number | null;
 }
 
 export function SettingsContent({
   workflow,
   onChange,
   readOnly = false,
+  memoryFloorBytes,
 }: SettingsContentProps) {
   const [activeSection, setActiveSection] =
     useState<SettingsSection>('general');
@@ -176,6 +188,7 @@ export function SettingsContent({
               workflow={workflow}
               onChange={onChange}
               readOnly={readOnly}
+              memoryFloorBytes={memoryFloorBytes}
             />
           )}
           {activeSection === 'variables' && (
@@ -218,11 +231,19 @@ function GeneralSection({
   workflow,
   onChange,
   readOnly,
+  memoryFloorBytes,
 }: {
   workflow: WorkflowData;
   onChange: (data: Partial<WorkflowData>) => void;
   readOnly: boolean;
+  memoryFloorBytes?: number | null;
 }) {
+  const memoryFloorMib =
+    memoryFloorBytes != null
+      ? Math.ceil(memoryFloorBytes / (1024 * 1024))
+      : null;
+  const belowFloor = (tier: MemoryTier) =>
+    memoryFloorMib != null && MEMORY_TIER_MIB[tier] < memoryFloorMib;
   const form = useForm<GeneralFormValues>({
     resolver: zodResolver(generalSchema),
     mode: 'onChange',
@@ -417,12 +438,20 @@ function GeneralSection({
                   </FormControl>
                   <SelectContent>
                     <SelectItem value="default">Default</SelectItem>
-                    <SelectItem value="S">S</SelectItem>
-                    <SelectItem value="M">M</SelectItem>
-                    <SelectItem value="L">L</SelectItem>
-                    <SelectItem value="XL">XL</SelectItem>
+                    {(['S', 'M', 'L', 'XL'] as const).map((tier) => (
+                      <SelectItem
+                        key={tier}
+                        value={tier}
+                        disabled={belowFloor(tier)}
+                      >
+                        {tier} ({MEMORY_TIER_MIB[tier]} MiB)
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
+                {memoryFloorMib != null && (
+                  <FormDescription>Needs {memoryFloorMib} MiB</FormDescription>
+                )}
                 <FormMessage />
               </FormItem>
             )}

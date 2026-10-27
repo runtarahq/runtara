@@ -340,6 +340,11 @@ pub struct UpdateWorkflowParams {
     )]
     #[schemars(schema_with = "crate::mcp::tools::internal_api::json_object_schema")]
     pub execution_graph: serde_json::Value,
+    #[serde(default)]
+    #[schemars(
+        description = "Memory tier for the new version: S (8 MiB), M (64 MiB), L (128 MiB) or XL (256 MiB) of linear memory per run. Omit to keep the current tier. Compiling fails, naming the floor, when the workflow needs more than its tier."
+    )]
+    pub memory_tier: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1129,9 +1134,14 @@ pub async fn update_workflow(
 ) -> Result<CallToolResult, rmcp::ErrorData> {
     validate_path_param("workflow_id", &params.workflow_id)?;
     let execution_graph = normalize_json_arg(params.execution_graph, "execution_graph")?;
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "executionGraph": execution_graph,
     });
+    if let Some(tier) = params.memory_tier {
+        let tier = crate::types::MemoryTier::parse(&tier)
+            .ok_or_else(|| err(format!("Unknown memory tier '{tier}': use S, M, L or XL")))?;
+        body["memoryTier"] = tier.as_str().into();
+    }
     let result = api_post(
         server,
         &format!("/api/runtime/workflows/{}/update", params.workflow_id),

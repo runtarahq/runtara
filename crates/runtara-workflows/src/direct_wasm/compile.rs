@@ -92,8 +92,9 @@ pub use artifact_metadata::{
     check_agent_component_imports,
 };
 use artifact_metadata::{
-    InitialArtifactMetadataInput, initial_artifact_metadata, resolve_agent_component_dependencies,
-    resolve_shared_component_dependencies, write_artifact_metadata,
+    InitialArtifactMetadataInput, initial_artifact_metadata, initial_memory_bytes,
+    resolve_agent_component_dependencies, resolve_shared_component_dependencies,
+    write_artifact_metadata,
 };
 use core_imports::{DirectAgentInvokeImport, DirectCoreFunctionIndices};
 use core_module::{DirectCoreConfig, DirectVariables, emit_direct_core_module};
@@ -840,6 +841,8 @@ fn compose_direct_workflow_selected(
         "compose: in-process wac-graph composition complete",
     );
     trusted::pin_trusted_dependencies(&mut composed_wasm, &agent_components, components_dir)?;
+    // Before isolated children are appended: they run in Stores of their own.
+    let memory_floor_bytes = initial_memory_bytes(&composed_wasm)?;
     let isolation = if bindings.is_empty() {
         None
     } else {
@@ -889,6 +892,7 @@ fn compose_direct_workflow_selected(
     };
     fs::write(&composed_path, &composed_wasm)?;
     result.artifact_metadata.isolation = isolation;
+    result.artifact_metadata.memory_floor_bytes = Some(memory_floor_bytes);
 
     let composed_wasm_size = composed_wasm.len();
     let composed_wasm_checksum = sha256_hex(&composed_wasm);

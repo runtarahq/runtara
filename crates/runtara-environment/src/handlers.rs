@@ -1711,7 +1711,17 @@ pub fn spawn_container_monitor(
                     {
                         crate::observed_exit::ObservedExit::unparked_suspend(error)
                     }
-                    _ => observed_unreported_exit(&drain, stderr.as_deref()),
+                    report => {
+                        // A run without a stderr file says why it trapped
+                        // through its exit report.
+                        let trapped = match report {
+                            Some(crate::runner::RunExitReport::Trapped { reason }) => {
+                                Some(format!("workflow trapped: {reason}"))
+                            }
+                            _ => None,
+                        };
+                        observed_unreported_exit(&drain, stderr.as_deref().or(trapped.as_deref()))
+                    }
                 };
                 // Retain the observed exit before Core cleanup. Both local retry
                 // and restart recovery keep the exact physical ownership fence.

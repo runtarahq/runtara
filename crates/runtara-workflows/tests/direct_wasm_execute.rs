@@ -4153,11 +4153,13 @@ fn ai_agent_loop_long_conversation_stays_bounded() {
         "long AiAgent conversation should complete; stderr={:?} error_json={:?}",
         captured.stderr, captured.error_json,
     );
+    // The peak sums every memory in the run (~55 MiB healthy); a regression
+    // runs into the 96 MiB cap.
     let peak = captured
         .memory_peak_bytes
         .expect("embedded executor reports a memory peak");
     assert!(
-        peak < 48 * 1024 * 1024,
+        peak < 64 * 1024 * 1024,
         "per-turn scratch not reclaimed: peak {peak} bytes over {} turns \
          (expected bounded to ~the final conversation's working set)",
         AI_LEAK_TURNS,
@@ -6781,14 +6783,14 @@ fn while_growing_accumulator_stays_bounded() {
 
     // Without the GC the un-reclaimed O(N²) interned blobs climb past this bound and
     // OOM at the 96 MiB cap; with it the peak is just one iteration's working set.
-    // 48 MiB sits above the GC'd working set and far below the GC-regression peak,
-    // so a linear→quadratic regression trips it while a healthy run — or an early
-    // HTTP flake — passes.
+    // 64 MiB sits above the GC'd working set (~55 MiB, summed over every memory in
+    // the run) and below the GC-regression peak, so a linear→quadratic regression
+    // trips it while a healthy run — or an early HTTP flake — passes.
     let peak = captured
         .memory_peak_bytes
         .expect("embedded executor reports a memory peak");
     assert!(
-        peak < 48 * 1024 * 1024,
+        peak < 64 * 1024 * 1024,
         "accumulator not reclaimed across iterations: peak {peak} bytes over {} \
          iterations (expected bounded to one accumulator's working set)",
         WHILE_ACC_ITERATIONS,

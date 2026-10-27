@@ -296,6 +296,7 @@ impl Harness {
             prepersisted_input: input,
             launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         }
     }
 
