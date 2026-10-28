@@ -312,12 +312,16 @@ pub async fn scan_scopes(
                 scan.corrupt_keys.push(key)
             }
             // An indexed queue that has since expired or been cleaned up.
+            // Checked again and dropped in one step, so a queue created
+            // since the HMGET keeps its entry.
             (None, None) if scoped => {
-                let _: () = redis::cmd("SREM")
-                    .arg(session_index(tenant_id))
-                    .arg(&key)
-                    .query_async(conn)
-                    .await?;
+                let _: i64 = redis::Script::new(
+                    "if redis.call('EXISTS', KEYS[2]) == 0 then return redis.call('SREM', KEYS[1], KEYS[2]) end return 0",
+                )
+                .key(session_index(tenant_id))
+                .key(&key)
+                .invoke_async(conn)
+                .await?;
             }
             // Another tenant's queue, or an owner that concurrent
             // completed-queue cleanup removed, or one corrupt beyond
