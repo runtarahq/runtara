@@ -8,7 +8,7 @@
 //! write still gets its first answer.
 
 use async_trait::async_trait;
-use runtara_workflow_api::server::{Receipt, ReceiptStore};
+use runtara_workflow_api::server::{KeyHold, Receipt, ReceiptStore};
 use runtara_workflow_api::{ApiError, ErrorCode};
 use sqlx::PgPool;
 
@@ -48,6 +48,23 @@ fn unavailable(error: sqlx::Error) -> ApiError {
 
 #[async_trait]
 impl ReceiptStore for PostgresReceiptStore {
+    /// A transaction-scoped advisory lock on the key, so every process
+    /// sharing the database waits for the request holding it. The hold keeps
+    /// the transaction open; dropping it rolls back and releases the lock.
+    /// Two keys whose hashes collide only wait for each other.
+    async fn hold(&self, launch_id: &str, key: &str) -> Result<KeyHold, ApiError> {
+        let mut transaction = self.pool.begin().await.map_err(unavailable)?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended(length($1) || ':' || $1 || $2, 0))",
+        )
+        .bind(launch_id)
+        .bind(key)
+        .execute(&mut *transaction)
+        .await
+        .map_err(unavailable)?;
+        Ok(KeyHold::new(transaction))
+    }
+
     async fn get(&self, launch_id: &str, key: &str) -> Result<Option<Receipt>, ApiError> {
         let row: Option<(Vec<u8>, i16, serde_json::Value, Vec<u8>, bool)> = sqlx::query_as(
             "SELECT request_hash, status, headers, body, body_omitted FROM workflow_api_receipts \

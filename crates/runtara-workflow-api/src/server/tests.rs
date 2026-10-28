@@ -1245,3 +1245,81 @@ async fn tasks_start_join_cancel_and_release() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(error_code(&body), "invalid");
 }
+
+/// A heartbeat that waits for its gate, so two requests overlap in it.
+#[derive(Default)]
+struct Gated {
+    gate: tokio::sync::Notify,
+    entered: tokio::sync::Notify,
+    heartbeats: Mutex<u32>,
+}
+
+#[async_trait]
+impl WorkflowApiBackend for Gated {
+    async fn launch_state(&self, _: &Binding) -> Result<LaunchState, ApiError> {
+        Ok(LaunchState::Active)
+    }
+    async fn run_info(&self, _: &Binding) -> Result<RunInfo, ApiError> {
+        unreachable!()
+    }
+    async fn run_input(&self, _: &Binding) -> Result<Vec<u8>, ApiError> {
+        unreachable!()
+    }
+    async fn post_outcome(&self, _: &Binding, _: PostedOutcome) -> Result<(), ApiError> {
+        unreachable!()
+    }
+    async fn set_deadline(&self, _: &Binding, _: u64) -> Result<(), ApiError> {
+        unreachable!()
+    }
+    async fn heartbeat(&self, _: &Binding) -> Result<(), ApiError> {
+        *self.heartbeats.lock().unwrap() += 1;
+        self.entered.notify_one();
+        self.gate.notified().await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn overlapping_requests_with_one_key_run_once() {
+    let backend = Arc::new(Gated::default());
+    let app = router(WorkflowApiState {
+        backend: backend.clone(),
+        receipts: Arc::new(MemoryReceiptStore::default()),
+        caps: Caps::default(),
+    });
+    let first = tokio::spawn({
+        let app = app.clone();
+        async move { send(&app, write("POST", "/v1/heartbeat", "h", "")).await }
+    });
+    backend.entered.notified().await;
+    // The same request, and a different one with the key, while it runs.
+    let same = tokio::spawn({
+        let app = app.clone();
+        async move { send(&app, write("POST", "/v1/heartbeat", "h", "")).await }
+    });
+    let different = tokio::spawn({
+        let app = app.clone();
+        async move { send(&app, write("POST", "/v1/heartbeat", "h", "other body")).await }
+    });
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!same.is_finished() && !different.is_finished(), "they wait");
+    backend.gate.notify_one();
+    // Were the waiters let through, they would wait at the gate for good.
+    let joined = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        (first.await, same.await, different.await)
+    })
+    .await
+    .expect("a request with the key ran again");
+    let (first, _, _) = joined.0.unwrap();
+    let (same, _, _) = joined.1.unwrap();
+    let (different, _, body) = joined.2.unwrap();
+    assert_eq!(
+        (first, same),
+        (StatusCode::NO_CONTENT, StatusCode::NO_CONTENT)
+    );
+    assert_eq!(different, StatusCode::CONFLICT);
+    assert_eq!(error_code(&body), "replay-conflict");
+    assert_eq!(*backend.heartbeats.lock().unwrap(), 1, "ran once");
+}

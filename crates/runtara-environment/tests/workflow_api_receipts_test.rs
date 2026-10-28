@@ -167,3 +167,30 @@ async fn an_omitted_body_is_stored_as_omitted() {
     store.put(&launch, "big", omitted.clone()).await.unwrap();
     assert_eq!(store.get(&launch, "big").await.unwrap(), Some(omitted));
 }
+
+/// Two processes sharing the database (two stores on their own pools) hold a
+/// key in turn: the second waits until the first lets go.
+#[tokio::test]
+async fn a_key_is_held_across_processes() {
+    let (first, _) = store().await;
+    let (second, _) = store().await;
+    let launch = fresh_launch();
+    let held = first.hold(&launch, "k").await.unwrap();
+    let other_key = second.hold(&launch, "other").await.unwrap();
+    let waiter = tokio::spawn({
+        let launch = launch.clone();
+        async move { second.hold(&launch, "k").await.map(|_| ()) }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !waiter.is_finished(),
+        "the key is held by the other process"
+    );
+    drop(held);
+    tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        .await
+        .expect("released when the hold dropped")
+        .unwrap()
+        .unwrap();
+    drop(other_key);
+}

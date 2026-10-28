@@ -426,6 +426,11 @@ pub struct Receipt {
 /// launch's newest; see [`MemoryReceiptStore`]).
 #[async_trait]
 pub trait ReceiptStore: Send + Sync + 'static {
+    /// Holds `(launch_id, key)` until the returned hold drops: a request
+    /// with the key waits for one already running with it, then reads its
+    /// receipt, so overlapping requests with one key run once. A store that
+    /// several processes share must hold across them.
+    async fn hold(&self, launch_id: &str, key: &str) -> Result<KeyHold, ApiError>;
     async fn get(&self, launch_id: &str, key: &str) -> Result<Option<Receipt>, ApiError>;
     /// Store `receipt` unless one is already stored for the key; the first
     /// stays.
@@ -434,6 +439,40 @@ pub trait ReceiptStore: Send + Sync + 'static {
     async fn forget_launch(&self, launch_id: &str) -> Result<(), ApiError> {
         let _ = launch_id;
         Ok(())
+    }
+}
+
+/// A held `(launch, key)`, released when dropped.
+pub struct KeyHold(#[allow(dead_code)] Box<dyn Send + Sync>);
+
+impl KeyHold {
+    /// A hold that `guard` keeps until it drops.
+    pub fn new(guard: impl Send + Sync + 'static) -> Self {
+        Self(Box::new(guard))
+    }
+}
+
+/// Keys being run, each with the requests that hold or wait for it.
+type HeldKeys = Arc<Mutex<HashMap<(String, String), Arc<tokio::sync::Mutex<()>>>>>;
+
+/// One process's hold on a key. Dropping it lets the next waiter run, and
+/// forgets the key when no one else holds or waits for it.
+struct MemoryHold {
+    keys: HeldKeys,
+    key: (String, String),
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Drop for MemoryHold {
+    fn drop(&mut self) {
+        self.guard.take();
+        let mut keys = self.keys.lock().expect("held keys poisoned");
+        if keys
+            .get(&self.key)
+            .is_some_and(|lock| Arc::strong_count(lock) == 1)
+        {
+            keys.remove(&self.key);
+        }
     }
 }
 
@@ -454,6 +493,9 @@ pub const RECEIPT_BYTES_PER_LAUNCH: usize = 16 * 1024 * 1024;
 /// letting an honest retry run twice.
 pub struct MemoryReceiptStore {
     launches: Mutex<HashMap<String, LaunchReceipts>>,
+    /// A launch is served by one process, so holding a key in this process
+    /// is enough.
+    held: HeldKeys,
     max_receipts: usize,
     max_bytes: usize,
 }
@@ -487,6 +529,7 @@ impl MemoryReceiptStore {
     pub fn with_limits(max_receipts: usize, max_bytes: usize) -> Self {
         Self {
             launches: Mutex::default(),
+            held: HeldKeys::default(),
             max_receipts: max_receipts.max(1),
             max_bytes,
         }
@@ -502,6 +545,23 @@ impl MemoryReceiptStore {
 
 #[async_trait]
 impl ReceiptStore for MemoryReceiptStore {
+    async fn hold(&self, launch_id: &str, key: &str) -> Result<KeyHold, ApiError> {
+        let key = (launch_id.to_string(), key.to_string());
+        let lock = Arc::clone(
+            self.held
+                .lock()
+                .expect("held keys poisoned")
+                .entry(key.clone())
+                .or_default(),
+        );
+        let guard = lock.lock_owned().await;
+        Ok(KeyHold::new(MemoryHold {
+            keys: Arc::clone(&self.held),
+            key,
+            guard: Some(guard),
+        }))
+    }
+
     async fn get(&self, launch_id: &str, key: &str) -> Result<Option<Receipt>, ApiError> {
         Ok(self
             .launches
@@ -580,6 +640,23 @@ mod receipt_tests {
             keys(&store, "a", &["k1", "k2", "k3", "k4"]).await,
             [false, true, true, true]
         );
+    }
+
+    #[tokio::test]
+    async fn a_held_key_makes_the_next_holder_wait_and_is_then_forgotten() {
+        let store = Arc::new(MemoryReceiptStore::default());
+        let first = store.hold("a", "k").await.unwrap();
+        let other = store.hold("a", "other").await.unwrap();
+        let waiter = tokio::spawn({
+            let store = Arc::clone(&store);
+            async move { store.hold("a", "k").await.unwrap() }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished(), "the key is held");
+        drop(first);
+        let second = waiter.await.unwrap();
+        drop((second, other));
+        assert!(store.held.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -872,6 +949,12 @@ async fn idempotency(
     let uri = parts.uri.to_string();
     let hash = request_hash(&parts.method, &uri, &parts.headers, &body);
 
+    // Held until the receipt is stored: an overlapping request with the key
+    // waits, then replays this one's answer or conflicts with it.
+    let _hold = match state.receipts.hold(&binding.launch_id, &key).await {
+        Ok(hold) => hold,
+        Err(error) => return error_response(&error),
+    };
     match state.receipts.get(&binding.launch_id, &key).await {
         Ok(Some(receipt)) if receipt.request_hash == hash && receipt.body_omitted => {
             return error_response(&ApiError::domain(
