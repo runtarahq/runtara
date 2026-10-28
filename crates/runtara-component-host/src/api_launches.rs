@@ -1976,6 +1976,21 @@ mod tests {
             ended(4, RemoteGuestExit::Timeout),
             InvokeExit::Timeout
         ));
+        // A non-zero exit: what was posted decides; with nothing, the code
+        // names the trap.
+        let failed = begin(5);
+        backend
+            .post_outcome(&failed, PostedOutcome::Completed(b"done".to_vec()))
+            .await
+            .unwrap();
+        assert!(
+            matches!(ended(5, RemoteGuestExit::ExitedWith(1)), InvokeExit::Completed(out) if out == b"done")
+        );
+        begin(6);
+        assert!(matches!(
+            ended(6, RemoteGuestExit::ExitedWith(1)),
+            InvokeExit::Trapped { reason } if reason.contains("exited with code 1")
+        ));
         // Each one stopped being served.
         assert_eq!(
             backend.launch_state(&completed).await.unwrap(),

@@ -1601,6 +1601,10 @@ fn split_instance_waits(exit: &mut InvokeExit) -> Vec<String> {
 pub enum RemoteGuestExit {
     /// `run` returned, whatever it returned.
     Returned,
+    /// The guest's process exited with this non-zero code. What it posted
+    /// decides, as for `Returned` (a failed workflow exits so too); with
+    /// nothing posted it trapped, and the code says so.
+    ExitedWith(i32),
     /// The guest trapped, or its process or VM failed, with this reason.
     Trapped(String),
     /// The wall-clock budget elapsed.
@@ -1625,17 +1629,22 @@ pub fn remote_invoke_result(
         (RemoteGuestExit::Cancelled, ..) => InvokeExit::Cancelled,
         (_, Some(fault), _) => InvokeExit::Trapped { reason: fault },
         (RemoteGuestExit::Trapped(reason), ..) => InvokeExit::Trapped { reason },
-        (RemoteGuestExit::Returned, None, Some(outcome)) => match posted_outcome(outcome) {
-            Ok(crate::lifecycle::WorkflowOutcome::Completed(output)) => {
-                InvokeExit::Completed(output)
+        (RemoteGuestExit::Returned | RemoteGuestExit::ExitedWith(_), None, Some(outcome)) => {
+            match posted_outcome(outcome) {
+                Ok(crate::lifecycle::WorkflowOutcome::Completed(output)) => {
+                    InvokeExit::Completed(output)
+                }
+                Ok(crate::lifecycle::WorkflowOutcome::Suspended(suspension)) => {
+                    InvokeExit::Suspended(suspension.wakes)
+                }
+                Err(error) => InvokeExit::Failed(error),
             }
-            Ok(crate::lifecycle::WorkflowOutcome::Suspended(suspension)) => {
-                InvokeExit::Suspended(suspension.wakes)
-            }
-            Err(error) => InvokeExit::Failed(error),
-        },
+        }
         (RemoteGuestExit::Returned, None, None) => InvokeExit::Trapped {
             reason: "workflow run returned without posting an outcome".into(),
+        },
+        (RemoteGuestExit::ExitedWith(code), None, None) => InvokeExit::Trapped {
+            reason: format!("the guest exited with code {code} without posting an outcome"),
         },
     };
     let instance_waits = split_instance_waits(&mut exit);
