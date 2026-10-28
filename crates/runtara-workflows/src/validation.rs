@@ -4561,6 +4561,26 @@ fn validate_references_with_inherited(
         for reference in collect_unmapped_step_references(step) {
             validate_step_reference(step_id, &reference, &step_ids, &step_types, true, result);
         }
+
+        // A typed mapping value cannot hold a non-string reference `value`,
+        // but a Switch output is bare JSON: one there saves, and the runtime
+        // fails the step when it resolves it.
+        if let Step::Switch(switch_step) = step
+            && let Some(config) = &switch_step.config
+        {
+            visit_switch_output_references(config, &mut |value| {
+                if !value.is_string() {
+                    result.errors.push(ValidationError::InvalidReferencePath {
+                        step_id: step_id.clone(),
+                        reference_path: value.to_string(),
+                        reason: format!(
+                            "reference value must be a string path, not {}",
+                            get_json_type_name(value)
+                        ),
+                    });
+                }
+            });
+        }
     }
 
     // Edge conditions live on the graph, not on a step, so no per-step walk
@@ -4996,6 +5016,7 @@ fn collect_unmapped_step_references(step: &Step) -> Vec<String> {
         Step::Switch(switch_step) => {
             if let Some(config) = &switch_step.config {
                 extract_references_from_mapping_value(&config.value, &mut refs);
+                extract_references_from_switch_outputs(config, &mut refs);
             }
         }
         Step::GroupBy(group_step) => {
@@ -5404,8 +5425,16 @@ struct TemplateStaticReferenceContext<'a> {
 /// segment or an empty bracket key, reads an unterminated bracket's remainder
 /// as one key, ends a malformed quoted key at the first `]`, and keeps a stray
 /// `]` as key text.
+///
+/// A path with no segments at all (`""`, what the editor stores until a path
+/// is picked) is reported too. It has no root, so it would otherwise reach the
+/// root check as an unrecognized root named `''`.
 fn malformed_path_reason(path: &str) -> Option<&'static str> {
-    tokenize_reference(path)
+    let tokenized = tokenize_reference(path);
+    if tokenized.segments.is_empty() && tokenized.defects.is_empty() {
+        return Some("empty reference path");
+    }
+    tokenized
         .defects
         .into_iter()
         .map(defect_reason)
@@ -7603,6 +7632,69 @@ fn extract_references_from_input_mapping(mapping: &InputMapping, refs: &mut Vec<
     }
 }
 
+/// Extract the references in every case `output` and the `default` of a
+/// Switch. Those are bare JSON rather than `MappingValue`s, so the walkers
+/// above never reach them. A non-string reference `value` is not a path; the
+/// reference phase rejects it (see [`visit_switch_output_references`]).
+fn extract_references_from_switch_outputs(
+    config: &runtara_dsl::SwitchConfig,
+    refs: &mut Vec<String>,
+) {
+    visit_switch_output_references(config, &mut |value| {
+        if let Some(path) = value.as_str() {
+            refs.push(path.to_string());
+        }
+    });
+}
+
+/// Call `visit` with the `value` of every reference in a Switch's case
+/// outputs and `default`, string or not.
+fn visit_switch_output_references(
+    config: &runtara_dsl::SwitchConfig,
+    visit: &mut impl FnMut(&serde_json::Value),
+) {
+    for case in &config.cases {
+        visit_switch_output_reference_values(&case.output, visit);
+    }
+    if let Some(default) = &config.default {
+        visit_switch_output_reference_values(default, visit);
+    }
+}
+
+/// Walk one Switch output the way `process_switch_output` in the workflow
+/// stdlib resolves it: a `{valueType: "reference", value: ...}` at any depth
+/// is a reference (its own `default` is a literal), an `immediate` is
+/// returned as written, and every other object or array, a `composite`
+/// included, is recursed into.
+fn visit_switch_output_reference_values(
+    output: &serde_json::Value,
+    visit: &mut impl FnMut(&serde_json::Value),
+) {
+    match output {
+        serde_json::Value::Object(map) => {
+            if let (Some(value_type), Some(value)) = (map.get("valueType"), map.get("value")) {
+                match value_type.as_str() {
+                    Some("reference") => {
+                        visit(value);
+                        return;
+                    }
+                    Some("immediate") => return,
+                    _ => {}
+                }
+            }
+            for value in map.values() {
+                visit_switch_output_reference_values(value, visit);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                visit_switch_output_reference_values(item, visit);
+            }
+        }
+        _ => {}
+    }
+}
+
 // ============================================================================
 // Phase 7.5: Data and Variable Reference Validation
 // ============================================================================
@@ -8130,6 +8222,7 @@ fn collect_references_from_step(step: &Step) -> Vec<String> {
         Step::Switch(switch_step) => {
             if let Some(ref config) = switch_step.config {
                 extract_references_from_mapping_value(&config.value, &mut refs);
+                extract_references_from_switch_outputs(config, &mut refs);
             }
         }
         Step::Filter(filter_step) => {
@@ -8263,6 +8356,8 @@ fn collect_template_static_references_from_step(step: &Step) -> Vec<String> {
             extract_template_static_references_from_condition(&cond_step.condition, &mut refs);
         }
         Step::Switch(switch_step) => {
+            // Case outputs and `default` are not walked: the runtime returns a
+            // `template` value there as a literal object, never rendering it.
             if let Some(ref config) = switch_step.config {
                 extract_template_static_references_from_mapping_value(&config.value, &mut refs);
             }
@@ -10112,7 +10207,10 @@ mod tests {
             serde_json::json!({"id":"split","stepType":"Split","subgraph":subgraph,
                 "config":{"value":r("split.value"),"variables":{"v":r("split.variables")}}}),
             serde_json::json!({"id":"switch","stepType":"Switch",
-                "config":{"value":r("switch.value"),"cases":[]}}),
+                "config":{"value":r("switch.value"),
+                          "cases":[{"matchType":"EQ","match":1,
+                                    "output":{"o":r("switch.cases.output")}}],
+                          "default":[r("switch.default")]}}),
             serde_json::json!({"id":"embed","stepType":"EmbedWorkflow",
                 "childWorkflowId":"child","childVersion":"latest",
                 "inputMapping":{"i":r("embed.inputMapping")}}),
@@ -10239,7 +10337,7 @@ mod tests {
             .collect();
         assert_eq!(
             expected.len(),
-            29,
+            31,
             "every field set in the fixture is walked: {expected:?}"
         );
 
@@ -10256,6 +10354,37 @@ mod tests {
                 result.errors
             );
         }
+    }
+
+    /// An empty path in every reference-bearing field is one E011 per field
+    /// and never an E126. A Split's `config.variables` and a `connectionRef`
+    /// never reach the root check, so `""` there used to save, and resolved
+    /// to the whole scope at run time.
+    #[test]
+    fn test_empty_paths_are_rejected_once_in_every_step_field() {
+        let steps =
+            one_step_of_every_type(|_| serde_json::json!({"valueType":"reference","value":""}));
+        let mut graph = create_basic_graph(HashMap::new(), "finish");
+        for (id, step) in steps {
+            graph.steps.insert(id, step);
+        }
+        let result = validate_workflow(&graph, &test_catalog());
+        // The fixture sets 31 reference fields; see
+        // `test_malformed_paths_are_rejected_once_in_every_step_field`.
+        assert_eq!(
+            malformed_path_errors(&result, "").len(),
+            31,
+            "{:?}",
+            result.errors
+        );
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|error| matches!(error, ValidationError::UnknownReferenceRoot { .. })),
+            "{:?}",
+            result.errors
+        );
     }
 
     /// A malformed path naming a later step used to add a `StepNotYetExecuted`
@@ -10325,6 +10454,258 @@ mod tests {
                 result.errors
             );
         }
+    }
+
+    /// `split` (a Split, whose outputs are an array) runs before the Switch
+    /// `sw`, and `later` runs after it. `output` is the single case's output
+    /// and `default` the Switch's default.
+    fn switch_output_graph(
+        output: serde_json::Value,
+        default: Option<serde_json::Value>,
+    ) -> ExecutionGraph {
+        let mut config = serde_json::json!({
+            "value": {"valueType": "reference", "value": "data.x"},
+            "cases": [{"matchType": "EQ", "match": 1, "output": output}]
+        });
+        if let Some(default) = default {
+            config["default"] = default;
+        }
+        serde_json::from_value(serde_json::json!({
+            "entryPoint": "split",
+            "inputSchema": {"items": {"type": "array"}, "x": {"type": "integer"}},
+            "variables": {"known": {"type": "string", "value": "v"}},
+            "executionPlan": [
+                {"fromStep": "split", "toStep": "sw"},
+                {"fromStep": "sw", "toStep": "later"},
+                {"fromStep": "later", "toStep": "finish"}
+            ],
+            "steps": {
+                "split": {"id": "split", "stepType": "Split",
+                    "config": {"value": {"valueType": "reference", "value": "data.items"}},
+                    "subgraph": {"entryPoint": "body",
+                        "steps": {"body": {"id": "body", "stepType": "Finish"}}}},
+                "sw": {"id": "sw", "stepType": "Switch", "config": config},
+                "later": {"id": "later", "stepType": "Log", "message": "m"},
+                "finish": {"id": "finish", "stepType": "Finish"}
+            }
+        }))
+        .unwrap()
+    }
+
+    /// Every place a Switch output can hold a reference: directly as a case
+    /// output or the `default`, and nested in an array, an object or a
+    /// `composite` wrapper, all of which the runtime resolves.
+    fn switch_output_placements(
+        reference_value: serde_json::Value,
+    ) -> Vec<(&'static str, ExecutionGraph)> {
+        let r = serde_json::json!({"valueType": "reference", "value": reference_value});
+        let constant = serde_json::json!("c");
+        vec![
+            ("case output", switch_output_graph(r.clone(), None)),
+            (
+                "default",
+                switch_output_graph(constant.clone(), Some(r.clone())),
+            ),
+            (
+                "array in a case output",
+                switch_output_graph(serde_json::json!([1, r.clone()]), None),
+            ),
+            (
+                "object in the default",
+                switch_output_graph(
+                    constant.clone(),
+                    Some(serde_json::json!({"a": {"b": r.clone()}})),
+                ),
+            ),
+            (
+                "composite in a case output",
+                switch_output_graph(
+                    serde_json::json!({"valueType": "composite", "value": {"k": r}}),
+                    None,
+                ),
+            ),
+        ]
+    }
+
+    /// Switch case outputs and `default` used to be skipped by every
+    /// reference check, so each of these saved cleanly. Each must now be the
+    /// one error the graph has, reported against the Switch, in every
+    /// placement and in both spellings.
+    #[test]
+    fn test_switch_output_references_are_validated() {
+        type Expect = fn(&ValidationError) -> bool;
+        let cases: &[(&str, Expect)] = &[
+            ("steps.gone.outputs.x", |e| {
+                matches!(e, ValidationError::InvalidStepReference { step_id, referenced_step_id, .. }
+                    if step_id == "sw" && referenced_step_id == "gone")
+            }),
+            ("steps['gone'].outputs.x", |e| {
+                matches!(e, ValidationError::InvalidStepReference { step_id, referenced_step_id, .. }
+                    if step_id == "sw" && referenced_step_id == "gone")
+            }),
+            ("", |e| {
+                matches!(e, ValidationError::InvalidReferencePath { step_id, reference_path, reason }
+                    if step_id == "sw" && reference_path.is_empty() && reason == "empty reference path")
+            }),
+            (
+                "steps.",
+                |e| matches!(e, ValidationError::InvalidReferencePath { step_id, .. } if step_id == "sw"),
+            ),
+            (
+                "steps['split",
+                |e| matches!(e, ValidationError::InvalidReferencePath { step_id, .. } if step_id == "sw"),
+            ),
+            ("steps.split.outputs.result", |e| {
+                matches!(e, ValidationError::ReferenceNonObjectTraversal { step_id, attempted_field, .. }
+                    if step_id == "sw" && attempted_field == "result")
+            }),
+            ("steps['split'].outputs['result']", |e| {
+                matches!(e, ValidationError::ReferenceNonObjectTraversal { step_id, attempted_field, .. }
+                    if step_id == "sw" && attempted_field == "result")
+            }),
+            ("steps.later.outputs", |e| {
+                matches!(e, ValidationError::StepNotYetExecuted { step_id, referenced_step_id }
+                    if step_id == "sw" && referenced_step_id == "later")
+            }),
+            ("steps[\"later\"].outputs", |e| {
+                matches!(e, ValidationError::StepNotYetExecuted { step_id, referenced_step_id }
+                    if step_id == "sw" && referenced_step_id == "later")
+            }),
+            ("data.missing", |e| {
+                matches!(e, ValidationError::UndefinedDataReference { step_id, field_name, .. }
+                    if step_id == "sw" && field_name == "missing")
+            }),
+            ("data['missing']", |e| {
+                matches!(e, ValidationError::UndefinedDataReference { step_id, field_name, .. }
+                    if step_id == "sw" && field_name == "missing")
+            }),
+            ("variables.nope", |e| {
+                matches!(e, ValidationError::UndefinedVariableReference { step_id, variable_name, .. }
+                    if step_id == "sw" && variable_name == "nope")
+            }),
+            ("variables['nope']", |e| {
+                matches!(e, ValidationError::UndefinedVariableReference { step_id, variable_name, .. }
+                    if step_id == "sw" && variable_name == "nope")
+            }),
+            ("stepz.split", |e| {
+                matches!(e, ValidationError::UnknownReferenceRoot { step_id, root, .. }
+                    if step_id == "sw" && root == "stepz")
+            }),
+        ];
+
+        for (reference, expect) in cases {
+            for (placement, graph) in switch_output_placements(serde_json::json!(reference)) {
+                let result = validate_workflow(&graph, &test_catalog());
+                assert!(
+                    matches!(result.errors.as_slice(), [error] if expect(error)),
+                    "`{reference}` in a Switch {placement}: {:?}",
+                    result.errors
+                );
+            }
+        }
+    }
+
+    /// The walk follows the runtime: an `immediate` is returned as written and
+    /// a reference's own `default` is a literal, so neither is looked into,
+    /// and a `template` is never rendered there.
+    #[test]
+    fn test_switch_output_valid_and_literal_references_are_accepted() {
+        let gone = serde_json::json!({"valueType": "reference", "value": "steps.gone"});
+        for output in [
+            serde_json::json!({"valueType": "reference", "value": "steps.split.outputs"}),
+            serde_json::json!({"valueType": "reference", "value": "steps['split'].outputs[0]"}),
+            serde_json::json!({"valueType": "reference", "value": "steps[\"split\"].outputs.-1"}),
+            serde_json::json!({"valueType": "reference", "value": "data['x']"}),
+            serde_json::json!({"valueType": "reference", "value": "variables.known"}),
+            serde_json::json!({"valueType": "reference", "value": "steps.__error.message"}),
+            serde_json::json!({"valueType": "immediate", "value": gone.clone()}),
+            serde_json::json!({"valueType": "reference", "value": "data.x", "default": gone}),
+            serde_json::json!({"valueType": "template", "value": "{{ steps.gone.outputs }}"}),
+        ] {
+            let graph = switch_output_graph(output.clone(), Some(output.clone()));
+            let result = validate_workflow(&graph, &test_catalog());
+            assert!(!result.has_errors(), "{output}: {:?}", result.errors);
+        }
+    }
+
+    /// A typed mapping value cannot hold a reference whose `value` is not a
+    /// string, but a Switch output is bare JSON and used to save one. The
+    /// runtime fails the step on it ("reference mapping value must be a
+    /// string path"), so it is rejected once, in every placement.
+    #[test]
+    fn test_switch_output_non_string_reference_value_is_rejected() {
+        for (value, type_name) in [
+            (serde_json::json!(42), "integer"),
+            (serde_json::json!(null), "null"),
+            (serde_json::json!(true), "boolean"),
+            (serde_json::json!(["steps.split"]), "array"),
+            (
+                serde_json::json!({"valueType": "reference", "value": "steps.gone"}),
+                "object",
+            ),
+        ] {
+            let expected_path = value.to_string();
+            let expected_reason = format!("reference value must be a string path, not {type_name}");
+            for (placement, graph) in switch_output_placements(value.clone()) {
+                let result = validate_workflow(&graph, &test_catalog());
+                assert!(
+                    matches!(
+                        result.errors.as_slice(),
+                        [ValidationError::InvalidReferencePath { step_id, reference_path, reason }]
+                            if step_id == "sw"
+                                && *reference_path == expected_path
+                                && *reason == expected_reason
+                    ),
+                    "`{value}` in a Switch {placement}: {:?}",
+                    result.errors
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_switch_output_self_reference_warns() {
+        let graph = switch_output_graph(
+            serde_json::json!({"valueType": "reference", "value": "steps['sw'].outputs"}),
+            None,
+        );
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(!result.has_errors(), "{:?}", result.errors);
+        assert!(
+            result.warnings.iter().any(|w| matches!(
+                w,
+                ValidationWarning::SelfReference { step_id, .. } if step_id == "sw"
+            )),
+            "{:?}",
+            result.warnings
+        );
+    }
+
+    /// An empty path has no root, so it used to reach the root check and be
+    /// rejected as an unrecognized root named `''`. It is reported as a
+    /// malformed path instead, once, in every field.
+    #[test]
+    fn test_empty_reference_path_is_malformed_not_an_unknown_root() {
+        let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+            "entryPoint": "log",
+            "executionPlan": [{"fromStep": "log", "toStep": "finish"}],
+            "steps": {
+                "log": {"id": "log", "stepType": "Log", "message": "m",
+                    "context": {"c": {"valueType": "reference", "value": ""}}},
+                "finish": {"id": "finish", "stepType": "Finish"}
+            }
+        }))
+        .unwrap();
+        let result = validate_workflow(&graph, &test_catalog());
+        assert!(
+            matches!(
+                result.errors.as_slice(),
+                [ValidationError::InvalidReferencePath { step_id, reference_path, reason }]
+                    if step_id == "log" && reference_path.is_empty() && reason == "empty reference path"
+            ),
+            "{:?}",
+            result.errors
+        );
     }
 
     /// A `connection_ref` referencing a nonexistent step must fail at save
