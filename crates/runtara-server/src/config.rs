@@ -62,6 +62,13 @@ pub struct Config {
     /// A Valkey shared by several processes must turn it off: that record
     /// names no tenant, so it would answer for every process's primary.
     pub legacy_member_keys: bool,
+    /// Whether this process shares its Valkey with other tenants' processes,
+    /// each confined by Valkey access rules to its own tenants' keys
+    /// (`RUNTARA_VALKEY_TENANT_SCOPED`, default false). It then keeps every
+    /// key it uses under a served tenant (managed session queues at
+    /// `{tenant}:session:…`), and never touches the unscoped legacy keys or
+    /// scans for other tenants' streams. It implies no legacy member keys.
+    pub valkey_tenant_scoped: bool,
     /// Maximum pool connections for the object model database.
     pub object_model_max_connections: u32,
     /// Whether the object model uses soft delete.
@@ -196,6 +203,7 @@ impl Config {
         let object_model_tenant_pool_max: usize =
             parse_usize_or("OBJECT_MODEL_TENANT_POOL_MAX", 16)?;
         let legacy_member_keys = parse_bool_or("RUNTARA_AUTH_LEGACY_MEMBER_KEYS", true)?;
+        let valkey_tenant_scoped = parse_bool_or("RUNTARA_VALKEY_TENANT_SCOPED", false)?;
         let object_model_max_connections: u32 = parse_u32_or("OBJECT_MODEL_MAX_CONNECTIONS", 10)?;
         let object_model_soft_delete: bool = parse_bool_or("OBJECT_MODEL_SOFT_DELETE", true)?;
         let object_model_bulk_request_limit: usize = parse_usize_or(
@@ -344,6 +352,7 @@ impl Config {
             database_connection_guard,
             object_model_tenant_pool_max,
             legacy_member_keys,
+            valkey_tenant_scoped,
             object_model_max_connections,
             object_model_soft_delete,
             object_model_bulk_request_limit,
@@ -823,7 +832,13 @@ pub fn database_connection_guard() -> bool {
 /// Whether the version 1 `member:{uid}` record answers for the primary tenant.
 /// True before config is initialised (unit tests).
 pub fn legacy_member_keys() -> bool {
-    try_get().is_none_or(|config| config.legacy_member_keys)
+    try_get().is_none_or(|config| config.legacy_member_keys && !config.valkey_tenant_scoped)
+}
+
+/// Whether every Valkey key this process uses stays under a served tenant
+/// (`RUNTARA_VALKEY_TENANT_SCOPED`). False before config is initialised.
+pub fn valkey_tenant_scoped() -> bool {
+    try_get().is_some_and(|config| config.valkey_tenant_scoped)
 }
 
 /// The most database pools one tenant's connections may hold open.

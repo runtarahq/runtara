@@ -72,9 +72,20 @@ async fn cleanup_old_messages(
         cutoff_timestamp_ms, cutoff_stream_id
     );
 
-    // Scan for legacy event streams and per-tenant trigger streams.
-    let mut stream_keys = scan_streams(&mut conn, "runtara:events:*").await?;
-    stream_keys.extend(scan_streams(&mut conn, &format!("{}:*", trigger_stream_prefix)).await?);
+    // A tenant-scoped process trims only its own tenants' trigger streams: a
+    // scan would name every tenant's, which it may not touch. Otherwise, scan
+    // for legacy event streams and every tenant's trigger stream.
+    let stream_keys = if crate::config::valkey_tenant_scoped() {
+        crate::config::get()
+            .served_tenants
+            .iter()
+            .map(|tenant| format!("{trigger_stream_prefix}:{tenant}"))
+            .collect()
+    } else {
+        let mut keys = scan_streams(&mut conn, "runtara:events:*").await?;
+        keys.extend(scan_streams(&mut conn, &format!("{}:*", trigger_stream_prefix)).await?);
+        keys
+    };
 
     println!("Found {} streams to process", stream_keys.len());
 

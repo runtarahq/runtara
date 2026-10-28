@@ -395,7 +395,11 @@ impl CompilationQueue {
     ///
     /// It moves any pending items that are NOT in the queue back to the queue.
     pub async fn recover_orphaned(&self) -> Result<usize, CompilationQueueError> {
-        self.drain_legacy().await?;
+        // The legacy keys hold every tenant's entries; a tenant-scoped
+        // process may not touch them.
+        if !crate::config::valkey_tenant_scoped() {
+            self.drain_legacy().await?;
+        }
         let mut recovered = 0;
         for tenant in &self.tenants {
             recovered += self.recover_orphaned_for(tenant).await?;

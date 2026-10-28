@@ -28,6 +28,23 @@ pub enum QueueError {
 }
 pub type QueueResult<T> = Result<T, QueueError>;
 
+/// Where a session's queue keys live: `runtara:session:{digest}`, or, for a
+/// tenant-scoped process (`RUNTARA_VALKEY_TENANT_SCOPED`), under the tenant's
+/// own prefix, `{tenant}:session:{digest}`, which its Valkey access rules
+/// cover. A scoped tenant id must be plain, since it is also a SCAN pattern.
+fn session_prefix(tenant_id: &str, digest: &str) -> QueueResult<String> {
+    if !crate::config::valkey_tenant_scoped() {
+        return Ok(format!("runtara:session:{digest}"));
+    }
+    if !tenant_id
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+    {
+        return Err(QueueError::Invalid);
+    }
+    Ok(format!("{tenant_id}:session:{digest}"))
+}
+
 #[derive(Clone, Debug)]
 pub struct QueueScope {
     tenant_id: String,
@@ -49,7 +66,7 @@ impl QueueScope {
         Ok(Self {
             tenant_id: tenant_id.into(),
             session_id: session_id.into(),
-            prefix: format!("runtara:session:{{{digest:x}}}"),
+            prefix: session_prefix(tenant_id, &format!("{{{digest:x}}}"))?,
         })
     }
     pub fn tenant_id(&self) -> &str {
@@ -227,7 +244,7 @@ pub async fn scan_scopes(
     let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
         .arg(cursor)
         .arg("MATCH")
-        .arg("runtara:session:*:owner")
+        .arg(session_prefix(tenant_id, "*")? + ":owner")
         .arg("COUNT")
         .arg(count)
         .query_async(conn)

@@ -82,7 +82,9 @@ pub async fn install(
     for tenant_id in &tenants {
         let held = durable.get(tenant_id).copied().unwrap_or(0);
         let _: () = conn.set(key(tenant_id), held).await?;
-        let _: () = conn.del(legacy_key(tenant_id)).await?;
+        if !crate::config::valkey_tenant_scoped() {
+            let _: () = conn.del(legacy_key(tenant_id)).await?;
+        }
     }
     info!(
         tenants = tenants.len(),

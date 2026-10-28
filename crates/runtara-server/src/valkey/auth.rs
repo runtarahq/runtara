@@ -107,18 +107,19 @@ pub async fn get_member_role(
 /// (`{tenant}:token:revoked:{jti}`, or the version 1 `token:revoked:{jti}`).
 ///
 /// Presence of either key means revoked — the body is advisory, so this is one `EXISTS`.
+/// A tenant-scoped process (`RUNTARA_VALKEY_TENANT_SCOPED`) looks only at the
+/// tenant's key: the version 1 key is outside what it may read.
 pub async fn token_is_revoked(
     manager: &ConnectionManager,
     tenant: &str,
     jti: &str,
 ) -> Result<bool, AuthzValkeyError> {
     let mut conn = manager.clone();
-    let present: u32 = conn
-        .exists(&[
-            revoked_token_key(tenant, jti),
-            legacy_revoked_token_key(jti),
-        ])
-        .await?;
+    let mut keys = vec![revoked_token_key(tenant, jti)];
+    if !crate::config::valkey_tenant_scoped() {
+        keys.push(legacy_revoked_token_key(jti));
+    }
+    let present: u32 = conn.exists(&keys).await?;
     Ok(present > 0)
 }
 
