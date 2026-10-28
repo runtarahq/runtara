@@ -14264,9 +14264,7 @@ async fn trusted_presigning_composes_pins_and_runs_without_internal_http() {
     // (root, Split and workflow-agent routes); their trusted call fails with
     // TRUSTED_VERSION_REQUIRED before any credential is resolved.
     let sidecar = _bundle.path().join("runtara_agent_s3_storage.meta.json");
-    let mut metadata = fs::read(&sidecar).unwrap();
-    metadata.push(b'\n');
-    fs::write(&sidecar, metadata).unwrap();
+    upgrade_trusted_metadata(&sidecar);
     let replacement = runtara_component_host::ComponentDispatcherService::from_dir(_bundle.path())
         .await
         .unwrap();
@@ -14734,6 +14732,19 @@ async fn production_compile_entry_records_installed_trusted_pins() {
     assert!(plain.trusted_pins.is_empty(), "{:?}", plain.trusted_pins);
 }
 
+/// Approves a new version of the agent whose metadata is at `sidecar`: its
+/// JSON changes (whitespace around it does not count, as a release drops it).
+fn upgrade_trusted_metadata(sidecar: &std::path::Path) {
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(sidecar).unwrap()).unwrap();
+    let description = metadata["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    metadata["description"] = serde_json::Value::String(format!("{description} "));
+    fs::write(sidecar, serde_json::to_vec(&metadata).unwrap()).unwrap();
+}
+
 /// The per-call check is per agent. An artifact pinning the installed version
 /// of one trusted built-in and a stale version of another (an operator
 /// upgraded only one) runs the current one's calls and refuses only the stale
@@ -14798,9 +14809,7 @@ async fn a_stale_trusted_pin_fails_only_its_own_agent_calls() {
         // Upgrade only `upgraded`.
         let file = format!("runtara_agent_{}.meta.json", upgraded.replace('-', "_"));
         let sidecar = bundle.path().join(file);
-        let mut metadata = fs::read(&sidecar).unwrap();
-        metadata.push(b'\n');
-        fs::write(&sidecar, metadata).unwrap();
+        upgrade_trusted_metadata(&sidecar);
         let replacement =
             runtara_component_host::ComponentDispatcherService::from_dir(bundle.path())
                 .await
