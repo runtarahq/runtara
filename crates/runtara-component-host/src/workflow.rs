@@ -1467,20 +1467,7 @@ impl WorkflowExecutor {
         }
 
         let mut exit = exit;
-        let mut instance_waits = Vec::new();
-        // A run names the waits it parks on as `instances` wakes; report them
-        // apart from its lifecycle wakes.
-        if let InvokeExit::Suspended(wakes) = &mut exit {
-            wakes.retain(|wake| match wake {
-                crate::lifecycle::WorkflowWake::Instances(id) => {
-                    if !instance_waits.contains(id) {
-                        instance_waits.push(id.clone());
-                    }
-                    false
-                }
-                _ => true,
-            });
-        }
+        let instance_waits = split_instance_waits(&mut exit);
 
         InvokeRunResult {
             exit,
@@ -1588,6 +1575,77 @@ pub enum InvokeExit {
     Cancelled,
     /// Cleanup exceeded its grace; no cooperative acknowledgement is implied.
     CleanupAborted,
+}
+
+/// A run names the waits it parks on as `instances` wakes; take them out of
+/// its lifecycle wakes to report apart.
+fn split_instance_waits(exit: &mut InvokeExit) -> Vec<String> {
+    let mut instance_waits = Vec::new();
+    if let InvokeExit::Suspended(wakes) = exit {
+        wakes.retain(|wake| match wake {
+            crate::lifecycle::WorkflowWake::Instances(id) => {
+                if !instance_waits.contains(id) {
+                    instance_waits.push(id.clone());
+                }
+                false
+            }
+            _ => true,
+        });
+    }
+    instance_waits
+}
+
+/// How a `wasi:cli/run` guest that ran outside this process ended, as its
+/// runner observed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteGuestExit {
+    /// `run` returned, whatever it returned.
+    Returned,
+    /// The guest trapped, or its process or VM failed, with this reason.
+    Trapped(String),
+    /// The wall-clock budget elapsed.
+    Timeout,
+    /// The run was cancelled.
+    Cancelled,
+}
+
+/// The result of a `wasi:cli/run` workflow whose guest ran elsewhere, from
+/// how it ended and what it posted to the launch `launch_id` in `launches`:
+/// the mapping a run in this process gets. The launch stops being served.
+pub fn remote_invoke_result(
+    launches: &crate::api_launches::ApiLaunches,
+    launch_id: &str,
+    ended: RemoteGuestExit,
+    duration: Duration,
+) -> InvokeRunResult {
+    let fault = launches.fault(launch_id);
+    let posted = launches.finish(launch_id);
+    let mut exit = match (ended, fault, posted) {
+        (RemoteGuestExit::Timeout, ..) => InvokeExit::Timeout,
+        (RemoteGuestExit::Cancelled, ..) => InvokeExit::Cancelled,
+        (_, Some(fault), _) => InvokeExit::Trapped { reason: fault },
+        (RemoteGuestExit::Trapped(reason), ..) => InvokeExit::Trapped { reason },
+        (RemoteGuestExit::Returned, None, Some(outcome)) => match posted_outcome(outcome) {
+            Ok(crate::lifecycle::WorkflowOutcome::Completed(output)) => {
+                InvokeExit::Completed(output)
+            }
+            Ok(crate::lifecycle::WorkflowOutcome::Suspended(suspension)) => {
+                InvokeExit::Suspended(suspension.wakes)
+            }
+            Err(error) => InvokeExit::Failed(error),
+        },
+        (RemoteGuestExit::Returned, None, None) => InvokeExit::Trapped {
+            reason: "workflow run returned without posting an outcome".into(),
+        },
+    };
+    let instance_waits = split_instance_waits(&mut exit);
+    InvokeRunResult {
+        exit,
+        // Measured where the guest ran, not here.
+        memory_peak_bytes: 0,
+        duration,
+        instance_waits,
+    }
 }
 
 /// Result of one workflow run.

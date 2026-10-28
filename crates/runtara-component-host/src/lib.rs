@@ -51,8 +51,9 @@ pub use registry::{LoadedAgent, build_linker, instantiate, load_agent};
 pub use workflow::{
     CapabilityInvocation, ChildInvocationScope, ChildInvocationSpec, InvocationScopeFactory,
     InvokeExit, InvokeRunResult, PreparedChildCatalog, PreparedInvocationLauncher,
-    PreparedWorkflow, RootExecutionCoordinator, RootLifecycleDecision, WorkflowExecutor,
-    WorkflowLimits, WorkflowRunSpec, WorkflowStartConfirmation, WorkflowState,
+    PreparedWorkflow, RemoteGuestExit, RootExecutionCoordinator, RootLifecycleDecision,
+    WorkflowExecutor, WorkflowLimits, WorkflowRunSpec, WorkflowStartConfirmation, WorkflowState,
+    remote_invoke_result,
 };
 
 /// Agent metadata loaded from a sidecar `<agent>.meta.json` next to the

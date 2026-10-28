@@ -1921,6 +1921,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_remote_run_ends_as_a_local_one_would() {
+        use crate::{InvokeExit, RemoteGuestExit, remote_invoke_result};
+        let launches = Arc::new(ApiLaunches::default());
+        let backend = Backend(launches.clone());
+        let begin = |n: u64| {
+            let mut binding = binding(1);
+            binding.launch_id = format!("launch-{n}");
+            launches
+                .begin(
+                    binding.clone(),
+                    info(),
+                    Vec::new(),
+                    no_runtime(),
+                    controls(),
+                )
+                .unwrap();
+            binding
+        };
+        let ended = |n: u64, how: RemoteGuestExit| {
+            remote_invoke_result(
+                &launches,
+                &format!("launch-{n}"),
+                how,
+                std::time::Duration::ZERO,
+            )
+            .exit
+        };
+        let completed = begin(1);
+        backend
+            .post_outcome(&completed, PostedOutcome::Completed(b"out".to_vec()))
+            .await
+            .unwrap();
+        assert!(
+            matches!(ended(1, RemoteGuestExit::Returned), InvokeExit::Completed(out) if out == b"out")
+        );
+        // A return without an outcome, a trap and a timeout end as locally.
+        begin(2);
+        assert!(matches!(
+            ended(2, RemoteGuestExit::Returned),
+            InvokeExit::Trapped { .. }
+        ));
+        let trapped = begin(3);
+        backend
+            .post_outcome(&trapped, PostedOutcome::Completed(Vec::new()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            ended(3, RemoteGuestExit::Trapped("vm lost".into())),
+            InvokeExit::Trapped { reason } if reason == "vm lost"
+        ));
+        begin(4);
+        assert!(matches!(
+            ended(4, RemoteGuestExit::Timeout),
+            InvokeExit::Timeout
+        ));
+        // Each one stopped being served.
+        assert_eq!(
+            backend.launch_state(&completed).await.unwrap(),
+            LaunchState::Fenced
+        );
+    }
+
+    #[tokio::test]
     async fn a_launch_serves_until_it_finishes() {
         let launches = Arc::new(ApiLaunches::default());
         let backend = Backend(launches.clone());
