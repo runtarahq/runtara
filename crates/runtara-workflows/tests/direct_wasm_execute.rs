@@ -14729,7 +14729,11 @@ async fn production_compile_entry_records_installed_trusted_pins() {
         serde_json::from_str(SIMPLE_PASSTHROUGH).unwrap(),
         vec![],
     );
-    assert!(plain.trusted_pins.is_empty(), "{:?}", plain.trusted_pins);
+    assert!(
+        plain.trusted_pins.is_empty(),
+        "{} trusted pins",
+        plain.trusted_pins.len()
+    );
 }
 
 /// Approves a new version of the agent whose metadata is at `sidecar`: its
