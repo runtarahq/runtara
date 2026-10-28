@@ -8,6 +8,10 @@
 #   2. NOTHING LOCAL — a second server with an empty data dir and no
 #      components directory loads its agents from the bucket, runs the first
 #      workflow from its image in the bucket, and compiles and runs a new one.
+#   3. PUBLISHED BY CI — `runtara-server publish-release`, with no server or
+#      database, publishes the bundle as a named release into another prefix;
+#      a server with nothing local pointed at it boots on that release and
+#      compiles and runs a workflow (SYN-779).
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
 # environment) + docker (isolated Valkey, and RustFS from the pinned
@@ -170,7 +174,8 @@ start_server() {
     RUNTARA_CORE_HTTP_PORT="${TEST_CORE_HTTP_PORT}" \
     RUNTARA_ENV_HTTP_PORT="${TEST_ENV_HTTP_PORT}" \
     RUNTARA_AGENT_COMPONENTS_DIR="${AGENTS_DIR-${COMPONENTS_DIR}}" \
-    RUNTARA_ARTIFACT_STORE_URL="s3://${BUCKET}/runtara" \
+    RUNTARA_ARTIFACT_STORE_URL="s3://${BUCKET}/${STORE_PREFIX:-runtara}" \
+    RUNTARA_AGENT_RELEASE="${RELEASE_NAME:-}" \
     AWS_ENDPOINT="${S3_ENDPOINT}" \
     AWS_ALLOW_HTTP=true \
     AWS_REGION=us-east-1 \
@@ -223,9 +228,11 @@ run_echo() {
 
 
 runtime_sql() { psql_quiet -d "${TEST_DB_RUNTIME}" -c "$1"; }
-# The keys under runtara/<prefix>, relative to it.
-bucket_objects() {
-    local prefix="runtara/$1"
+# The keys under <store>/<prefix>, relative to it (the store is runtara unless
+# bucket_objects_in names another).
+bucket_objects() { bucket_objects_in runtara "$1"; }
+bucket_objects_in() {
+    local prefix="$1/$2"
     s3_request "http://127.0.0.1:9000/${BUCKET}?list-type=2&max-keys=1000&prefix=${prefix//\//%2F}" \
         | grep -o '<Key>[^<]*</Key>' | sed -e 's#^<Key>##' -e 's#</Key>$##' -e "s#^${prefix}##"
 }
@@ -301,4 +308,24 @@ done
 [ ! -e "${TEST_DATA_DIR}/b/artifacts" ] || { print_error "artifacts were stored under the data dir"; exit 1; }
 echo "  agents from the bucket's release; the first image ran from the bucket; a new workflow compiled into it and ran ✓"
 
-print_success "object store: releases, agent records and workflow images live in an S3-compatible bucket; a server with nothing local boots, compiles and runs from it"
+#-------------------------------------------------------------------------
+print_step "3. A release published by the CLI, and a server that runs it..."
+kill "${SERVER_PID}"; wait "${SERVER_PID}" 2>/dev/null || true
+SERVER_PID=""
+RUNTARA_ARTIFACT_STORE_URL="s3://${BUCKET}/published" \
+AWS_ENDPOINT="${S3_ENDPOINT}" AWS_ALLOW_HTTP=true AWS_REGION=us-east-1 \
+AWS_ACCESS_KEY_ID="${S3_USER}" AWS_SECRET_ACCESS_KEY="${S3_SECRET}" \
+    "${RUNTARA_SERVER_BIN}" publish-release "${COMPONENTS_DIR}" --release ci-test > "${TEST_DATA_DIR}/publish.out" 2>&1 \
+    || { print_error "publish-release failed: $(cat "${TEST_DATA_DIR}/publish.out")"; exit 1; }
+grep -q "^published release ci-test: [1-9][0-9]* agents" "${TEST_DATA_DIR}/publish.out" \
+    || { print_error "unexpected publish output: $(cat "${TEST_DATA_DIR}/publish.out")"; exit 1; }
+[ "$(STORE_PREFIX=published bucket_objects_in published "manifests/agents/index/")" = "ci-test.json" ] \
+    || { print_error "the published prefix has no ci-test index"; exit 1; }
+SERVER_DATA_DIR="${TEST_DATA_DIR}/c" AGENTS_DIR="" STORE_PREFIX=published RELEASE_NAME=ci-test start_server
+grep -q "loaded [0-9]* agent(s) from release ci-test" "${TEST_LOG}" \
+    || { print_error "the server did not load release ci-test"; tail -20 "${TEST_LOG}"; exit 1; }
+PUBLISHED=$(create_and_compile "Hash Published" "${GRAPH/\"Hash\"/\"Hash Published\"}")
+run_workflow "${PUBLISHED}"
+echo "  $(cat "${TEST_DATA_DIR}/publish.out"); a server with nothing local booted on it and compiled and ran a workflow ✓"
+
+print_success "object store: releases, agent records and workflow images live in an S3-compatible bucket; a server with nothing local boots, compiles and runs from it, also from a release the CLI published"

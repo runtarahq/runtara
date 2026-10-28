@@ -38,6 +38,24 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
         return run_internal_precompile_component();
     }
 
+    // Publishing a release needs no database and no server.
+    match crate::publish_release::parse_args(std::env::args_os()) {
+        Some(Ok(args)) => {
+            dotenvy::dotenv().ok();
+            crate::observability::init_cli_logging();
+            if let Err(msg) = crate::publish_release::run(args).await {
+                eprintln!("❌ {msg}");
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        Some(Err(msg)) => {
+            eprintln!("{msg}");
+            std::process::exit(2);
+        }
+        None => {}
+    }
+
     let reencrypt = match crate::reencrypt::parse_args(std::env::args_os()) {
         Some(Ok(args)) => Some(args),
         Some(Err(msg)) => {

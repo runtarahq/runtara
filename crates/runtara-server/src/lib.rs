@@ -23,6 +23,7 @@ pub mod object_model_privileges;
 pub mod observability;
 pub mod plan_check;
 pub mod product_events;
+pub mod publish_release;
 pub mod reencrypt;
 pub mod runtime_client;
 pub mod runtime_types;
