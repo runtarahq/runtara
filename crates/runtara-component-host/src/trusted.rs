@@ -23,6 +23,35 @@ const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 /// The longest a trusted call runs, whatever deadline its caller passes.
 pub const TIME_LIMIT: Duration = Duration::from_secs(30);
 
+/// Prefix of a trusted artifact pin, an import of the workflow artifact.
+pub const PIN_PREFIX: &str = "runtara:trusted-artifacts/";
+
+/// The trusted artifact pins of the workflow artifact `wasm`: its top-level
+/// `runtara:trusted-artifacts/…` imports, read without compiling it. A host
+/// whose guest runs elsewhere (the fleet) hands these to the run's launch, as
+/// an in-process run takes them from its compiled component.
+pub fn artifact_pins(wasm: &[u8]) -> Result<std::collections::HashSet<String>> {
+    let mut depth = 0usize;
+    let mut pins = std::collections::HashSet::new();
+    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+        match payload? {
+            wasmparser::Payload::ModuleSection { .. }
+            | wasmparser::Payload::ComponentSection { .. } => depth += 1,
+            wasmparser::Payload::End(_) => depth = depth.saturating_sub(1),
+            wasmparser::Payload::ComponentImportSection(reader) if depth == 0 => {
+                for import in reader {
+                    let name = import?.name.0;
+                    if name.starts_with(PIN_PREFIX) {
+                        pins.insert(name.to_owned());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(pins)
+}
+
 /// Implementations must check tenant ownership, entitlement and the exact type
 /// before decrypting; returned credentials must come from that same record.
 #[async_trait::async_trait]
@@ -534,6 +563,34 @@ impl TrustedExecutor {
 
 #[cfg(test)]
 mod tests {
+
+    /// The pins read from the bytes are the ones a compiled run takes from
+    /// its component's imports, nested components' own imports aside.
+    #[test]
+    fn artifact_pins_are_the_top_level_trusted_imports() {
+        let wasm = wat::parse_str(
+            r#"(component
+                (import "runtara:trusted-artifacts/s3-storage-hab-hcd@0.1.0" (instance))
+                (import "runtara:trusted-artifacts/azure-blob-h01-h02@0.1.0" (instance))
+                (import "runtara:agent/types@0.1.0" (instance))
+                (component
+                    (import "runtara:trusted-artifacts/nested-h03-h04@0.1.0" (instance)))
+            )"#,
+        )
+        .unwrap();
+        let pins = artifact_pins(&wasm).unwrap();
+        let engine = crate::engine::build_engine(&crate::engine::EngineConfig::default()).unwrap();
+        let component = wasmtime::component::Component::new(&engine, &wasm).unwrap();
+        let compiled: std::collections::HashSet<String> = component
+            .component_type()
+            .imports(&engine)
+            .filter(|(name, _)| name.starts_with(PIN_PREFIX))
+            .map(|(name, _)| name.to_owned())
+            .collect();
+        assert_eq!(pins, compiled);
+        assert_eq!(pins.len(), 2);
+        assert!(artifact_pins(b"not a component").is_err());
+    }
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

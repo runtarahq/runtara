@@ -509,7 +509,7 @@ impl WorkflowExecutor {
             component
                 .component_type()
                 .imports(&self.engine)
-                .filter(|(name, _)| name.starts_with("runtara:trusted-artifacts/"))
+                .filter(|(name, _)| name.starts_with(crate::trusted::PIN_PREFIX))
                 .map(|(name, _)| name.to_owned())
                 .collect(),
         )
