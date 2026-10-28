@@ -52,7 +52,12 @@ pub(super) async fn get_task_outcome(
     let binding = binding_of(&request)?;
     let Some(outcome) = state
         .backend
-        .task_outcome(&binding, &task_id, wait.wait_ms)
+        // Held no longer than any other long poll; a guest asks again.
+        .task_outcome(
+            &binding,
+            &task_id,
+            wait.wait_ms.min(state.caps.long_poll_ms),
+        )
         .await?
     else {
         return Ok(StatusCode::ACCEPTED.into_response());
