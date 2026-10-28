@@ -183,7 +183,7 @@ entries, until a vacuum removes them and later inserts reuse the space.
 the Split's result keeps every item's result in one row, stored out of line
 (TOAST) and live until retention deletes the instance.
 
-Autovacuum vacuums the table when either count reaches its trigger, which
+Autovacuum vacuums the table once either count exceeds its trigger, which
 Postgres 18 computes as:
 
 - dead tuples (`n_dead_tup`): 50 + 0.2 × `reltuples`, at most
@@ -194,35 +194,57 @@ Postgres 18 computes as:
 
 Earlier versions have neither the cap nor the frozen share. On a table of a
 million rows the dead trigger is 200,000, twenty Splits of 10,000 items, so
-the insert trigger is the one that fires, as soon as much of the table is
-frozen. A vacuum freezes a page early when pruning it has just written a
-full-page image, and with data checksums on (the default for a cluster
-created by Postgres 18) setting hint bits writes one on a page's first change
-after each checkpoint, so a table's older rows end up frozen. The seeded
-table below was 97.6% all-frozen, and autovacuum ran about every 5,000
-inserts.
+how soon the table is vacuumed depends on how much of it is frozen: mostly
+frozen, the insert trigger fires within a Split; mostly unfrozen, both
+triggers sit near 20% of the table. That share depends on the table's
+history. A vacuum freezes a page early when it would write a full-page image
+of it anyway, which with data checksums on (the default for a cluster created
+by Postgres 18) happens to a page it is the first to change after a
+checkpoint; otherwise it freezes rows once they are older than
+`vacuum_freeze_min_age`.
 
-`scripts/measure-checkpoint-bloat.py` measured it on Postgres 18.3 with the
-default autovacuum settings: 20 runs of `A → Split[10,000] → B` (items of 256
-bytes) back to back, then 300 s with no runs, per mode. Heap and indexes are
-in MiB; the table started at 0 or 755.5. The last column counts dead tuples
-with pgstattuple after the 300 s.
+It was measured on Postgres 18.3 with the default autovacuum settings: a
+runtara server ran `A → Split[10,000] → B` (items of 256 bytes) 20 times back
+to back per mode, then stood idle for 300 s, while the table's statistics,
+sizes, WAL (pg_walinspect) and statement timings (pg_stat_statements) were
+sampled. The seeded table was **99.9% all-frozen at the start**, because its
+setup vacuumed the million rows right after loading them, and 97.6% at the
+end. Heap and indexes are in MiB; the table started at 0 or 755.5. The last
+column counts dead tuples with pgstattuple after the 300 s.
 
 | Mode | Table | Autovacuums (TOAST) | Heap + indexes, run 1 → 20 | Over the last 10 runs | Dead at the end |
 |---|---|---|---|---|---|
 | empty | empty | 77 (8) | 14.4 → 19.7 | +1.2 | 0 |
-| seeded | 1M live rows | 38 (8) | 769.9 → 793.0 | −0.5 | 10,000 (1.1%) |
-| tuned | 1M live rows, both scale factors 0.02 | 77 (17) | 769.9 → 789.0 | −1.1 | 10,000 (1.1%) |
+| seeded | 1M live rows | 38 (8) | 769.9 → 793.0 | −0.6 | 10,000 (1.1%) |
+| tuned | 1M live rows, both scale factors 0.02 | 77 (17) | 769.9 → 789.0 | −1.0 | 10,000 (1.1%) |
 | paused | 1M live rows, autovacuum off | 0 | 769.9 → 1,042.3 | +143.4 | 199,167 (18.1%) |
 
-The defaults keep up. On the seeded table every collapse's 10,000 dead tuples
-went with the next autovacuum (1.9 a run), heap and indexes stopped growing
-after the first ten runs, and the table ended 6.2% free. The statement that
-records a result and applies its closure (10,003 calls a run, most deleting
-nothing) averaged 0.057–0.060 ms in every mode, with no trend from the first
-run to the last; its slowest call took 6–17 ms. Scale factors of 0.02 doubled
-the autovacuums and saved 4 MiB (0.5%), so `checkpoints` keeps the server's
-settings and sets no per-table parameters.
+On a mostly frozen table the defaults keep up. The seeded table's insert
+trigger rose from about 1,300 inserts to 5,800 as new rows added pages not yet
+frozen, so autovacuum ran 1.9 times a run and each collapse's 10,000 dead
+tuples went with the next one. Heap and indexes stopped growing after the
+first ten runs, and the table ended 6.2% free. Scale factors of 0.02 doubled
+the autovacuums and saved 4 MiB (0.5%). The statement that records a result
+and applies its closure (10,003 calls a run, most deleting nothing) averaged
+0.057–0.060 ms a run in the seeded, tuned and paused modes, with no trend; in
+the empty mode it rose to 0.15 ms in runs 4–7 and settled back to 0.06. Its
+slowest call took 6–17 ms.
+
+On a mostly unfrozen table, or on Postgres 17 or earlier, dead tuples build
+up to the dead trigger before each vacuum. The paused mode follows that path:
+after 20 runs it held 199,167 dead tuples, at the trigger of 200,000, and its
+heap and indexes were 250 MiB larger than the seeded mode's (14.3 MiB a run).
+The vacuum then makes that space reusable, so the table should hold at about
+that size rather than keep growing. That part is derived, not measured.
+
+So `checkpoints` keeps the server's settings for now.
+`scripts/checkpoint-bloat-sample.sql` shows which case a runtime database is
+in. It reads the table's counts, sizes, frozen share, both triggers and the
+WAL position as one row, without scanning the table. Sampled daily for a
+week, it shows whether autovacuum runs on inserts, with `n_dead_tup` far below
+`vacuum_trigger_dead`, or only once dead tuples reach it. If it is the second
+and that much dead space is too much, per-table parameters go in a forward
+migration.
 
 - **The last collapse waits for traffic.** Dead tuples stay until the inserts
   after them reach the insert trigger: a median 76 s between runs here and,
@@ -231,29 +253,12 @@ settings and sets no per-table parameters.
   has.
 - **`n_dead_tup` is an estimate after an ANALYZE**: it read 19,162 where
   pgstattuple counted 10,000.
-- **Few frozen pages mean a later vacuum.** On Postgres 17 or earlier, without
-  checksums, or while most rows are newer than the last checkpoint, both
-  triggers sit near 20% of the table, the default bound for any table, and
-  the table carries that much dead space before each vacuum reuses it. The
-  paused mode shows the rate: heap and indexes grew 14.3 MiB a run. This is
-  derived, not measured.
 - **The Split's result is the growth that remains.** TOAST grew 2.82 MiB a run
-  in every mode (10,000 results of 256 bytes). In the `toast` mode (5 runs of
-  2,000 items of 3 KB, each iteration's row out of line) it grew 6.0 MiB a
-  run, and the TOAST table vacuumed the iterations' chunks on its own trigger
-  (6 autovacuums).
-- **WAL** was about 96 MiB a run, mostly the run's events (`instance_events`,
-  37 MiB). `checkpoints`, its indexes and TOAST took 28 MiB, of which the
-  collapse's deletes were 2.3 MiB and autovacuum about 4 MiB, most of it
-  unlinking emptied index pages.
-
-The harness starts its own Postgres and Valkey containers and a built
-`runtara-server`, and writes a JSON report; the numbers above came from
-`--runs 20 --sample-interval 5 --tail-seconds 300`, one process per mode
-(a run takes about 4 minutes), and are kept, compacted, in
-`docs/research/checkpoint-bloat-measurements.json`. For a runtime database,
-`scripts/checkpoint-bloat-sample.sql` returns one row, read-only: the table's
-counts, sizes and frozen share, both triggers and the WAL position. Sampled
-daily for a week, it shows whether `n_dead_tup` stays well below
-`vacuum_trigger_dead` and the size follows retention. If dead tuples build up
-to the dead trigger instead, per-table parameters go in a forward migration.
+  in every mode (10,000 results of 256 bytes). With 2,000 items of 3 KB, each
+  iteration's row out of line, it grew 6.0 MiB a run, and the TOAST table
+  vacuumed the iterations' chunks on its own trigger (6 autovacuums in 5
+  runs).
+- **WAL** was about 97 MiB a run, the largest share the run's events
+  (`instance_events`, 37 MiB). `checkpoints`, its indexes and TOAST took
+  28 MiB, of which the collapse's deletes were 2.4 MiB and autovacuum about
+  4 MiB, most of it unlinking emptied index pages.

@@ -10,11 +10,12 @@
 --   seconds between them (the whole cluster, not just this table);
 -- - autovacuum_count says how many times autovacuum vacuumed the table.
 --
--- vacuum_trigger_dead and vacuum_trigger_inserts are the n_dead_tup and
--- n_ins_since_vacuum at which autovacuum next vacuums the table, from the
--- table's own settings where it has them. Postgres 18 scales the insert
--- fraction by the share of pages not all-frozen (relallfrozen of relpages),
--- so the more of the table is frozen, the fewer inserts start a vacuum.
+-- Autovacuum vacuums the table once n_dead_tup exceeds vacuum_trigger_dead
+-- or n_ins_since_vacuum exceeds vacuum_trigger_inserts, both from the
+-- table's own settings where it has them; vacuum_trigger_inserts is NULL
+-- where insert vacuums are off. Postgres 18 scales the insert fraction by
+-- the share of pages not all-frozen (relallfrozen of relpages), so the more
+-- of the table is frozen, the fewer inserts start a vacuum.
 WITH t AS (
     SELECT c.oid, c.reltoastrelid, c.reloptions, greatest(c.reltuples, 0) AS reltuples,
            c.relpages,
@@ -27,7 +28,9 @@ WITH t AS (
            (SELECT option_value FROM pg_options_to_table(c.reloptions)
             WHERE option_name = 'autovacuum_vacuum_insert_threshold') AS insert_threshold,
            (SELECT option_value FROM pg_options_to_table(c.reloptions)
-            WHERE option_name = 'autovacuum_vacuum_insert_scale_factor') AS insert_scale_factor
+            WHERE option_name = 'autovacuum_vacuum_insert_scale_factor') AS insert_scale_factor,
+           (SELECT option_value FROM pg_options_to_table(c.reloptions)
+            WHERE option_name = 'autovacuum_vacuum_max_threshold') AS max_threshold
     FROM pg_class c
     WHERE c.oid = 'checkpoints'::regclass
 )
@@ -49,13 +52,15 @@ SELECT
     t.reltuples::bigint AS reltuples,
     t.relpages,
     t.relallfrozen,
-    -- least() ignores the NULL a server without the setting (before 18) returns.
+    -- A maximum of -1 lifts the cap, and a server without the setting
+    -- (before 18) returns NULL; least() ignores both once nullif has run.
     least(
         coalesce(t.threshold, current_setting('autovacuum_vacuum_threshold'))::float8
           + coalesce(t.scale_factor, current_setting('autovacuum_vacuum_scale_factor'))::float8 * t.reltuples,
-        current_setting('autovacuum_vacuum_max_threshold', true)::float8
+        nullif(coalesce(t.max_threshold, current_setting('autovacuum_vacuum_max_threshold', true))::float8, -1)
     )::bigint AS vacuum_trigger_dead,
-    (coalesce(t.insert_threshold, current_setting('autovacuum_vacuum_insert_threshold'))::float8
+    -- An insert threshold of -1 turns insert vacuums off.
+    (nullif(coalesce(t.insert_threshold, current_setting('autovacuum_vacuum_insert_threshold'))::float8, -1)
       + coalesce(t.insert_scale_factor, current_setting('autovacuum_vacuum_insert_scale_factor'))::float8
         * t.reltuples
         * CASE WHEN t.relpages > 0 AND t.relallfrozen > 0
