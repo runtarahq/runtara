@@ -1290,21 +1290,28 @@ PYEOF
     esac
     read -r PARENT FINANCE LEGAL <<< "$(parked_parent "${UPGRADE_WF}" "${APPROVER_DATA}")"
     parked_or_exit "${PARENT:-}" "${FINANCE:-}" "${LEGAL:-}"
-    read -r PARENT_IMAGE PARENT_PACKAGE <<< "$(psql_quiet -d "${TEST_DB_RUNTIME}" -F ' ' -c \
-        "SELECT ii.image_id, img.binary_path FROM instance_images ii JOIN images img USING (image_id)
+    # An image's package is its artifact, a blob in the store named by digest.
+    BLOBS="${TEST_DATA_DIR}/artifacts/blobs/sha256"
+    read -r PARENT_IMAGE PARENT_DIGEST <<< "$(psql_quiet -d "${TEST_DB_RUNTIME}" -F ' ' -c \
+        "SELECT ii.image_id, img.binary_digest FROM instance_images ii JOIN images img USING (image_id)
          WHERE ii.instance_id = '${PARENT}'")"
-    [ -n "${PARENT_PACKAGE:-}" ] && [ -f "${PARENT_PACKAGE}" ] || { print_error "No package bound to ${PARENT}"; exit 1; }
+    PARENT_PACKAGE="${BLOBS}/${PARENT_DIGEST:-none}"
+    [ -n "${PARENT_DIGEST:-}" ] && [ -f "${PARENT_PACKAGE}" ] || { print_error "No package bound to ${PARENT}"; exit 1; }
     # Age the parent's package and binding past any max age, so only the
     # parked-run guard keeps it; add a stale image nothing runs on.
     psql_quiet -d "${TEST_DB_RUNTIME}" -c \
         "UPDATE images SET updated_at = now() - interval '30 days' WHERE image_id = '${PARENT_IMAGE}';
          UPDATE instance_images SET created_at = now() - interval '30 days' WHERE image_id = '${PARENT_IMAGE}'" >/dev/null
-    IMAGES_DIR=$(dirname "$(dirname "${PARENT_PACKAGE}")")
+    # The stale image has a package of its own (one more byte, so its own
+    # digest), which cleanup releases with it.
     STALE_IMAGE="stage6-stale-$$"
-    mkdir -p "${IMAGES_DIR}/${STALE_IMAGE}" && cp "${PARENT_PACKAGE}" "${IMAGES_DIR}/${STALE_IMAGE}/binary"
+    STALE_BLOB="${TEST_DATA_DIR}/stage6-stale-blob"
+    { cat "${PARENT_PACKAGE}"; printf '\n'; } > "${STALE_BLOB}"
+    STALE_DIGEST=$(sha256sum "${STALE_BLOB}" | cut -d' ' -f1)
+    mv "${STALE_BLOB}" "${BLOBS}/${STALE_DIGEST}"
     psql_quiet -d "${TEST_DB_RUNTIME}" -c \
-        "INSERT INTO images (image_id, tenant_id, name, binary_path, created_at, updated_at)
-         VALUES ('${STALE_IMAGE}', '${TENANT}', 'stage6-stale', '${IMAGES_DIR}/${STALE_IMAGE}/binary',
+        "INSERT INTO images (image_id, tenant_id, name, binary_digest, created_at, updated_at)
+         VALUES ('${STALE_IMAGE}', '${TENANT}', 'stage6-stale', '${STALE_DIGEST}',
                  now() - interval '30 days', now() - interval '30 days')" >/dev/null
 
     print_step "Stage 6: swapping in a version-bumped control bundle while parked..."
@@ -1325,6 +1332,7 @@ PYEOF
     done
     [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM images WHERE image_id = '${STALE_IMAGE}'")" = "0" ] \
         || { print_error "The cleanup pass did not run: the stale image is still registered"; exit 1; }
+    [ ! -e "${BLOBS}/${STALE_DIGEST}" ] || { print_error "Cleanup kept the stale image's package"; exit 1; }
     # ...and keeps the parked parent's package.
     [ "$(psql_quiet -d "${TEST_DB_RUNTIME}" -c "SELECT count(*) FROM images WHERE image_id = '${PARENT_IMAGE}'")" = "1" ] \
         || { print_error "Image cleanup deleted the parked parent's image ${PARENT_IMAGE}"; exit 1; }
