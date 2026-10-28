@@ -3,7 +3,11 @@
 //! The component host hands every control call here with the caller's authority (tenant, calling
 //! instance, operation) taken from the calling run, never from arguments.
 //!
-//! - Reads (`get`, `query`, `list-pending-signals`) cover the caller's tenant.
+//! - Reads (`get`, `get-state`, `query`, `list-pending-signals`) from a run
+//!   cover that run and its direct children only (`not-child` otherwise): a
+//!   run does not read another run of its tenant. A call with no calling run
+//!   is a tenant user's agent test call, which reads the tenant, as the
+//!   executions API does.
 //! - Mutations (`send-signal`, `cancel`, `pause`, `resume`) check, in order:
 //!   a calling instance (`requires-instance`), an operation scope
 //!   (`requires-operation`), their arguments, then decision D1 through
@@ -1227,6 +1231,14 @@ fn invalid(message: impl Into<String>) -> ControlError {
     ControlError::new(ControlErrorCode::Invalid, message)
 }
 
+/// A read of a run that is neither the caller nor one of its children.
+fn not_readable() -> ControlError {
+    ControlError::new(
+        ControlErrorCode::NotChild,
+        "a run reads only itself and its child runs",
+    )
+}
+
 fn not_found() -> ControlError {
     ControlError::new(ControlErrorCode::NotFound, "no such run in this tenant")
 }
@@ -1580,6 +1592,26 @@ fn signal_bytes(signal: &PendingSignal) -> usize {
         + 64
 }
 
+impl NativeControl {
+    /// Whether the caller may read `target`: a run reads itself and its
+    /// direct children; a call with no run (a tenant user's test call) reads
+    /// the tenant.
+    async fn readable(
+        &self,
+        tenant: &str,
+        authority: &ControlAuthority,
+        target: &str,
+    ) -> Result<(), ControlError> {
+        let Some(caller) = authority.caller.as_deref() else {
+            return Ok(());
+        };
+        match self.relation(tenant, caller, target).await? {
+            Relation::SelfCall | Relation::Child => Ok(()),
+            Relation::Ancestor | Relation::Other => Err(not_readable()),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl ControlHost for NativeControl {
     async fn start(
@@ -1638,6 +1670,7 @@ impl ControlHost for NativeControl {
     ) -> Result<InstanceDetail, ControlError> {
         let tenant = self.tenant(authority)?;
         check_id("instanceId", &instance_id)?;
+        self.readable(tenant, authority, &instance_id).await?;
         let runtime = self.runtime().await?;
         let row = runtime
             .control_instance(
@@ -1731,6 +1764,7 @@ impl ControlHost for NativeControl {
     ) -> Result<StateRead, ControlError> {
         let tenant = self.tenant(authority)?;
         check_id("instanceId", &instance_id)?;
+        self.readable(tenant, authority, &instance_id).await?;
         let runtime = self.runtime().await?;
         // The run's summary without its result; a run that never launched
         // has none of its own, and no state.
@@ -1766,18 +1800,20 @@ impl ControlHost for NativeControl {
         let tenant = self.tenant(authority)?;
         let limit = check_page_size(request.page_size)?;
         let offset = page_offset(request.page_token.as_deref())?;
-        let parent = match &request.parent {
-            None => None,
-            Some(ParentFilter::Caller) => Some(
-                authority
-                    .caller
-                    .clone()
-                    .ok_or_else(|| identity_call("a caller filter"))?,
-            ),
-            Some(ParentFilter::Instance(id)) => {
+        // A run lists its own children only: with no parent filter, or its
+        // own id, the caller's; any other parent is not its to list. A call
+        // with no run lists the tenant's runs.
+        let parent = match (&request.parent, authority.caller.clone()) {
+            (Some(ParentFilter::Caller), None) => return Err(identity_call("a caller filter")),
+            (None | Some(ParentFilter::Caller), Some(caller)) => Some(caller),
+            (Some(ParentFilter::Instance(id)), caller) => {
                 check_id("parent", id)?;
+                if caller.as_ref().is_some_and(|caller| caller != id) {
+                    return Err(not_readable());
+                }
                 Some(id.clone())
             }
+            (None, None) => None,
         };
         if let Some(workflow) = &request.workflow_id {
             check_id("workflowId", workflow)?;
@@ -1877,6 +1913,7 @@ impl ControlHost for NativeControl {
             }
             SignalScope::Instance(id) => {
                 check_id("instanceId", id)?;
+                self.readable(tenant, authority, id).await?;
                 let row = runtime
                     .control_instance(tenant, id, 0, 0)
                     .await
@@ -1886,10 +1923,20 @@ impl ControlHost for NativeControl {
             }
             SignalScope::Workflow(workflow) => {
                 check_id("workflowId", workflow)?;
-                let instances = runtime
+                let mut instances = runtime
                     .workflow_input_instances(tenant, workflow)
                     .await
                     .map_err(input_error)?;
+                // From a run, of that workflow's runs its children only.
+                if let Some(caller) = authority.caller.as_deref() {
+                    let children: std::collections::HashSet<String> = runtime
+                        .parent_input_instances(tenant, caller)
+                        .await
+                        .map_err(input_error)?
+                        .into_iter()
+                        .collect();
+                    instances.retain(|instance| children.contains(instance));
+                }
                 (instances, workflow.clone())
             }
         };
@@ -2522,11 +2569,86 @@ mod tests {
         }
     }
 
+    /// Relations fixed by target id.
+    struct Related;
+
+    #[async_trait::async_trait]
+    impl RelationResolver for Related {
+        async fn relation(
+            &self,
+            _: &str,
+            caller: &str,
+            target: &str,
+        ) -> Result<Relation, ControlError> {
+            Ok(match target {
+                _ if target == caller => Relation::SelfCall,
+                "child" => Relation::Child,
+                "parent" => Relation::Ancestor,
+                _ => Relation::Other,
+            })
+        }
+    }
+
+    /// A run reads itself and its children; its parent, another run of its
+    /// tenant, or another run's children, are not its to read. A call with no
+    /// run is a tenant user's test call and reads the tenant.
+    #[tokio::test]
+    async fn a_run_reads_only_itself_and_its_children() {
+        let control = NativeControl::with_install_wait(Some("tenant".into()), Duration::ZERO)
+            .with_relations(Arc::new(Related));
+        let caller = authority(Some("caller"));
+        for target in ["caller", "child"] {
+            // Past the read check, the uninstalled runtime answers.
+            let error = control.get(&caller, target.into()).await.unwrap_err();
+            assert_eq!(error.code, ControlErrorCode::Unavailable, "{target}");
+            let error = control.get_state(&caller, target.into()).await.unwrap_err();
+            assert_eq!(error.code, ControlErrorCode::Unavailable, "{target}");
+        }
+        for target in ["parent", "sibling"] {
+            let error = control.get(&caller, target.into()).await.unwrap_err();
+            assert_eq!(error.code, ControlErrorCode::NotChild, "{target}");
+            let error = control.get_state(&caller, target.into()).await.unwrap_err();
+            assert_eq!(error.code, ControlErrorCode::NotChild, "{target}");
+        }
+        let query = |parent| QueryRequest {
+            workflow_id: None,
+            run_label: None,
+            statuses: Vec::new(),
+            parent,
+            created_after_ms: None,
+            created_before_ms: None,
+            finished_after_ms: None,
+            finished_before_ms: None,
+            state: None,
+            sort_by: SortField::CreatedAt,
+            order: SortOrder::Descending,
+            page_size: 10,
+            page_token: None,
+        };
+        let error = control
+            .query(&caller, query(Some(ParentFilter::Instance("child".into()))))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ControlErrorCode::NotChild);
+        let error = control
+            .query(&authority(None), query(Some(ParentFilter::Caller)))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ControlErrorCode::RequiresInstance);
+        // A tenant user's test call, with no run, reads the tenant: past the
+        // check, the uninstalled runtime answers.
+        let error = control
+            .get(&authority(None), "sibling".into())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ControlErrorCode::Unavailable);
+    }
+
     #[tokio::test]
     async fn an_uninstalled_service_is_unavailable_and_foreign_tenants_denied() {
         let control = NativeControl::with_install_wait(Some("tenant".into()), Duration::ZERO);
         let error = control
-            .get(&authority(None), "run-1".into())
+            .get(&authority(Some("run-0")), "run-1".into())
             .await
             .unwrap_err();
         assert_eq!(error.code, ControlErrorCode::Unavailable);

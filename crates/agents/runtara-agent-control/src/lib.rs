@@ -8,9 +8,9 @@
 //! tenant, instance and operation from the launch, and answers `denied`
 //! everywhere else.
 //!
-//! Reads: `get`, `get-state`, `query` and `list-pending-signals` cover the
-//! caller's tenant; identity and caller-relative filters need a calling
-//! instance. `get-state` reads a run's published state and `query` filters
+//! Reads: `get`, `get-state`, `query` and `list-pending-signals` from a run
+//! cover that run and its direct children; an agent test call, with no run,
+//! reads the tenant. `get-state` reads a run's published state and `query` filters
 //! by it, without waking the run.
 //! Mutations: `start` durably admits a child of the calling run and returns
 //! once it is accepted, without waiting for it to run; `send-signal`
@@ -73,7 +73,7 @@ fn page_size(requested: Option<u32>) -> u32 {
 pub struct GetInput {
     #[field(
         display_name = "Instance ID",
-        description = "The run to read, in this tenant"
+        description = "The run to read: this run or one of its child runs"
     )]
     pub instance_id: String,
 }
@@ -168,11 +168,12 @@ pub struct GetOutput {
     module = "control",
     id = "get",
     display_name = "Get Run",
-    description = "Read one run of this tenant, with its output or error once it finished.",
+    description = "Read this run or one of its child runs, with its output or error once it finished.",
     side_effects = false,
     idempotent = true,
     errors(
         permanent("CONTROL_NOT_FOUND", "No such run in this tenant"),
+        permanent("CONTROL_NOT_CHILD", "A run reads only itself and its child runs"),
         permanent("CONTROL_INVALID", "The instance id is malformed"),
         permanent("CONTROL_DENIED", "Control is not available to this call"),
         permanent("CONTROL_TOO_LARGE", "The response is over its cap"),
@@ -216,11 +217,12 @@ pub struct GetStateOutput {
     module = "control",
     id = "get-state",
     display_name = "Get Run State",
-    description = "Read one run's published state (what its SetState steps wrote), without waking the run.",
+    description = "Read the published state (what its SetState steps wrote) of this run or one of its child runs, without waking it.",
     side_effects = false,
     idempotent = true,
     errors(
         permanent("CONTROL_NOT_FOUND", "No such run in this tenant"),
+        permanent("CONTROL_NOT_CHILD", "A run reads only itself and its child runs"),
         permanent("CONTROL_INVALID", "The instance id is malformed"),
         permanent("CONTROL_DENIED", "Control is not available to this call"),
         transient(
@@ -262,13 +264,13 @@ pub struct QueryInput {
     pub statuses: Vec<String>,
     #[field(
         display_name = "Parent Instance ID",
-        description = "Only children of this run"
+        description = "Only children of this run; it must be the calling run, whose children a query lists anyway"
     )]
     #[serde(default)]
     pub parent_instance_id: Option<String>,
     #[field(
         display_name = "Children Of This Run",
-        description = "Only children of the calling run (needs a calling run)"
+        description = "Children of the calling run, which is what a query lists anyway"
     )]
     #[serde(default)]
     pub caller_children: bool,
@@ -387,12 +389,13 @@ fn query_args(input: &QueryInput) -> Result<QueryArgs, String> {
     module = "control",
     id = "query",
     display_name = "Query Runs",
-    description = "Find runs of this tenant, sorted by creation or finish time, a page at a time.",
+    description = "Find this run's child runs, sorted by creation or finish time, a page at a time.",
     side_effects = false,
     idempotent = true,
     errors(
         permanent("CONTROL_INVALID", "A filter, sort or page size is out of range"),
         permanent("CONTROL_REQUIRES_INSTANCE", "Children of this run need a calling run"),
+        permanent("CONTROL_NOT_CHILD", "A run reads only itself and its child runs"),
         permanent("CONTROL_DENIED", "Control is not available to this call"),
         permanent("CONTROL_TOO_LARGE", "The response is over its cap"),
         transient(
@@ -547,6 +550,7 @@ fn signal_scope(input: &ListPendingSignalsInput) -> Result<SignalScope, String> 
         permanent("CONTROL_INVALID", "The scope or page size is out of range"),
         permanent("CONTROL_NOT_FOUND", "No such run in this tenant"),
         permanent("CONTROL_REQUIRES_INSTANCE", "Children of this run need a calling run"),
+        permanent("CONTROL_NOT_CHILD", "A run reads only itself and its child runs"),
         permanent("CONTROL_DENIED", "Control is not available to this call"),
         permanent("CONTROL_TOO_LARGE", "The page is over its cap"),
         transient(
@@ -1445,7 +1449,7 @@ pub fn agent_info() -> runtara_dsl::agent_meta::AgentInfo {
     AgentInfo {
         id: runtara_dsl::agent_meta::CONTROL_AGENT_ID.into(),
         name: "Control".into(),
-        description: "Read and coordinate runs of this tenant from a workflow.".into(),
+        description: "Read and coordinate a workflow's own run and its child runs.".into(),
         has_side_effects: false,
         supports_connections: false,
         integration_ids: vec![],

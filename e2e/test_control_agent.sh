@@ -308,7 +308,7 @@ if stage_enabled 1; then
         "SELECT count(*) FROM approved_builtin_artifacts WHERE agent_id = 'control'")
     [ "${APPROVED}" = "0" ] || { print_error "Boot approved a control version: ${APPROVED} rows"; exit 1; }
 
-    print_step "Creating the runs control will read..."
+    print_step "Creating the workflows control will read..."
     DONE_GRAPH=$(jq -n '{
         name: "control-done", durable: true, entryPoint: "finish",
         steps: { finish: { id: "finish", stepType: "Finish",
@@ -316,9 +316,6 @@ if stage_enabled 1; then
         executionPlan: [], variables: {}, inputSchema: {}, outputSchema: {}
     }')
     read -r DONE_WF _ <<< "$(make_workflow control-done "${DONE_GRAPH}")"
-    DONE=$(launch "${DONE_WF}")
-    [ "$(wait_status "${DONE}" completed 120)" = "completed" ] || { print_error "Target run did not complete: $(instance_row "${DONE}")"; exit 1; }
-
     WAIT_GRAPH=$(jq -n '{
         name: "control-waiting", durable: true, entryPoint: "approve",
         steps: { approve: { id: "approve", stepType: "WaitForSignal", name: "Approve",
@@ -330,43 +327,59 @@ if stage_enabled 1; then
         variables: {}, inputSchema: {}, outputSchema: {}
     }')
     read -r WAIT_WF _ <<< "$(make_workflow control-waiting "${WAIT_GRAPH}")"
-    WAITING=$(launch "${WAIT_WF}")
-    [ "$(wait_status "${WAITING}" suspended 120)" = "suspended" ] || { print_error "Waiting run did not park: $(instance_row "${WAITING}")"; exit 1; }
-    echo "  done=${DONE} waiting=${WAITING}"
 
-    print_step "A workflow reads both runs through control..."
-    GET_STEP=$(control_step get get '{"instanceId": {"valueType": "reference", "value": "data.done"}}')
+    # A run reads itself and its child runs only (SYN-906): the reader starts
+    # the runs it reads.
+    print_step "A workflow reads its child runs through control..."
+    child_start() {
+        jq -n --arg id "$1" --arg wf "$2" '{
+            id: $id, stepType: "Agent", agentId: "control", capabilityId: "start",
+            maxRetries: 0, inputMapping: {
+                workflowId: { valueType: "reference", value: $wf },
+                runLabel: { valueType: "immediate", value: $id },
+                parentClosePolicy: { valueType: "immediate", value: "cancel" },
+                inputs: { valueType: "immediate", value: { data: {}, variables: {} } } } }'
+    }
+    GET_STEP=$(control_step get get '{"instanceId": {"valueType": "reference", "value": "steps.startDone.outputs.instanceId"}}')
     QUERY_STEP=$(control_step query query '{
         "workflowId": {"valueType": "reference", "value": "data.doneWorkflow"},
         "statuses": {"valueType": "immediate", "value": ["completed"]},
         "pageSize": {"valueType": "immediate", "value": 10}}')
     SIGNALS_STEP=$(control_step signals list-pending-signals \
-        '{"instanceId": {"valueType": "reference", "value": "data.waiting"}}')
+        '{"instanceId": {"valueType": "reference", "value": "steps.startWaiting.outputs.instanceId"}}')
     READER_GRAPH=$(jq -n --argjson get "${GET_STEP}" --argjson query "${QUERY_STEP}" \
         --argjson signals "${SIGNALS_STEP}" \
+        --argjson startDone "$(child_start startDone data.doneWorkflow)" \
+        --argjson startWaiting "$(child_start startWaiting data.waitWorkflow)" \
         '{
-            name: "control-reader", durable: true, entryPoint: "get",
-            steps: { get: $get, query: $query, signals: $signals,
+            name: "control-reader", durable: true, entryPoint: "startDone",
+            steps: { startDone: $startDone, startWaiting: $startWaiting,
+                     settle: { id: "settle", stepType: "Delay", durationMs: { valueType: "immediate", value: 6000 } },
+                     get: $get, query: $query, signals: $signals,
                      finish: { id: "finish", stepType: "Finish", inputMapping: {
+                         done: { valueType: "reference", value: "steps.startDone.outputs.instanceId" },
+                         waiting: { valueType: "reference", value: "steps.startWaiting.outputs.instanceId" },
                          get: { valueType: "reference", value: "steps.get.outputs" },
                          query: { valueType: "reference", value: "steps.query.outputs" },
                          signals: { valueType: "reference", value: "steps.signals.outputs" } } } },
-            executionPlan: [ { fromStep: "get", toStep: "query" }, { fromStep: "query", toStep: "signals" },
-                             { fromStep: "signals", toStep: "finish" } ],
+            executionPlan: [ { fromStep: "startDone", toStep: "startWaiting" },
+                             { fromStep: "startWaiting", toStep: "settle" },
+                             { fromStep: "settle", toStep: "get" }, { fromStep: "get", toStep: "query" },
+                             { fromStep: "query", toStep: "signals" }, { fromStep: "signals", toStep: "finish" } ],
             variables: {}, outputSchema: {},
-            inputSchema: { done: { type: "string", required: true },
-                           doneWorkflow: { type: "string", required: true },
-                           waiting: { type: "string", required: true } }
+            inputSchema: { doneWorkflow: { type: "string", required: true },
+                           waitWorkflow: { type: "string", required: true } }
         }')
     read -r READER_WF READER_V <<< "$(make_workflow control-reader "${READER_GRAPH}")"
     PINS=$(compiled_pins "${READER_WF}" "${READER_V}")
     case "${PINS}" in *builtin-artifacts*) print_error "The reader records a control pin: ${PINS}"; exit 1 ;; esac
-    DATA=$(jq -nc --arg done "${DONE}" --arg wf "${DONE_WF}" --arg waiting "${WAITING}" \
-        '{done: $done, doneWorkflow: $wf, waiting: $waiting}')
+    DATA=$(jq -nc --arg done "${DONE_WF}" --arg waiting "${WAIT_WF}" '{doneWorkflow: $done, waitWorkflow: $waiting}')
     READER=$(launch "${READER_WF}" "${DATA}")
-    [ "$(wait_status "${READER}" completed 120)" = "completed" ] || { print_error "Reader failed: $(instance_row "${READER}")"; exit 1; }
+    [ "$(wait_status "${READER}" completed 180)" = "completed" ] || { print_error "Reader failed: $(instance_row "${READER}")"; exit 1; }
     OUT=$(instance_output "${READER}")
     echo "  output: $(echo "${OUT}" | head -c 600)"
+    DONE=$(echo "${OUT}" | jq -r '.done')
+    WAITING=$(echo "${OUT}" | jq -r '.waiting')
     [ "$(echo "${OUT}" | jq -r '.get.instance.status')" = "completed" ] || { print_error "get status wrong"; exit 1; }
     [ "$(echo "${OUT}" | jq -r '.get.instance.instanceId')" = "${DONE}" ] || { print_error "get read another run"; exit 1; }
     [ "$(echo "${OUT}" | jq -r '.get.instance.workflowId')" = "${DONE_WF}" ] || { print_error "get workflowId wrong"; exit 1; }
@@ -377,9 +390,11 @@ if stage_enabled 1; then
     [ "$(echo "${OUT}" | jq -r '.signals.items[0].signalId')" = "approve" ] || { print_error "signalId wrong"; exit 1; }
     [ "$(echo "${OUT}" | jq -r '.signals.items[0].actionKey')" = "finance" ] || { print_error "actionKey wrong"; exit 1; }
     [ "$(echo "${OUT}" | jq -r '.signals.items[0].instanceId')" = "${WAITING}" ] || { print_error "signal instance wrong"; exit 1; }
-    print_success "get, query and list-pending-signals read other runs of the tenant ✓"
+    print_success "get, query and list-pending-signals read the run's child runs ✓"
 
     print_step "Failures carry CONTROL_* codes..."
+    OTHER=$(launch "${DONE_WF}")
+    [ "$(wait_status "${OTHER}" completed 120)" = "completed" ] || { print_error "Top-level run did not complete: $(instance_row "${OTHER}")"; exit 1; }
     PROBE_STEP=$(control_step get get '{"instanceId": {"valueType": "reference", "value": "data.target"}}')
     PROBE_GRAPH=$(jq -n --argjson get "${PROBE_STEP}" \
         '{
@@ -390,9 +405,12 @@ if stage_enabled 1; then
             inputSchema: { target: { type: "string", required: true } }
         }')
     read -r PROBE_WF _ <<< "$(make_workflow control-probe "${PROBE_GRAPH}")"
-    PROBE=$(launch "${PROBE_WF}" '{"target": "no-such-run"}')
-    [ "$(wait_status "${PROBE}" failed 120)" = "failed" ] || { print_error "Missing target should fail: $(instance_row "${PROBE}")"; exit 1; }
-    instance_row "${PROBE}" | grep -q "CONTROL_NOT_FOUND" || { print_error "Expected CONTROL_NOT_FOUND: $(instance_row "${PROBE}")"; exit 1; }
+    # Another run of the tenant, and a run that does not exist, read alike.
+    for target in "${OTHER}" "no-such-run"; do
+        PROBE=$(launch "${PROBE_WF}" "$(jq -nc --arg t "${target}" '{target: $t}')")
+        [ "$(wait_status "${PROBE}" failed 120)" = "failed" ] || { print_error "Reading ${target} should fail: $(instance_row "${PROBE}")"; exit 1; }
+        instance_row "${PROBE}" | grep -q "CONTROL_NOT_CHILD" || { print_error "Expected CONTROL_NOT_CHILD for ${target}: $(instance_row "${PROBE}")"; exit 1; }
+    done
     QUERY_PROBE_STEP=$(control_step query query '{
         "pageSize": {"valueType": "reference", "value": "data.pageSize"},
         "callerChildren": {"valueType": "reference", "value": "data.callerChildren"}}')
@@ -409,14 +427,18 @@ if stage_enabled 1; then
     RUN=$(launch "${QUERY_WF}" '{"pageSize": 101, "callerChildren": false}')
     [ "$(wait_status "${RUN}" failed 120)" = "failed" ] || { print_error "pageSize 101 should fail: $(instance_row "${RUN}")"; exit 1; }
     instance_row "${RUN}" | grep -q "CONTROL_INVALID" || { print_error "Expected CONTROL_INVALID: $(instance_row "${RUN}")"; exit 1; }
-    # A run without children reads an empty page of them.
-    RUN=$(launch "${QUERY_WF}" '{"pageSize": 10, "callerChildren": true}')
-    [ "$(wait_status "${RUN}" completed 120)" = "completed" ] || { print_error "callerChildren should read an empty page: $(instance_row "${RUN}")"; exit 1; }
+    # A run without children reads an empty page of them, asked for or not.
+    for children in true false; do
+        RUN=$(launch "${QUERY_WF}" "{\"pageSize\": 10, \"callerChildren\": ${children}}")
+        [ "$(wait_status "${RUN}" completed 120)" = "completed" ] || { print_error "A query should read an empty page of children: $(instance_row "${RUN}")"; exit 1; }
+    done
+    # A test invocation has no run: it has no children, and it reads the
+    # tenant, as a tenant user does through the executions API.
     CODE=$(test_control query '{"callerChildren": true}' | error_code)
     [ "${CODE}" = "CONTROL_REQUIRES_INSTANCE" ] || { print_error "Test invocation without a run: expected CONTROL_REQUIRES_INSTANCE, got '${CODE}'"; exit 1; }
-    RESP=$(test_control get "{\"instanceId\": \"${DONE}\"}")
+    RESP=$(test_control get "{\"instanceId\": \"${OTHER}\"}")
     echo "${RESP}" | grep -q '"total":42' || { print_error "Tenant-scoped test read failed: ${RESP}"; exit 1; }
-    print_success "NOT_FOUND and INVALID from runs; callerChildren reads; REQUIRES_INSTANCE from a test invocation ✓"
+    print_success "NOT_CHILD for another run, INVALID, children-only queries; a test invocation reads the tenant ✓"
 fi
 
 if stage_enabled 2; then
