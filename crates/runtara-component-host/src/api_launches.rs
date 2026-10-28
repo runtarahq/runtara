@@ -74,7 +74,12 @@ pub struct LaunchSlot {
     /// The child runs this launch started and has not released, by task id.
     /// Dropping one cancels its child, so a launch that ends reaps them.
     tasks: Mutex<LaunchTasks>,
+    /// When this launch's lease was last read from the store.
+    lease_checked: Mutex<Option<std::time::Instant>>,
 }
+
+/// How often a launch's lease is read again while it calls the workflow API.
+const LEASE_RECHECK: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// A launch's child runs.
 #[derive(Default)]
@@ -183,6 +188,7 @@ impl ApiLaunches {
                 standalone: None,
                 pending_waits: Mutex::default(),
                 tasks: Mutex::default(),
+                lease_checked: Mutex::default(),
             }),
         );
         Ok(())
@@ -251,6 +257,7 @@ impl ApiLaunches {
                 standalone: Some((trust, control)),
                 pending_waits: Mutex::default(),
                 tasks: Mutex::default(),
+                lease_checked: Mutex::default(),
             }),
         );
         Ok(())
@@ -890,12 +897,9 @@ impl WorkflowApiBackend for Backend {
         let Some(slot) = self.0.slot(binding) else {
             return Ok(LaunchState::Fenced);
         };
+        let runtime = slot.runtime.upgrade();
         // Nor does one whose writes the store refused for another owner.
-        if slot
-            .runtime
-            .upgrade()
-            .is_some_and(|runtime| runtime.superseded())
-        {
+        if runtime.as_ref().is_some_and(|runtime| runtime.superseded()) {
             return Ok(LaunchState::Fenced);
         }
         let posted = slot
@@ -903,11 +907,30 @@ impl WorkflowApiBackend for Backend {
             .lock()
             .expect("workflow API outcome poisoned")
             .is_some();
-        Ok(if posted {
-            LaunchState::Finished
-        } else {
-            LaunchState::Active
-        })
+        if posted {
+            return Ok(LaunchState::Finished);
+        }
+        // Nor one whose lease was revoked (recovered elsewhere, stopped)
+        // while it made no write the store could refuse: an outbound call,
+        // SQL or a child run is fenced too. The lease is read again at most
+        // every LEASE_RECHECK.
+        if let Some(runtime) = runtime {
+            let due = {
+                let mut checked = slot
+                    .lease_checked
+                    .lock()
+                    .expect("workflow API lease check poisoned");
+                let due = checked.is_none_or(|at| at.elapsed() >= LEASE_RECHECK);
+                if due {
+                    *checked = Some(std::time::Instant::now());
+                }
+                due
+            };
+            if due && !runtime.holds_run().await {
+                return Ok(LaunchState::Fenced);
+            }
+        }
+        Ok(LaunchState::Active)
     }
 
     async fn run_info(&self, binding: &Binding) -> Result<RunInfo, ApiError> {
@@ -2070,13 +2093,27 @@ mod tests {
         assert_eq!(launches.finish("launch-1"), None);
     }
 
-    /// A runtime that lost its run's lease, as recovery leaves one.
-    struct LostRun;
+    /// A runtime whose run's lease is held or lost (as recovery leaves one),
+    /// counting how often it is read.
+    struct Lease {
+        holds: std::sync::atomic::AtomicBool,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Lease {
+        fn new(holds: bool) -> Self {
+            Self {
+                holds: holds.into(),
+                reads: 0.into(),
+            }
+        }
+    }
 
     #[async_trait]
-    impl RuntimeHost for LostRun {
+    impl RuntimeHost for Lease {
         async fn holds_run(&self) -> bool {
-            false
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.holds.load(std::sync::atomic::Ordering::SeqCst)
         }
         fn instance_id(&self) -> Result<String, String> {
             unreachable!()
@@ -2144,7 +2181,7 @@ mod tests {
     async fn an_outcome_from_a_launch_that_lost_its_run_is_fenced() {
         let launches = Arc::new(ApiLaunches::default());
         let backend = Backend(launches.clone());
-        let runtime: Arc<dyn RuntimeHost> = Arc::new(LostRun);
+        let runtime: Arc<dyn RuntimeHost> = Arc::new(Lease::new(false));
         launches
             .begin(
                 binding(1),
@@ -2160,6 +2197,41 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::Fenced, "{error:?}");
         assert_eq!(launches.finish("launch-1"), None);
+    }
+
+    /// A launch whose lease was revoked is fenced on its next call, whatever
+    /// the call: it need not have made a write the store refused. The lease
+    /// is read at most once a second.
+    #[tokio::test]
+    async fn a_launch_is_fenced_once_its_lease_is_revoked() {
+        let launches = Arc::new(ApiLaunches::default());
+        let backend = Backend(launches.clone());
+        let lease = Arc::new(Lease::new(true));
+        let runtime: Arc<dyn RuntimeHost> = lease.clone();
+        launches
+            .begin(
+                binding(1),
+                info(),
+                Vec::new(),
+                Arc::downgrade(&runtime),
+                controls(),
+            )
+            .unwrap();
+        for _ in 0..5 {
+            assert_eq!(
+                backend.launch_state(&binding(1)).await.unwrap(),
+                LaunchState::Active
+            );
+        }
+        assert_eq!(lease.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        lease
+            .holds
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(LEASE_RECHECK).await;
+        assert_eq!(
+            backend.launch_state(&binding(1)).await.unwrap(),
+            LaunchState::Fenced
+        );
     }
 
     /// A standalone launch's trusted calls follow the trust its store had:
