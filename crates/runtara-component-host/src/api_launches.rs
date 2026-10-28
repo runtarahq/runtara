@@ -364,12 +364,19 @@ impl ApiLaunches {
 
     /// The `/v1` router over these launches, as a component-host transport.
     pub fn transport(self: &Arc<Self>) -> Arc<dyn WorkflowApiTransport> {
-        let state = WorkflowApiState {
+        Arc::new(RouterTransport(self.router()))
+    }
+
+    /// The `/v1` router over these launches, for a host whose guests run
+    /// elsewhere (a VM behind a gateway). The caller attaches each request's
+    /// [`Binding`] as an extension, derived from where the request came from,
+    /// never from the request itself.
+    pub fn router(self: &Arc<Self>) -> axum::Router {
+        router(WorkflowApiState {
             backend: Arc::new(Backend(Arc::clone(self))),
             receipts: Arc::clone(&self.receipts),
             caps: Caps::default(),
-        };
-        Arc::new(RouterTransport(router(state)))
+        })
     }
 }
 
@@ -1859,6 +1866,58 @@ mod tests {
             api_version: runtara_workflow_api::api_version(),
             capability_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_remote_launch_is_served_through_the_public_router() {
+        let launches = Arc::new(ApiLaunches::default());
+        let shortened = Arc::new(Mutex::new(None));
+        let deadline = {
+            let shortened = Arc::clone(&shortened);
+            WorkflowApiControls::remote(
+                Arc::new(move |after| *shortened.lock().unwrap() = Some(after)),
+                Arc::default(),
+            )
+        };
+        launches
+            .begin(
+                binding(1),
+                info(),
+                b"{\"data\":1}".to_vec(),
+                no_runtime(),
+                deadline,
+            )
+            .unwrap();
+        let app = launches.router();
+        let call = |method: &str, path: &str, body: &'static [u8]| {
+            let mut request = axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header("idempotency-key", format!("{method}-{path}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            request.extensions_mut().insert(binding(1));
+            app.clone().oneshot(request)
+        };
+        let input = call("GET", "/v1/run/input", b"").await.unwrap();
+        assert_eq!(input.status(), 200);
+        assert_eq!(
+            to_bytes(input.into_body(), 1 << 20).await.unwrap(),
+            &b"{\"data\":1}"[..]
+        );
+        let deadline = call("PUT", "/v1/run/deadline", b"{\"abortAfterMs\":250}")
+            .await
+            .unwrap();
+        assert!(deadline.status().is_success(), "{}", deadline.status());
+        assert_eq!(
+            *shortened.lock().unwrap(),
+            Some(std::time::Duration::from_millis(250))
+        );
+        // No in-process child runs: a remote launch's task calls are refused.
+        let task = call("POST", "/v1/tasks", b"{}").await.unwrap();
+        assert!(task.status().is_client_error(), "{}", task.status());
+        assert_eq!(launches.finish("launch-1"), None);
     }
 
     #[tokio::test]

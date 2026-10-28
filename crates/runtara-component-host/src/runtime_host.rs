@@ -185,6 +185,23 @@ pub struct WorkflowApiControls {
     pub(crate) execution: Option<Arc<crate::execution_host::ExecutionContext>>,
 }
 
+impl WorkflowApiControls {
+    /// Controls for a launch whose guest runs outside this process. It has no
+    /// in-process cleanup alarm or child runs, so those calls are answered as
+    /// for a run without them; `shorten_deadline` is how the runner ends it.
+    pub fn remote(
+        shorten_deadline: Arc<dyn Fn(Duration) + Send + Sync>,
+        trusted_pins: Arc<std::collections::HashSet<String>>,
+    ) -> Self {
+        Self {
+            shorten_deadline,
+            trusted_pins,
+            cleanup_alarm: None,
+            execution: None,
+        }
+    }
+}
+
 impl std::fmt::Debug for WorkflowApiControls {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("WorkflowApiControls")
