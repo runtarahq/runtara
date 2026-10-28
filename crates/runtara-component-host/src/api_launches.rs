@@ -255,6 +255,7 @@ impl ApiLaunches {
                     trusted_pins: Arc::default(),
                     cleanup_alarm,
                     execution,
+                    alarm_shortens_deadline: false,
                 },
                 resolver: std::sync::OnceLock::new(),
                 operations: Mutex::default(),
@@ -366,6 +367,15 @@ impl ApiLaunches {
             .lock()
             .expect("launch fault poisoned")
             .clone()
+    }
+
+    /// Whether `launch_id`'s cleanup alarm expired, aborting the run.
+    pub fn cleanup_aborted(&self, launch_id: &str) -> bool {
+        let slots = self.slots.lock().expect("workflow API launches poisoned");
+        slots
+            .get(launch_id)
+            .and_then(|slot| slot.controls.cleanup_alarm.as_ref())
+            .is_some_and(|alarm| alarm.expired())
     }
 
     /// How many launches currently serve the API.
@@ -1021,6 +1031,9 @@ impl WorkflowApiBackend for Backend {
         // The alarm never resolves on its own except by expiring, which
         // latched the abort; dropping this call disarms it.
         let _ = alarm.arm(ms).await;
+        if slot.controls.alarm_shortens_deadline {
+            (slot.controls.shorten_deadline)(std::time::Duration::ZERO);
+        }
         Ok(())
     }
 
@@ -1927,6 +1940,7 @@ mod tests {
             trusted_pins: Arc::default(),
             cleanup_alarm: None,
             execution: None,
+            alarm_shortens_deadline: false,
         }
     }
 
@@ -2416,6 +2430,56 @@ mod tests {
         ));
         assert!(backend.run_info(&binding(1)).await.is_err());
         assert!(backend.heartbeat(&binding(1)).await.is_err());
+    }
+
+    /// A remote launch arms its cleanup alarm too (a deadline scope's hard
+    /// stop). Expired, it ends the run through `shorten_deadline`, which the
+    /// runner acts on, and the run ends as cleanup-aborted.
+    #[tokio::test]
+    async fn a_remote_launchs_expired_alarm_ends_the_run() {
+        let launches = Arc::new(ApiLaunches::default());
+        let backend = Backend(launches.clone());
+        let shortened = Arc::new(Mutex::new(None));
+        let controls = {
+            let shortened = Arc::clone(&shortened);
+            WorkflowApiControls::remote(
+                Arc::new(move |after| *shortened.lock().unwrap() = Some(after)),
+                Arc::default(),
+            )
+        };
+        launches
+            .begin(binding(1), info(), Vec::new(), no_runtime(), controls)
+            .unwrap();
+        let dropped = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            backend.alarm(&binding(1), 200),
+        )
+        .await;
+        assert!(dropped.is_err(), "armed: held until it expires");
+        assert_eq!(
+            *shortened.lock().unwrap(),
+            None,
+            "a disarmed alarm ends nothing"
+        );
+        assert!(!launches.cleanup_aborted("launch-1"));
+
+        backend.alarm(&binding(1), 20).await.unwrap();
+        assert_eq!(
+            *shortened.lock().unwrap(),
+            Some(std::time::Duration::ZERO),
+            "expired: the runner is told to end the run now"
+        );
+        let result = crate::workflow::remote_invoke_result(
+            &launches,
+            "launch-1",
+            crate::workflow::RemoteGuestExit::Timeout,
+            std::time::Duration::from_millis(30),
+        );
+        assert!(
+            matches!(result.exit, crate::InvokeExit::CleanupAborted),
+            "{:?}",
+            result.exit
+        );
     }
 
     /// Child runs: the outcome is held until the child ends, release is idempotent, and a launch that

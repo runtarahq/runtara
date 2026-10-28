@@ -707,6 +707,7 @@ impl WorkflowExecutor {
             trusted_pins: store.data().trusted_pins.clone().unwrap_or_default(),
             cleanup_alarm: Some(store.data().cleanup_alarm.clone()),
             execution: store.data().execution.clone(),
+            alarm_shortens_deadline: false,
         };
         let launches = Arc::clone(self.workflow_api());
         if let Err(error) = launches.begin(
@@ -1623,8 +1624,11 @@ pub fn remote_invoke_result(
     duration: Duration,
 ) -> InvokeRunResult {
     let fault = launches.fault(launch_id);
+    let cleanup_aborted = launches.cleanup_aborted(launch_id);
     let posted = launches.finish(launch_id);
     let mut exit = match (ended, fault, posted) {
+        // The runner stopped it because its cleanup alarm expired.
+        _ if cleanup_aborted => InvokeExit::CleanupAborted,
         (RemoteGuestExit::Timeout, ..) => InvokeExit::Timeout,
         (RemoteGuestExit::Cancelled, ..) => InvokeExit::Cancelled,
         (_, Some(fault), _) => InvokeExit::Trapped { reason: fault },
