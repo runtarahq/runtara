@@ -26,12 +26,8 @@ import {
   useHasExplicitPermission,
 } from '@/shared/stores/authStore.ts';
 import { ThemeSwitcher } from '@/shared/components/theme-switcher.tsx';
-import { DollarSign, Settings } from 'lucide-react';
-import { Button } from '@/shared/components/ui/button';
+import { Settings } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { useCustomMutation } from '@/shared/hooks/api';
-import { createBillingPortalSession } from '@/shared/queries';
-import { toast } from 'sonner';
 import { edition } from '@edition';
 
 export function Sidebar() {
@@ -176,16 +172,6 @@ function FooterMenu() {
     config.build.commit,
     config.build.buildNumber
   );
-  const { mutate: createPortalSession, isPending } = useCustomMutation({
-    mutationFn: createBillingPortalSession,
-    onSuccess: (data: { url: string }) => {
-      window.location.href = data.url;
-    },
-    onError: () => {
-      toast.error('Failed to create billing portal session');
-    },
-  });
-
   // Utilities, not actions: neutral like the nav, not primary blue.
   const iconButton = 'size-8 text-muted-foreground hover:text-foreground';
 
@@ -201,17 +187,6 @@ function FooterMenu() {
       <div className="flex shrink-0 items-center gap-0.5 group-data-[state=collapsed]:flex-col group-data-[state=collapsed]:gap-1">
         <TenantSwitcher className={iconButton} />
         <AuthSidebar className={iconButton} />
-        <Button
-          variant="secondary"
-          size="icon"
-          className={cn('relative shrink-0', iconButton)}
-          aria-label="Manage billing"
-          onClick={() => createPortalSession({})}
-          disabled={isPending}
-        >
-          <DollarSign className="size-4" />
-          <span className="sr-only">Manage billing</span>
-        </Button>
         {edition.footer.map((Control, index) => (
           <Control key={index} className={iconButton} />
         ))}
