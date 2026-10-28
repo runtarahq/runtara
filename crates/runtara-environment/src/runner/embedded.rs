@@ -163,6 +163,7 @@ impl WorkflowStartConfirmation for GateWorkflowStartConfirmation {
 mod root_lease;
 pub use root_lease::RootLease;
 mod run_state;
+pub use run_state::PersistenceRunState;
 mod scoped;
 pub use scoped::ScopedAgentRunnerConfig;
 

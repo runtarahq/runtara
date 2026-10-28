@@ -100,7 +100,7 @@ pub struct ApiLaunches {
     /// In memory by default: an embedded launch lives in one process.
     receipts: Arc<dyn ReceiptStore>,
     /// The published-state service the runner gives the old ABI as well.
-    run_state: Option<Arc<dyn RunStateHost>>,
+    run_state: std::sync::OnceLock<Arc<dyn RunStateHost>>,
     /// The instance-wait service, once the runner is given one.
     instance_waits: std::sync::OnceLock<Arc<dyn InstanceWaitHost>>,
     /// The connection services the runner gives the old ABI as well.
@@ -118,7 +118,7 @@ impl Default for ApiLaunches {
         Self {
             slots: Mutex::default(),
             receipts: Arc::new(MemoryReceiptStore::default()),
-            run_state: None,
+            run_state: std::sync::OnceLock::new(),
             instance_waits: std::sync::OnceLock::new(),
             outbound_http: std::sync::OnceLock::new(),
             database: std::sync::OnceLock::new(),
@@ -132,10 +132,17 @@ impl Default for ApiLaunches {
 impl ApiLaunches {
     /// Launches whose published state is served by `run_state`.
     pub fn with_run_state(run_state: Arc<dyn RunStateHost>) -> Self {
-        Self {
-            run_state: Some(run_state),
-            ..Self::default()
-        }
+        let launches = Self::default();
+        let _ = launches.run_state.set(run_state);
+        launches
+    }
+
+    /// Serve published state with `run_state`, for launches made before the
+    /// host had it (a runner built after the router was mounted).
+    pub fn set_run_state(&self, run_state: Arc<dyn RunStateHost>) -> Result<(), String> {
+        self.run_state
+            .set(run_state)
+            .map_err(|_| "run state already configured for the workflow API".to_string())
     }
 
     /// Keep idempotency receipts in `receipts` instead of in memory, for
@@ -321,6 +328,18 @@ impl ApiLaunches {
     /// Stop serving `launch_id`, dropping any outcome it posted. Idempotent.
     pub fn release(&self, launch_id: &str) {
         let _ = self.finish(launch_id);
+    }
+
+    /// Whether `launch_id` posted its outcome, without finishing it: a runner
+    /// whose guest exited non-zero can tell a failed workflow from a trap.
+    pub fn posted(&self, launch_id: &str) -> bool {
+        let slots = self.slots.lock().expect("workflow API launches poisoned");
+        slots.get(launch_id).is_some_and(|slot| {
+            slot.outcome
+                .lock()
+                .expect("workflow API outcome poisoned")
+                .is_some()
+        })
     }
 
     /// The fault that ends `launch_id` as trapped, if one was recorded.
@@ -698,7 +717,7 @@ impl Backend {
         binding: &Binding,
     ) -> Result<(Arc<dyn RunStateHost>, RunStateAuthority), ApiError> {
         self.0.slot(binding).ok_or_else(not_serving)?;
-        let host = self.0.run_state.clone().ok_or_else(|| {
+        let host = self.0.run_state.get().cloned().ok_or_else(|| {
             ApiError::new(ErrorCode::Unavailable, "no run state service is configured")
         })?;
         Ok((
@@ -1983,10 +2002,13 @@ mod tests {
             .post_outcome(&failed, PostedOutcome::Completed(b"done".to_vec()))
             .await
             .unwrap();
+        assert!(launches.posted("launch-5"));
         assert!(
             matches!(ended(5, RemoteGuestExit::ExitedWith(1)), InvokeExit::Completed(out) if out == b"done")
         );
+        assert!(!launches.posted("launch-5"), "finished");
         begin(6);
+        assert!(!launches.posted("launch-6"));
         assert!(matches!(
             ended(6, RemoteGuestExit::ExitedWith(1)),
             InvokeExit::Trapped { reason } if reason.contains("exited with code 1")

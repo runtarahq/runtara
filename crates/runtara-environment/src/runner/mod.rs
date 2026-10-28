@@ -11,8 +11,8 @@ mod traits;
 
 pub use common::WorkflowRunnerConfig;
 pub use embedded::{
-    EmbeddedWasmRunner, LaunchLifecycle, RootLease, ScopedAgentRunnerConfig, publish_terminal,
-    run_launch_lifecycle,
+    EmbeddedWasmRunner, LaunchLifecycle, PersistenceRunState, RootLease, ScopedAgentRunnerConfig,
+    publish_terminal, run_launch_lifecycle,
 };
 pub use mock::MockRunner;
 pub use traits::*;

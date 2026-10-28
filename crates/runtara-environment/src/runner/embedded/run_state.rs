@@ -13,8 +13,9 @@ use runtara_core::persistence::run_state::StatePatch;
 use serde_json::{Map, Value};
 
 /// [`RunStateHost`] backed by [`Persistence::run_state`]. Without it every
-/// call fails with `unavailable`.
-pub(super) struct PersistenceRunState(pub(super) Arc<dyn Persistence>);
+/// call fails with `unavailable`. A runner whose guests run elsewhere serves
+/// their published state with it too.
+pub struct PersistenceRunState(pub Arc<dyn Persistence>);
 
 fn state_error(error: CoreError) -> RunStateError {
     match error {
