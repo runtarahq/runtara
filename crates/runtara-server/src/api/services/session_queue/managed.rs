@@ -45,6 +45,11 @@ fn session_prefix(tenant_id: &str, digest: &str) -> QueueResult<String> {
     Ok(format!("{tenant_id}:session:{digest}"))
 }
 
+/// A tenant-scoped process's index of its queues' owner keys.
+fn session_index(tenant_id: &str) -> String {
+    format!("{tenant_id}:session:index")
+}
+
 #[derive(Clone, Debug)]
 pub struct QueueScope {
     tenant_id: String,
@@ -84,6 +89,17 @@ impl QueueScope {
         conn: &mut ConnectionManager,
         args: &[String],
     ) -> QueueResult<(String, Option<String>)> {
+        // A tenant-scoped process may not SCAN (it would list every
+        // tenant's key names), so it indexes its queues for discovery. Added
+        // before the script runs, so no queue it creates is missed; an entry
+        // whose queue has since expired is dropped by `scan_scopes`.
+        if crate::config::valkey_tenant_scoped() {
+            let _: () = redis::cmd("SADD")
+                .arg(session_index(&self.tenant_id))
+                .arg(&self.keys()[4])
+                .query_async(conn)
+                .await?;
+        }
         let script = redis::Script::new(SCRIPT);
         let mut call = script.prepare_invoke();
         for key in self.keys() {
@@ -241,14 +257,27 @@ pub async fn scan_scopes(
     if count == 0 || count > 1000 {
         return Err(QueueError::Invalid);
     }
-    let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-        .arg(cursor)
-        .arg("MATCH")
-        .arg(session_prefix(tenant_id, "*")? + ":owner")
-        .arg("COUNT")
-        .arg(count)
-        .query_async(conn)
-        .await?;
+    let scoped = crate::config::valkey_tenant_scoped();
+    let (next, keys): (u64, Vec<String>) = if scoped {
+        // Its own index rather than the keyspace (see `QueueScope::run`).
+        session_prefix(tenant_id, "")?;
+        redis::cmd("SSCAN")
+            .arg(session_index(tenant_id))
+            .arg(cursor)
+            .arg("COUNT")
+            .arg(count)
+            .query_async(conn)
+            .await?
+    } else {
+        redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(session_prefix(tenant_id, "*")? + ":owner")
+            .arg("COUNT")
+            .arg(count)
+            .query_async(conn)
+            .await?
+    };
     let mut scan = ScopeScan {
         cursor: next,
         scopes: Vec::with_capacity(keys.len()),
@@ -281,6 +310,14 @@ pub async fn scan_scopes(
                     .is_ok_and(|scope| scope.keys()[4] == key) =>
             {
                 scan.corrupt_keys.push(key)
+            }
+            // An indexed queue that has since expired or been cleaned up.
+            (None, None) if scoped => {
+                let _: () = redis::cmd("SREM")
+                    .arg(session_index(tenant_id))
+                    .arg(&key)
+                    .query_async(conn)
+                    .await?;
             }
             // Another tenant's queue, or an owner that concurrent
             // completed-queue cleanup removed, or one corrupt beyond
