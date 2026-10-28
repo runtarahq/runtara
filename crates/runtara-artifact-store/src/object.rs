@@ -341,6 +341,33 @@ impl ArtifactStore for ObjectArtifactStore {
         self.store.delete(&path).await.map_err(store_error)?;
         Ok(true)
     }
+
+    async fn list_blobs(&self) -> Result<Vec<(Digest, std::time::SystemTime)>, ArtifactError> {
+        let objects: Vec<_> = self
+            .store
+            .list(Some(&Path::from("blobs/sha256")))
+            .try_collect()
+            .await
+            .map_err(store_error)?;
+        Ok(objects
+            .into_iter()
+            .filter_map(|object| {
+                let digest = Digest::parse(object.location.filename()?).ok()?;
+                Some((digest, object.last_modified.into()))
+            })
+            .collect())
+    }
+
+    async fn manifest_modified(
+        &self,
+        key: &str,
+    ) -> Result<Option<std::time::SystemTime>, ArtifactError> {
+        match self.store.head(&Self::manifest(key)?).await {
+            Ok(meta) => Ok(Some(meta.last_modified.into())),
+            Err(error) if is_not_found(&error) => Ok(None),
+            Err(error) => Err(store_error(error)),
+        }
+    }
 }
 
 #[cfg(test)]

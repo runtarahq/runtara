@@ -621,6 +621,61 @@ impl ImageRegistry {
     }
 }
 
+/// What [`ImageRegistry::collect_artifacts`] removed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CollectedArtifacts {
+    /// Release records removed.
+    pub records: usize,
+    /// Artifacts removed.
+    pub blobs: usize,
+}
+
+/// How old something unreferenced in the artifact store must be before it is
+/// collected, so a publish in flight is never swept.
+pub const ARTIFACT_GRACE: Duration = Duration::from_secs(24 * 3600);
+
+impl ImageRegistry {
+    /// Removes what nothing references any more, older than `grace` (see
+    /// [`runtara_artifact_store::gc`]): release records no retained index
+    /// names, then each blob no retained manifest names, unless an image
+    /// names it. A blob is judged and deleted under the lock registration
+    /// takes before it stores one, so an image being registered keeps its
+    /// blob (SYN-777). Also answers the index digests of the releases the
+    /// store holds.
+    pub async fn collect_artifacts(
+        &self,
+        artifacts: &dyn ArtifactStore,
+        grace: Duration,
+    ) -> Result<(CollectedArtifacts, Vec<Digest>)> {
+        let other = |error: runtara_artifact_store::ArtifactError| {
+            crate::error::Error::Other(format!("collect artifacts: {error}"))
+        };
+        let plan = runtara_artifact_store::gc::plan(artifacts, grace, std::time::SystemTime::now())
+            .await
+            .map_err(other)?;
+        let mut collected = CollectedArtifacts::default();
+        for key in &plan.records {
+            if artifacts.delete_manifest(key).await.map_err(other)? {
+                collected.records += 1;
+            }
+        }
+        for digest in &plan.blobs {
+            let mut tx = self.pool.begin().await?;
+            lock_artifact(&mut tx, digest).await?;
+            let named: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM images WHERE binary_digest = $1)")
+                    .bind(digest.as_str())
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if !named && artifacts.delete(digest).await.map_err(other)? {
+                collected.blobs += 1;
+            }
+            tx.commit().await?;
+        }
+        Ok((collected, plan.releases))
+    }
+}
+
 /// Internal row type for database queries
 #[derive(sqlx::FromRow)]
 struct ImageRow {

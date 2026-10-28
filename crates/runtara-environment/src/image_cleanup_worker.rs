@@ -35,9 +35,10 @@ use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
 use crate::error::Result;
-use crate::image_registry::{ImageRegistry, default_artifact_store};
+use crate::image_registry::{ARTIFACT_GRACE, ImageRegistry, default_artifact_store};
 use crate::periodic::PeriodicLoop;
 use runtara_artifact_store::ArtifactStore;
+use runtara_artifact_store::Digest;
 
 /// Configuration for the image cleanup worker.
 #[derive(Debug, Clone)]
@@ -166,10 +167,11 @@ impl ImageCleanupWorker {
         self.cleanup_images().await
     }
 
-    /// Run both cleanup phases.
+    /// Run every cleanup phase.
     async fn cleanup_images(&self) -> Result<()> {
         let orphaned_cleaned = self.cleanup_orphaned_directories().await;
         let stale_cleaned = self.cleanup_stale_images().await?;
+        self.collect_artifacts().await;
 
         if orphaned_cleaned > 0 || stale_cleaned > 0 {
             info!(
@@ -182,6 +184,58 @@ impl ImageCleanupWorker {
         }
 
         Ok(())
+    }
+
+    /// Phase 3: what nothing in the artifact store references any more, and
+    /// the compile views (`releases/<index digest>`) of releases it no longer
+    /// holds, once older than [`ARTIFACT_GRACE`] (SYN-777). A store that
+    /// cannot list its artifacts is skipped.
+    async fn collect_artifacts(&self) {
+        let images = ImageRegistry::new(self.pool.clone());
+        let releases = match images
+            .collect_artifacts(self.artifacts.as_ref(), ARTIFACT_GRACE)
+            .await
+        {
+            Ok((collected, releases)) => {
+                if collected != Default::default() {
+                    info!(
+                        records = collected.records,
+                        artifacts = collected.blobs,
+                        "Collected unreferenced artifacts"
+                    );
+                }
+                releases
+            }
+            Err(error) => {
+                debug!(error = %error, "Artifact collection skipped");
+                return;
+            }
+        };
+        let views = self.config.data_dir.join("releases");
+        let Ok(mut entries) = tokio::fs::read_dir(&views).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Ok(digest) = Digest::parse(&name) else {
+                continue;
+            };
+            let old = entry
+                .metadata()
+                .await
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|at| at.elapsed().ok())
+                .is_some_and(|age| age > ARTIFACT_GRACE);
+            if old && !releases.contains(&digest) {
+                match tokio::fs::remove_dir_all(entry.path()).await {
+                    Ok(()) => info!(release = %name, "Removed an old release's compile view"),
+                    Err(error) => {
+                        warn!(release = %name, error = %error, "Failed to remove a compile view")
+                    }
+                }
+            }
+        }
     }
 
     /// Phase 1: Clean up legacy `images/<id>` directories on disk that have no

@@ -187,6 +187,26 @@ pub trait ArtifactStore: Send + Sync {
     /// Remove the manifest under `key`; `false` when there was none. Its
     /// content stays: other records may name it.
     async fn delete_manifest(&self, key: &str) -> Result<bool, ArtifactError>;
+
+    /// Every stored artifact with when it was stored, for collecting what
+    /// nothing references ([`gc`]).
+    async fn list_blobs(&self) -> Result<Vec<(Digest, std::time::SystemTime)>, ArtifactError> {
+        Err(ArtifactError::Store(
+            "this store cannot list its artifacts".into(),
+        ))
+    }
+
+    /// When the manifest under `key` was written, or `None` when there is
+    /// none.
+    async fn manifest_modified(
+        &self,
+        key: &str,
+    ) -> Result<Option<std::time::SystemTime>, ArtifactError> {
+        let _ = key;
+        Err(ArtifactError::Store(
+            "this store cannot date its manifests".into(),
+        ))
+    }
 }
 
 /// Artifacts as files under a root directory: `blobs/sha256/<digest>`.
@@ -243,6 +263,17 @@ impl ArtifactStore for FilesystemArtifactStore {
         let digest = Digest::of(bytes);
         let path = self.blob(&digest);
         if tokio::fs::try_exists(&path).await? {
+            // Stored again: young again, so collection leaves it until the
+            // record about to name it is written.
+            let touched = path.clone();
+            tokio::task::spawn_blocking(move || {
+                std::fs::File::options()
+                    .append(true)
+                    .open(&touched)?
+                    .set_modified(std::time::SystemTime::now())
+            })
+            .await
+            .map_err(|error| ArtifactError::Store(error.to_string()))??;
             return Ok(digest);
         }
         // A racing writer of the same bytes renames identical content over it.
@@ -341,6 +372,34 @@ impl ArtifactStore for FilesystemArtifactStore {
         Ok(keys)
     }
 
+    async fn list_blobs(&self) -> Result<Vec<(Digest, std::time::SystemTime)>, ArtifactError> {
+        let mut blobs = Vec::new();
+        let mut entries = match tokio::fs::read_dir(self.blobs()).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(blobs),
+            Err(error) => return Err(error.into()),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            // Uploads in flight are not artifacts.
+            let Ok(digest) = Digest::parse(&entry.file_name().to_string_lossy()) else {
+                continue;
+            };
+            blobs.push((digest, entry.metadata().await?.modified()?));
+        }
+        Ok(blobs)
+    }
+
+    async fn manifest_modified(
+        &self,
+        key: &str,
+    ) -> Result<Option<std::time::SystemTime>, ArtifactError> {
+        match tokio::fs::metadata(self.manifest(key)?).await {
+            Ok(metadata) => Ok(Some(metadata.modified()?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     async fn delete_manifest(&self, key: &str) -> Result<bool, ArtifactError> {
         match tokio::fs::remove_file(self.manifest(key)?).await {
             Ok(()) => Ok(true),
@@ -350,6 +409,7 @@ impl ArtifactStore for FilesystemArtifactStore {
     }
 }
 
+pub mod gc;
 #[cfg(feature = "object-store")]
 pub mod object;
 pub mod release;
