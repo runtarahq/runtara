@@ -20,6 +20,11 @@ pub const LAUNCH_QUEUE_TIMEOUT: &str = "launch_queue_timeout";
 /// Stable detail recorded when a dispatcher found the runner full.
 pub const RUNNER_CAPACITY_UNAVAILABLE: &str = "runner_capacity_unavailable";
 
+/// Stable detail recorded when a launch's workflow artifact is not in the
+/// store: after a restore artifacts are rebuilt from their workflow versions
+/// (the artifact store is not backed up), so the launch waits for that.
+pub const WORKFLOW_ARTIFACT_MISSING: &str = "workflow_artifact_missing";
+
 /// Stable detail recorded when bounded artifact/component preparation outlived
 /// its dispatcher lease. The launch is retried from the durable queue rather
 /// than leaving an unbounded compiler task associated with a runner permit.
@@ -2254,6 +2259,7 @@ fn requeue_reason(error: Option<&str>) -> &'static str {
         Some(RUNNER_CAPACITY_UNAVAILABLE) => "run_capacity",
         Some(PREPARATION_CAPACITY_UNAVAILABLE) => "preparation_capacity",
         Some(PREPARATION_TIMEOUT) => "preparation_timeout",
+        Some(WORKFLOW_ARTIFACT_MISSING) => "artifact_missing",
         _ => "retry",
     }
 }

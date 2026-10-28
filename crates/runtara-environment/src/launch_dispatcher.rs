@@ -27,7 +27,7 @@ use crate::image_registry::{Image, ImageRegistry};
 use crate::instance_repository::InstanceRepository;
 use crate::launch_queue::{
     LAUNCH_QUEUE_TIMEOUT, Launch, LaunchKind, LaunchRepository, PREPARATION_CAPACITY_UNAVAILABLE,
-    PREPARATION_TIMEOUT, RUNNER_CAPACITY_UNAVAILABLE,
+    PREPARATION_TIMEOUT, RUNNER_CAPACITY_UNAVAILABLE, WORKFLOW_ARTIFACT_MISSING,
 };
 use crate::runner::{
     LaunchOptions, PreparedLaunch, Runner, RunnerError, StartGate, StartGateConfirmation,
@@ -684,6 +684,22 @@ impl LaunchDispatcher {
                 .await?;
                 return Ok(());
             }
+            // As at handoff: a missing artifact (a restore) is waited for.
+            Err(RunnerError::BinaryNotFound(missing)) => {
+                warn!(
+                    launch_id = %launch.launch_id,
+                    %missing,
+                    "Workflow artifact missing; the launch waits for it to be rebuilt"
+                );
+                self.requeue_owned_bounded(
+                    &repository,
+                    &launch,
+                    self.config.preparation_retry_delay,
+                    Some(WORKFLOW_ARTIFACT_MISSING),
+                )
+                .await?;
+                return Ok(());
+            }
             Err(error) => {
                 self.fail_before_runner(&launch, &format!("launch preparation failed: {error}"))
                     .await?;
@@ -929,6 +945,24 @@ impl LaunchDispatcher {
                     &launch,
                     self.config.capacity_retry_delay,
                     Some(RUNNER_CAPACITY_UNAVAILABLE),
+                )
+                .await?;
+            }
+            // The artifact store is not backed up: a launch whose artifact
+            // is gone (a restore) waits, until its queue deadline, for the
+            // server to rebuild it from the workflow version, rather than
+            // failing a run that was only waiting to wake.
+            Err(RunnerError::BinaryNotFound(missing)) => {
+                warn!(
+                    launch_id = %launch.launch_id,
+                    %missing,
+                    "Workflow artifact missing; the launch waits for it to be rebuilt"
+                );
+                self.requeue_owned_bounded(
+                    &repository,
+                    &launch,
+                    self.config.capacity_retry_delay,
+                    Some(WORKFLOW_ARTIFACT_MISSING),
                 )
                 .await?;
             }

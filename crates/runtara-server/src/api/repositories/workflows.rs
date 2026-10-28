@@ -1697,6 +1697,32 @@ impl WorkflowRepository {
         Ok(result.and_then(|r| r.registered_image_id))
     }
 
+    /// Every successfully compiled live workflow version of the tenant with
+    /// its registered image: `(workflow_id, version, image_id)`.
+    pub async fn registered_images(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<(String, i32, String)>, sqlx::Error> {
+        sqlx::query_as(
+            r#"
+            SELECT sc.workflow_id, sc.version, sc.registered_image_id
+            FROM workflow_compilations sc
+            JOIN workflow_definitions wd
+              ON wd.tenant_id = sc.tenant_id
+             AND wd.workflow_id = sc.workflow_id
+             AND wd.version = sc.version
+             AND wd.deleted_at IS NULL
+            WHERE sc.tenant_id = $1
+              AND sc.compilation_status = 'success'
+              AND sc.registered_image_id IS NOT NULL
+            ORDER BY sc.workflow_id, sc.version
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await
+    }
+
     pub async fn get_fresh_registered_image_id(
         &self,
         tenant_id: &str,

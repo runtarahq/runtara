@@ -1548,8 +1548,10 @@ pub async fn start_with(
         native_control.install(runtime_client.clone());
     }
 
-    // Workflow-agents staged by another lowering (an upgrade changed how
-    // they compile) are republished from their versions, off the boot path.
+    // Workflow artifacts missing from the store (a restore: the store is not
+    // backed up) are rebuilt from their versions, and workflow-agents staged
+    // by another lowering (an upgrade changed how they compile) republished,
+    // off the boot path. Launches that find no artifact wait for it.
     {
         let service = api::services::compilation::CompilationService::new(
             Arc::new(api::repositories::workflows::WorkflowRepository::new(
@@ -1563,6 +1565,15 @@ pub async fn start_with(
         );
         tokio::spawn(async move {
             for tenant_id in config::served_tenants() {
+                let (rebuilt, failed) = service.restage_missing_artifacts(tenant_id).await;
+                if rebuilt + failed > 0 {
+                    tracing::info!(
+                        %tenant_id,
+                        rebuilt,
+                        failed,
+                        "rebuilt missing workflow artifacts"
+                    );
+                }
                 let (restaged, failed) = service.restage_stale_workflow_agents(tenant_id).await;
                 if restaged + failed > 0 {
                     tracing::info!(

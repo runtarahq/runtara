@@ -1518,6 +1518,48 @@ impl CompilationService {
         })
     }
 
+    /// Rebuild every registered workflow image of the tenant whose artifact
+    /// is not in the store, from its version. The artifact store is not
+    /// backed up: after a restore this puts each artifact back (compilation
+    /// is deterministic, so under the same digest), and the launches that
+    /// waited for one proceed. Answers how many were rebuilt and how many
+    /// failed.
+    pub async fn restage_missing_artifacts(&self, tenant_id: &str) -> (usize, usize) {
+        let Some(client) = self.runtime_client.clone() else {
+            return (0, 0);
+        };
+        let images = match self.repository.registered_images(tenant_id).await {
+            Ok(images) => images,
+            Err(error) => {
+                warn!(%tenant_id, %error, "could not list registered workflow images");
+                return (0, 1);
+            }
+        };
+        let (mut rebuilt, mut failed) = (0, 0);
+        for (workflow_id, version, image_id) in images {
+            if self.artifact_present_for_reuse(&client, &image_id).await {
+                continue;
+            }
+            match self
+                .compile_workflow(tenant_id, &workflow_id, version, true)
+                .await
+            {
+                Ok(_) => {
+                    rebuilt += 1;
+                    info!(%tenant_id, %workflow_id, version, "rebuilt a missing workflow artifact");
+                }
+                Err(error) => {
+                    failed += 1;
+                    warn!(
+                        %tenant_id, %workflow_id, version, %error,
+                        "could not rebuild a missing workflow artifact; compile it again"
+                    );
+                }
+            }
+        }
+        (rebuilt, failed)
+    }
+
     /// Republish the tenant's staged workflow-agents that another lowering
     /// built (see [`crate::workflow_agents::stale_agents`]), from the version
     /// each was published from, or the workflow's current version when it
