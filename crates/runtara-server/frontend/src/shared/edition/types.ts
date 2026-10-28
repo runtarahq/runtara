@@ -17,6 +17,12 @@ export type EditionRoute = {
 export type Edition = {
   /** Pages, after the built-in ones. */
   routes: EditionRoute[];
+  /**
+   * Pages for any signed-in user, whether or not they belong to the tenant
+   * (accepting an invitation to it, say): shown outside the app layout and
+   * before the tenant gates.
+   */
+  open: EditionRoute[];
   /** Main-menu entries, after the built-in ones. */
   menu: MenuItem[];
   /** Entries in the Settings group, after API Keys. */

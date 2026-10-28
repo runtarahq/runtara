@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components */
 // Router config files naturally export route configurations that reference components.
 // Separating would require splitting the routing logic from its component references.
-import { createBrowserRouter, Navigate } from 'react-router';
+import { createBrowserRouter, matchPath, Navigate } from 'react-router';
 import { lazy, Suspense } from 'react';
 import { InvocationHistoryRedirect } from '@/router/InvocationHistoryRedirect';
 import { PrivateRoute } from '@/router/PrivateRoute';
@@ -444,3 +444,28 @@ export const router = createBrowserRouter(
   ],
   { basename }
 );
+
+let open: ReturnType<typeof createBrowserRouter> | undefined;
+
+/**
+ * The router for the edition's open pages, made on first use so it does not
+ * follow the history while the app's router does.
+ */
+export function openRouter() {
+  open ??= createBrowserRouter(
+    edition.open.map(({ path, element }) => ({
+      path,
+      element: <Suspense fallback={<PageLoader />}>{element}</Suspense>,
+    })),
+    { basename }
+  );
+  return open;
+}
+
+/** Whether `pathname` is one of the edition's open pages. */
+export function isOpenPath(pathname: string): boolean {
+  const within = pathname.startsWith(basename)
+    ? pathname.slice(basename.length) || '/'
+    : pathname;
+  return edition.open.some(({ path }) => matchPath(path, within) !== null);
+}

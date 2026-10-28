@@ -1,5 +1,5 @@
 import { RouterProvider } from 'react-router/dom';
-import { router } from '@/router';
+import { isOpenPath, openRouter, router } from '@/router';
 import { Loader } from '@/shared/components/loader.tsx';
 import { useAutoSignin } from '@/shared/hooks/useAutoSignin';
 import { useMe } from '@/shared/hooks/useMe';
@@ -46,6 +46,16 @@ function App() {
 
   if (isMaintenanceMode) {
     return <MaintenancePage />;
+  }
+
+  // The edition's open pages are for any signed-in user, a member of this
+  // tenant or not, so they come before the tenant gates.
+  if (isOpenPath(window.location.pathname)) {
+    return isOidcAuth && !auth.isAuthenticated ? (
+      <Loader />
+    ) : (
+      <RouterProvider router={openRouter()} />
+    );
   }
 
   // Signed in with a token that names no tenant: at the bare mount the user
