@@ -238,15 +238,20 @@ fn runner(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_composed_control_get_reads_another_run() -> anyhow::Result<()> {
+async fn a_composed_control_get_reads_a_child_run_only() -> anyhow::Result<()> {
     let harness = Harness::new().await?;
     let (persistence, tenant) = (&harness.persistence, &harness.tenant);
 
-    // The target run.
-    let target = format!("{tenant}-target");
-    persistence
-        .try_register_instance(&target, tenant, None)
-        .await?;
+    // The target run, a child of the caller: a run reads only itself and its
+    // child runs.
+    let (caller, target) = (format!("{tenant}-caller"), format!("{tenant}-target"));
+    let input = harness
+        .family(
+            &caller,
+            std::slice::from_ref(&target),
+            json!({"target": target}),
+        )
+        .await;
     persistence
         .complete_instance(
             CompleteInstanceParams::new(&target, InstanceStatus::Completed)
@@ -271,13 +276,7 @@ async fn a_composed_control_get_reads_another_run() -> anyhow::Result<()> {
         "the composed control agent imports no control interface"
     );
 
-    let run = harness
-        .launch(
-            &wasm_path,
-            &format!("{tenant}-caller"),
-            json!({"target": target}),
-        )
-        .await?;
+    let run = harness.run(&wasm_path, &caller, input).await?;
     assert_eq!(run.status, InstanceStatus::Completed, "{:?}", run.error);
     let output: Value = serde_json::from_slice(run.output.as_deref().unwrap())?;
     let read = &output["run"];
@@ -285,6 +284,28 @@ async fn a_composed_control_get_reads_another_run() -> anyhow::Result<()> {
     assert_eq!(read["instance"]["status"], "completed");
     assert_eq!(read["output"], json!({"total": 42}));
     assert_eq!(read["outputOmitted"], false);
+
+    // Another run of the tenant is not the caller's to read.
+    let other = format!("{tenant}-other");
+    persistence
+        .try_register_instance(&other, tenant, None)
+        .await?;
+    let run = harness
+        .launch(
+            &wasm_path,
+            &format!("{tenant}-prying"),
+            json!({"target": other}),
+        )
+        .await?;
+    assert_eq!(run.status, InstanceStatus::Failed);
+    assert!(
+        run.error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("CONTROL_NOT_CHILD"),
+        "{:?}",
+        run.error
+    );
     Ok(())
 }
 
