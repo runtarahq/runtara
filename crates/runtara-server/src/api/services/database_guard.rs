@@ -137,8 +137,9 @@ mod relay {
     /// pool reconnects through its socket.
     #[derive(Default)]
     struct Relays {
-        /// The relay directory for each vetted address.
-        directories: HashMap<SocketAddr, String>,
+        /// The relay directory for each vetted address, and the task serving
+        /// it.
+        directories: HashMap<SocketAddr, (String, tokio::task::JoinHandle<()>)>,
         /// The addresses each tenant brought a relay to.
         by_tenant: HashMap<String, std::collections::HashSet<SocketAddr>>,
     }
@@ -156,8 +157,18 @@ mod relay {
 
         let mut relays = relays().lock().expect("database relays poisoned");
         let relays = &mut *relays;
+        // A relay whose task has ended (its runtime gone, as between tests)
+        // serves nothing: it is started again rather than handed out.
+        if relays
+            .directories
+            .get(&address)
+            .is_some_and(|(_, task)| task.is_finished())
+            && let Some((directory, _)) = relays.directories.remove(&address)
+        {
+            let _ = std::fs::remove_dir_all(directory);
+        }
         let mine = relays.by_tenant.entry(tenant.to_owned()).or_default();
-        if let Some(directory) = relays.directories.get(&address) {
+        if let Some((directory, _)) = relays.directories.get(&address) {
             // Another tenant's relay to the same address is shared, and
             // counts for this tenant too.
             if mine.contains(&address) || mine.len() < RELAYS_PER_TENANT {
@@ -191,12 +202,14 @@ mod relay {
         }
         let listener = tokio::net::UnixListener::bind(&socket)
             .map_err(|error| format!("cannot start a database relay: {error}"))?;
-        tokio::spawn(serve(listener, address));
+        let task = tokio::spawn(serve(listener, address));
         let directory = directory
             .to_str()
             .ok_or("the database relay's directory is not UTF-8")?
             .to_owned();
-        relays.directories.insert(address, directory.clone());
+        relays
+            .directories
+            .insert(address, (directory.clone(), task));
         mine.insert(address);
         Ok(directory)
     }
