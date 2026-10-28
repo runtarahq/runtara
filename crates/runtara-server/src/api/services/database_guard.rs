@@ -25,7 +25,8 @@ use std::sync::{Mutex, OnceLock};
 use runtara_connections::net::{host_is_allowlisted_for_egress, is_private_ip};
 
 /// The URL to connect with for `database_url`, or why it is refused.
-pub(crate) async fn admit(database_url: &str) -> Result<String, String> {
+/// `tenant` is whose connection it is: relays are counted per tenant.
+pub(crate) async fn admit(database_url: &str, tenant: &str) -> Result<String, String> {
     if !crate::config::database_connection_guard() {
         return Ok(database_url.to_owned());
     }
@@ -33,11 +34,12 @@ pub(crate) async fn admit(database_url: &str) -> Result<String, String> {
     if crate::config::object_model_database_url().as_deref() == Some(database_url) {
         return Ok(database_url.to_owned());
     }
-    admit_with(database_url, host_is_allowlisted_for_egress).await
+    admit_with(database_url, tenant, host_is_allowlisted_for_egress).await
 }
 
 async fn admit_with(
     database_url: &str,
+    tenant: &str,
     allowlisted: impl Fn(&str) -> bool,
 ) -> Result<String, String> {
     // Everything is read through the connector's own parser, so the guard
@@ -86,7 +88,7 @@ async fn admit_with(
         options.get_ssl_mode(),
         sqlx::postgres::PgSslMode::VerifyFull
     ) {
-        let directory = relay::to(SocketAddr::new(address, options.get_port())).await?;
+        let directory = relay::to(SocketAddr::new(address, options.get_port()), tenant).await?;
         return through_relay(database_url, &host, &directory);
     }
     let pinned = pin(database_url, address)?;
@@ -125,26 +127,51 @@ fn through_relay(database_url: &str, host: &str, directory: &str) -> Result<Stri
 mod relay {
     use super::*;
 
+    /// The most addresses one tenant's connections bring a relay to, so a
+    /// tenant cannot use up the process's relays.
+    pub(super) const RELAYS_PER_TENANT: usize = 16;
     /// The most addresses one process relays to.
-    pub(super) const MAX_RELAYS: usize = 256;
+    pub(super) const MAX_RELAYS: usize = 4096;
 
-    /// The relay directory for each vetted address.
-    fn relays() -> &'static Mutex<HashMap<SocketAddr, String>> {
-        static RELAYS: OnceLock<Mutex<HashMap<SocketAddr, String>>> = OnceLock::new();
+    /// The relays of this process. A relay stays while the process runs: a
+    /// pool reconnects through its socket.
+    #[derive(Default)]
+    struct Relays {
+        /// The relay directory for each vetted address.
+        directories: HashMap<SocketAddr, String>,
+        /// The addresses each tenant brought a relay to.
+        by_tenant: HashMap<String, std::collections::HashSet<SocketAddr>>,
+    }
+
+    fn relays() -> &'static Mutex<Relays> {
+        static RELAYS: OnceLock<Mutex<Relays>> = OnceLock::new();
         RELAYS.get_or_init(Mutex::default)
     }
 
     /// The directory of the relay to `address`, started on first use. sqlx
     /// connects to `{directory}/.s.PGSQL.{port}`.
     #[cfg(unix)]
-    pub(super) async fn to(address: SocketAddr) -> Result<String, String> {
+    pub(super) async fn to(address: SocketAddr, tenant: &str) -> Result<String, String> {
         use std::os::unix::fs::DirBuilderExt;
 
         let mut relays = relays().lock().expect("database relays poisoned");
-        if let Some(directory) = relays.get(&address) {
-            return Ok(directory.clone());
+        let relays = &mut *relays;
+        let mine = relays.by_tenant.entry(tenant.to_owned()).or_default();
+        if let Some(directory) = relays.directories.get(&address) {
+            // Another tenant's relay to the same address is shared, and
+            // counts for this tenant too.
+            if mine.contains(&address) || mine.len() < RELAYS_PER_TENANT {
+                mine.insert(address);
+                return Ok(directory.clone());
+            }
         }
-        if relays.len() >= MAX_RELAYS {
+        if !mine.contains(&address) && mine.len() >= RELAYS_PER_TENANT {
+            return Err(format!(
+                "this tenant's connections already reach {RELAYS_PER_TENANT} \
+                 sslmode=verify-full database addresses"
+            ));
+        }
+        if relays.directories.len() >= MAX_RELAYS {
             return Err(format!(
                 "this server already relays to {MAX_RELAYS} database addresses"
             ));
@@ -169,13 +196,14 @@ mod relay {
             .to_str()
             .ok_or("the database relay's directory is not UTF-8")?
             .to_owned();
-        relays.insert(address, directory.clone());
+        relays.directories.insert(address, directory.clone());
+        mine.insert(address);
         Ok(directory)
     }
 
     /// No Unix sockets: a host name cannot be both verified and pinned.
     #[cfg(not(unix))]
-    pub(super) async fn to(_: SocketAddr) -> Result<String, String> {
+    pub(super) async fn to(_: SocketAddr, _: &str) -> Result<String, String> {
         Err("sslmode=verify-full needs an allowlisted host on this platform".to_string())
     }
 
@@ -241,7 +269,10 @@ mod tests {
             "postgres://u:p@8.8.8.8/db?hostaddr=169.254.169.254",
             "postgres://u:p@8.8.8.8/db?HOST=10.0.0.1",
         ] {
-            assert!(admit_with(url, nothing_allowlisted).await.is_err(), "{url}");
+            assert!(
+                admit_with(url, "t", nothing_allowlisted).await.is_err(),
+                "{url}"
+            );
         }
     }
 
@@ -249,6 +280,7 @@ mod tests {
     async fn a_public_address_is_admitted_and_pinned() {
         let admitted = admit_with(
             "postgres://u:p@8.8.8.8:5433/db?sslmode=require",
+            "t",
             nothing_allowlisted,
         )
         .await
@@ -262,7 +294,9 @@ mod tests {
     #[tokio::test]
     async fn a_verified_connection_goes_through_a_relay_to_the_vetted_address() {
         let verified = "postgres://u:p@8.8.8.8:5433/db?sslmode=verify-full";
-        let admitted = admit_with(verified, nothing_allowlisted).await.unwrap();
+        let admitted = admit_with(verified, "t", nothing_allowlisted)
+            .await
+            .unwrap();
         let options = sqlx::postgres::PgConnectOptions::from_str(&admitted).unwrap();
         assert_eq!(options.get_host(), "8.8.8.8");
         assert_eq!(options.get_port(), 5433);
@@ -274,7 +308,9 @@ mod tests {
         assert!(directory.join(".s.PGSQL.5433").exists(), "{directory:?}");
         // One relay per vetted address.
         assert_eq!(
-            admit_with(verified, nothing_allowlisted).await.unwrap(),
+            admit_with(verified, "t", nothing_allowlisted)
+                .await
+                .unwrap(),
             admitted
         );
     }
@@ -314,7 +350,7 @@ mod tests {
             return;
         };
         let address: SocketAddr = address.parse().unwrap();
-        let directory = relay::to(address).await.unwrap();
+        let directory = relay::to(address, "tls-test").await.unwrap();
         let connect = |host: &'static str| {
             let url = format!(
                 "postgres://postgres:{password}@{host}:{}/postgres?sslmode=verify-full&sslrootcert={ca}",
@@ -337,6 +373,31 @@ mod tests {
         assert!(matches!(refused, sqlx::Error::Tls(_)), "{refused}");
     }
 
+    /// A tenant brings a relay to at most RELAYS_PER_TENANT addresses, so it
+    /// cannot use up the process's; another tenant still gets its own.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_tenant_cannot_use_up_the_relays() {
+        let mut listeners = Vec::new();
+        for _ in 0..=relay::RELAYS_PER_TENANT {
+            listeners.push(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap());
+        }
+        let addresses: Vec<SocketAddr> =
+            listeners.iter().map(|l| l.local_addr().unwrap()).collect();
+        for address in &addresses[..relay::RELAYS_PER_TENANT] {
+            relay::to(*address, "greedy").await.unwrap();
+        }
+        // Again to one it already has: fine.
+        relay::to(addresses[0], "greedy").await.unwrap();
+        let refused = relay::to(addresses[relay::RELAYS_PER_TENANT], "greedy")
+            .await
+            .unwrap_err();
+        assert!(refused.contains("this tenant"), "{refused}");
+        relay::to(addresses[relay::RELAYS_PER_TENANT], "other")
+            .await
+            .unwrap();
+    }
+
     /// The relay dials the address it was started for, whatever the name
     /// would resolve to now: a byte sent to the relay reaches that address.
     #[cfg(unix)]
@@ -344,7 +405,7 @@ mod tests {
     async fn the_relay_dials_only_its_vetted_address() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let vetted = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let directory = relay::to(vetted.local_addr().unwrap()).await.unwrap();
+        let directory = relay::to(vetted.local_addr().unwrap(), "t").await.unwrap();
         let socket = format!(
             "{directory}/.s.PGSQL.{}",
             vetted.local_addr().unwrap().port()
@@ -361,7 +422,9 @@ mod tests {
     async fn an_allowlisted_host_is_admitted_as_is() {
         let url = "postgres://u:p@localhost:5432/db";
         assert_eq!(
-            admit_with(url, |host| host == "localhost").await.unwrap(),
+            admit_with(url, "t", |host| host == "localhost")
+                .await
+                .unwrap(),
             url
         );
     }

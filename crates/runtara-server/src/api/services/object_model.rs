@@ -119,7 +119,7 @@ pub(crate) async fn resolve_database_url_uncached(
                     ))
                 })?;
 
-            super::database_guard::admit(db_url)
+            super::database_guard::admit(db_url, tenant_id)
                 .await
                 .map(Some)
                 .map_err(|reason| {
@@ -173,7 +173,7 @@ pub(crate) async fn resolve_database_url_uncached(
                     )
                 })?;
 
-            super::database_guard::admit(db_url)
+            super::database_guard::admit(db_url, tenant_id)
                 .await
                 .map(Some)
                 .map_err(|reason| {
