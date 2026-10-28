@@ -174,3 +174,91 @@ row count, which falls when rows are collapsed, so a healthy run killed both
 before and after a collapse would look stuck.
 `Persistence::checkpoint_progress` replaces it: the highest checkpoint row id
 in Postgres, and stored plus collapsed rows in memory.
+
+## Dead tuples and autovacuum
+
+A collapse leaves the rows it deletes behind as dead tuples, with their index
+entries, until a vacuum removes them and later inserts reuse the space.
+`A → Split[N] → B` inserts N + 3 rows and kills N of them in one statement;
+the Split's result keeps every item's result in one row, stored out of line
+(TOAST) and live until retention deletes the instance.
+
+Autovacuum vacuums the table once either count exceeds its trigger, which
+Postgres 18 computes as:
+
+- dead tuples (`n_dead_tup`): 50 + 0.2 × `reltuples`, at most
+  `autovacuum_vacuum_max_threshold` (100 million);
+- inserts since the last vacuum (`n_ins_since_vacuum`): 1000 + 0.2 ×
+  `reltuples` × the share of pages not all-frozen (1 − `relallfrozen` /
+  `relpages`).
+
+Earlier versions have neither the cap nor the frozen share. On a table of a
+million rows the dead trigger is 200,000, twenty Splits of 10,000 items, so
+how soon the table is vacuumed depends on how much of it is frozen: mostly
+frozen, the insert trigger fires within a Split; mostly unfrozen, both
+triggers sit near 20% of the table. That share depends on the table's
+history. A vacuum freezes a page early when it would write a full-page image
+of it anyway, which with data checksums on (the default for a cluster created
+by Postgres 18) happens to a page it is the first to change after a
+checkpoint; otherwise it freezes rows once they are older than
+`vacuum_freeze_min_age`.
+
+It was measured on Postgres 18.3 with the default autovacuum settings: a
+runtara server ran `A → Split[10,000] → B` (items of 256 bytes) 20 times back
+to back per mode, then stood idle for 300 s, while the table's statistics,
+sizes, WAL (pg_walinspect) and statement timings (pg_stat_statements) were
+sampled. The seeded table was **99.9% all-frozen at the start**, because its
+setup vacuumed the million rows right after loading them, and 97.6% at the
+end. Heap and indexes are in MiB; the table started at 0 or 755.5. The last
+column counts dead tuples with pgstattuple after the 300 s.
+
+| Mode | Table | Autovacuums (TOAST) | Heap + indexes, run 1 → 20 | Over the last 10 runs | Dead at the end |
+|---|---|---|---|---|---|
+| empty | empty | 77 (8) | 14.4 → 19.7 | +1.2 | 0 |
+| seeded | 1M live rows | 38 (8) | 769.9 → 793.0 | −0.6 | 10,000 (1.1%) |
+| tuned | 1M live rows, both scale factors 0.02 | 77 (17) | 769.9 → 789.0 | −1.0 | 10,000 (1.1%) |
+| paused | 1M live rows, autovacuum off | 0 | 769.9 → 1,042.3 | +143.4 | 199,167 (18.1%) |
+
+On a mostly frozen table the defaults keep up. The seeded table's insert
+trigger rose from about 1,300 inserts to 5,800 as new rows added pages not yet
+frozen, so autovacuum ran 1.9 times a run and each collapse's 10,000 dead
+tuples went with the next one. Heap and indexes stopped growing after the
+first ten runs, and the table ended 6.2% free. Scale factors of 0.02 doubled
+the autovacuums and saved 4 MiB (0.5%). The statement that records a result
+and applies its closure (10,003 calls a run, most deleting nothing) averaged
+0.057–0.060 ms a run in the seeded, tuned and paused modes, with no trend; in
+the empty mode it rose to 0.15 ms in runs 4–7 and settled back to 0.06. Its
+slowest call took 6–17 ms.
+
+On a mostly unfrozen table, or on Postgres 17 or earlier, dead tuples build
+up to the dead trigger before each vacuum. The paused mode follows that path:
+after 20 runs it held 199,167 dead tuples, at the trigger of 200,000, and its
+heap and indexes were 250 MiB larger than the seeded mode's (14.3 MiB a run).
+The vacuum then makes that space reusable, so the table should hold at about
+that size rather than keep growing. That part is derived, not measured.
+
+So `checkpoints` keeps the server's settings for now.
+`scripts/checkpoint-bloat-sample.sql` shows which case a runtime database is
+in. It reads the table's counts, sizes, frozen share, both triggers and the
+WAL position as one row, without scanning the table. Sampled daily for a
+week, it shows whether autovacuum runs on inserts, with `n_dead_tup` far below
+`vacuum_trigger_dead`, or only once dead tuples reach it. If it is the second
+and that much dead space is too much, per-table parameters go in a forward
+migration.
+
+- **The last collapse waits for traffic.** Dead tuples stay until the inserts
+  after them reach the insert trigger: a median 76 s between runs here and,
+  after the last run, for good (3,503 inserts against a trigger of about
+  5,800, and 10,000 dead against 200,000). They hold space the table already
+  has.
+- **`n_dead_tup` is an estimate after an ANALYZE**: it read 19,162 where
+  pgstattuple counted 10,000.
+- **The Split's result is the growth that remains.** TOAST grew 2.82 MiB a run
+  in every mode (10,000 results of 256 bytes). With 2,000 items of 3 KB, each
+  iteration's row out of line, it grew 6.0 MiB a run, and the TOAST table
+  vacuumed the iterations' chunks on its own trigger (6 autovacuums in 5
+  runs).
+- **WAL** was about 97 MiB a run, the largest share the run's events
+  (`instance_events`, 37 MiB). `checkpoints`, its indexes and TOAST took
+  28 MiB, of which the collapse's deletes were 2.4 MiB and autovacuum about
+  4 MiB, most of it unlinking emptied index pages.
