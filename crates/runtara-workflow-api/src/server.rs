@@ -11,7 +11,7 @@
 //! itself, through [`WorkflowApiBackend`]. Endpoint families land one at a
 //! time; anything not served yet answers `unsupported`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -422,7 +422,8 @@ pub struct Receipt {
     pub body_omitted: bool,
 }
 
-/// Idempotency receipts, kept for the life of a launch.
+/// Idempotency receipts of running launches (a store may keep only a
+/// launch's newest; see [`MemoryReceiptStore`]).
 #[async_trait]
 pub trait ReceiptStore: Send + Sync + 'static {
     async fn get(&self, launch_id: &str, key: &str) -> Result<Option<Receipt>, ApiError>;
@@ -436,19 +437,66 @@ pub trait ReceiptStore: Send + Sync + 'static {
     }
 }
 
+/// Receipts a launch keeps in memory before its oldest go.
+pub const RECEIPTS_PER_LAUNCH: usize = 4096;
+/// Answer bytes (bodies and headers) a launch keeps in memory before its
+/// oldest receipts go.
+pub const RECEIPT_BYTES_PER_LAUNCH: usize = 16 * 1024 * 1024;
+
 /// In-memory receipts for one process. The embedded runner forgets a launch's
 /// receipts when the launch ends; a relaunch is a new launch with new keys.
-#[derive(Default)]
+///
+/// A launch keeps its newest receipts, up to a count and a total size; past
+/// either the oldest go. A receipt only matters to a retry of its own call,
+/// and a guest has few calls in flight (the node serves a run 4 at a time,
+/// and the SDK mints a new key for every call), so a call a guest could still
+/// retry is never among those dropped: this bounds a launch's memory without
+/// letting an honest retry run twice.
 pub struct MemoryReceiptStore {
-    receipts: Mutex<HashMap<(String, String), Receipt>>,
+    launches: Mutex<HashMap<String, LaunchReceipts>>,
+    max_receipts: usize,
+    max_bytes: usize,
+}
+
+#[derive(Default)]
+struct LaunchReceipts {
+    /// Keys, oldest first.
+    order: VecDeque<String>,
+    by_key: HashMap<String, Receipt>,
+    bytes: usize,
+}
+
+fn receipt_bytes(receipt: &Receipt) -> usize {
+    receipt.body.len()
+        + receipt
+            .headers
+            .iter()
+            .map(|(name, value)| name.len() + value.len())
+            .sum::<usize>()
+}
+
+impl Default for MemoryReceiptStore {
+    fn default() -> Self {
+        Self::with_limits(RECEIPTS_PER_LAUNCH, RECEIPT_BYTES_PER_LAUNCH)
+    }
 }
 
 impl MemoryReceiptStore {
+    /// A store whose launches each keep at most `max_receipts` receipts and
+    /// `max_bytes` of answers (the newest receipt always stays).
+    pub fn with_limits(max_receipts: usize, max_bytes: usize) -> Self {
+        Self {
+            launches: Mutex::default(),
+            max_receipts: max_receipts.max(1),
+            max_bytes,
+        }
+    }
+
     pub fn forget_launch(&self, launch_id: &str) {
-        self.receipts
+        self.launches
             .lock()
             .expect("receipt store poisoned")
-            .retain(|(launch, _), _| launch != launch_id);
+            .remove(launch_id);
     }
 }
 
@@ -456,25 +504,102 @@ impl MemoryReceiptStore {
 impl ReceiptStore for MemoryReceiptStore {
     async fn get(&self, launch_id: &str, key: &str) -> Result<Option<Receipt>, ApiError> {
         Ok(self
-            .receipts
+            .launches
             .lock()
             .expect("receipt store poisoned")
-            .get(&(launch_id.to_string(), key.to_string()))
+            .get(launch_id)
+            .and_then(|launch| launch.by_key.get(key))
             .cloned())
     }
 
     async fn put(&self, launch_id: &str, key: &str, receipt: Receipt) -> Result<(), ApiError> {
-        self.receipts
-            .lock()
-            .expect("receipt store poisoned")
-            .entry((launch_id.to_string(), key.to_string()))
-            .or_insert(receipt);
+        let mut launches = self.launches.lock().expect("receipt store poisoned");
+        let launch = launches.entry(launch_id.to_string()).or_default();
+        if launch.by_key.contains_key(key) {
+            return Ok(());
+        }
+        launch.bytes += receipt_bytes(&receipt);
+        launch.by_key.insert(key.to_string(), receipt);
+        launch.order.push_back(key.to_string());
+        while launch.order.len() > 1
+            && (launch.order.len() > self.max_receipts || launch.bytes > self.max_bytes)
+        {
+            let oldest = launch.order.pop_front().expect("more than one receipt");
+            if let Some(dropped) = launch.by_key.remove(&oldest) {
+                launch.bytes -= receipt_bytes(&dropped);
+            }
+        }
         Ok(())
     }
 
     async fn forget_launch(&self, launch_id: &str) -> Result<(), ApiError> {
         MemoryReceiptStore::forget_launch(self, launch_id);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    fn receipt(body: usize) -> Receipt {
+        Receipt {
+            request_hash: [0; 32],
+            status: 200,
+            headers: Vec::new(),
+            body: vec![b'x'; body],
+            body_omitted: false,
+        }
+    }
+
+    async fn keys(store: &MemoryReceiptStore, launch: &str, keys: &[&str]) -> Vec<bool> {
+        let mut kept = Vec::new();
+        for key in keys {
+            kept.push(store.get(launch, key).await.unwrap().is_some());
+        }
+        kept
+    }
+
+    #[tokio::test]
+    async fn a_launch_keeps_its_newest_receipts_up_to_a_count() {
+        let store = MemoryReceiptStore::with_limits(3, usize::MAX);
+        for key in ["k0", "k1", "k2", "k3"] {
+            store.put("a", key, receipt(1)).await.unwrap();
+        }
+        store.put("b", "k0", receipt(1)).await.unwrap();
+        assert_eq!(
+            keys(&store, "a", &["k0", "k1", "k2", "k3"]).await,
+            [false, true, true, true]
+        );
+        assert_eq!(keys(&store, "b", &["k0"]).await, [true], "per launch");
+        // A second put of a kept key leaves the first receipt, and the order.
+        store.put("a", "k1", receipt(5)).await.unwrap();
+        assert_eq!(store.get("a", "k1").await.unwrap().unwrap().body.len(), 1);
+        store.put("a", "k4", receipt(1)).await.unwrap();
+        assert_eq!(
+            keys(&store, "a", &["k1", "k2", "k3", "k4"]).await,
+            [false, true, true, true]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_launch_keeps_its_newest_receipts_up_to_a_size() {
+        let store = MemoryReceiptStore::with_limits(usize::MAX, 10);
+        store.put("a", "k0", receipt(4)).await.unwrap();
+        store.put("a", "k1", receipt(4)).await.unwrap();
+        store.put("a", "k2", receipt(4)).await.unwrap();
+        assert_eq!(
+            keys(&store, "a", &["k0", "k1", "k2"]).await,
+            [false, true, true]
+        );
+        // One answer over the whole budget is still kept: it is the newest.
+        store.put("a", "big", receipt(64)).await.unwrap();
+        assert_eq!(
+            keys(&store, "a", &["k1", "k2", "big"]).await,
+            [false, false, true]
+        );
+        store.forget_launch("a");
+        assert_eq!(keys(&store, "a", &["big"]).await, [false]);
     }
 }
 

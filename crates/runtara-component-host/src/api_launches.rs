@@ -76,6 +76,8 @@ pub struct LaunchSlot {
     tasks: Mutex<LaunchTasks>,
     /// When this launch's lease was last read from the store.
     lease_checked: Mutex<Option<std::time::Instant>>,
+    /// What this launch may still append through `POST /v1/events`.
+    events: Mutex<crate::event_budget::EventBudget>,
 }
 
 /// How often a launch's lease is read again while it calls the workflow API.
@@ -189,6 +191,9 @@ impl ApiLaunches {
                 pending_waits: Mutex::default(),
                 tasks: Mutex::default(),
                 lease_checked: Mutex::default(),
+                events: Mutex::new(crate::event_budget::EventBudget::new(
+                    std::time::Instant::now(),
+                )),
             }),
         );
         Ok(())
@@ -258,6 +263,9 @@ impl ApiLaunches {
                 pending_waits: Mutex::default(),
                 tasks: Mutex::default(),
                 lease_checked: Mutex::default(),
+                events: Mutex::new(crate::event_budget::EventBudget::new(
+                    std::time::Instant::now(),
+                )),
             }),
         );
         Ok(())
@@ -1597,11 +1605,38 @@ impl WorkflowApiBackend for Backend {
 
     async fn append_events(&self, binding: &Binding, events: Vec<Event>) -> Result<(), ApiError> {
         let runtime = self.runtime(binding)?;
+        let mut batch = Vec::with_capacity(events.len());
         for event in events {
             let payload = serde_json::to_vec(&event.payload)
                 .map_err(|e| ApiError::new(ErrorCode::Invalid, e.to_string()))?;
+            batch.push((event.kind, payload));
+        }
+        // A launch over its event budget is held until the budget refills,
+        // and refused only when that would take too long.
+        let slot = self.0.slot(binding).ok_or_else(not_serving)?;
+        let bytes = batch
+            .iter()
+            .map(|(kind, payload)| kind.len() + payload.len())
+            .sum();
+        let taken = slot.events.lock().expect("event budget poisoned").take(
+            batch.len(),
+            bytes,
+            tokio::time::Instant::now().into_std(),
+        );
+        match taken {
+            Ok(wait) if !wait.is_zero() => tokio::time::sleep(wait).await,
+            Ok(_) => {}
+            Err(wait) => {
+                return Err(ApiError::new(
+                    ErrorCode::Capacity,
+                    "this launch is over its event budget",
+                )
+                .with_retry_after(wait.as_millis() as u64));
+            }
+        }
+        for (kind, payload) in batch {
             runtime
-                .custom_event(event.kind, payload)
+                .custom_event(kind, payload)
                 .await
                 .map_err(host_error)?;
         }
@@ -2094,10 +2129,11 @@ mod tests {
     }
 
     /// A runtime whose run's lease is held or lost (as recovery leaves one),
-    /// counting how often it is read.
+    /// counting how often it is read and the events appended.
     struct Lease {
         holds: std::sync::atomic::AtomicBool,
         reads: std::sync::atomic::AtomicUsize,
+        events: std::sync::atomic::AtomicUsize,
     }
 
     impl Lease {
@@ -2105,6 +2141,7 @@ mod tests {
             Self {
                 holds: holds.into(),
                 reads: 0.into(),
+                events: 0.into(),
             }
         }
     }
@@ -2119,7 +2156,9 @@ mod tests {
             unreachable!()
         }
         async fn custom_event(&self, _: String, _: Vec<u8>) -> Result<(), String> {
-            unreachable!()
+            self.events
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
         }
         fn debug_mode_enabled(&self) -> Result<bool, String> {
             unreachable!()
@@ -2173,6 +2212,61 @@ mod tests {
         ) -> Result<(), String> {
             unreachable!()
         }
+    }
+
+    /// A launch past its event budget is held while the budget refills, and
+    /// refused once it would wait too long; what it was refused is not
+    /// appended.
+    #[tokio::test(start_paused = true)]
+    async fn a_launch_flooding_events_is_held_then_refused() {
+        let launches = Arc::new(ApiLaunches::default());
+        let backend = Backend(launches.clone());
+        let lease = Arc::new(Lease::new(true));
+        let runtime: Arc<dyn RuntimeHost> = lease.clone();
+        launches
+            .begin(
+                binding(1),
+                info(),
+                Vec::new(),
+                Arc::downgrade(&runtime),
+                controls(),
+            )
+            .unwrap();
+        let batch = |n: usize| {
+            (0..n)
+                .map(|_| Event {
+                    kind: "flood".into(),
+                    payload: serde_json::json!({}),
+                })
+                .collect::<Vec<_>>()
+        };
+        let appended = || lease.events.load(std::sync::atomic::Ordering::SeqCst);
+        let start = tokio::time::Instant::now();
+        // The burst passes at once.
+        for _ in 0..10 {
+            backend
+                .append_events(&binding(1), batch(1000))
+                .await
+                .unwrap();
+        }
+        assert_eq!(appended(), 10_000);
+        assert!(start.elapsed() < std::time::Duration::from_millis(1));
+        // The next batch waits its second.
+        backend
+            .append_events(&binding(1), batch(1000))
+            .await
+            .unwrap();
+        assert_eq!(appended(), 11_000);
+        assert!(start.elapsed() >= std::time::Duration::from_secs(1));
+        // One that would wait over the hold is refused, and not appended.
+        let error = backend
+            .append_events(&binding(1), batch(11_000))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Capacity, "{error:?}");
+        assert!(error.retry_after_ms.is_some_and(|ms| ms > 10_000));
+        assert_eq!(appended(), 11_000);
+        assert_eq!(launches.finish("launch-1"), None);
     }
 
     /// A launch that lost its run is told its outcome was fenced, and the

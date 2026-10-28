@@ -16,6 +16,7 @@ mod cleanup_alarm;
 pub mod connection_resolver_host;
 pub mod control_host;
 pub mod database_host;
+pub mod event_budget;
 pub use database_host::DatabaseHost;
 pub mod outbound_http;
 pub use outbound_http::OutboundHttpHost;
