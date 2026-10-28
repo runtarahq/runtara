@@ -11,6 +11,7 @@ import { Login } from '@/shared/pages/login';
 import { NotFound } from '@/shared/pages/NotFound';
 import { ErrorBoundary } from '@/shared/components/error-boundary.tsx';
 import { Spinner } from '@/shared/components/ui/spinner';
+import { edition } from '@edition';
 
 const Operations = lazy(() =>
   import('@/features/operations/pages').then((m) => ({ default: m.Operations }))
@@ -421,6 +422,15 @@ export const router = createBrowserRouter(
             </PrivateRoute>
           ),
         },
+        // The edition's pages (src/shared/edition/types.ts), behind sign-in.
+        ...edition.routes.map(({ path, element }) => ({
+          path,
+          element: (
+            <PrivateRoute>
+              <Suspense fallback={<PageLoader />}>{element}</Suspense>
+            </PrivateRoute>
+          ),
+        })),
         {
           path: '/login',
           element: <Login />,

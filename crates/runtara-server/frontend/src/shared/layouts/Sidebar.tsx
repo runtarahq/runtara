@@ -32,6 +32,7 @@ import { cn } from '@/lib/utils';
 import { useCustomMutation } from '@/shared/hooks/api';
 import { createBillingPortalSession } from '@/shared/queries';
 import { toast } from 'sonner';
+import { edition } from '@edition';
 
 export function Sidebar() {
   return (
@@ -98,7 +99,7 @@ function AppMenu() {
   const entitlements = useEntitlements();
 
   const allowedMenu = useMemo(
-    () => filterMenu(menu, userGroups, entitlements),
+    () => filterMenu([...menu, ...edition.menu], userGroups, entitlements),
     [userGroups, entitlements]
   );
 
@@ -129,6 +130,7 @@ function AppMenu() {
               },
             ]
           : []),
+        ...edition.settings,
       ],
     }),
     [canManageUsers]
@@ -210,6 +212,9 @@ function FooterMenu() {
           <DollarSign className="size-4" />
           <span className="sr-only">Manage billing</span>
         </Button>
+        {edition.footer.map((Control, index) => (
+          <Control key={index} className={iconButton} />
+        ))}
         <ThemeSwitcher className={iconButton} />
         <SidebarTrigger className={cn('mx-0 shrink-0 px-0', iconButton)} />
       </div>

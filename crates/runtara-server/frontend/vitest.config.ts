@@ -41,6 +41,12 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      // The console's edition (src/shared/edition/types.ts): this repository's
+      // by default, a distribution's module when RUNTARA_EDITION_DIR names one.
+      '@edition': path.resolve(
+        __dirname,
+        process.env.RUNTARA_EDITION_DIR ?? './src/edition'
+      ),
       '@': path.resolve(__dirname, './src'),
     },
   },
