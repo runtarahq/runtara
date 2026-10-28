@@ -861,9 +861,10 @@ pub fn object_model_pool_cache_ttl() -> std::time::Duration {
     std::time::Duration::from_secs(get().object_model_pool_cache_ttl_secs)
 }
 
-/// Whether the object model uses soft delete.
+/// Whether the object model uses soft delete. True (the default) before
+/// config is initialised (unit tests).
 pub fn object_model_soft_delete() -> bool {
-    get().object_model_soft_delete
+    try_get().is_none_or(|config| config.object_model_soft_delete)
 }
 
 /// Guard rails for caller-supplied raw SQL (workflow capabilities and the
@@ -873,9 +874,13 @@ pub fn raw_sql_guardrails() -> runtara_object_store::SqlGuardrails {
 }
 
 /// Maximum number of items accepted per bulk request (create/upsert/update-by-ids).
+/// The store's default before config is initialised (unit tests).
 pub fn object_model_bulk_request_limit() -> usize {
+    let Some(config) = try_get() else {
+        return runtara_object_store::DEFAULT_BULK_REQUEST_LIMIT;
+    };
     crate::middleware::entitlement::effective_limit(
-        get().object_model_bulk_request_limit,
+        config.object_model_bulk_request_limit,
         entitlements().limits.object_model_bulk_request_limit,
     )
 }

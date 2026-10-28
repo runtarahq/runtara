@@ -107,6 +107,14 @@ pub struct ObjectStoreManager {
     building: std::sync::Mutex<std::collections::HashMap<String, usize>>,
 }
 
+/// Why a store build failed: the tenant was at its pool limit, or the
+/// database could not be reached.
+#[derive(Debug)]
+enum BuildError {
+    Capacity(String),
+    Connect(String),
+}
+
 /// A tenant's slot for a pool being built, released when the build ends.
 struct BuildSlot<'a> {
     building: &'a std::sync::Mutex<std::collections::HashMap<String, usize>>,
@@ -211,20 +219,21 @@ impl ObjectStoreManager {
             tracing::debug!(key = ?key, "object-model store in failure cooldown; fast-failing");
             return Err(ObjectStoreError::Connection(cached_error));
         }
-        let _slot = match &key {
-            StoreKey::Url { tenant, .. } if !self.stores.contains_key(&key) => {
-                Some(self.reserve_pool(tenant)?)
-            }
-            _ => None,
-        };
-
         let pool_config = self.pool_config.clone();
         // try_get_with is single-flight: this closure runs only on a cache miss —
-        // exactly when we pay a (potentially cross-cloud) cold connect.
+        // exactly when we pay a (potentially cross-cloud) cold connect. Only the
+        // build holds a tenant pool slot: concurrent callers for the same key
+        // wait for it and share its result.
         let log_key = key.clone();
         let result = self
             .stores
-            .try_get_with(key.clone(), async move {
+            .try_get_with(key.clone(), async {
+                let _slot = match &key {
+                    StoreKey::Url { tenant, .. } => {
+                        Some(self.reserve_pool(tenant).map_err(BuildError::Capacity)?)
+                    }
+                    StoreKey::Tenant(_) => None,
+                };
                 let start = Instant::now();
                 let config = StoreConfig::builder(&database_url)
                     .soft_delete(crate::config::object_model_soft_delete())
@@ -243,25 +252,30 @@ impl ObjectStoreManager {
                         "failed to build object-model store pool"
                     ),
                 }
-                result
+                result.map_err(|error| BuildError::Connect(error.to_string()))
             })
             .await;
 
         match result {
             Ok(store) => Ok(store),
-            Err(e) => {
-                let message = format!("failed to initialize object store: {e}");
-                // Remember the failure briefly so repeated requests fast-fail
-                // instead of re-attempting a cold connect to a dead database.
-                self.failures.insert(key, message.clone()).await;
-                Err(ObjectStoreError::Connection(message))
-            }
+            // At the tenant's limit: not a failure of this database, so it is
+            // not remembered; the next request tries again.
+            Err(error) => match error.as_ref() {
+                BuildError::Capacity(message) => Err(ObjectStoreError::Connection(message.clone())),
+                BuildError::Connect(error) => {
+                    let message = format!("failed to initialize object store: {error}");
+                    // Remember the failure briefly so repeated requests fast-fail
+                    // instead of re-attempting a cold connect to a dead database.
+                    self.failures.insert(key, message.clone()).await;
+                    Err(ObjectStoreError::Connection(message))
+                }
+            },
         }
     }
 
-    /// Reserve one of `tenant`'s pool slots for a build, or refuse when the
-    /// pools it holds and is building reach the limit.
-    fn reserve_pool(&self, tenant: &str) -> Result<BuildSlot<'_>, ObjectStoreError> {
+    /// Reserve one of `tenant`'s pool slots for a build, or refuse (with why)
+    /// when the pools it holds and is building reach the limit.
+    fn reserve_pool(&self, tenant: &str) -> Result<BuildSlot<'_>, String> {
         let mut building = self.building.lock().unwrap_or_else(|e| e.into_inner());
         let held = self
             .stores
@@ -272,11 +286,11 @@ impl ObjectStoreManager {
             .count();
         let pending = building.get(tenant).copied().unwrap_or(0);
         if held + pending >= self.tenant_pool_max {
-            return Err(ObjectStoreError::Connection(format!(
+            return Err(format!(
                 "this tenant already holds {} database connection pools, the limit \
                  (OBJECT_MODEL_TENANT_POOL_MAX); unused ones close after they idle",
                 held + pending
-            )));
+            ));
         }
         *building.entry(tenant.to_string()).or_default() += 1;
         Ok(BuildSlot {
@@ -437,6 +451,95 @@ mod tests {
             error.to_string().contains("add a Postgres connection"),
             "{error}"
         );
+    }
+
+    /// A database that accepts connections and never answers, so a build
+    /// stays in flight until the pool's acquire timeout; answers its URL for
+    /// `db`.
+    async fn silent_database() -> (tokio::net::TcpListener, impl Fn(&str) -> String) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (listener, move |db: &str| {
+            format!("postgres://u:p@127.0.0.1:{port}/{db}?sslmode=disable")
+        })
+    }
+
+    fn quick_failing_manager() -> ObjectStoreManager {
+        ObjectStoreManager::without_default_database()
+            .with_tenant_pool_max(1)
+            .with_pool_config(PoolConfig {
+                acquire_timeout: Duration::from_millis(500),
+                ..PoolConfig::default()
+            })
+    }
+
+    /// SYN-787: concurrent first requests for one pool share its build and
+    /// its single slot, so none of them is refused for capacity.
+    #[tokio::test]
+    async fn concurrent_requests_for_one_pool_share_one_slot() {
+        let (listener, url) = silent_database().await;
+        let held = tokio::spawn(async move {
+            let mut sockets = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                sockets.push(socket);
+            }
+        });
+        let manager = quick_failing_manager();
+        let url = url("one");
+        let (first, second, third) = tokio::join!(
+            manager.get_database_by_url("t", &url),
+            manager.get_database_by_url("t", &url),
+            manager.get_database_by_url("t", &url),
+        );
+        for result in [first, second, third] {
+            let error = result.err().expect("the silent database never answers");
+            assert!(
+                !error.to_string().contains("OBJECT_MODEL_TENANT_POOL_MAX"),
+                "{error}"
+            );
+        }
+        held.abort();
+    }
+
+    /// Distinct pools still respect the tenant's limit while they build, and
+    /// a capacity refusal is not remembered as a failed database.
+    #[tokio::test]
+    async fn distinct_pools_respect_the_limit_and_a_refusal_is_not_remembered() {
+        let (listener, url) = silent_database().await;
+        let held = tokio::spawn(async move {
+            let mut sockets = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                sockets.push(socket);
+            }
+        });
+        let manager = quick_failing_manager();
+        let (a, b) = (url("a"), url("b"));
+        let first = manager.get_database_by_url("t", &a);
+        let second = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            manager.get_database_by_url("t", &b).await
+        };
+        let (first, second) = tokio::join!(first, second);
+        assert!(
+            !first
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("OBJECT_MODEL_TENANT_POOL_MAX")
+        );
+        let refused = second.err().expect("the second pool is over the limit");
+        assert!(
+            refused.to_string().contains("OBJECT_MODEL_TENANT_POOL_MAX"),
+            "{refused}"
+        );
+        // The slot is free again: `b` is built (and fails to connect), rather
+        // than fast-failing with the remembered refusal.
+        let retried = manager.get_database_by_url("t", &b).await.err().unwrap();
+        assert!(
+            !retried.to_string().contains("OBJECT_MODEL_TENANT_POOL_MAX"),
+            "{retried}"
+        );
+        held.abort();
     }
 
     #[test]
