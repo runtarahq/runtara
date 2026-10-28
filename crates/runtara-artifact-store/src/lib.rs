@@ -102,7 +102,8 @@ impl Manifest {
         })
     }
 
-    /// The metadata's exact bytes.
+    /// The metadata's bytes: the JSON exactly, without the whitespace around
+    /// it, which a JSON value does not keep.
     pub fn metadata_bytes(&self) -> &[u8] {
         self.metadata.get().as_bytes()
     }
@@ -458,6 +459,38 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A manifest keeps its metadata's JSON byte for byte through the store,
+    /// but not the whitespace around it, which is why trusted pins bind the
+    /// metadata without it (`runtara_dsl::agent_meta::pinned_metadata`).
+    #[tokio::test]
+    async fn a_manifest_keeps_its_metadata_json_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FilesystemArtifactStore::new(dir.path());
+        let content = store.put(b"component").await.unwrap();
+        for (metadata, kept) in [
+            (&b"{\"a\":1}"[..], &b"{\"a\":1}"[..]),
+            (b"{\"a\":1}\n", b"{\"a\":1}"),
+            (b"\n  {\"a\" :  1}\r\n\n", b"{\"a\" :  1}"),
+        ] {
+            let manifest = Manifest::new(content.clone(), metadata).unwrap();
+            store
+                .put_manifest("agents/x/y.json", &manifest)
+                .await
+                .unwrap();
+            let read = store
+                .get_manifest("agents/x/y.json")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                read.metadata_bytes(),
+                kept,
+                "{:?}",
+                String::from_utf8_lossy(metadata)
+            );
+        }
+    }
 
     #[test]
     fn a_digest_is_sha256_hex_and_nothing_else() {

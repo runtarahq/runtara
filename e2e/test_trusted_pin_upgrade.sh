@@ -25,15 +25,19 @@
 #              Republishing the workflow-agent releases that failure: the
 #              parent's next launch recompiles and runs, with no forced
 #              recompile.
-#   DRIFT      a bundle replaced on disk without a restart compiles to pins the
-#              server did not install; that failure is terminal and records
-#              its pins, and retries once a restart installs them.
+#   ON DISK    a bundle changed on disk without a restart is not compiled
+#              against: compilation reads the release the server published at
+#              boot, so a new workflow pins the installed version. A restart
+#              publishes the change; the workflow's artifact is then stale and
+#              its next launch recompiles to the new version and runs.
 #
 # Before the upgrade it also checks that an unchanged bundle keeps the artifact
 # ready, so a second launch reuses the image without recompiling.
 #
-# The "upgrade" is the same component with one extra byte in its metadata
-# sidecar: any change to either hash is a different approved version. The S3
+# The "upgrade" is the same component with one more character in its metadata
+# sidecar's description: any change to the component or to the metadata's
+# JSON is a different approved version. Whitespace around the JSON is not
+# (a release does not keep it), so the edit is inside it. The S3
 # connection holds synthetic credentials; presigning never reaches the network.
 #
 # Usage:  ./e2e/test_trusted_pin_upgrade.sh
@@ -173,6 +177,11 @@ compilation_row() {
 compile_version() {
     api_post "/workflows/$1/versions/$2/compile${3:-}" '{}' 900
 }
+# Another version of an agent: one more character in its description.
+upgrade_metadata() {
+    jq -c '.description += " "' "$1" > "$1.next" && mv "$1.next" "$1"
+}
+
 version_compiled() {
     curl -sS "${API}/workflows/$1/versions" | jq -r --argjson v "$2" \
         '[.data[]? | select((.version // .versionNumber) == $v) | .compiled] | first // false'
@@ -345,7 +354,7 @@ echo "  instance ${PARKED} parked"
 # ---------------------------------------------------------------------------
 print_step "Restarting with an upgraded s3-storage bundle..."
 stop_server
-echo "" >> "${BUNDLE_DIR}/runtara_agent_s3_storage.meta.json"
+upgrade_metadata "${BUNDLE_DIR}/runtara_agent_s3_storage.meta.json"
 start_server
 
 [ "$(version_compiled "${SIGN_WF}" "${SIGN_V}")" = "false" ] || { print_error "The version list still reports the stale artifact compiled"; exit 1; }
@@ -409,7 +418,14 @@ psql_quiet -d "${TEST_DB_SERVER}" -c \
     "SELECT error_message FROM workflow_compilations WHERE tenant_id = '${TENANT}' AND workflow_id = '${PARENT_WF}' AND version = ${PARENT_V}" \
     | grep -q "workflow-agent \`trusted-pin-signer\`" \
     || { print_error "Recorded failure does not name the workflow-agent"; exit 1; }
-stale_parent_run
+# Once the failure is recorded as terminal, a launch is refused at once
+# (it could never start), still naming the workflow-agent, and nothing
+# recompiles.
+RESP=$(api_post "/workflows/${PARENT_WF}/execute" '{"inputs": {"data": {}, "variables": {}}}')
+[ -z "$(echo "${RESP}" | jq -r '.data.instanceId // empty')" ] \
+    || { print_error "A launch after the terminal failure should be refused: ${RESP}"; exit 1; }
+echo "${RESP}" | grep -q "workflow-agent \`trusted-pin-signer\`" \
+    || { print_error "The refusal does not name the workflow-agent: ${RESP}"; exit 1; }
 [ "$(compilation_row "${PARENT_WF}" "${PARENT_V}")" = "${FAILED}" ] \
     || { print_error "The terminal failure was recompiled: before=${FAILED} after=$(compilation_row "${PARENT_WF}" "${PARENT_V}")"; exit 1; }
 print_success "Stale workflow-agent: parent fails terminally with a republish diagnostic, no recompile loop ✓"
@@ -439,11 +455,11 @@ fi
 print_success "Old instance woke on its old artifact and presigned on the installed bytes ✓"
 
 # ---------------------------------------------------------------------------
-# A bundle replaced on disk without a restart: the compiler reads a version
-# the running server did not install.
+# A bundle changed on disk without a restart: compilation reads the release
+# the server published at boot, not the directory.
 # ---------------------------------------------------------------------------
-print_step "Replacing s3-storage on disk without restarting..."
-echo "" >> "${BUNDLE_DIR}/runtara_agent_s3_storage.meta.json"
+print_step "Changing s3-storage on disk without restarting..."
+upgrade_metadata "${BUNDLE_DIR}/runtara_agent_s3_storage.meta.json"
 RESP=$(api_post /workflows/create '{"name": "trusted-pin-drift", "description": "trusted pin upgrade"}')
 DRIFT_WF=$(echo "${RESP}" | jq -r '.data.id // empty')
 [ -n "${DRIFT_WF}" ] || { print_error "Workflow create failed: ${RESP}"; exit 1; }
@@ -451,32 +467,24 @@ RESP=$(api_post "/workflows/${DRIFT_WF}/update" "{\"executionGraph\": $(echo "${
 [ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] || { print_error "Update failed: ${RESP}"; exit 1; }
 DRIFT_V=$(curl -sS "${API}/workflows/${DRIFT_WF}/versions" | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')
 RESP=$(compile_version "${DRIFT_WF}" "${DRIFT_V}")
-[ "$(echo "${RESP}" | jq -r '.success // false')" = "false" ] && echo "${RESP}" | grep -q "does not run" \
-    || { print_error "Compiling against a drifted bundle should fail naming the version: ${RESP}"; exit 1; }
+[ "$(echo "${RESP}" | jq -r '.success // false')" = "true" ] \
+    || { print_error "Compiling while the bundle changed on disk should use the installed release: ${RESP}"; exit 1; }
 DRIFTED=$(compilation_row "${DRIFT_WF}" "${DRIFT_V}")
 echo "  compilation: $(echo "${DRIFTED}" | cut -d'|' -f1,3)"
-[ "$(echo "${DRIFTED}" | cut -d'|' -f1)" = "failed" ] && [ "$(echo "${DRIFTED}" | cut -d'|' -f3)" != "<null>" ] \
-    || { print_error "Expected a failure carrying the compiled pins: ${DRIFTED}"; exit 1; }
-RESP=$(api_post "/workflows/${DRIFT_WF}/execute" '{"inputs": {"data": {}, "variables": {}}}')
-INST=$(echo "${RESP}" | jq -r '.data.instanceId // empty')
-[ -n "${INST}" ] || { print_error "Launch was not accepted: ${RESP}"; exit 1; }
-ST=""
-for _ in {1..60}; do
-    ST=$(request_state "${INST}")
-    case "${ST}" in terminal*|accepted*) break ;; esac
-    sleep 2
-done
-[ "${ST%%|*}" = "terminal" ] || { print_error "Launch on a drifted bundle should be terminal, got '${ST}'"; exit 1; }
-[ "$(compilation_row "${DRIFT_WF}" "${DRIFT_V}")" = "${DRIFTED}" ] || { print_error "The drift failure was recompiled before a restart"; exit 1; }
-print_success "Drifted bundle: compile fails terminally with its pins recorded, no recompile loop ✓"
+[ "$(echo "${DRIFTED}" | cut -d'|' -f1,3)" = "success|${A_PINS}" ] \
+    || { print_error "Expected the installed version's pin before a restart: ${DRIFTED}"; exit 1; }
+print_success "A bundle changed on disk is not compiled against until a restart publishes it ✓"
 
-print_step "Restarting onto the drifted bundle heals the failure..."
+print_step "Restarting publishes the change; the workflow recompiles to it..."
 stop_server
 start_server
+[ "$(version_compiled "${DRIFT_WF}" "${DRIFT_V}")" = "false" ] || { print_error "The artifact pinning the replaced version is still reported compiled"; exit 1; }
 INST=$(launch "${DRIFT_WF}")
 [ "$(wait_terminal "${INST}" 300)" = "completed" ] || { print_error "Run after the restart did not complete: $(instance_row "${INST}")"; exit 1; }
-[ "$(compilation_row "${DRIFT_WF}" "${DRIFT_V}" | cut -d'|' -f1)" = "success" ] || { print_error "No rebuilt success: $(compilation_row "${DRIFT_WF}" "${DRIFT_V}")"; exit 1; }
-print_success "After the restart the failure retried once and the workflow runs ✓"
+REBUILT=$(compilation_row "${DRIFT_WF}" "${DRIFT_V}")
+[ "$(echo "${REBUILT}" | cut -d'|' -f1)" = "success" ] && [ "$(echo "${REBUILT}" | cut -d'|' -f3)" != "${A_PINS}" ] \
+    || { print_error "Expected a rebuild pinning the new version: ${REBUILT}"; exit 1; }
+print_success "After the restart the workflow recompiled to the new version and runs ✓"
 
 echo
 print_success "Trusted built-in upgrades recompile new launches and parked runs resume under approved pins."

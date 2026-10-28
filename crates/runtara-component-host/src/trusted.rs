@@ -212,6 +212,7 @@ impl TrustedExecutor {
         crate::removed_abi::refuse(&self.engine, &component)?;
         let linker = crate::registry::build_linker(&self.engine)?;
         let pre = linker.instantiate_pre(&component)?;
+        let meta = runtara_dsl::agent_meta::pinned_metadata(meta);
         let mut hash = Sha256::new();
         hash.update(wasm);
         hash.update(meta);

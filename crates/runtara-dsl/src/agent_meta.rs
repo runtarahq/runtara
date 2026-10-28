@@ -3019,6 +3019,24 @@ mod slug_tests {
     }
 }
 
+/// The bytes of an agent's metadata sidecar that its trusted pin binds: the
+/// JSON without the whitespace around it. A release stores the metadata as a
+/// JSON value, which keeps every byte of it but not what surrounds it, so the
+/// compiler (reading the sidecar file) and the host (reading the release)
+/// hash the same bytes only this way.
+pub fn pinned_metadata(meta: &[u8]) -> &[u8] {
+    let json_space = |byte: &u8| matches!(byte, b' ' | b'\t' | b'\n' | b'\r');
+    let start = meta
+        .iter()
+        .position(|byte| !json_space(byte))
+        .unwrap_or(meta.len());
+    let end = meta
+        .iter()
+        .rposition(|byte| !json_space(byte))
+        .map_or(start, |end| end + 1);
+    &meta[start..end]
+}
+
 /// Content-bound import used to pin a workflow's privileged built-in dependency.
 /// The host only provides this marker for its approved installed artifact.
 pub fn trusted_artifact_import(agent_id: &str, wasm_sha256: &str, metadata_sha256: &str) -> String {
@@ -3077,6 +3095,20 @@ fn parse_artifact_import<'a>(prefix: &str, import: &'a str) -> Option<(&'a str, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sidecar's trusted pin binds its JSON, whatever whitespace surrounds
+    /// it, as a release keeps it; any change inside is another version.
+    #[test]
+    fn pinned_metadata_is_the_json_without_surrounding_whitespace() {
+        assert_eq!(pinned_metadata(b"{\"a\":1}"), b"{\"a\":1}");
+        assert_eq!(pinned_metadata(b"\r\n {\"a\": 1}\n\t "), b"{\"a\": 1}");
+        assert_ne!(
+            pinned_metadata(b"{\"a\": 1}"),
+            pinned_metadata(b"{\"a\":1}")
+        );
+        assert_eq!(pinned_metadata(b" \n "), b"");
+        assert_eq!(pinned_metadata(b""), b"");
+    }
 
     #[test]
     fn trusted_artifact_import_names_round_trip_their_component_digest() {
