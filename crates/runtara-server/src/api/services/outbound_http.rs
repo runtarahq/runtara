@@ -210,12 +210,7 @@ impl OutboundHttpHost for NativeOutboundHttp {
         let mut internal = OutboundRequest {
             method: request.method,
             url: String::new(),
-            headers: request
-                .headers
-                .into_iter()
-                .filter(|(name, _)| !name.to_ascii_lowercase().starts_with("x-runtara-"))
-                .map(|(name, value)| (name.to_ascii_lowercase(), value))
-                .collect(),
+            headers: guest_headers(request.headers),
             body: request.body,
             connection_id: None,
             ai_provider: None,
@@ -1012,6 +1007,31 @@ fn record_credential_request_async(
 /// once at process start and is intended for local Azurite/MinIO-style
 /// emulators reachable on loopback. **Do not set this in production** — it
 /// re-opens the SSRF surface for every connection routed through the proxy.
+/// The headers a guest's outbound request keeps: not the host's own
+/// (`x-runtara-*`), and not the ones that frame or route the request, which
+/// are the client's to set. A guest-chosen `Host` would otherwise reach
+/// another virtual host behind the pinned address with the connection's
+/// credentials.
+fn guest_headers<H: IntoIterator<Item = (String, String)>>(headers: H) -> HashMap<String, String> {
+    const FRAMING: &[&str] = &[
+        "host",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "keep-alive",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "upgrade",
+    ];
+    headers
+        .into_iter()
+        .map(|(name, value)| (name.to_ascii_lowercase(), value))
+        .filter(|(name, _)| !name.starts_with("x-runtara-") && !FRAMING.contains(&name.as_str()))
+        .collect()
+}
+
 async fn reject_private_url(url: &str) -> Result<(), (u16, Value)> {
     let parsed = url::Url::parse(url).map_err(|_| (400, json!({"error": "Invalid URL"})))?;
 
@@ -1100,6 +1120,22 @@ fn is_explicitly_allowed_host(url: &url::Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_guest_sets_neither_the_host_nor_the_framing() {
+        let kept = guest_headers([
+            ("Host".to_string(), "other-vhost.example".to_string()),
+            ("Content-Length".into(), "1".into()),
+            ("Transfer-Encoding".into(), "chunked".into()),
+            ("Connection".into(), "upgrade".into()),
+            ("X-Runtara-Connection".into(), "forged".into()),
+            ("Accept".into(), "application/json".into()),
+        ]);
+        assert_eq!(
+            kept,
+            HashMap::from([("accept".to_string(), "application/json".to_string())])
+        );
+    }
 
     #[tokio::test]
     async fn private_ip_literals_are_refused_in_every_form() {
