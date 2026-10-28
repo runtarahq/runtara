@@ -342,22 +342,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dotted and bracket spelling alike:
   - a step that does not exist (E010) or has not run yet (E012);
   - a malformed path, such as `steps.` or `steps['a` (E011);
+  - a reference whose `value` is not a string, which fails the step when the
+    runtime resolves it (E011);
   - a named field on a Split's array output, such as
     `steps.split.outputs.result` (E059), and the other output-shape checks;
   - an unknown root (E126), and a `data.*`, `variables.*` or `workflow.*`
     path the input schema or variables do not declare (E051–E053, E058).
 
-  The self-reference and error-context warnings apply there too. A reference
-  inside an `immediate` is still left alone, as the runtime returns it as
-  written. Saving a workflow (`PUT`/`POST …/update`, MCP `deploy_workflow`),
-  `validate_graph` and MCP `deploy_latest` fail on these; an MCP graph edit
-  still saves, with them as warnings; compiling does not validate, so a
-  workflow saved before keeps compiling and running until it is next saved.
-- **A reference with an empty path is reported as E011 ("empty reference
-  path")** instead of E126 naming a root `''`. This is the `""` the editor
-  stores until a path is picked. It was already rejected in every other
-  field, and now is in Switch outputs too, where it runs as its `default` or
-  null.
+  The self-reference and error-context warnings apply there too. These checks
+  skip a reference inside an `immediate`, which the runtime returns as
+  written; the check of an embedded workflow's outputs (E058) still reads one
+  there, as it does in every field. Saving a workflow (`PUT`/`POST …/update`,
+  MCP `deploy_workflow`), `validate_graph` and MCP `deploy_latest` fail on
+  these; an MCP graph edit still saves, with them as warnings; compiling does
+  not validate, so a workflow saved before keeps compiling and running until
+  it is next saved.
+- **A reference with an empty path is rejected in every field, as E011
+  ("empty reference path").** This is the `""` the editor stores until a path
+  is picked. Most fields rejected it already, as E126 naming a root `''`.
+  Three did not, and now fail to save with it:
+  - a Switch case output or `default`, where it runs as its `default` or
+    null;
+  - a Split's `config.variables`, where the variable got the whole scope;
+  - an Agent or AiAgent `connectionRef`, where the step failed because the
+    whole scope is not a connection id.
 - **A finished EmbedWorkflow or workflow-agent call keeps its result, not
   its child's rows.** Recording a durable EmbedWorkflow's result, or the
   result of an Agent step calling a workflow published as an agent, now
