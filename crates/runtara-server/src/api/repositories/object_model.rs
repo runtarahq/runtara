@@ -223,17 +223,17 @@ impl ObjectStoreManager {
         // try_get_with is single-flight: this closure runs only on a cache miss —
         // exactly when we pay a (potentially cross-cloud) cold connect. Only the
         // build holds a tenant pool slot: concurrent callers for the same key
-        // wait for it and share its result.
+        // wait for it and share its result. The slot outlives the build until
+        // the pool is in the cache, so another build never counts it missing.
         let log_key = key.clone();
+        let slot = std::sync::Mutex::new(None);
         let result = self
             .stores
             .try_get_with(key.clone(), async {
-                let _slot = match &key {
-                    StoreKey::Url { tenant, .. } => {
-                        Some(self.reserve_pool(tenant).map_err(BuildError::Capacity)?)
-                    }
-                    StoreKey::Tenant(_) => None,
-                };
+                if let StoreKey::Url { tenant, .. } = &key {
+                    let reserved = self.reserve_pool(tenant).map_err(BuildError::Capacity)?;
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(reserved);
+                }
                 let start = Instant::now();
                 let config = StoreConfig::builder(&database_url)
                     .soft_delete(crate::config::object_model_soft_delete())
@@ -255,6 +255,8 @@ impl ObjectStoreManager {
                 result.map_err(|error| BuildError::Connect(error.to_string()))
             })
             .await;
+        // The pool is cached (or the build failed): its slot is free.
+        drop(slot);
 
         match result {
             Ok(store) => Ok(store),
