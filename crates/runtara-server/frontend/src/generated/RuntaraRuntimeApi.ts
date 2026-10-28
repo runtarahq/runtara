@@ -5298,6 +5298,12 @@ export interface WorkflowInstanceDto {
    * Absent for an execution that is not live.
    */
   executionPhase?: null | ExecutionPhase;
+  /**
+   * What the run's guest wrote to stdout and stderr, as its runner captured
+   * it (the first capture is kept). Only on a single execution's detail;
+   * absent when the runner keeps no capture, as for a durable embedded run.
+   */
+  guestOutput?: string | null;
   /** Whether this execution has pending human input requests (AI Agent waiting for signal) */
   hasPendingInput?: boolean;
   id: string;

@@ -1132,6 +1132,15 @@ pub struct WorkflowInstanceDto {
         rename = "stateUpdatedAt"
     )]
     pub state_updated_at: Option<String>,
+    /// What the run's guest wrote to stdout and stderr, as its runner captured
+    /// it (the first capture is kept). Only on a single execution's detail;
+    /// absent when the runner keeps no capture, as for a durable embedded run.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "guestOutput"
+    )]
+    pub guest_output: Option<String>,
 }
 
 #[allow(dead_code)]
