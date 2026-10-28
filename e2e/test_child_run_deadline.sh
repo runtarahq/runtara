@@ -9,6 +9,14 @@
 #      parent's wait settles at the deadline, the parent wakes, cancels the
 #      child and fails the step with AGENT_TIMEOUT, well before the child
 #      would have woken.
+#   4. PARALLEL — a Split runs three nap calls at once (parallelism 3) under
+#      a 3s Agent timeout: one naps 1s, two nap 60s. The window parks on all
+#      three and wakes at the deadline; it cancels the two still napping and
+#      the Split fails with AGENT_TIMEOUT.
+#   5. ENCLOSING SPLIT — the same window with no Agent timeout under a 3s
+#      Split timeout. The window wakes at the Split's deadline and the Split
+#      fails with SPLIT_TIMEOUT; its children are cancelled once the parent
+#      ended.
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
 # environment) + docker (isolated Valkey) and the shared workflow components
@@ -293,4 +301,103 @@ echo "${KIDS}" | jq -e 'length == 1 and (.[0].status | IN("cancelled", "stopped"
     || { print_error "the timed-out child must be cancelled: ${KIDS}"; exit 1; }
 echo "  the child was cancelled ($(echo "${KIDS}" | jq -r '.[0].status')) ✓"
 
-print_success "child-run deadline: a child within the timeout completes the step; one past it is cancelled and the step times out"
+# A parent fanning nap out over `items` ([{ms}]) at once, with an Agent
+# timeout (or none: 0) and a Split timeout (or none: 0).
+split_graph() {
+    local agent_timeout="$1" split_timeout="$2"
+    jq -n --argjson agent "${agent_timeout}" --argjson split "${split_timeout}" '{
+      name: "Fan Out Naps", durable: true,
+      steps: {
+        split: {
+          stepType: "Split", id: "split",
+          config: ({value: {valueType: "reference", value: "data.items"},
+                    parallelism: 3, maxRetries: 0}
+                   + (if $split > 0 then {timeoutMs: $split} else {} end)),
+          subgraph: {
+            name: "Nap Item",
+            steps: {
+              call: ({stepType: "Agent", id: "call", agentId: "nap", capabilityId: "run",
+                      maxRetries: 0,
+                      inputMapping: {ms: {valueType: "reference", value: "data.ms"}}}
+                     + (if $agent > 0 then {timeoutMs: $agent} else {} end)),
+              done: {stepType: "Finish", id: "done",
+                     inputMapping: {slept: {valueType: "reference", value: "steps.call.outputs.slept"}}}
+            },
+            entryPoint: "call",
+            executionPlan: [{fromStep: "call", toStep: "done"}]
+          }
+        },
+        finish: {stepType: "Finish", id: "finish",
+                 inputMapping: {results: {valueType: "reference", value: "steps.split.outputs"}}}
+      },
+      entryPoint: "split",
+      executionPlan: [{fromStep: "split", toStep: "finish"}],
+      variables: {},
+      inputSchema: {items: {type: "array", required: true}},
+      outputSchema: {}
+    }'
+}
+ITEMS='{"inputs": {"data": {"items": [{"ms": 1000}, {"ms": 60000}, {"ms": 60000}]}}}'
+
+# Run a fan-out parent to its end; echoes "<status> <seconds> <instance id>".
+run_fan_out() {
+    local wf_id="$1" resp instance started status
+    resp=$(api_post "/workflows/${wf_id}/execute" "${ITEMS}")
+    instance=$(echo "${resp}" | jq -r '.data.instanceId // empty')
+    [ -n "${instance}" ] || { print_error "execute failed: ${resp}"; exit 1; }
+    started=$(date +%s)
+    for _ in {1..120}; do
+        status=$(curl -sS "${API}/workflows/instances/${instance}" | jq -r '.data.status // empty')
+        case "${status}" in completed|failed|crashed|stopped|cancelled) break ;; esac
+        sleep 0.5
+    done
+    echo "${status} $(( $(date +%s) - started )) ${instance}"
+}
+
+# Wait until no child of PARENT runs; echoes them.
+settled_children() {
+    local kids=""
+    for _ in {1..40}; do
+        kids=$(children_of "$1")
+        echo "${kids}" | jq -e 'all(.[]; .status | IN("running", "suspended", "pending", "queued") | not)' >/dev/null && break
+        sleep 0.5
+    done
+    echo "${kids}"
+}
+
+#-------------------------------------------------------------------------
+print_step "4. A parallel window under an Agent timeout..."
+PARALLEL_ID=$(create_and_compile "Parallel Naps Timed Out" "$(split_graph 3000 0)")
+read -r STATUS ELAPSED PARENT <<<"$(run_fan_out "${PARALLEL_ID}")"
+RESP=$(curl -sS "${API}/workflows/instances/${PARENT}")
+[ "${STATUS}" = "failed" ] \
+    || { print_error "the parallel parent ended '${STATUS}' after ${ELAPSED}s: $(echo "${RESP}" | jq -c '.data.error // empty')"; tail -60 "${TEST_LOG}"; exit 1; }
+echo "${RESP}" | jq -r '.data.error // empty' | grep -q "AGENT_TIMEOUT" \
+    || { print_error "the Split must fail with AGENT_TIMEOUT: $(echo "${RESP}" | jq -c '.data.error')"; exit 1; }
+[ "${ELAPSED}" -lt 30 ] \
+    || { print_error "the window must wake at its 3s deadline, not after ${ELAPSED}s"; exit 1; }
+KIDS=$(settled_children "${PARENT}")
+echo "${KIDS}" | jq -e 'length == 3' >/dev/null || { print_error "three children expected: ${KIDS}"; exit 1; }
+echo "${KIDS}" | jq -e '[.[] | select(.status == "completed")] | length == 1' >/dev/null \
+    || { print_error "the 1s child must complete: ${KIDS}"; exit 1; }
+echo "${KIDS}" | jq -e '[.[] | select(.status | IN("cancelled", "stopped"))] | length == 2' >/dev/null \
+    || { print_error "the two 60s children must be cancelled: ${KIDS}"; exit 1; }
+echo "  three children at once; failed with AGENT_TIMEOUT after ${ELAPSED}s; one completed, two cancelled ✓"
+
+#-------------------------------------------------------------------------
+print_step "5. A parallel window under an enclosing Split timeout..."
+ENCLOSING_ID=$(create_and_compile "Parallel Naps Split Timeout" "$(split_graph 0 3000)")
+read -r STATUS ELAPSED PARENT <<<"$(run_fan_out "${ENCLOSING_ID}")"
+RESP=$(curl -sS "${API}/workflows/instances/${PARENT}")
+[ "${STATUS}" = "failed" ] \
+    || { print_error "the parent ended '${STATUS}' after ${ELAPSED}s: $(echo "${RESP}" | jq -c '.data.error // empty')"; tail -60 "${TEST_LOG}"; exit 1; }
+echo "${RESP}" | jq -r '.data.error // empty' | grep -q "SPLIT_TIMEOUT" \
+    || { print_error "the Split must fail with SPLIT_TIMEOUT: $(echo "${RESP}" | jq -c '.data.error')"; exit 1; }
+[ "${ELAPSED}" -lt 30 ] \
+    || { print_error "the window must wake at the Split's 3s deadline, not after ${ELAPSED}s"; exit 1; }
+KIDS=$(settled_children "${PARENT}")
+echo "${KIDS}" | jq -e '[.[] | select(.status | IN("cancelled", "stopped"))] | length == 2' >/dev/null \
+    || { print_error "the two 60s children must be cancelled once the parent ended: ${KIDS}"; exit 1; }
+echo "  failed with SPLIT_TIMEOUT after ${ELAPSED}s; the 60s children were cancelled ✓"
+
+print_success "child-run deadline: a child within the timeout completes the step; one past it is cancelled and the step times out, also from a parallel window and under an enclosing Split timeout"

@@ -211,7 +211,7 @@ fn emit_child_run(
             (key_ptr, key_len),
             attempt_local,
             Some(deadline),
-            flags,
+            ChildRunFlags::Const(flags),
         );
     };
     call(body, 0);
@@ -318,6 +318,13 @@ pub(super) fn emit_child_run_deadline(
 /// and the attempt is the retry attempt, or 1 for a step that never retries
 /// (whatever an earlier step left in the attempt local must not name a
 /// different child on a replay). `deadline` (ms since the epoch) goes on
+/// The `flags` of a `child-run` call: fixed, or read from a local.
+#[derive(Clone, Copy)]
+pub(super) enum ChildRunFlags {
+    Const(i32),
+    Local(u32),
+}
+
 /// the wait; `flags` are [`super::api_shims::child_run`]'s.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_child_run_call(
@@ -328,7 +335,7 @@ pub(super) fn emit_child_run_call(
     (path_ptr, path_len): (u32, u32),
     attempt_local: Option<u32>,
     deadline_local: Option<u32>,
-    flags: i32,
+    flags: ChildRunFlags,
 ) {
     push_segment_args(body, binding);
     body.instruction(&Instruction::LocalGet(input_ptr));
@@ -343,7 +350,10 @@ pub(super) fn emit_child_run_call(
         Some(local) => body.instruction(&Instruction::LocalGet(local)),
         None => body.instruction(&Instruction::I64Const(0)),
     };
-    body.instruction(&Instruction::I32Const(flags));
+    match flags {
+        ChildRunFlags::Const(flags) => body.instruction(&Instruction::I32Const(flags)),
+        ChildRunFlags::Local(local) => body.instruction(&Instruction::LocalGet(local)),
+    };
     push_retptr_arg(body);
     body.instruction(&Instruction::Call(
         indices

@@ -105,10 +105,11 @@ const CHILD_RUN_WINDOW_MAX: u32 = 100;
 /// 36-character UUIDs).
 const CHILD_RUN_ID_MAX: i32 = 60;
 const CHILD_RUN_REQUEST_PREFIX: &[u8] = br#"{"instanceIds":["#;
-const CHILD_RUN_REQUEST_SUFFIX: &[u8] = br#"],"mode":"all"}"#;
-/// Bytes a child-run window reserves for its wait request: the frame, then
-/// each id quoted, with a comma.
-const CHILD_RUN_REQUEST_BYTES: i32 = 64 + CHILD_RUN_WINDOW_MAX as i32 * (CHILD_RUN_ID_MAX + 3);
+const CHILD_RUN_REQUEST_SUFFIX: &[u8] = br#"],"mode":"all""#;
+const CHILD_RUN_REQUEST_DEADLINE: &[u8] = br#","deadlineMs":"#;
+/// Bytes a child-run window reserves for its wait request: the frame (with
+/// a deadline of up to 20 digits), then each id quoted, with a comma.
+const CHILD_RUN_REQUEST_BYTES: i32 = 96 + CHILD_RUN_WINDOW_MAX as i32 * (CHILD_RUN_ID_MAX + 3);
 
 /// Borrowed fields of the eligible single-Agent Split body.
 pub(super) struct ParallelAgentBody<'a> {
@@ -804,22 +805,17 @@ pub(super) fn emit_parallel_split_items(
     body.instruction(&Instruction::I32Const(0));
     body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_PENDING_LOCAL));
     if child_run.is_some() {
-        // No start refused for capacity yet.
-        body.instruction(&Instruction::I32Const(0));
-        body.instruction(&Instruction::LocalSet(
-            super::DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
-        ));
-        // The window's wait request is built as children start: reserve it,
-        // write its head, and count no child yet.
-        body.instruction(&Instruction::GlobalGet(0));
-        body.instruction(&Instruction::LocalSet(CHILD_RUN_REQUEST_CURSOR));
+        // The window's wait request is built as children start, right after
+        // its slots. A window first reads its children without waiting.
         body.instruction(&Instruction::GlobalGet(0));
         body.instruction(&Instruction::I32Const(CHILD_RUN_REQUEST_BYTES));
         body.instruction(&Instruction::I32Add);
         body.instruction(&Instruction::GlobalSet(0));
-        emit_write_bytes(body, CHILD_RUN_REQUEST_CURSOR, CHILD_RUN_REQUEST_PREFIX);
-        body.instruction(&Instruction::I32Const(0));
-        body.instruction(&Instruction::LocalSet(CHILD_RUN_STARTED));
+        body.instruction(&Instruction::I32Const(super::api_shims::child_run::NO_WAIT));
+        body.instruction(&Instruction::LocalSet(CHILD_RUN_FLAGS));
+        // $pass: once the window's wait settled, the pass runs again.
+        body.instruction(&Instruction::Loop(BlockType::Empty));
+        emit_child_run_window_pass(body);
     }
     if child_run.is_none() {
         body.instruction(&Instruction::GlobalGet(0));
@@ -1011,8 +1007,17 @@ pub(super) fn emit_parallel_split_items(
             super::DIRECT_WAIT_DEADLINE_MS_LOCAL,
         );
         body.instruction(&Instruction::End);
-        emit_child_run_window_wait(body, indices);
+        emit_child_run_window_wait(body, indices, static_data, parallel.agent_id);
+        // The wait settled with children still running: its deadline passed,
+        // or they ended since they were read. Read them again, cancelling
+        // those that still run (`timed-out`), and assemble.
+        body.instruction(&Instruction::I32Const(
+            super::api_shims::child_run::NO_WAIT | super::api_shims::child_run::SETTLED,
+        ));
+        body.instruction(&Instruction::LocalSet(CHILD_RUN_FLAGS));
+        body.instruction(&Instruction::Br(1)); // -> $pass
         body.instruction(&Instruction::End);
+        body.instruction(&Instruction::End); // $pass
     } else {
         // ── DRAIN ───────────────────────────────────────────────────────────
         // Wait until every launched subtask has RETURNED. Results are written
@@ -1321,6 +1326,75 @@ const CHILD_RUN_REQUEST_CURSOR: u32 = DIRECT_PSPLIT_WS_LOCAL;
 const CHILD_RUN_STARTED: u32 = DIRECT_PSPLIT_ROUND_CURSOR_LOCAL;
 const CHILD_RUN_KEY_PTR: u32 = super::DIRECT_WAIT_SIGNAL_ID_PTR_LOCAL;
 const CHILD_RUN_KEY_LEN: u32 = super::DIRECT_WAIT_SIGNAL_ID_LEN_LOCAL;
+// The window's `child-run` flags, and its Agent deadline while the wait
+// request is written, in locals only a retrying or branch body uses (a
+// child-run window's Agent and Split never retry).
+const CHILD_RUN_FLAGS: u32 = super::DIRECT_PSPLIT_TIMERS_FIRED_LOCAL;
+const CHILD_RUN_DEADLINE: u32 = super::DIRECT_RETRY_PARK_DEADLINE_MS_LOCAL;
+const CHILD_RUN_DIGIT_AT: u32 = super::DIRECT_RETRY_PARK_STATE_PTR_LOCAL;
+
+/// Store the i64 in `value` (consumed) in decimal at `cursor`, advancing it;
+/// `rest` is i64 scratch.
+fn emit_write_decimal(body: &mut WasmFunction, cursor: u32, value: u32, rest: u32) {
+    // Advance past the digits, then write them backwards.
+    body.instruction(&Instruction::LocalGet(value));
+    body.instruction(&Instruction::LocalSet(rest));
+    body.instruction(&Instruction::Loop(BlockType::Empty));
+    body.instruction(&Instruction::LocalGet(cursor));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::LocalSet(cursor));
+    body.instruction(&Instruction::LocalGet(rest));
+    body.instruction(&Instruction::I64Const(10));
+    body.instruction(&Instruction::I64DivU);
+    body.instruction(&Instruction::LocalTee(rest));
+    body.instruction(&Instruction::I64Eqz);
+    body.instruction(&Instruction::I32Eqz);
+    body.instruction(&Instruction::BrIf(0));
+    body.instruction(&Instruction::End);
+    body.instruction(&Instruction::LocalGet(cursor));
+    body.instruction(&Instruction::LocalSet(CHILD_RUN_DIGIT_AT));
+    body.instruction(&Instruction::Loop(BlockType::Empty));
+    body.instruction(&Instruction::LocalGet(CHILD_RUN_DIGIT_AT));
+    body.instruction(&Instruction::I32Const(1));
+    body.instruction(&Instruction::I32Sub);
+    body.instruction(&Instruction::LocalTee(CHILD_RUN_DIGIT_AT));
+    body.instruction(&Instruction::LocalGet(value));
+    body.instruction(&Instruction::I64Const(10));
+    body.instruction(&Instruction::I64RemU);
+    body.instruction(&Instruction::I32WrapI64);
+    body.instruction(&Instruction::I32Const(i32::from(b'0')));
+    body.instruction(&Instruction::I32Add);
+    body.instruction(&Instruction::I32Store8(wasm_encoder::MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    }));
+    body.instruction(&Instruction::LocalGet(value));
+    body.instruction(&Instruction::I64Const(10));
+    body.instruction(&Instruction::I64DivU);
+    body.instruction(&Instruction::LocalTee(value));
+    body.instruction(&Instruction::I64Eqz);
+    body.instruction(&Instruction::I32Eqz);
+    body.instruction(&Instruction::BrIf(0));
+    body.instruction(&Instruction::End);
+}
+
+/// Start a child-run window's pass: no child counted yet, none refused for
+/// capacity, and its wait request rewritten from its head at `cursor`.
+fn emit_child_run_window_pass(body: &mut WasmFunction) {
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(DIRECT_PSPLIT_PENDING_LOCAL));
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(
+        super::DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+    ));
+    push_child_run_request_base(body);
+    body.instruction(&Instruction::LocalSet(CHILD_RUN_REQUEST_CURSOR));
+    emit_write_bytes(body, CHILD_RUN_REQUEST_CURSOR, CHILD_RUN_REQUEST_PREFIX);
+    body.instruction(&Instruction::I32Const(0));
+    body.instruction(&Instruction::LocalSet(CHILD_RUN_STARTED));
+}
 
 /// Store `bytes` at the address in `cursor`, advancing it.
 fn emit_write_bytes(body: &mut WasmFunction, cursor: u32, bytes: &[u8]) {
@@ -1403,12 +1477,35 @@ fn push_child_run_request_base(body: &mut WasmFunction) {
 /// started (`mode: all`). The children a window starts only grow across its
 /// replays, so the wait is keyed by the last one's call site (a canonical
 /// agent key): a replay that started the same children names the same wait,
-/// and one that started more names another. A
-/// wait that already settled (the last child ended since its read) parks
-/// for no time, so the relaunch reads every outcome.
-fn emit_child_run_window_wait(body: &mut WasmFunction, indices: &DirectCoreFunctionIndices) {
+/// and one that started more names another. The Agent's timeout is the
+/// wait's deadline, which the host keeps from its first registration, so a
+/// relaunch keeps it; the park wakes at it, or at an earlier enclosing
+/// deadline. A wait that already settled returns to the caller.
+fn emit_child_run_window_wait(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    agent_id: u32,
+) {
     let waits = indices.wait_instances().clone();
     emit_write_bytes(body, CHILD_RUN_REQUEST_CURSOR, CHILD_RUN_REQUEST_SUFFIX);
+    if static_data.agent_timeout(agent_id).is_some() {
+        super::agent_invoke::emit_child_run_deadline(
+            body,
+            indices,
+            static_data,
+            agent_id,
+            CHILD_RUN_DEADLINE,
+        );
+        emit_write_bytes(body, CHILD_RUN_REQUEST_CURSOR, CHILD_RUN_REQUEST_DEADLINE);
+        emit_write_decimal(
+            body,
+            CHILD_RUN_REQUEST_CURSOR,
+            CHILD_RUN_DEADLINE,
+            super::DIRECT_WAIT_DEADLINE_MS_LOCAL,
+        );
+    }
+    emit_write_bytes(body, CHILD_RUN_REQUEST_CURSOR, b"}");
     // register(key, request): (key ptr, len) then (request ptr, len).
     body.instruction(&Instruction::LocalGet(CHILD_RUN_KEY_PTR));
     body.instruction(&Instruction::LocalGet(CHILD_RUN_KEY_LEN));
@@ -1427,15 +1524,19 @@ fn emit_child_run_window_wait(body: &mut WasmFunction, indices: &DirectCoreFunct
     super::abi::return_if_retptr_error(body, indices);
     super::abi::push_retptr_u8_load(body, super::wait_instances::PROGRESS_PENDING_OFFSET);
     body.instruction(&Instruction::If(BlockType::Empty));
-    super::abi::emit_entry_suspend_return(body, indices);
-    body.instruction(&Instruction::End);
-    body.instruction(&Instruction::I64Const(0));
+    super::abi::push_retptr_u8_load(body, super::wait_instances::PROGRESS_DEADLINE_TAG_OFFSET);
+    body.instruction(&Instruction::LocalSet(
+        super::DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
+    ));
+    super::abi::push_retptr_i64_load(body, super::wait_instances::PROGRESS_DEADLINE_VALUE_OFFSET);
     body.instruction(&Instruction::LocalSet(super::DIRECT_WAIT_DEADLINE_MS_LOCAL));
-    super::agent_invoke::emit_child_run_retry_park(
+    super::wait_instances::emit_park(
         body,
         indices,
+        super::DIRECT_WAIT_TIMEOUT_PRESENT_LOCAL,
         super::DIRECT_WAIT_DEADLINE_MS_LOCAL,
     );
+    body.instruction(&Instruction::End);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1468,7 +1569,7 @@ fn emit_child_run_launch(
         (DIRECT_SPLIT_ITEM_PTR_LOCAL, DIRECT_SPLIT_ITEM_LEN_LOCAL),
         None,
         None,
-        super::api_shims::child_run::NO_WAIT,
+        super::agent_invoke::ChildRunFlags::Local(CHILD_RUN_FLAGS),
     );
     emit_child_run_collect(body);
     super::agent_invoke::emit_child_run_outcome(body, static_data);

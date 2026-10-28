@@ -1440,7 +1440,7 @@ fn emit_child_run_prestart(
             (key_ptr, key_len),
             None,
             Some(deadline),
-            0,
+            super::agent_invoke::ChildRunFlags::Const(0),
         );
         body.instruction(&Instruction::End);
     }
