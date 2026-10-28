@@ -30,6 +30,11 @@
 #              boot, so a new workflow pins the installed version. A restart
 #              publishes the change; the workflow's artifact is then stale and
 #              its next launch recompiles to the new version and runs.
+#   RELEASE    a restart onto a release that differs only in an agent the
+#              workflow does not use (its trusted pins unchanged) makes the
+#              artifact stale too: it composed the old release's bytes. Its
+#              next launch recompiles once and runs, and a restart onto the
+#              same release keeps it compiled (SYN-786).
 #
 # Before the upgrade it also checks that an unchanged bundle keeps the artifact
 # ready, so a second launch reuses the image without recompiling.
@@ -485,6 +490,35 @@ REBUILT=$(compilation_row "${DRIFT_WF}" "${DRIFT_V}")
 [ "$(echo "${REBUILT}" | cut -d'|' -f1)" = "success" ] && [ "$(echo "${REBUILT}" | cut -d'|' -f3)" != "${A_PINS}" ] \
     || { print_error "Expected a rebuild pinning the new version: ${REBUILT}"; exit 1; }
 print_success "After the restart the workflow recompiled to the new version and runs ✓"
+
+# ---------------------------------------------------------------------------
+# A release that differs only in an agent the workflow does not use.
+# ---------------------------------------------------------------------------
+print_step "Restarting onto a release that changes only the crypto agent..."
+upgrade_metadata "${BUNDLE_DIR}/runtara_agent_crypto.meta.json"
+stop_server
+start_server
+[ "$(version_compiled "${DRIFT_WF}" "${DRIFT_V}")" = "false" ] \
+    || { print_error "An artifact composed from the previous release is still reported compiled"; exit 1; }
+INST=$(launch "${DRIFT_WF}")
+[ "$(wait_terminal "${INST}" 300)" = "completed" ] || { print_error "Run on the new release did not complete: $(instance_row "${INST}")"; exit 1; }
+RELEASED=$(compilation_row "${DRIFT_WF}" "${DRIFT_V}")
+[ "$(echo "${RELEASED}" | cut -d'|' -f1)" = "success" ] \
+    && [ "$(echo "${RELEASED}" | cut -d'|' -f3)" = "$(echo "${REBUILT}" | cut -d'|' -f3)" ] \
+    && [ "$(echo "${RELEASED}" | cut -d'|' -f4)" != "$(echo "${REBUILT}" | cut -d'|' -f4)" ] \
+    || { print_error "Expected one rebuild with the same pins: before=${REBUILT} after=${RELEASED}"; exit 1; }
+print_success "A release-only change recompiled the workflow (same trusted pins) and it runs ✓"
+
+print_step "Restarting onto the same release..."
+stop_server
+start_server
+[ "$(version_compiled "${DRIFT_WF}" "${DRIFT_V}")" = "true" ] \
+    || { print_error "An unchanged release made the artifact stale"; exit 1; }
+INST=$(launch "${DRIFT_WF}")
+[ "$(wait_terminal "${INST}" 120)" = "completed" ] || { print_error "Run on the same release did not complete: $(instance_row "${INST}")"; exit 1; }
+[ "$(compilation_row "${DRIFT_WF}" "${DRIFT_V}")" = "${RELEASED}" ] \
+    || { print_error "An unchanged release recompiled: $(compilation_row "${DRIFT_WF}" "${DRIFT_V}")"; exit 1; }
+print_success "The same release keeps the artifact compiled and reuses it ✓"
 
 echo
 print_success "Trusted built-in upgrades recompile new launches and parked runs resume under approved pins."

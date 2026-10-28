@@ -33,6 +33,7 @@ struct WorkflowVersionRow {
     compiled_template_major: Option<String>,
     compiled_lowering_mode: Option<String>,
     compiled_trusted_pins: Option<Vec<String>>,
+    compiled_component_release: Option<String>,
     memory_floor_bytes: Option<i64>,
     definition: Value,
 }
@@ -45,10 +46,23 @@ pub fn workflow_definition_checksum(definition: &Value) -> String {
 /// Whether durable compilation provenance still describes this server's
 /// compiler.  Missing fields deliberately miss: legacy rows cannot safely
 /// attest that they were produced by the current template and lowering mode.
-fn compiler_provenance_matches(template_major: Option<&str>, lowering_mode: Option<&str>) -> bool {
+/// The component release is part of it: new agent or stdlib bytes compose a
+/// different artifact.
+fn compiler_provenance_matches(
+    template_major: Option<&str>,
+    lowering_mode: Option<&str>,
+    component_release: Option<&str>,
+) -> bool {
     let current_lowering_mode = crate::config::workflow_lowering_tag();
     template_major == Some(runtara_workflows::TEMPLATE_MAJOR_VERSION)
         && lowering_mode == Some(current_lowering_mode.as_str())
+        && component_release == current_component_release()
+}
+
+/// The index digest of the release this server compiles by; `None` when it
+/// compiles from a raw components directory.
+fn current_component_release() -> Option<&'static str> {
+    crate::config::compile_component_release().map(|release| release.index.as_str())
 }
 
 /// Approved trusted built-in versions installed on this server, as
@@ -243,8 +257,8 @@ impl CompilationWriteGuard<'_> {
         sqlx::query(
             r#"
             INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum, runtara_version, source_checksum, package_size, compiler_mode, track_events, template_major, lowering_mode, trusted_pins, memory_floor_bytes)
-            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, wasm_size, wasm_checksum, runtara_version, source_checksum, package_size, compiler_mode, track_events, template_major, lowering_mode, trusted_pins, memory_floor_bytes, component_release)
+            VALUES ($1, $2, $3, NOW(), $4, 'success', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             ON CONFLICT (tenant_id, workflow_id, version)
             DO UPDATE SET
                 compiled_at = NOW(),
@@ -266,7 +280,8 @@ impl CompilationWriteGuard<'_> {
                 template_major = $12,
                 lowering_mode = $13,
                 trusted_pins = $14,
-                memory_floor_bytes = $15
+                memory_floor_bytes = $15,
+                component_release = $16
             "#,
         )
         .bind(record.tenant_id)
@@ -284,6 +299,7 @@ impl CompilationWriteGuard<'_> {
         .bind(&lowering_mode)
         .bind(record.trusted_pins)
         .bind(record.memory_floor_bytes)
+        .bind(current_component_release())
         .execute(&mut *self.transaction)
         .await?;
 
@@ -298,8 +314,8 @@ impl CompilationWriteGuard<'_> {
         sqlx::query(
             r#"
             INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, registered_image_id, runtara_version, source_checksum, compiler_mode, track_events, template_major, lowering_mode, trusted_pins)
-            VALUES ($1, $2, $3, NOW(), '', 'success', $4, $5, $6, $7, $8, $9, $10, $11)
+                (tenant_id, workflow_id, version, compiled_at, translated_path, compilation_status, registered_image_id, runtara_version, source_checksum, compiler_mode, track_events, template_major, lowering_mode, trusted_pins, component_release)
+            VALUES ($1, $2, $3, NOW(), '', 'success', $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (tenant_id, workflow_id, version)
             DO UPDATE SET
                 registered_image_id = $4,
@@ -311,7 +327,8 @@ impl CompilationWriteGuard<'_> {
                 track_events = $8,
                 template_major = $9,
                 lowering_mode = $10,
-                trusted_pins = $11
+                trusted_pins = $11,
+                component_release = $12
             "#,
         )
         .bind(record.tenant_id)
@@ -325,6 +342,7 @@ impl CompilationWriteGuard<'_> {
         .bind(runtara_workflows::TEMPLATE_MAJOR_VERSION)
         .bind(&lowering_mode)
         .bind(record.trusted_pins)
+        .bind(current_component_release())
         .execute(&mut *self.transaction)
         .await?;
 
@@ -346,8 +364,8 @@ impl CompilationWriteGuard<'_> {
         let result = sqlx::query(
             r#"
             INSERT INTO workflow_compilations
-                (tenant_id, workflow_id, version, compilation_status, translated_path, compiled_at, error_message, runtara_version, source_checksum, track_events, template_major, lowering_mode, compiler_build, trusted_pins)
-            VALUES ($1, $2, $3, 'failed', '', NOW(), $4, $5, $6, $7, $8, $9, $10, $12)
+                (tenant_id, workflow_id, version, compilation_status, translated_path, compiled_at, error_message, runtara_version, source_checksum, track_events, template_major, lowering_mode, compiler_build, trusted_pins, component_release)
+            VALUES ($1, $2, $3, 'failed', '', NOW(), $4, $5, $6, $7, $8, $9, $10, $12, $13)
             ON CONFLICT (tenant_id, workflow_id, version)
             DO UPDATE SET
                 compilation_status = 'failed',
@@ -366,6 +384,7 @@ impl CompilationWriteGuard<'_> {
                 -- once they are all installed (a restart onto the matching
                 -- bundle), or after a workflow-agent republish releases it.
                 trusted_pins = $12,
+                component_release = $13,
                 -- A failed row never attests that a previously registered
                 -- image remains executable.
                 registered_image_id = NULL,
@@ -389,6 +408,8 @@ impl CompilationWriteGuard<'_> {
                     IS DISTINCT FROM EXCLUDED.template_major
                OR workflow_compilations.lowering_mode
                     IS DISTINCT FROM EXCLUDED.lowering_mode
+               OR workflow_compilations.component_release
+                    IS DISTINCT FROM EXCLUDED.component_release
                -- An artifact pinning a trusted built-in version this server
                -- no longer has is not ready either, so it must not mask the
                -- failure of the rebuild that was meant to replace it.
@@ -408,6 +429,7 @@ impl CompilationWriteGuard<'_> {
         .bind(compiler_build_id())
         .bind(installed_trusted_pins())
         .bind(trusted_pins)
+        .bind(current_component_release())
         .execute(&mut *self.transaction)
         .await?;
 
@@ -1229,6 +1251,7 @@ impl WorkflowRepository {
                 sc.template_major AS compiled_template_major,
                 sc.lowering_mode AS compiled_lowering_mode,
                 sc.trusted_pins AS compiled_trusted_pins,
+                sc.component_release AS compiled_component_release,
                 sc.memory_floor_bytes,
                 sd.definition
             FROM workflow_definitions sd
@@ -1267,6 +1290,7 @@ impl WorkflowRepository {
                     && compiler_provenance_matches(
                         row.compiled_template_major.as_deref(),
                         row.compiled_lowering_mode.as_deref(),
+                        row.compiled_component_release.as_deref(),
                     )
                     && trusted_pins_installed(row.compiled_trusted_pins.as_deref());
 
@@ -1737,6 +1761,7 @@ impl WorkflowRepository {
                    sc.template_major AS compiled_template_major,
                    sc.lowering_mode AS compiled_lowering_mode,
                    sc.trusted_pins AS compiled_trusted_pins,
+                   sc.component_release AS compiled_component_release,
                    wd.definition,
                    wd.track_events AS definition_track_events
             FROM workflow_definitions wd
@@ -1767,6 +1792,8 @@ impl WorkflowRepository {
         let compiled_template_major: Option<String> = row.try_get("compiled_template_major")?;
         let compiled_lowering_mode: Option<String> = row.try_get("compiled_lowering_mode")?;
         let compiled_trusted_pins: Option<Vec<String>> = row.try_get("compiled_trusted_pins")?;
+        let compiled_component_release: Option<String> =
+            row.try_get("compiled_component_release")?;
         let definition: Value = row.try_get("definition")?;
         let definition_track_events: bool = row.try_get("definition_track_events")?;
         let current_checksum = workflow_definition_checksum(&definition);
@@ -1778,6 +1805,7 @@ impl WorkflowRepository {
                     && compiler_provenance_matches(
                         compiled_template_major.as_deref(),
                         compiled_lowering_mode.as_deref(),
+                        compiled_component_release.as_deref(),
                     )
                     && trusted_pins_installed(compiled_trusted_pins.as_deref()) =>
             {
@@ -1804,6 +1832,7 @@ impl WorkflowRepository {
                    sc.template_major AS compiled_template_major,
                    sc.lowering_mode AS compiled_lowering_mode,
                    sc.trusted_pins AS compiled_trusted_pins,
+                   sc.component_release AS compiled_component_release,
                    wd.definition,
                    wd.track_events AS definition_track_events
             FROM workflow_definitions wd
@@ -1835,6 +1864,8 @@ impl WorkflowRepository {
         let compiled_template_major: Option<String> = row.try_get("compiled_template_major")?;
         let compiled_lowering_mode: Option<String> = row.try_get("compiled_lowering_mode")?;
         let compiled_trusted_pins: Option<Vec<String>> = row.try_get("compiled_trusted_pins")?;
+        let compiled_component_release: Option<String> =
+            row.try_get("compiled_component_release")?;
         let definition: Value = row.try_get("definition")?;
         let definition_track_events: bool = row.try_get("definition_track_events")?;
         let current_checksum = workflow_definition_checksum(&definition);
@@ -1858,6 +1889,7 @@ impl WorkflowRepository {
                     && compiler_provenance_matches(
                         compiled_template_major.as_deref(),
                         compiled_lowering_mode.as_deref(),
+                        compiled_component_release.as_deref(),
                     )
                     && trusted_pins_installed(compiled_trusted_pins.as_deref()) =>
                 {
@@ -2716,6 +2748,7 @@ impl WorkflowRepository {
                    sc.lowering_mode AS compiled_lowering_mode,
                    sc.compiler_build AS compiled_build,
                    sc.trusted_pins AS compiled_trusted_pins,
+                   sc.component_release AS compiled_component_release,
                    wd.definition,
                    wd.track_events AS definition_track_events,
                    wd.version AS resolved_version
@@ -2764,6 +2797,8 @@ impl WorkflowRepository {
                 let compiled_build: Option<String> = record.try_get("compiled_build")?;
                 let compiled_trusted_pins: Option<Vec<String>> =
                     record.try_get("compiled_trusted_pins")?;
+                let compiled_component_release: Option<String> =
+                    record.try_get("compiled_component_release")?;
                 let definition: Value = record.try_get("definition")?;
                 let definition_track_events: bool = record.try_get("definition_track_events")?;
                 let execution_timeout = match execution_timeout_from_definition(&definition) {
@@ -2783,6 +2818,7 @@ impl WorkflowRepository {
                 let artifact_matches_current_compiler = compiler_provenance_matches(
                     compiled_template_major.as_deref(),
                     compiled_lowering_mode.as_deref(),
+                    compiled_component_release.as_deref(),
                 );
                 let artifact_matches_tracking_mode = compiled_track_events
                     == Some(definition_track_events)
@@ -2895,6 +2931,7 @@ impl WorkflowRepository {
                               AND lowering_mode IS NOT DISTINCT FROM $7
                               AND compiler_build IS NOT DISTINCT FROM $8
                               AND trusted_pins IS NOT DISTINCT FROM $9
+                              AND component_release IS NOT DISTINCT FROM $10
                             "#,
                         )
                         .bind(tenant_id)
@@ -2906,6 +2943,7 @@ impl WorkflowRepository {
                         .bind(compiled_lowering_mode.as_deref())
                         .bind(compiled_build.as_deref())
                         .bind(compiled_trusted_pins.as_deref())
+                        .bind(compiled_component_release.as_deref())
                         .execute(&self.pool)
                         .await;
                     }
