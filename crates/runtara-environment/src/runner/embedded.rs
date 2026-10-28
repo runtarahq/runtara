@@ -51,7 +51,7 @@ use crate::config::{ProcessEnv, Vars, positive};
 use super::common::{self, WorkflowRunnerConfig};
 use super::traits::{
     CancelToken, ContainerMetrics, LaunchOptions, PreparationOccupancy, PreparedLaunch, Result,
-    RunExitReport, Runner, RunnerError, RunnerHandle, RunnerOccupancy, StartGateOutcome,
+    RunExitReport, Runner, RunnerError, RunnerHandle, RunnerOccupancy, StartGate, StartGateOutcome,
 };
 
 /// Mark a run `running`, clearing what a previous stop left behind.
@@ -161,6 +161,7 @@ impl WorkflowStartConfirmation for GateWorkflowStartConfirmation {
 }
 
 mod root_lease;
+pub use root_lease::RootLease;
 mod run_state;
 mod scoped;
 pub use scoped::ScopedAgentRunnerConfig;
@@ -1381,6 +1382,255 @@ async fn wake_if_signal_already_arrived(
 /// leave the command pending and mark an unclean exit only if still running.
 /// With the run's root lease the write is owned: a superseded run cannot
 /// stamp its replacement.
+/// What a launch's durable lifecycle needs besides its guest: the run it
+/// executes, its gate and cancel flag, and where it reports how it ended.
+pub struct LaunchLifecycle {
+    /// The durable store the run writes to.
+    pub persistence: Arc<dyn Persistence>,
+    /// The run's instance.
+    pub instance_id: String,
+    /// The instance's tenant.
+    pub tenant_id: String,
+    /// This launch of the instance.
+    pub launch_id: String,
+    /// This execution's runner identity; it owns a root lease it claims.
+    pub invocation_owner: String,
+    /// The durable dispatcher's gate; without one the runner promotes the run.
+    pub start_gate: Option<StartGate>,
+    /// Raised by a stop. One that wins before the guest starts leaves it unrun.
+    pub cancel: CancelToken,
+    /// Whether this execution owns its root even under a durable supervisor.
+    pub requires_root_lease: bool,
+    /// Where an exit the durable state cannot show is filed, by owner.
+    pub exit_reports: Arc<Mutex<HashMap<String, RunExitReport>>>,
+}
+
+/// The durable lifecycle of one launch around its guest, shared by every
+/// runner: wait for the gate, refuse a stop that won before the guest starts,
+/// own and bind the root lease, run `execute`, then park a suspension, record
+/// a trap, cleanup abort or late cancel, and release the lease. `execute`
+/// runs the guest wherever it runs and publishes its terminal (see
+/// [`publish_terminal`]); it is given the root lease. `None` when the guest
+/// never ran.
+pub async fn run_launch_lifecycle<F, Fut>(
+    lifecycle: LaunchLifecycle,
+    runtime_host: Arc<crate::runtime_host::PersistenceRuntimeHost>,
+    execute: F,
+) -> Option<runtara_component_host::InvokeRunResult>
+where
+    F: FnOnce(Option<Arc<root_lease::RootLease>>) -> Fut,
+    Fut: std::future::Future<Output = runtara_component_host::InvokeRunResult>,
+{
+    let LaunchLifecycle {
+        persistence,
+        instance_id,
+        tenant_id,
+        launch_id,
+        invocation_owner,
+        start_gate,
+        cancel,
+        requires_root_lease,
+        exit_reports,
+    } = lifecycle;
+    let supervisor_owns_lifecycle = start_gate.is_some();
+    if let Some(gate) = start_gate.as_ref() {
+        // The durable dispatcher may open the in-memory gate once it
+        // owns the running generation. Do not clear the durable
+        // marker here: Store/WASI setup below can still pause or
+        // crash. Component host confirms exactly before
+        // `instantiate_async`, the first guest-controlled boundary.
+        match gate.wait().await {
+            StartGateOutcome::Opened => {}
+            StartGateOutcome::Cancelled
+            | StartGateOutcome::TimedOut
+            | StartGateOutcome::ConfirmationFailed => {
+                info!(
+                    instance_id = %instance_id,
+                    launch_id = %launch_id,
+                    "Detached launch gate did not permit guest execution"
+                );
+                return None;
+            }
+        }
+    }
+    // A stop can win in the small interval after the dispatcher has
+    // durably promoted this generation but before it opens the gate.
+    // `Runner::stop` cannot hold the supervisor's in-memory gate, so
+    // re-check the task-local cancellation fence here. This keeps a
+    // cancelled handoff from loading (let alone invoking) guest code
+    // if the supervisor subsequently opens its gate.
+    if cancel.load(Ordering::SeqCst) {
+        info!(
+            instance_id = %instance_id,
+            launch_id = %launch_id,
+            "Detached launch was cancelled before guest execution"
+        );
+        return None;
+    }
+    // The verified component and persisted input were both prepared
+    // before the run permit. Only guest invocation remains after
+    // the durable gate confirmation.
+    if !supervisor_owns_lifecycle {
+        mark_running(persistence.as_ref(), &instance_id).await;
+    }
+    // Own the root execution lease for the whole run. Whoever promotes
+    // the run claims it: the durable supervisor in its promotion
+    // transaction, otherwise this task, which promoted the run just
+    // above. A scoped root always owns one. Every durable write
+    // presents it, and a run that cannot own its root must not
+    // execute as a stale writer.
+    let claims_lease = !supervisor_owns_lifecycle || requires_root_lease;
+    let root_lease = match start_gate.as_ref().and_then(|gate| gate.root_lease()) {
+        Some(token) => Some(Arc::new(root_lease::RootLease::adopt(
+            persistence.clone(),
+            token,
+        ))),
+        None if claims_lease && persistence.invocation_fences().is_some() => {
+            match root_lease::RootLease::claim(
+                persistence.clone(),
+                &tenant_id,
+                &instance_id,
+                &invocation_owner,
+                root_lease::ROOT_LEASE_CONTROL_TIMEOUT,
+            )
+            .await
+            {
+                Ok(lease) => Some(Arc::new(lease)),
+                Err(error) => {
+                    error!(
+                        instance_id = %instance_id,
+                        launch_id = %launch_id,
+                        error = %error,
+                        "Run could not own its root; not executing"
+                    );
+                    return None;
+                }
+            }
+        }
+        None => None,
+    };
+    if requires_root_lease && root_lease.is_none() {
+        error!(instance_id = %instance_id, "Scoped root requires a root lease; not executing");
+        return None;
+    }
+    if let Some(lease) = &root_lease
+        && let Err(error) = runtime_host.bind_root_lease(lease.token.clone())
+    {
+        error!(instance_id = %instance_id, %error, "Run could not bind its root lease; not executing");
+        return None;
+    }
+    let run = execute(root_lease.clone()).await;
+    use runtara_component_host::InvokeExit;
+    match &run.exit {
+        InvokeExit::Completed(_) => {
+            info!(instance_id = %instance_id, "Embedded workflow run completed");
+        }
+        InvokeExit::Suspended(wakes) => {
+            info!(instance_id = %instance_id, ?wakes, "Embedded workflow run suspended");
+            // Store-freeing durable sleep: the guest exited with a
+            // timed wake instead of blocking; park it so the wake
+            // scheduler relaunches at the deadline.
+            if let Err(error) = park_with_retry(
+                persistence.as_ref(),
+                &instance_id,
+                root_lease.as_ref().map(|lease| &lease.token),
+                wakes,
+                &run.instance_waits,
+            )
+            .await
+            {
+                // Execution stopped but the suspension is not
+                // committed: the row is still `running`. Tell the
+                // monitor, which hands it to recovery instead of
+                // recording a crash.
+                error!(instance_id, %error, "Park did not commit after retries; handing the run to recovery");
+                exit_reports
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(
+                        invocation_owner.clone(),
+                        RunExitReport::SuspendNotParked {
+                            error: error.to_string(),
+                        },
+                    );
+            }
+        }
+        InvokeExit::Failed(_) => {
+            warn!(instance_id = %instance_id, "Embedded workflow run returned error");
+        }
+        InvokeExit::Trapped { reason } => {
+            error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
+            // A durable launch has no stderr file to carry the reason.
+            exit_reports
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(
+                    invocation_owner.clone(),
+                    RunExitReport::Trapped {
+                        reason: reason.clone(),
+                    },
+                );
+        }
+        InvokeExit::Timeout => {
+            warn!(instance_id = %instance_id, "Embedded workflow run timed out");
+        }
+        InvokeExit::Cancelled => {
+            warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
+        }
+        InvokeExit::CleanupAborted => {
+            record_cleanup_aborted_exit(
+                &persistence,
+                &instance_id,
+                root_lease.as_ref().map(|lease| &lease.token),
+            )
+            .await;
+        }
+    }
+    if matches!(&run.exit, InvokeExit::Suspended(_)) {
+        // A cancel may arrive after the guest's last poll but before
+        // it parks. Resolve it now; the scheduler recovers this if
+        // the process stops before reaching this point.
+        if let Err(error) = persistence
+            .cancel_suspended_instances(Some(&instance_id), 1)
+            .await
+        {
+            warn!(instance_id, %error, "Parked cancellation deferred to scheduler recovery");
+        }
+    } else {
+        record_unacknowledged_cancel_exit(
+            &persistence,
+            &instance_id,
+            root_lease.as_ref().map(|lease| &lease.token),
+        )
+        .await;
+    }
+    // Nothing of this execution writes after this point. Leaving
+    // `running` already revoked the lease; this covers an exit that
+    // left the row running for the monitor to settle.
+    if let Some(lease) = &root_lease
+        && let Err(error) = lease.release().await
+    {
+        warn!(instance_id = %instance_id, error = %error, "Root lease release deferred to the status transition");
+    }
+    Some(run)
+}
+
+/// Persist a run's terminal once, from its exit, as its only terminal
+/// channel. A scoped root publishes after its own cleanup instead.
+pub async fn publish_terminal(
+    runtime_host: &crate::runtime_host::PersistenceRuntimeHost,
+    instance_id: &str,
+    run: &runtara_component_host::InvokeRunResult,
+) {
+    if let Some(terminal) = runtara_component_host::runtime_host::RunTerminal::from_exit(&run.exit)
+        && let Err(error) =
+            runtara_component_host::runtime_host::RuntimeHost::terminal(runtime_host, terminal)
+                .await
+    {
+        error!(instance_id = %instance_id, %error, "Terminal write failed");
+    }
+}
+
 async fn record_unacknowledged_cancel_exit(
     persistence: &Arc<dyn Persistence>,
     instance_id: &str,
@@ -1762,232 +2012,61 @@ impl Runner for EmbeddedWasmRunner {
             Arc::new(GateWorkflowStartConfirmation { gate: gate.clone() })
                 as Arc<dyn WorkflowStartConfirmation>
         });
-        // Durable dispatchers promote the matching Core instance in the same
-        // transaction that changes their queue row to `running`, before they
-        // open `start_gate`. Direct callers retain the historical runner-side
-        // promotion below.
-        let supervisor_owns_lifecycle = start_gate.is_some();
         // The run slot was already claimed without waiting before any per-run
         // allocation. It moves into the task so every completion/error/panic
         // returns capacity and records the optional permit duration together.
+        let lifecycle = LaunchLifecycle {
+            persistence: Arc::clone(&persistence),
+            instance_id: instance_id.clone(),
+            tenant_id,
+            launch_id,
+            invocation_owner,
+            start_gate,
+            cancel: Arc::clone(&task_for_run.cancel),
+            requires_root_lease: scoped_authority.is_some(),
+            exit_reports,
+        };
         tokio::spawn(async move {
             let _completion = completion;
-            if let Some(gate) = start_gate.as_ref() {
-                // The durable dispatcher may open the in-memory gate once it
-                // owns the running generation. Do not clear the durable
-                // marker here: Store/WASI setup below can still pause or
-                // crash. Component host confirms exactly before
-                // `instantiate_async`, the first guest-controlled boundary.
-                match gate.wait().await {
-                    StartGateOutcome::Opened => {}
-                    StartGateOutcome::Cancelled
-                    | StartGateOutcome::TimedOut
-                    | StartGateOutcome::ConfirmationFailed => {
-                        info!(
-                            instance_id = %instance_id,
-                            launch_id = %launch_id,
-                            "Detached launch gate did not permit guest execution"
-                        );
-                        return;
+            let lifecycle_host = Arc::clone(&runtime_host);
+            let ran =
+                run_launch_lifecycle(lifecycle, lifecycle_host, move |root_lease| async move {
+                    if let Some(authority) = scoped_authority {
+                        // The lifecycle refused to execute without one.
+                        let lease = root_lease.expect("a scoped root owns its root lease");
+                        scoped::execute(
+                            &executor,
+                            &workflow,
+                            spec,
+                            runtime_host,
+                            input,
+                            start_confirmation.clone(),
+                            authority,
+                            scoped_config.as_ref().expect("admitted scoped policy"),
+                            &lease,
+                        )
+                        .await
+                    } else {
+                        let run = executor
+                            .execute_prepared_invoke_with_start_confirmation(
+                                &workflow,
+                                spec,
+                                input,
+                                start_confirmation.clone(),
+                            )
+                            .await;
+                        // The return value is the run's only terminal channel:
+                        // persist it once, here, before the completion guard drops
+                        // and the monitor would record a still-running run as
+                        // crashed. (A scoped root publishes after its cleanup.)
+                        publish_terminal(&runtime_host, &instance_id, &run).await;
+                        run
                     }
-                }
-            }
-            // A stop can win in the small interval after the dispatcher has
-            // durably promoted this generation but before it opens the gate.
-            // `Runner::stop` cannot hold the supervisor's in-memory gate, so
-            // re-check the task-local cancellation fence here. This keeps a
-            // cancelled handoff from loading (let alone invoking) guest code
-            // if the supervisor subsequently opens its gate.
-            if task_for_run.cancel.load(Ordering::SeqCst) {
-                info!(
-                    instance_id = %instance_id,
-                    launch_id = %launch_id,
-                    "Detached launch was cancelled before guest execution"
-                );
-                return;
-            }
-            // The verified component and persisted input were both prepared
-            // before the run permit. Only guest invocation remains after
-            // the durable gate confirmation.
-            if !supervisor_owns_lifecycle {
-                mark_running(persistence.as_ref(), &instance_id).await;
-            }
-            // Own the root execution lease for the whole run. Whoever promotes
-            // the run claims it: the durable supervisor in its promotion
-            // transaction, otherwise this task, which promoted the run just
-            // above. A scoped root always owns one. Every durable write
-            // presents it, and a run that cannot own its root must not
-            // execute as a stale writer.
-            let claims_lease = !supervisor_owns_lifecycle || scoped_authority.is_some();
-            let root_lease = match start_gate.as_ref().and_then(|gate| gate.root_lease()) {
-                Some(token) => Some(root_lease::RootLease::adopt(persistence.clone(), token)),
-                None if claims_lease && persistence.invocation_fences().is_some() => {
-                    match root_lease::RootLease::claim(
-                        persistence.clone(),
-                        &tenant_id,
-                        &instance_id,
-                        &invocation_owner,
-                        root_lease::ROOT_LEASE_CONTROL_TIMEOUT,
-                    )
-                    .await
-                    {
-                        Ok(lease) => Some(lease),
-                        Err(error) => {
-                            error!(
-                                instance_id = %instance_id,
-                                launch_id = %launch_id,
-                                error = %error,
-                                "Run could not own its root; not executing"
-                            );
-                            return;
-                        }
-                    }
-                }
-                None => None,
-            };
-            if let Some(lease) = &root_lease
-                && let Err(error) = runtime_host.bind_root_lease(lease.token.clone())
-            {
-                error!(instance_id = %instance_id, %error, "Run could not bind its root lease; not executing");
-                return;
-            }
-            let run = if let Some(authority) = scoped_authority {
-                let Some(lease) = root_lease.as_ref() else {
-                    error!(instance_id = %instance_id, "Scoped root requires a root lease; not executing");
-                    return;
-                };
-                scoped::execute(
-                    &executor,
-                    &workflow,
-                    spec,
-                    runtime_host,
-                    input,
-                    start_confirmation.clone(),
-                    authority,
-                    scoped_config.as_ref().expect("admitted scoped policy"),
-                    lease,
-                )
-                .await
-            } else {
-                let run = executor
-                    .execute_prepared_invoke_with_start_confirmation(
-                        &workflow,
-                        spec,
-                        input,
-                        start_confirmation.clone(),
-                    )
-                    .await;
-                // The return value is the run's only terminal channel:
-                // persist it once, here, before the completion guard drops
-                // and the monitor would record a still-running run as
-                // crashed. (A scoped root publishes after its cleanup.)
-                if let Some(terminal) =
-                    runtara_component_host::runtime_host::RunTerminal::from_exit(&run.exit)
-                    && let Err(error) = runtara_component_host::runtime_host::RuntimeHost::terminal(
-                        runtime_host.as_ref(),
-                        terminal,
-                    )
-                    .await
-                {
-                    error!(instance_id = %instance_id, %error, "Terminal write failed");
-                }
-                run
-            };
-            {
+                })
+                .await;
+            if let Some(run) = ran {
                 let mut guard = metrics_for_task.lock().await;
                 *guard = invoke_metrics_of(&run);
-            }
-            use runtara_component_host::InvokeExit;
-            match &run.exit {
-                InvokeExit::Completed(_) => {
-                    info!(instance_id = %instance_id, "Embedded workflow run completed");
-                }
-                InvokeExit::Suspended(wakes) => {
-                    info!(instance_id = %instance_id, ?wakes, "Embedded workflow run suspended");
-                    // Store-freeing durable sleep: the guest exited with a
-                    // timed wake instead of blocking; park it so the wake
-                    // scheduler relaunches at the deadline.
-                    if let Err(error) = park_with_retry(
-                        persistence.as_ref(),
-                        &instance_id,
-                        root_lease.as_ref().map(|lease| &lease.token),
-                        wakes,
-                        &run.instance_waits,
-                    )
-                    .await
-                    {
-                        // Execution stopped but the suspension is not
-                        // committed: the row is still `running`. Tell the
-                        // monitor, which hands it to recovery instead of
-                        // recording a crash.
-                        error!(instance_id, %error, "Park did not commit after retries; handing the run to recovery");
-                        exit_reports
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .insert(
-                                invocation_owner.clone(),
-                                RunExitReport::SuspendNotParked {
-                                    error: error.to_string(),
-                                },
-                            );
-                    }
-                }
-                InvokeExit::Failed(_) => {
-                    warn!(instance_id = %instance_id, "Embedded workflow run returned error");
-                }
-                InvokeExit::Trapped { reason } => {
-                    error!(instance_id = %instance_id, reason = %reason, "Embedded workflow run failed");
-                    // A durable launch has no stderr file to carry the reason.
-                    exit_reports
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .insert(
-                            invocation_owner.clone(),
-                            RunExitReport::Trapped {
-                                reason: reason.clone(),
-                            },
-                        );
-                }
-                InvokeExit::Timeout => {
-                    warn!(instance_id = %instance_id, "Embedded workflow run timed out");
-                }
-                InvokeExit::Cancelled => {
-                    warn!(instance_id = %instance_id, "Embedded workflow run cancelled");
-                }
-                InvokeExit::CleanupAborted => {
-                    record_cleanup_aborted_exit(
-                        &persistence,
-                        &instance_id,
-                        root_lease.as_ref().map(|lease| &lease.token),
-                    )
-                    .await;
-                }
-            }
-            if matches!(&run.exit, InvokeExit::Suspended(_)) {
-                // A cancel may arrive after the guest's last poll but before
-                // it parks. Resolve it now; the scheduler recovers this if
-                // the process stops before reaching this point.
-                if let Err(error) = persistence
-                    .cancel_suspended_instances(Some(&instance_id), 1)
-                    .await
-                {
-                    warn!(instance_id, %error, "Parked cancellation deferred to scheduler recovery");
-                }
-            } else {
-                record_unacknowledged_cancel_exit(
-                    &persistence,
-                    &instance_id,
-                    root_lease.as_ref().map(|lease| &lease.token),
-                )
-                .await;
-            }
-            // Nothing of this execution writes after this point. Leaving
-            // `running` already revoked the lease; this covers an exit that
-            // left the row running for the monitor to settle.
-            if let Some(lease) = &root_lease
-                && let Err(error) = lease.release().await
-            {
-                warn!(instance_id = %instance_id, error = %error, "Root lease release deferred to the status transition");
             }
         });
 
