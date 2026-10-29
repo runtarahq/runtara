@@ -1030,6 +1030,10 @@ pub async fn start_with(
     if let Some(manager) = redis_manager.clone() {
         crate::tenant_quota::install(manager);
     }
+    // Runs' calls that start external work wait for their tenant's tokens.
+    runtara_component_host::api_launches::set_default_call_limiter(Arc::new(
+        crate::tenant_quota::WorkflowCallLimiter,
+    ));
 
     // Per-tenant Valkey membership enforcement policy. Built here, after the
     // shared manager, so the policy default can see whether Valkey is actually configured.

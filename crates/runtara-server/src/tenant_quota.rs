@@ -1,6 +1,7 @@
 //! Per-tenant rate limits from the tenant's entitlements: `apiRequestsPerMinute`
-//! for authenticated API requests and `compilationsPerHour` for requested
-//! compilations.
+//! for authenticated API requests, `compilationsPerHour` for requested
+//! compilations, and `workflowCallsPerMinute` for the calls runs make that
+//! start external work, which wait for a token rather than being refused.
 //!
 //! Each is a token bucket in Valkey, `{tenant}:quota:{name}`, shared by every
 //! process serving the tenant: it holds the limit's worth of tokens and refills
@@ -38,6 +39,8 @@ pub enum Quota {
     Api,
     /// Requested compilations (`compilationsPerHour`).
     Compile,
+    /// Runs' calls that start external work (`workflowCallsPerMinute`).
+    WorkflowCalls,
 }
 
 impl Quota {
@@ -46,6 +49,7 @@ impl Quota {
         match self {
             Quota::Api => "api",
             Quota::Compile => "compile",
+            Quota::WorkflowCalls => "workflow_calls",
         }
     }
 
@@ -54,6 +58,7 @@ impl Quota {
         let (tokens, window_ms) = match self {
             Quota::Api => (limits.api_requests_per_minute?, 60_000),
             Quota::Compile => (limits.compilations_per_hour?, 3_600_000),
+            Quota::WorkflowCalls => (limits.workflow_calls_per_minute?, 60_000),
         };
         Some((tokens, window_ms))
     }
@@ -152,6 +157,26 @@ pub async fn limit_compilations(request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
+/// Paces runs' calls that start external work by their tenant's
+/// `workflowCallsPerMinute`: such a call waits for a token instead of being
+/// refused, so a run over the limit slows down rather than fails.
+pub struct WorkflowCallLimiter;
+
+/// The longest one wait for a token lasts before it is tried again.
+const MAX_WAIT_MS: u64 = 5_000;
+
+#[async_trait::async_trait]
+impl runtara_workflow_api::server::CallLimiter for WorkflowCallLimiter {
+    async fn admit(&self, binding: &runtara_workflow_api::Binding) {
+        while let Err(retry_after_ms) = take(&binding.tenant_id, Quota::WorkflowCalls).await {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                retry_after_ms.clamp(1, MAX_WAIT_MS),
+            ))
+            .await;
+        }
+    }
+}
+
 /// The refusal of a request over `quota`, retryable after `retry_after_ms`.
 pub fn refusal(quota: Quota, retry_after_ms: u64) -> Response {
     let seconds = retry_after_ms.div_ceil(1000).max(1);
@@ -184,6 +209,7 @@ mod tests {
         };
         assert_eq!(Quota::Api.limit(&limits), Some((5, 60_000)));
         assert_eq!(Quota::Compile.limit(&limits), Some((2, 3_600_000)));
+        assert_eq!(Quota::WorkflowCalls.limit(&limits), None);
         assert_eq!(Quota::Api.limit(&EntitlementLimits::default()), None);
         assert_eq!(key("t1", Quota::Compile), "t1:quota:compile");
     }

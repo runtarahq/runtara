@@ -29,6 +29,9 @@
 #   8. RUNTIME ROW SECURITY (C11) — the server reaches the runtime database
 #      as a plain role that owns it, so row-level security binds everything
 #      above; that role, naming one tenant, sees none of the other's runs.
+#   9. PACED CALLS (SYN-917) — the second tenant may make 12 calls a minute
+#      that start external work: its run of 15 outbound HTTP calls waits for
+#      the last three and completes, while the primary's same run does not.
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
 # environment) + docker (isolated Valkey) and the shared workflow components
@@ -87,6 +90,7 @@ cleanup() {
     if [ -n "${VALKEY_CONTAINER}" ]; then
         docker rm -f "${VALKEY_CONTAINER}" >/dev/null 2>&1 || true
     fi
+    [ -n "${MOCK_PID:-}" ] && kill "${MOCK_PID}" 2>/dev/null || true
     psql_quiet -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB_SERVER}" >/dev/null 2>&1 || true
     psql_quiet -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB_RUNTIME}" >/dev/null 2>&1 || true
     psql_quiet -d postgres -c "DROP ROLE IF EXISTS ${RUNTIME_ROLE}" >/dev/null 2>&1 || true
@@ -166,7 +170,8 @@ start_server() {
     RUNTARA_DATABASE_URL="postgresql://${RUNTIME_ROLE}:${RUNTIME_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_RUNTIME}" \
     TENANT_ID="${TENANT}" \
     RUNTARA_SERVED_TENANTS="${SECOND_TENANT}" \
-    RUNTARA_TENANT_ENTITLEMENTS_JSON="{\"${SECOND_TENANT}\": {\"overrides\": {\"limits\": {\"maxWorkflows\": 1}}}}" \
+    RUNTARA_TENANT_ENTITLEMENTS_JSON="{\"${SECOND_TENANT}\": {\"overrides\": {\"limits\": {\"maxWorkflows\": 1, \"workflowCallsPerMinute\": 12}}}}" \
+    RUNTARA_PROXY_ALLOWED_HOSTS=127.0.0.1 \
     SERVER_HOST=127.0.0.1 \
     SERVER_PORT="${TEST_PORT_PUBLIC}" \
     RUNTARA_CORE_PORT="${TEST_CORE_PORT}" \
@@ -443,5 +448,59 @@ SECOND_RUNS=$(runtime_sql "SELECT count(*) FROM instances WHERE tenant_id = '${S
 SEEN=$(as_runtime_role "SELECT set_config('runtara.tenant_id', '${TENANT}', false); SELECT count(*) FROM instances WHERE tenant_id = '${SECOND_TENANT}'" | tail -1)
 [ "${SEEN}" = "0" ] || { print_error "as ${TENANT} the runtime role saw ${SEEN} of the second tenant's runs"; exit 1; }
 echo "  every stage ran on a runtime role bound by row-level security; naming ${TENANT}, it sees none of the second tenant's ${SECOND_RUNS} runs ✓"
+
+#-------------------------------------------------------------------------
+print_step "9. A run's outbound calls wait for its tenant's limit..."
+MOCK_PORT="${TEST_MOCK_PORT:-17889}"
+mkdir -p "${TEST_DATA_DIR}/mock" && echo ok > "${TEST_DATA_DIR}/mock/index.html"
+python3 -m http.server "${MOCK_PORT}" --bind 127.0.0.1 --directory "${TEST_DATA_DIR}/mock" >/dev/null 2>&1 &
+MOCK_PID=$!
+CALLS_GRAPH=$(python3 - "${MOCK_PORT}" <<'PY'
+import json, sys
+url = f"http://127.0.0.1:{sys.argv[1]}/"
+n = 15
+steps = {f"call{i}": {"stepType": "Agent", "id": f"call{i}", "agentId": "http", "capabilityId": "http-request",
+                      "inputMapping": {"url": {"valueType": "immediate", "value": url},
+                                       "method": {"valueType": "immediate", "value": "GET"}}}
+         for i in range(1, n + 1)}
+steps["finish"] = {"stepType": "Finish", "id": "finish",
+                   "inputMapping": {"calls": {"valueType": "immediate", "value": n}}}
+plan = [{"fromStep": f"call{i}", "toStep": f"call{i + 1}"} for i in range(1, n)]
+plan.append({"fromStep": f"call{n}", "toStep": "finish"})
+print(json.dumps({"name": "Calls", "steps": steps, "entryPoint": "call1", "executionPlan": plan,
+                  "variables": {}, "inputSchema": {}, "outputSchema": {}}))
+PY
+)
+# timed_run WF: seconds the run took to complete; fails unless it completes.
+timed_run() {
+    local resp instance status started
+    started=$(date +%s)
+    resp=$(api_post "/workflows/$1/execute" '{"inputs": {"data": {}}}')
+    instance=$(echo "${resp}" | jq -r '.data.instanceId // empty')
+    [ -n "${instance}" ] || { print_error "execute failed: ${resp}"; exit 1; }
+    for _ in {1..240}; do
+        status=$(curl -sS ${AUTH[@]+"${AUTH[@]}"} "${API}/workflows/instances/${instance}" | jq -r '.data.status // empty')
+        case "${status}" in completed|failed|crashed|stopped|cancelled) break ;; esac
+        sleep 0.5
+    done
+    [ "${status}" = completed ] || { print_error "the run ended '${status}': $(curl -sS ${AUTH[@]+"${AUTH[@]}"} "${API}/workflows/instances/${instance}" | jq -c '.data.error // .data')"; exit 1; }
+    echo $(( $(date +%s) - started ))
+}
+AUTH=()
+A_CALLS=$(create_and_compile "Calls" "${CALLS_GRAPH}")
+AUTH=(-H "Authorization: Bearer ${SECOND_KEY}")
+RESP=$(api_post "/workflows/${B_WF}/update" "{\"executionGraph\": ${CALLS_GRAPH}}")
+[ "$(echo "${RESP}" | jq -r '.success // false')" = true ] || { print_error "the second tenant's update failed: ${RESP}"; exit 1; }
+VERSION=$(curl -sS ${AUTH[@]+"${AUTH[@]}"} "${API}/workflows/${B_WF}/versions" | jq -r '[.data[]?.version // .data[]?.versionNumber // empty] | max // 1')
+RESP=$(api_post "/workflows/${B_WF}/versions/${VERSION}/compile" '{}' 900)
+[ "$(echo "${RESP}" | jq -r '.success // false')" = true ] || { print_error "the second tenant's compile failed: ${RESP}"; exit 1; }
+B_SECONDS=$(timed_run "${B_WF}")
+AUTH=()
+A_SECONDS=$(timed_run "${A_CALLS}")
+# At 12 a minute 15 calls cannot finish sooner than three tokens' refill,
+# (15 - 12) x 5 s, however fast each call is.
+[ "${B_SECONDS}" -ge 15 ] && [ "${A_SECONDS}" -lt "${B_SECONDS}" ] \
+    || { print_error "the second tenant's 15 calls took ${B_SECONDS} s against the primary's ${A_SECONDS} s: not paced"; exit 1; }
+echo "  15 outbound calls: the second tenant's run, at 12 a minute, completed in ${B_SECONDS} s (at least 15), the primary's in ${A_SECONDS} s ✓"
 
 print_success "served tenants: webhooks, API keys, triggers, cron, OAuth callbacks and connection events reach exactly the tenants this server serves, each its own, under its own limits"

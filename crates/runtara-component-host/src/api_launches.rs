@@ -118,6 +118,8 @@ pub struct ApiLaunches {
     pub(crate) control: std::sync::OnceLock<Arc<dyn ControlHost>>,
     /// The approved built-in trusted executor the old ABI uses as well.
     pub(crate) trusted: std::sync::OnceLock<Arc<TrustedExecutor>>,
+    /// Paces each tenant's calls that start external work, once given one.
+    limiter: std::sync::OnceLock<Arc<dyn runtara_workflow_api::server::CallLimiter>>,
 }
 
 impl Default for ApiLaunches {
@@ -128,6 +130,7 @@ impl Default for ApiLaunches {
             run_state: std::sync::OnceLock::new(),
             instance_waits: std::sync::OnceLock::new(),
             outbound_http: std::sync::OnceLock::new(),
+            limiter: std::sync::OnceLock::new(),
             database: std::sync::OnceLock::new(),
             connection_resolver: std::sync::OnceLock::new(),
             control: std::sync::OnceLock::new(),
@@ -150,6 +153,17 @@ impl ApiLaunches {
         self.run_state
             .set(run_state)
             .map_err(|_| "run state already configured for the workflow API".to_string())
+    }
+
+    /// Pace each tenant's calls that start external work with `limiter`,
+    /// including through routers made before it was given.
+    pub fn set_call_limiter(
+        &self,
+        limiter: Arc<dyn runtara_workflow_api::server::CallLimiter>,
+    ) -> Result<(), String> {
+        self.limiter
+            .set(limiter)
+            .map_err(|_| "a call limiter is already configured".to_string())
     }
 
     /// Keep idempotency receipts in `receipts` instead of in memory, for
@@ -419,12 +433,35 @@ impl ApiLaunches {
         router(WorkflowApiState {
             backend: Arc::new(Backend(Arc::clone(self))),
             receipts: Arc::clone(&self.receipts),
+            limiter: Some(Arc::new(Paced(Arc::clone(self)))),
             caps: Caps::default(),
         })
     }
 }
 
 struct Backend(Arc<ApiLaunches>);
+
+/// The limiter every registry without its own paces with.
+static DEFAULT_LIMITER: std::sync::OnceLock<Arc<dyn runtara_workflow_api::server::CallLimiter>> =
+    std::sync::OnceLock::new();
+
+/// Pace the calls that start external work, in every registry not given a
+/// limiter of its own, with `limiter`. Set once, at boot.
+pub fn set_default_call_limiter(limiter: Arc<dyn runtara_workflow_api::server::CallLimiter>) {
+    let _ = DEFAULT_LIMITER.set(limiter);
+}
+
+/// The launches' call limiter as it is when a call arrives.
+struct Paced(Arc<ApiLaunches>);
+
+#[async_trait::async_trait]
+impl runtara_workflow_api::server::CallLimiter for Paced {
+    async fn admit(&self, binding: &Binding) {
+        if let Some(limiter) = self.0.limiter.get().or_else(|| DEFAULT_LIMITER.get()) {
+            limiter.admit(binding).await;
+        }
+    }
+}
 
 impl Backend {
     /// The live task `task_id` of `binding`'s launch.

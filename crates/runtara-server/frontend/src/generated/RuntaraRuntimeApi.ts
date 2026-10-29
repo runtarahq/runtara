@@ -2191,6 +2191,14 @@ export interface EntitlementLimits {
   maxWorkflows?: number | null;
   /** @min 0 */
   objectModelBulkRequestLimit?: number | null;
+  /**
+   * Calls the tenant's runs may make per minute that start external work
+   * (outbound HTTP, SQL, child runs, trusted capabilities); a run over it
+   * waits rather than fails.
+   * @format int32
+   * @min 0
+   */
+  workflowCallsPerMinute?: number | null;
 }
 
 export interface EntitlementsDto {

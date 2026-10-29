@@ -241,6 +241,7 @@ fn app(backend: Arc<FakeBackend>) -> Router {
     router(WorkflowApiState {
         backend,
         receipts: Arc::new(MemoryReceiptStore::default()),
+        limiter: None,
         caps: Caps::default(),
     })
 }
@@ -513,6 +514,7 @@ async fn retryable_failures_are_not_remembered() {
     let app = router(WorkflowApiState {
         backend: flaky.clone(),
         receipts: Arc::new(MemoryReceiptStore::default()),
+        limiter: None,
         caps: Caps::default(),
     });
     let (status, _, _) = send(&app, outcome("completed", "k1", "{}")).await;
@@ -763,6 +765,7 @@ async fn events_are_ndjson_within_the_caps() {
     let small = router(WorkflowApiState {
         backend: backend.clone(),
         receipts: Arc::new(MemoryReceiptStore::default()),
+        limiter: None,
         caps: Caps {
             event_batch_lines: 1,
             ..Caps::default()
@@ -796,6 +799,7 @@ async fn services_a_backend_does_not_serve_are_unsupported() {
     let app = router(WorkflowApiState {
         backend: Arc::new(Minimal),
         receipts: Arc::new(MemoryReceiptStore::default()),
+        limiter: None,
         caps: Caps::default(),
     });
     let (status, _, body) = send(
@@ -946,6 +950,7 @@ fn outbound_app() -> Router {
     router(WorkflowApiState {
         backend: Arc::new(Outbound),
         receipts: Arc::new(MemoryReceiptStore::default()),
+        limiter: None,
         caps: Caps::default(),
     })
 }
@@ -1013,6 +1018,7 @@ async fn an_answer_too_large_to_keep_is_not_replayed() {
     let app = router(WorkflowApiState {
         backend: Arc::new(Outbound),
         receipts: Arc::new(MemoryReceiptStore::default()),
+        limiter: None,
         caps: Caps {
             receipt_body_bytes: 4,
             ..Caps::default()
@@ -1086,6 +1092,7 @@ async fn control_calls_route_to_their_names_with_the_operation() {
     let app = router(WorkflowApiState {
         backend: Arc::new(Control),
         receipts: Arc::new(MemoryReceiptStore::default()),
+        limiter: None,
         caps: Caps::default(),
     });
     let answer = |body: &Bytes| serde_json::from_slice::<serde_json::Value>(body).unwrap();
@@ -1285,6 +1292,7 @@ async fn overlapping_requests_with_one_key_run_once() {
     let app = router(WorkflowApiState {
         backend: backend.clone(),
         receipts: Arc::new(MemoryReceiptStore::default()),
+        limiter: None,
         caps: Caps::default(),
     });
     let first = tokio::spawn({
@@ -1322,4 +1330,66 @@ async fn overlapping_requests_with_one_key_run_once() {
     assert_eq!(different, StatusCode::CONFLICT);
     assert_eq!(error_code(&body), "replay-conflict");
     assert_eq!(*backend.heartbeats.lock().unwrap(), 1, "ran once");
+}
+
+/// Lets one call through per permit, and remembers whose.
+struct Gate {
+    permits: tokio::sync::Semaphore,
+    admitted: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl crate::server::CallLimiter for Gate {
+    async fn admit(&self, binding: &Binding) {
+        self.permits.acquire().await.unwrap().forget();
+        self.admitted
+            .lock()
+            .unwrap()
+            .push(binding.tenant_id.clone());
+    }
+}
+
+/// SYN-917: a call that starts external work waits for its tenant's limiter,
+/// and a call that keeps the run durable never does.
+#[tokio::test]
+async fn external_calls_wait_for_the_limiter_and_durable_calls_do_not() {
+    let gate = Arc::new(Gate {
+        permits: tokio::sync::Semaphore::new(0),
+        admitted: Default::default(),
+    });
+    let app = router(WorkflowApiState {
+        backend: Arc::new(Outbound),
+        receipts: Arc::new(MemoryReceiptStore::default()),
+        limiter: Some(gate.clone()),
+        caps: Caps::default(),
+    });
+    let meta =
+        r#"{"method":"POST","destination":{"connection":{"connectionId":"c","url":"https://x"}}}"#;
+    let held = tokio::spawn({
+        let app = app.clone();
+        async move { send(&app, http_call("held", Some(meta), "ping")).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !held.is_finished(),
+        "the outbound call waits for the limiter"
+    );
+
+    // A durable call answers meanwhile, whatever this backend makes of it.
+    let durable = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        send(
+            &app,
+            request("GET", "/v1/time").body(Body::empty()).unwrap(),
+        ),
+    )
+    .await;
+    assert!(durable.is_ok(), "a durable call is never held");
+    assert!(gate.admitted.lock().unwrap().is_empty());
+
+    gate.permits.add_permits(1);
+    let (status, _, body) = held.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body[..], b"ping");
+    assert_eq!(*gate.admitted.lock().unwrap(), [binding().tenant_id]);
 }

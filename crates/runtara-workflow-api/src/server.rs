@@ -685,12 +685,40 @@ mod receipt_tests {
 pub struct WorkflowApiState {
     pub backend: Arc<dyn WorkflowApiBackend>,
     pub receipts: Arc<dyn ReceiptStore>,
+    /// Holds the calls that start external work while the run's tenant is
+    /// over its limit for them; `None` holds nothing.
+    pub limiter: Option<Arc<dyn CallLimiter>>,
     pub caps: Caps,
+}
+
+/// Paces a tenant's calls that start external work: outbound HTTP, SQL,
+/// connection resources, child tasks, started instances and trusted
+/// capabilities. Calls that keep a run durable (checkpoints, signals,
+/// heartbeats, outcomes) are never paced.
+#[async_trait]
+pub trait CallLimiter: Send + Sync + 'static {
+    /// Returns once `binding`'s tenant may make one more such call. The call
+    /// waits meanwhile, so a run over its tenant's limit slows down rather
+    /// than fails; a guest that gives up drops the wait.
+    async fn admit(&self, binding: &Binding);
+}
+
+/// Holds an external-work call until the run's tenant may make it.
+async fn pace_external(
+    State(state): State<WorkflowApiState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let (Some(limiter), Ok(binding)) = (&state.limiter, binding_of(&request)) {
+        limiter.admit(&binding).await;
+    }
+    next.run(request).await
 }
 
 /// The `/v1` router. The caller attaches the [`Binding`] as a request
 /// extension before handing it over.
 pub fn router(state: WorkflowApiState) -> Router {
+    let paced = || middleware::from_fn_with_state(state.clone(), pace_external);
     let api = Router::new()
         .route("/v1/run", get(get_run))
         .route("/v1/run/input", get(get_run_input))
@@ -726,7 +754,7 @@ pub fn router(state: WorkflowApiState) -> Router {
         .route("/v1/time/sleep", get(runtime::get_sleep))
         .route("/v1/heartbeat", post(runtime::post_heartbeat))
         .route("/v1/debug/breakpoint", post(runtime::post_breakpoint))
-        .route("/v1/tasks", post(tasks::post_task))
+        .route("/v1/tasks", post(tasks::post_task).route_layer(paced()))
         .route("/v1/tasks/{task_id}", delete(tasks::delete_task))
         .route("/v1/tasks/{task_id}/outcome", get(tasks::get_task_outcome))
         .route("/v1/tasks/{task_id}/cancel", post(tasks::post_task_cancel))
@@ -762,14 +790,20 @@ pub fn router(state: WorkflowApiState) -> Router {
         )
         .route(
             "/v1/connections/{connection_id}/resources",
-            post(connections::post_resources),
+            post(connections::post_resources).route_layer(paced()),
         )
         .route(
             "/v1/connections/{connection_id}/sql/{operation}",
-            post(connections::post_sql),
+            post(connections::post_sql).route_layer(paced()),
         )
-        .route("/v1/http", post(connections::post_http))
-        .route("/v1/instances", post(control::post_start))
+        .route(
+            "/v1/http",
+            post(connections::post_http).route_layer(paced()),
+        )
+        .route(
+            "/v1/instances",
+            post(control::post_start).route_layer(paced()),
+        )
         .route("/v1/instances/query", post(control::post_query))
         .route(
             "/v1/instances/signals/pending",
@@ -783,7 +817,7 @@ pub fn router(state: WorkflowApiState) -> Router {
         .route("/v1/instances/{id}/resume", post(control::post_resume))
         .route(
             "/v1/trusted/{agent_id}/{capability_id}",
-            post(control::post_trusted),
+            post(control::post_trusted).route_layer(paced()),
         )
         .route(
             "/v1/state/{key}",

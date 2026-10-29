@@ -4916,6 +4916,7 @@ dependencies = [
  "runtara-object-store",
  "runtara-store-postgres",
  "runtara-text-parser",
+ "runtara-workflow-api",
  "runtara-workflow-stdlib",
  "runtara-workflows",
  "rust-embed",

@@ -67,7 +67,8 @@ All three of `features`, `agents`, and `limits` are optional inside a JSON layer
     "objectModelBulkRequestLimit": 1000,
     "maxConcurrentExecutions": 8,
     "apiRequestsPerMinute": 600,
-    "compilationsPerHour": 60
+    "compilationsPerHour": 60,
+    "workflowCallsPerMinute": 600
   }
 }
 ```
@@ -106,12 +107,13 @@ Its children share `maxConcurrentExecutions` with every other trigger:
 
 ### Rate limits
 
-`apiRequestsPerMinute` and `compilationsPerHour` are unset on every built-in tier.
+`apiRequestsPerMinute`, `compilationsPerHour` and `workflowCallsPerMinute` are unset on every built-in tier.
 
 - **`apiRequestsPerMinute`** counts each authenticated API or MCP request to the tenant, once its caller is known. An MCP tool's own in-process calls don't count again.
+- **`workflowCallsPerMinute`** counts each call a tenant's runs make that starts external work: outbound HTTP, SQL, connection resources, child tasks, started instances and trusted capabilities. A call over the limit is not refused. It waits for a token, so the run slows down instead of failing. Calls that keep a run durable (checkpoints, signals, heartbeats, outcomes) are never counted.
 - **`compilationsPerHour`** counts each requested compilation: `POST .../versions/{version}/compile` and the MCP compile tool. Compilations a save or a run starts by itself are not counted; the requests that caused them are.
 
-Each limit is a token bucket in Valkey, `{tenant}:quota:api` and `{tenant}:quota:compile`, shared by every process serving the tenant. The bucket holds the limit's worth of tokens and refills at that rate. A request without a token gets `429` with `Retry-After` and `{"error": "TENANT_RATE_LIMITED", "quota": "api" | "compile", ...}`.
+Each limit is a token bucket in Valkey (`{tenant}:quota:api`, `{tenant}:quota:compile`, `{tenant}:quota:workflow_calls`), shared by every process serving the tenant. The bucket holds the limit's worth of tokens and refills at that rate. An API request or compilation without a token gets `429` with `Retry-After` and `{"error": "TENANT_RATE_LIMITED", "quota": "api" | "compile", ...}`.
 
 These limits fail open. With no Valkey configured, or when Valkey errors, the request is allowed and a warning is logged, the same as connection rate limits. A Valkey outage therefore lifts these limits instead of refusing every tenant.
 

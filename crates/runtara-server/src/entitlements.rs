@@ -67,6 +67,10 @@ pub struct EntitlementLimits {
     pub api_requests_per_minute: Option<u32>,
     /// Compilations the tenant may request per hour.
     pub compilations_per_hour: Option<u32>,
+    /// Calls the tenant's runs may make per minute that start external work
+    /// (outbound HTTP, SQL, child runs, trusted capabilities); a run over it
+    /// waits rather than fails.
+    pub workflow_calls_per_minute: Option<u32>,
 }
 
 /// Agents every tier gets whenever they are registered, whatever the
@@ -244,6 +248,7 @@ impl EntitlementSnapshot {
             max_concurrent_executions: self.limits.max_concurrent_executions,
             api_requests_per_minute: self.limits.api_requests_per_minute,
             compilations_per_hour: self.limits.compilations_per_hour,
+            workflow_calls_per_minute: self.limits.workflow_calls_per_minute,
         }
     }
 
@@ -267,6 +272,7 @@ impl EntitlementSnapshot {
             max_concurrent_executions = ?s.max_concurrent_executions,
             api_requests_per_minute = ?s.api_requests_per_minute,
             compilations_per_hour = ?s.compilations_per_hour,
+            workflow_calls_per_minute = ?s.workflow_calls_per_minute,
             "entitlement snapshot resolved"
         );
     }
@@ -338,6 +344,7 @@ pub struct EntitlementSummary {
     pub max_concurrent_executions: Option<usize>,
     pub api_requests_per_minute: Option<u32>,
     pub compilations_per_hour: Option<u32>,
+    pub workflow_calls_per_minute: Option<u32>,
 }
 
 /// One partial entitlement layer, as deserialized from a `RUNTARA_ENTITLEMENT*_JSON`
@@ -418,6 +425,9 @@ fn apply_layer(
         current.compilations_per_hour = limits
             .compilations_per_hour
             .or(current.compilations_per_hour);
+        current.workflow_calls_per_minute = limits
+            .workflow_calls_per_minute
+            .or(current.workflow_calls_per_minute);
     }
 
     Ok(())
@@ -540,6 +550,7 @@ impl TierBase {
                 max_concurrent_executions: Some(2),
                 api_requests_per_minute: None,
                 compilations_per_hour: None,
+                workflow_calls_per_minute: None,
             },
         }
     }
@@ -560,6 +571,7 @@ impl TierBase {
                 max_concurrent_executions: Some(8),
                 api_requests_per_minute: None,
                 compilations_per_hour: None,
+                workflow_calls_per_minute: None,
             },
         }
     }

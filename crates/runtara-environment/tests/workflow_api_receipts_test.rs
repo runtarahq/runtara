@@ -132,6 +132,7 @@ async fn a_retry_after_a_restart_gets_the_stored_answer() {
         router(WorkflowApiState {
             backend,
             receipts: store.clone(),
+            limiter: None,
             caps: Caps::default(),
         })
     };

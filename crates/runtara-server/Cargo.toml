@@ -183,6 +183,7 @@ runtara-connections = { path = "../runtara-connections", features = ["utoipa"] }
 # HTTP client (and no ureq) is linked into the server.
 runtara-ai = { path = "../runtara-ai", default-features = false, features = ["tracing"] }
 runtara-component-host = { path = "../runtara-component-host" }
+runtara-workflow-api = { path = "../runtara-workflow-api", features = ["server"] }
 
 # Database
 sqlx = { version = "0.8.6", features = [
