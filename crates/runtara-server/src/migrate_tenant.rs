@@ -21,16 +21,18 @@
 //!   the artifacts go where this process keeps its own
 //!   (`RUNTARA_ARTIFACT_STORE_URL`, else `DATA_DIR`).
 //!
-//! Each database's rows are copied in one transaction. Columns are copied by
+//! Both target databases are first brought to this process's schema, so a
+//! service that has never run can take its first tenant. Each database's rows
+//! are copied in one transaction. Columns are copied by
 //! the names both sides have; a column the source has and the target lacks
 //! stops the copy, as it would lose data. Serial ids are given anew in the
 //! source's order. Not copied: compilations (the first run compiles again,
 //! against this process's release), OAuth states, rate-limit telemetry, the
 //! live process registry and workflow-API receipts, and process bookkeeping.
 //!
-//! It refuses when the target already holds the tenant, when a connection
-//! title is taken there, and when the tenant keeps object-model data in its
-//! process's default database, which a shared process does not provide.
+//! It refuses when the target already holds the tenant, and when the tenant
+//! keeps object-model data in its process's default database, which a shared
+//! process does not provide.
 
 use std::ffi::OsString;
 
@@ -214,6 +216,14 @@ pub async fn run(
     let to_runtime = connect("MIGRATE_TO_RUNTIME_DATABASE_URL").await?;
     let from_store = source_store()?;
 
+    // A service that has not run yet holds no tables: bring both targets to
+    // this process's schema, as it would at boot.
+    crate::server::run_server_migrations(&to_server)
+        .await
+        .map_err(|error| format!("migrating the target server database: {error}"))?;
+    crate::embedded_runtara::run_migrations(&to_runtime)
+        .await
+        .map_err(|error| format!("migrating the target runtime database: {error}"))?;
     preconditions(tenant, &from_server, &from_runtime, &to_server, &to_runtime).await?;
 
     let mut runtime_tx = replica(&to_runtime).await?;
@@ -459,29 +469,6 @@ async fn preconditions(
     ] {
         if count(pool, sql).await? > 0 {
             return Err(format!("the target already has {tenant}'s {what}"));
-        }
-    }
-    // A connection title the target has given another tenant.
-    let titles: Vec<String> =
-        sqlx::query_scalar("SELECT title FROM connection_data_entity WHERE tenant_id = $1")
-            .bind(tenant)
-            .fetch_all(from_server)
-            .await
-            .map_err(|error| error.to_string())?;
-    if !titles.is_empty() {
-        let taken: Vec<String> = sqlx::query_scalar(
-            "SELECT title FROM connection_data_entity WHERE title = ANY($1) AND tenant_id <> $2",
-        )
-        .bind(&titles)
-        .bind(tenant)
-        .fetch_all(to_server)
-        .await
-        .map_err(|error| error.to_string())?;
-        if !taken.is_empty() {
-            return Err(format!(
-                "connection titles taken in the target by another tenant: {}; rename them first",
-                taken.join(", ")
-            ));
         }
     }
     // Object-model data in the process's own default database has nowhere

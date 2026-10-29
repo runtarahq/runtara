@@ -3038,7 +3038,7 @@ pub fn skip_migrations() -> bool {
 /// in `main`), which holds all server-managed tables — never the object-model
 /// pool. Uses ignore_missing since this pool may share the _sqlx_migrations
 /// table with other migrators.
-async fn run_server_migrations(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn run_server_migrations(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     #[derive(Debug)]
     struct Migrations(Vec<sqlx::migrate::Migration>);
 
