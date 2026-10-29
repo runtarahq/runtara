@@ -33,6 +33,9 @@
 #      that start external work: its run of 15 outbound HTTP calls waits for
 #      the last three and completes, while the primary's same run does not.
 #
+# With SERVED_TENANTS_KEY_ID_PER_TENANT, a host that seals each tenant's
+# credentials under its own keys (key id `{tenant}-k1`) is checked to.
+#
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
 # environment) + docker (isolated Valkey) and the shared workflow components
 # in target/wasm32-wasip2/release (scripts/build-agent-components.sh).
@@ -356,6 +359,14 @@ RESP=$(api_post /connections '{"title":"B OAuth","integrationId":"http_oauth2_au
 AUTH=()
 B_CONN=$(echo "${RESP}" | jq -r '.connection_id // .connectionId // empty')
 [ -n "${B_CONN}" ] || { print_error "the second tenant could not create an OAuth connection: ${RESP}"; exit 1; }
+# A host that seals each tenant under its own keys names them by tenant
+# (SERVED_TENANTS_KEY_ID_PER_TENANT): the connection is under the second's.
+if [ -n "${SERVED_TENANTS_KEY_ID_PER_TENANT:-}" ]; then
+    KID=$(server_sql "SELECT connection_parameters::jsonb->>'kid' FROM connection_data_entity WHERE id = '${B_CONN}'")
+    [ "${KID}" = "${SECOND_TENANT}-k1" ] \
+        || { print_error "the second tenant's connection is sealed under '${KID}', not its own key"; exit 1; }
+    echo "  the second tenant's connection is sealed under its own key (${KID}) ✓"
+fi
 AUTHORIZE=$(curl -sS -H "Authorization: Bearer ${SECOND_KEY}" "${API}/connections/${B_CONN}/oauth/authorize" | jq -r '.authorization_url // .authorizationUrl // empty')
 case "${AUTHORIZE}" in
     *"%2Fapi%2Foauth%2F${SECOND_TENANT}%2Fcallback"*) ;;
