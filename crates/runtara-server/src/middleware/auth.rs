@@ -10,6 +10,7 @@ use tracing::Instrument;
 use crate::api::handlers::api_keys::ApiKey;
 use crate::auth::{AuthContext, AuthMethod, AuthProviderKind, AuthState, MembershipPolicy};
 use crate::authz::{ApiKeyScope, Role};
+use crate::tenant_quota;
 use crate::valkey::auth::{AuthzValkeyError, get_member_role, tenant_is_ready, token_is_revoked};
 
 /// Authentication middleware. Defers to the configured `AuthProvider` for everything
@@ -90,6 +91,12 @@ async fn authenticate_with(
         {
             return response;
         }
+        if enforce_membership_here
+            && let Err(retry_after_ms) =
+                tenant_quota::take(&auth_context.org_id, tenant_quota::Quota::Api).await
+        {
+            return tenant_quota::refusal(tenant_quota::Quota::Api, retry_after_ms);
+        }
         let span = auth_span(&auth_context);
         request.extensions_mut().insert(auth_context);
         return next.run(request).instrument(span).await;
@@ -118,6 +125,14 @@ async fn authenticate_with(
         && let Err(response) = enforce_membership(&auth_state, &mut auth_context).await
     {
         return response;
+    }
+
+    // Counted once the caller is known, so nobody else spends the tenant's.
+    if enforce_membership_here
+        && let Err(retry_after_ms) =
+            tenant_quota::take(&auth_context.org_id, tenant_quota::Quota::Api).await
+    {
+        return tenant_quota::refusal(tenant_quota::Quota::Api, retry_after_ms);
     }
 
     let span = auth_span(&auth_context);

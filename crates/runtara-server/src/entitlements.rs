@@ -62,6 +62,11 @@ pub struct EntitlementLimits {
     pub max_api_keys: Option<u32>,
     pub object_model_bulk_request_limit: Option<usize>,
     pub max_concurrent_executions: Option<usize>,
+    /// Authenticated API requests the tenant may make per minute, counted
+    /// across every process serving it.
+    pub api_requests_per_minute: Option<u32>,
+    /// Compilations the tenant may request per hour.
+    pub compilations_per_hour: Option<u32>,
 }
 
 /// Agents every tier gets whenever they are registered, whatever the
@@ -237,6 +242,8 @@ impl EntitlementSnapshot {
             max_api_keys: self.limits.max_api_keys,
             object_model_bulk_request_limit: self.limits.object_model_bulk_request_limit,
             max_concurrent_executions: self.limits.max_concurrent_executions,
+            api_requests_per_minute: self.limits.api_requests_per_minute,
+            compilations_per_hour: self.limits.compilations_per_hour,
         }
     }
 
@@ -258,6 +265,8 @@ impl EntitlementSnapshot {
             max_api_keys = ?s.max_api_keys,
             object_model_bulk_request_limit = ?s.object_model_bulk_request_limit,
             max_concurrent_executions = ?s.max_concurrent_executions,
+            api_requests_per_minute = ?s.api_requests_per_minute,
+            compilations_per_hour = ?s.compilations_per_hour,
             "entitlement snapshot resolved"
         );
     }
@@ -327,6 +336,8 @@ pub struct EntitlementSummary {
     pub max_api_keys: Option<u32>,
     pub object_model_bulk_request_limit: Option<usize>,
     pub max_concurrent_executions: Option<usize>,
+    pub api_requests_per_minute: Option<u32>,
+    pub compilations_per_hour: Option<u32>,
 }
 
 /// One partial entitlement layer, as deserialized from a `RUNTARA_ENTITLEMENT*_JSON`
@@ -401,6 +412,12 @@ fn apply_layer(
         current.max_concurrent_executions = limits
             .max_concurrent_executions
             .or(current.max_concurrent_executions);
+        current.api_requests_per_minute = limits
+            .api_requests_per_minute
+            .or(current.api_requests_per_minute);
+        current.compilations_per_hour = limits
+            .compilations_per_hour
+            .or(current.compilations_per_hour);
     }
 
     Ok(())
@@ -521,6 +538,8 @@ impl TierBase {
                 max_api_keys: Some(2),
                 object_model_bulk_request_limit: Some(100),
                 max_concurrent_executions: Some(2),
+                api_requests_per_minute: None,
+                compilations_per_hour: None,
             },
         }
     }
@@ -539,6 +558,8 @@ impl TierBase {
                 max_api_keys: Some(10),
                 object_model_bulk_request_limit: Some(1000),
                 max_concurrent_executions: Some(8),
+                api_requests_per_minute: None,
+                compilations_per_hour: None,
             },
         }
     }

@@ -1026,6 +1026,11 @@ pub async fn start_with(
         }
     }
 
+    // Per-tenant rate limits share their buckets through Valkey.
+    if let Some(manager) = redis_manager.clone() {
+        crate::tenant_quota::install(manager);
+    }
+
     // Per-tenant Valkey membership enforcement policy. Built here, after the
     // shared manager, so the policy default can see whether Valkey is actually configured.
     // The auth middleware consumes both; they ride on AuthState.
@@ -2065,7 +2070,8 @@ pub async fn start_with(
         )
         .route(
             "/api/runtime/workflows/{id}/versions/{version}/compile",
-            post(api::handlers::workflows::compile_workflow_handler),
+            post(api::handlers::workflows::compile_workflow_handler)
+                .route_layer(from_fn(crate::tenant_quota::limit_compilations)),
         )
         .route(
             "/api/runtime/workflows/{id}/versions/{version}/compilation-progress",

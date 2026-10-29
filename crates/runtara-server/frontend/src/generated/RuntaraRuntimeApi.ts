@@ -2160,6 +2160,19 @@ export interface EmbedWorkflowStep {
 
 export interface EntitlementLimits {
   /**
+   * Authenticated API requests the tenant may make per minute, counted
+   * across every process serving it.
+   * @format int32
+   * @min 0
+   */
+  apiRequestsPerMinute?: number | null;
+  /**
+   * Compilations the tenant may request per hour.
+   * @format int32
+   * @min 0
+   */
+  compilationsPerHour?: number | null;
+  /**
    * @format int32
    * @min 0
    */

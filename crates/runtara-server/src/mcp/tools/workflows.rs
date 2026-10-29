@@ -132,6 +132,14 @@ async fn compile_workflow_for_mcp(
             .map_err(|e| err(format!("Failed to invalidate stale compilation: {}", e)))?;
     }
 
+    if let Err(retry_after_ms) =
+        crate::tenant_quota::take(&server.tenant(), crate::tenant_quota::Quota::Compile).await
+    {
+        return Err(err(format!(
+            "TENANT_RATE_LIMITED: this tenant's compile rate limit is reached; retry in {} s",
+            retry_after_ms.div_ceil(1000).max(1)
+        )));
+    }
     let queued = crate::workers::compilation_worker::enqueue_compilation(
         &redis_url,
         &server.tenant(),

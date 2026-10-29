@@ -65,7 +65,9 @@ All three of `features`, `agents`, and `limits` are optional inside a JSON layer
     "maxObjectSchemas": 50,
     "maxApiKeys": 10,
     "objectModelBulkRequestLimit": 1000,
-    "maxConcurrentExecutions": 8
+    "maxConcurrentExecutions": 8,
+    "apiRequestsPerMinute": 600,
+    "compilationsPerHour": 60
   }
 }
 ```
@@ -101,6 +103,17 @@ Its children share `maxConcurrentExecutions` with every other trigger:
 - Children started by `control:start` may hold at most `max(1, floor(0.8 × limit))` slots (limit 5 → 4, limit 10 → 8, limit 100 → 80), so webhooks, cron and API starts keep at least a fifth of the limit. Beyond that `start` fails with retryable `CONTROL_CAPACITY_RATE_LIMITED` (a 3-8 s retry hint); outside triggers are still admitted up to the full limit.
 - A limit of at most 1 can never admit a child: the calling run holds the only slot. `start` then fails permanently with `CONTROL_CAPACITY_UNSATISFIABLE`, and the server logs a `WARN` at boot naming `max_concurrent_executions`. Raise the limit to 2 or more for tenants that use control.
 - A limit above what the runner can execute leaves admitted children queued; they, and parents woken from a wait, can hit the launch-queue timeout (`launch_queue_timeout`) like any other run. Keep the limit near runner capacity for tenants that fan out.
+
+### Rate limits
+
+`apiRequestsPerMinute` and `compilationsPerHour` are unset on every built-in tier.
+
+- **`apiRequestsPerMinute`** counts each authenticated API or MCP request to the tenant, once its caller is known. An MCP tool's own in-process calls don't count again.
+- **`compilationsPerHour`** counts each requested compilation: `POST .../versions/{version}/compile` and the MCP compile tool. Compilations a save or a run starts by itself are not counted; the requests that caused them are.
+
+Each limit is a token bucket in Valkey, `{tenant}:quota:api` and `{tenant}:quota:compile`, shared by every process serving the tenant. The bucket holds the limit's worth of tokens and refills at that rate. A request without a token gets `429` with `Retry-After` and `{"error": "TENANT_RATE_LIMITED", "quota": "api" | "compile", ...}`.
+
+These limits fail open. With no Valkey configured, or when Valkey errors, the request is allowed and a warning is logged, the same as connection rate limits. A Valkey outage therefore lifts these limits instead of refusing every tenant.
 
 ## Worked example: disable Database for this tenant
 
