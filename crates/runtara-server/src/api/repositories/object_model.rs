@@ -259,7 +259,13 @@ impl ObjectStoreManager {
         drop(slot);
 
         match result {
-            Ok(store) => Ok(store),
+            Ok(store) => {
+                // The cache evicts lazily; evict now, so an idle pool past the
+                // cap closes when the new one opens rather than some requests
+                // later (one still in use closes when its request ends).
+                self.stores.run_pending_tasks().await;
+                Ok(store)
+            }
             // At the tenant's limit: not a failure of this database, so it is
             // not remembered; the next request tries again.
             Err(error) => match error.as_ref() {
