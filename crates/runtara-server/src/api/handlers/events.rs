@@ -261,7 +261,7 @@ pub async fn capture_http_event(
                 Ok((StatusCode::OK, Json(response)))
             }
             Err(crate::workers::execution_engine::ExecutionError::EntitlementDenied(denial)) => {
-                Err((StatusCode::FORBIDDEN, Json(denial.json_body())))
+                Err((denial.status(), Json(denial.json_body())))
             }
             Err(error) => {
                 let status = error.http_status();

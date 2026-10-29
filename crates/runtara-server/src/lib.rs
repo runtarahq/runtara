@@ -31,6 +31,7 @@ pub mod server;
 pub mod shutdown;
 pub mod step_events;
 pub mod tenant_quota;
+pub mod tenant_status;
 #[cfg(test)]
 pub(crate) mod test_env;
 pub mod types;

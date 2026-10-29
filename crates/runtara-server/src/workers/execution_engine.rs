@@ -193,6 +193,9 @@ impl ExecutionError {
             ExecutionError::RuntimeError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ExecutionError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ExecutionError::NotConnected(_) => StatusCode::SERVICE_UNAVAILABLE,
+            ExecutionError::EntitlementDenied(
+                crate::entitlement_error::EntitlementDenial::TenantStatusUnavailable,
+            ) => StatusCode::SERVICE_UNAVAILABLE,
             ExecutionError::EntitlementDenied(_) => StatusCode::FORBIDDEN,
         }
     }
@@ -762,6 +765,8 @@ impl ExecutionEngine {
         &self,
         tenant_id: &str,
     ) -> Result<u64, crate::entitlement_error::EntitlementDenial> {
+        // A tenant not served now (not ready, or suspended) starts nothing.
+        crate::tenant_status::admit(tenant_id).await?;
         let admission_lock = self.admission_lock_for(tenant_id);
         let _admission_guard = admission_lock.lock().await;
 

@@ -1028,7 +1028,8 @@ pub async fn start_with(
 
     // Per-tenant rate limits share their buckets through Valkey.
     if let Some(manager) = redis_manager.clone() {
-        crate::tenant_quota::install(manager);
+        crate::tenant_quota::install(manager.clone());
+        crate::tenant_status::install(manager);
     }
     // Runs' calls that start external work wait for their tenant's tokens.
     runtara_component_host::api_launches::set_default_call_limiter(Arc::new(
