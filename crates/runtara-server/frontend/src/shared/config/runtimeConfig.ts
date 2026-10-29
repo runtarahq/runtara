@@ -18,6 +18,10 @@ type RuntimeConfig = {
    *  sends an `organization` parameter. */
   oidcOrganizations?: string;
   apiBaseUrl?: string;
+  /** Where providers and callers deliver events (webhooks, HTTP triggers),
+   *  when that is another host than the console's: the trigger URLs shown
+   *  are made from it. Set from RUNTARA_UI_EVENTS_BASE_URL. */
+  eventsBaseUrl?: string;
   plausibleDomain?: string;
   plausibleHost?: string;
   version?: string;
@@ -87,6 +91,7 @@ export const config = {
   },
   apiBaseUrl:
     pick(runtime.apiBaseUrl, import.meta.env.VITE_RUNTARA_API_BASE_URL) ?? '',
+  eventsBaseUrl: clean(runtime.eventsBaseUrl),
   plausible: {
     domain: pick(
       runtime.plausibleDomain,

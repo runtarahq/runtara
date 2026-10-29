@@ -607,6 +607,7 @@ fn runtime_config_json_for(
         ("oidcAudience", "RUNTARA_UI_OIDC_AUDIENCE"),
         ("oidcOrganizations", "RUNTARA_UI_OIDC_ORGANIZATIONS"),
         ("apiBaseUrl", "RUNTARA_UI_API_BASE_URL"),
+        ("eventsBaseUrl", "RUNTARA_UI_EVENTS_BASE_URL"),
         ("plausibleDomain", "RUNTARA_UI_PLAUSIBLE_DOMAIN"),
         ("plausibleHost", "RUNTARA_UI_PLAUSIBLE_HOST"),
     ];
