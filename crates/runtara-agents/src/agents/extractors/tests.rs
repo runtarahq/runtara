@@ -573,3 +573,40 @@ fn test_extract_http_config_mcp_requires_url() {
     // Either fails at serde (missing field) or at the explicit url-required check.
     assert!(err.contains("url") || err.contains("Invalid mcp"), "{err}");
 }
+
+// ============================================================================
+// PipedriveExtractor Tests
+// ============================================================================
+
+#[test]
+fn test_pipedrive_extractor_sends_token_header_to_api_origin() {
+    let config = extract_http_config(
+        "pipedrive_api_token",
+        &json!({ "api_token": "token-value" }),
+        None,
+    )
+    .expect("Should extract config");
+
+    assert_eq!(
+        config.headers.get("x-api-token"),
+        Some(&"token-value".to_string())
+    );
+    assert_eq!(config.url_prefix, "https://api.pipedrive.com");
+}
+
+#[test]
+fn test_pipedrive_extractor_requires_token() {
+    let err = extract_http_config("pipedrive_api_token", &json!({}), None)
+        .expect_err("missing api_token should fail");
+    assert!(err.contains("pipedrive_api_token"), "{err}");
+}
+
+#[test]
+fn test_pipedrive_connection_type_is_registered() {
+    assert!(get_http_extractor_ids().contains(&"pipedrive_api_token"));
+    let meta = crate::registry::find_connection_type("pipedrive_api_token")
+        .expect("pipedrive_api_token is in the static registry");
+    assert_eq!(meta.display_name, "Pipedrive");
+    let token = meta.fields.iter().find(|f| f.name == "api_token").unwrap();
+    assert!(token.is_secret);
+}

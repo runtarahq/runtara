@@ -13,6 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Pipedrive agent, generated from Pipedrive's OpenAPI spec.** Five deal
+  capabilities (list, get, create, update, delete) bound to a new
+  `pipedrive_api_token` connection type: a personal API token sent as
+  `x-api-token` to `https://api.pipedrive.com`, limited by default to
+  5 requests/s with a burst of 10. Each field of a request body is its own step
+  input, field labels are humanized from the spec, and response fields the
+  spec does not declare are passed through.
+- **`scripts/connector_gen` generates an agent's capabilities from an
+  OpenAPI 3 spec** into one `src/generated.rs` per agent crate, using
+  openapi-generator (the pinned pip package bundles its own JDK) with
+  runtara's templates. A crate's `connector.yaml` pins the spec by sha256 and
+  lists the operations to generate; CI fails when a generated file is stale
+  or edited by hand. `docs/adding-an-agent.md` covers the whole cycle.
+- **`#[field(skip)]` on `CapabilityOutput` fields** leaves a field out of the
+  output metadata, e.g. a flattened passthrough map.
+
 - **DSL 3.7.0: a step id an `onWait` graph shares with the graph around it is
   rejected (E152).** An `onWait` graph runs at its WaitForSignal step's
   position, so a step there with the id of a step around it, or of a step in

@@ -1,0 +1,1 @@
+{{#description}}, description = r##"{{{.}}}{{#isEnum}}{{#allowableValues}} One of: {{#values}}{{.}}{{^-last}}, {{/-last}}{{/values}}.{{/allowableValues}}{{/isEnum}}"##{{/description}}{{^description}}{{#isEnum}}{{#allowableValues}}, description = r##"One of: {{#values}}{{.}}{{^-last}}, {{/-last}}{{/values}}."##{{/allowableValues}}{{/isEnum}}{{/description}}

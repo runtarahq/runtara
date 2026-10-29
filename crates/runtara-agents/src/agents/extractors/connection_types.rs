@@ -1258,6 +1258,54 @@ impl HttpConnectionExtractor for StripeExtractor {
 }
 
 // ============================================================================
+// Pipedrive Connection Type
+// ============================================================================
+
+/// Parameters for Pipedrive API token authentication
+#[derive(Debug, Deserialize, ConnectionParams)]
+#[connection(
+    integration_id = "pipedrive_api_token",
+    display_name = "Pipedrive",
+    description = "Connect to the Pipedrive CRM API with a personal API token",
+    category = "crm",
+    auth_type = "api_key"
+)]
+pub struct PipedriveApiTokenParams {
+    /// Pipedrive personal API token
+    #[field(
+        display_name = "API Token",
+        description = "Personal API token from Pipedrive: Settings → Personal preferences → API",
+        secret
+    )]
+    pub api_token: String,
+}
+
+/// HTTP extractor for Pipedrive connections. The base URL is the bare origin:
+/// callers include the API version in the path (`/api/v2/...`).
+pub struct PipedriveExtractor;
+
+impl HttpConnectionExtractor for PipedriveExtractor {
+    fn integration_id(&self) -> &'static str {
+        "pipedrive_api_token"
+    }
+
+    fn extract(&self, params: &Value) -> Result<HttpConnectionConfig, String> {
+        let p: PipedriveApiTokenParams = serde_json::from_value(params.clone())
+            .map_err(|e| format!("Invalid pipedrive_api_token connection parameters: {}", e))?;
+
+        let mut headers = HashMap::new();
+        headers.insert("x-api-token".to_string(), p.api_token);
+
+        Ok(HttpConnectionConfig {
+            headers,
+            query_parameters: HashMap::new(),
+            url_prefix: "https://api.pipedrive.com".to_string(),
+            rate_limit_config: None,
+        })
+    }
+}
+
+// ============================================================================
 // MCP (Model Context Protocol) Connection Type
 // ============================================================================
 

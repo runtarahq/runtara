@@ -169,6 +169,21 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # Agents generated from an OpenAPI spec (crates/agents/*/connector.yaml)
+      # must match a fresh render: fails on a stale or hand-edited
+      # src/generated.rs. Rendering is offline; the pip package bundles its JDK.
+      - name: Setup Python for connector_gen
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/connector_gen/requirements.txt
+
+      - name: Check generated agents
+        run: |
+          pip install -r scripts/connector_gen/requirements.txt
+          python scripts/connector_gen/connector_gen.py check $(dirname crates/agents/*/connector.yaml)
+
       # The *-integration-tests features are empty markers that gate [[test]]
       # targets via required-features. Without them cargo silently drops those
       # targets, so ~78% of the LOC under tests/ was never linted or even

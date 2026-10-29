@@ -65,6 +65,7 @@ install/database-credentials.txt
 
 # Python virtual environment
 api-tests/.venv/
+scripts/connector_gen/.venv/
 
 # Local data directory for development
 .data/

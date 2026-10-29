@@ -264,6 +264,9 @@ struct OutputFieldArgs {
     description: Option<String>,
     #[darling(default)]
     example: Option<String>,
+    /// Leave this field out of the metadata (e.g. a flattened passthrough map)
+    #[darling(default)]
+    skip: bool,
 }
 
 /// Container attributes for CapabilityOutput derive
@@ -1790,6 +1793,7 @@ pub fn derive_capability_output(input: TokenStream) -> TokenStream {
 
     let field_metas: Vec<_> = fields
         .iter()
+        .filter(|f| !f.skip)
         .map(|f| {
             let name = f
                 .ident
