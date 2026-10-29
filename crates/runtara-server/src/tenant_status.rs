@@ -4,6 +4,9 @@
 //! admitted only while the tenant's status record says `ready`. Authenticated
 //! requests are refused earlier, in the auth middleware.
 //!
+//! Parked runs of such a tenant stay parked ([`TenantWakeGate`]) and wake
+//! once it is served again.
+//!
 //! A status is cached for a few seconds, since admission runs per run. An
 //! unreadable status fails closed.
 
@@ -24,6 +27,16 @@ const FRESH_FOR: Duration = Duration::from_secs(5);
 /// Read statuses from `manager`'s Valkey. Set once, at boot.
 pub fn install(manager: ConnectionManager) {
     let _ = MANAGER.set(manager);
+}
+
+/// Holds parked runs of a tenant not served now: they wake once it is.
+pub struct TenantWakeGate;
+
+#[async_trait::async_trait]
+impl runtara_environment::wake_scheduler::WakeGate for TenantWakeGate {
+    async fn may_wake(&self, tenant: &str) -> bool {
+        admit(tenant).await.is_ok()
+    }
 }
 
 /// Admit new work for `tenant`, or say why not.

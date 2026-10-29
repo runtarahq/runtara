@@ -1031,6 +1031,10 @@ pub async fn start_with(
         crate::tenant_quota::install(manager.clone());
         crate::tenant_status::install(manager);
     }
+    // A tenant not served now keeps its parked runs parked.
+    runtara_environment::wake_scheduler::set_wake_gate(Arc::new(
+        crate::tenant_status::TenantWakeGate,
+    ));
     // Runs' calls that start external work wait for their tenant's tokens.
     runtara_component_host::api_launches::set_default_call_limiter(Arc::new(
         crate::tenant_quota::WorkflowCallLimiter,

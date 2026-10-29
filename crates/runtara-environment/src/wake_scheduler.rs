@@ -30,6 +30,25 @@ use crate::launch_queue::{
     EnqueueOutcome, EnqueueRequest, LaunchKind, LaunchQueueError, LaunchRepository,
 };
 
+/// Whether a tenant's parked runs may wake now. A host that suspends tenants
+/// supplies one ([`set_wake_gate`]); a run of a tenant it holds stays parked
+/// and is offered again later.
+#[async_trait::async_trait]
+pub trait WakeGate: Send + Sync + 'static {
+    /// Whether `tenant`'s parked runs may wake now.
+    async fn may_wake(&self, tenant: &str) -> bool;
+}
+
+static WAKE_GATE: std::sync::OnceLock<Arc<dyn WakeGate>> = std::sync::OnceLock::new();
+
+/// Hold every tenant's wakes to `gate`. Set once, at boot.
+pub fn set_wake_gate(gate: Arc<dyn WakeGate>) {
+    let _ = WAKE_GATE.set(gate);
+}
+
+/// How long a held wake waits before it is offered again.
+const HELD_WAKE_RETRY: Duration = Duration::from_secs(30);
+
 /// Wake scheduler configuration.
 #[derive(Debug, Clone)]
 pub struct WakeSchedulerConfig {
@@ -420,6 +439,40 @@ impl WakeScheduler {
                             instance_id = %instance.instance_id,
                             error = %e,
                             "Failed to release a wake claim abandoned to drain; \
+                             it will retry when the claim lease expires"
+                        );
+                    }
+                    return;
+                }
+
+                // A tenant not served now (suspended) keeps its runs parked:
+                // the claim goes back with a later wake rather than launching.
+                if let Some(gate) = WAKE_GATE.get()
+                    && !gate.may_wake(&instance.tenant_id).await
+                {
+                    debug!(
+                        instance_id = %instance.instance_id,
+                        tenant_id = %instance.tenant_id,
+                        "Tenant not served; holding this wake"
+                    );
+                    if let Err(e) = scheduler
+                        .persistence
+                        .reschedule_claimed_wake(
+                            &instance.instance_id,
+                            instance.sleep_until.expect("batch claim has a lease"),
+                            chrono::Utc::now()
+                                + chrono::Duration::from_std(HELD_WAKE_RETRY)
+                                    .expect("a short duration"),
+                            instance
+                                .wake_reason
+                                .unwrap_or(runtara_core::domain::WakeReason::Timer),
+                        )
+                        .await
+                    {
+                        warn!(
+                            instance_id = %instance.instance_id,
+                            error = %e,
+                            "Failed to hold a wake of a tenant not served; \
                              it will retry when the claim lease expires"
                         );
                     }

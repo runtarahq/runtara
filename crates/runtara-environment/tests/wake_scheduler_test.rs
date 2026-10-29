@@ -1189,3 +1189,91 @@ async fn a_wake_lost_before_its_stamp_is_recovered_once_after_a_crash() {
     cleanup(&pool, &waiter).await;
     cleanup_image(&pool, &image).await;
 }
+
+// ============================================================================
+// Held wakes (M7.7)
+// ============================================================================
+
+/// Holds the one tenant it names. The gate is process-wide, so it holds only
+/// a tenant no other test uses.
+struct HoldOne(&'static str);
+
+#[async_trait::async_trait]
+impl runtara_environment::wake_scheduler::WakeGate for HoldOne {
+    async fn may_wake(&self, tenant: &str) -> bool {
+        tenant != self.0
+    }
+}
+
+/// A suspended tenant's due run stays parked, offered again later, while
+/// another tenant's due run is queued to wake.
+#[tokio::test]
+async fn a_held_tenants_wake_waits_while_another_tenants_runs() {
+    let (pool, _test_db) = get_test_pool().await;
+    let (held, free) = ("wake-held-tenant-m77", "wake-free-tenant-m77");
+    runtara_environment::wake_scheduler::set_wake_gate(Arc::new(HoldOne(held)));
+    let held_image = create_test_image(&pool, held).await;
+    let free_image = create_test_image(&pool, free).await;
+    let held_id = park_due_instance(&pool, held, &held_image).await;
+    let free_id = park_due_instance(&pool, free, &free_image).await;
+
+    let persistence = Arc::new(PostgresPersistence::new(pool.clone()));
+    let scheduler = WakeScheduler::new(
+        pool.clone(),
+        persistence.clone(),
+        WakeSchedulerConfig {
+            poll_interval: Duration::from_millis(100),
+            batch_size: 10,
+            concurrency: 4,
+            claim_lease: Duration::from_secs(300),
+            failed_wake_retry_delay: Duration::from_millis(200),
+        },
+    );
+    let shutdown = scheduler.shutdown_handle();
+    let handle = tokio::spawn(scheduler.run());
+
+    let launches = LaunchRepository::new(pool.clone());
+    let queued = |instance: String| {
+        let launches = launches.clone();
+        async move {
+            launches
+                .get_active_for_instance(&instance)
+                .await
+                .expect("active launch query must succeed")
+                .is_some_and(|launch| launch.kind == LaunchKind::Wake)
+        }
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline && !queued(free_id.clone()).await {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // A pass or two more, in case the held one was claimed in a later batch.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    shutdown.notify_one();
+    let _ = handle.await;
+
+    assert!(
+        queued(free_id.clone()).await,
+        "the free tenant's run is queued"
+    );
+    assert!(
+        !queued(held_id.clone()).await,
+        "the held tenant's run is not"
+    );
+    let parked = persistence
+        .get_instance(&held_id)
+        .await
+        .expect("Failed to read instance")
+        .expect("Instance should exist");
+    assert_eq!(parked.status, CoreInstanceStatus::Suspended);
+    let next = parked.sleep_until.expect("still parked with a wake time");
+    assert!(
+        next > Utc::now() + chrono::Duration::seconds(10),
+        "offered again later, not at once: {next}"
+    );
+
+    cleanup(&pool, &held_id).await;
+    cleanup(&pool, &free_id).await;
+    cleanup_image(&pool, &held_image).await;
+    cleanup_image(&pool, &free_image).await;
+}
