@@ -46,6 +46,8 @@ SERVER_PID=""
 VALKEY_CONTAINER=""
 TENANTS_COUNT="${MANY_TENANTS:-24}"
 ROUNDS="${MANY_TENANTS_ROUNDS:-3}"
+# How long one run may take before it counts as failed.
+RUN_TIMEOUT="${MANY_TENANTS_RUN_TIMEOUT:-60}"
 # Far fewer than the tenants' demand, so they have to share them.
 RUNTIME_MAX="${MANY_TENANTS_RUNTIME_POOL:-32}"
 POOL_CACHE_MAX="${MANY_TENANTS_POOL_CACHE:-6}"
@@ -211,15 +213,17 @@ tenant_load() {
             -H "Content-Type: application/json" -d '{"inputs":{"data":{}}}' "${API}/workflows/${wf}/execute")
         echo "execute ${t}" >> "${out}"
         instance=$(jq -r '.data.instanceId // empty' "${out}.body")
+        run_started=$(date +%s)
         [ -n "${instance}" ] || { echo "FAIL execute ${t}" >> "${out}"; continue; }
         echo "${instance}" >> "${out}.instances"
         status=""
-        for _ in {1..240}; do
+        for _ in $(seq 1 $((RUN_TIMEOUT * 4))); do
             status=$(curl -sS -H "Authorization: Bearer ${key}" "${API}/workflows/instances/${instance}" | jq -r '.data.status // empty')
             case "${status}" in completed|failed|crashed|stopped|cancelled) break ;; esac
             sleep 0.25
         done
         [ "${status}" = completed ] || echo "FAIL run ${instance} ${status}" >> "${out}"
+        echo "run ${instance} $(( $(date +%s) - run_started ))" >> "${out}.durations"
         t=$(curl -sS -o /dev/null -w '%{http_code} %{time_total}' -H "Authorization: Bearer ${key}" "${API}/workflows")
         echo "list ${t}" >> "${out}"
         t=$(curl -sS -o /dev/null -w '%{http_code} %{time_total}' -H "Authorization: Bearer ${key}" "${API}/object-model/schemas?connectionId=${conn}")
@@ -256,6 +260,8 @@ REQUESTS=$((TENANTS_COUNT * ROUNDS))
 echo "  ${REQUESTS} runs and $((REQUESTS * 3)) requests from ${TENANTS_COUNT} tenants at once in ${ELAPSED} s, every one served ✓"
 STEADY_EXTERNAL=$(cut -d'|' -f2 "${SAMPLES}" | sort -n | uniq -c | sort -rn | head -1 | awk '{print $2}')
 echo "  at most ${MAX_RUNTIME}/${RUNTIME_MAX} runtime connections; external ones at most ${MAX_EXTERNAL} (mostly ${STEADY_EXTERNAL}) against ${POOL_CACHE_MAX} pools of ${POOL_MAX} kept, ${EXTERNAL_BOUND} with every tenant mid-request ✓"
+RUN_SECONDS=$(for f in ${LOADS_OUT}; do cat "${f}.durations" 2>/dev/null; done | awk '{print $3}' | sort -n)
+echo "  each run, from start to completed: median $(echo "${RUN_SECONDS}" | awk '{v[NR]=$1} END {print v[int((NR+1)/2)]}') s, longest $(echo "${RUN_SECONDS}" | tail -1) s"
 for kind in execute list database; do
     echo "  ${kind}: p50 $(percentile "${kind}" 50) ms, p95 $(percentile "${kind}" 95) ms"
 done
