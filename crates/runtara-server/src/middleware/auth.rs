@@ -52,7 +52,10 @@ async fn authenticate_with(
     enforce_membership_here: bool,
 ) -> Response {
     if let Some(ctx) = request.extensions().get::<AuthContext>().cloned() {
-        return next.run(request).instrument(auth_span(&ctx)).await;
+        let span = auth_span(&ctx);
+        return as_tenant(enforce_membership_here, &ctx.org_id, next.run(request))
+            .instrument(span)
+            .await;
     }
 
     let requested_tenant = request
@@ -98,8 +101,11 @@ async fn authenticate_with(
             return tenant_quota::refusal(tenant_quota::Quota::Api, retry_after_ms);
         }
         let span = auth_span(&auth_context);
+        let tenant = auth_context.org_id.clone();
         request.extensions_mut().insert(auth_context);
-        return next.run(request).instrument(span).await;
+        return as_tenant(enforce_membership_here, &tenant, next.run(request))
+            .instrument(span)
+            .await;
     }
 
     // Delegate everything else to the configured provider.
@@ -136,8 +142,26 @@ async fn authenticate_with(
     }
 
     let span = auth_span(&auth_context);
+    let tenant = auth_context.org_id.clone();
     request.extensions_mut().insert(auth_context);
-    next.run(request).instrument(span).await
+    as_tenant(enforce_membership_here, &tenant, next.run(request))
+        .instrument(span)
+        .await
+}
+
+/// Runs the rest of a request for `tenant` on the runtime database, where row
+/// level security then confines it to that tenant's rows (C11). A request
+/// that answers across tenants (`scoped` false) runs as the system path.
+async fn as_tenant(
+    scoped: bool,
+    tenant: &str,
+    rest: impl std::future::Future<Output = Response>,
+) -> Response {
+    if scoped {
+        runtara_store_postgres::tenant_scope::scoped(tenant, rest).await
+    } else {
+        rest.await
+    }
 }
 
 /// Span carrying the resolved auth identity, used to wrap the rest of the

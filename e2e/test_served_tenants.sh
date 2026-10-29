@@ -26,6 +26,9 @@
 #   7. MCP SESSIONS — the second tenant's MCP session is kept under its own
 #      tenant; after a restart, restoring it with the primary tenant's
 #      credentials fails, while its owner restores it.
+#   8. RUNTIME ROW SECURITY (C11) — the server reaches the runtime database
+#      as a plain role that owns it, so row-level security binds everything
+#      above; that role, naming one tenant, sees none of the other's runs.
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD in the
 # environment) + docker (isolated Valkey) and the shared workflow components
@@ -47,6 +50,7 @@ POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-${PGPASSWORD:-}}"
 
 TEST_DB_SERVER="served_tenants_e2e_server_$$"
 TEST_DB_RUNTIME="served_tenants_e2e_runtime_$$"
+RUNTIME_ROLE="${TEST_DB_RUNTIME}_owner"
 TEST_PORT_PUBLIC="${TEST_PORT_PUBLIC:-17880}"
 TEST_CORE_PORT="${TEST_CORE_PORT:-18881}"
 TEST_ENV_PORT="${TEST_ENV_PORT:-18882}"
@@ -85,6 +89,7 @@ cleanup() {
     fi
     psql_quiet -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB_SERVER}" >/dev/null 2>&1 || true
     psql_quiet -d postgres -c "DROP DATABASE IF EXISTS ${TEST_DB_RUNTIME}" >/dev/null 2>&1 || true
+    psql_quiet -d postgres -c "DROP ROLE IF EXISTS ${RUNTIME_ROLE}" >/dev/null 2>&1 || true
     rm -rf "${TEST_DATA_DIR}" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -148,14 +153,17 @@ done
 
 print_step "Creating test databases..."
 psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_SERVER}" >/dev/null
-psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_RUNTIME}" >/dev/null
+# Neither a superuser nor BYPASSRLS: row-level security binds the server.
+RUNTIME_PASSWORD=$(openssl rand -hex 16)
+psql_quiet -d postgres -c "CREATE ROLE ${RUNTIME_ROLE} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '${RUNTIME_PASSWORD}'" >/dev/null
+psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_RUNTIME} OWNER ${RUNTIME_ROLE}" >/dev/null
 SERVER_DB_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}"
 
 start_server() {
     print_step "Starting runtara-server on :${TEST_PORT_PUBLIC}..."
     RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
     OBJECT_MODEL_DATABASE_URL="${SERVER_DB_URL}" \
-    RUNTARA_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_RUNTIME}" \
+    RUNTARA_DATABASE_URL="postgresql://${RUNTIME_ROLE}:${RUNTIME_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_RUNTIME}" \
     TENANT_ID="${TENANT}" \
     RUNTARA_SERVED_TENANTS="${SECOND_TENANT}" \
     RUNTARA_TENANT_ENTITLEMENTS_JSON="{\"${SECOND_TENANT}\": {\"overrides\": {\"limits\": {\"maxWorkflows\": 1}}}}" \
@@ -421,5 +429,19 @@ CODE=$(mcp_status "${LIST}")
     || { print_error "the second tenant could not restore its own MCP session (${CODE}): $(head -c 300 "${TEST_DATA_DIR}/mcp_body")"; exit 1; }
 AUTH=()
 echo "  the session is kept under the second tenant; after a restart the primary is refused it and its owner restores it ✓"
+
+#-------------------------------------------------------------------------
+print_step "8. The runtime database binds the server to each request's tenant..."
+as_runtime_role() {
+    PGPASSWORD="${RUNTIME_PASSWORD}" psql -qtA -U "${RUNTIME_ROLE}" -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" \
+        -d "${TEST_DB_RUNTIME}" -c "$1"
+}
+[ "$(as_runtime_role "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")" = "f" ] \
+    || { print_error "the runtime role escapes row-level security"; exit 1; }
+SECOND_RUNS=$(runtime_sql "SELECT count(*) FROM instances WHERE tenant_id = '${SECOND_TENANT}'")
+[ "${SECOND_RUNS}" -gt 0 ] || { print_error "the second tenant has no runs to hide"; exit 1; }
+SEEN=$(as_runtime_role "SELECT set_config('runtara.tenant_id', '${TENANT}', false); SELECT count(*) FROM instances WHERE tenant_id = '${SECOND_TENANT}'" | tail -1)
+[ "${SEEN}" = "0" ] || { print_error "as ${TENANT} the runtime role saw ${SEEN} of the second tenant's runs"; exit 1; }
+echo "  every stage ran on a runtime role bound by row-level security; naming ${TENANT}, it sees none of the second tenant's ${SECOND_RUNS} runs ✓"
 
 print_success "served tenants: webhooks, API keys, triggers, cron, OAuth callbacks and connection events reach exactly the tenants this server serves, each its own, under its own limits"

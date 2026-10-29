@@ -25,6 +25,7 @@ pub mod encoding;
 
 /// The launch fence between a parented launch and an external outcome.
 pub mod fence;
+pub mod tenant_scope;
 
 mod backend;
 mod checkpoints;

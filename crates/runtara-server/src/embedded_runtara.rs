@@ -292,7 +292,9 @@ pub async fn create_runtara_pool(
     };
 
     info!("Connecting to Runtara database...");
-    let pool = PgPoolOptions::new()
+    // Shared by every tenant: work inside a tenant's scope (an authenticated
+    // request) sees only that tenant's rows; everything else is the system path.
+    let pool = runtara_store_postgres::tenant_scope::scoping(PgPoolOptions::new())
         .max_connections(pool_config.max_connections)
         .acquire_timeout(pool_config.acquire_timeout)
         .idle_timeout(pool_config.idle_timeout)
