@@ -4,10 +4,12 @@
 //! The vendor's own response examples (`tests/fixtures`, written by
 //! `connector_gen.py fetch`) must deserialize into the generated output types
 //! and survive a round trip without losing a field. Request bodies are
-//! flattened into the capability inputs.
+//! flattened into the capability inputs, and each input builds the exact
+//! request the capability sends.
 
 use runtara_agent_pipedrive::{
-    AddDealInput, DeleteDealResponse, GetDealsResponse, UpsertDealResponse,
+    AddDealInput, DeleteDealResponse, GetDealsInput, GetDealsResponse, UpdateDealInput,
+    UpsertDealResponse,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -175,4 +177,66 @@ fn flat_step_input_deserializes() {
     assert_eq!(input.title, "Website redesign");
     assert_eq!(input.value, Some(1500.0));
     assert!(serde_json::from_value::<AddDealInput>(json!({ "value": 1500.0 })).is_err());
+}
+
+fn update_deal_body(input: Value) -> Option<Value> {
+    serde_json::from_value::<UpdateDealInput>(input)
+        .unwrap()
+        .request()
+        .unwrap()
+        .body_json()
+}
+
+#[test]
+fn explicit_nulls_clear_nullable_body_fields() {
+    let input: UpdateDealInput = serde_json::from_value(json!({
+        "id": 1, "org_id": null, "person_id": null, "title": "Renamed"
+    }))
+    .unwrap();
+    let request = input.request().unwrap();
+    assert_eq!(request.method(), "PATCH");
+    assert_eq!(request.path(), "/api/v2/deals/1");
+    assert_eq!(
+        request.body_json(),
+        Some(json!({ "org_id": null, "person_id": null, "title": "Renamed" }))
+    );
+}
+
+#[test]
+fn omitted_body_fields_are_not_sent() {
+    assert_eq!(
+        update_deal_body(json!({ "id": 1, "person_id": 42 })),
+        Some(json!({ "person_id": 42 }))
+    );
+    assert_eq!(update_deal_body(json!({ "id": 1 })), Some(json!({})));
+}
+
+#[test]
+fn nullable_inputs_are_described_as_their_value_type() {
+    let info = runtara_agent_pipedrive::agent_info();
+    let org_id = info
+        .capabilities
+        .iter()
+        .find(|c| c.id == "update-deal")
+        .and_then(|c| c.inputs.iter().find(|f| f.name == "org_id"))
+        .unwrap();
+    assert_eq!(org_id.type_name, "integer");
+    assert!(!org_id.required);
+}
+
+#[test]
+fn query_parameters_are_encoded_into_the_request() {
+    let input: GetDealsInput =
+        serde_json::from_value(json!({ "ids": [1, 2], "limit": 10 })).unwrap();
+    let request = input.request().unwrap();
+    assert_eq!(request.method(), "GET");
+    assert_eq!(request.path(), "/api/v2/deals");
+    assert_eq!(
+        request.query_pairs(),
+        [
+            ("ids".to_string(), "1,2".to_string()),
+            ("limit".to_string(), "10".to_string())
+        ]
+    );
+    assert_eq!(request.body_json(), None);
 }

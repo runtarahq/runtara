@@ -70,6 +70,7 @@
             "in": "query",
             "name": "filter_id",
             "schema": {
+              "format": "int64",
               "type": "integer"
             },
             "x-runtara-label": "Filter ID"
@@ -81,6 +82,7 @@
             "name": "ids",
             "schema": {
               "items": {
+                "format": "int64",
                 "type": "integer"
               },
               "maxItems": 100,
@@ -95,6 +97,7 @@
             "in": "query",
             "name": "owner_id",
             "schema": {
+              "format": "int64",
               "type": "integer"
             },
             "x-runtara-label": "Owner ID"
@@ -104,6 +107,7 @@
             "in": "query",
             "name": "person_id",
             "schema": {
+              "format": "int64",
               "type": "integer"
             },
             "x-runtara-label": "Person ID"
@@ -113,6 +117,7 @@
             "in": "query",
             "name": "org_id",
             "schema": {
+              "format": "int64",
               "type": "integer"
             },
             "x-runtara-label": "Organization"
@@ -122,6 +127,7 @@
             "in": "query",
             "name": "pipeline_id",
             "schema": {
+              "format": "int64",
               "type": "integer"
             },
             "x-runtara-label": "Pipeline ID"
@@ -131,6 +137,7 @@
             "in": "query",
             "name": "stage_id",
             "schema": {
+              "format": "int64",
               "type": "integer"
             },
             "x-runtara-label": "Stage ID"
@@ -278,6 +285,7 @@
             "name": "limit",
             "schema": {
               "example": 100,
+              "format": "int64",
               "maximum": 500,
               "minimum": 1,
               "type": "integer"
@@ -402,6 +410,7 @@
                               },
                               "channel": {
                                 "description": "The ID of your Marketing channel this Deal was created from. Recognized Marketing channels can be configured in your <a href=\"https://app.pipedrive.com/settings/fields\" target=\"_blank\" rel=\"noopener noreferrer\">Company settings</a>.",
+                                "format": "int64",
                                 "nullable": true,
                                 "type": "integer",
                                 "x-runtara-label": "Channel"
@@ -438,6 +447,7 @@
                               },
                               "id": {
                                 "description": "The ID of the deal",
+                                "format": "int64",
                                 "type": "integer",
                                 "x-runtara-label": "ID"
                               },
@@ -454,6 +464,7 @@
                               "label_ids": {
                                 "description": "The IDs of labels assigned to the deal",
                                 "items": {
+                                  "format": "int64",
                                   "type": "integer"
                                 },
                                 "type": "array",
@@ -479,6 +490,7 @@
                               },
                               "org_id": {
                                 "description": "The ID of the organization linked to the deal",
+                                "format": "int64",
                                 "nullable": true,
                                 "type": "integer",
                                 "x-runtara-label": "Organization"
@@ -496,17 +508,20 @@
                               },
                               "owner_id": {
                                 "description": "The ID of the user who owns the deal",
+                                "format": "int64",
                                 "type": "integer",
                                 "x-runtara-label": "Owner ID"
                               },
                               "person_id": {
                                 "description": "The ID of the person linked to the deal",
+                                "format": "int64",
                                 "nullable": true,
                                 "type": "integer",
                                 "x-runtara-label": "Person ID"
                               },
                               "pipeline_id": {
                                 "description": "The ID of the pipeline associated with the deal",
+                                "format": "int64",
                                 "type": "integer",
                                 "x-runtara-label": "Pipeline ID"
                               },
@@ -531,6 +546,7 @@
                               },
                               "stage_id": {
                                 "description": "The ID of the deal stage",
+                                "format": "int64",
                                 "type": "integer",
                                 "x-runtara-label": "Stage ID"
                               },
@@ -557,6 +573,7 @@
                               },
                               "visible_to": {
                                 "description": "The visibility of the deal",
+                                "format": "int64",
                                 "type": "integer",
                                 "x-runtara-label": "Visible To"
                               },
@@ -600,6 +617,7 @@
           "Deals"
         ],
         "x-runtara-first": true,
+        "x-runtara-summary": "Get all deals",
         "x-token-cost": 10,
         "x-tool-description": "Retrieves paginated active deals with filtering by owner, person, organization, pipeline, stage, status, and time ranges. Essential for analytics, reporting, dashboard views, and bulk operations. Filters combine for precise selection; filter_id overrides individual filters."
       },
@@ -652,6 +670,7 @@
                   "label_ids": {
                     "description": "The IDs of labels assigned to the deal",
                     "items": {
+                      "format": "int64",
                       "type": "integer"
                     },
                     "type": "array",
@@ -669,23 +688,27 @@
                   },
                   "org_id": {
                     "description": "The ID of the organization linked to the deal",
+                    "format": "int64",
                     "nullable": true,
                     "type": "integer",
                     "x-runtara-label": "Organization"
                   },
                   "owner_id": {
                     "description": "The ID of the user who owns the deal",
+                    "format": "int64",
                     "type": "integer",
                     "x-runtara-label": "Owner ID"
                   },
                   "person_id": {
                     "description": "The ID of the person linked to the deal",
+                    "format": "int64",
                     "nullable": true,
                     "type": "integer",
                     "x-runtara-label": "Person ID"
                   },
                   "pipeline_id": {
                     "description": "The ID of the pipeline associated with the deal",
+                    "format": "int64",
                     "type": "integer",
                     "x-runtara-label": "Pipeline ID"
                   },
@@ -696,6 +719,7 @@
                   },
                   "stage_id": {
                     "description": "The ID of the deal stage",
+                    "format": "int64",
                     "type": "integer",
                     "x-runtara-label": "Stage ID"
                   },
@@ -716,6 +740,7 @@
                   },
                   "visible_to": {
                     "description": "The visibility of the deal",
+                    "format": "int64",
                     "type": "integer",
                     "x-runtara-label": "Visible To"
                   },
@@ -819,6 +844,7 @@
                             },
                             "channel": {
                               "description": "The ID of your Marketing channel this Deal was created from. Recognized Marketing channels can be configured in your <a href=\"https://app.pipedrive.com/settings/fields\" target=\"_blank\" rel=\"noopener noreferrer\">Company settings</a>.",
+                              "format": "int64",
                               "nullable": true,
                               "type": "integer",
                               "x-runtara-label": "Channel"
@@ -855,6 +881,7 @@
                             },
                             "id": {
                               "description": "The ID of the deal",
+                              "format": "int64",
                               "type": "integer",
                               "x-runtara-label": "ID"
                             },
@@ -871,6 +898,7 @@
                             "label_ids": {
                               "description": "The IDs of labels assigned to the deal",
                               "items": {
+                                "format": "int64",
                                 "type": "integer"
                               },
                               "type": "array",
@@ -896,6 +924,7 @@
                             },
                             "org_id": {
                               "description": "The ID of the organization linked to the deal",
+                              "format": "int64",
                               "nullable": true,
                               "type": "integer",
                               "x-runtara-label": "Organization"
@@ -913,17 +942,20 @@
                             },
                             "owner_id": {
                               "description": "The ID of the user who owns the deal",
+                              "format": "int64",
                               "type": "integer",
                               "x-runtara-label": "Owner ID"
                             },
                             "person_id": {
                               "description": "The ID of the person linked to the deal",
+                              "format": "int64",
                               "nullable": true,
                               "type": "integer",
                               "x-runtara-label": "Person ID"
                             },
                             "pipeline_id": {
                               "description": "The ID of the pipeline associated with the deal",
+                              "format": "int64",
                               "type": "integer",
                               "x-runtara-label": "Pipeline ID"
                             },
@@ -948,6 +980,7 @@
                             },
                             "stage_id": {
                               "description": "The ID of the deal stage",
+                              "format": "int64",
                               "type": "integer",
                               "x-runtara-label": "Stage ID"
                             },
@@ -974,6 +1007,7 @@
                             },
                             "visible_to": {
                               "description": "The visibility of the deal",
+                              "format": "int64",
                               "type": "integer",
                               "x-runtara-label": "Visible To"
                             },
@@ -1015,6 +1049,7 @@
           "Deals"
         ],
         "x-runtara-side-effects": true,
+        "x-runtara-summary": "Add a new deal",
         "x-token-cost": 5,
         "x-tool-description": "Creates new sales deals with customizable properties: title (required), value, person, organization, pipeline stage, and custom fields. Essential for lead conversion, sales processes, and integrations. Automatically assigns timestamps and ownership."
       }
@@ -1030,6 +1065,7 @@
             "name": "id",
             "required": true,
             "schema": {
+              "format": "int64",
               "type": "integer"
             },
             "x-runtara-label": "ID"
@@ -1051,6 +1087,7 @@
                       "properties": {
                         "id": {
                           "description": "Deleted deal ID",
+                          "format": "int64",
                           "type": "integer",
                           "x-runtara-label": "ID"
                         }
@@ -1087,6 +1124,7 @@
           "Deals"
         ],
         "x-runtara-side-effects": true,
+        "x-runtara-summary": "Delete a deal",
         "x-token-cost": 3,
         "x-tool-description": "Soft-deletes deals with 30-day recovery period before permanent removal. Essential for deal cleanup, error correction, and removing unwanted opportunities. Becomes inaccessible via standard APIs but recoverable during grace period."
       },
@@ -1100,6 +1138,7 @@
             "name": "id",
             "required": true,
             "schema": {
+              "format": "int64",
               "type": "integer"
             },
             "x-runtara-label": "ID"
@@ -1258,6 +1297,7 @@
                             },
                             "channel": {
                               "description": "The ID of your Marketing channel this Deal was created from. Recognized Marketing channels can be configured in your <a href=\"https://app.pipedrive.com/settings/fields\" target=\"_blank\" rel=\"noopener noreferrer\">Company settings</a>.",
+                              "format": "int64",
                               "nullable": true,
                               "type": "integer",
                               "x-runtara-label": "Channel"
@@ -1294,6 +1334,7 @@
                             },
                             "id": {
                               "description": "The ID of the deal",
+                              "format": "int64",
                               "type": "integer",
                               "x-runtara-label": "ID"
                             },
@@ -1310,6 +1351,7 @@
                             "label_ids": {
                               "description": "The IDs of labels assigned to the deal",
                               "items": {
+                                "format": "int64",
                                 "type": "integer"
                               },
                               "type": "array",
@@ -1335,6 +1377,7 @@
                             },
                             "org_id": {
                               "description": "The ID of the organization linked to the deal",
+                              "format": "int64",
                               "nullable": true,
                               "type": "integer",
                               "x-runtara-label": "Organization"
@@ -1352,17 +1395,20 @@
                             },
                             "owner_id": {
                               "description": "The ID of the user who owns the deal",
+                              "format": "int64",
                               "type": "integer",
                               "x-runtara-label": "Owner ID"
                             },
                             "person_id": {
                               "description": "The ID of the person linked to the deal",
+                              "format": "int64",
                               "nullable": true,
                               "type": "integer",
                               "x-runtara-label": "Person ID"
                             },
                             "pipeline_id": {
                               "description": "The ID of the pipeline associated with the deal",
+                              "format": "int64",
                               "type": "integer",
                               "x-runtara-label": "Pipeline ID"
                             },
@@ -1387,6 +1433,7 @@
                             },
                             "stage_id": {
                               "description": "The ID of the deal stage",
+                              "format": "int64",
                               "type": "integer",
                               "x-runtara-label": "Stage ID"
                             },
@@ -1413,6 +1460,7 @@
                             },
                             "visible_to": {
                               "description": "The visibility of the deal",
+                              "format": "int64",
                               "type": "integer",
                               "x-runtara-label": "Visible To"
                             },
@@ -1454,6 +1502,7 @@
         "tags": [
           "Deals"
         ],
+        "x-runtara-summary": "Get details of a deal",
         "x-token-cost": 1,
         "x-tool-description": "Fetches comprehensive details of a specific deal by ID, including all properties, custom fields, associated contacts, and metadata. Use this endpoint for deal detail pages, updating deal information, or when you need complete deal context. Supports optional field inclusion for optimized data retrieval and custom field expansion for enhanced deal analysis."
       },
@@ -1467,6 +1516,7 @@
             "name": "id",
             "required": true,
             "schema": {
+              "format": "int64",
               "type": "integer"
             },
             "x-runtara-label": "ID"
@@ -1518,6 +1568,7 @@
                   "label_ids": {
                     "description": "The IDs of labels assigned to the deal",
                     "items": {
+                      "format": "int64",
                       "type": "integer"
                     },
                     "type": "array",
@@ -1535,23 +1586,27 @@
                   },
                   "org_id": {
                     "description": "The ID of the organization linked to the deal",
+                    "format": "int64",
                     "nullable": true,
                     "type": "integer",
                     "x-runtara-label": "Organization"
                   },
                   "owner_id": {
                     "description": "The ID of the user who owns the deal",
+                    "format": "int64",
                     "type": "integer",
                     "x-runtara-label": "Owner ID"
                   },
                   "person_id": {
                     "description": "The ID of the person linked to the deal",
+                    "format": "int64",
                     "nullable": true,
                     "type": "integer",
                     "x-runtara-label": "Person ID"
                   },
                   "pipeline_id": {
                     "description": "The ID of the pipeline associated with the deal",
+                    "format": "int64",
                     "type": "integer",
                     "x-runtara-label": "Pipeline ID"
                   },
@@ -1562,6 +1617,7 @@
                   },
                   "stage_id": {
                     "description": "The ID of the deal stage",
+                    "format": "int64",
                     "type": "integer",
                     "x-runtara-label": "Stage ID"
                   },
@@ -1582,6 +1638,7 @@
                   },
                   "visible_to": {
                     "description": "The visibility of the deal",
+                    "format": "int64",
                     "type": "integer",
                     "x-runtara-label": "Visible To"
                   },
@@ -1682,6 +1739,7 @@
                             },
                             "channel": {
                               "description": "The ID of your Marketing channel this Deal was created from. Recognized Marketing channels can be configured in your <a href=\"https://app.pipedrive.com/settings/fields\" target=\"_blank\" rel=\"noopener noreferrer\">Company settings</a>.",
+                              "format": "int64",
                               "nullable": true,
                               "type": "integer",
                               "x-runtara-label": "Channel"
@@ -1718,6 +1776,7 @@
                             },
                             "id": {
                               "description": "The ID of the deal",
+                              "format": "int64",
                               "type": "integer",
                               "x-runtara-label": "ID"
                             },
@@ -1734,6 +1793,7 @@
                             "label_ids": {
                               "description": "The IDs of labels assigned to the deal",
                               "items": {
+                                "format": "int64",
                                 "type": "integer"
                               },
                               "type": "array",
@@ -1759,6 +1819,7 @@
                             },
                             "org_id": {
                               "description": "The ID of the organization linked to the deal",
+                              "format": "int64",
                               "nullable": true,
                               "type": "integer",
                               "x-runtara-label": "Organization"
@@ -1776,17 +1837,20 @@
                             },
                             "owner_id": {
                               "description": "The ID of the user who owns the deal",
+                              "format": "int64",
                               "type": "integer",
                               "x-runtara-label": "Owner ID"
                             },
                             "person_id": {
                               "description": "The ID of the person linked to the deal",
+                              "format": "int64",
                               "nullable": true,
                               "type": "integer",
                               "x-runtara-label": "Person ID"
                             },
                             "pipeline_id": {
                               "description": "The ID of the pipeline associated with the deal",
+                              "format": "int64",
                               "type": "integer",
                               "x-runtara-label": "Pipeline ID"
                             },
@@ -1811,6 +1875,7 @@
                             },
                             "stage_id": {
                               "description": "The ID of the deal stage",
+                              "format": "int64",
                               "type": "integer",
                               "x-runtara-label": "Stage ID"
                             },
@@ -1837,6 +1902,7 @@
                             },
                             "visible_to": {
                               "description": "The visibility of the deal",
+                              "format": "int64",
                               "type": "integer",
                               "x-runtara-label": "Visible To"
                             },
@@ -1878,6 +1944,7 @@
           "Deals"
         ],
         "x-runtara-side-effects": true,
+        "x-runtara-summary": "Update a deal",
         "x-token-cost": 5,
         "x-tool-description": "Modifies deal properties using PATCH semantics for partial updates without affecting unchanged fields. Essential for deal progression, value updates, stage changes, and workflow automation. Preserves data integrity by updating only provided fields."
       }

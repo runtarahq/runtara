@@ -1528,18 +1528,18 @@ fn parse_str_list(spec: Option<&str>) -> proc_macro2::TokenStream {
     quote! { &[ #(#items),* ] }
 }
 
-/// Unwrap Option<T> to get T and whether it's optional
+/// Unwrap Option<T> to get T and whether it's optional. Nested options
+/// (`Option<Option<T>>`, which tells an absent field from an explicit null)
+/// unwrap to `T` as well.
 fn unwrap_option_type(type_str: &str) -> (String, bool) {
-    if type_str.starts_with("Option<") && type_str.ends_with('>') {
-        let inner = type_str
-            .strip_prefix("Option<")
-            .unwrap()
-            .strip_suffix('>')
-            .unwrap();
-        (inner.to_string(), true)
-    } else {
-        (type_str.to_string(), false)
+    let mut inner = type_str;
+    while let Some(next) = inner
+        .strip_prefix("Option<")
+        .and_then(|s| s.strip_suffix('>'))
+    {
+        inner = next;
     }
+    (inner.to_string(), inner.len() != type_str.len())
 }
 
 /// Check if a field has `#[serde(default)]` or `#[serde(default = "...")]` attribute
@@ -2118,6 +2118,13 @@ mod tests {
     fn test_unwrap_option_type_complex_inner() {
         let (inner, is_optional) = unwrap_option_type("Option<Vec<String>>");
         assert_eq!(inner, "Vec<String>");
+        assert!(is_optional);
+    }
+
+    #[test]
+    fn test_unwrap_option_type_nested_option() {
+        let (inner, is_optional) = unwrap_option_type("Option<Option<i32>>");
+        assert_eq!(inner, "i32");
         assert!(is_optional);
     }
 

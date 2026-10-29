@@ -101,9 +101,24 @@ pub fn require_connection<'a>(
     })
 }
 
-/// Percent-encodes one path segment.
+/// `deserialize_with` for a nullable optional input: an explicit `null`
+/// becomes `Some(None)` instead of collapsing into an absent field (`None`),
+/// so a step can clear a nullable vendor field rather than leave it unchanged.
+pub fn nullable<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+/// Percent-encodes one path segment. `.` and `..` are encoded too: left as is,
+/// URL resolution would turn them into "this" or "the parent" resource.
 pub fn encode_path<T: ToString>(value: &T) -> String {
     let raw = value.to_string();
+    if raw == "." || raw == ".." {
+        return raw.replace('.', "%2E");
+    }
     let mut out = String::with_capacity(raw.len());
     for byte in raw.bytes() {
         match byte {
@@ -206,6 +221,25 @@ impl Request {
         }
     }
 
+    pub fn method(&self) -> &str {
+        self.method
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn query_pairs(&self) -> &[(String, String)] {
+        &self.query
+    }
+
+    /// The JSON body, if one is set.
+    pub fn body_json(&self) -> Option<Value> {
+        self.body
+            .as_ref()
+            .and_then(|bytes| serde_json::from_slice(bytes).ok())
+    }
+
     pub fn query<T: ParamValue>(mut self, name: &str, value: &T) -> Self {
         self.query.push((name.to_string(), value.to_param()));
         self
@@ -214,6 +248,21 @@ impl Request {
     pub fn query_opt<T: ParamValue>(self, name: &str, value: &Option<T>) -> Self {
         match value {
             Some(value) => self.query(name, value),
+            None => self,
+        }
+    }
+
+    /// An exploded array parameter: one `name=value` pair per item.
+    pub fn query_each<T: ParamValue>(mut self, name: &str, values: &[T]) -> Self {
+        for value in values {
+            self.query.push((name.to_string(), value.to_param()));
+        }
+        self
+    }
+
+    pub fn query_each_opt<T: ParamValue>(self, name: &str, values: &Option<Vec<T>>) -> Self {
+        match values {
+            Some(values) => self.query_each(name, values),
             None => self,
         }
     }
@@ -255,8 +304,7 @@ impl Request {
         self.json(&value, prefix)
     }
 
-    /// Sends the request through the connection and decodes a 2xx JSON body.
-    /// 429 and 5xx are transient, every other non-2xx is permanent.
+    /// Sends the request through the connection and [`decode`]s the response.
     pub async fn send<T: DeserializeOwned>(
         self,
         connection: &RawConnection,
@@ -285,40 +333,81 @@ impl Request {
             )
         })?;
 
-        let status = response.status;
-        if !(200..300).contains(&status) {
-            let body: String = String::from_utf8_lossy(&response.body)
-                .chars()
-                .take(ERROR_BODY_LIMIT)
-                .collect();
-            let message = format!("{prefix} HTTP {status} at {}: {body}", self.path);
-            let err = match status {
-                429 => AgentError::transient(format!("{prefix}_RATE_LIMITED"), message)
-                    .with_retry_after_ms(retry_after_ms(&response.headers)),
-                500..=599 => AgentError::transient(format!("{prefix}_UPSTREAM_ERROR"), message),
-                401 | 403 => AgentError::permanent(format!("{prefix}_UNAUTHORIZED"), message),
-                _ => AgentError::permanent(format!("{prefix}_REQUEST_FAILED"), message),
-            };
-            return Err(err
-                .with_attr("status_code", status.to_string())
-                .with_attr("path", self.path.clone()));
-        }
-
-        serde_json::from_slice(&response.body).map_err(|e| {
-            AgentError::permanent(
-                format!("{prefix}_INVALID_RESPONSE"),
-                format!("{prefix} {} {}: {e}", self.method, self.path),
-            )
-        })
+        decode(&response, self.method, &self.path, prefix)
     }
 }
 
-/// `Retry-After` in whole seconds; HTTP-date values are left to the host's
-/// default backoff.
-fn retry_after_ms(headers: &HashMap<String, String>) -> Option<u64> {
+/// Turns a response into the capability's output.
+///
+/// - A non-2xx status is an error: 429 and 5xx are transient, the rest permanent.
+/// - An empty 2xx body (e.g. 204) decodes as JSON `null`, so an operation
+///   without a response body returns `Value::Null`.
+/// - A 2xx body that is not JSON (text, binary) decodes as a JSON string of its
+///   text, which suits operations whose output is `Value`.
+pub fn decode<T: DeserializeOwned>(
+    response: &runtara_http::HttpResponse,
+    method: &str,
+    path: &str,
+    prefix: &str,
+) -> Result<T, AgentError> {
+    let status = response.status;
+    if !(200..300).contains(&status) {
+        let body: String = String::from_utf8_lossy(&response.body)
+            .chars()
+            .take(ERROR_BODY_LIMIT)
+            .collect();
+        let message = format!("{prefix} HTTP {status} at {path}: {body}");
+        let err = match status {
+            429 => AgentError::transient(format!("{prefix}_RATE_LIMITED"), message)
+                .with_retry_after_ms(retry_after_ms(&response.headers)),
+            500..=599 => AgentError::transient(format!("{prefix}_UPSTREAM_ERROR"), message),
+            401 | 403 => AgentError::permanent(format!("{prefix}_UNAUTHORIZED"), message),
+            _ => AgentError::permanent(format!("{prefix}_REQUEST_FAILED"), message),
+        };
+        return Err(err
+            .with_attr("status_code", status.to_string())
+            .with_attr("path", path));
+    }
+
+    let invalid = |e: serde_json::Error| {
+        AgentError::permanent(
+            format!("{prefix}_INVALID_RESPONSE"),
+            format!("{prefix} {method} {path}: {e}"),
+        )
+    };
+    let text = String::from_utf8_lossy(&response.body);
+    if text.trim().is_empty() {
+        return serde_json::from_value(Value::Null).map_err(invalid);
+    }
+    match serde_json::from_slice(&response.body) {
+        Ok(value) => Ok(value),
+        Err(e) if !is_json(&response.headers) => {
+            serde_json::from_value(Value::String(text.into_owned())).map_err(|_| invalid(e))
+        }
+        Err(e) => Err(invalid(e)),
+    }
+}
+
+fn header<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
     headers
         .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-        .and_then(|(_, value)| value.trim().parse::<u64>().ok())
-        .map(|seconds| seconds * 1000)
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.trim())
+}
+
+fn is_json(headers: &HashMap<String, String>) -> bool {
+    header(headers, "content-type").is_none_or(|value| value.contains("json"))
+}
+
+/// The host's `retry-after-ms` (set by its rate limiter) when present,
+/// otherwise `Retry-After` in whole seconds; HTTP-date values are left to the
+/// host's default backoff.
+fn retry_after_ms(headers: &HashMap<String, String>) -> Option<u64> {
+    header(headers, "retry-after-ms")
+        .and_then(|value| value.parse::<u64>().ok())
+        .or_else(|| {
+            header(headers, "retry-after")
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|seconds| seconds * 1000)
+        })
 }

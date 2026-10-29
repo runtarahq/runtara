@@ -12,7 +12,10 @@ Written for people and coding assistants alike; the rules in
 | No usable spec, or behaviour the spec cannot express | Write the agent by hand; `crates/agents/runtara-agent-stripe` is the reference |
 | A plain HTTP API nobody needs typed capabilities for | Add only a [connection type](#connection-type); the generic `http` agent can then call the service with it |
 
-Swagger 2.0 specs are not supported by the generator yet.
+The generator does not support Swagger 2.0 specs yet, and `fetch` refuses
+operations it cannot send correctly: form-encoded or multipart request bodies,
+object (`deepObject`) query parameters, and required cookie parameters. Such an
+operation needs a hand-written capability, or the generic `http` agent.
 
 ## For coding assistants
 

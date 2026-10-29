@@ -182,6 +182,7 @@ jobs:
       - name: Check generated agents
         run: |
           pip install -r scripts/connector_gen/requirements.txt
+          python scripts/connector_gen/test_connector_gen.py
           python scripts/connector_gen/connector_gen.py check $(dirname crates/agents/*/connector.yaml)
 
       # The *-integration-tests features are empty markers that gate [[test]]

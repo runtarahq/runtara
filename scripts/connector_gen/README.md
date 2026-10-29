@@ -132,7 +132,8 @@ persons:
 
 Run `fetch` and `generate` again and review `git diff`: new capabilities
 `get-persons`, `get-person`, `add-person`, `update-person`. Capabilities are
-ordered by operationId, whatever the order of the list.
+grouped by the operation's (first) tag, then ordered by operationId, whatever
+the order of the list.
 
 **The vendor changed the spec.** `fetch` stops with
 `… changed: sha256 is <new>, connector.yaml pins <old>`. Put the new hash in
@@ -140,14 +141,26 @@ ordered by operationId, whatever the order of the list.
 `spec.slice.json` and `src/generated.rs`: it is exactly the vendor's change to
 the operations you use.
 
-**Before committing**, confirm the generated file is current and was not
-edited by hand:
+**Before committing**, confirm everything derived from the spec is current:
 
 ```bash
 scripts/connector_gen/.venv/bin/python scripts/connector_gen/connector_gen.py check crates/agents/runtara-agent-pipedrive
 ```
 
-`check` takes several crates at once and prints the diff when a file is stale.
+`check` takes several crates at once and fails when `src/generated.rs` is stale
+or edited by hand (printing the diff), when `tests/fixtures` no longer match the
+examples in `spec.slice.json`, or when `connector.yaml`'s operations or labels
+are not in `spec.slice.json` (edited without running `fetch`). It does not
+download the spec, so a hand edit to `spec.slice.json` itself shows only in the
+diff under review; `fetch` re-derives it.
+
+**A schema name collides with the generated code** (`Value`, `Result`, or
+`<OperationId>Input`): `fetch` stops and asks for a rename in `connector.yaml`:
+
+```yaml
+model_names:
+  Value: Amount
+```
 
 ## A generated agent crate
 
@@ -169,9 +182,26 @@ crates/agents/runtara-agent-<id>/
   so is every writable field of an object request body: the step takes `title`,
   `value`, … rather than one JSON `body` (that is what the generic HTTP agent is
   for). The function rebuilds the body from those fields. A body that is not an
-  object stays a single `body` input. Enum inputs keep their wire type and list
-  the allowed values in their description. Non-GET operations are marked
+  object stays a single `body` input. Non-GET operations are marked
   `side_effects`.
+- An exploded array query parameter (the OpenAPI default) is sent as
+  `ids=1&ids=2`; with `explode: false` it is sent as `ids=1,2`. Optional cookie
+  parameters are dropped by `fetch`.
+- An optional body field the spec marks `nullable` is an `Option<Option<T>>`
+  (deserialized with `kit::nullable`): omitted is not sent, an explicit `null`
+  is sent as `null` (to clear the vendor's value), and a value is sent as is.
+- `<OperationId>Input::request()` builds the exact request without sending it,
+  so tests can check the method, path, query and body; the capability function
+  only adds the connection.
+- The capability returns the full response type: `Vec<T>` for an array,
+  `HashMap<String, T>` for a map, the primitive or model otherwise, and `Value`
+  when the operation declares no JSON response. At runtime an empty success
+  body (e.g. 204) decodes as `null`, and a non-JSON one as its text.
+- Enums keep their wire type (`String`, `i64`) in inputs and outputs, so a value
+  the spec does not list passes through unchanged; the allowed values are listed
+  in the field's description. A `$ref` to an enum schema is inlined by `fetch`.
+- `integer` without a `format` is generated as `i64` (`fetch` adds
+  `format: int64`), so large ids and amounts fit.
 - Every input and output field gets a label for the step editor, chosen by
   `fetch` in this order: the `labels:` override in `connector.yaml`; the
   vendor's `title` when it is a phrase (one-word titles name models); the field
@@ -179,21 +209,27 @@ crates/agents/runtara-agent-<id>/
   such as ID, URL, HTML, VAT kept upper-case). A field that is a bare `$ref`
   keeps its raw name unless overridden, because OpenAPI 3.0 ignores keys next to
   a `$ref`. Scalar `example`s become the field's placeholder and scalar
-  `default`s its default value (inputs only).
+  `default`s the default value of optional inputs. Descriptions, summaries and
+  the agent's name are printed as written; an operation without a summary is
+  named after its operationId.
 - Each schema becomes a `CapabilityOutput` struct. Every field is an `Option`,
-  string enums get an `__Unknown` fallback, and a flattened `__extra` map keeps
-  fields the vendor returns but does not declare.
+  and a flattened `__extra` map (hidden from the metadata) keeps fields the
+  vendor returns but does not declare.
 - Type names are written bare (no `models::` prefix) so the output macro can
   resolve nested types; the `pascalcase` lambda turns raw inline schema names
   into the generated struct names.
 - `fetch` marks operations with `x-runtara-*` vendor extensions (side effects,
-  which capability carries the agent's module attributes) because the templates
-  cannot compute them.
-- `oneOf` schemas are kept as raw JSON.
+  summaries, which capability carries the agent's module attributes) because
+  the templates cannot compute them. An operation with several tags keeps its
+  first, so it is rendered once.
+- `oneOf` and `anyOf` schemas are kept as raw JSON (`Value`).
 
 ## Limits
 
 - OpenAPI 3 only; convert Swagger 2.0 specs first.
+- `fetch` refuses, naming the operation, what the templates cannot send yet:
+  request bodies that are not JSON (form-encoded, multipart), object
+  (`deepObject`) query parameters, and required cookie parameters.
 - Hand-written extra capabilities cannot be added to a generated agent yet.
 - A request-body field named like a path or query parameter of the same
   operation produces a compile error.
