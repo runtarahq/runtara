@@ -1304,7 +1304,16 @@ impl Persistence for PostgresPersistence {
         limit: i64,
         retry_at: DateTime<Utc>,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
-        Self::op_claim_sleeping_instances_due(&self.pool, limit, retry_at).await
+        Self::op_claim_sleeping_instances_due(&self.pool, limit, retry_at, None).await
+    }
+
+    async fn claim_sleeping_instances_due_of(
+        &self,
+        limit: i64,
+        retry_at: DateTime<Utc>,
+        tenants: Option<&[String]>,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
+        Self::op_claim_sleeping_instances_due(&self.pool, limit, retry_at, tenants).await
     }
 
     async fn list_events(

@@ -174,10 +174,13 @@ macro_rules! impl_sleep_ops {
             /// A successful launch leaves `suspended` behind, so the lease
             /// never fires for a run that actually started; the scan only
             /// considers suspended rows.
+            ///
+            /// With `tenants`, only those tenants' instances are claimed.
             pub(crate) async fn op_claim_sleeping_instances_due(
                 pool: &$Pool,
                 limit: i64,
                 retry_at: ::chrono::DateTime<::chrono::Utc>,
+                tenants: ::core::option::Option<&[::std::string::String]>,
             ) -> ::core::result::Result<
                 ::std::vec::Vec<::runtara_core::persistence::InstanceRecord>,
                 ::runtara_core::error::CoreError,
@@ -190,6 +193,7 @@ macro_rules! impl_sleep_ops {
                 let lhs = <$Dialect>::normalize_timestamp("sleep_until");
                 let rhs = <$Dialect>::normalize_timestamp(now);
                 let p2 = <$Dialect>::placeholder(2);
+                let p3 = <$Dialect>::placeholder(3);
                 let sql = format!(
                     "UPDATE instances SET sleep_until = {p2} \
                      WHERE instance_id IN ( \
@@ -197,6 +201,7 @@ macro_rules! impl_sleep_ops {
                          WHERE sleep_until IS NOT NULL \
                            AND {lhs} <= {rhs} \
                            AND status = 'suspended' \
+                           AND ({p3}::text[] IS NULL OR tenant_id = ANY({p3})) \
                          ORDER BY sleep_until ASC \
                          LIMIT {p1} \
                          FOR UPDATE SKIP LOCKED \
@@ -209,6 +214,7 @@ macro_rules! impl_sleep_ops {
                 let records = ::sqlx::query_as::<_, crate::rows::InstanceRow>(&sql)
                     .bind(limit)
                     .bind(retry_at)
+                    .bind(tenants.map(<[::std::string::String]>::to_vec))
                     .fetch_all(&mut *tx)
                     .await.db()?;
                 // Root locks from the claim precede park locks. An acceptance

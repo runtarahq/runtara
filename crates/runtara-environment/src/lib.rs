@@ -240,6 +240,9 @@ pub mod step_vocabulary;
 /// Durable sleep wake scheduling.
 pub mod wake_scheduler;
 
+/// Whose work this process claims.
+pub mod claim_scope;
+
 /// Pure configuration parsing shared by environment and server callers.
 pub mod config;
 

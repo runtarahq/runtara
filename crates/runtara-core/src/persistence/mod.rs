@@ -1685,6 +1685,26 @@ pub trait Persistence: Send + Sync {
         retry_at: DateTime<Utc>,
     ) -> Result<Vec<InstanceRecord>, CoreError>;
 
+    /// [`Self::claim_sleeping_instances_due`], of `tenants`' instances only
+    /// when given: a process serving some tenants of a store that others
+    /// share never wakes another's runs, which it has neither the keys nor
+    /// the routing for. A backend that cannot filter refuses a list rather
+    /// than claim every tenant's.
+    async fn claim_sleeping_instances_due_of(
+        &self,
+        limit: i64,
+        retry_at: DateTime<Utc>,
+        tenants: Option<&[String]>,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
+        match tenants {
+            None => self.claim_sleeping_instances_due(limit, retry_at).await,
+            Some(_) => Err(CoreError::PersistenceError {
+                operation: "claim_sleeping_instances_due_of".into(),
+                details: "this store cannot claim by tenant".into(),
+            }),
+        }
+    }
+
     /// List events for an instance with filtering and pagination.
     ///
     /// Events are returned in reverse chronological order (newest first).

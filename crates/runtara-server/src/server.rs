@@ -1035,6 +1035,18 @@ pub async fn start_with(
     runtara_environment::wake_scheduler::set_wake_gate(Arc::new(
         crate::tenant_status::TenantWakeGate,
     ));
+    // RUNTARA_CLAIM_ONLY_SERVED_TENANTS: wake and launch only the served
+    // tenants' runs, where processes serving other tenants share the store.
+    if std::env::var("RUNTARA_CLAIM_ONLY_SERVED_TENANTS").is_ok_and(|raw| {
+        matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    }) {
+        runtara_environment::claim_scope::set_claim_tenants(
+            crate::config::served_tenants().to_vec(),
+        );
+    }
     // Runs' calls that start external work wait for their tenant's tokens.
     runtara_component_host::api_launches::set_default_call_limiter(Arc::new(
         crate::tenant_quota::WorkflowCallLimiter,

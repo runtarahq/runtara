@@ -2674,3 +2674,52 @@ async fn promotion_refuses_an_active_root_lease_and_rolls_back() {
     );
     context.cleanup_tenant(&fixture.tenant_id).await;
 }
+
+/// A preparation claim scoped to some tenants takes only their launches, so a
+/// process serving those tenants of a shared store never launches another's.
+#[tokio::test]
+async fn a_claim_scoped_to_tenants_takes_only_their_launches() {
+    let context = TestContext::new().await.expect("test database must start");
+    let (mine, theirs) = (fixture(&context).await, fixture(&context).await);
+    let repository = LaunchRepository::new(context.pool.clone());
+    for fixture in [&mine, &theirs] {
+        repository
+            .enqueue(request(
+                fixture,
+                Uuid::new_v4().to_string(),
+                LaunchKind::Start,
+                Duration::from_secs(60),
+            ))
+            .await
+            .expect("launch must enqueue");
+    }
+    let claim = |tenant: &str| {
+        let tenants = vec![tenant.to_owned()];
+        let repository = &repository;
+        async move {
+            repository
+                .claim_ready_for_preparation_of(
+                    "scoped-owner",
+                    Duration::from_secs(60),
+                    10,
+                    Some(&tenants),
+                )
+                .await
+                .expect("scoped preparation claim must succeed")
+        }
+    };
+
+    assert!(claim("launch-queue-nobody").await.is_empty());
+    let claimed = claim(&mine.tenant_id).await;
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].instance_id, mine.instance_id);
+    let claimed = claim(&theirs.tenant_id).await;
+    assert_eq!(
+        claimed.len(),
+        1,
+        "the other tenant's launch was left for it"
+    );
+    assert_eq!(claimed[0].instance_id, theirs.instance_id);
+
+    context.cleanup().await;
+}

@@ -1221,6 +1221,20 @@ impl LaunchRepository {
         lease_for: Duration,
         limit: usize,
     ) -> Result<Vec<Launch>, LaunchQueueError> {
+        self.claim_ready_for_preparation_of(lease_owner, lease_for, limit, None)
+            .await
+    }
+
+    /// [`Self::claim_ready_for_preparation`], of `tenants`' launches only when
+    /// given: a process serving some tenants of a store that others share
+    /// never launches another's runs.
+    pub async fn claim_ready_for_preparation_of(
+        &self,
+        lease_owner: &str,
+        lease_for: Duration,
+        limit: usize,
+        tenants: Option<&[String]>,
+    ) -> Result<Vec<Launch>, LaunchQueueError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -1237,6 +1251,7 @@ impl LaunchRepository {
                 WHERE state = 'queued'
                   AND available_at <= NOW()
                   AND deadline_at > NOW()
+                  AND ($4::text[] IS NULL OR tenant_id = ANY($4))
                 ORDER BY available_at, created_at, launch_id
                 FOR UPDATE SKIP LOCKED
                 LIMIT $3
@@ -1257,6 +1272,7 @@ impl LaunchRepository {
                 .bind(lease_owner)
                 .bind(lease_us)
                 .bind(limit)
+                .bind(tenants.map(<[String]>::to_vec))
                 .fetch_all(&self.pool)
                 .await?,
             "prepare",

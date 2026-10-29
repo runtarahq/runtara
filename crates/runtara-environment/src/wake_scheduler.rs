@@ -378,11 +378,12 @@ impl WakeScheduler {
         // Every record returned is already owned by this caller.
         let sleeping_instances = self
             .persistence
-            .claim_sleeping_instances_due(
+            .claim_sleeping_instances_due_of(
                 self.config.batch_size,
                 chrono::Utc::now()
                     + chrono::Duration::from_std(self.config.claim_lease)
                         .unwrap_or_else(|_| chrono::Duration::seconds(300)),
+                crate::claim_scope::claim_tenants(),
             )
             .await
             .map_err(|e| crate::error::Error::Other(format!("Core persistence error: {}", e)))?;

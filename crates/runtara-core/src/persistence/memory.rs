@@ -1650,6 +1650,16 @@ impl Persistence for InMemoryPersistence {
         limit: i64,
         retry_at: DateTime<Utc>,
     ) -> Result<Vec<InstanceRecord>, CoreError> {
+        self.claim_sleeping_instances_due_of(limit, retry_at, None)
+            .await
+    }
+
+    async fn claim_sleeping_instances_due_of(
+        &self,
+        limit: i64,
+        retry_at: DateTime<Utc>,
+        tenants: Option<&[String]>,
+    ) -> Result<Vec<InstanceRecord>, CoreError> {
         let now = Utc::now();
         let mut store = self.store.lock().unwrap();
 
@@ -1660,6 +1670,7 @@ impl Persistence for InMemoryPersistence {
             .values()
             .filter(|i| i.status == CoreInstanceStatus::Suspended)
             .filter(|i| i.sleep_until.is_some_and(|t| t <= now))
+            .filter(|i| tenants.is_none_or(|tenants| tenants.contains(&i.tenant_id)))
             .map(|i| (i.instance_id.clone(), i.sleep_until))
             .collect();
         candidates.sort_by_key(|(_, sleep_until)| *sleep_until);
@@ -2127,6 +2138,13 @@ mod tests {
     async fn in_memory_backend_claims_a_sleeping_instance_atomically() {
         let backend = std::sync::Arc::new(InMemoryPersistence::new());
         crate::persistence::conformance::run_concurrent_claim_sequence(backend).await;
+    }
+
+    /// A claim scoped to a tenant takes only that tenant's due instances.
+    #[tokio::test]
+    async fn in_memory_claims_by_tenant() {
+        let backend = InMemoryPersistence::new();
+        crate::persistence::conformance::run_claim_by_tenant_sequence(&backend).await;
     }
 
     /// A batch claim must never expose a row without a wake deadline.

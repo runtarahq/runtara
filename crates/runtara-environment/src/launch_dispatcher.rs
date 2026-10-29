@@ -471,10 +471,11 @@ impl LaunchDispatcher {
             .min(local_capacity)
             .min(runner_capacity);
         let launches = repository
-            .claim_ready_for_preparation(
+            .claim_ready_for_preparation_of(
                 &self.owner,
                 self.config.preparation_lease_duration,
                 claim_limit,
+                crate::claim_scope::claim_tenants(),
             )
             .await?;
         let claimed = launches.len();
