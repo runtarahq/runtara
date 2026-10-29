@@ -962,9 +962,16 @@ pub fn install_entitlement_source(source: Arc<dyn EntitlementSource>) {
 /// `tenant`'s entitlements: from the installed source, else the environment
 /// (its `RUNTARA_TENANT_ENTITLEMENTS_JSON` entry, else the primary's).
 pub fn entitlements_for(tenant: &str) -> Arc<EntitlementSnapshot> {
-    if let Some(source) = ENTITLEMENT_SOURCE.get() {
-        return source.entitlements(tenant);
+    match ENTITLEMENT_SOURCE.get() {
+        Some(source) => source.entitlements(tenant),
+        None => environment_entitlements_for(tenant),
     }
+}
+
+/// `tenant`'s entitlements as the environment gives them: its
+/// `RUNTARA_TENANT_ENTITLEMENTS_JSON` entry, else the primary's. What an
+/// installed source may fall back to.
+pub fn environment_entitlements_for(tenant: &str) -> Arc<EntitlementSnapshot> {
     let config = get();
     let snapshot = config
         .tenant_entitlements
@@ -1006,20 +1013,43 @@ fn tenant_entitlements_from_raw(
                 format!("{tenant} is not a served tenant"),
             ));
         }
-        let field = |name: &str| entry.get(name).filter(|value| !value.is_null());
-        let tier = field("pricingTier").and_then(serde_json::Value::as_str);
-        let entitlements = field("entitlements").map(serde_json::Value::to_string);
-        let overrides = field("overrides").map(serde_json::Value::to_string);
-        let snapshot = EntitlementSnapshot::parse_entitlements(
-            &tenant,
-            tier,
-            entitlements.as_deref(),
-            overrides.as_deref(),
-            registered_agents,
-        )?;
+        let snapshot = tenant_entry(&tenant, &entry, registered_agents)?;
         snapshots.insert(tenant, Arc::new(snapshot));
     }
     Ok(snapshots)
+}
+
+/// One tenant's `{"pricingTier", "entitlements", "overrides"}` entry.
+fn tenant_entry(
+    tenant: &str,
+    entry: &serde_json::Value,
+    registered_agents: &BTreeSet<String>,
+) -> Result<EntitlementSnapshot, ConfigError> {
+    let field = |name: &str| entry.get(name).filter(|value| !value.is_null());
+    let tier = field("pricingTier").and_then(serde_json::Value::as_str);
+    let entitlements = field("entitlements").map(serde_json::Value::to_string);
+    let overrides = field("overrides").map(serde_json::Value::to_string);
+    EntitlementSnapshot::parse_entitlements(
+        tenant,
+        tier,
+        entitlements.as_deref(),
+        overrides.as_deref(),
+        registered_agents,
+    )
+}
+
+/// `tenant`'s entitlements from an entry shaped as in
+/// `RUNTARA_TENANT_ENTITLEMENTS_JSON`, against this process's agents: how an
+/// [`EntitlementSource`] turns a record it was given into a snapshot.
+pub fn entitlements_from_entry(
+    tenant: &str,
+    entry: &serde_json::Value,
+) -> Result<EntitlementSnapshot, ConfigError> {
+    tenant_entry(
+        tenant,
+        entry,
+        get().entitlement_snapshot.registered_agents(),
+    )
 }
 
 /// Whether source admission counting uses Valkey instead of the
@@ -1175,6 +1205,22 @@ mod tests {
             tenant_entitlements_from_raw(Some(r#"{"c": {}}"#), &served, &agents).is_err(),
             "only served tenants"
         );
+    }
+
+    #[test]
+    fn a_source_parses_a_tenants_entry_against_this_processs_agents() {
+        init_for_test();
+        let entry = serde_json::json!({"overrides": {"limits": {"maxWorkflows": 1}}});
+        let snapshot = entitlements_from_entry("t2", &entry).unwrap();
+        assert_eq!(snapshot.tenant_id, "t2");
+        assert_eq!(snapshot.limits.max_workflows, Some(1));
+        let invalid = [
+            serde_json::json!({"pricingTier": "gold"}),
+            serde_json::json!({"overrides": {"limits": {"x": 1}}}),
+        ];
+        for entry in invalid {
+            assert!(entitlements_from_entry("t2", &entry).is_err(), "{entry}");
+        }
     }
 
     #[test]

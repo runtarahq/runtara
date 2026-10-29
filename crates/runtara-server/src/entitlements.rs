@@ -178,6 +178,11 @@ impl EntitlementSnapshot {
         &self.features
     }
 
+    /// The agent modules this snapshot was checked against.
+    pub(crate) fn registered_agents(&self) -> &BTreeSet<String> {
+        &self.registered_agents
+    }
+
     /// Wire-shape agent allowlist: `enabled_agents` collapsed against the
     /// registered dispatcher modules. `None` ("all known") materialises to
     /// the full registered set so the frontend never sees an implicit-all
