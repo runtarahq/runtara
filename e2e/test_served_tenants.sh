@@ -170,6 +170,7 @@ start_server() {
     DATA_DIR="${TEST_DATA_DIR}" \
     RUST_LOG="warn,runtara_server=info" \
     AUTH_PROVIDER=local \
+    RUNTARA_CONNECTION_ALLOW_HTTP_HOSTS=127.0.0.1 \
     VALKEY_HOST=127.0.0.1 \
     VALKEY_PORT="${TEST_VALKEY_PORT}" \
     OTEL_SDK_DISABLED=true \
@@ -356,9 +357,15 @@ curl -sS "${CALLBACK}/${SECOND_TENANT}/callback?state=${STATE}&code=c1" | grep -
 # A failed callback names no tenant it could prove: its event is not filed
 # under the tenant in its path.
 curl -sS -o /dev/null "${CALLBACK}/not-a-served-tenant/callback?error=access_denied"
+# Inside the suite's Valkey container: on its published port's own 6379, or,
+# where docker runs it on the host network, on the suite's port.
+valkey_cli() {
+    docker exec "${VALKEY_CONTAINER}" valkey-cli -p "${TEST_VALKEY_PORT}" --raw "$@" 2>/dev/null \
+        || docker exec "${VALKEY_CONTAINER}" valkey-cli --raw "$@"
+}
 EVENT_TENANT=""
 for _ in {1..10}; do
-    EVENT_TENANT=$(docker exec "${VALKEY_CONTAINER}" valkey-cli --raw XRANGE runtara:product_events:stream - + \
+    EVENT_TENANT=$(valkey_cli XRANGE runtara:product_events:stream - + \
         | grep '^{' | jq -r --arg c "${B_CONN}" 'select(.event_type == "connection.created" and .resource_id == $c) | .tenant_id' | head -1)
     [ -n "${EVENT_TENANT}" ] && break
     sleep 1
@@ -367,7 +374,7 @@ done
     || { print_error "the second tenant's connection.created event names '${EVENT_TENANT}'"; exit 1; }
 FAILED_TENANT=""
 for _ in {1..10}; do
-    FAILED_TENANT=$(docker exec "${VALKEY_CONTAINER}" valkey-cli --raw XRANGE runtara:product_events:stream - + \
+    FAILED_TENANT=$(valkey_cli XRANGE runtara:product_events:stream - + \
         | grep '^{' | jq -r 'select(.event_type == "connection.oauth_failed" and (.properties.reason | startswith("access_denied"))) | .tenant_id' | head -1)
     [ -n "${FAILED_TENANT}" ] && break
     sleep 1
@@ -395,7 +402,6 @@ MCP_SESSION=$(grep -i '^mcp-session-id:' "${MCP_HEADERS}" | head -1 | cut -d' ' 
 [ "${CODE}" = "200" ] && [ -n "${MCP_SESSION}" ] \
     || { print_error "the second tenant's MCP initialize answered ${CODE}: $(head -c 300 "${TEST_DATA_DIR}/mcp_body")"; exit 1; }
 mcp_status '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
-valkey_cli() { docker exec "${VALKEY_CONTAINER}" valkey-cli --raw "$@"; }
 [ "$(valkey_cli EXISTS "runtara:mcp:sessions:${SECOND_TENANT}:${MCP_SESSION}")" = "1" ] \
     || { print_error "the session is not kept under the second tenant"; exit 1; }
 [ "$(valkey_cli EXISTS "runtara:mcp:sessions:${TENANT}:${MCP_SESSION}")" = "0" ] \
