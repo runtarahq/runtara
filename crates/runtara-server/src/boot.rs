@@ -56,6 +56,34 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
         None => {}
     }
 
+    // Copying a tenant in needs neither this process's database nor its
+    // server: only where from (its environment) and where to.
+    match crate::migrate_tenant::parse_args(std::env::args_os()) {
+        Some(Ok(args)) => {
+            dotenvy::dotenv().ok();
+            crate::observability::init_cli_logging();
+            let store = match options.artifacts.clone() {
+                Some(store) => store,
+                None => crate::migrate_tenant::own_artifact_store()?,
+            };
+            match crate::migrate_tenant::run(args, store).await {
+                Ok(report) => {
+                    println!("{report}");
+                    return Ok(());
+                }
+                Err(msg) => {
+                    eprintln!("❌ {msg}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some(Err(msg)) => {
+            eprintln!("{msg}");
+            std::process::exit(2);
+        }
+        None => {}
+    }
+
     let reencrypt = match crate::reencrypt::parse_args(std::env::args_os()) {
         Some(Ok(args)) => Some(args),
         Some(Err(msg)) => {
