@@ -306,6 +306,12 @@ fn inline_script_hashes(html: &str) -> Vec<String> {
 /// (rather than reading the `OnceLock` here) lets tests pass a fixture snapshot
 /// without initialising the global config.
 fn inline_config_script(entitlements: &EntitlementSnapshot) -> String {
+    if tenantless_root() {
+        return format!(
+            "window.__RUNTARA_CONFIG__={};",
+            runtime_config_json_for(None, None)
+        );
+    }
     inline_config_script_for(entitlements, crate::config::try_tenant_id())
 }
 
@@ -313,8 +319,22 @@ fn inline_config_script(entitlements: &EntitlementSnapshot) -> String {
 fn inline_config_script_for(entitlements: &EntitlementSnapshot, tenant: Option<&str>) -> String {
     format!(
         "window.__RUNTARA_CONFIG__={};",
-        runtime_config_json_for(entitlements, tenant)
+        runtime_config_json_for(Some(entitlements), tenant)
     )
+}
+
+/// `RUNTARA_UI_TENANTLESS_ROOT`: the SPA at the bare mount names no tenant and
+/// carries no entitlements, so a process in a deployment of many serves the
+/// page a signed-in user without a tenant starts from (picking one, or signing
+/// up) without showing any tenant's id or plan to whoever loads it. Each
+/// served tenant keeps its own copy at `{mount}/{tenant}/`.
+fn tenantless_root() -> bool {
+    std::env::var("RUNTARA_UI_TENANTLESS_ROOT").is_ok_and(|raw| {
+        matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
 }
 
 /// Base64-encoded SHA-256 of an inline script body, the form CSP `script-src`
@@ -570,10 +590,15 @@ fn normalize_plausible_script_src(raw: &str) -> Option<String> {
 /// before any network request completes.
 #[cfg(test)]
 fn runtime_config_json(entitlements: &EntitlementSnapshot) -> String {
-    runtime_config_json_for(entitlements, crate::config::try_tenant_id())
+    runtime_config_json_for(Some(entitlements), crate::config::try_tenant_id())
 }
 
-fn runtime_config_json_for(entitlements: &EntitlementSnapshot, tenant: Option<&str>) -> String {
+/// The SPA's runtime config: for `tenant` with its `entitlements`, or for no
+/// tenant with neither (the SPA then reads them from the API once it has one).
+fn runtime_config_json_for(
+    entitlements: Option<&EntitlementSnapshot>,
+    tenant: Option<&str>,
+) -> String {
     use std::fmt::Write;
 
     let pairs = [
@@ -639,14 +664,16 @@ fn runtime_config_json_for(entitlements: &EntitlementSnapshot, tenant: Option<&s
         // Keys are fixed identifiers, values are untrusted env content — JSON-escape.
         let _ = write!(out, "\"{}\":{}", key, json_string(val));
     }
-    // `version`, `commit`, and `authMode` are pushed unconditionally above, so
-    // `entries` is never empty in practice — but guard the leading comma anyway
-    // to keep the function safe if the unconditional pushes ever change.
-    if !entries.is_empty() {
-        out.push(',');
+    if let Some(entitlements) = entitlements {
+        // `version`, `commit`, and `authMode` are pushed unconditionally above,
+        // so `entries` is never empty in practice — but guard the leading comma
+        // anyway to keep the function safe if the unconditional pushes change.
+        if !entries.is_empty() {
+            out.push(',');
+        }
+        out.push_str("\"entitlements\":");
+        out.push_str(&entitlements_inline_json(entitlements));
     }
-    out.push_str("\"entitlements\":");
-    out.push_str(&entitlements_inline_json(entitlements));
     out.push('}');
     out
 }
@@ -894,6 +921,21 @@ mod tests {
             &registered_agents(),
         )
         .expect("fixture snapshot parses")
+    }
+
+    #[test]
+    fn a_tenantless_config_names_no_tenant_and_carries_no_entitlements() {
+        let snap = fixture_snapshot("tenant-abc", None);
+        let tenantless: serde_json::Value =
+            serde_json::from_str(&runtime_config_json_for(None, None)).unwrap();
+        assert!(tenantless.get("tenantId").is_none());
+        assert!(tenantless.get("entitlements").is_none());
+        assert!(tenantless.get("authMode").is_some());
+        let tenant: serde_json::Value =
+            serde_json::from_str(&runtime_config_json_for(Some(&snap), Some("tenant-abc")))
+                .unwrap();
+        assert_eq!(tenant["tenantId"], "tenant-abc");
+        assert!(tenant.get("entitlements").is_some());
     }
 
     #[test]

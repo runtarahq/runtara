@@ -1,5 +1,6 @@
 import type { ComponentType, ReactNode } from 'react';
 import type { MenuChild, MenuItem } from '@/shared/config';
+import type { MyTenant } from '@/shared/tenant/myTenants';
 
 /** A page an edition adds, mounted in the app layout behind sign-in. */
 export type EditionRoute = {
@@ -29,4 +30,15 @@ export type Edition = {
   settings: MenuChild[];
   /** Sidebar-footer controls, before the theme switcher. */
   footer: ComponentType<{ className?: string }>[];
+  /**
+   * The tenants a signed-in user may open, when they are kept elsewhere than
+   * on this server (a hook: `null` while unknown). By default, this server's
+   * `GET /api/runtime/me/tenants`.
+   */
+  useTenants?: () => MyTenant[] | null;
+  /**
+   * What a signed-in user who belongs to no tenant is offered, in place of
+   * asking a workspace owner for an invitation (signing up, say).
+   */
+  noWorkspace?: ReactNode;
 };

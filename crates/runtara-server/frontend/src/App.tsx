@@ -14,6 +14,11 @@ import { tenantIdFromUrl } from '@/shared/config/oidcConfig';
 import { isOidcAuth } from '@/shared/config/runtimeConfig';
 import { TenantGate } from '@/shared/tenant/TenantGate';
 import { canOpen, useMyTenants } from '@/shared/tenant/myTenants';
+import { edition } from '@edition';
+
+// Where the signed-in user's tenants come from: the edition's, or this
+// server's. Chosen once, so every render calls the same hook.
+const useTenants = edition.useTenants ?? useMyTenants;
 
 function App() {
   const auth = useAutoSignin();
@@ -23,7 +28,7 @@ function App() {
   useUserGroups();
   useMe();
   const isMaintenanceMode = useHealthCheck();
-  const myTenants = useMyTenants();
+  const myTenants = useTenants();
 
   // Global cleanup for pointer-events
   useEffect(() => {

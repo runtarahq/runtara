@@ -3,6 +3,7 @@ import { useAuth } from 'react-oidc-context';
 import logoIcon from '@/assets/logo/runtara-logo-icon.svg';
 import { Button } from '@/shared/components/ui/button';
 import { Loader } from '@/shared/components/loader.tsx';
+import { edition } from '@edition';
 import { mountReturnPath } from '@/shared/config/oidcConfig';
 import {
   chooseTenant,
@@ -85,10 +86,12 @@ export function TenantGate({
           ) : (
             <>
               <h1 className="mb-1 text-lg font-semibold">No workspace</h1>
-              <p className="mb-6 text-sm text-muted-foreground">
-                Your account is not a member of any workspace on this server.
-                Ask a workspace owner to invite you.
-              </p>
+              {edition.noWorkspace ?? (
+                <p className="mb-6 text-sm text-muted-foreground">
+                  Your account is not a member of any workspace on this server.
+                  Ask a workspace owner to invite you.
+                </p>
+              )}
               <Button variant="secondary" onClick={() => signoutRedirect()}>
                 Sign out
               </Button>
