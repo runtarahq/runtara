@@ -841,6 +841,17 @@ pub fn valkey_tenant_scoped() -> bool {
     try_get().is_some_and(|config| config.valkey_tenant_scoped)
 }
 
+/// Whether a tenant is served only while its status record says it is
+/// `ready` (`RUNTARA_AUTH_TENANT_STATUS=required`): a provisioning plane, such
+/// as Runtara Cloud's customer plane, writes `runtara:tenant_status:{tenant}`.
+/// Off by default, where nothing writes it.
+pub fn tenant_status_required() -> bool {
+    static REQUIRED: OnceLock<bool> = OnceLock::new();
+    *REQUIRED.get_or_init(|| {
+        std::env::var("RUNTARA_AUTH_TENANT_STATUS").is_ok_and(|value| value == "required")
+    })
+}
+
 /// The most database pools one tenant's connections may hold open.
 pub fn object_model_tenant_pool_max() -> usize {
     get().object_model_tenant_pool_max

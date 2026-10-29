@@ -1,6 +1,6 @@
 # User-management contracts
 
-**Contract version:** `2` (version 1 keys are still read; see §3.4)
+**Contract version:** `2` (version 1 keys are still read; see §3.5)
 **Status:** authoritative — this document is the single source of truth for the
 cross-service contracts between Auth0, smo-management and runtara. runtara
 *enforces* these contracts; smo-management and the Auth0 Post-Login Action
@@ -184,7 +184,19 @@ control plane consumes it with one consumer group and deduplicates by
 `event_id`. The stream is capped (`XADD MAXLEN ~`,
 `RUNTARA_PRODUCT_EVENTS_STREAM_MAXLEN`).
 
-### 3.4 Version 1 keys
+### 3.4 `runtara:tenant_status:{tenant}` — whether the tenant is served
+
+- **Key:** `runtara:tenant_status:{tenant}`.
+- **Value:** `{"state": "created|provisioning|ready", "updated_at": "..."}`.
+- **Written by** the control plane as the tenant's provisioning moves on, and
+  again by its reconcile, so a lost write is made good.
+- **Read by** runtara on every authenticated request when
+  `RUNTARA_AUTH_TENANT_STATUS=required`, in any auth mode: only `ready` is
+  served. A missing key is not ready; an unreadable one fails closed (§7).
+- It sits outside the `{tenant}:` prefix on purpose: a process confined to its
+  own tenant's keys reads this one but cannot write it.
+
+### 3.5 Version 1 keys
 
 Contract version 1 assumed one Valkey per tenant and used unprefixed keys.
 runtara still reads them during the migration:
@@ -199,7 +211,7 @@ runtara still reads them during the migration:
 Writers should move to the prefixed keys; once none writes version 1 keys,
 set `RUNTARA_AUTH_LEGACY_MEMBER_KEYS=false` everywhere.
 
-### 3.5 runtara's own keys
+### 3.6 runtara's own keys
 
 These are runtara-internal (no other service reads or writes them), listed so a
 shared Valkey can be reasoned about. Each is scoped to its tenant:
@@ -486,7 +498,15 @@ The rows below are marked with the lowest policy at which each takes effect.
 | Unknown/unparseable `role` value | `403 Forbidden` | `MALFORMED_MEMBER_RECORD` | `required` |
 | Valkey unreachable | `503 Service Unavailable`; loud alert | `AUTH_MEMBERSHIP_UNAVAILABLE` | `required` |
 
-Every code above is stable and appears in both the response body and the denial
+With `RUNTARA_AUTH_TENANT_STATUS=required`, checked before membership in any
+auth mode and whatever the membership policy (§3.4):
+
+| Failure | Behavior | Error code |
+|---|---|---|
+| `runtara:tenant_status:{tenant}` missing or not `ready` | `403 Forbidden` | `TENANT_NOT_READY` |
+| The status unparseable, or Valkey unconfigured or unreachable | `503 Service Unavailable` | `TENANT_STATUS_UNAVAILABLE` |
+
+Every code in the first table is stable and appears in both the response body and the denial
 metric. The distinct `AUTH_MEMBERSHIP_UNAVAILABLE` (503) is what lets operators
 tell an infrastructure failure apart from a bad credential.
 

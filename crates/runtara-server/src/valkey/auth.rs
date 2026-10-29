@@ -103,6 +103,35 @@ pub async fn get_member_role(
     }
 }
 
+/// The status record a provisioning plane keeps for `tenant`, outside the
+/// tenant's own key prefix so a process confined to that prefix cannot rewrite
+/// it: `{"state": "ready", ...}`.
+pub fn tenant_status_key(tenant: &str) -> String {
+    format!("runtara:tenant_status:{tenant}")
+}
+
+/// Whether `tenant`'s status record says it is `ready`. No record is not
+/// ready; a record that is not the contract's JSON is an error.
+pub async fn tenant_is_ready(
+    manager: &ConnectionManager,
+    tenant: &str,
+) -> Result<bool, AuthzValkeyError> {
+    let raw: Option<String> = manager.clone().get(tenant_status_key(tenant)).await?;
+    raw.map_or(Ok(false), |raw| status_is_ready(&raw))
+}
+
+/// Whether a tenant status record says `ready`.
+fn status_is_ready(raw: &str) -> Result<bool, AuthzValkeyError> {
+    let record: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|_| AuthzValkeyError::Parse("tenant status is not JSON".into()))?;
+    match record["state"].as_str() {
+        Some(state) => Ok(state == "ready"),
+        None => Err(AuthzValkeyError::Parse(
+            "tenant status names no state".into(),
+        )),
+    }
+}
+
 /// Whether the token identified by `jti` is on `tenant`'s revocation denylist
 /// (`{tenant}:token:revoked:{jti}`, or the version 1 `token:revoked:{jti}`).
 ///
@@ -172,6 +201,25 @@ mod tests {
             "tenant-b:token:revoked:jti-1"
         );
         assert_eq!(legacy_revoked_token_key("jti-1"), "token:revoked:jti-1");
+    }
+
+    #[test]
+    fn only_a_ready_status_is_served() {
+        assert_eq!(tenant_status_key("t1"), "runtara:tenant_status:t1");
+        let status =
+            |state: &str| format!(r#"{{"state":"{state}","updated_at":"2026-10-29T12:00:00Z"}}"#);
+        assert!(status_is_ready(&status("ready")).unwrap());
+        for state in [
+            "created",
+            "provisioning",
+            "suspended",
+            "deleting",
+            "deleted",
+        ] {
+            assert!(!status_is_ready(&status(state)).unwrap(), "{state}");
+        }
+        assert!(status_is_ready("not json").is_err());
+        assert!(status_is_ready(r#"{"updated_at":"x"}"#).is_err());
     }
 
     #[test]

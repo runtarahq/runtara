@@ -10,7 +10,7 @@ use tracing::Instrument;
 use crate::api::handlers::api_keys::ApiKey;
 use crate::auth::{AuthContext, AuthMethod, AuthProviderKind, AuthState, MembershipPolicy};
 use crate::authz::{ApiKeyScope, Role};
-use crate::valkey::auth::{AuthzValkeyError, get_member_role, token_is_revoked};
+use crate::valkey::auth::{AuthzValkeyError, get_member_role, tenant_is_ready, token_is_revoked};
 
 /// Authentication middleware. Defers to the configured `AuthProvider` for everything
 /// except the in-process bypass and the RUNTARA-issued API-key fast path.
@@ -77,6 +77,11 @@ async fn authenticate_with(
                 .into_http_response();
         }
         let mut auth_context = api_key_context(&api_key);
+        if enforce_membership_here
+            && let Err(response) = enforce_tenant_status(&auth_state, &auth_context.org_id).await
+        {
+            return response;
+        }
         // The key inherits the issuing user's current role from Valkey and is
         // subject to the same revocation denylist.
         if enforce_membership_here
@@ -99,6 +104,12 @@ async fn authenticate_with(
         Ok(ctx) => ctx,
         Err(e) => return e.into_http_response(),
     };
+
+    if enforce_membership_here
+        && let Err(response) = enforce_tenant_status(&auth_state, &auth_context.org_id).await
+    {
+        return response;
+    }
 
     // Resolve per-tenant membership + token revocation from Valkey, attaching the
     // caller's role. Governed by `membership_policy`; fails the request closed under
@@ -397,6 +408,44 @@ impl MembershipDenial {
             ),
         }
         crate::observability::record_membership_denial(self.code(), auth_method, enforced);
+    }
+}
+
+/// With `RUNTARA_AUTH_TENANT_STATUS=required`, serves `tenant` only while
+/// its status record says it is `ready`; an unreadable record fails closed.
+async fn enforce_tenant_status(auth_state: &AuthState, tenant: &str) -> Result<(), Response> {
+    if !crate::config::tenant_status_required() {
+        return Ok(());
+    }
+    let refuse = |status: StatusCode, code: &str, message: &str| {
+        (status, Json(json!({ "error": code, "message": message }))).into_response()
+    };
+    let Some(manager) = auth_state.valkey.as_ref() else {
+        tracing::error!(tenant_id = %tenant, "tenant status required but Valkey is not configured");
+        return Err(refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TENANT_STATUS_UNAVAILABLE",
+            "the tenant's status cannot be read",
+        ));
+    };
+    match tenant_is_ready(manager, tenant).await {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            tracing::warn!(tenant_id = %tenant, code = "TENANT_NOT_READY", "tenant is not ready");
+            Err(refuse(
+                StatusCode::FORBIDDEN,
+                "TENANT_NOT_READY",
+                "this tenant is not ready to be served",
+            ))
+        }
+        Err(error) => {
+            tracing::error!(tenant_id = %tenant, detail = %error, "tenant status lookup failed");
+            Err(refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "TENANT_STATUS_UNAVAILABLE",
+                "the tenant's status cannot be read",
+            ))
+        }
     }
 }
 
