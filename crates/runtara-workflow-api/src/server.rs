@@ -68,10 +68,18 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
     /// Shorten the launch deadline to `abort_after_ms` from now. Never extends.
     async fn set_deadline(&self, binding: &Binding, abort_after_ms: u64) -> Result<(), ApiError>;
 
-    /// The artifact whose SHA-256 is `sha256`, for a launch whose work names
-    /// it: a compile's components (M7.15). Others are refused.
-    async fn get_artifact(&self, binding: &Binding, sha256: &str) -> Result<Vec<u8>, ApiError> {
-        let _ = (binding, sha256);
+    /// The bytes `offset`..`offset + length` (to its end, without a length)
+    /// of the artifact whose SHA-256 is `sha256`, and its whole size, for a
+    /// launch whose work names it: a compile's components (M7.15). Others are
+    /// refused.
+    async fn get_artifact(
+        &self,
+        binding: &Binding,
+        sha256: &str,
+        offset: u64,
+        length: Option<u64>,
+    ) -> Result<(Vec<u8>, u64), ApiError> {
+        let _ = (binding, sha256, offset, length);
         Err(unsupported_service("artifacts"))
     }
 
@@ -1243,8 +1251,8 @@ fn checked_sha256(sha256: &str) -> Result<(), ApiError> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Slice {
-    offset: Option<usize>,
-    length: Option<usize>,
+    offset: Option<u64>,
+    length: Option<u64>,
 }
 
 /// An artifact, or the slice `offset`..`offset + length` of it: a guest's
@@ -1258,13 +1266,11 @@ async fn get_artifact(
 ) -> Result<Response, Failure> {
     let binding = binding_of(&request)?;
     checked_sha256(&sha256)?;
-    let bytes = state.backend.get_artifact(&binding, &sha256).await?;
-    let size = bytes.len();
-    let start = slice.offset.unwrap_or(0).min(size);
-    let end = slice
-        .length
-        .map_or(size, |length| start.saturating_add(length).min(size));
-    let mut response = Bytes::from(bytes).slice(start..end).into_response();
+    let (bytes, size) = state
+        .backend
+        .get_artifact(&binding, &sha256, slice.offset.unwrap_or(0), slice.length)
+        .await?;
+    let mut response = Bytes::from(bytes).into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),

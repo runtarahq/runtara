@@ -1102,7 +1102,14 @@ impl WorkflowApiBackend for Backend {
         Ok(self.0.slot(binding).ok_or_else(not_serving)?.input.clone())
     }
 
-    async fn get_artifact(&self, binding: &Binding, sha256: &str) -> Result<Vec<u8>, ApiError> {
+    async fn get_artifact(
+        &self,
+        binding: &Binding,
+        sha256: &str,
+        offset: u64,
+        length: Option<u64>,
+    ) -> Result<(Vec<u8>, u64), ApiError> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
         let slot = self.0.slot(binding).ok_or_else(not_serving)?;
         // Only a compile's own components, and nothing else on this host.
         let path = slot
@@ -1110,9 +1117,23 @@ impl WorkflowApiBackend for Backend {
             .as_ref()
             .and_then(|work| work.components.get(sha256))
             .ok_or_else(|| ApiError::new(ErrorCode::Denied, "not an artifact of this launch"))?;
-        tokio::fs::read(path)
+        let unavailable = |error: std::io::Error| {
+            ApiError::new(ErrorCode::Unavailable, format!("artifact: {error}"))
+        };
+        // Only the slice asked for is read.
+        let mut file = tokio::fs::File::open(path).await.map_err(unavailable)?;
+        let size = file.metadata().await.map_err(unavailable)?.len();
+        let start = offset.min(size);
+        let end = length.map_or(size, |length| start.saturating_add(length).min(size));
+        file.seek(std::io::SeekFrom::Start(start))
             .await
-            .map_err(|error| ApiError::new(ErrorCode::Unavailable, format!("artifact: {error}")))
+            .map_err(unavailable)?;
+        let mut bytes = Vec::with_capacity((end - start) as usize);
+        file.take(end - start)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(unavailable)?;
+        Ok((bytes, size))
     }
 
     async fn put_artifact(
@@ -2224,6 +2245,12 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(body(slice).await, b"dli");
+        // Past its end, nothing, and still its size.
+        let past = call("GET", format!("{stdlib}?offset=9"), vec![], binding(1))
+            .await
+            .unwrap();
+        assert_eq!(past.headers()["runtara-artifact-size"], "6");
+        assert!(body(past).await.is_empty());
         // A file it was not given, whatever its digest.
         let refused = call(
             "GET",
