@@ -1,0 +1,18 @@
+# Input to scripts/connector_gen/connector_gen.py; see its README.md.
+agent:
+  id: pipedrive
+  name: Pipedrive
+  description: Pipedrive CRM — deals.
+  integration_id: pipedrive_api_token
+  error_prefix: PIPEDRIVE
+spec:
+  url: https://developers.pipedrive.com/docs/api/v1/openapi-v2.yaml
+  sha256: 2b0fb0de3cad7a37158528034f85942e6b22a0a0649d9c811e0676e7c040955d
+labels:
+  org_id: Organization
+operations:
+  - getDeals
+  - getDeal
+  - addDeal
+  - updateDeal
+  - deleteDeal

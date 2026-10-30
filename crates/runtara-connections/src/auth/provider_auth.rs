@@ -196,6 +196,17 @@ fn describe_connection_auth(
                 deferred_auth: None,
             }
         }
+        "pipedrive_api_token" => {
+            if let Some(token) = params["api_token"].as_str() {
+                headers.insert("x-api-token".into(), token.to_string());
+            }
+            ConnectionAuthDescriptor {
+                base_url: Some("https://api.pipedrive.com".into()),
+                aws_signing: None,
+                azure_signing: None,
+                deferred_auth: None,
+            }
+        }
         "slack_bot" => {
             if let Some(token) = params["bot_token"].as_str() {
                 headers.insert("Authorization".into(), format!("Bearer {}", token));
@@ -1083,6 +1094,26 @@ mod tests {
             pkce_required: false,
             params_driven: false,
         }
+    }
+
+    #[test]
+    fn pipedrive_token_goes_in_its_header_and_pins_the_api_host() {
+        let mut headers = HashMap::new();
+        let descriptor = describe_connection_auth(
+            "conn-1",
+            "pipedrive_api_token",
+            &json!({ "api_token": "token-value" }),
+            &mut headers,
+        );
+        assert_eq!(
+            headers.get("x-api-token").map(String::as_str),
+            Some("token-value")
+        );
+        assert!(!headers.contains_key("Authorization"));
+        assert_eq!(
+            descriptor.base_url.as_deref(),
+            Some("https://api.pipedrive.com")
+        );
     }
 
     #[test]

@@ -13,6 +13,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Pipedrive agent, generated from Pipedrive's OpenAPI spec.** Five deal
+  capabilities (list, get, create, update, delete) bound to a new
+  `pipedrive_api_token` connection type: a personal API token sent as
+  `x-api-token` to `https://api.pipedrive.com`, limited by default to
+  5 requests/s with a burst of 10. Each field of a request body is its own step
+  input (an explicit `null` clears a nullable field), field labels are
+  humanized from the spec, and response fields and enum values the spec does
+  not declare are passed through.
+
+- **`scripts/connector_gen` generates an agent's capabilities from an
+  OpenAPI 3 spec** into one `src/generated.rs` per agent crate, using
+  openapi-generator (the pinned pip package bundles its own JDK) with
+  runtara's templates. A crate's `connector.yaml` pins the spec by sha256 and
+  lists the operations to generate; CI fails when `generated.rs` or the test
+  fixtures no longer match the trimmed spec, or `connector.yaml` changed
+  without re-fetching. Spec shapes the templates cannot send yet (form and
+  multipart bodies, object query parameters, required cookies) are refused
+  when fetching. `docs/adding-an-agent.md` covers the whole cycle.
+
+- **`#[field(skip)]` on `CapabilityOutput` fields** leaves a field out of the
+  output metadata, e.g. a flattened passthrough map. Capability inputs typed
+  `Option<Option<T>>` are described as optional `T`.
+
 - **Workflow images live in a content-addressed artifact store.** A new
   `runtara-artifact-store` crate defines `ArtifactStore` (put, get, exists,
   local path and delete by SHA-256 digest), with a filesystem store at
