@@ -12,7 +12,6 @@
 //! pre-staged component at compile time instead of as a mysterious runtime link
 //! failure.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::super::child_workflows::DirectChildWorkflowDependencyMetadata;
@@ -278,7 +277,7 @@ pub(super) fn resolve_shared_component_dependencies(
         .iter()
         .map(|component| {
             let wasm_path = components_dir.join(component.bundle_wasm_filename);
-            if !wasm_path.exists() {
+            if !crate::compile_fs::exists(&wasm_path) {
                 return Err(DirectCompileError::Io(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     format!(
@@ -308,7 +307,7 @@ fn reject_cancellable_waits(
     wasm: &Path,
     component: &DirectAgentComponentRequirement,
 ) -> Result<(), DirectCompileError> {
-    let bytes = std::fs::read(wasm)?;
+    let bytes = crate::compile_fs::read(wasm)?;
     let marker = b"[cancellable]";
     if bytes.windows(marker.len()).any(|window| window == marker) {
         return Err(DirectCompileError::Component(format!(
@@ -342,7 +341,9 @@ pub(super) fn resolve_agent_component_dependencies(
             // child's `.wasm` there via the identical naming convention.
             let found = std::iter::once((components_dir, false))
                 .chain(extra_component_dirs.iter().map(|dir| (dir.as_path(), true)))
-                .find(|(dir, _)| dir.join(&component.bundle_wasm_filename).exists());
+                .find(|(dir, _)| {
+                    crate::compile_fs::exists(dir.join(&component.bundle_wasm_filename))
+                });
             let Some((dir, from_staging_dir)) = found else {
                 let searched: Vec<String> = std::iter::once(components_dir)
                     .chain(extra_component_dirs.iter().map(std::path::PathBuf::as_path))
@@ -407,7 +408,7 @@ pub(super) fn resolve_agent_component_dependencies(
             }
             check_agent_component_imports(
                 &component.agent_id,
-                &fs::read(&resolved.wasm_path)?,
+                &crate::compile_fs::read(&resolved.wasm_path)?,
                 kind,
             )?;
             Ok(resolved)
@@ -458,7 +459,7 @@ fn check_sidecar_suspends(
     meta: &Path,
     sites: &std::collections::BTreeMap<String, bool>,
 ) -> Result<(), DirectCompileError> {
-    let capabilities = fs::read(meta)
+    let capabilities = crate::compile_fs::read(meta)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .and_then(|meta| meta.get("capabilities").cloned())
@@ -523,7 +524,7 @@ fn workflow_agent_import_kind(
     dir: &Path,
     component: &DirectAgentComponentRequirement,
 ) -> Result<AgentImportKind, DirectCompileError> {
-    let meta = fs::read(dir.join(&component.bundle_meta_filename))
+    let meta = crate::compile_fs::read(dir.join(&component.bundle_meta_filename))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
     let tagged = meta
@@ -554,7 +555,7 @@ fn workflow_agent_import_kind(
     // workflow-agent without risking a false positive for an unrelated generic
     // agent. Keep the existing conservative runtime-import fallback for that
     // anomalous partial-stage/manual-copy case.
-    let wasm_bytes = fs::read(dir.join(&component.bundle_wasm_filename))?;
+    let wasm_bytes = crate::compile_fs::read(dir.join(&component.bundle_wasm_filename))?;
     if component_imports_workflow_runtime(&wasm_bytes)? {
         return Err(DirectCompileError::Component(format!(
             "published workflow-agent `{}` has a missing or unreadable .meta.json sidecar — \
@@ -650,7 +651,7 @@ fn resolve_component_dependency(
     meta_filename: &str,
 ) -> Result<ResolvedComponentDependency, DirectCompileError> {
     let wasm_path = components_dir.join(wasm_filename);
-    let wasm_bytes = fs::read(&wasm_path)?;
+    let wasm_bytes = crate::compile_fs::read(&wasm_path)?;
     let wasm = DirectArtifactFileMetadata {
         filename: wasm_filename.to_string(),
         sha256: sha256_hex(&wasm_bytes),
@@ -685,11 +686,11 @@ fn read_component_sidecar_metadata(
     expected_wasm_filename: &str,
     actual_wasm: &DirectArtifactFileMetadata,
 ) -> Result<Option<DirectComponentSidecarMetadata>, DirectCompileError> {
-    if !path.exists() {
+    if !crate::compile_fs::exists(path) {
         return Ok(None);
     }
 
-    let bytes = fs::read(path)?;
+    let bytes = crate::compile_fs::read(path)?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)?;
     let declared_wasm = json_string_field(&value, "wasm");
     if declared_wasm
@@ -760,7 +761,7 @@ pub(super) fn write_artifact_metadata(
     path: &Path,
     metadata: &DirectArtifactMetadata,
 ) -> Result<(), DirectCompileError> {
-    fs::write(path, serde_json::to_vec_pretty(metadata)?)?;
+    crate::compile_fs::write(path, serde_json::to_vec_pretty(metadata)?)?;
     Ok(())
 }
 
@@ -928,6 +929,7 @@ mod tests {
     }
 
     use super::*;
+    use std::fs;
 
     #[test]
     fn initial_memory_counts_every_instantiation() {

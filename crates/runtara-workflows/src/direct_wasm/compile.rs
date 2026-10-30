@@ -75,6 +75,7 @@ mod while_loop;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
+#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -776,7 +777,7 @@ fn compose_direct_workflow_selected(
         )?);
         wac_source = super::component::http_guest_wac(&wac_source, with_api, entry, &isolated)
             .map_err(component_error)?;
-        fs::write(result.build_dir.join("workflow.wac"), &wac_source)?;
+        crate::compile_fs::write(result.build_dir.join("workflow.wac"), &wac_source)?;
     }
 
     let mut overrides: HashMap<String, PathBuf> = HashMap::new();
@@ -803,7 +804,7 @@ fn compose_direct_workflow_selected(
                         "isolated Agent `{agent}` is not a workflow dependency"
                     ))
                 })?;
-            let child = fs::read(&component.wasm_path)?;
+            let child = crate::compile_fs::read(&component.wasm_path)?;
             if sha256_hex(&child) != *digest
                 || component.metadata.wasm.as_ref().map(|w| &w.sha256) != Some(digest)
             {
@@ -825,7 +826,7 @@ fn compose_direct_workflow_selected(
             let adapter_path = result
                 .build_dir
                 .join(format!("isolated-agent-{}.wasm", bindings.len()));
-            fs::write(&adapter_path, adapter)?;
+            crate::compile_fs::write(&adapter_path, adapter)?;
             overrides.insert(component.package.clone(), adapter_path);
             children.push(child);
             bindings.push(binding);
@@ -891,7 +892,7 @@ fn compose_direct_workflow_selected(
     } else {
         composed_wasm
     };
-    fs::write(&composed_path, &composed_wasm)?;
+    crate::compile_fs::write(&composed_path, &composed_wasm)?;
     result.artifact_metadata.isolation = isolation;
     result.artifact_metadata.memory_floor_bytes = Some(memory_floor_bytes);
 
@@ -941,7 +942,7 @@ fn compose_workflow_component_in_process(
 ) -> Result<Vec<u8>, DirectCompileError> {
     use wac_graph::EncodeOptions;
     use wac_parser::Document;
-    use wac_resolver::{FileSystemPackageResolver, packages};
+    use wac_resolver::packages;
 
     let parse_start = Instant::now();
     let document = Document::parse(wac_source).map_err(|err| {
@@ -962,16 +963,53 @@ fn compose_workflow_component_in_process(
     );
 
     let resolve_pkgs_start = Instant::now();
-    let overrides = overrides
+    let overrides: HashMap<String, PathBuf> = overrides
         .into_iter()
         .map(|(package, path)| (wac_name(&package), path))
         .collect();
-    let resolver = FileSystemPackageResolver::new(deps_dir, overrides, false);
-    let resolved = resolver.resolve(&keys).map_err(|err| {
-        DirectCompileError::Component(format!(
-            "failed to resolve direct workflow wac packages: {err}"
-        ))
-    })?;
+    // As wac's `FileSystemPackageResolver` (without its WIT and WAT
+    // features) resolves them, read through `compile_fs`, so a compile in
+    // memory composes from memory: an unversioned package with an override
+    // from that file, any other from `deps_dir/<namespace>/<name>[/<version>]
+    // .wasm`, and a package found nowhere left to the document to report.
+    let resolved = keys
+        .keys()
+        .filter_map(|key| {
+            let path = match overrides.get(key.name) {
+                Some(path) if key.version.is_none() => path.clone(),
+                _ => {
+                    let mut path = deps_dir.to_path_buf();
+                    for segment in key.name.split(':') {
+                        path.push(segment);
+                    }
+                    if let Some(version) = key.version {
+                        path.push(version.to_string());
+                    }
+                    let mut file = path.into_os_string();
+                    file.push(".wasm");
+                    PathBuf::from(file)
+                }
+            };
+            match crate::compile_fs::read(&path) {
+                Ok(bytes) => Some(Ok((*key, bytes))),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    if overrides.contains_key(key.name) && key.version.is_none() {
+                        Some(Err(DirectCompileError::Component(format!(
+                            "failed to resolve direct workflow wac packages: local path `{}` for package `{}` does not exist",
+                            path.display(),
+                            key.name
+                        ))))
+                    } else {
+                        None
+                    }
+                }
+                Err(err) => Some(Err(DirectCompileError::Component(format!(
+                    "failed to resolve direct workflow wac packages: failed to read package `{}`: {err}",
+                    path.display()
+                )))),
+            }
+        })
+        .collect::<Result<_, DirectCompileError>>()?;
     tracing::debug!(
         target: "runtara::direct_compile::profile",
         elapsed_ms = resolve_pkgs_start.elapsed().as_secs_f64() * 1000.0,
@@ -1213,12 +1251,18 @@ fn compile_direct_workflow_selected(
     #[cfg(not(target_os = "wasi"))]
     {
         let span = tracing::Span::current();
+        // A compile in memory stays in memory on its own thread.
+        let memory = crate::compile_fs::current();
         let handle = std::thread::Builder::new()
             .name("direct-compile".to_string())
             .stack_size(DIRECT_COMPILE_STACK_SIZE)
             .spawn(move || {
                 let _span = span.entered();
-                compile_direct_workflow_inner(input, abi, omit_runtime, selection)
+                let compile = || compile_direct_workflow_inner(input, abi, omit_runtime, selection);
+                match memory {
+                    Some(memory) => crate::compile_fs::in_memory(memory, compile),
+                    None => compile(),
+                }
             })
             .map_err(DirectCompileError::Io)?;
         match handle.join() {
@@ -1382,8 +1426,8 @@ fn compile_direct_workflow_inner(
         sanitize_path_segment(&input.workflow_id),
         input.version
     ));
-    fs::create_dir_all(&build_dir)?;
-    fs::create_dir_all(build_dir.join("wit"))?;
+    crate::compile_fs::create_dir_all(&build_dir)?;
+    crate::compile_fs::create_dir_all(build_dir.join("wit"))?;
 
     let wasm_path = build_dir.join("workflow-logic.wasm");
     let manifest_path = build_dir.join("manifest.json");
@@ -1407,12 +1451,12 @@ fn compile_direct_workflow_inner(
     });
 
     artifact_metadata.isolation_selection = selection_report;
-    fs::write(&wasm_path, &wasm)?;
-    fs::write(&manifest_path, &manifest_json)?;
-    fs::write(&support_report_path, &support_json)?;
+    crate::compile_fs::write(&wasm_path, &wasm)?;
+    crate::compile_fs::write(&manifest_path, &manifest_json)?;
+    crate::compile_fs::write(&support_report_path, &support_json)?;
     write_artifact_metadata(&artifact_metadata_path, &artifact_metadata)?;
-    fs::write(&world_wit_path, &component_artifacts.world_wit)?;
-    fs::write(&wac_path, &component_artifacts.wac_source)?;
+    crate::compile_fs::write(&world_wit_path, &component_artifacts.world_wit)?;
+    crate::compile_fs::write(&wac_path, &component_artifacts.wac_source)?;
 
     Ok(DirectCompilationResult {
         invocation_manifest: if scoped_agents.is_empty() {

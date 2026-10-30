@@ -247,11 +247,12 @@ pub fn compile_workflow_direct(
     )
     .map_err(direct_compile_error_to_io)?;
     let package_size = direct_artifact_package_size(&direct_result.build_dir);
-    let trusted_pins =
-        crate::direct_wasm::trusted_artifact_pins(&std::fs::read(&direct_result.wasm_path)?)
-            .map_err(direct_compile_error_to_io)?
-            .into_iter()
-            .collect();
+    let trusted_pins = crate::direct_wasm::trusted_artifact_pins(&crate::compile_fs::read(
+        &direct_result.wasm_path,
+    )?)
+    .map_err(direct_compile_error_to_io)?
+    .into_iter()
+    .collect();
 
     Ok(NativeCompilationResult {
         binary_path: direct_result.wasm_path,
@@ -297,8 +298,8 @@ fn direct_artifact_package_size(build_dir: &std::path::Path) -> usize {
     PACKAGE_FILES
         .iter()
         .map(|rel| {
-            std::fs::metadata(build_dir.join(rel))
-                .map(|m| m.len() as usize)
+            crate::compile_fs::file_len(build_dir.join(rel))
+                .map(|len| len as usize)
                 .unwrap_or(0)
         })
         .sum()

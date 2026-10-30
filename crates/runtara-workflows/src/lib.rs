@@ -69,6 +69,15 @@
 ))]
 pub mod compile;
 
+/// Where the compiler reads components and writes its build: the real
+/// filesystem, or memory (for a compiler with no filesystem, such as one run
+/// as a WASI command in a VM).
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
+pub mod compile_fs;
+
 /// Dependency analysis for child workflows.
 pub mod dependency_analysis;
 
