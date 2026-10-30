@@ -2192,26 +2192,14 @@ impl WorkflowRepository {
         .await?;
 
         // Same orphan rule as `TriggerRepository::deactivate_orphaned`: this
-        // tenant's triggers go with its workflow, while a global (NULL-tenant)
-        // trigger only goes once no tenant has a live workflow with this id.
-        // Workflow ids are only unique per tenant, and the soft delete above
-        // already hides this tenant's row from the check.
+        // tenant's triggers go with its workflow.
         let deactivated_triggers = sqlx::query_as::<_, InvocationTrigger>(
             r#"
             UPDATE invocation_trigger t
             SET active = false, updated_at = NOW()
             WHERE t.workflow_id = $2
               AND t.active = true
-              AND (
-                  t.tenant_id = $1
-                  OR (
-                      t.tenant_id IS NULL
-                      AND NOT EXISTS (
-                          SELECT 1 FROM workflows w
-                          WHERE w.workflow_id = $2 AND w.deleted_at IS NULL
-                      )
-                  )
-              )
+              AND t.tenant_id = $1
             RETURNING t.id, t.tenant_id, t.workflow_id, t.trigger_type, t.active, t.configuration,
                       t.created_at, t.last_run, t.updated_at, t.remote_tenant_id, t.single_instance
             "#,

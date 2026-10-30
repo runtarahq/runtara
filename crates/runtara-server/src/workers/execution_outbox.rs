@@ -738,8 +738,9 @@ impl ExecutionOutbox {
         );
 
         give_back!(
-            sqlx::query("INSERT INTO execution_outbox (request_id) VALUES ($1)")
+            sqlx::query("INSERT INTO execution_outbox (request_id, tenant_id) VALUES ($1, $2)")
                 .bind(request_id)
+                .bind(tenant_id)
                 .execute(&mut *tx)
                 .await
         );

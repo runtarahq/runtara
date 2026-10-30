@@ -41,6 +41,11 @@ path = "tests/audit_events.rs"
 required-features = ["db-integration-tests"]
 
 [[test]]
+name = "tenant_row_security"
+path = "tests/tenant_row_security.rs"
+required-features = ["db-integration-tests"]
+
+[[test]]
 name = "authz_ownership"
 path = "tests/authz_ownership.rs"
 required-features = ["db-integration-tests"]

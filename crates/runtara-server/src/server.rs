@@ -1197,6 +1197,21 @@ pub async fn start_with(
     )
     .await;
 
+    // Triggers from before every trigger named its tenant ran as the primary
+    // tenant; they become its own, so row-level security covers them too.
+    match api::repositories::triggers::TriggerRepository::new(pool.clone())
+        .claim_untenanted(&tenant_id)
+        .await
+    {
+        Ok(0) => {}
+        Ok(claimed) => {
+            tracing::info!(claimed, tenant_id = %tenant_id, "Gave untenanted triggers to the primary tenant")
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to give untenanted triggers to the primary tenant")
+        }
+    }
+
     // Cipher is built from RUNTARA_CONNECTIONS_ENCRYPTION_KEY env var — falls back to
     // NoOp (plaintext at rest) with a loud warning if missing, unless
     // RUNTARA_REQUIRE_CREDENTIAL_ENCRYPTION or RUNTARA_ENV=production is set, in which
@@ -1980,12 +1995,9 @@ pub async fn start_with(
         let cron_pool = pool.clone();
         let cron_engine = Arc::clone(&execution_engine);
         let cron_shutdown = shutdown_signal.clone();
-        // Triggers no tenant owns run as the primary tenant, fired once.
-        let claims_untenanted = cron_tenant_id == tenant_id;
         shutdown_coordinator.spawn_intake(async move {
             let scheduler_config = workers::cron_scheduler::CronSchedulerConfig {
                 tenant_id: cron_tenant_id,
-                claims_untenanted,
                 check_interval_secs: 60,
             };
             workers::cron_scheduler::run(cron_pool, cron_engine, scheduler_config, cron_shutdown)
