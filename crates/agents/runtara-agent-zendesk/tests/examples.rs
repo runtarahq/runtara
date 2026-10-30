@@ -288,6 +288,26 @@ fn cursor_pagination_uses_zendesks_parameter_names() {
 }
 
 #[test]
+fn offset_pagination_keeps_the_page_number() {
+    // Zendesk's `page` is a page number or a cursor object; both forms are inputs.
+    for capability in ["list-tickets", "list-groups"] {
+        let inputs = input_names(capability);
+        for name in ["page", "per_page", "page[size]", "page[after]"] {
+            assert!(inputs.iter().any(|i| i == name), "{capability}: {inputs:?}");
+        }
+    }
+    let input: ListTicketsInput =
+        serde_json::from_value(json!({ "page": 3, "per_page": 25 })).unwrap();
+    assert_eq!(
+        input.request().unwrap().query_pairs(),
+        [
+            ("page".to_string(), "3".to_string()),
+            ("per_page".to_string(), "25".to_string()),
+        ]
+    );
+}
+
+#[test]
 fn search_export_requires_a_query_and_a_type() {
     let input: ExportSearchResultsInput = serde_json::from_value(json!({
         "query": "status:open",

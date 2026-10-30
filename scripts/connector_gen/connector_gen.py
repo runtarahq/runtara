@@ -162,7 +162,7 @@ def is_scalar(schema: dict) -> bool:
 
 def check_parameter(spec: dict, name: str, parameter: dict) -> list:
     """The parameters `parameter` is sent as: none (an optional cookie), itself,
-    or one per field of an object (deepObject) query parameter."""
+    or one per field of an object query parameter."""
     resolved = deref(spec, parameter)
     if resolved.get("in") == "cookie":
         if resolved.get("required"):
@@ -173,7 +173,7 @@ def check_parameter(spec: dict, name: str, parameter: dict) -> list:
     if resolved.get("in") == "query" and (
         resolved.get("style") == "deepObject" or schema.get("type") == "object"
     ):
-        return expand_deep_object(spec, name, resolved, schema)
+        return expand_object_parameter(spec, name, resolved, schema)
     alternatives = [deref(spec, s) for s in schema.get("oneOf") or schema.get("anyOf") or []]
     if alternatives:
         if not all(is_scalar(s) for s in alternatives):
@@ -183,56 +183,92 @@ def check_parameter(spec: dict, name: str, parameter: dict) -> list:
     return [parameter]
 
 
-def expand_deep_object(spec: dict, name: str, parameter: dict, schema: dict) -> list:
-    """`page` with the fields `size` and `after` becomes the query parameters
-    `page[size]` and `page[after]`, as `style: deepObject` sends them. Of a
-    oneOf/anyOf, the one alternative that declares fields is kept."""
+def expand_object_parameter(spec: dict, name: str, parameter: dict, schema: dict) -> list:
+    """One query parameter per field of an object parameter, named as its style
+    sends it: `page` with the fields `size` and `after` is `page[size]` and
+    `page[after]` with `style: deepObject`, and `size` and `after` with the
+    default `style: form` (exploded). Other styles are refused.
+
+    Of a oneOf/anyOf, the alternative that declares fields is expanded, and a
+    scalar alternative stays an input under the parameter's own name: Zendesk's
+    `page` is a page number or a cursor object, and both are kept."""
     param = parameter["name"]
+    style = parameter.get("style", "form")
+    if style not in ("deepObject", "form") or not parameter.get("explode", True):
+        sys.exit(f"{name}: object query parameter `{param}` with style `{style}`"
+                 f"{'' if parameter.get('explode', True) else ' (explode: false)'} is not supported")
+
+    def wire_name(field):
+        return f"{param}[{field}]" if style == "deepObject" else field
+
     alternatives = [deref(spec, s) for s in schema.get("oneOf") or schema.get("anyOf") or [schema]]
     objects = [s for s in alternatives if s.get("properties")]
     if len(objects) != 1:
-        sys.exit(f"{name}: object query parameter `{param}` (deepObject) without declared fields is not supported")
+        sys.exit(f"{name}: object query parameter `{param}` ({style}) without declared fields is not supported")
+    scalars = [s for s in alternatives if s is not objects[0]]
+    if not all(is_scalar(s) for s in scalars):
+        sys.exit(f"{name}: query parameter `{param}` has non-scalar alternatives besides its object")
     fields = objects[0]["properties"]
-    if len(alternatives) > 1:
-        print(f"note: {name}: `{param}` is sent as {', '.join(f'{param}[{f}]' for f in fields)}; "
-              "its other alternatives are dropped")
     required = objects[0].get("required") or []
     expanded = []
+    if scalars:
+        scalar = copy.deepcopy(scalars[0]) if len(scalars) == 1 else {"type": "string"}
+        description = scalar.pop("description", None) or parameter.get("description")
+        expanded.append({
+            "name": param,
+            "in": "query",
+            **({"description": description} if description else {}),
+            "schema": scalar,
+        })
     for field, field_schema in fields.items():
         field_schema = copy.deepcopy(deref(spec, field_schema))
         if not is_scalar(field_schema):
-            sys.exit(f"{name}: deepObject field `{param}[{field}]` is not a scalar")
+            sys.exit(f"{name}: field `{field}` of the object query parameter `{param}` is not a scalar")
         description = field_schema.pop("description", None) or parameter.get("description")
         expanded.append({
-            "name": f"{param}[{field}]",
+            "name": wire_name(field),
             "in": "query",
             **({"description": description} if description else {}),
             **({"required": True} if parameter.get("required") and field in required else {}),
             "schema": field_schema,
         })
+    if scalars:
+        print(f"note: {name}: `{param}` is either `{param}` or "
+              f"{', '.join(f'`{wire_name(f)}`' for f in fields)}; send one form")
     return expanded
+
+
+def envelope_of(spec: dict, name: str, media: dict, envelopes: list) -> str:
+    """The `body_envelopes` name that wraps this request body, if any."""
+    properties = deref(spec, media.get("schema") or {}).get("properties") or {}
+    found = [key for key in properties if key in envelopes]
+    if len(found) > 1:
+        sys.exit(f"{name}: request body has several envelopes {found}")
+    return found[0] if found else None
 
 
 def unwrap_envelope(spec: dict, name: str, body: dict, media: dict, envelopes: list) -> str:
     """A body such as `{"ticket": {...}}` takes the ticket's fields as step
     inputs: the body schema becomes the envelope's schema, and the template
     wraps the fields back into `ticket`. Returns the envelope it unwrapped."""
-    properties = deref(spec, media.get("schema") or {}).get("properties") or {}
-    found = [key for key in properties if key in envelopes]
-    if not found:
+    key = envelope_of(spec, name, media, envelopes)
+    if key is None:
         return None
-    if len(found) > 1:
-        sys.exit(f"{name}: request body has several envelopes {found}")
-    key = found[0]
+    wrapper = deref(spec, media.get("schema") or {})
+    properties = wrapper["properties"]
     envelope = deref(spec, properties[key])
     schema = properties[key]
+    alternatives = [deref(spec, s) for s in envelope.get("anyOf") or envelope.get("oneOf") or []]
+    if not envelope.get("properties") and (not alternatives or not all(s.get("properties") for s in alternatives)):
+        print(f"note: {name}: `{key}` declares no fields, so it stays one `{key}` input")
+        return key
+    dropped = [other for other in properties if other != key]
+    required = [field for field in dropped if field in (wrapper.get("required") or [])]
+    if required:
+        sys.exit(f"{name}: unwrapping `{key}` would drop the required body fields {required}")
     if not envelope.get("properties"):
         # One of several shapes (create or merge, say): offer every field of
         # every shape, all optional, and let the vendor validate the mix.
-        alternatives = [deref(spec, s) for s in envelope.get("anyOf") or envelope.get("oneOf") or []]
-        if not alternatives or not all(s.get("properties") for s in alternatives):
-            print(f"note: {name}: `{key}` declares no fields, so it stays one `{key}` input")
-            return key
         fields = {}
         for alternative in alternatives:
             for field, field_schema in alternative["properties"].items():
@@ -240,7 +276,6 @@ def unwrap_envelope(spec: dict, name: str, body: dict, media: dict, envelopes: l
         print(f"note: {name}: `{key}` is one of {len(alternatives)} shapes; "
               "the fields of all of them are optional inputs")
         schema = {"type": "object", "properties": fields}
-    dropped = [other for other in properties if other != key]
     if dropped:
         print(f"note: {name}: dropped the body fields {dropped} beside the `{key}` envelope")
     media["schema"] = schema
@@ -271,7 +306,13 @@ def check_operation(spec: dict, path: str, method: str, op: dict, item: dict, en
                 "only JSON bodies are (form and multipart bodies need template support)"
             )
         body["content"] = json_types
-        for media in json_types.values():
+        if any(envelope_of(spec, name, media, envelopes) for media in json_types.values()):
+            # The body may be a `#/components/requestBodies` entry other operations
+            # share: unwrap this operation's own copy, or the next one would unwrap
+            # the already unwrapped fields again.
+            body = copy.deepcopy(body)
+            op["requestBody"] = body
+        for media in body["content"].values():
             used.add(unwrap_envelope(spec, name, body, media, envelopes))
 
     # An operation with several tags would be rendered once per tag.
@@ -381,8 +422,9 @@ def normalize_schemas(sliced: dict) -> None:
 
 
 def rust_model_name(name: str) -> str:
-    """openapi-generator's Rust model name: `EmailCCObject` -> `EmailCcObject`."""
-    spaced = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+    """openapi-generator's Rust model name: `EmailCCObject` -> `EmailCcObject`,
+    `IPv4Address` -> `Ipv4Address`. The patterns are its `StringUtils.underscore`."""
+    spaced = re.sub(r"([A-Z]+)([A-Z][a-z][a-z]+)", r"\1_\2", name)
     spaced = re.sub(r"([a-z\d])([A-Z])", r"\1_\2", spaced)
     return "".join(word[:1].upper() + word[1:].lower() for word in re.split(r"[^A-Za-z0-9]+", spaced) if word)
 

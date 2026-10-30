@@ -691,4 +691,15 @@ fn test_zendesk_connection_type_is_registered() {
     assert!(secret.is_secret);
     let scope = meta.fields.iter().find(|f| f.name == "scope").unwrap();
     assert!(scope.is_optional);
+    // The form default is a literal in the attribute; it must match the
+    // default the extractor and the token request fall back to.
+    assert_eq!(
+        scope.default_value,
+        Some(connection_types::ZENDESK_DEFAULT_SCOPE)
+    );
+    let params: connection_types::ZendeskClientCredentialsParams = serde_json::from_value(
+        json!({ "subdomain": "acme", "client_id": "c", "client_secret": "s" }),
+    )
+    .unwrap();
+    assert_eq!(params.scope, connection_types::ZENDESK_DEFAULT_SCOPE);
 }

@@ -3885,6 +3885,18 @@
             "$ref": "#/components/parameters/GroupsInclude"
           },
           {
+            "description": "Traditional offset pagination page number (non-negative integer)",
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "example": 1,
+              "format": "int64",
+              "type": "integer"
+            },
+            "x-runtara-example": "1",
+            "x-runtara-label": "Page"
+          },
+          {
             "description": "Cursor token for next page",
             "in": "query",
             "name": "page[after]",
@@ -4551,6 +4563,18 @@
           },
           {
             "$ref": "#/components/parameters/TicketSupportTypeScope"
+          },
+          {
+            "description": "Traditional offset pagination page number (non-negative integer)",
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "example": 1,
+              "format": "int64",
+              "type": "integer"
+            },
+            "x-runtara-example": "1",
+            "x-runtara-label": "Page"
           },
           {
             "description": "Cursor token for next page",

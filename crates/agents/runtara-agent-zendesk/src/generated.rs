@@ -4533,6 +4533,13 @@ pub struct ListGroupsInput {
     #[serde(rename = "include", default, skip_serializing_if = "Option::is_none")]
     pub include: Option<String>,
     #[field(
+        display_name = r##"Page"##,
+        description = r##"Traditional offset pagination page number (non-negative integer)"##,
+        example = r##"1"##
+    )]
+    #[serde(rename = "page", default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<i64>,
+    #[field(
         display_name = r##"Page After"##,
         description = r##"Cursor token for next page"##,
         example = r##"eyJvIjoiaWQiLCJ2IjoiYVFFPSJ9"##
@@ -4647,6 +4654,7 @@ impl ListGroupsInput {
         let request = kit::Request::new("GET", path)
             .query_opt("exclude_deleted", &self.exclude_deleted)
             .query_opt("include", &self.include)
+            .query_opt("page", &self.page)
             .query_opt("page[after]", &self.page_after)
             .query_opt("page[before]", &self.page_before)
             .query_opt("page[size]", &self.page_size)
@@ -6324,6 +6332,13 @@ pub struct ListTicketsInput {
     )]
     pub support_type_scope: Option<String>,
     #[field(
+        display_name = r##"Page"##,
+        description = r##"Traditional offset pagination page number (non-negative integer)"##,
+        example = r##"1"##
+    )]
+    #[serde(rename = "page", default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<i64>,
+    #[field(
         display_name = r##"Page After"##,
         description = r##"Cursor token for next page"##,
         example = r##"eyJvIjoiaWQiLCJ2IjoiYVFFPSJ9"##
@@ -6415,6 +6430,7 @@ impl ListTicketsInput {
             .query_opt("sort_by", &self.sort_by)
             .query_opt("sort_order", &self.sort_order)
             .query_opt("support_type_scope", &self.support_type_scope)
+            .query_opt("page", &self.page)
             .query_opt("page[after]", &self.page_after)
             .query_opt("page[before]", &self.page_before)
             .query_opt("page[size]", &self.page_size)

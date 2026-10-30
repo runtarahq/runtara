@@ -172,10 +172,12 @@ body_envelopes:
   - user
 ```
 
-`fetch` notes what it did per operation: other body fields beside the envelope
-are dropped, and an envelope that is one of several shapes (`anyOf` of create
-and merge fields, say) offers the fields of all of them, all optional. A
-listed name that wraps no request body is an error.
+`fetch` notes what it did per operation: other optional body fields beside the
+envelope are dropped (a required one is an error), and an envelope that is one
+of several shapes (`anyOf` of create and merge fields, say) offers the fields
+of all of them, all optional. Each operation unwraps its own copy of a shared
+`#/components/requestBodies` entry. A listed name that wraps no request body
+is an error.
 
 **The agent accepts several connection types** for the same API (an OAuth
 client and an API token, say): list them all.
@@ -212,10 +214,13 @@ crates/agents/runtara-agent-<id>/
 - An exploded array query parameter (the OpenAPI default) is sent as
   `ids=1&ids=2`; with `explode: false` it is sent as `ids=1,2`. Optional cookie
   parameters are dropped by `fetch`.
-- An object (`deepObject`) query parameter is one input per field, named as
-  it is sent: `page` with `size` and `after` becomes `page[size]` and
-  `page[after]` (Rust fields `page_size`, `page_after`). Of a `oneOf` such as
-  Zendesk's "page number or cursor", the alternative with fields is kept.
+- An object query parameter is one input per field, named as its style sends
+  it: with `style: deepObject`, `page` with `size` and `after` becomes
+  `page[size]` and `page[after]` (Rust fields `page_size`, `page_after`); with
+  the default `style: form`, the fields go unprefixed (`size`, `after`). Of a
+  `oneOf` such as Zendesk's "page number or cursor", the object's fields are
+  inputs and the scalar alternative stays an input under the parameter's own
+  name (`page`).
 - A parameter whose schema is a `oneOf`/`anyOf` of scalars is a string input.
 - An optional body field the spec marks `nullable` is an `Option<Option<T>>`
   (deserialized with `kit::nullable`): omitted is not sent, an explicit `null`
@@ -264,9 +269,9 @@ crates/agents/runtara-agent-<id>/
 
 - OpenAPI 3 only; convert Swagger 2.0 specs first.
 - `fetch` refuses, naming the operation, what the templates cannot send yet:
-  request bodies that are not JSON (form-encoded, multipart), object
-  (`deepObject`) query parameters without declared scalar fields, and required
-  cookie parameters.
+  request bodies that are not JSON (form-encoded, multipart), object query
+  parameters without declared scalar fields or in a style other than
+  `deepObject` or exploded `form`, and required cookie parameters.
 - An input typed by a schema (a ticket's `comment`, say) is described to the
   step editor as `any`, without its fields.
 - Hand-written extra capabilities cannot be added to a generated agent yet.

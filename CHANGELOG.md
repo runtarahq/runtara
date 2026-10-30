@@ -28,8 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The connector generator handles more of a vendor spec.** A
   `connector.yaml` can list `body_envelopes` (Zendesk's
   `{"ticket": {...}}`), whose fields then become the step's inputs and are
-  wrapped back when sending; object (`deepObject`) query parameters such as
-  `page[size]`/`page[after]` become one input each; `integration_id` can name
+  wrapped back when sending; object query parameters become one input per
+  field (`page[size]`/`page[after]` for `deepObject`, unprefixed for `form`),
+  and a page-number alternative stays a `page` input; `integration_id` can name
   several connection types. `fetch` also reads specs it used to fail on: a
   bare `=` in YAML, examples given as `$ref`s, `oneOf` query parameters,
   objects that declare fields and allow more, and schema names with runs of

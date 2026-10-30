@@ -1,6 +1,6 @@
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use reqwest::Client;
-use runtara_agents::extractors::connection_types::zendesk_base_url;
+use runtara_agents::extractors::connection_types::{ZENDESK_DEFAULT_SCOPE, zendesk_base_url};
 use runtara_agents::registry::find_connection_type;
 use runtara_dsl::agent_meta::{OAuthConfig, TokenEndpointAuth};
 use serde_json::Value;
@@ -468,7 +468,7 @@ fn describe_zendesk_client_credentials_auth(
         .as_str()
         .map(str::trim)
         .filter(|scope| !scope.is_empty())
-        .unwrap_or("read write");
+        .unwrap_or(ZENDESK_DEFAULT_SCOPE);
 
     Some(DeferredAuth::OAuth2ClientCredentials {
         cache_key: token_cache::build_token_cache_key(

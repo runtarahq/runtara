@@ -1336,6 +1336,11 @@ pub fn zendesk_base_url(subdomain: &str) -> Result<String, String> {
     Ok(format!("https://{label}.zendesk.com"))
 }
 
+/// The scopes a Zendesk token is requested with when the connection sets none.
+/// The `scope` field's form default repeats it as a literal (the attribute takes
+/// no constant); a test keeps the two equal.
+pub const ZENDESK_DEFAULT_SCOPE: &str = "read write";
+
 /// Parameters for Zendesk OAuth2 client-credentials authentication
 #[derive(Debug, Deserialize, ConnectionParams)]
 #[connection(
@@ -1380,7 +1385,7 @@ pub struct ZendeskClientCredentialsParams {
 }
 
 fn default_zendesk_scope() -> String {
-    "read write".to_string()
+    ZENDESK_DEFAULT_SCOPE.to_string()
 }
 
 /// HTTP extractor for Zendesk client-credentials connections. The Bearer

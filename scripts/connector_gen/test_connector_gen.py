@@ -8,6 +8,7 @@ repository's rustfmt; they are skipped when the generator is not installed.
 """
 
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -167,10 +168,56 @@ class NormalizeTest(unittest.TestCase):
             ]}}
         sliced = cg.slice_spec(spec_with({"parameters": [page]}, method="get"), ["op"])
         params = operation(sliced, "op")["parameters"]
-        self.assertEqual([p["name"] for p in params], ["page[size]", "page[after]"])
-        self.assertEqual(params[0]["description"], "Page size")
-        self.assertEqual(params[1]["description"], "Pagination")
+        # The page-number alternative stays an input under the parameter's own name.
+        self.assertEqual([p["name"] for p in params], ["page", "page[size]", "page[after]"])
         self.assertEqual(params[0]["schema"], {"type": "integer", "format": "int64"})
+        self.assertEqual(params[0]["description"], "Pagination")
+        self.assertEqual(params[1]["description"], "Page size")
+        self.assertEqual(params[2]["description"], "Pagination")
+        self.assertEqual(params[1]["schema"], {"type": "integer", "format": "int64"})
+
+    def test_form_object_query_parameter_sends_its_fields_unprefixed(self):
+        # No `style` means `form` with `explode: true`: status=…&owner=…, not filter[status]=….
+        flt = {"in": "query", "name": "filter", "schema": {"type": "object", "properties": {
+            "status": {"type": "string"}, "owner": {"type": "string"}}}}
+        sliced = cg.slice_spec(spec_with({"parameters": [flt]}, method="get"), ["op"])
+        self.assertEqual([p["name"] for p in operation(sliced, "op")["parameters"]], ["status", "owner"])
+
+    def test_shared_request_body_is_unwrapped_once_per_operation(self):
+        user = {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "organization": {"type": "object", "properties": {"name": {"type": "string"}}},
+        }}
+        body = {"$ref": "#/components/requestBodies/UserBody"}
+        spec = {"openapi": "3.0.1", "info": {"title": "t", "version": "1"},
+                "paths": {"/users": {"post": {"operationId": "createUser", "requestBody": body,
+                                              "responses": {"204": {"description": "ok"}}}},
+                          "/users/{id}": {"put": {"operationId": "updateUser", "requestBody": dict(body),
+                                                  "parameters": [{"in": "path", "name": "id", "required": True,
+                                                                  "schema": {"type": "string"}}],
+                                                  "responses": {"204": {"description": "ok"}}}},
+                          "/organizations": {"post": {"operationId": "createOrganization",
+                                                      "responses": {"204": {"description": "ok"}},
+                                                      **json_body({"type": "object", "properties": {
+                                                          "organization": user["properties"]["organization"]}})}}},
+                "components": {"requestBodies": {"UserBody": {"content": {"application/json": {
+                    "schema": {"type": "object", "properties": {"user": user}}}}}}}}
+        sliced = cg.slice_spec(spec, ["createUser", "updateUser", "createOrganization"],
+                               body_envelopes=["user", "organization"])
+        for op_id in ("createUser", "updateUser"):
+            body = operation(sliced, op_id)["requestBody"]
+            self.assertEqual(body["x-runtara-body-envelope"], "user", op_id)
+            fields = body["content"]["application/json"]["schema"]["properties"]
+            self.assertEqual(list(fields), ["name", "organization"], op_id)
+
+    def test_envelope_beside_a_required_field_fails(self):
+        body = json_body({"type": "object", "required": ["ticket", "via_id"], "properties": {
+            "ticket": {"type": "object", "properties": {"subject": {"type": "string"}}},
+            "via_id": {"type": "integer"},
+        }})
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_spec(spec_with(body), ["op"], body_envelopes=["ticket"])
+        self.assertIn("via_id", str(raised.exception))
 
     def test_scalar_alternatives_of_a_parameter_are_sent_as_text(self):
         brand = {"in": "query", "name": "brand", "schema": {"oneOf": [{"type": "string"}, {"type": "integer"}]}}
@@ -267,7 +314,13 @@ class RefusalTest(unittest.TestCase):
     def test_deep_object_without_fields_or_with_object_fields(self):
         spec = self.spec_with({"parameters": [{"in": "query", "name": "filter", "style": "deepObject", "schema": {
             "type": "object", "properties": {"range": {"type": "object"}}}}]})
-        self.assert_refused(spec, "filter[range]")
+        self.assert_refused(spec, "`range`")
+
+    def test_object_query_parameter_in_other_styles(self):
+        fields = {"type": "object", "properties": {"status": {"type": "string"}}}
+        for extra in ({"style": "form", "explode": False}, {"style": "spaceDelimited"}):
+            spec = self.spec_with({"parameters": [{"in": "query", "name": "filter", "schema": fields, **extra}]})
+            self.assert_refused(spec, "is not supported")
 
     def test_required_cookie_parameter(self):
         spec = self.spec_with({"parameters": [{"in": "cookie", "name": "sid", "required": True,
@@ -403,6 +456,28 @@ class EnvelopeRenderTest(unittest.TestCase):
     def test_several_integrations(self):
         self.assertIn('module_integration_ids = "sample_oauth,sample_token"', self.text)
         self.assertIn('integration_ids: vec!["sample_oauth".to_string(), "sample_token".to_string()]', self.text)
+
+
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
+class ModelNameRenderTest(unittest.TestCase):
+    """Rendered with the real generator: every model a field refers to exists
+    under that name, however the schema name mixes capitals and underscores."""
+
+    NAMES = ["EmailCCObject", "IPv4Address", "XYzABCd", "HTMLBody", "OAuthToken", "SLAPolicyV2",
+             "getHTTPResponseCode", "V2Item", "deal_status", "Mixed_Case_Name", "APIKeyAbc", "ABCdef"]
+
+    def test_references_match_struct_names(self):
+        schemas = {name: {"type": "object", "properties": {"id": {"type": "string"}}} for name in self.NAMES}
+        schemas["Holder"] = {"type": "object", "properties": {
+            f"f{i}": {"$ref": f"#/components/schemas/{name}"} for i, name in enumerate(self.NAMES)}}
+        spec = spec_with(ok_json({"$ref": "#/components/schemas/Holder"}), schemas, method="get")
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), spec, ["op"])
+            text = cg.render(Path(tmp))
+        structs = set(re.findall(r"pub struct (\w+)", text))
+        referenced = re.findall(r"pub f\d+: Option<(\w+)>", text)
+        self.assertEqual(len(referenced), len(self.NAMES))
+        self.assertEqual([name for name in referenced if name not in structs], [])
 
 
 @unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")

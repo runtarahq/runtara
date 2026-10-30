@@ -14,8 +14,8 @@ Written for people and coding assistants alike; the rules in
 
 The generator does not support Swagger 2.0 specs yet, and `fetch` refuses
 operations it cannot send correctly: form-encoded or multipart request bodies,
-object (`deepObject`) query parameters without declared scalar fields, and
-required cookie parameters. Such an operation needs a hand-written capability,
+object query parameters without declared scalar fields or in a style other
+than `deepObject` or exploded `form`, and required cookie parameters. Such an operation needs a hand-written capability,
 or the generic `http` agent.
 
 ## For coding assistants
