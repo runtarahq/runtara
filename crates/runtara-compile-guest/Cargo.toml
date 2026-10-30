@@ -12,6 +12,7 @@ publish = false
 runtara-workflows = { path = "../runtara-workflows" }
 runtara-workflow-api = { path = "../runtara-workflow-api" }
 serde_json = { workspace = true }
+sha2 = "0.10"
 
 [target.'cfg(target_os = "wasi")'.dependencies]
 wasi = "=0.14.2"

@@ -87,7 +87,17 @@ pub struct LaunchSlot {
 /// composed component it made.
 struct CompileWork {
     components: std::collections::BTreeMap<String, std::path::PathBuf>,
-    made: Mutex<Option<Vec<u8>>>,
+    made: Mutex<Made>,
+}
+
+/// What a compile launch is handing back: its parts so far, by index, of the
+/// component whose SHA-256 and part count its first part named, and the
+/// whole once every part is in and its SHA-256 checked.
+#[derive(Default)]
+struct Made {
+    expected: Option<(String, u32)>,
+    parts: std::collections::BTreeMap<u32, Vec<u8>>,
+    whole: Option<Vec<u8>>,
 }
 
 /// How often a launch's lease is read again while it calls the workflow API.
@@ -320,7 +330,7 @@ impl ApiLaunches {
         slot.info.launch_kind = "compile".into();
         slot.compile = Some(CompileWork {
             components,
-            made: Mutex::new(None),
+            made: Mutex::default(),
         });
         Ok(())
     }
@@ -338,6 +348,7 @@ impl ApiLaunches {
             .made
             .lock()
             .expect("compile output poisoned")
+            .whole
             .take()
     }
 
@@ -1074,27 +1085,61 @@ impl WorkflowApiBackend for Backend {
             .map_err(|error| ApiError::new(ErrorCode::Unavailable, format!("artifact: {error}")))
     }
 
-    async fn put_artifact(&self, binding: &Binding, bytes: Vec<u8>) -> Result<String, ApiError> {
+    async fn put_artifact(
+        &self,
+        binding: &Binding,
+        sha256: &str,
+        part: u32,
+        parts: u32,
+        bytes: Vec<u8>,
+    ) -> Result<bool, ApiError> {
         use sha2::Digest;
+        /// The most a compile hands back, whatever its parts say.
+        const MADE_LIMIT: usize = 64 * 1024 * 1024;
         let slot = self.0.slot(binding).ok_or_else(not_serving)?;
         let work = slot
             .compile
             .as_ref()
             .ok_or_else(|| ApiError::new(ErrorCode::Denied, "this launch makes no artifact"))?;
-        let sha256: String = sha2::Sha256::digest(&bytes)
+        let mut made = work.made.lock().expect("compile output poisoned");
+        // One component; its parts again are retries.
+        let expected = (sha256.to_owned(), parts);
+        if made.expected.get_or_insert_with(|| expected.clone()) != &expected {
+            return Err(ApiError::new(
+                ErrorCode::ReplayConflict,
+                "this launch is handing back another artifact",
+            ));
+        }
+        if made.whole.is_some() {
+            return Ok(true);
+        }
+        if made.parts.values().map(Vec::len).sum::<usize>() + bytes.len() > MADE_LIMIT {
+            return Err(ApiError::new(
+                ErrorCode::TooLarge,
+                "the artifact is over the limit",
+            ));
+        }
+        made.parts.insert(part, bytes);
+        if made.parts.len() < parts as usize {
+            return Ok(false);
+        }
+        let whole: Vec<u8> = std::mem::take(&mut made.parts)
+            .into_values()
+            .flatten()
+            .collect();
+        let digest: String = sha2::Sha256::digest(&whole)
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
-        let mut made = work.made.lock().expect("compile output poisoned");
-        // One component; the same again is a retry.
-        if made.as_ref().is_some_and(|made| made != &bytes) {
+        if digest != sha256 {
+            made.expected = None;
             return Err(ApiError::new(
-                ErrorCode::ReplayConflict,
-                "this launch already handed back another artifact",
+                ErrorCode::Invalid,
+                "the parts are not the artifact they name",
             ));
         }
-        *made = Some(bytes);
-        Ok(sha256)
+        made.whole = Some(whole);
+        Ok(true)
     }
 
     async fn post_outcome(
@@ -2088,15 +2133,14 @@ mod tests {
     }
 
     /// M7.15: a compile launch reads its request, fetches only the
-    /// components it was given, by SHA-256, and hands back one composed
-    /// component; another launch fetches nothing.
+    /// components it was given, by SHA-256 (whole or in slices), and hands
+    /// back one composed component (in parts, checked once whole); another
+    /// launch fetches nothing.
     #[tokio::test]
     async fn a_compile_launch_fetches_its_components_and_hands_back_one() {
         let dir = tempfile::tempdir().unwrap();
         let component = dir.path().join("stdlib.wasm");
         std::fs::write(&component, b"stdlib").unwrap();
-        let other = dir.path().join("secret");
-        std::fs::write(&other, b"not a component").unwrap();
         let sha = |bytes: &[u8]| -> String {
             use sha2::Digest;
             sha2::Sha256::digest(bytes)
@@ -2123,27 +2167,34 @@ mod tests {
             request.extensions_mut().insert(binding);
             app.clone().oneshot(request)
         };
+        let body = |response: axum::response::Response| async move {
+            to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap()
+                .to_vec()
+        };
         let input = call("GET", "/v1/run/input".into(), vec![], binding(1))
             .await
             .unwrap();
-        assert_eq!(
-            to_bytes(input.into_body(), 1 << 20).await.unwrap(),
-            &b"{\"compile\":1}"[..]
-        );
-        let fetched = call(
+        assert_eq!(body(input).await, b"{\"compile\":1}");
+        let stdlib = format!("/v1/artifacts/{}", sha(b"stdlib"));
+        let fetched = call("GET", stdlib.clone(), vec![], binding(1))
+            .await
+            .unwrap();
+        assert_eq!(fetched.status(), 200);
+        assert_eq!(fetched.headers()["runtara-artifact-size"], "6");
+        assert_eq!(body(fetched).await, b"stdlib");
+        // A slice of it, as a host that bounds responses needs.
+        let slice = call(
             "GET",
-            format!("/v1/artifacts/{}", sha(b"stdlib")),
+            format!("{stdlib}?offset=2&length=3"),
             vec![],
             binding(1),
         )
         .await
         .unwrap();
-        assert_eq!(fetched.status(), 200);
-        assert_eq!(
-            to_bytes(fetched.into_body(), 1 << 20).await.unwrap(),
-            &b"stdlib"[..]
-        );
-        // A file of the host's it was not given, though it names its digest.
+        assert_eq!(body(slice).await, b"dli");
+        // A file it was not given, whatever its digest.
         let refused = call(
             "GET",
             format!("/v1/artifacts/{}", sha(b"not a component")),
@@ -2153,18 +2204,26 @@ mod tests {
         .await
         .unwrap();
         assert!(refused.status().is_client_error(), "{}", refused.status());
-        let made = call(
-            "PUT",
-            "/v1/artifacts".into(),
-            b"composed".to_vec(),
-            binding(1),
-        )
-        .await
-        .unwrap();
-        assert_eq!(made.status(), 200);
-        let answer: serde_json::Value =
-            serde_json::from_slice(&to_bytes(made.into_body(), 1 << 20).await.unwrap()).unwrap();
-        assert_eq!(answer["sha256"], sha(b"composed"));
+
+        // Handed back in parts, in any order, each part again a retry.
+        let composed = format!("/v1/artifacts/{}", sha(b"composed"));
+        let put = |part: u32, bytes: &[u8]| {
+            call(
+                "PUT",
+                format!("{composed}?part={part}&parts=2"),
+                bytes.to_vec(),
+                binding(1),
+            )
+        };
+        let whole = |response: axum::response::Response| async move {
+            assert_eq!(response.status(), 200);
+            let answer: serde_json::Value = serde_json::from_slice(&body(response).await).unwrap();
+            answer["whole"].as_bool().unwrap()
+        };
+        assert!(!whole(put(1, b"posed").await.unwrap()).await);
+        assert!(!whole(put(1, b"posed").await.unwrap()).await);
+        assert_eq!(launches.made("launch-1"), None, "not whole yet");
+        assert!(whole(put(0, b"com").await.unwrap()).await);
         assert_eq!(launches.made("launch-1").as_deref(), Some(&b"composed"[..]));
 
         // A launch that is not a compile neither fetches nor hands back.
@@ -2177,18 +2236,16 @@ mod tests {
                 StandaloneControl::Denied,
             )
             .unwrap();
-        let fetched = call(
-            "GET",
-            format!("/v1/artifacts/{}", sha(b"stdlib")),
-            vec![],
-            run.clone(),
+        let fetched = call("GET", stdlib, vec![], run.clone()).await.unwrap();
+        assert!(fetched.status().is_client_error(), "{}", fetched.status());
+        let made = call(
+            "PUT",
+            format!("/v1/artifacts/{}?part=0&parts=1", sha(b"x")),
+            b"x".to_vec(),
+            run,
         )
         .await
         .unwrap();
-        assert!(fetched.status().is_client_error(), "{}", fetched.status());
-        let made = call("PUT", "/v1/artifacts".into(), b"x".to_vec(), run)
-            .await
-            .unwrap();
         assert!(made.status().is_client_error(), "{}", made.status());
     }
 

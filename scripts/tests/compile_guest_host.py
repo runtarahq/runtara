@@ -10,6 +10,7 @@ import http.server
 import json
 import os
 import sys
+import urllib.parse
 
 port, workflow, components_dir, out_dir = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 files = {}
@@ -41,17 +42,34 @@ class Host(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/v1/run/input":
             return self.reply(200, REQUEST)
-        digest = self.path.removeprefix("/v1/artifacts/")
+        url = urllib.parse.urlparse(self.path)
+        digest = url.path.removeprefix("/v1/artifacts/")
+        query = urllib.parse.parse_qs(url.query)
         if digest in files:
             with open(os.path.join(out_dir, "fetched"), "a") as fetched:
                 fetched.write(digest + "\n")
-            return self.reply(200, open(files[digest], "rb").read())
+            data = open(files[digest], "rb").read()
+            offset = int(query.get("offset", ["0"])[0])
+            length = int(query.get("length", [str(len(data))])[0])
+            return self.reply(200, data[offset:offset + length])
         self.reply(404, b"{}")
 
+    # The composed component, in parts, as a node's host origin bounds a
+    # request.
+    PARTS = {}
+
     def do_PUT(self):
-        wasm = self.body()
-        open(os.path.join(out_dir, "workflow.wasm"), "wb").write(wasm)
-        self.reply(200, json.dumps({"sha256": hashlib.sha256(wasm).hexdigest()}).encode())
+        url = urllib.parse.urlparse(self.path)
+        digest = url.path.removeprefix("/v1/artifacts/")
+        query = urllib.parse.parse_qs(url.query)
+        part, parts = int(query["part"][0]), int(query["parts"][0])
+        Host.PARTS[part] = self.body()
+        whole = len(Host.PARTS) == parts
+        if whole:
+            wasm = b"".join(Host.PARTS[i] for i in range(parts))
+            assert hashlib.sha256(wasm).hexdigest() == digest
+            open(os.path.join(out_dir, "workflow.wasm"), "wb").write(wasm)
+        self.reply(200, json.dumps({"sha256": digest, "whole": whole}).encode())
 
     def do_POST(self):
         open(os.path.join(out_dir, "outcome.json"), "wb").write(self.body())

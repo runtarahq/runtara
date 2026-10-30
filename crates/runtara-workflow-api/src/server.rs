@@ -75,10 +75,19 @@ pub trait WorkflowApiBackend: Send + Sync + 'static {
         Err(unsupported_service("artifacts"))
     }
 
-    /// Takes `bytes` as what the launch made (a compile's composed component,
-    /// M7.15), answering its SHA-256.
-    async fn put_artifact(&self, binding: &Binding, bytes: Vec<u8>) -> Result<String, ApiError> {
-        let _ = (binding, bytes);
+    /// Takes `bytes` as part `part` of `parts` of what the launch made (a
+    /// compile's composed component, M7.15), whose SHA-256 is `sha256`:
+    /// answers whether it is now whole (every part taken, and its SHA-256
+    /// checked).
+    async fn put_artifact(
+        &self,
+        binding: &Binding,
+        sha256: &str,
+        part: u32,
+        parts: u32,
+        bytes: Vec<u8>,
+    ) -> Result<bool, ApiError> {
+        let _ = (binding, sha256, part, parts, bytes);
         Err(unsupported_service("artifacts"))
     }
 
@@ -739,8 +748,10 @@ pub fn router(state: WorkflowApiState) -> Router {
         .route("/v1/run/outcome", post(post_run_outcome))
         .route("/v1/run/deadline", put(put_run_deadline))
         .route("/v1/run/alarm", post(post_run_alarm))
-        .route("/v1/artifacts", put(put_artifact))
-        .route("/v1/artifacts/{sha256}", get(get_artifact))
+        .route(
+            "/v1/artifacts/{sha256}",
+            get(get_artifact).put(put_artifact),
+        )
         .route(
             "/v1/checkpoints/{id}",
             get(runtime::get_checkpoint).put(runtime::put_checkpoint),
@@ -1219,34 +1230,79 @@ async fn post_run_outcome(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// The header that names an artifact's whole size, on each slice of it.
+pub const ARTIFACT_SIZE: &str = "runtara-artifact-size";
+
+fn checked_sha256(sha256: &str) -> Result<(), ApiError> {
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ApiError::new(ErrorCode::Invalid, "not a SHA-256"));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Slice {
+    offset: Option<usize>,
+    length: Option<usize>,
+}
+
+/// An artifact, or the slice `offset`..`offset + length` of it: a guest's
+/// host may bound what one response carries (M7.15). Its whole size is in
+/// [`ARTIFACT_SIZE`].
 async fn get_artifact(
     State(state): State<WorkflowApiState>,
     axum::extract::Path(sha256): axum::extract::Path<String>,
+    axum::extract::Query(slice): axum::extract::Query<Slice>,
     request: Request,
 ) -> Result<Response, Failure> {
     let binding = binding_of(&request)?;
-    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(ApiError::new(ErrorCode::Invalid, "not a SHA-256").into());
-    }
+    checked_sha256(&sha256)?;
     let bytes = state.backend.get_artifact(&binding, &sha256).await?;
-    let mut response = Bytes::from(bytes).into_response();
+    let size = bytes.len();
+    let start = slice.offset.unwrap_or(0).min(size);
+    let end = slice
+        .length
+        .map_or(size, |length| start.saturating_add(length).min(size));
+    let mut response = Bytes::from(bytes).slice(start..end).into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
     );
+    response
+        .headers_mut()
+        .insert(ARTIFACT_SIZE, HeaderValue::from(size));
     Ok(response)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Part {
+    part: u32,
+    parts: u32,
+}
+
+/// Part `part` of `parts` of what the launch made, whose SHA-256 the path
+/// names: a guest's host may bound what one request carries (M7.15).
 async fn put_artifact(
     State(state): State<WorkflowApiState>,
+    axum::extract::Path(sha256): axum::extract::Path<String>,
+    axum::extract::Query(part): axum::extract::Query<Part>,
     request: Request,
 ) -> Result<Response, Failure> {
     let binding = binding_of(&request)?;
+    checked_sha256(&sha256)?;
+    if part.parts == 0 || part.part >= part.parts {
+        return Err(ApiError::new(ErrorCode::Invalid, "no such part").into());
+    }
     let body = to_bytes(request.into_body(), state.caps.request_body_bytes)
         .await
-        .map_err(|_| ApiError::new(ErrorCode::TooLarge, "artifact is over the cap"))?;
-    let sha256 = state.backend.put_artifact(&binding, body.to_vec()).await?;
-    Ok(axum::Json(serde_json::json!({ "sha256": sha256 })).into_response())
+        .map_err(|_| ApiError::new(ErrorCode::TooLarge, "artifact part is over the cap"))?;
+    let whole = state
+        .backend
+        .put_artifact(&binding, &sha256, part.part, part.parts, body.to_vec())
+        .await?;
+    Ok(axum::Json(serde_json::json!({ "sha256": sha256, "whole": whole })).into_response())
 }
 
 #[derive(Deserialize)]

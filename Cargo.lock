@@ -4665,6 +4665,7 @@ dependencies = [
  "runtara-workflow-api",
  "runtara-workflows",
  "serde_json",
+ "sha2 0.10.9",
  "wasi 0.14.2+wasi-0.2.4",
 ]
 
@@ -4977,6 +4978,8 @@ dependencies = [
  "urlencoding",
  "utoipa",
  "uuid",
+ "wasmtime",
+ "wasmtime-wasi",
  "wiremock",
 ]
 
