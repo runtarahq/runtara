@@ -85,20 +85,20 @@ const generalSchema = z.object({
   description: z.string().optional(),
   entryPointId: z.string().optional(),
   executionTimeoutSeconds: z.coerce
-    .number()
+    .number<number>()
     .int()
     .min(1, 'Timeout must be at least 1 second')
     .max(3600, 'Timeout cannot exceed 3600 seconds (1 hour)')
     .optional(),
   rateLimitBudgetSec: z.coerce
-    .number()
+    .number<number>()
     .int()
     .min(1, 'Budget must be at least 1 second')
     .max(86400, 'Budget cannot exceed 86400 seconds (24 hours)')
     .optional(),
   durableMode: z.enum(['default', 'true', 'false']),
   memoryMb: z.coerce
-    .number()
+    .number<number>()
     .int()
     .min(1, 'Memory must be at least 1 MiB')
     .max(MAX_MEMORY_MB, `Memory cannot exceed ${MAX_MEMORY_MB} MiB`)
@@ -246,7 +246,11 @@ function GeneralSection({
       : null;
   const belowFloor = (mib: number) =>
     memoryFloorMib != null && mib < memoryFloorMib;
-  const form = useForm<GeneralFormValues>({
+  const form = useForm<
+    z.input<typeof generalSchema>,
+    unknown,
+    GeneralFormValues
+  >({
     resolver: zodResolver(generalSchema),
     mode: 'onChange',
     defaultValues: {

@@ -197,7 +197,11 @@ export function DynamicConnectionForm({
     [canonicalDefaults, defaultRateLimit, existingRateLimit, initValues]
   );
   const form = useForm<Record<string, unknown>>({
-    resolver: zodResolver(frameSchema),
+    // The form also carries the connection type's dynamic fields, which the
+    // frame schema passes through, so it stays typed as an open record.
+    resolver: zodResolver(
+      frameSchema as z.ZodType<Record<string, unknown>, Record<string, unknown>>
+    ),
     values: formValues,
     // Background refetches must not clobber in-progress edits; the explicit
     // reset on version change below handles the post-save clean state.

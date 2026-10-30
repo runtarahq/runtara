@@ -939,6 +939,7 @@ export const schema = () =>
     });
 
 export type SchemaType = z.infer<ReturnType<typeof schema>>;
+export type SchemaInput = z.input<ReturnType<typeof schema>>;
 
 export const initialValues: Partial<SchemaType> = {
   ...fieldsConfig.reduce((initValues: Record<string, any>, field) => {

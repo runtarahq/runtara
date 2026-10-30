@@ -46,7 +46,11 @@ export function TriggerForm(props: Props) {
     onSubmit,
   } = props;
 
-  const entireForm = useForm<TriggerSchemaType>({
+  const entireForm = useForm<
+    z.input<typeof form.schema>,
+    unknown,
+    TriggerSchemaType
+  >({
     resolver: zodResolver(form.schema),
     defaultValues: form.initialValues,
     values: initValues,
