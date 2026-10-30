@@ -21,7 +21,7 @@
       (global.set $heap (i32.add (global.get $heap) (local.get $size)))
       (local.get $p)))
   (core instance $memory (instantiate $memory))
-  (core func $return (canon task.return (result (result $outcome (error $error))) (memory $memory "memory")))
+  (core func $return (canon task.return (result (result $outcome (error $error))) (memory (core memory $memory "memory"))))
   (core module $code
     (import "m" "memory" (memory 1))
     ;; `result<outcome, error-info>` flattens past 16 values, so task.return
@@ -56,8 +56,8 @@
     (with "h" (instance (export "return" (func $return))))))
   (func $invoke async (param "capability-id" string) (param "input" (list u8))
     (result (result $outcome (error $error)))
-    (canon lift (core func $code "invoke") async (callback (func $code "callback"))
-      (memory $memory "memory") (realloc (func $memory "realloc"))))
+    (canon lift (core func $code "invoke") async (callback (core func $code "callback"))
+      (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
   (instance $capabilities
     (export "error-info" (type $error))
     (export "signal-wait" (type $signal))

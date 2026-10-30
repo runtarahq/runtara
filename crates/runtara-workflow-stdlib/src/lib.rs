@@ -11,7 +11,7 @@
 //!
 //! Everything here is pure: JSON in, JSON out, plus an interning value
 //! store. Durability (registration, checkpointing, signals, heartbeats)
-//! is the host-implemented `runtara:workflow/runtime` interface, and
+//! is the workflow API's (`runtara:api`), and
 //! agent calls go out over each
 //! agent's own WIT interface (`runtara:agent-<id>/capabilities@1.0.0`),
 //! bound at `wac compose` time. This crate therefore has no HTTP client,
@@ -867,6 +867,22 @@ mod component {
 
         fn state_error(step_id: String, error: Vec<u8>) -> Result<Vec<u8>, String> {
             with_manifest(|manifest| manifest.state_error(&step_id, &error))
+        }
+
+        fn api_error_json(code: String, message: String, retry_after_ms: Option<u64>) -> Vec<u8> {
+            crate::direct_json::api_error_json(&code, &message, retry_after_ms)
+        }
+
+        fn agent_operation_input(
+            input: Vec<u8>,
+            operation_id: Option<String>,
+            continuation: Option<Vec<u8>>,
+        ) -> Result<Vec<u8>, String> {
+            crate::direct_json::agent_operation_input(
+                &input,
+                operation_id.as_deref(),
+                continuation.as_deref(),
+            )
         }
 
         fn ai_wait_tool_signal_id(

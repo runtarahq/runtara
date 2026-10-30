@@ -253,12 +253,26 @@ pub(super) fn emit_agent_plan(
         !suspends || (durable_checkpoint && memo_slot_ptr_local.is_none()),
         "agent_suspend::check_sites admits only durable sequential suspending sites"
     );
-    let invoke = indices
-        .agent_invoke(agent_component_id)
-        .expect("direct Agent run plans have matching component imports");
+    // A child run calls no composed component (`emit_agent_invoke` runs it
+    // through the `child-run` helper), so it has no import of its own.
+    let child_run_invoke;
+    let invoke = if static_data.agent_child_run(agent_id).is_some() {
+        child_run_invoke = super::core_imports::DirectAgentInvokeImport {
+            function_index: u32::MAX,
+            params: Vec::new(),
+        };
+        &child_run_invoke
+    } else {
+        indices
+            .agent_invoke(agent_component_id)
+            .expect("direct Agent run plans have matching component imports")
+    };
     let capability_id = static_data
         .agent_capability_id(agent_id)
         .expect("direct Agent run plans have static capability ids");
+    // A memoized parallel-window result is the agent's raw outcome, except a
+    // child run's, which the launch pass stored as the normalized result.
+    let normalize_memo = !invoke.is_scoped() && static_data.agent_child_run(agent_id).is_none();
     if max_retries > 0 {
         body.instruction(&Instruction::I32Const(1));
         body.instruction(&Instruction::LocalSet(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL));
@@ -345,9 +359,9 @@ pub(super) fn emit_agent_plan(
                     memory_index: 0,
                 }));
                 // The launch pass stored the agent's raw outcome; normalize it like
-                // a sequential invoke (parallel windows never hold a workflow-agent). The
-                // private scoped interface still answers a bare list.
-                if !invoke.is_scoped() {
+                // a sequential invoke. The private scoped interface still answers
+                // a bare list, and a child run's slot is already normalized.
+                if normalize_memo {
                     super::agent_invoke::emit_normalize_outcome(body, indices, static_data, false);
                 }
                 body.instruction(&Instruction::Else);
@@ -362,6 +376,8 @@ pub(super) fn emit_agent_plan(
                     (route_ptr_local, route_len_local),
                     Some(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL),
                     suspends,
+                    agent_id,
+                    (output_ptr_local, output_len_local),
                 );
             }
             emit_agent_invoke(
@@ -483,9 +499,9 @@ pub(super) fn emit_agent_plan(
                     memory_index: 0,
                 }));
                 // The launch pass stored the agent's raw outcome; normalize it like
-                // a sequential invoke (parallel windows never hold a workflow-agent). The
-                // private scoped interface still answers a bare list.
-                if !invoke.is_scoped() {
+                // a sequential invoke. The private scoped interface still answers
+                // a bare list, and a child run's slot is already normalized.
+                if normalize_memo {
                     super::agent_invoke::emit_normalize_outcome(body, indices, static_data, false);
                 }
                 body.instruction(&Instruction::Else);
@@ -509,6 +525,8 @@ pub(super) fn emit_agent_plan(
                     (route_ptr_local, route_len_local),
                     Some(DIRECT_AGENT_RETRY_ATTEMPT_LOCAL),
                     false,
+                    agent_id,
+                    (output_ptr_local, output_len_local),
                 );
             }
             emit_agent_invoke(
@@ -680,9 +698,9 @@ pub(super) fn emit_agent_plan(
                 memory_index: 0,
             }));
             // The launch pass stored the agent's raw outcome; normalize it like
-            // a sequential invoke (parallel windows never hold a workflow-agent). The
-            // private scoped interface still answers a bare list.
-            if !invoke.is_scoped() {
+            // a sequential invoke. The private scoped interface still answers
+            // a bare list, and a child run's slot is already normalized.
+            if normalize_memo {
                 super::agent_invoke::emit_normalize_outcome(body, indices, static_data, false);
             }
             body.instruction(&Instruction::Else);
@@ -726,6 +744,8 @@ pub(super) fn emit_agent_plan(
                     (route_ptr_local, route_len_local),
                     None,
                     suspends,
+                    agent_id,
+                    (output_ptr_local, output_len_local),
                 );
             }
             emit_agent_invoke(

@@ -872,13 +872,6 @@ async fn run_with_deadline(scenario: Scenario, deadline: bool) -> anyhow::Result
         compiled.invocation_manifest.is_none(),
         "fixture emitted an isolation inventory"
     );
-    let bytes = fs::read(&compiled.wasm_path)?;
-    anyhow::ensure!(
-        !bytes
-            .windows(b"runtara:workflow/tasks".len())
-            .any(|bytes| bytes == b"runtara:workflow/tasks"),
-        "fixture contains the superseded task interface"
-    );
     let server_host = host.clone();
     let server = tokio::spawn(async move {
         let mut connections = tokio::task::JoinSet::new();

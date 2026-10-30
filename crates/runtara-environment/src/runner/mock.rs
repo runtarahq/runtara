@@ -292,15 +292,13 @@ impl Runner for MockRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn test_options() -> LaunchOptions {
         LaunchOptions {
             launch_id: "test-launch-123".to_string(),
             instance_id: "test-instance-123".to_string(),
             tenant_id: "test-tenant".to_string(),
-            wasm_path: PathBuf::from("/test/workflow.wasm"),
-            expected_workflow_checksum: None,
+            workflow_digest: crate::artifacts::Digest::of(b"workflow"),
             preparation_attempt: None,
             preparation_deadline: None,
             input: serde_json::json!({"key": "value"}),
@@ -310,6 +308,7 @@ mod tests {
             prepersisted_input: None,
             launch_kind: crate::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         }
     }
 

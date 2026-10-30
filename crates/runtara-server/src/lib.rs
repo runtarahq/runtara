@@ -1,8 +1,10 @@
+pub mod agent_release;
 pub mod api;
 pub mod audit;
 pub mod auth;
 pub mod authz;
 pub mod bind;
+pub mod boot;
 pub mod channels;
 pub mod compiler;
 pub mod config;
@@ -17,16 +19,20 @@ pub mod environment_client;
 pub mod mcp;
 pub mod metrics;
 pub mod middleware;
+pub mod migrate_tenant;
 pub mod object_model_privileges;
 pub mod observability;
 pub mod plan_check;
 pub mod product_events;
+pub mod publish_release;
 pub mod reencrypt;
 pub mod runtime_client;
 pub mod runtime_types;
 pub mod server;
 pub mod shutdown;
 pub mod step_events;
+pub mod tenant_quota;
+pub mod tenant_status;
 #[cfg(test)]
 pub(crate) mod test_env;
 pub mod types;
@@ -34,7 +40,7 @@ pub mod valkey;
 pub mod workers;
 pub mod workflow_agents;
 
-pub use server::{skip_migrations, start};
+pub use server::{ServerOptions, skip_migrations, start, start_with};
 
 // Link runtara_agents so the static metadata registry is available at runtime.
 extern crate runtara_agents;

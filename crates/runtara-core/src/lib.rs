@@ -12,9 +12,8 @@
 //! HTTP, no sockets, no binary. Hosts embed it two ways:
 //!
 //! - **In-process**: call the [`instance_handlers`] functions directly. This is
-//!   what `runtara-environment` does for workflows composed against
-//!   `runtara:workflow/runtime` as a host import, which is how every workflow
-//!   runs.
+//!   what `runtara-environment` does behind the workflow API every composed
+//!   workflow calls, which is how every workflow runs.
 //! - **Over HTTP**: `runtara-server` wraps the same functions in an axum router
 //!   (`runtara_server::core_runtime`) for tests and debugging. Workflows never
 //!   use it, and the server serves it on loopback only when
@@ -57,8 +56,8 @@
 //! # Instance Protocol
 //!
 //! The instance protocol handles all communication between workflow instances and Core.
-//! Instances reach it through the host-implemented
-//! `runtara:workflow/runtime` interface.
+//! Instances reach it through the workflow API (`/v1`), which the host serves
+//! in process.
 //!
 //! The environment's in-process runner calls the handlers directly for every
 //! workflow. `runtara-server` can also expose them over HTTP on loopback for

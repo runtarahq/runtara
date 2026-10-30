@@ -1,4 +1,4 @@
-use super::super::test_support::{Ticker, bounded, parent_wat, spec};
+use super::super::test_support::{Ticker, bounded, spec};
 use super::*;
 use crate::execution_host::{InvocationContext, TaskOutcome};
 use crate::isolated_tasks::{IsolatedTasks, TaskError, TaskId};
@@ -235,7 +235,7 @@ fn capability() -> String {
       {OUTCOME_TYPES}
       (func $invoke async (param "capability" string) (param "input" (list u8))
         (result (result $outcome (error $error)))
-        (canon lift (core func $m "invoke") (memory $m "memory") (realloc (func $m "realloc"))))
+        (canon lift (core func $m "invoke") (memory (core memory $m "memory")) (realloc (core func $m "realloc"))))
       (instance $api (export "error-info" (type $error)) {OUTCOME_EXPORTS}
         (export "invoke" (func $invoke)))
       (export "{CAPABILITY}" (instance $api)))"#
@@ -366,10 +366,12 @@ async fn prestart_cancel_skips_spec_and_initializer_but_closes_child_scope() {
     fx.tasks.shutdown().await.unwrap();
 }
 
+#[cfg(feature = "component-integration-tests")]
 #[tokio::test]
 async fn prepared_root_parent_controls_cancellation_through_real_launcher() {
+    use super::super::test_support::{parent_wat, with_api_component};
     let fx = Fixture::new(true);
-    let root = Component::new(fx.executor.engine(), parent_wat("")).unwrap();
+    let root = Component::new(fx.executor.engine(), with_api_component(&parent_wat(""))).unwrap();
     let package = crate::precompile::CompiledWorkflowPackage {
         invocations: None,
         root,
@@ -455,7 +457,7 @@ fn lifecycle() -> String {
       {OUTCOME_TYPES}
       (func $v2 async (param "capability-id" string) (param "input" (list u8))
         (result (result $outcome (error $error)))
-        (canon lift (core func $m "v2") (memory $m "memory") (realloc (func $m "realloc"))))
+        (canon lift (core func $m "v2") (memory (core memory $m "memory")) (realloc (core func $m "realloc"))))
       (instance $b (export "error-info" (type $error)) {OUTCOME_EXPORTS}
         (export "invoke" (func $v2)))
       (export "{}" (instance $b)))"#,
@@ -712,7 +714,7 @@ async fn a_three_case_entry_wake_cannot_bind_the_four_case_host_type() {
       (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
       (func $invoke async (param "capability-id" string) (param "input" (list u8))
         (result (result $outcome (error $error)))
-        (canon lift (core func $m "invoke") (memory $m "memory") (realloc (func $m "realloc"))))
+        (canon lift (core func $m "invoke") (memory (core memory $m "memory")) (realloc (core func $m "realloc"))))
       (instance $entry (export "error-info" (type $error)) {OUTCOME_EXPORTS}
         (export "invoke" (func $invoke)))
       (export "{}" (instance $entry)))"#,

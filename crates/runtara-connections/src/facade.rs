@@ -344,6 +344,7 @@ impl ConnectionsFacade {
     ) -> Result<ResolvedConnectionAuth, ConnectionsError> {
         let resolved = match provider_auth::resolve_connection_auth(
             &self.state.http_client,
+            tenant_id,
             connection_id,
             integration_id,
             params,
@@ -531,6 +532,7 @@ impl ConnectionsFacade {
     /// Returns `Err(retry_after_ms)` if the caller should wait.
     pub async fn check_rate_limit(
         &self,
+        tenant_id: &str,
         connection_id: &str,
         rate_limit_config: &Option<Value>,
     ) -> Result<(), u64> {
@@ -556,7 +558,7 @@ impl ConnectionsFacade {
             }
         };
 
-        let key = format!("rate_limit:{}", connection_id);
+        let key = crate::service::rate_limits::rate_limit_key(tenant_id, connection_id);
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()

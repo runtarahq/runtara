@@ -19,3 +19,7 @@ serde_json = { workspace = true }
 runtara-control-contract = { path = "../../runtara-control-contract" }
 runtara-agent-macro = { workspace = true }
 runtara-dsl = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+runtara-workflow-sdk = { path = "../../runtara-workflow-sdk" }
+runtara-workflow-api = { path = "../../runtara-workflow-api" }

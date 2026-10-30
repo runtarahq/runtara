@@ -121,7 +121,7 @@ pub async fn run(
             return;
         }
     };
-    let queue = CompilationQueue::new(manager);
+    let queue = CompilationQueue::new(manager, crate::config::served_tenants().to_vec());
 
     // Recover any orphaned pending compilations (from previous crashes)
     match queue.recover_orphaned().await {
@@ -245,10 +245,13 @@ pub async fn run(
                     // so it must not be counted as an ordinary failed compile.
                     if !superseded {
                         let mut event = request.product_event.clone().unwrap_or_else(|| {
-                            ProductEvent::new(EventType::WorkflowCompiled)
-                                .no_user_actor("compilation_worker", ActorType::System)
-                                .resource(&request.workflow_id, "workflow")
-                                .source(EventSource::Worker)
+                            ProductEvent::for_tenant(
+                                EventType::WorkflowCompiled,
+                                &request.tenant_id,
+                            )
+                            .no_user_actor("compilation_worker", ActorType::System)
+                            .resource(&request.workflow_id, "workflow")
+                            .source(EventSource::Worker)
                         });
                         event.properties = serde_json::json!({ "success": success });
                         event.occurred_at = chrono::Utc::now();
@@ -491,7 +494,10 @@ async fn open_shared_queue(
         .map_err(|e| {
             crate::valkey::compilation_queue::CompilationQueueError::ConnectionError(e.to_string())
         })?;
-    Ok(CompilationQueue::new(manager))
+    Ok(CompilationQueue::new(
+        manager,
+        crate::config::served_tenants().to_vec(),
+    ))
 }
 
 #[cfg(test)]

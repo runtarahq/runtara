@@ -57,7 +57,7 @@ serde_ignored = "0.1"
 sha2 = "0.10"
 tracing = "0.1"
 minijinja = "2.5"
-wasm-encoder = { version = "0.247", optional = true }
+wasm-encoder = { version = "0.247", optional = true, features = ["wasmparser"] }
 wit-component = { version = "0.247", optional = true }
 wit-parser = { version = "0.247", optional = true }
 wac-parser = { version = "0.10", optional = true }
@@ -69,11 +69,11 @@ wasmparser = { version = "0.247", optional = true }
 runtara-core = { path = "../runtara-core", features = ["test-support"] }
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 runtara-database-contract = { path = "../runtara-database-contract" }
-wat = "1.253"
+wat = "1"
 anyhow = "1"
 runtara-agent-trusted = { path = "../runtara-agent-trusted" }
 # Execute emitted retry predicates at u32 boundaries without billions of invocations.
-wasmtime = { version = "46", default-features = false, features = ["std", "runtime", "cranelift"] }
+wasmtime = { version = "50", default-features = false, features = ["std", "runtime", "cranelift"] }
 async-trait = "0.1"
 tempfile = "3"
 base64 = { workspace = true }

@@ -1,0 +1,11 @@
+// The run shim the compiler composes behind a workflow's logic on the
+// workflow API ABI: it turns the logic's entry into `wasi:cli/run`, reading
+// the input and posting the outcome over the workflow API through the guest
+// SDK (which imports `wasi:http/client@0.3.0` on its behalf). The logic
+// reaches the rest of the API through `runtara:api`.
+package runtara:workflow-adapter@1.0.0;
+
+world run-shim {
+    import runtara:agent-workflow-agent/capabilities@1.0.0;
+    export wasi:cli/run@0.3.0;
+}

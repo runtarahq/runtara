@@ -296,6 +296,6 @@ fn host_failure(reason: String) -> InvokeRunResult {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "component-integration-tests"))]
 #[path = "scoped_execution_tests.rs"]
 mod tests;

@@ -438,15 +438,10 @@ pub struct LaunchOptions {
     pub instance_id: String,
     /// Tenant ID
     pub tenant_id: String,
-    /// Path to the image's composed `workflow.wasm`. It must export the
-    /// workflow entry; preparation refuses it otherwise.
-    pub wasm_path: std::path::PathBuf,
-    /// Immutable source checksum for a generated direct workflow image.
-    ///
-    /// The killable precompiler calculates a digest of the bytes it read and
-    /// the runner compares it to this value before deserializing its output.
-    /// Images registered without a recorded checksum leave it unset.
-    pub expected_workflow_checksum: Option<String>,
+    /// Digest of the image's composed `workflow.wasm` in the artifact store.
+    /// The runner fetches it from its store, and refuses bytes whose digest
+    /// differs or a component without the workflow entry.
+    pub workflow_digest: runtara_artifact_store::Digest,
     /// Durable preparation claim incarnation, when this came from the launch
     /// queue. It distinguishes an old timed-out compiler from a later claim
     /// with the same launch id and dispatcher owner.
@@ -483,6 +478,10 @@ pub struct LaunchOptions {
     /// or invokes the guest. Direct/legacy callers leave this unset; durable
     /// dispatchers always provide one.
     pub start_gate: Option<StartGate>,
+    /// The workflow's memory setting, in bytes: a cap on the sum of the
+    /// guest's linear memories. The runner's own ceiling still applies;
+    /// `None` leaves only that ceiling.
+    pub memory_limit_bytes: Option<u64>,
 }
 
 /// Handle for a launched instance (detached execution).
@@ -514,6 +513,20 @@ pub enum RunExitReport {
     SuspendNotParked {
         /// The last park error.
         error: String,
+    },
+    /// The guest trapped without posting an outcome; `reason` says why (its
+    /// memory limit, for example). The run is a crash with this reason.
+    Trapped {
+        /// The host's account of the trap.
+        reason: String,
+    },
+    /// The runner lost the executor (its node or its link went away) and
+    /// cannot say how the guest ended; it may still be running. The run is
+    /// resumable: recovery revokes its lease, so anything the lost executor
+    /// still writes is fenced, and relaunches it from its checkpoints.
+    Lost {
+        /// What the runner observed.
+        reason: String,
     },
 }
 
@@ -861,8 +874,7 @@ mod prepared_launch_tests {
             launch_id: launch_id.to_string(),
             instance_id: "instance-1".to_string(),
             tenant_id: "tenant-1".to_string(),
-            wasm_path: std::path::PathBuf::from("/nonexistent.wasm"),
-            expected_workflow_checksum: None,
+            workflow_digest: runtara_artifact_store::Digest::of(b"workflow"),
             preparation_attempt: None,
             preparation_deadline: None,
             input: serde_json::Value::Null,
@@ -872,6 +884,7 @@ mod prepared_launch_tests {
             prepersisted_input: None,
             launch_kind: crate::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         }
     }
 

@@ -11,6 +11,8 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use runtara_artifact_store::{ArtifactStore, Digest, FilesystemArtifactStore};
+
 use crate::error::Result;
 use runtara_core::persistence::checkpoint_scope::SharedChildSteps;
 
@@ -25,8 +27,10 @@ pub struct Image {
     pub name: String,
     /// Optional description
     pub description: Option<String>,
-    /// Path to the executable binary
-    pub binary_path: String,
+    /// Digest of the workflow artifact in the artifact store. `None` for a
+    /// name claimed by an upload that has not registered yet, or an image
+    /// whose artifact was lost before it reached the store.
+    pub binary_digest: Option<String>,
     /// When the image was created
     pub created_at: DateTime<Utc>,
     /// When the image was last updated
@@ -36,6 +40,15 @@ pub struct Image {
 }
 
 impl Image {
+    /// The digest that addresses this image's workflow artifact.
+    pub fn artifact_digest(&self) -> std::result::Result<Digest, String> {
+        let digest = self
+            .binary_digest
+            .as_deref()
+            .ok_or_else(|| "workflow image has no artifact in the store".to_string())?;
+        Digest::parse(digest).map_err(|error| error.to_string())
+    }
+
     /// Immutable SHA-256 identity of the image's binary, which durable
     /// preparation compares to the bytes it reads.
     ///
@@ -50,6 +63,21 @@ impl Image {
             .filter(|checksum| !checksum.is_empty())
             .ok_or_else(|| "workflow image is missing its immutable binary checksum".to_string())
     }
+
+    /// The workflow's memory setting compiled into the image's `workflow`
+    /// metadata envelope, in bytes; `None` for an image without one.
+    pub fn workflow_memory_limit_bytes(&self) -> Option<u64> {
+        self.metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pointer("/workflow/memoryLimitBytes"))
+            .and_then(serde_json::Value::as_u64)
+    }
+}
+
+/// The artifact store a deployment uses when it configures none: files under
+/// `<data_dir>/artifacts`.
+pub fn default_artifact_store(data_dir: &std::path::Path) -> FilesystemArtifactStore {
+    FilesystemArtifactStore::new(data_dir.join("artifacts"))
 }
 
 /// Reject an image that does not export the workflow entry
@@ -58,11 +86,21 @@ impl Image {
 /// [`SharedChildSteps`]). This is called before the launch, so an artifact
 /// without the entry cannot take a runner permit or receive a container
 /// registry entry.
-pub async fn inspect_current_workflow_image(image: &Image) -> Result<SharedChildSteps> {
-    let binary_path = image.binary_path.clone();
+pub async fn inspect_current_workflow_image(
+    image: &Image,
+    artifacts: &dyn ArtifactStore,
+) -> Result<SharedChildSteps> {
+    let digest = image
+        .artifact_digest()
+        .map_err(crate::error::Error::Other)?;
+    let bytes = artifacts
+        .get(&digest)
+        .await
+        .map_err(|error| crate::error::Error::Other(format!("read workflow artifact: {error}")))?
+        .ok_or_else(|| {
+            crate::error::Error::Other(format!("workflow artifact {digest} is not in the store"))
+        })?;
     tokio::task::spawn_blocking(move || {
-        let bytes = std::fs::read(&binary_path)
-            .map_err(|error| anyhow::anyhow!("read workflow component {binary_path}: {error}"))?;
         runtara_component_host::lifecycle::require_workflow_entry(&bytes)?;
         Ok::<_, anyhow::Error>(
             match runtara_component_host::workflow_manifest::shared_child_steps(&bytes) {
@@ -133,8 +171,23 @@ pub struct ImageFilter {
 }
 
 /// Image registry - manages available images in the database.
+#[derive(Clone)]
 pub struct ImageRegistry {
     pool: PgPool,
+}
+
+/// Serializes, per digest, storing an artifact for a registration with
+/// releasing it after a delete, so a release never removes bytes a
+/// registration racing it has just pointed a row at.
+async fn lock_artifact(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    digest: &Digest,
+) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('runtara-artifact:' || $1, 0))")
+        .bind(digest.as_str())
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 /// The stable image ID claimed for a tenant-scoped name.
@@ -177,7 +230,6 @@ impl ImageRegistry {
         tenant_id: &str,
         name: &str,
         candidate_image_id: &str,
-        binary_path: &str,
     ) -> Result<ImageNameClaim> {
         // A concurrent delete after a losing insert is extraordinarily rare,
         // but retrying makes the read-after-conflict path robust without ever
@@ -186,8 +238,8 @@ impl ImageRegistry {
             let inserted: Option<String> = sqlx::query_scalar(
                 r#"
                 INSERT INTO images (
-                    image_id, tenant_id, name, binary_path, created_at, updated_at
-                ) VALUES ($1, $2, $3, $4, NOW(), NOW())
+                    image_id, tenant_id, name, created_at, updated_at
+                ) VALUES ($1, $2, $3, NOW(), NOW())
                 ON CONFLICT (tenant_id, name) DO NOTHING
                 RETURNING image_id
                 "#,
@@ -195,7 +247,6 @@ impl ImageRegistry {
             .bind(candidate_image_id)
             .bind(tenant_id)
             .bind(name)
-            .bind(binary_path)
             .fetch_optional(&self.pool)
             .await?;
 
@@ -228,18 +279,32 @@ impl ImageRegistry {
         )))
     }
 
-    /// Register a new image
-    pub async fn register(&self, image: &Image) -> Result<()> {
+    /// Register (or replace, by name) an image whose workflow artifact is
+    /// `binary`: the bytes go to the artifact store and the row records
+    /// their digest. Returns the digest.
+    pub async fn register(
+        &self,
+        image: &Image,
+        binary: &[u8],
+        artifacts: &dyn ArtifactStore,
+    ) -> Result<Digest> {
         invalidate_image_cache();
+        let digest = Digest::of(binary);
+        let mut tx = self.pool.begin().await?;
+        lock_artifact(&mut tx, &digest).await?;
+        artifacts.put(binary).await.map_err(|error| {
+            crate::error::Error::Other(format!("store image artifact: {error}"))
+        })?;
         sqlx::query(
             r#"
             INSERT INTO images (
-                image_id, tenant_id, name, description, binary_path,
+                image_id, tenant_id, name, description, binary_digest,
                 created_at, updated_at, metadata
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (tenant_id, name) DO UPDATE SET
                 description = EXCLUDED.description,
-                binary_path = EXCLUDED.binary_path,
+                binary_digest = EXCLUDED.binary_digest,
+                binary_path = NULL,
                 updated_at = EXCLUDED.updated_at,
                 metadata = EXCLUDED.metadata
             "#,
@@ -248,20 +313,23 @@ impl ImageRegistry {
         .bind(&image.tenant_id)
         .bind(&image.name)
         .bind(&image.description)
-        .bind(&image.binary_path)
+        .bind(digest.as_str())
         .bind(image.created_at)
         .bind(image.updated_at)
         .bind(&image.metadata)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
+        invalidate_image_cache();
 
         tracing::info!(
             image_id = %image.image_id,
             name = %image.name,
+            digest = %digest,
             "Registered image"
         );
 
-        Ok(())
+        Ok(digest)
     }
 
     /// Get an image by ID
@@ -272,7 +340,7 @@ impl ImageRegistry {
 
         let row: Option<ImageRow> = sqlx::query_as(
             r#"
-            SELECT image_id, tenant_id, name, description, binary_path,
+            SELECT image_id, tenant_id, name, description, binary_digest,
                    created_at, updated_at, metadata
             FROM images
             WHERE image_id = $1
@@ -289,25 +357,102 @@ impl ImageRegistry {
         Ok(image)
     }
 
-    /// Whether an image's registered artifact is still on disk.
+    /// Move the artifacts of images registered before the artifact store
+    /// (a `binary_path` on disk) into the store, recording their digest, and
+    /// remove the old files. Returns how many were moved.
     ///
-    /// The row and the file can disagree. The row is immutable once written;
-    /// the file can go missing — a wiped data dir, a half-restored backup, an
-    /// operator clearing space. A caller about to reuse an artifact on the
+    /// An image's digest was backfilled from the checksum it recorded when it
+    /// was stored; a file whose bytes no longer match it is left where it is
+    /// and its image stays unrunnable, as it already was. A file that is gone
+    /// leaves the image without an artifact.
+    pub async fn import_legacy_artifacts(&self, artifacts: &dyn ArtifactStore) -> Result<u64> {
+        let legacy: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT image_id, binary_path, binary_digest FROM images WHERE binary_path IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut imported = 0;
+        for (image_id, path, recorded) in legacy {
+            let bytes = match tokio::fs::read(&path).await {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::warn!(image_id = %image_id, path = %path, "Legacy image artifact is gone; the image has no artifact");
+                    sqlx::query("UPDATE images SET binary_path = NULL WHERE image_id = $1 AND binary_path = $2")
+                        .bind(&image_id)
+                        .bind(&path)
+                        .execute(&self.pool)
+                        .await?;
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(image_id = %image_id, path = %path, error = %error, "Could not read legacy image artifact; left in place");
+                    continue;
+                }
+            };
+            let digest = Digest::of(&bytes);
+            if recorded
+                .as_deref()
+                .is_some_and(|recorded| recorded != digest.as_str())
+            {
+                tracing::error!(image_id = %image_id, path = %path, recorded = ?recorded, actual = %digest, "Legacy image artifact does not match its recorded checksum; left in place");
+                continue;
+            }
+            let mut tx = self.pool.begin().await?;
+            lock_artifact(&mut tx, &digest).await?;
+            artifacts.put(&bytes).await.map_err(|error| {
+                crate::error::Error::Other(format!("store legacy image artifact: {error}"))
+            })?;
+            sqlx::query(
+                "UPDATE images SET binary_digest = $3, binary_path = NULL \
+                 WHERE image_id = $1 AND binary_path = $2",
+            )
+            .bind(&image_id)
+            .bind(&path)
+            .bind(digest.as_str())
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            let path = std::path::Path::new(&path);
+            let _ = tokio::fs::remove_file(path).await;
+            if let Some(dir) = path.parent() {
+                // Only empty: the directory was the image's own.
+                let _ = tokio::fs::remove_dir(dir).await;
+            }
+            imported += 1;
+        }
+        if imported > 0 {
+            invalidate_image_cache();
+            tracing::info!(
+                imported,
+                "Moved legacy image artifacts into the artifact store"
+            );
+        }
+        Ok(imported)
+    }
+
+    /// Whether an image's registered artifact is still in the store.
+    ///
+    /// The row and the store can disagree. The row is immutable once written;
+    /// the artifact can go missing — a wiped data dir, a half-restored backup,
+    /// an operator clearing space. A caller about to reuse an artifact on the
     /// strength of its row is exactly the caller that needs to know which it
     /// has, because reusing a row whose file is gone produces an image that
     /// registers fine and refuses to start.
     ///
     /// `false` for an image that does not exist at all: a caller asking whether
     /// it can reuse this artifact gets the same answer either way.
-    pub async fn artifact_present(&self, image_id: &str) -> Result<bool> {
+    pub async fn artifact_present(
+        &self,
+        image_id: &str,
+        artifacts: &dyn ArtifactStore,
+    ) -> Result<bool> {
         let Some(image) = self.get(image_id).await? else {
             return Ok(false);
         };
-        let path = std::path::PathBuf::from(&image.binary_path);
-        Ok(tokio::task::spawn_blocking(move || path.is_file())
-            .await
-            .unwrap_or(false))
+        let Ok(digest) = image.artifact_digest() else {
+            return Ok(false);
+        };
+        Ok(artifacts.exists(&digest).await.unwrap_or(false))
     }
 
     /// Get an image by ID, refusing one that belongs to another tenant.
@@ -363,7 +508,7 @@ impl ImageRegistry {
     pub async fn get_by_name(&self, tenant_id: &str, name: &str) -> Result<Option<Image>> {
         let row: Option<ImageRow> = sqlx::query_as(
             r#"
-            SELECT image_id, tenant_id, name, description, binary_path,
+            SELECT image_id, tenant_id, name, description, binary_digest,
                    created_at, updated_at, metadata
             FROM images
             WHERE tenant_id = $1 AND name = $2
@@ -381,7 +526,7 @@ impl ImageRegistry {
     pub async fn list(&self, tenant_id: &str) -> Result<Vec<Image>> {
         let rows: Vec<ImageRow> = sqlx::query_as(
             r#"
-            SELECT image_id, tenant_id, name, description, binary_path,
+            SELECT image_id, tenant_id, name, description, binary_digest,
                    created_at, updated_at, metadata
             FROM images
             WHERE tenant_id = $1
@@ -404,7 +549,7 @@ impl ImageRegistry {
     ) -> Result<Vec<Image>> {
         let rows: Vec<ImageRow> = sqlx::query_as(
             r#"
-            SELECT image_id, tenant_id, name, description, binary_path,
+            SELECT image_id, tenant_id, name, description, binary_digest,
                    created_at, updated_at, metadata
             FROM images
             WHERE tenant_id = $1
@@ -425,7 +570,7 @@ impl ImageRegistry {
     pub async fn list_all(&self, limit: i64, offset: i64) -> Result<Vec<Image>> {
         let rows: Vec<ImageRow> = sqlx::query_as(
             r#"
-            SELECT image_id, tenant_id, name, description, binary_path,
+            SELECT image_id, tenant_id, name, description, binary_digest,
                    created_at, updated_at, metadata
             FROM images
             ORDER BY created_at DESC
@@ -440,15 +585,94 @@ impl ImageRegistry {
         Ok(rows.into_iter().map(|r| r.into()).collect())
     }
 
-    /// Delete an image
-    pub async fn delete(&self, image_id: &str) -> Result<bool> {
+    /// Delete an image, and its artifact once no other image names it.
+    pub async fn delete(&self, image_id: &str, artifacts: &dyn ArtifactStore) -> Result<bool> {
         invalidate_image_cache();
-        let result = sqlx::query("DELETE FROM images WHERE image_id = $1")
-            .bind(image_id)
-            .execute(&self.pool)
-            .await?;
+        let mut tx = self.pool.begin().await?;
+        let deleted: Option<Option<String>> =
+            sqlx::query_scalar("DELETE FROM images WHERE image_id = $1 RETURNING binary_digest")
+                .bind(image_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some(digest) = deleted else {
+            return Ok(false);
+        };
+        let digest = digest
+            .as_deref()
+            .and_then(|digest| Digest::parse(digest).ok());
+        if let Some(digest) = digest {
+            lock_artifact(&mut tx, &digest).await?;
+            let referenced: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM images WHERE binary_digest = $1)")
+                    .bind(digest.as_str())
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if !referenced {
+                // Released before the row's delete commits: a failure here
+                // leaves the row, not a row whose artifact is gone.
+                artifacts.delete(&digest).await.map_err(|error| {
+                    crate::error::Error::Other(format!("release image artifact: {error}"))
+                })?;
+            }
+        }
+        tx.commit().await?;
+        invalidate_image_cache();
+        Ok(true)
+    }
+}
 
-        Ok(result.rows_affected() > 0)
+/// What [`ImageRegistry::collect_artifacts`] removed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CollectedArtifacts {
+    /// Release records removed.
+    pub records: usize,
+    /// Artifacts removed.
+    pub blobs: usize,
+}
+
+/// How old something unreferenced in the artifact store must be before it is
+/// collected, so a publish in flight is never swept.
+pub const ARTIFACT_GRACE: Duration = Duration::from_secs(24 * 3600);
+
+impl ImageRegistry {
+    /// Removes what nothing references any more, older than `grace` (see
+    /// [`runtara_artifact_store::gc`]): release records no retained index
+    /// names, then each blob no retained manifest names, unless an image
+    /// names it. A blob is judged and deleted under the lock registration
+    /// takes before it stores one, so an image being registered keeps its
+    /// blob (SYN-777). Also answers the index digests of the releases the
+    /// store holds.
+    pub async fn collect_artifacts(
+        &self,
+        artifacts: &dyn ArtifactStore,
+        grace: Duration,
+    ) -> Result<(CollectedArtifacts, Vec<Digest>)> {
+        let other = |error: runtara_artifact_store::ArtifactError| {
+            crate::error::Error::Other(format!("collect artifacts: {error}"))
+        };
+        let plan = runtara_artifact_store::gc::plan(artifacts, grace, std::time::SystemTime::now())
+            .await
+            .map_err(other)?;
+        let mut collected = CollectedArtifacts::default();
+        for key in &plan.records {
+            if artifacts.delete_manifest(key).await.map_err(other)? {
+                collected.records += 1;
+            }
+        }
+        for digest in &plan.blobs {
+            let mut tx = self.pool.begin().await?;
+            lock_artifact(&mut tx, digest).await?;
+            let named: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM images WHERE binary_digest = $1)")
+                    .bind(digest.as_str())
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if !named && artifacts.delete(digest).await.map_err(other)? {
+                collected.blobs += 1;
+            }
+            tx.commit().await?;
+        }
+        Ok((collected, plan.releases))
     }
 }
 
@@ -459,7 +683,7 @@ struct ImageRow {
     tenant_id: String,
     name: String,
     description: Option<String>,
-    binary_path: String,
+    binary_digest: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     metadata: Option<serde_json::Value>,
@@ -472,7 +696,7 @@ impl From<ImageRow> for Image {
             tenant_id: row.tenant_id,
             name: row.name,
             description: row.description,
-            binary_path: row.binary_path,
+            binary_digest: row.binary_digest,
             created_at: row.created_at,
             updated_at: row.updated_at,
             metadata: row.metadata,
@@ -486,23 +710,17 @@ pub struct ImageBuilder {
     tenant_id: String,
     name: String,
     description: Option<String>,
-    binary_path: String,
     metadata: Option<serde_json::Value>,
 }
 
 impl ImageBuilder {
     /// Create a new image builder
-    pub fn new(
-        tenant_id: impl Into<String>,
-        name: impl Into<String>,
-        binary_path: impl Into<String>,
-    ) -> Self {
+    pub fn new(tenant_id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             image_id: None,
             tenant_id: tenant_id.into(),
             name: name.into(),
             description: None,
-            binary_path: binary_path.into(),
             metadata: None,
         }
     }
@@ -535,7 +753,7 @@ impl ImageBuilder {
             tenant_id: self.tenant_id,
             name: self.name,
             description: self.description,
-            binary_path: self.binary_path,
+            binary_digest: None,
             created_at: now,
             updated_at: now,
             metadata: self.metadata,
@@ -550,7 +768,7 @@ mod tests {
     #[test]
     fn every_image_must_record_its_binary_checksum() {
         let workflow = |envelope: serde_json::Value| {
-            ImageBuilder::new("tenant", "workflow", "/tmp/workflow.wasm")
+            ImageBuilder::new("tenant", "workflow")
                 .metadata(serde_json::json!({ "workflow": envelope }))
                 .build()
         };
@@ -569,7 +787,7 @@ mod tests {
                 .is_err()
         );
 
-        let without_envelope = ImageBuilder::new("tenant", "image", "/tmp/image.wasm").build();
+        let without_envelope = ImageBuilder::new("tenant", "image").build();
         assert!(
             without_envelope.workflow_binary_checksum().is_err(),
             "every image records its checksum"

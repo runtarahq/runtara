@@ -229,12 +229,17 @@ impl Server {
         }));
         let (seen, count, cleanup) = (requests.clone(), children.clone(), closed.clone());
         let task = tokio::spawn(async move {
-            loop {
+            'accept: loop {
                 let (mut stream, _) = listener.accept().await?;
                 let mut bytes = Vec::new();
                 let mut buffer = [0; 4096];
                 let end = loop {
                     let n = stream.read(&mut buffer).await?;
+                    // An expired call may connect and abandon the connection
+                    // before writing anything: that is no request.
+                    if n == 0 && bytes.is_empty() {
+                        continue 'accept;
+                    }
                     anyhow::ensure!(n > 0, "incomplete request");
                     bytes.extend_from_slice(&buffer[..n]);
                     if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {

@@ -25,3 +25,4 @@ runtara-http = { workspace = true, features = ["native"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 runtara-http = { workspace = true, features = ["wasi"] }
+runtara-workflow-sdk = { path = "../../runtara-workflow-sdk" }

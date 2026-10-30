@@ -181,9 +181,15 @@ fn compile_children(
             ["utils".into()].into(),
         )
     } else {
-        compile_direct_workflow(input)
+        compile_isolated(input)
     }
     .unwrap()
+}
+/// Isolated-agent packages on the workflow API ABI, the default.
+fn compile_isolated(
+    input: DirectCompilationInput,
+) -> Result<DirectCompilationResult, runtara_workflows::direct_wasm::DirectCompileError> {
+    runtara_workflows::direct_wasm::compile_direct_workflow(input)
 }
 fn selected(components: &Path) -> BTreeMap<String, String> {
     BTreeMap::from([(

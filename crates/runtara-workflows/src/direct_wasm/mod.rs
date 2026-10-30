@@ -17,6 +17,8 @@
 //! `child_workflows` and `error` are supporting concerns.
 
 #[cfg(feature = "compiler")]
+mod asyncify;
+#[cfg(feature = "compiler")]
 mod child_workflows;
 #[cfg(feature = "compiler")]
 pub mod compile;
@@ -34,17 +36,16 @@ pub mod support;
 
 #[cfg(feature = "compiler")]
 pub use compile::{
-    AGENT_IMPORT_ALLOWLIST, AgentImportGrants, AgentImportKind, AgentIsolationDecision,
-    AgentIsolationReason, AgentIsolationReport, CONTROL_AGENT_IMPORTS, DIRECT_WORKFLOW_ABI_SECTION,
-    DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME, DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION,
-    DIRECT_WORKFLOW_MANIFEST_SECTION, DIRECT_WORKFLOW_SUPPORT_SECTION, DirectArtifactFileMetadata,
-    DirectArtifactMetadata, DirectChildWorkflowDependencyMetadata, DirectCompilationInput,
-    DirectCompilationResult, DirectComponentDependencyMetadata, DirectComponentSidecarMetadata,
-    DirectIsolationMetadata, bundled_trusted_pin, check_agent_component_imports,
-    compile_direct_workflow, compile_direct_workflow_composed,
-    compile_direct_workflow_composed_configured, compile_direct_workflow_with_abi,
-    compose_direct_workflow, compose_direct_workflow_with_extra_dirs, staged_dependency_is_stale,
-    trusted_artifact_pins,
+    AGENT_IMPORT_ALLOWLIST, AgentImportKind, AgentIsolationDecision, AgentIsolationReason,
+    AgentIsolationReport, DIRECT_WORKFLOW_ABI_SECTION, DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME,
+    DIRECT_WORKFLOW_ARTIFACT_METADATA_VERSION, DIRECT_WORKFLOW_MANIFEST_SECTION,
+    DIRECT_WORKFLOW_SUPPORT_SECTION, DirectArtifactFileMetadata, DirectArtifactMetadata,
+    DirectChildWorkflowDependencyMetadata, DirectCompilationInput, DirectCompilationResult,
+    DirectComponentDependencyMetadata, DirectComponentSidecarMetadata, DirectIsolationMetadata,
+    bundled_trusted_pin, check_agent_component_imports, compile_direct_workflow,
+    compile_direct_workflow_composed, compile_direct_workflow_composed_configured,
+    compile_direct_workflow_with_abi, compose_direct_workflow,
+    compose_direct_workflow_with_extra_dirs, staged_dependency_is_stale, trusted_artifact_pins,
 };
 // Builders for old packages exist only in the existing integration-test surface.
 #[cfg(all(
@@ -60,7 +61,8 @@ pub use compile::{
 pub use component::{
     DIRECT_SHARED_COMPONENT_REQUIREMENTS, DIRECT_WORKFLOW_LOGIC_PACKAGE,
     DirectAgentComponentRequirement, DirectComponentArtifacts, DirectSharedComponentRequirement,
-    WorkflowRole, emit_direct_component_artifacts, emit_direct_component_artifacts_configured,
+    RUNTARA_API_COMPONENT_REQUIREMENT, WORKFLOW_API_ADAPTER_REQUIREMENTS, WorkflowRole,
+    emit_direct_component_artifacts, emit_direct_component_artifacts_configured,
 };
 #[cfg(feature = "compiler")]
 pub use error::DirectCompileError;

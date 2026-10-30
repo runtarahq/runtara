@@ -43,7 +43,8 @@ fn stalled_agent_components(source: &Path, output: &Path, url: &str) -> anyhow::
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         if name_str == "runtara_agent_http.meta.json"
-            || (name_str.starts_with("runtara_workflow_")
+            || ((name_str.starts_with("runtara_workflow_")
+                || name_str.starts_with("runtara_api_component."))
                 && (name_str.ends_with(".wasm") || name_str.ends_with(".meta.json")))
         {
             std::fs::copy(entry.path(), output.join(name))?;
@@ -63,7 +64,26 @@ fn stalled_agent_components(source: &Path, output: &Path, url: &str) -> anyhow::
         .replace("{{REQUEST_LEN}}", &first.len().to_string())
         .replace("{{CLEANUP}}", &escape(&cleanup))
         .replace("{{CLEANUP_LEN}}", &cleanup.len().to_string());
-    std::fs::write(output.join("runtara_agent_http.wasm"), wat::parse_str(wat)?)?;
+    // The fixture reaches HTTP through `runtara:api`, like the real agent's
+    // SDK reaches the workflow API: compose it with the api component.
+    let mut graph = wac_graph::CompositionGraph::new();
+    let fixture = wac_graph::types::Package::from_bytes(
+        "test:stalled",
+        None,
+        wat::parse_str(wat)?,
+        graph.types_mut(),
+    )?;
+    let socket = graph.register_package(fixture)?;
+    let api = wac_graph::types::Package::from_bytes(
+        "runtara:api-component",
+        None,
+        std::fs::read(source.join("runtara_api_component.wasm"))?,
+        graph.types_mut(),
+    )?;
+    let plug = graph.register_package(api)?;
+    wac_graph::plug(&mut graph, vec![plug], socket)?;
+    let agent = graph.encode(wac_graph::EncodeOptions::default())?;
+    std::fs::write(output.join("runtara_agent_http.wasm"), agent)?;
     Ok(output)
 }
 
@@ -148,6 +168,7 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
                 skip_cert_verification: false,
             },
             persistence.clone(),
+            artifacts().clone(),
         )?
         .with_in_process_precompiler_for_tests()
         .with_outbound_http(Arc::new(outbound_fixture::PublicHttp::default()))?,
@@ -207,8 +228,7 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
             launch_id: format!("launch-{id}"),
             instance_id: id.clone(),
             tenant_id: "stop-test".into(),
-            wasm_path: compiled.wasm_path.clone(),
-            expected_workflow_checksum: None,
+            workflow_digest: artifacts().add(&compiled.wasm_path),
             preparation_attempt: None,
             preparation_deadline: None,
             input: json!({}),
@@ -218,6 +238,7 @@ async fn cancel_hanging_http(partial_body: bool, cleanup: Cleanup) -> anyhow::Re
             prepersisted_input: None,
             launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         })
         .await?;
     let registry = ContainerRegistry::new(pool.clone());
@@ -345,4 +366,12 @@ async fn grace_aborts_emitted_workflow_waiting_for_stalled_cancellation_callback
 #[tokio::test(flavor = "multi_thread")]
 async fn grace_closes_original_partial_body_and_stalled_cleanup_io() -> anyhow::Result<()> {
     cancel_hanging_http(true, Cleanup::Stalled).await
+}
+
+/// Where this binary's launches find the components they wrote.
+fn artifacts() -> &'static std::sync::Arc<runtara_artifact_store::test_support::FileMapStore> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Arc<runtara_artifact_store::test_support::FileMapStore>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(Default::default)
 }

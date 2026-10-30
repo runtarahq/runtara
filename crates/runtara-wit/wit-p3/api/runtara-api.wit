@@ -1,0 +1,461 @@
+// The workflow API as a component interface.
+//
+// `runtara:api` maps one-to-one onto the `/v1` endpoints of the workflow API
+// (crates/runtara-workflow-api); the `runtara-api-component` crate implements
+// it over `wasi:http` with the guest SDK, and the compiler composes that
+// component into every artifact built for the workflow API ABI. Guest code in
+// any language with component tooling may import it instead of speaking HTTP.
+//
+// This is a public contract. Within 1.x only additive changes are made (new
+// functions, new interfaces); anything else is a new major version. An
+// artifact keeps the component version it was built with, and keeps working
+// while the `/v1` version that component speaks is served.
+//
+// Conventions:
+// - Every function is `async`, so concurrent callers each keep a call in
+//   flight.
+// - Every failure is an `api-error`, the API's error envelope.
+// - `list<u8>` fields named for JSON (requests, reads, patches, payloads of
+//   events) carry JSON documents, as the endpoint's body does.
+// - Nothing here names the run: the host attaches it to every call.
+package runtara:api@1.0.0;
+
+interface types {
+    /// The error envelope of every non-2xx answer.
+    record api-error {
+        /// A generic code (`invalid`, `denied`, `not-found`, `replay-conflict`,
+        /// `fenced`, `finished`, `too-large`, `capacity`, `unavailable`,
+        /// `timeout`, `unsupported`) or a family's own (`not-child`,
+        /// `requires-operation`, `database-error`, `trusted-error`, ...).
+        code: string,
+        message: string,
+        retry-after-ms: option<u64>,
+        /// JSON, when the family carries details (a database error, an agent
+        /// error envelope).
+        details: option<string>,
+    }
+
+    record signal-wait {
+        checkpoint-id: string,
+        deadline-ms: option<u64>,
+    }
+
+    /// When the host should launch a suspended run again; any one wakes it.
+    variant wake {
+        at(u64),
+        on-signal(signal-wait),
+        on-resume,
+        instances(string),
+    }
+
+    /// A failed run or call, as persisted.
+    record error-info {
+        code: string,
+        message: string,
+        category: string,
+        severity: string,
+        retryable: bool,
+        retry-after-ms: option<u64>,
+        /// JSON object.
+        attributes: option<string>,
+        /// JSON: the producer's full structured error.
+        details: option<string>,
+    }
+}
+
+/// `/v1/run`: who the run is, its input, its outcome and its deadline.
+interface run {
+    use types.{api-error, error-info, wake};
+
+    record run-info {
+        instance-id: string,
+        tenant-id: string,
+        workflow-id: option<string>,
+        version: option<u32>,
+        attempt: option<u32>,
+        /// `fresh`, `resume`, `recovery`, ...
+        launch-kind: string,
+        debug: bool,
+        deadline-ms: option<u64>,
+        api-version: string,
+        /// Set only for an agent launched as a child run.
+        capability-id: option<string>,
+    }
+
+    variant outcome {
+        completed(list<u8>),
+        failed(error-info),
+        suspended(list<wake>),
+    }
+
+    /// `GET /v1/run`.
+    info: async func() -> result<run-info, api-error>;
+    /// `GET /v1/run/input`: the `{data, variables}` envelope (JSON).
+    input: async func() -> result<list<u8>, api-error>;
+    /// `POST /v1/run/outcome`, exactly once per launch.
+    post-outcome: async func(outcome: outcome) -> result<_, api-error>;
+    /// `PUT /v1/run/deadline`: end the run `abort-after-ms` from now, never
+    /// later than its current deadline.
+    set-deadline: async func(abort-after-ms: u64) -> result<_, api-error>;
+}
+
+/// `/v1/time`, `/v1/heartbeat` and the run's cleanup alarm.
+interface time {
+    use types.{api-error};
+
+    /// `GET /v1/time`: persistence time, in ms since the Unix epoch.
+    now-ms: async func() -> result<u64, api-error>;
+    /// `POST /v1/heartbeat`.
+    heartbeat: async func() -> result<_, api-error>;
+    /// `GET /v1/time/sleep`: wait `ms`, keeping the run's resources, while
+    /// the host shows the run waiting in process. Cancelling the call ends
+    /// the wait. Where the host cannot hold it, the guest's own clock waits.
+    sleep: async func(ms: u64);
+    /// `POST /v1/run/alarm`: the whole-execution cleanup alarm. `ms` from now
+    /// the host aborts the execution; cancelling the call first disarms it.
+    /// It has no normal result.
+    abort-after: async func(ms: u64);
+}
+
+/// `/v1/signals`: lifecycle commands (cancel, pause, shutdown) and custom
+/// signals.
+interface signals {
+    use types.{api-error};
+
+    record lifecycle-notice {
+        /// `cancel`, `pause` or `shutdown`.
+        signal-type: string,
+        command-id: string,
+        checkpoint-id: option<string>,
+    }
+
+    record lifecycle-signal {
+        notice: lifecycle-notice,
+        payload: list<u8>,
+    }
+
+    record custom-signal-notice {
+        signal-id: string,
+        checkpoint-id: string,
+    }
+
+    /// `GET /v1/signals/lifecycle`: the pending command, not acknowledged.
+    poll-lifecycle: async func() -> result<option<lifecycle-signal>, api-error>;
+    /// `POST /v1/signals/lifecycle/{commandId}/ack`: whether it applied.
+    ack-lifecycle: async func(command-id: string, signal-type: string) -> result<bool, api-error>;
+    /// `POST /v1/signals/lifecycle/check`: handle the pending command; true
+    /// when a stop-like command was handled and the run should return.
+    check-lifecycle: async func() -> result<bool, api-error>;
+    /// `POST /v1/signals/lifecycle/cancelled`: whether a cancel is pending
+    /// (acknowledging it) or was already handled.
+    cancelled: async func() -> result<bool, api-error>;
+    /// `GET /v1/signals/custom/{checkpointId}`, waiting up to `wait-ms`.
+    poll-custom: async func(checkpoint-id: string, wait-ms: u64) -> result<option<list<u8>>, api-error>;
+}
+
+/// `/v1/checkpoints`.
+interface checkpoints {
+    use types.{api-error};
+    use signals.{lifecycle-notice, custom-signal-notice};
+
+    record checkpoint-written {
+        /// False when the checkpoint already existed; `state` is the one that
+        /// won.
+        stored: bool,
+        state: list<u8>,
+        /// A lifecycle command waiting for the run.
+        pending-signal: option<lifecycle-notice>,
+        /// A custom signal waiting at this checkpoint.
+        custom-signal: option<custom-signal-notice>,
+    }
+
+    /// `GET /v1/checkpoints/{id}`.
+    get: async func(checkpoint-id: string) -> result<option<list<u8>>, api-error>;
+    /// `PUT /v1/checkpoints/{id}`: the first committed state wins.
+    put: async func(checkpoint-id: string, state: list<u8>) -> result<checkpoint-written, api-error>;
+    /// `POST /v1/checkpoints/{id}/retry-attempts`.
+    record-retry-attempt: async func(
+        checkpoint-id: string,
+        attempt-number: u32,
+        error-message: option<string>,
+    ) -> result<_, api-error>;
+}
+
+/// `/v1/events`.
+interface events {
+    use types.{api-error};
+
+    record event {
+        kind: string,
+        /// JSON.
+        payload: list<u8>,
+    }
+
+    /// `POST /v1/events`: append `events` in order.
+    append: async func(events: list<event>) -> result<_, api-error>;
+}
+
+/// `/v1/inputs`: managed inputs (human-in-the-loop requests).
+interface inputs {
+    use types.{api-error};
+
+    variant input-read {
+        open,
+        /// The response that won (JSON).
+        accepted(list<u8>),
+        /// Closed without a response; machine-readable reason.
+        closed(string),
+    }
+
+    /// `PUT /v1/inputs/{signalId}`: `descriptor` is a JSON object carrying
+    /// `signal_id`.
+    register: async func(descriptor: list<u8>, deadline-ms: option<u64>) -> result<_, api-error>;
+    /// `GET /v1/inputs/{signalId}`, waiting up to `wait-ms` while it is open.
+    poll: async func(signal-id: string, wait-ms: u64) -> result<input-read, api-error>;
+    /// `DELETE /v1/inputs/{signalId}`: abandon it; returns its final state.
+    close: async func(signal-id: string) -> result<input-read, api-error>;
+}
+
+/// `/v1/waits`: waits on direct child runs.
+interface waits {
+    use types.{api-error};
+
+    /// `PUT /v1/waits/{key}` with the request JSON
+    /// `{instanceIds, mode: "all" | "any", deadlineMs?}`; the answer is the
+    /// wait's read (JSON). On replay the first registration stands.
+    register: async func(key: string, request: list<u8>) -> result<list<u8>, api-error>;
+    /// `GET /v1/waits/{key}`, waiting up to `wait-ms` while it is pending.
+    poll: async func(key: string, wait-ms: u64) -> result<list<u8>, api-error>;
+    /// `DELETE /v1/waits/{key}`.
+    release: async func(key: string) -> result<_, api-error>;
+}
+
+/// `/v1/state`: the run's published state.
+interface state {
+    use types.{api-error};
+
+    /// `PATCH /v1/state/{key}`: merge the JSON object `patch`, once per key.
+    set: async func(key: string, patch: list<u8>) -> result<_, api-error>;
+    /// `GET /v1/state/{key}`: the state, a JSON object.
+    get: async func(key: string) -> result<list<u8>, api-error>;
+}
+
+/// `/v1/operations`: scopes around suspending capabilities and control
+/// mutations.
+interface operations {
+    use types.{api-error, wake};
+
+    record entered {
+        operation-id: string,
+        /// The continuation saved for this attempt, when `load` found one.
+        continuation: option<list<u8>>,
+    }
+
+    /// `POST /v1/operations`.
+    enter: async func(checkpoint-key: string, attempt: u32, load: bool) -> result<entered, api-error>;
+    /// `POST /v1/operations/{id}/suspend`.
+    suspend: async func(operation-id: string, state: list<u8>, wakes: list<wake>) -> result<_, api-error>;
+    /// `POST /v1/operations/{id}/exit`.
+    exit: async func(operation-id: string, failed: bool) -> result<_, api-error>;
+    /// `DELETE /v1/operations/{id}`.
+    release: async func(operation-id: string) -> result<_, api-error>;
+}
+
+/// `/v1/connections` and `/v1/http`.
+interface connections {
+    use types.{api-error};
+
+    enum sql-operation {
+        query,
+        execute,
+        batch,
+    }
+
+    record connection-target {
+        connection-id: string,
+        url: string,
+        endpoint: option<string>,
+        endpoint-ref: option<string>,
+        ai-provider: option<string>,
+        aws-service: option<string>,
+    }
+
+    variant destination {
+        connection(connection-target),
+        public(string),
+    }
+
+    record outbound-request {
+        method: string,
+        destination: destination,
+        headers: list<tuple<string, string>>,
+        timeout-ms: option<u64>,
+        max-response-bytes: option<u64>,
+    }
+
+    record outbound-reply {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    record outbound-failure {
+        code: string,
+        message: string,
+        status: option<u16>,
+        retry-after-ms: option<u64>,
+        /// Whatever upstream body was received.
+        body: list<u8>,
+    }
+
+    /// `GET /v1/connections/{id}`: the safe descriptor (JSON).
+    describe: async func(connection-id: string) -> result<list<u8>, api-error>;
+    /// `POST /v1/connections/{id}/resources` (JSON in and out).
+    resolve-resource: async func(connection-id: string, request: list<u8>) -> result<list<u8>, api-error>;
+    /// `POST /v1/connections/{id}/sql/{operation}` (JSON in and out).
+    sql: async func(connection-id: string, operation: sql-operation, request: list<u8>) -> result<list<u8>, api-error>;
+    /// `POST /v1/http`. The outer error is the API's; the inner one is the
+    /// call's own failure.
+    http: async func(request: outbound-request, body: option<list<u8>>)
+        -> result<result<outbound-reply, outbound-failure>, api-error>;
+}
+
+/// `/v1/instances`: control of other runs. Bodies and answers are the JSON
+/// of the endpoints. A mutation names the entered operation it runs in.
+interface control {
+    use types.{api-error};
+
+    /// `POST /v1/instances`.
+    start: async func(request: list<u8>, operation-id: option<string>) -> result<list<u8>, api-error>;
+    /// `GET /v1/instances/{id}`.
+    get: async func(instance-id: string) -> result<list<u8>, api-error>;
+    /// `GET /v1/instances/{id}/state`.
+    get-state: async func(instance-id: string) -> result<list<u8>, api-error>;
+    /// `POST /v1/instances/query`.
+    query: async func(request: list<u8>) -> result<list<u8>, api-error>;
+    /// `POST /v1/instances/signals/pending`.
+    pending-signals: async func(request: list<u8>) -> result<list<u8>, api-error>;
+    /// `POST /v1/instances/{id}/signals`.
+    send-signal: async func(instance-id: string, request: list<u8>, operation-id: option<string>) -> result<list<u8>, api-error>;
+    /// `POST /v1/instances/{id}/cancel`.
+    cancel: async func(instance-id: string, request: option<list<u8>>, operation-id: option<string>) -> result<list<u8>, api-error>;
+    /// `POST /v1/instances/{id}/pause`.
+    pause: async func(instance-id: string, operation-id: option<string>) -> result<list<u8>, api-error>;
+    /// `POST /v1/instances/{id}/resume`.
+    resume: async func(instance-id: string, operation-id: option<string>) -> result<list<u8>, api-error>;
+}
+
+/// `/v1/trusted`: approved built-in capabilities run on the host with the
+/// tenant's connection.
+interface trusted {
+    use types.{api-error};
+
+    /// `POST /v1/trusted/{agentId}/{capabilityId}`; `input` and the answer
+    /// are JSON. Failures are `trusted-error` with the agent error envelope
+    /// in `details`.
+    invoke: async func(
+        agent-id: string,
+        capability-id: string,
+        connection-id: string,
+        input: list<u8>,
+        operation-id: option<string>,
+    ) -> result<list<u8>, api-error>;
+}
+
+/// `/v1/debug`.
+interface debug {
+    use types.{api-error};
+
+    /// `POST /v1/debug/breakpoint`: wait at a breakpoint for up to `wait-ms`;
+    /// true when the run was resumed, false when the wait ran out.
+    breakpoint: async func(wait-ms: u64) -> result<bool, api-error>;
+}
+
+/// `/v1/tasks`: child runs (embedded child workflows, isolated and scoped
+/// agents), each in its own sandbox. A task is named by its id; the launch
+/// owns it, and it is cancelled and reaped when the launch ends.
+interface tasks {
+    use types.{api-error, error-info, wake};
+
+    /// What a child run invokes.
+    variant entry {
+        capability(string),
+        workflow,
+    }
+
+    /// The call site, generated by the parent and validated by the host
+    /// against the parent's own scope. Not an authorization token.
+    record invocation-context {
+        path: string,
+        attempt: u64,
+    }
+
+    enum cancel-status {
+        requested,
+        already-requested,
+        already-terminal,
+    }
+
+    /// A terminal child run. `suspended` is interim, until a parked child is
+    /// a parked run of its own.
+    variant task-outcome {
+        completed(list<u8>),
+        failed(error-info),
+        suspended(list<wake>),
+        cancelled,
+        timed-out,
+        trapped(string),
+    }
+
+    /// `POST /v1/tasks`: start a child run of `binding`; the task id.
+    start: async func(binding: string, entry: entry, input: list<u8>, context: invocation-context)
+        -> result<string, api-error>;
+    /// `GET /v1/tasks/{id}/outcome`, repeated until the task's execution was
+    /// destroyed.
+    join: async func(task-id: string) -> result<task-outcome, api-error>;
+    /// `GET /v1/tasks/{id}/outcome?waitMs=`, once: the outcome if the task
+    /// has ended within `wait-ms`, `none` while it still runs.
+    outcome: async func(task-id: string, wait-ms: u64) -> result<option<task-outcome>, api-error>;
+    /// `POST /v1/tasks/{id}/cancel`.
+    request-cancel: async func(task-id: string) -> result<cancel-status, api-error>;
+    /// `DELETE /v1/tasks/{id}`: cancel and reap. Idempotent.
+    release: async func(task-id: string) -> result<_, api-error>;
+}
+
+/// Everything the component exports. It reaches the API over
+/// `wasi:http/client@0.3.0` through the guest SDK, which imports it.
+world api {
+    export types;
+    export run;
+    export time;
+    export signals;
+    export checkpoints;
+    export events;
+    export inputs;
+    export waits;
+    export state;
+    export operations;
+    export connections;
+    export control;
+    export trusted;
+    export debug;
+    export tasks;
+}
+
+/// What a guest using the API imports.
+world client {
+    import run;
+    import time;
+    import signals;
+    import checkpoints;
+    import events;
+    import inputs;
+    import waits;
+    import state;
+    import operations;
+    import connections;
+    import control;
+    import trusted;
+    import debug;
+    import tasks;
+}

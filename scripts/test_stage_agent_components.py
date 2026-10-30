@@ -29,8 +29,15 @@ class ComponentStagingTests(unittest.TestCase):
 
     def test_stale_removed_agent_is_excluded_and_source_is_preserved(self):
         module.stage(self.root, self.source, self.destination)
-        # The agent and the shared stdlib, each a .wasm and a .meta.json.
-        self.assertEqual(len(list(self.destination.iterdir())), 4)
+        # The agent and the shared components (stdlib and the workflow API's),
+        # each a .wasm and a .meta.json; nothing else.
+        expected = {
+            f"{name}.{extension}"
+            for name in module.component_names(self.root)
+            for extension in ("wasm", "meta.json")
+        }
+        self.assertEqual({path.name for path in self.destination.iterdir()}, expected)
+        self.assertEqual(len(expected), 8)
         self.assertFalse((self.destination / "runtara_agent_sftp.wasm").exists())
         self.assertTrue((self.source / "runtara_agent_sftp.wasm").exists())
 

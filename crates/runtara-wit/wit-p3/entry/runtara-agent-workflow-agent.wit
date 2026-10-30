@@ -1,0 +1,13 @@
+// The entry a compiled workflow's logic exports (`runtara_wit::workflow::ENTRY`),
+// the per-agent capabilities package of the `workflow-agent` id. The run shim
+// imports it to call the workflow.
+package runtara:agent-workflow-agent@1.0.0;
+
+interface capabilities {
+    use runtara:agent/types@1.0.0.{error-info, outcome};
+
+    invoke: async func(
+        capability-id: string,
+        input: list<u8>,
+    ) -> result<outcome, error-info>;
+}

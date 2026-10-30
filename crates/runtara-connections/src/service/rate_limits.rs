@@ -34,6 +34,17 @@ struct ParsedBucketState {
     window_start: Option<i64>,
 }
 
+/// Valkey key of a connection's token bucket. One Valkey may serve many
+/// tenants, so the key names the connection's tenant.
+pub fn rate_limit_key(tenant_id: &str, connection_id: &str) -> String {
+    format!("{tenant_id}:rate_limit:{connection_id}")
+}
+
+/// Valkey key of a connection's learned (provider-reported) limit.
+pub fn rate_limit_learned_key(tenant_id: &str, connection_id: &str) -> String {
+    format!("{tenant_id}:rate_limit_learned:{connection_id}")
+}
+
 impl RateLimitService {
     pub fn new(connection_repository: Arc<ConnectionRepository>) -> Self {
         Self {
@@ -94,7 +105,7 @@ impl RateLimitService {
         let config = connection.rate_limit_config;
 
         // Fetch Redis state
-        let state = self.fetch_redis_state(connection_id).await;
+        let state = self.fetch_redis_state(tenant_id, connection_id).await;
 
         // Compute metrics
         let metrics = self.compute_metrics(&config, &state);
@@ -135,7 +146,9 @@ impl RateLimitService {
         let connection_ids: Vec<String> = connections.iter().map(|c| c.id.clone()).collect();
 
         // Batch fetch Redis states
-        let states = self.fetch_redis_states_batch(&connection_ids).await;
+        let states = self
+            .fetch_redis_states_batch(tenant_id, &connection_ids)
+            .await;
 
         // Fetch period stats for all connections
         let period_stats = self
@@ -167,12 +180,12 @@ impl RateLimitService {
     }
 
     /// Fetch rate limit state from Redis for a single connection
-    async fn fetch_redis_state(&self, connection_id: &str) -> RateLimitStateDto {
+    async fn fetch_redis_state(&self, tenant_id: &str, connection_id: &str) -> RateLimitStateDto {
         let Some(manager) = self.redis_manager.clone() else {
             return RateLimitStateDto::default();
         };
 
-        self.fetch_redis_state_internal(manager, connection_id)
+        self.fetch_redis_state_internal(manager, tenant_id, connection_id)
             .await
             .unwrap_or_default()
     }
@@ -181,10 +194,11 @@ impl RateLimitService {
     async fn fetch_redis_state_internal(
         &self,
         mut conn: ConnectionManager,
+        tenant_id: &str,
         connection_id: &str,
     ) -> Result<RateLimitStateDto, redis::RedisError> {
-        let key = format!("rate_limit:{}", connection_id);
-        let learned_key = format!("rate_limit_learned:{}", connection_id);
+        let key = rate_limit_key(tenant_id, connection_id);
+        let learned_key = rate_limit_learned_key(tenant_id, connection_id);
 
         // Fetch token bucket state
         let bucket: HashMap<String, String> = conn.hgetall(&key).await?;
@@ -225,6 +239,7 @@ impl RateLimitService {
     /// Batch fetch Redis states for multiple connections
     async fn fetch_redis_states_batch(
         &self,
+        tenant_id: &str,
         connection_ids: &[String],
     ) -> HashMap<String, RateLimitStateDto> {
         let mut states = HashMap::new();
@@ -239,7 +254,7 @@ impl RateLimitService {
 
         // Try to batch fetch, fall back to defaults on error
         match self
-            .fetch_redis_states_batch_internal(manager, connection_ids)
+            .fetch_redis_states_batch_internal(manager, tenant_id, connection_ids)
             .await
         {
             Ok(fetched) => fetched,
@@ -257,6 +272,7 @@ impl RateLimitService {
     async fn fetch_redis_states_batch_internal(
         &self,
         mut conn: ConnectionManager,
+        tenant_id: &str,
         connection_ids: &[String],
     ) -> Result<HashMap<String, RateLimitStateDto>, redis::RedisError> {
         let mut states = HashMap::new();
@@ -265,8 +281,8 @@ impl RateLimitService {
         let mut pipe = redis::pipe();
 
         for conn_id in connection_ids {
-            let key = format!("rate_limit:{}", conn_id);
-            let learned_key = format!("rate_limit_learned:{}", conn_id);
+            let key = rate_limit_key(tenant_id, conn_id);
+            let learned_key = rate_limit_learned_key(tenant_id, conn_id);
 
             pipe.hgetall(&key);
             pipe.get(&learned_key);
@@ -522,7 +538,7 @@ impl RateLimitService {
         metadata: Option<serde_json::Value>,
     ) -> Result<(), ServiceError> {
         // Increment Redis counters
-        if let Err(e) = self.increment_call_counters(connection_id).await {
+        if let Err(e) = self.increment_call_counters(tenant_id, connection_id).await {
             tracing::warn!(
                 connection_id = connection_id,
                 error = %e,
@@ -546,12 +562,16 @@ impl RateLimitService {
     }
 
     /// Increment call counters in Redis
-    async fn increment_call_counters(&self, connection_id: &str) -> Result<(), redis::RedisError> {
+    async fn increment_call_counters(
+        &self,
+        tenant_id: &str,
+        connection_id: &str,
+    ) -> Result<(), redis::RedisError> {
         let Some(mut conn) = self.redis_manager.clone() else {
             return Ok(()); // Redis not configured, skip
         };
 
-        let key = format!("rate_limit:{}", connection_id);
+        let key = rate_limit_key(tenant_id, connection_id);
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()

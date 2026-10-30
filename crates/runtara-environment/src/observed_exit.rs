@@ -20,6 +20,8 @@ enum ExitKind {
     /// The run exited to suspend, but its park never committed. Recovery
     /// resumes it from its checkpoints instead of failing it.
     UnparkedSuspend,
+    /// The runner lost the executor. Recovery fences it and relaunches.
+    Lost,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -59,6 +61,15 @@ impl ObservedExit {
         }
     }
 
+    /// A run whose executor the runner lost.
+    pub(crate) fn lost(error: String) -> Self {
+        Self {
+            kind: ExitKind::Lost,
+            error,
+            stderr: None,
+        }
+    }
+
     pub(crate) fn is_drain(&self) -> bool {
         matches!(self.kind, ExitKind::Drain)
     }
@@ -92,6 +103,26 @@ impl ObservedExit {
                     error = %self.error,
                     ?outcome,
                     "Run exited to suspend but its park did not commit; handed to recovery"
+                );
+                return Ok(outcome != crate::recovery::RecoveryOutcome::Unchanged);
+            }
+            ExitKind::Lost => {
+                // Not a crash either: the guest may still be running where
+                // the runner lost it. Recovery suspends the run, which revokes
+                // its lease (the lost executor's writes are fenced from here),
+                // and wakes it at once, bounded by the crash-loop cap.
+                let outcome = crate::recovery::recover_or_fail_because(
+                    pool,
+                    persistence,
+                    instance,
+                    crate::recovery::RecoveryCause::ExecutorLost,
+                )
+                .await?;
+                tracing::warn!(
+                    instance_id = %instance,
+                    error = %self.error,
+                    ?outcome,
+                    "The runner lost the run's executor; handed to recovery"
                 );
                 return Ok(outcome != crate::recovery::RecoveryOutcome::Unchanged);
             }

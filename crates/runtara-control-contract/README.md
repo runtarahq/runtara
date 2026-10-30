@@ -1,10 +1,9 @@
 # runtara-control-contract
 
 The numbers and names every side of the control service agrees on:
-`runtara-agent-control` (the guest), `runtara-component-host` (the host
-binding of `runtara:control/api`) and `runtara-server` (the `NativeControl`
-service). The ABI itself is the WIT
-in `runtara-wit/wit/control` (`runtara:control@1.0.0`); this crate is
+`runtara-agent-control` (the guest), `runtara-component-host` (the
+workflow API's `/v1/instances`) and `runtara-server` (the `NativeControl`
+service). The wire shapes are the workflow API's JSON; this crate is
 serde-only so all three can depend on it.
 
 ## What it fixes

@@ -137,6 +137,7 @@ pub fn runtara_instance_to_dto_with_info(
         error_summary: None,
         state: None,
         state_updated_at: None,
+        guest_output: None,
         id: inst.instance_id.clone(),
         run_label: inst.run_label,
         parent_instance_id: inst.parent_instance_id,
@@ -211,6 +212,7 @@ pub fn runtara_info_to_dto(info: InstanceInfo) -> WorkflowInstanceDto {
         error_summary: None,
         state: None,
         state_updated_at: None,
+        guest_output: info.stderr.clone(),
         id: info.instance_id.clone(),
         run_label: info.run_label.clone(),
         parent_instance_id: info.parent_instance_id.clone(),
@@ -274,6 +276,7 @@ pub fn request_instance_dto(
         error_summary: None,
         state: None,
         state_updated_at: None,
+        guest_output: None,
         id: instance_id.to_string(),
         run_label: request.run_label,
         parent_instance_id: request.parent_instance_id,
@@ -330,6 +333,7 @@ pub fn runtara_info_to_execution_with_metadata(
         error_summary: None,
         state: None,
         state_updated_at: None,
+        guest_output: info.stderr.clone(),
         id: info.instance_id.clone(),
         run_label: info.run_label.clone(),
         parent_instance_id: info.parent_instance_id.clone(),
@@ -473,6 +477,43 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn an_execution_detail_carries_its_guest_output() {
+        let info = InstanceInfo {
+            run_label: None,
+            parent_instance_id: None,
+            instance_id: "inst-1".into(),
+            image_id: "img-1".into(),
+            image_name: "wf:2".into(),
+            tenant_id: "tenant-1".into(),
+            status: RuntaraInstanceStatus::Completed,
+            checkpoint_id: None,
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: Some(Utc::now()),
+            input: None,
+            output: None,
+            error: None,
+            stderr: Some("guest says hello\n".into()),
+            retry_count: 0,
+            max_retries: 0,
+            memory_peak_bytes: None,
+            cpu_usage_usec: None,
+            termination_reason: None,
+            suspension_reason: None,
+            exit_code: Some(0),
+        };
+        let dto = runtara_info_to_dto(info.clone());
+        assert_eq!(dto.guest_output.as_deref(), Some("guest says hello\n"));
+        let json = serde_json::to_value(&dto).unwrap();
+        assert_eq!(json["guestOutput"], "guest says hello\n");
+        let detail = runtara_info_to_execution_with_metadata(info, None, None);
+        assert_eq!(
+            detail.instance.guest_output.as_deref(),
+            Some("guest says hello\n")
+        );
     }
 
     #[test]

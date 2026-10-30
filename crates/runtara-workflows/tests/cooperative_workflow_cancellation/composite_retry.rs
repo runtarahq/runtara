@@ -98,12 +98,19 @@ async fn run_nested(
             .world_wit
             .contains("import runtara:agent-")
     );
+    // On the workflow API ABI the timers are `runtara:api/time`'s: the logic
+    // async-lowers its `sleep` exactly when the graph retries.
     anyhow::ensure!(
-        compiled
+        !compiled
             .component_artifacts
             .world_wit
-            .contains("runtara:host/timers")
-            == (retries > 0),
+            .contains("runtara:host/timers"),
+        "the workflow API ABI imports no host timers"
+    );
+    let logic = std::fs::read(&compiled.workflow_logic_wasm_path)?;
+    let needle = b"[async-lower]sleep";
+    anyhow::ensure!(
+        logic.windows(needle.len()).any(|bytes| bytes == needle) == (retries > 0),
         "timer imports must follow the graph's retry requirement"
     );
     anyhow::ensure!(compiled.component_artifacts.has_timers == (retries > 0));

@@ -45,7 +45,14 @@ pub fn gate_decision(
 /// 403 or hand off to the inner handler chain. Kept thin so the testable
 /// decision logic lives in `gate_decision`.
 async fn require_feature(feature: FeatureKey, req: Request, next: Next) -> Response {
-    match gate_decision(crate::config::entitlements(), feature) {
+    // The calling tenant's entitlements; an unauthenticated route has the
+    // primary tenant's.
+    let tenant = req
+        .extensions()
+        .get::<AuthContext>()
+        .map(|ctx| ctx.org_id.clone())
+        .unwrap_or_else(|| crate::config::tenant_id().to_string());
+    match gate_decision(&crate::config::entitlements_for(&tenant), feature) {
         Ok(()) => next.run(req).await,
         Err(denial) => denial.into_response(),
     }
@@ -318,7 +325,10 @@ pub fn api_key_decision(
 /// surfaces elsewhere).
 pub async fn api_key_auth_guard(req: Request, next: Next) -> Response {
     if let Some(ctx) = req.extensions().get::<AuthContext>().cloned()
-        && let Err(denial) = api_key_decision(crate::config::entitlements(), &ctx.auth_method)
+        && let Err(denial) = api_key_decision(
+            &crate::config::entitlements_for(&ctx.org_id),
+            &ctx.auth_method,
+        )
     {
         return denial.into_response();
     }

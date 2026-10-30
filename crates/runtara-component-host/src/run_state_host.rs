@@ -1,18 +1,16 @@
 // Copyright (C) 2025 SyncMyOrders Sp. z o.o.
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Host side of a run's queryable state (`runtara:workflow/state`).
+//! Host side of a run's queryable state (`/v1/state`).
 //!
 //! The embedding implements [`RunStateHost`] and installs it once
 //! ([`crate::WorkflowExecutor::set_run_state_host`]). Compiled workflow code
-//! reaches it through the host, never through agent bytes, so the run always
+//! reaches it through the workflow API, never through agent bytes, so the run always
 //! comes from the calling store ([`RunStateAuthority`]), and a write's
 //! identity is derived by the host from the SetState step's checkpoint key
 //! the way an operation's `op_hash` is
 //! ([`crate::operation_scope_host::operation_hash`]).
 //!
-//! Errors reach the guest as JSON `{code, message}`.
-
-use std::sync::Arc;
+//! Errors reach the workflow API as JSON `{code, message}`.
 
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -53,10 +51,6 @@ impl RunStateError {
             code,
             message: message.into(),
         }
-    }
-
-    fn json(&self) -> String {
-        serde_json::to_string(self).expect("a state error always serializes")
     }
 }
 
@@ -102,6 +96,12 @@ pub fn state_operation_id(key: &str) -> Result<String, String> {
     Ok(crate::operation_scope_host::operation_hash(key))
 }
 
+/// Check that `key` is a GetState step's canonical v2 `state-read` key of the
+/// outer run.
+pub fn check_state_read_key(key: &str) -> Result<(), String> {
+    check_state_key(key, STATE_READ_KEY_KIND)
+}
+
 /// Check a canonical v2 state key of `kind`. Only the outer run has state
 /// here: a key with namespace frames comes from a workflow running inside the
 /// run (an embedded child or a published workflow-agent), which keeps its
@@ -140,112 +140,6 @@ fn check_state_key(key: &str, kind: &str) -> Result<(), String> {
                 .to_string(),
         );
     }
-    Ok(())
-}
-
-/// Per-run access to the state service: the host-installed service and the
-/// run's own authority.
-#[derive(Default)]
-pub(crate) struct RunStateAccess {
-    host: Option<Arc<dyn RunStateHost>>,
-    authority: Option<RunStateAuthority>,
-}
-
-impl RunStateAccess {
-    /// State of the run `instance` of `tenant`, both host-supplied.
-    pub(crate) fn for_run(
-        host: Option<Arc<dyn RunStateHost>>,
-        tenant: Option<&str>,
-        instance: Option<&str>,
-    ) -> Self {
-        let authority = match (tenant, instance) {
-            (Some(tenant), Some(instance)) if !tenant.is_empty() && !instance.is_empty() => {
-                Some(RunStateAuthority {
-                    tenant: tenant.to_owned(),
-                    instance: instance.to_owned(),
-                })
-            }
-            _ => None,
-        };
-        Self { host, authority }
-    }
-
-    fn service(&self) -> Result<(Arc<dyn RunStateHost>, RunStateAuthority), RunStateError> {
-        let host = self.host.clone().ok_or_else(|| {
-            RunStateError::new(
-                RunStateErrorCode::Unavailable,
-                "no run state service is configured",
-            )
-        })?;
-        let authority = self.authority.clone().ok_or_else(|| {
-            RunStateError::new(
-                RunStateErrorCode::Invalid,
-                "only a workflow run of a tenant has state",
-            )
-        })?;
-        Ok((host, authority))
-    }
-}
-
-/// Bind `runtara:workflow/state` for workflow stores. The tenant and the run
-/// come from the store, never from the guest; without an installed service
-/// every call fails closed with `unavailable`.
-pub(crate) fn add_run_state_to_linker(
-    linker: &mut wasmtime::component::Linker<crate::workflow::WorkflowState>,
-) -> anyhow::Result<()> {
-    use crate::workflow::WorkflowState;
-    use wasmtime::StoreContextMut;
-
-    let invalid = |message: String| RunStateError::new(RunStateErrorCode::Invalid, message).json();
-
-    let mut state = linker.instance(runtara_wit::workflow::STATE)?;
-    state.func_wrap_async(
-        "set",
-        move |store: StoreContextMut<'_, WorkflowState>, (key, patch): (String, Vec<u8>)| {
-            Box::new(async move {
-                let operation_id = match state_operation_id(&key) {
-                    Ok(operation_id) => operation_id,
-                    Err(error) => return Ok((Err(invalid(error)),)),
-                };
-                let patch = match serde_json::from_slice::<Value>(&patch) {
-                    Ok(Value::Object(patch)) => patch,
-                    Ok(_) => {
-                        return Ok((Err(invalid("a state patch must be a JSON object".into())),));
-                    }
-                    Err(error) => {
-                        return Ok((Err(invalid(format!("malformed state patch: {error}"))),));
-                    }
-                };
-                let (host, authority) = match store.data().run_state.service() {
-                    Ok(service) => service,
-                    Err(error) => return Ok((Err(error.json()),)),
-                };
-                Ok((host
-                    .set(&authority, &operation_id, patch)
-                    .await
-                    .map_err(|error| error.json()),))
-            })
-        },
-    )?;
-    state.func_wrap_async(
-        "get",
-        move |store: StoreContextMut<'_, WorkflowState>, (key,): (String,)| {
-            Box::new(async move {
-                if let Err(error) = check_state_key(&key, STATE_READ_KEY_KIND) {
-                    return Ok((Err(invalid(error)),));
-                }
-                let (host, authority) = match store.data().run_state.service() {
-                    Ok(service) => service,
-                    Err(error) => return Ok((Err(error.json()),)),
-                };
-                Ok((match host.get(&authority).await {
-                    Ok(state) => Ok(serde_json::to_vec(&Value::Object(state))
-                        .expect("a JSON object always serializes")),
-                    Err(error) => Err(error.json()),
-                },))
-            })
-        },
-    )?;
     Ok(())
 }
 
@@ -325,6 +219,9 @@ mod tests {
     #[test]
     fn errors_serialize_as_code_and_message() {
         let error = RunStateError::new(RunStateErrorCode::TooLarge, "too big");
-        assert_eq!(error.json(), r#"{"code":"too-large","message":"too big"}"#);
+        assert_eq!(
+            serde_json::to_string(&error).unwrap(),
+            r#"{"code":"too-large","message":"too big"}"#
+        );
     }
 }

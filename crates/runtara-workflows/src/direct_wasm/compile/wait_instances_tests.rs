@@ -65,9 +65,10 @@ fn a_wait_imports_the_instance_waits_and_nothing_else_does() {
         compile(single(wait("wait")), WorkflowRole::Root).expect("a top-level wait compiles");
     let world = fs::read_to_string(&result.world_wit_path).unwrap();
     let logic = fs::read(&result.workflow_logic_wasm_path).unwrap();
-    assert!(world.contains(runtara_wit::workflow::WAITS), "{world}");
+    // A run's own entry waits through `runtara:api` (the default ABI).
+    assert!(world.contains(runtara_wit::api::WAITS), "{world}");
     assert!(result.component_artifacts.wait_instances);
-    assert!(contains(&logic, runtara_wit::workflow::WAITS.as_bytes()));
+    assert!(contains(&logic, runtara_wit::api::WAITS.as_bytes()));
     // It is not an Agent site: no operation scope.
     assert!(!world.contains("workflow-operation"), "{world}");
 

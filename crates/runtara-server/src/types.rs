@@ -159,9 +159,9 @@ impl SuspensionReason {
             Some("waiting_signal") => Some(Self::WaitingSignal),
             Some("waiting_instances") => Some(Self::WaitingInstances),
             Some("sleeping") => Some(Self::Sleeping),
-            Some("shutdown_requested" | "environment_restart" | "park_failed") => {
-                Some(Self::Shutdown)
-            }
+            Some(
+                "shutdown_requested" | "environment_restart" | "park_failed" | "executor_lost",
+            ) => Some(Self::Shutdown),
             _ => None,
         }
     }
@@ -228,7 +228,24 @@ impl utoipa::PartialSchema for MemoryTier {
     }
 }
 
+/// A workflow's memory when none is set, in MiB (the XL preset).
+pub const DEFAULT_MEMORY_MB: u32 = 256;
+/// The largest memory a workflow may ask for, in MiB. The runner's own
+/// ceiling (`RUNTARA_INSTANCE_MEMORY_MAX_BYTES`) still applies below it.
+pub const MAX_MEMORY_MB: u32 = 65_536;
+
+/// A workflow's memory setting from a request: `memoryMb`, or a tier preset
+/// for clients that still send `memoryTier`. `memoryMb` wins when both are set.
+pub fn requested_memory_mb(memory_mb: Option<u32>, memory_tier: Option<MemoryTier>) -> Option<u32> {
+    memory_mb.or_else(|| memory_tier.map(|tier| tier.mib()))
+}
+
 impl MemoryTier {
+    /// The preset's memory, in MiB.
+    pub fn mib(&self) -> u32 {
+        (self.total_memory_bytes() / (1024 * 1024)) as u32
+    }
+
     pub const S: MemoryTier = MemoryTier(runtara_dsl::MemoryTier::S);
     pub const M: MemoryTier = MemoryTier(runtara_dsl::MemoryTier::M);
     pub const L: MemoryTier = MemoryTier(runtara_dsl::MemoryTier::L);

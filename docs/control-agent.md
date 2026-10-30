@@ -39,9 +39,9 @@ says. Its mutations run only as steps of a workflow run
 | Capability | What it does |
 |---|---|
 | `start` | Durably admit a child run of another workflow; returns `{instanceId, workflowId, version, runLabel, replayed}` once accepted, without waiting for it. |
-| `get` | Read one run of the tenant: status, `suspensionReason`, `parentInstanceId`, output or error. |
-| `query` | Page runs of the tenant by `createdAtMs` or `finishedAtMs`; `parentInstanceId` or `callerChildren` lists children, including ones still `queued` in admission. |
-| `list-pending-signals` | List open WaitForSignal requests of one run, a workflow, or the calling run's children. |
+| `get` | Read the calling run or one of its child runs: status, `suspensionReason`, `parentInstanceId`, output or error. |
+| `query` | Page the calling run's child runs by `createdAtMs` or `finishedAtMs`, including ones still `queued` in admission. |
+| `list-pending-signals` | List open WaitForSignal requests of the calling run or a child run, or of its children (of one workflow, or all). |
 | `send-signal` | Answer the one open request of a WaitForSignal step, validated against its response schema. |
 | `cancel` | Cancel a direct child: cooperatively, forced after `graceMs`. A parked or queued child ends at once. |
 | `pause` | Pause a direct child. A waiting child pauses at once, a running one at its next checkpoint. |

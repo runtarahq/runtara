@@ -681,41 +681,147 @@ fn imported_wit_function<'a>(
         .expect("imported WIT function")
 }
 
-fn direct_core_imports_and_run_calls(core: &[u8]) -> (HashMap<String, u32>, Vec<u32>) {
-    let mut imports = HashMap::new();
-    let mut next_function_index = 0;
-    let mut run_calls = Vec::new();
-    let mut code_body_index = 0;
+/// The module the scanners name a runtime shim under: the old
+/// `runtara:workflow/runtime` import it stands for.
+const RUNTIME_SHIM_MODULE: &str = "cm32p2|runtara:workflow/runtime@1";
 
+/// A function a core module calls, by its index and the import it is or
+/// stands for.
+struct DirectCoreFunction<'a> {
+    index: u32,
+    module: &'a str,
+    name: &'a str,
+}
+
+/// Every function import of `core`, in function-index order, followed by
+/// the runtime shims (see `api_shims`): each defines an old
+/// `runtara:workflow/runtime` function over `runtara:api` and comes first
+/// among the defined functions, in `SHIMMED` order, so the scanners find a
+/// runtime call under its old name.
+fn direct_core_functions(core: &[u8]) -> Vec<DirectCoreFunction<'_>> {
+    let mut functions = Vec::new();
+    for payload in Parser::new(0).parse_all(core) {
+        if let Payload::ImportSection(reader) = payload.expect("core wasm payload") {
+            for import in reader.into_imports() {
+                let import = import.expect("core import");
+                if matches!(import.ty, TypeRef::Func(_)) {
+                    functions.push(DirectCoreFunction {
+                        index: functions.len() as u32,
+                        module: import.module,
+                        name: import.name,
+                    });
+                }
+            }
+        }
+    }
+    let api_runtime = functions
+        .iter()
+        .any(|function| function.module == "cm32p2|runtara:api/run@1");
+    if api_runtime {
+        assert!(
+            direct_core_run_body(core) >= api_shims::SHIMMED.len(),
+            "the runtime shims precede the run function"
+        );
+        let imported = functions.len();
+        functions.extend(
+            api_shims::SHIMMED
+                .iter()
+                .enumerate()
+                .map(|(position, name)| DirectCoreFunction {
+                    index: (imported + position) as u32,
+                    module: RUNTIME_SHIM_MODULE,
+                    name,
+                }),
+        );
+    }
+    functions
+}
+
+/// Index of the run function among `core`'s code bodies: the body of the
+/// exported entry (`…|invoke`). The runtime shims, and a scoped invoke's
+/// early `realloc`, come before it.
+fn direct_core_run_body(core: &[u8]) -> usize {
+    let mut imported = 0;
+    let mut entry = None;
     for payload in Parser::new(0).parse_all(core) {
         match payload.expect("core wasm payload") {
             Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        imports.insert(
-                            format!("{}::{}", import.module, import.name),
-                            next_function_index,
-                        );
-                        next_function_index += 1;
-                    }
-                }
+                imported += reader
+                    .into_imports()
+                    .filter(|import| {
+                        matches!(import.as_ref().expect("import").ty, TypeRef::Func(_))
+                    })
+                    .count();
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        if let Operator::Call { function_index } = operator.expect("operator") {
-                            run_calls.push(function_index);
-                        }
+            Payload::ExportSection(reader) => {
+                for export in reader {
+                    let export = export.expect("core export");
+                    if export.kind == wasmparser::ExternalKind::Func
+                        && export.name.ends_with("|invoke")
+                    {
+                        entry = Some(export.index as usize);
                     }
                 }
-                code_body_index += 1;
             }
             _ => {}
         }
     }
+    entry.expect("exported run function") - imported
+}
+
+fn direct_core_imports_and_run_calls(core: &[u8]) -> (HashMap<String, u32>, Vec<u32>) {
+    let imports = direct_core_functions(core)
+        .iter()
+        .map(|function| {
+            (
+                format!("{}::{}", function.module, function.name),
+                function.index,
+            )
+        })
+        .collect();
+    let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(core);
+    let mut code_body_index = 0;
+
+    for payload in Parser::new(0).parse_all(core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    if let Operator::Call { function_index } = operator.expect("operator") {
+                        run_calls.push(function_index);
+                    }
+                }
+            }
+            code_body_index += 1;
+        }
+    }
 
     (imports, run_calls)
+}
+
+/// Whether any function of `core` posts the run's outcome
+/// (`runtara:api/run.post-outcome`): the logic's terminal channel is its
+/// return value alone.
+fn direct_core_posts_outcome(core: &[u8]) -> bool {
+    let post_outcome = direct_core_functions(core)
+        .iter()
+        .find(|function| {
+            function.module == "cm32p2|runtara:api/run@1" && function.name == "post-outcome"
+        })
+        .expect("run.post-outcome import")
+        .index;
+    Parser::new(0).parse_all(core).any(|payload| {
+        let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") else {
+            return false;
+        };
+        body.get_operators_reader()
+            .expect("operators")
+            .into_iter()
+            .any(|operator| {
+                matches!(operator.expect("operator"), Operator::Call { function_index }
+                    if function_index == post_outcome)
+            })
+    })
 }
 
 /// Operator positions of the in-band `Ok(outcome::completed(output))` write
@@ -743,7 +849,10 @@ fn completed_return_positions(ops: &[Operator<'_>]) -> Vec<usize> {
 
 /// Expand calls to defined core helpers for structural ordering assertions.
 /// Only entry returns are retained: a helper return does not end the workflow.
+/// The functions defined before the run function (the runtime shims) stand
+/// for imports and are not expanded.
 fn entry_operators_with_helpers(core: &[u8]) -> Vec<Operator<'_>> {
+    let run_body = direct_core_run_body(core);
     let mut imported = 0;
     let mut bodies = Vec::new();
     for payload in Parser::new(0).parse_all(core) {
@@ -769,6 +878,7 @@ fn entry_operators_with_helpers(core: &[u8]) -> Vec<Operator<'_>> {
     fn expand<'a>(
         body: usize,
         imported: usize,
+        run_body: usize,
         bodies: &[Vec<Operator<'a>>],
         depth: usize,
         out: &mut Vec<Operator<'a>>,
@@ -780,13 +890,14 @@ fn entry_operators_with_helpers(core: &[u8]) -> Vec<Operator<'_>> {
             }
             if let Operator::Call { function_index } = op
                 && let Some(index) = (*function_index as usize).checked_sub(imported)
+                && index > run_body
             {
-                expand(index, imported, bodies, depth + 1, out);
+                expand(index, imported, run_body, bodies, depth + 1, out);
             }
         }
     }
     let mut out = Vec::new();
-    expand(0, imported, &bodies, 0, &mut out);
+    expand(run_body, imported, run_body, &bodies, 0, &mut out);
     out
 }
 
@@ -1289,7 +1400,8 @@ fn direct_compile_exports_the_workflow_entry_and_imports_components() {
                     let import = import.expect("component import");
                     saw_stdlib_import |=
                         import.name.0.contains("runtara:workflow-stdlib/json@1.0.0");
-                    saw_runtime_import |= import.name.0.contains("runtara:workflow/runtime@1.0.0");
+                    // The workflow API ABI's run services.
+                    saw_runtime_import |= import.name.0.contains(runtara_wit::api::CHECKPOINTS);
                 }
             }
             Payload::ComponentExportSection(reader) => {
@@ -1490,7 +1602,6 @@ fn direct_core_run_lowers_embed_workflow_breakpoint_after_child_input_mapping() 
         .validate_all(&core)
         .expect("EmbedWorkflow breakpoint core module validates");
 
-    let mut next_function_index = 0;
     let mut stdlib_apply_mapping_index = None;
     let mut stdlib_build_source_index = None;
     let mut runtime_debug_mode_enabled_index = None;
@@ -1501,60 +1612,51 @@ fn direct_core_run_lowers_embed_workflow_breakpoint_after_child_input_mapping() 
     let mut runtime_breakpoint_pause_index = None;
     let mut stdlib_embed_workflow_cache_key_index = None;
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
-                                stdlib_apply_mapping_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
-                                stdlib_build_source_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "debug-mode-enabled") => {
-                                runtime_debug_mode_enabled_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-key") => {
-                                stdlib_breakpoint_key_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "checkpoint") => {
-                                runtime_checkpoint_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-event") => {
-                                stdlib_breakpoint_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
-                                runtime_custom_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "breakpoint-pause") => {
-                                runtime_breakpoint_pause_index = Some(next_function_index)
-                            }
-                            (
-                                "cm32p2|runtara:workflow-stdlib/json@1",
-                                "embed-workflow-cache-key",
-                            ) => stdlib_embed_workflow_cache_key_index = Some(next_function_index),
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
+                stdlib_apply_mapping_index = Some(import.index)
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        if let Operator::Call { function_index } = operator.expect("operator") {
-                            run_calls.push(function_index);
-                        }
-                    }
-                }
-                code_body_index += 1;
+            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
+                stdlib_build_source_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "debug-mode-enabled") => {
+                runtime_debug_mode_enabled_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-key") => {
+                stdlib_breakpoint_key_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "checkpoint") => {
+                runtime_checkpoint_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-event") => {
+                stdlib_breakpoint_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
+                runtime_custom_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "breakpoint-pause") => {
+                runtime_breakpoint_pause_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "embed-workflow-cache-key") => {
+                stdlib_embed_workflow_cache_key_index = Some(import.index)
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    if let Operator::Call { function_index } = operator.expect("operator") {
+                        run_calls.push(function_index);
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -4779,18 +4881,13 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
                 WasmType::Pointer,
             ],
         ),
+        // `runtime.custom-event` is a shim over `events.append`.
         (
-            "runtime.custom-event",
-            "runtara:workflow/runtime",
-            "cm32p2|runtara:workflow/runtime@1",
-            "custom-event",
-            vec![
-                WasmType::Pointer,
-                WasmType::Length,
-                WasmType::Pointer,
-                WasmType::Length,
-                WasmType::Pointer,
-            ],
+            "api.events.append",
+            "runtara:api/events",
+            "cm32p2|runtara:api/events@1",
+            "append",
+            vec![WasmType::Pointer, WasmType::Length, WasmType::Pointer],
         ),
         (
             "stdlib.error-event",
@@ -4843,7 +4940,6 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         .validate_all(&core)
         .expect("core module validates");
 
-    let mut next_function_index = 0;
     let mut init_manifest_index = None;
     let mut invoke_error_fields_index = None;
     let mut build_source_index = None;
@@ -4854,8 +4950,6 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
     let mut log_index = None;
     let mut error_event_index = None;
     let mut error_index = None;
-    let mut complete_index = None;
-    let mut fail_index = None;
     let mut custom_event_index = None;
     let mut saw_manifest_data = false;
     let mut saw_variables_data = false;
@@ -4863,62 +4957,47 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
     let mut saw_mapping_id = false;
     let mut saw_run_retptr_tag_load = false;
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "init-manifest") => {
+                init_manifest_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "invoke-error-fields") => {
+                invoke_error_fields_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
+                build_source_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
+                apply_mapping_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "eval-condition") => {
+                eval_condition_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "process-switch") => {
+                process_switch_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "log-event") => {
+                log_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "log") => log_index = Some(import.index),
+            ("cm32p2|runtara:workflow-stdlib/json@1", "error-event") => {
+                error_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "error") => error_index = Some(import.index),
+            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
+                custom_event_index = Some(import.index)
+            }
+            _ => {}
+        }
+    }
     for payload in Parser::new(0).parse_all(&core) {
         match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "init-manifest") => {
-                                init_manifest_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "invoke-error-fields") => {
-                                invoke_error_fields_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
-                                build_source_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
-                                apply_mapping_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "eval-condition") => {
-                                eval_condition_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "process-switch") => {
-                                process_switch_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "log-event") => {
-                                log_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "log") => {
-                                log_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "error-event") => {
-                                error_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "error") => {
-                                error_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "complete") => {
-                                complete_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "fail") => {
-                                fail_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
-                                custom_event_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
-            }
             Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
+                if code_body_index == run_body {
                     for operator in body.get_operators_reader().expect("operators").into_iter() {
                         match operator.expect("operator") {
                             Operator::Call { function_index } => run_calls.push(function_index),
@@ -4993,8 +5072,8 @@ fn direct_core_run_lowers_finish_mapping_through_stdlib() {
         "error import should exist for Error lowering"
     );
     assert!(
-        complete_index.is_none() && fail_index.is_none(),
-        "the return value is the only terminal channel; no runtime.complete/fail import"
+        !direct_core_posts_outcome(&core),
+        "the return value is the only terminal channel; no run.post-outcome call"
     );
     assert!(
         custom_event_index.is_some(),
@@ -5042,7 +5121,6 @@ fn direct_core_run_lowers_finish_breakpoint_after_output_mapping() {
         .validate_all(&core)
         .expect("Finish breakpoint core module validates");
 
-    let mut next_function_index = 0;
     let mut stdlib_apply_mapping_index = None;
     let mut runtime_debug_mode_enabled_index = None;
     let mut stdlib_breakpoint_key_index = None;
@@ -5052,56 +5130,48 @@ fn direct_core_run_lowers_finish_breakpoint_after_output_mapping() {
     let mut runtime_breakpoint_pause_index = None;
     let mut saw_mapping_id = false;
     let mut entry_ops = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
-                                stdlib_apply_mapping_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "debug-mode-enabled") => {
-                                runtime_debug_mode_enabled_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-key") => {
-                                stdlib_breakpoint_key_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "checkpoint") => {
-                                runtime_checkpoint_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-event") => {
-                                stdlib_breakpoint_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
-                                runtime_custom_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "breakpoint-pause") => {
-                                runtime_breakpoint_pause_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
+                stdlib_apply_mapping_index = Some(import.index)
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        let operator = operator.expect("operator");
-                        if matches!(operator, Operator::I32Const { value } if value == *mapping_id as i32)
-                        {
-                            saw_mapping_id = true;
-                        }
-                        entry_ops.push(operator);
-                    }
-                }
-                code_body_index += 1;
+            ("cm32p2|runtara:workflow/runtime@1", "debug-mode-enabled") => {
+                runtime_debug_mode_enabled_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-key") => {
+                stdlib_breakpoint_key_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "checkpoint") => {
+                runtime_checkpoint_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-event") => {
+                stdlib_breakpoint_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
+                runtime_custom_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "breakpoint-pause") => {
+                runtime_breakpoint_pause_index = Some(import.index)
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    let operator = operator.expect("operator");
+                    if matches!(operator, Operator::I32Const { value } if value == *mapping_id as i32)
+                    {
+                        saw_mapping_id = true;
+                    }
+                    entry_ops.push(operator);
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -5363,10 +5433,11 @@ fn direct_core_run_lowers_agent_breakpoint_after_input_mapping_before_validation
     let mut debug_start_retptr_locals = Vec::new();
     let mut remaining_debug_start_local_sets = 0u8;
     let mut saw_agent_debug_start = false;
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
     for payload in Parser::new(0).parse_all(&core) {
         if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
-            if code_body_index == 0 {
+            if code_body_index == run_body {
                 for operator in body.get_operators_reader().expect("operators") {
                     match operator.expect("operator") {
                         Operator::Call { function_index }
@@ -5415,7 +5486,11 @@ fn direct_core_metadata_can_import_agent_capabilities() {
     let graph = fixture("simple");
     let manifest = build_direct_workflow_manifest(&graph).expect("manifest");
     let manifest_json = manifest.to_canonical_json().expect("manifest json");
-    let core_config = DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+    let mut core_config =
+        DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+    // The world below imports Agents the Agent-free manifest does not have;
+    // their cooperative waits need the timers a manifest with Agents arms.
+    core_config.timers = true;
 
     let agents = vec!["crypto".to_string(), "object-model".to_string()];
     let (resolve, world) =
@@ -5533,7 +5608,6 @@ fn direct_core_lowers_non_durable_agent_call() {
     let mut saw_agent_validate_input = false;
     let mut saw_agent_error = false;
     let mut saw_agent_debug_error = false;
-    let mut saw_runtime_terminal = false;
     let mut saw_agent_ok_ptr_load = false;
     let mut saw_agent_ok_len_load = false;
     let mut saw_agent_error_in_place = false;
@@ -5541,6 +5615,7 @@ fn direct_core_lowers_non_durable_agent_call() {
     let mut agent_invoke_index = None;
     let mut agent_validate_input_index = None;
     let mut saw_validate_before_invoke = false;
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
     let mut next_function_index = 0;
     for payload in Parser::new(0).parse_all(&core) {
@@ -5568,15 +5643,13 @@ fn direct_core_lowers_non_durable_agent_call() {
                     }
                     saw_agent_debug_error |= import.module.contains("runtara:workflow-stdlib/json")
                         && import.name == "agent-debug-error";
-                    saw_runtime_terminal |= import.module.contains("runtara:workflow/runtime")
-                        && matches!(import.name, "complete" | "fail" | "load-input");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         next_function_index += 1;
                     }
                 }
             }
             Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
+                if code_body_index == run_body {
                     let mut saw_validate_call = false;
                     let mut recent: Vec<Operator> = Vec::new();
                     for operator in body.get_operators_reader().expect("operators").into_iter() {
@@ -5644,8 +5717,8 @@ fn direct_core_lowers_non_durable_agent_call() {
         "core should import stdlib.agent-debug-error"
     );
     assert!(
-        !saw_runtime_terminal,
-        "the return value is the only terminal channel; core must not import a runtime terminal call"
+        !direct_core_posts_outcome(&core),
+        "the return value is the only terminal channel; core must not post an outcome"
     );
     assert!(
         saw_agent_ok_ptr_load,
@@ -5696,7 +5769,6 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
         .validate_all(&core)
         .expect("non-durable Agent retry core module validates");
 
-    let mut next_function_index = 0;
     let mut get_checkpoint_index = None;
     let mut checkpoint_index = None;
     let mut durable_sleep_index = None;
@@ -5736,195 +5808,172 @@ fn direct_core_lowers_non_durable_agent_retry_loop() {
     let mut saw_durable_sleep_checkpoint_call = false;
     let mut saw_retry_sleep_key_call = false;
     let mut saw_record_retry_attempt_call = false;
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            (module, "get-checkpoint")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                get_checkpoint_index = Some(next_function_index);
-                            }
-                            (module, "checkpoint")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                checkpoint_index = Some(next_function_index);
-                            }
-                            (module, "durable-sleep")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                durable_sleep_index = Some(next_function_index);
-                            }
-                            (module, "durable-sleep-checkpoint")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                durable_sleep_checkpoint_index = Some(next_function_index);
-                            }
-                            ("runtara:host/timers@1.0.0", "[async-lower]sleep") => {
-                                timer_sleep_index = Some(next_function_index);
-                            }
-                            (module, "blocking-sleep")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                saw_blocking_sleep_import = true;
-                                blocking_sleep_index = Some(next_function_index);
-                            }
-                            (module, "agent-retry-sleep-key")
-                                if module.contains("runtara:workflow-stdlib/json") =>
-                            {
-                                agent_retry_sleep_key_index = Some(next_function_index);
-                            }
-                            (module, "agent-retry-delay-ms")
-                                if module.contains("runtara:workflow-stdlib/json") =>
-                            {
-                                saw_agent_retry_delay_import = true;
-                                agent_retry_delay_index = Some(next_function_index);
-                            }
-                            (module, "agent-retry-error-info")
-                                if module.contains("runtara:workflow-stdlib/json") =>
-                            {
-                                saw_agent_retry_error_info_import = true;
-                                agent_retry_error_info_index = Some(next_function_index);
-                            }
-                            (module, "agent-error-from-info")
-                                if module.contains("runtara:workflow-stdlib/json") =>
-                            {
-                                saw_agent_error_from_info_import = true;
-                                agent_error_from_info_index = Some(next_function_index);
-                            }
-                            (module, "record-retry-attempt")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                record_retry_attempt_index = Some(next_function_index);
-                            }
-                            (module, "[async-lower]invoke")
-                                if module.contains("runtara:agent-utils/capabilities") =>
-                            {
-                                agent_invoke_index = Some(next_function_index);
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            (module, "get-checkpoint") if module.contains("runtara:workflow/runtime") => {
+                get_checkpoint_index = Some(import.index);
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    let mut saw_invoke_call = false;
-                    let mut saw_retry_info_call = false;
-                    let mut saw_retry_delay_call = false;
-                    for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
-                            Operator::Call { function_index }
-                                if Some(function_index) == get_checkpoint_index =>
-                            {
-                                saw_get_checkpoint_call = true;
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == checkpoint_index =>
-                            {
-                                saw_checkpoint_call = true;
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == durable_sleep_index =>
-                            {
-                                saw_durable_sleep_call = true;
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == durable_sleep_checkpoint_index =>
-                            {
-                                saw_durable_sleep_checkpoint_call = true;
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == agent_retry_sleep_key_index =>
-                            {
-                                saw_retry_sleep_key_call = true;
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == record_retry_attempt_index =>
-                            {
-                                saw_record_retry_attempt_call = true;
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == agent_invoke_index =>
-                            {
-                                saw_invoke = true;
-                                saw_invoke_call = true;
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == agent_retry_error_info_index =>
-                            {
-                                saw_retry_info_after_invoke = saw_invoke_call;
-                                saw_retry_info_call = true;
-                                // The Agent's error-info passes by pointer;
-                                // the stdlib reads its `retryable`.
-                                saw_retryable_load = true;
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == agent_retry_delay_index =>
-                            {
-                                saw_retry_delay_after_retry_info = saw_retry_info_call;
-                                saw_retry_delay_call = true;
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == blocking_sleep_index =>
-                            {
-                                saw_blocking_sleep_call = true;
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == timer_sleep_index =>
-                            {
-                                saw_timer_sleep_after_retry_delay = saw_retry_delay_call;
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == agent_error_from_info_index =>
-                            {
-                                saw_error_from_info_after_retry_info = saw_retry_info_call;
-                            }
-                            Operator::Loop { .. } => saw_retry_loop = true,
-                            Operator::Br { relative_depth: 2 } => {
-                                saw_retry_continue_branch = true;
-                            }
-                            Operator::I32Load8U { memarg }
-                                if memarg.offset == DIRECT_AGENT_RETRY_INFO_RETRYABLE_OFFSET =>
-                            {
-                                saw_retry_info_retryable_load = true;
-                            }
-                            Operator::I32Load8U { memarg }
-                                if memarg.offset
-                                    == DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET =>
-                            {
-                                saw_retry_after_tag_load = true;
-                            }
-                            Operator::I64Load { memarg }
-                                if memarg.offset
-                                    == DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET =>
-                            {
-                                saw_retry_after_value_load = true;
-                            }
-                            Operator::I64Add => saw_rate_limit_wait_accumulator = true,
-                            Operator::I64Const { value: 1_000 } => {
-                                saw_rate_limit_base_delay_const = true;
-                            }
-                            Operator::I64Const { value: 60_000 } => {
-                                saw_rate_limit_budget_const = true;
-                            }
-                            Operator::I64LeU => saw_rate_limit_budget_compare = true,
-                            Operator::I32Const { value: 3 } => {
-                                saw_retry_bound = true;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                code_body_index += 1;
+            (module, "checkpoint") if module.contains("runtara:workflow/runtime") => {
+                checkpoint_index = Some(import.index);
+            }
+            (module, "durable-sleep") if module.contains("runtara:workflow/runtime") => {
+                durable_sleep_index = Some(import.index);
+            }
+            (module, "durable-sleep-checkpoint") if module.contains("runtara:workflow/runtime") => {
+                durable_sleep_checkpoint_index = Some(import.index);
+            }
+            ("runtara:api/time@1.0.0", "[async-lower]sleep") => {
+                timer_sleep_index = Some(import.index);
+            }
+            (module, "blocking-sleep") if module.contains("runtara:workflow/runtime") => {
+                saw_blocking_sleep_import = true;
+                blocking_sleep_index = Some(import.index);
+            }
+            (module, "agent-retry-sleep-key")
+                if module.contains("runtara:workflow-stdlib/json") =>
+            {
+                agent_retry_sleep_key_index = Some(import.index);
+            }
+            (module, "agent-retry-delay-ms") if module.contains("runtara:workflow-stdlib/json") => {
+                saw_agent_retry_delay_import = true;
+                agent_retry_delay_index = Some(import.index);
+            }
+            (module, "agent-retry-error-info")
+                if module.contains("runtara:workflow-stdlib/json") =>
+            {
+                saw_agent_retry_error_info_import = true;
+                agent_retry_error_info_index = Some(import.index);
+            }
+            (module, "agent-error-from-info")
+                if module.contains("runtara:workflow-stdlib/json") =>
+            {
+                saw_agent_error_from_info_import = true;
+                agent_error_from_info_index = Some(import.index);
+            }
+            (module, "record-retry-attempt") if module.contains("runtara:workflow/runtime") => {
+                record_retry_attempt_index = Some(import.index);
+            }
+            (module, "[async-lower]invoke")
+                if module.contains("runtara:agent-utils/capabilities") =>
+            {
+                agent_invoke_index = Some(import.index);
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                let mut saw_invoke_call = false;
+                let mut saw_retry_info_call = false;
+                let mut saw_retry_delay_call = false;
+                for operator in body.get_operators_reader().expect("operators") {
+                    match operator.expect("operator") {
+                        Operator::Call { function_index }
+                            if Some(function_index) == get_checkpoint_index =>
+                        {
+                            saw_get_checkpoint_call = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == checkpoint_index =>
+                        {
+                            saw_checkpoint_call = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == durable_sleep_index =>
+                        {
+                            saw_durable_sleep_call = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == durable_sleep_checkpoint_index =>
+                        {
+                            saw_durable_sleep_checkpoint_call = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == agent_retry_sleep_key_index =>
+                        {
+                            saw_retry_sleep_key_call = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == record_retry_attempt_index =>
+                        {
+                            saw_record_retry_attempt_call = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == agent_invoke_index =>
+                        {
+                            saw_invoke = true;
+                            saw_invoke_call = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == agent_retry_error_info_index =>
+                        {
+                            saw_retry_info_after_invoke = saw_invoke_call;
+                            saw_retry_info_call = true;
+                            // The Agent's error-info passes by pointer;
+                            // the stdlib reads its `retryable`.
+                            saw_retryable_load = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == agent_retry_delay_index =>
+                        {
+                            saw_retry_delay_after_retry_info = saw_retry_info_call;
+                            saw_retry_delay_call = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == blocking_sleep_index =>
+                        {
+                            saw_blocking_sleep_call = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == timer_sleep_index =>
+                        {
+                            saw_timer_sleep_after_retry_delay = saw_retry_delay_call;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == agent_error_from_info_index =>
+                        {
+                            saw_error_from_info_after_retry_info = saw_retry_info_call;
+                        }
+                        Operator::Loop { .. } => saw_retry_loop = true,
+                        Operator::Br { relative_depth: 2 } => {
+                            saw_retry_continue_branch = true;
+                        }
+                        Operator::I32Load8U { memarg }
+                            if memarg.offset == DIRECT_AGENT_RETRY_INFO_RETRYABLE_OFFSET =>
+                        {
+                            saw_retry_info_retryable_load = true;
+                        }
+                        Operator::I32Load8U { memarg }
+                            if memarg.offset == DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_TAG_OFFSET =>
+                        {
+                            saw_retry_after_tag_load = true;
+                        }
+                        Operator::I64Load { memarg }
+                            if memarg.offset
+                                == DIRECT_AGENT_RESULT_ERR_RETRY_AFTER_VALUE_OFFSET =>
+                        {
+                            saw_retry_after_value_load = true;
+                        }
+                        Operator::I64Add => saw_rate_limit_wait_accumulator = true,
+                        Operator::I64Const { value: 1_000 } => {
+                            saw_rate_limit_base_delay_const = true;
+                        }
+                        Operator::I64Const { value: 60_000 } => {
+                            saw_rate_limit_budget_const = true;
+                        }
+                        Operator::I64LeU => saw_rate_limit_budget_compare = true,
+                        Operator::I32Const { value: 3 } => {
+                            saw_retry_bound = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -6029,7 +6078,6 @@ fn direct_core_lowers_durable_agent_no_retry_checkpoint_path() {
         .validate_all(&core)
         .expect("durable Agent core module validates");
 
-    let mut next_function_index = 0;
     let mut agent_cache_key_index = None;
     let mut get_checkpoint_index = None;
     let mut checkpoint_index = None;
@@ -6049,129 +6097,113 @@ fn direct_core_lowers_durable_agent_no_retry_checkpoint_path() {
     let mut saw_cache_key_before_lookup = false;
     let mut saw_lookup_before_invoke = false;
     let mut saw_checkpoint_after_invoke = false;
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            (module, "agent-cache-key")
-                                if module.contains("runtara:workflow-stdlib/json") =>
-                            {
-                                saw_cache_key_import = true;
-                                agent_cache_key_index = Some(next_function_index);
-                            }
-                            (module, "get-checkpoint")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                saw_get_checkpoint_import = true;
-                                get_checkpoint_index = Some(next_function_index);
-                            }
-                            (module, "checkpoint")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                saw_checkpoint_import = true;
-                                checkpoint_index = Some(next_function_index);
-                            }
-                            (module, "handle-checkpoint-signal")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                saw_handle_checkpoint_signal_import = true;
-                                handle_checkpoint_signal_index = Some(next_function_index);
-                            }
-                            (module, "[async-lower]invoke")
-                                if module.contains("runtara:agent-utils/capabilities") =>
-                            {
-                                agent_invoke_index = Some(next_function_index);
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            (module, "agent-cache-key") if module.contains("runtara:workflow-stdlib/json") => {
+                saw_cache_key_import = true;
+                agent_cache_key_index = Some(import.index);
             }
-            Payload::CodeSectionEntry(_body) => {
-                if code_body_index == 0 {
-                    let mut saw_cache_key_call = false;
-                    let mut saw_lookup_call = false;
-                    let mut saw_invoke_call = false;
-                    let mut saw_checkpoint_call = false;
-                    let mut saw_handle_checkpoint_signal_call = false;
-                    let mut last_i32_const_after_signal_handler = None;
-                    for operator in entry_operators_with_helpers(&core) {
-                        match operator {
-                            Operator::Call { function_index }
-                                if Some(function_index) == agent_cache_key_index =>
-                            {
-                                saw_cache_key_call = true;
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == get_checkpoint_index =>
-                            {
-                                saw_cache_key_before_lookup = saw_cache_key_call;
-                                saw_lookup_call = true;
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == agent_invoke_index =>
-                            {
-                                saw_lookup_before_invoke = saw_lookup_call;
-                                saw_invoke_call = true;
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == checkpoint_index =>
-                            {
-                                saw_checkpoint_after_invoke = saw_invoke_call;
-                                saw_checkpoint_call = true;
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == handle_checkpoint_signal_index =>
-                            {
-                                saw_checkpoint_signal_handled = saw_checkpoint_call;
-                                saw_handle_checkpoint_signal_call = true;
-                            }
-                            Operator::I32Load { memarg }
-                                if memarg.offset == DIRECT_RESULT_OPTION_LIST_PTR_OFFSET =>
-                            {
-                                saw_cached_payload_ptr_load = true;
-                            }
-                            Operator::I32Load { memarg }
-                                if memarg.offset == DIRECT_RESULT_OPTION_LIST_LEN_OFFSET =>
-                            {
-                                saw_cached_payload_len_load = true;
-                            }
-                            Operator::I32Load8U { memarg }
-                                if memarg.offset == DIRECT_CHECKPOINT_PENDING_SIGNAL_TAG_OFFSET =>
-                            {
-                                saw_checkpoint_signal_tag_load = true;
-                            }
-                            Operator::I32Load8U { memarg }
-                                if memarg.offset == DIRECT_RET_BOOL_OK_OFFSET
-                                    && saw_handle_checkpoint_signal_call =>
-                            {
-                                saw_checkpoint_signal_bool_load = true;
-                            }
-                            Operator::I32Load8U { memarg }
-                                if memarg.offset == DIRECT_RESULT_OPTION_TAG_OFFSET =>
-                            {
-                                saw_get_checkpoint_option_tag_load = true;
-                            }
-                            Operator::I32Const { value } if saw_handle_checkpoint_signal_call => {
-                                last_i32_const_after_signal_handler = Some(value);
-                            }
-                            Operator::Return if saw_handle_checkpoint_signal_call => {
-                                saw_checkpoint_signal_early_return |=
-                                    last_i32_const_after_signal_handler == Some(0);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                code_body_index += 1;
+            (module, "get-checkpoint") if module.contains("runtara:workflow/runtime") => {
+                saw_get_checkpoint_import = true;
+                get_checkpoint_index = Some(import.index);
+            }
+            (module, "checkpoint") if module.contains("runtara:workflow/runtime") => {
+                saw_checkpoint_import = true;
+                checkpoint_index = Some(import.index);
+            }
+            (module, "handle-checkpoint-signal") if module.contains("runtara:workflow/runtime") => {
+                saw_handle_checkpoint_signal_import = true;
+                handle_checkpoint_signal_index = Some(import.index);
+            }
+            (module, "[async-lower]invoke")
+                if module.contains("runtara:agent-utils/capabilities") =>
+            {
+                agent_invoke_index = Some(import.index);
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(_body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                let mut saw_cache_key_call = false;
+                let mut saw_lookup_call = false;
+                let mut saw_invoke_call = false;
+                let mut saw_checkpoint_call = false;
+                let mut saw_handle_checkpoint_signal_call = false;
+                let mut last_i32_const_after_signal_handler = None;
+                for operator in entry_operators_with_helpers(&core) {
+                    match operator {
+                        Operator::Call { function_index }
+                            if Some(function_index) == agent_cache_key_index =>
+                        {
+                            saw_cache_key_call = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == get_checkpoint_index =>
+                        {
+                            saw_cache_key_before_lookup = saw_cache_key_call;
+                            saw_lookup_call = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == agent_invoke_index =>
+                        {
+                            saw_lookup_before_invoke = saw_lookup_call;
+                            saw_invoke_call = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == checkpoint_index =>
+                        {
+                            saw_checkpoint_after_invoke = saw_invoke_call;
+                            saw_checkpoint_call = true;
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == handle_checkpoint_signal_index =>
+                        {
+                            saw_checkpoint_signal_handled = saw_checkpoint_call;
+                            saw_handle_checkpoint_signal_call = true;
+                        }
+                        Operator::I32Load { memarg }
+                            if memarg.offset == DIRECT_RESULT_OPTION_LIST_PTR_OFFSET =>
+                        {
+                            saw_cached_payload_ptr_load = true;
+                        }
+                        Operator::I32Load { memarg }
+                            if memarg.offset == DIRECT_RESULT_OPTION_LIST_LEN_OFFSET =>
+                        {
+                            saw_cached_payload_len_load = true;
+                        }
+                        Operator::I32Load8U { memarg }
+                            if memarg.offset == DIRECT_CHECKPOINT_PENDING_SIGNAL_TAG_OFFSET =>
+                        {
+                            saw_checkpoint_signal_tag_load = true;
+                        }
+                        Operator::I32Load8U { memarg }
+                            if memarg.offset == DIRECT_RET_BOOL_OK_OFFSET
+                                && saw_handle_checkpoint_signal_call =>
+                        {
+                            saw_checkpoint_signal_bool_load = true;
+                        }
+                        Operator::I32Load8U { memarg }
+                            if memarg.offset == DIRECT_RESULT_OPTION_TAG_OFFSET =>
+                        {
+                            saw_get_checkpoint_option_tag_load = true;
+                        }
+                        Operator::I32Const { value } if saw_handle_checkpoint_signal_call => {
+                            last_i32_const_after_signal_handler = Some(value);
+                        }
+                        Operator::Return if saw_handle_checkpoint_signal_call => {
+                            saw_checkpoint_signal_early_return |=
+                                last_i32_const_after_signal_handler == Some(0);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -6285,83 +6317,68 @@ fn direct_core_checkpoint_replay_skips_agent_invoke_and_checkpoint_save() {
         .validate_all(&core)
         .expect("durable Agent replay core module validates");
 
-    let mut next_function_index = 0;
     let mut get_checkpoint_index = None;
     let mut checkpoint_index = None;
     let mut agent_invoke_index = None;
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
     let mut ops = Vec::new();
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            (module, "get-checkpoint")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                get_checkpoint_index = Some(next_function_index);
-                            }
-                            (module, "checkpoint")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                checkpoint_index = Some(next_function_index);
-                            }
-                            (module, "[async-lower]invoke")
-                                if module.contains("runtara:agent-utils/capabilities") =>
-                            {
-                                agent_invoke_index = Some(next_function_index);
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            (module, "get-checkpoint") if module.contains("runtara:workflow/runtime") => {
+                get_checkpoint_index = Some(import.index);
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
-                            Operator::Call { function_index }
-                                if Some(function_index) == get_checkpoint_index =>
-                            {
-                                ops.push(ReplayOp::CallGetCheckpoint);
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == agent_invoke_index =>
-                            {
-                                ops.push(ReplayOp::CallAgentInvoke);
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == checkpoint_index =>
-                            {
-                                ops.push(ReplayOp::CallCheckpoint);
-                            }
-                            Operator::If { .. } => ops.push(ReplayOp::If),
-                            Operator::Block { .. } | Operator::Loop { .. } => {
-                                ops.push(ReplayOp::Block)
-                            }
-                            Operator::Else => ops.push(ReplayOp::Else),
-                            Operator::End => ops.push(ReplayOp::End),
-                            Operator::I32Load { memarg }
-                                if memarg.offset == DIRECT_RESULT_OPTION_LIST_PTR_OFFSET =>
-                            {
-                                ops.push(ReplayOp::LoadCachedPtr);
-                            }
-                            Operator::I32Load { memarg }
-                                if memarg.offset == DIRECT_RESULT_OPTION_LIST_LEN_OFFSET =>
-                            {
-                                ops.push(ReplayOp::LoadCachedLen);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                code_body_index += 1;
+            (module, "checkpoint") if module.contains("runtara:workflow/runtime") => {
+                checkpoint_index = Some(import.index);
+            }
+            (module, "[async-lower]invoke")
+                if module.contains("runtara:agent-utils/capabilities") =>
+            {
+                agent_invoke_index = Some(import.index);
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    match operator.expect("operator") {
+                        Operator::Call { function_index }
+                            if Some(function_index) == get_checkpoint_index =>
+                        {
+                            ops.push(ReplayOp::CallGetCheckpoint);
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == agent_invoke_index =>
+                        {
+                            ops.push(ReplayOp::CallAgentInvoke);
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == checkpoint_index =>
+                        {
+                            ops.push(ReplayOp::CallCheckpoint);
+                        }
+                        Operator::If { .. } => ops.push(ReplayOp::If),
+                        Operator::Block { .. } | Operator::Loop { .. } => ops.push(ReplayOp::Block),
+                        Operator::Else => ops.push(ReplayOp::Else),
+                        Operator::End => ops.push(ReplayOp::End),
+                        Operator::I32Load { memarg }
+                            if memarg.offset == DIRECT_RESULT_OPTION_LIST_PTR_OFFSET =>
+                        {
+                            ops.push(ReplayOp::LoadCachedPtr);
+                        }
+                        Operator::I32Load { memarg }
+                            if memarg.offset == DIRECT_RESULT_OPTION_LIST_LEN_OFFSET =>
+                        {
+                            ops.push(ReplayOp::LoadCachedLen);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -6434,7 +6451,6 @@ fn direct_core_lowers_durable_agent_retry_loop() {
         .validate_all(&core)
         .expect("durable Agent retry core module validates");
 
-    let mut next_function_index = 0;
     let mut get_checkpoint_index = None;
     let mut checkpoint_index = None;
     let mut handle_checkpoint_signal_index = None;
@@ -6471,74 +6487,59 @@ fn direct_core_lowers_durable_agent_retry_loop() {
     let mut saw_checkpoint_after_invoke = false;
     let mut saw_checkpoint_signal_after_checkpoint = false;
     let mut saw_rate_limit_wait_state = false;
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            (module, "get-checkpoint") if module.contains("runtara:workflow/runtime") => {
+                get_checkpoint_index = Some(import.index);
+            }
+            (module, "checkpoint") if module.contains("runtara:workflow/runtime") => {
+                checkpoint_index = Some(import.index);
+            }
+            (module, "handle-checkpoint-signal") if module.contains("runtara:workflow/runtime") => {
+                saw_handle_checkpoint_signal_import = true;
+                handle_checkpoint_signal_index = Some(import.index);
+            }
+            (module, "agent-retry-sleep-key")
+                if module.contains("runtara:workflow-stdlib/json") =>
+            {
+                saw_agent_retry_sleep_key_import = true;
+                agent_retry_sleep_key_index = Some(import.index);
+            }
+            (module, "agent-retry-delay-ms") if module.contains("runtara:workflow-stdlib/json") => {
+                saw_agent_retry_delay_import = true;
+                agent_retry_delay_index = Some(import.index);
+            }
+            (module, "agent-retry-error-info")
+                if module.contains("runtara:workflow-stdlib/json") =>
+            {
+                saw_agent_retry_error_info_import = true;
+                agent_retry_error_info_index = Some(import.index);
+            }
+            (module, "agent-error-from-info")
+                if module.contains("runtara:workflow-stdlib/json") =>
+            {
+                saw_agent_error_from_info_import = true;
+                agent_error_from_info_index = Some(import.index);
+            }
+            (module, "record-retry-attempt") if module.contains("runtara:workflow/runtime") => {
+                saw_record_retry_attempt_import = true;
+                record_retry_attempt_index = Some(import.index);
+            }
+            (module, "[async-lower]invoke")
+                if module.contains("runtara:agent-utils/capabilities") =>
+            {
+                agent_invoke_index = Some(import.index);
+            }
+            _ => {}
+        }
+    }
     for payload in Parser::new(0).parse_all(&core) {
         match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            (module, "get-checkpoint")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                get_checkpoint_index = Some(next_function_index);
-                            }
-                            (module, "checkpoint")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                checkpoint_index = Some(next_function_index);
-                            }
-                            (module, "handle-checkpoint-signal")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                saw_handle_checkpoint_signal_import = true;
-                                handle_checkpoint_signal_index = Some(next_function_index);
-                            }
-                            (module, "agent-retry-sleep-key")
-                                if module.contains("runtara:workflow-stdlib/json") =>
-                            {
-                                saw_agent_retry_sleep_key_import = true;
-                                agent_retry_sleep_key_index = Some(next_function_index);
-                            }
-                            (module, "agent-retry-delay-ms")
-                                if module.contains("runtara:workflow-stdlib/json") =>
-                            {
-                                saw_agent_retry_delay_import = true;
-                                agent_retry_delay_index = Some(next_function_index);
-                            }
-                            (module, "agent-retry-error-info")
-                                if module.contains("runtara:workflow-stdlib/json") =>
-                            {
-                                saw_agent_retry_error_info_import = true;
-                                agent_retry_error_info_index = Some(next_function_index);
-                            }
-                            (module, "agent-error-from-info")
-                                if module.contains("runtara:workflow-stdlib/json") =>
-                            {
-                                saw_agent_error_from_info_import = true;
-                                agent_error_from_info_index = Some(next_function_index);
-                            }
-                            (module, "record-retry-attempt")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                saw_record_retry_attempt_import = true;
-                                record_retry_attempt_index = Some(next_function_index);
-                            }
-                            (module, "[async-lower]invoke")
-                                if module.contains("runtara:agent-utils/capabilities") =>
-                            {
-                                agent_invoke_index = Some(next_function_index);
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
-            }
             Payload::CodeSectionEntry(_body) => {
-                if code_body_index == 0 {
+                if code_body_index == run_body {
                     let mut saw_lookup_call = false;
                     let mut saw_invoke_call = false;
                     let mut saw_retry_info_call = false;
@@ -6768,7 +6769,6 @@ fn direct_core_lifecycle_agent_retry_parks_without_sleeping() {
         .validate_all(&core)
         .expect("lifecycle retry core module validates");
 
-    let mut next_function_index = 0;
     let mut get_checkpoint_index = None;
     let mut checkpoint_index = None;
     let mut now_ms_index = None;
@@ -6776,43 +6776,32 @@ fn direct_core_lifecycle_agent_retry_parks_without_sleeping() {
     let mut durable_sleep_index = None;
     let mut durable_sleep_checkpoint_index = None;
     let mut retry_sleep_key_index = None;
-    for payload in Parser::new(0).parse_all(&core) {
-        if let Payload::ImportSection(reader) = payload.expect("core wasm payload") {
-            for import in reader.into_imports() {
-                let import = import.expect("core import");
-                if !matches!(import.ty, TypeRef::Func(_)) {
-                    continue;
-                }
-                match (import.module, import.name) {
-                    (module, "get-checkpoint") if module.contains("runtara:workflow/runtime") => {
-                        get_checkpoint_index = Some(next_function_index);
-                    }
-                    (module, "checkpoint") if module.contains("runtara:workflow/runtime") => {
-                        checkpoint_index = Some(next_function_index);
-                    }
-                    (module, "now-ms") if module.contains("runtara:workflow/runtime") => {
-                        now_ms_index = Some(next_function_index);
-                    }
-                    (module, "blocking-sleep") if module.contains("runtara:workflow/runtime") => {
-                        blocking_sleep_index = Some(next_function_index);
-                    }
-                    (module, "durable-sleep") if module.contains("runtara:workflow/runtime") => {
-                        durable_sleep_index = Some(next_function_index);
-                    }
-                    (module, "durable-sleep-checkpoint")
-                        if module.contains("runtara:workflow/runtime") =>
-                    {
-                        durable_sleep_checkpoint_index = Some(next_function_index);
-                    }
-                    (module, "agent-retry-sleep-key")
-                        if module.contains("runtara:workflow-stdlib/json") =>
-                    {
-                        retry_sleep_key_index = Some(next_function_index);
-                    }
-                    _ => {}
-                }
-                next_function_index += 1;
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            (module, "get-checkpoint") if module.contains("runtara:workflow/runtime") => {
+                get_checkpoint_index = Some(import.index);
             }
+            (module, "checkpoint") if module.contains("runtara:workflow/runtime") => {
+                checkpoint_index = Some(import.index);
+            }
+            (module, "now-ms") if module.contains("runtara:workflow/runtime") => {
+                now_ms_index = Some(import.index);
+            }
+            (module, "blocking-sleep") if module.contains("runtara:workflow/runtime") => {
+                blocking_sleep_index = Some(import.index);
+            }
+            (module, "durable-sleep") if module.contains("runtara:workflow/runtime") => {
+                durable_sleep_index = Some(import.index);
+            }
+            (module, "durable-sleep-checkpoint") if module.contains("runtara:workflow/runtime") => {
+                durable_sleep_checkpoint_index = Some(import.index);
+            }
+            (module, "agent-retry-sleep-key")
+                if module.contains("runtara:workflow-stdlib/json") =>
+            {
+                retry_sleep_key_index = Some(import.index);
+            }
+            _ => {}
         }
     }
 
@@ -6823,10 +6812,11 @@ fn direct_core_lifecycle_agent_retry_parks_without_sleeping() {
     let mut saw_blocking_sleep = false;
     let mut saw_durable_sleep = false;
     let mut saw_durable_sleep_checkpoint = false;
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
     for payload in Parser::new(0).parse_all(&core) {
         if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
-            if code_body_index == 0 {
+            if code_body_index == run_body {
                 for operator in body.get_operators_reader().expect("operators") {
                     match operator.expect("operator") {
                         Operator::Call { function_index }
@@ -6915,7 +6905,7 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
         },
     );
     let (resolver_interface, describe) =
-        imported_wit_function(&resolve, world, "runtara:host/connections", "describe");
+        imported_wit_function(&resolve, world, "runtara:api/connections", "describe");
     let (resolver_module, resolver_name) = resolve.wasm_import_name(
         ManglingAndAbi::Legacy(wit_parser::LiftLowerAbi::AsyncCallback),
         WasmImport::Func {
@@ -6933,6 +6923,7 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
     let mut connection_describe_index = None;
     let mut agent_connection_input_index = None;
     let mut saw_resolution_chain_before_invoke = false;
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
     let mut next_function_index = 0;
 
@@ -6963,7 +6954,7 @@ fn direct_core_lowers_non_durable_agent_connection_call() {
                 }
             }
             Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
+                if code_body_index == run_body {
                     let mut saw_connection_id_call = false;
                     let mut saw_describe_call = false;
                     let mut saw_connection_input_call = false;
@@ -7035,10 +7026,10 @@ fn direct_core_lowers_non_durable_agent_on_error_route() {
 
     let mut error_steps_index = None;
     let mut eval_condition_index = None;
-    let mut saw_runtime_terminal = false;
     let mut saw_error_steps_call = false;
     let mut saw_condition_after_error_steps = false;
     let mut saw_complete_after_error_steps = false;
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
     let mut next_function_index = 0;
 
@@ -7057,15 +7048,13 @@ fn direct_core_lowers_non_durable_agent_on_error_route() {
                     {
                         eval_condition_index = Some(next_function_index);
                     }
-                    saw_runtime_terminal |= import.module.contains("runtara:workflow/runtime")
-                        && matches!(import.name, "complete" | "fail");
                     if matches!(import.ty, TypeRef::Func(_)) {
                         next_function_index += 1;
                     }
                 }
             }
             Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
+                if code_body_index == run_body {
                     let ops: Vec<_> = body
                         .get_operators_reader()
                         .expect("operators")
@@ -7099,8 +7088,8 @@ fn direct_core_lowers_non_durable_agent_on_error_route() {
         "core should import stdlib.error-steps"
     );
     assert!(
-        !saw_runtime_terminal,
-        "unmatched onError routes fail through the returned error, not runtime.fail"
+        !direct_core_posts_outcome(&core),
+        "unmatched onError routes fail through the returned error, not run.post-outcome"
     );
     assert!(
         saw_error_steps_call,
@@ -7129,12 +7118,10 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
         .validate_all(&core)
         .expect("tracked core module validates");
 
-    let mut next_function_index = 0;
     let mut init_manifest_index = None;
     let mut invoke_error_fields_index = None;
     let mut build_source_index = None;
     let mut apply_mapping_index = None;
-    let mut saw_runtime_terminal = false;
     let mut custom_event_index = None;
     let mut step_debug_start_index = None;
     let mut step_debug_end_index = None;
@@ -7143,50 +7130,42 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
     let mut saw_step_debug_end_kind = false;
     let mut saw_finish_step_id = false;
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "init-manifest") => {
+                init_manifest_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "invoke-error-fields") => {
+                invoke_error_fields_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
+                build_source_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
+                apply_mapping_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
+                custom_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "step-debug-start") => {
+                step_debug_start_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "step-debug-end") => {
+                step_debug_end_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "step-debug-error") => {
+                step_debug_error_index = Some(import.index)
+            }
+            _ => {}
+        }
+    }
     for payload in Parser::new(0).parse_all(&core) {
         match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "init-manifest") => {
-                                init_manifest_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "invoke-error-fields") => {
-                                invoke_error_fields_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
-                                build_source_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
-                                apply_mapping_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "complete" | "fail") => {
-                                saw_runtime_terminal = true
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
-                                custom_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "step-debug-start") => {
-                                step_debug_start_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "step-debug-end") => {
-                                step_debug_end_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "step-debug-error") => {
-                                step_debug_error_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
-            }
             Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
+                if code_body_index == run_body {
                     for operator in body.get_operators_reader().expect("operators") {
                         if let Operator::Call { function_index } = operator.expect("operator") {
                             run_calls.push(function_index);
@@ -7213,8 +7192,8 @@ fn direct_core_run_emits_step_debug_events_when_tracking_enabled() {
     // unhandled error is the run's returned failure. Completion is the
     // in-band return value, so no terminal call follows the end event.
     assert!(
-        !saw_runtime_terminal,
-        "the return value is the only terminal channel; no runtime.complete/fail import"
+        !direct_core_posts_outcome(&core),
+        "the return value is the only terminal channel; no run.post-outcome call"
     );
     let error_fields = invoke_error_fields_index.expect("invoke-error-fields import");
     let expected_call_order = [
@@ -7296,7 +7275,6 @@ fn direct_core_run_lowers_conditional_finish_branches_through_stdlib() {
         .validate_all(&core)
         .expect("conditional core module validates");
 
-    let mut next_function_index = 0;
     let mut eval_condition_index = None;
     let mut apply_mapping_index = None;
     let mut saw_condition_id = false;
@@ -7305,56 +7283,48 @@ fn direct_core_run_lowers_conditional_finish_branches_through_stdlib() {
     let mut saw_condition_bool_load = false;
     let mut saw_branch = false;
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "eval-condition") => {
-                                eval_condition_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
-                                apply_mapping_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "eval-condition") => {
+                eval_condition_index = Some(import.index)
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
-                            Operator::Call { function_index } => run_calls.push(function_index),
-                            Operator::I32Const { value } => {
-                                if value == *condition_id as i32 {
-                                    saw_condition_id = true;
-                                }
-                                if value == *true_mapping_id as i32 {
-                                    saw_true_mapping_id = true;
-                                }
-                                if value == *false_mapping_id as i32 {
-                                    saw_false_mapping_id = true;
-                                }
-                            }
-                            Operator::I32Load8U { memarg }
-                                if memarg.offset == 4 && memarg.memory == 0 =>
-                            {
-                                saw_condition_bool_load = true;
-                            }
-                            Operator::If { .. } => saw_branch = true,
-                            _ => {}
-                        }
-                    }
-                }
-                code_body_index += 1;
+            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
+                apply_mapping_index = Some(import.index)
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    match operator.expect("operator") {
+                        Operator::Call { function_index } => run_calls.push(function_index),
+                        Operator::I32Const { value } => {
+                            if value == *condition_id as i32 {
+                                saw_condition_id = true;
+                            }
+                            if value == *true_mapping_id as i32 {
+                                saw_true_mapping_id = true;
+                            }
+                            if value == *false_mapping_id as i32 {
+                                saw_false_mapping_id = true;
+                            }
+                        }
+                        Operator::I32Load8U { memarg }
+                            if memarg.offset == 4 && memarg.memory == 0 =>
+                        {
+                            saw_condition_bool_load = true;
+                        }
+                        Operator::If { .. } => saw_branch = true,
+                        _ => {}
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -7404,55 +7374,46 @@ fn direct_core_run_lowers_nested_conditional_tree_through_stdlib() {
         .validate_all(&core)
         .expect("nested conditional core module validates");
 
-    let mut next_function_index = 0;
     let mut eval_condition_index = None;
     let mut apply_mapping_index = None;
     let mut seen_condition_ids = Vec::new();
     let mut seen_mapping_ids = Vec::new();
     let mut branch_count = 0;
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "eval-condition") => {
-                                eval_condition_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
-                                apply_mapping_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "eval-condition") => {
+                eval_condition_index = Some(import.index)
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
-                            Operator::Call { function_index } => run_calls.push(function_index),
-                            Operator::I32Const { value } => {
-                                if condition_ids.contains(&(value as u32)) {
-                                    seen_condition_ids.push(value as u32);
-                                }
-                                if mapping_ids.contains(&(value as u32)) {
-                                    seen_mapping_ids.push(value as u32);
-                                }
-                            }
-                            Operator::If { .. } => branch_count += 1,
-                            _ => {}
-                        }
-                    }
-                }
-                code_body_index += 1;
+            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
+                apply_mapping_index = Some(import.index)
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    match operator.expect("operator") {
+                        Operator::Call { function_index } => run_calls.push(function_index),
+                        Operator::I32Const { value } => {
+                            if condition_ids.contains(&(value as u32)) {
+                                seen_condition_ids.push(value as u32);
+                            }
+                            if mapping_ids.contains(&(value as u32)) {
+                                seen_mapping_ids.push(value as u32);
+                            }
+                        }
+                        Operator::If { .. } => branch_count += 1,
+                        _ => {}
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -7512,57 +7473,48 @@ fn direct_core_run_lowers_group_by_finish_through_stdlib() {
         .validate_all(&core)
         .expect("GroupBy core module validates");
 
-    let mut next_function_index = 0;
     let mut build_source_index = None;
     let mut group_by_index = None;
     let mut apply_mapping_index = None;
     let mut saw_group_id = false;
     let mut saw_mapping_id = false;
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
-                                build_source_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "group-by") => {
-                                group_by_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
-                                apply_mapping_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
+                build_source_index = Some(import.index)
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
-                            Operator::Call { function_index } => run_calls.push(function_index),
-                            Operator::I32Const { value } => {
-                                if value == *group_id as i32 {
-                                    saw_group_id = true;
-                                }
-                                if value == *mapping_id as i32 {
-                                    saw_mapping_id = true;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                code_body_index += 1;
+            ("cm32p2|runtara:workflow-stdlib/json@1", "group-by") => {
+                group_by_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
+                apply_mapping_index = Some(import.index)
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    match operator.expect("operator") {
+                        Operator::Call { function_index } => run_calls.push(function_index),
+                        Operator::I32Const { value } => {
+                            if value == *group_id as i32 {
+                                saw_group_id = true;
+                            }
+                            if value == *mapping_id as i32 {
+                                saw_mapping_id = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -7647,6 +7599,7 @@ fn direct_core_run_lowers_split_loop_through_stdlib() {
     let mut saw_split_initial_results_call = false;
     let mut saw_split_append_output_call = false;
     let mut saw_split_output_call = false;
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
     for payload in Parser::new(0).parse_all(&core) {
@@ -7685,7 +7638,7 @@ fn direct_core_run_lowers_split_loop_through_stdlib() {
                 }
             }
             Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
+                if code_body_index == run_body {
                     for operator in body.get_operators_reader().expect("operators").into_iter() {
                         match operator.expect("operator") {
                             Operator::Loop { .. } => saw_loop = true,
@@ -7940,111 +7893,92 @@ fn direct_core_lowers_durable_split_checkpoint_path() {
         .validate_all(&core)
         .expect("durable Split core module validates");
 
-    let mut next_function_index = 0;
     let mut split_cache_key_index = None;
     let mut get_checkpoint_index = None;
     let mut split_item_count_index = None;
     let mut split_result_index = None;
     let mut checkpoint_index = None;
     let mut split_output_from_result_index = None;
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
     let mut ops = Vec::new();
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            (module, "split-cache-key")
-                                if module.contains("runtara:workflow-stdlib/json") =>
-                            {
-                                split_cache_key_index = Some(next_function_index);
-                            }
-                            (module, "get-checkpoint")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                get_checkpoint_index = Some(next_function_index);
-                            }
-                            (module, "split-item-count")
-                                if module.contains("runtara:workflow-stdlib/json") =>
-                            {
-                                split_item_count_index = Some(next_function_index);
-                            }
-                            (module, "split-result")
-                                if module.contains("runtara:workflow-stdlib/json") =>
-                            {
-                                split_result_index = Some(next_function_index);
-                            }
-                            (module, "checkpoint")
-                                if module.contains("runtara:workflow/runtime") =>
-                            {
-                                checkpoint_index = Some(next_function_index);
-                            }
-                            (module, "split-output-from-result")
-                                if module.contains("runtara:workflow-stdlib/json") =>
-                            {
-                                split_output_from_result_index = Some(next_function_index);
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            (module, "split-cache-key") if module.contains("runtara:workflow-stdlib/json") => {
+                split_cache_key_index = Some(import.index);
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
-                            Operator::Call { function_index }
-                                if Some(function_index) == split_cache_key_index =>
-                            {
-                                ops.push(SplitCheckpointOp::CallSplitCacheKey);
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == get_checkpoint_index =>
-                            {
-                                ops.push(SplitCheckpointOp::CallGetCheckpoint);
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == split_item_count_index =>
-                            {
-                                ops.push(SplitCheckpointOp::CallSplitItemCount);
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == split_result_index =>
-                            {
-                                ops.push(SplitCheckpointOp::CallSplitResult);
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == checkpoint_index =>
-                            {
-                                ops.push(SplitCheckpointOp::CallCheckpoint);
-                            }
-                            Operator::Call { function_index }
-                                if Some(function_index) == split_output_from_result_index =>
-                            {
-                                ops.push(SplitCheckpointOp::CallSplitOutputFromResult);
-                            }
-                            Operator::Else => ops.push(SplitCheckpointOp::Else),
-                            Operator::I32Load { memarg }
-                                if memarg.offset == DIRECT_RESULT_OPTION_LIST_PTR_OFFSET =>
-                            {
-                                ops.push(SplitCheckpointOp::LoadCachedPtr);
-                            }
-                            Operator::I32Load { memarg }
-                                if memarg.offset == DIRECT_RESULT_OPTION_LIST_LEN_OFFSET =>
-                            {
-                                ops.push(SplitCheckpointOp::LoadCachedLen);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                code_body_index += 1;
+            (module, "get-checkpoint") if module.contains("runtara:workflow/runtime") => {
+                get_checkpoint_index = Some(import.index);
+            }
+            (module, "split-item-count") if module.contains("runtara:workflow-stdlib/json") => {
+                split_item_count_index = Some(import.index);
+            }
+            (module, "split-result") if module.contains("runtara:workflow-stdlib/json") => {
+                split_result_index = Some(import.index);
+            }
+            (module, "checkpoint") if module.contains("runtara:workflow/runtime") => {
+                checkpoint_index = Some(import.index);
+            }
+            (module, "split-output-from-result")
+                if module.contains("runtara:workflow-stdlib/json") =>
+            {
+                split_output_from_result_index = Some(import.index);
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    match operator.expect("operator") {
+                        Operator::Call { function_index }
+                            if Some(function_index) == split_cache_key_index =>
+                        {
+                            ops.push(SplitCheckpointOp::CallSplitCacheKey);
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == get_checkpoint_index =>
+                        {
+                            ops.push(SplitCheckpointOp::CallGetCheckpoint);
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == split_item_count_index =>
+                        {
+                            ops.push(SplitCheckpointOp::CallSplitItemCount);
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == split_result_index =>
+                        {
+                            ops.push(SplitCheckpointOp::CallSplitResult);
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == checkpoint_index =>
+                        {
+                            ops.push(SplitCheckpointOp::CallCheckpoint);
+                        }
+                        Operator::Call { function_index }
+                            if Some(function_index) == split_output_from_result_index =>
+                        {
+                            ops.push(SplitCheckpointOp::CallSplitOutputFromResult);
+                        }
+                        Operator::Else => ops.push(SplitCheckpointOp::Else),
+                        Operator::I32Load { memarg }
+                            if memarg.offset == DIRECT_RESULT_OPTION_LIST_PTR_OFFSET =>
+                        {
+                            ops.push(SplitCheckpointOp::LoadCachedPtr);
+                        }
+                        Operator::I32Load { memarg }
+                            if memarg.offset == DIRECT_RESULT_OPTION_LIST_LEN_OFFSET =>
+                        {
+                            ops.push(SplitCheckpointOp::LoadCachedLen);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -8119,35 +8053,26 @@ fn direct_core_lowers_durable_split_checkpoint_path() {
 /// The workflow-stdlib functions the first code body calls.
 fn stdlib_calls(core: &[u8]) -> std::collections::BTreeSet<String> {
     let mut names = HashMap::new();
-    let mut next_function_index = 0;
     let mut called = std::collections::BTreeSet::new();
+    let run_body = direct_core_run_body(core);
     let mut code_body_index = 0;
+    for import in direct_core_functions(core) {
+        if import.module.contains("runtara:workflow-stdlib/json") {
+            names.insert(import.index, import.name.to_string());
+        }
+    }
     for payload in Parser::new(0).parse_all(core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        if import.module.contains("runtara:workflow-stdlib/json") {
-                            names.insert(next_function_index, import.name.to_string());
-                        }
-                        next_function_index += 1;
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators").into_iter() {
+                    if let Operator::Call { function_index } = operator.expect("operator")
+                        && let Some(name) = names.get(&function_index)
+                    {
+                        called.insert(name.clone());
                     }
                 }
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators").into_iter() {
-                        if let Operator::Call { function_index } = operator.expect("operator")
-                            && let Some(name) = names.get(&function_index)
-                        {
-                            called.insert(name.clone());
-                        }
-                    }
-                }
-                code_body_index += 1;
-            }
-            _ => {}
+            code_body_index += 1;
         }
     }
     called
@@ -8223,7 +8148,6 @@ fn direct_core_run_lowers_while_loop_through_stdlib() {
         .validate_all(&core)
         .expect("While core module validates");
 
-    let mut next_function_index = 0;
     let mut while_max_iterations_index = None;
     let mut while_initial_state_index = None;
     let mut while_condition_source_index = None;
@@ -8246,104 +8170,76 @@ fn direct_core_run_lowers_while_loop_through_stdlib() {
     let mut saw_runtime_heartbeat_call = false;
     let mut saw_runtime_is_cancelled_call = false;
     let mut saw_runtime_check_signals_call = false;
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
+    for import in direct_core_functions(&core) {
+        match import.module {
+            module if module.contains("runtara:workflow-stdlib/json") => match import.name {
+                "while-max-iterations" => while_max_iterations_index = Some(import.index),
+                "while-initial-state" => while_initial_state_index = Some(import.index),
+                "while-condition-source" => while_condition_source_index = Some(import.index),
+                "while-condition" => while_condition_index = Some(import.index),
+                "while-iteration-variables" => while_iteration_variables_index = Some(import.index),
+                "while-advance-state" => while_advance_state_index = Some(import.index),
+                "while-output" => while_output_index = Some(import.index),
+                _ => {}
+            },
+            module if module.contains("runtara:workflow/runtime") => match import.name {
+                "heartbeat" => runtime_heartbeat_index = Some(import.index),
+                "is-cancelled" => runtime_is_cancelled_index = Some(import.index),
+                "check-signals" => runtime_check_signals_index = Some(import.index),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
     for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    match import.module {
-                        module if module.contains("runtara:workflow-stdlib/json") => {
-                            match import.name {
-                                "while-max-iterations" => {
-                                    while_max_iterations_index = Some(next_function_index)
-                                }
-                                "while-initial-state" => {
-                                    while_initial_state_index = Some(next_function_index)
-                                }
-                                "while-condition-source" => {
-                                    while_condition_source_index = Some(next_function_index)
-                                }
-                                "while-condition" => {
-                                    while_condition_index = Some(next_function_index)
-                                }
-                                "while-iteration-variables" => {
-                                    while_iteration_variables_index = Some(next_function_index)
-                                }
-                                "while-advance-state" => {
-                                    while_advance_state_index = Some(next_function_index)
-                                }
-                                "while-output" => while_output_index = Some(next_function_index),
-                                _ => {}
-                            }
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators").into_iter() {
+                    match operator.expect("operator") {
+                        Operator::Loop { .. } => saw_loop = true,
+                        Operator::I32Const { value } if value == *while_id as i32 => {
+                            saw_while_id = true;
                         }
-                        module if module.contains("runtara:workflow/runtime") => {
-                            match import.name {
-                                "heartbeat" => runtime_heartbeat_index = Some(next_function_index),
-                                "is-cancelled" => {
-                                    runtime_is_cancelled_index = Some(next_function_index)
-                                }
-                                "check-signals" => {
-                                    runtime_check_signals_index = Some(next_function_index)
-                                }
-                                _ => {}
+                        Operator::Call { function_index } => {
+                            if Some(function_index) == while_max_iterations_index {
+                                saw_while_max_iterations_call = true;
+                            }
+                            if Some(function_index) == while_initial_state_index {
+                                saw_while_initial_state_call = true;
+                            }
+                            if Some(function_index) == while_condition_source_index {
+                                saw_while_condition_source_call = true;
+                            }
+                            if Some(function_index) == while_condition_index {
+                                saw_while_condition_call = true;
+                            }
+                            if Some(function_index) == while_iteration_variables_index {
+                                saw_while_iteration_variables_call = true;
+                            }
+                            if Some(function_index) == while_advance_state_index {
+                                saw_while_advance_state_call = true;
+                            }
+                            if Some(function_index) == while_output_index {
+                                saw_while_output_call = true;
+                            }
+                            if Some(function_index) == runtime_heartbeat_index {
+                                saw_runtime_heartbeat_call = true;
+                            }
+                            if Some(function_index) == runtime_is_cancelled_index {
+                                saw_runtime_is_cancelled_call = true;
+                            }
+                            if Some(function_index) == runtime_check_signals_index {
+                                saw_runtime_check_signals_call = true;
                             }
                         }
                         _ => {}
                     }
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        next_function_index += 1;
-                    }
                 }
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators").into_iter() {
-                        match operator.expect("operator") {
-                            Operator::Loop { .. } => saw_loop = true,
-                            Operator::I32Const { value } if value == *while_id as i32 => {
-                                saw_while_id = true;
-                            }
-                            Operator::Call { function_index } => {
-                                if Some(function_index) == while_max_iterations_index {
-                                    saw_while_max_iterations_call = true;
-                                }
-                                if Some(function_index) == while_initial_state_index {
-                                    saw_while_initial_state_call = true;
-                                }
-                                if Some(function_index) == while_condition_source_index {
-                                    saw_while_condition_source_call = true;
-                                }
-                                if Some(function_index) == while_condition_index {
-                                    saw_while_condition_call = true;
-                                }
-                                if Some(function_index) == while_iteration_variables_index {
-                                    saw_while_iteration_variables_call = true;
-                                }
-                                if Some(function_index) == while_advance_state_index {
-                                    saw_while_advance_state_call = true;
-                                }
-                                if Some(function_index) == while_output_index {
-                                    saw_while_output_call = true;
-                                }
-                                if Some(function_index) == runtime_heartbeat_index {
-                                    saw_runtime_heartbeat_call = true;
-                                }
-                                if Some(function_index) == runtime_is_cancelled_index {
-                                    saw_runtime_is_cancelled_call = true;
-                                }
-                                if Some(function_index) == runtime_check_signals_index {
-                                    saw_runtime_check_signals_call = true;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                code_body_index += 1;
-            }
-            _ => {}
+            code_body_index += 1;
         }
     }
 
@@ -8474,6 +8370,7 @@ fn direct_core_run_collects_split_validation_errors_when_dont_stop_is_enabled() 
     let mut pending_apply_mapping_failure_path = false;
     let mut saw_split_append_error_after_agent_failure = false;
     let mut saw_continue_after_split_append_error = false;
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
     for payload in Parser::new(0).parse_all(&core) {
@@ -8507,7 +8404,7 @@ fn direct_core_run_collects_split_validation_errors_when_dont_stop_is_enabled() 
                 }
             }
             Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
+                if code_body_index == run_body {
                     for operator in body.get_operators_reader().expect("operators").into_iter() {
                         match operator.expect("operator") {
                             Operator::Call { function_index }
@@ -8599,6 +8496,7 @@ fn direct_core_run_collects_split_error_steps_when_dont_stop_is_enabled() {
     let mut split_append_error_index = None;
     let mut saw_error_call = false;
     let mut saw_split_append_error_after_error = false;
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
     for payload in Parser::new(0).parse_all(&core) {
@@ -8622,7 +8520,7 @@ fn direct_core_run_collects_split_error_steps_when_dont_stop_is_enabled() {
                 }
             }
             Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
+                if code_body_index == run_body {
                     for operator in body.get_operators_reader().expect("operators").into_iter() {
                         match operator.expect("operator") {
                             Operator::Call { function_index }
@@ -8678,7 +8576,6 @@ fn direct_core_run_lowers_durable_delay_finish_through_stdlib_and_runtime() {
         .validate_all(&core)
         .expect("Delay core module validates");
 
-    let mut next_function_index = 0;
     let mut build_source_index = None;
     let mut delay_duration_index = None;
     let mut delay_sleep_key_index = None;
@@ -8687,56 +8584,46 @@ fn direct_core_run_lowers_durable_delay_finish_through_stdlib_and_runtime() {
     let mut saw_delay_id = false;
     let mut saw_mapping_id = false;
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
-                                build_source_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "delay-duration-ms") => {
-                                delay_duration_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "delay-sleep-key") => {
-                                delay_sleep_key_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "delay") => {
-                                delay_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
-                                apply_mapping_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
+                build_source_index = Some(import.index)
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
-                            Operator::Call { function_index } => run_calls.push(function_index),
-                            Operator::I32Const { value } => {
-                                if value == *delay_id as i32 {
-                                    saw_delay_id = true;
-                                }
-                                if value == *mapping_id as i32 {
-                                    saw_mapping_id = true;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                code_body_index += 1;
+            ("cm32p2|runtara:workflow-stdlib/json@1", "delay-duration-ms") => {
+                delay_duration_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "delay-sleep-key") => {
+                delay_sleep_key_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "delay") => delay_index = Some(import.index),
+            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
+                apply_mapping_index = Some(import.index)
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    match operator.expect("operator") {
+                        Operator::Call { function_index } => run_calls.push(function_index),
+                        Operator::I32Const { value } => {
+                            if value == *delay_id as i32 {
+                                saw_delay_id = true;
+                            }
+                            if value == *mapping_id as i32 {
+                                saw_mapping_id = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -8818,7 +8705,6 @@ fn direct_core_run_lowers_delay_breakpoint_pause_before_sleep() {
         .validate_all(&core)
         .expect("Delay breakpoint core module validates");
 
-    let mut next_function_index = 0;
     let mut stdlib_build_source_index = None;
     let mut runtime_debug_mode_enabled_index = None;
     let mut stdlib_breakpoint_key_index = None;
@@ -8829,59 +8715,51 @@ fn direct_core_run_lowers_delay_breakpoint_pause_before_sleep() {
     let mut stdlib_delay_duration_index = None;
     let mut runtime_delay_sleep_key_index = None;
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
-                                stdlib_build_source_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "debug-mode-enabled") => {
-                                runtime_debug_mode_enabled_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-key") => {
-                                stdlib_breakpoint_key_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "checkpoint") => {
-                                runtime_checkpoint_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-event") => {
-                                stdlib_breakpoint_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
-                                runtime_custom_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "breakpoint-pause") => {
-                                runtime_breakpoint_pause_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "delay-duration-ms") => {
-                                stdlib_delay_duration_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "delay-sleep-key") => {
-                                runtime_delay_sleep_key_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
+                stdlib_build_source_index = Some(import.index)
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        if let Operator::Call { function_index } = operator.expect("operator") {
-                            run_calls.push(function_index);
-                        }
-                    }
-                }
-                code_body_index += 1;
+            ("cm32p2|runtara:workflow/runtime@1", "debug-mode-enabled") => {
+                runtime_debug_mode_enabled_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-key") => {
+                stdlib_breakpoint_key_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "checkpoint") => {
+                runtime_checkpoint_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-event") => {
+                stdlib_breakpoint_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
+                runtime_custom_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "breakpoint-pause") => {
+                runtime_breakpoint_pause_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "delay-duration-ms") => {
+                stdlib_delay_duration_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "delay-sleep-key") => {
+                runtime_delay_sleep_key_index = Some(import.index)
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    if let Operator::Call { function_index } = operator.expect("operator") {
+                        run_calls.push(function_index);
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -8957,76 +8835,64 @@ fn direct_core_run_lowers_non_durable_delay_finish_through_blocking_sleep() {
         .validate_all(&core)
         .expect("non-durable Delay core module validates");
 
-    let mut next_function_index = 0;
     let mut build_source_index = None;
     let mut delay_duration_index = None;
-    let mut durable_sleep_checkpoint_index = None;
+    let mut checkpoint_index = None;
     let mut blocking_sleep_index = None;
     let mut delay_index = None;
     let mut apply_mapping_index = None;
     let mut saw_delay_id = false;
     let mut saw_mapping_id = false;
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
-                                build_source_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "delay-duration-ms") => {
-                                delay_duration_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "durable-sleep-checkpoint") => {
-                                durable_sleep_checkpoint_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "blocking-sleep") => {
-                                blocking_sleep_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "delay") => {
-                                delay_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
-                                apply_mapping_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
+                build_source_index = Some(import.index)
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
-                            Operator::Call { function_index } => run_calls.push(function_index),
-                            Operator::I32Const { value } => {
-                                if value == *delay_id as i32 {
-                                    saw_delay_id = true;
-                                }
-                                if value == *mapping_id as i32 {
-                                    saw_mapping_id = true;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                code_body_index += 1;
+            ("cm32p2|runtara:workflow-stdlib/json@1", "delay-duration-ms") => {
+                delay_duration_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "checkpoint") => {
+                checkpoint_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "blocking-sleep") => {
+                blocking_sleep_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "delay") => delay_index = Some(import.index),
+            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
+                apply_mapping_index = Some(import.index)
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    match operator.expect("operator") {
+                        Operator::Call { function_index } => run_calls.push(function_index),
+                        Operator::I32Const { value } => {
+                            if value == *delay_id as i32 {
+                                saw_delay_id = true;
+                            }
+                            if value == *mapping_id as i32 {
+                                saw_mapping_id = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
     let build_source_index = build_source_index.expect("build-source import");
     let delay_duration_index = delay_duration_index.expect("delay-duration-ms import");
-    let durable_sleep_checkpoint_index =
-        durable_sleep_checkpoint_index.expect("durable-sleep-checkpoint import");
+    let checkpoint_index = checkpoint_index.expect("checkpoint shim");
     let blocking_sleep_index = blocking_sleep_index.expect("blocking-sleep import");
     let delay_index = delay_index.expect("delay import");
     let apply_mapping_index = apply_mapping_index.expect("apply-mapping import");
@@ -9055,9 +8921,10 @@ fn direct_core_run_lowers_non_durable_delay_finish_through_blocking_sleep() {
         2,
         "Delay run should rebuild source after updating steps context"
     );
+    // A durable Delay checkpoints its deadline before it parks.
     assert!(
-        !run_calls.contains(&durable_sleep_checkpoint_index),
-        "non-durable Delay must not call durable sleep checkpoint"
+        !run_calls.contains(&checkpoint_index),
+        "non-durable Delay must not checkpoint a sleep deadline"
     );
     assert!(
         delay_duration_position < blocking_sleep_position,
@@ -9101,7 +8968,6 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
         .validate_all(&core)
         .expect("WaitForSignal core module validates");
 
-    let mut next_function_index = 0;
     let mut build_source_index = None;
     let mut wait_signal_id_index = None;
     let mut wait_timeout_index = None;
@@ -9120,83 +8986,74 @@ fn direct_core_run_lowers_wait_for_signal_finish_through_runtime_polling() {
     let mut runtime_heartbeat_index = None;
     let mut run_calls = Vec::new();
     let mut saw_loop = false;
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
-                                build_source_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-signal-id") => {
-                                wait_signal_id_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-timeout-ms") => {
-                                wait_timeout_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-closed-error") => {
-                                wait_closed_error_index = Some(next_function_index)
-                            }
-                            (
-                                "cm32p2|runtara:workflow-stdlib/json@1",
-                                "wait-poll-interval-ms-scoped",
-                            ) => wait_poll_interval_index = Some(next_function_index),
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-event") => {
-                                wait_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-output") => {
-                                wait_output_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
-                                apply_mapping_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "instance-id") => {
-                                runtime_instance_id_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "now-ms") => {
-                                runtime_now_ms_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "invoke-error-fields") => {
-                                invoke_error_fields_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
-                                runtime_custom_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "check-signals") => {
-                                runtime_check_signals_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "poll-input") => {
-                                runtime_poll_input_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "register-input") => {
-                                runtime_register_input_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "heartbeat") => {
-                                runtime_heartbeat_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
+                build_source_index = Some(import.index)
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
-                            Operator::Loop { .. } => saw_loop = true,
-                            Operator::Call { function_index } => run_calls.push(function_index),
-                            _ => {}
-                        }
-                    }
-                }
-                code_body_index += 1;
+            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-signal-id") => {
+                wait_signal_id_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-timeout-ms") => {
+                wait_timeout_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-closed-error") => {
+                wait_closed_error_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-poll-interval-ms-scoped") => {
+                wait_poll_interval_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-event") => {
+                wait_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-output") => {
+                wait_output_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
+                apply_mapping_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "instance-id") => {
+                runtime_instance_id_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "now-ms") => {
+                runtime_now_ms_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "invoke-error-fields") => {
+                invoke_error_fields_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
+                runtime_custom_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "check-signals") => {
+                runtime_check_signals_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "poll-input") => {
+                runtime_poll_input_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "register-input") => {
+                runtime_register_input_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "heartbeat") => {
+                runtime_heartbeat_index = Some(import.index)
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    match operator.expect("operator") {
+                        Operator::Loop { .. } => saw_loop = true,
+                        Operator::Call { function_index } => run_calls.push(function_index),
+                        _ => {}
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -9262,7 +9119,6 @@ fn direct_core_run_lowers_wait_for_signal_debug_events_with_tracking() {
         .validate_all(&core)
         .expect("tracked WaitForSignal core module validates");
 
-    let mut next_function_index = 0;
     let mut wait_signal_id_index = None;
     let mut wait_timeout_index = None;
     let mut wait_debug_start_index = None;
@@ -9272,56 +9128,48 @@ fn direct_core_run_lowers_wait_for_signal_debug_events_with_tracking() {
     let mut apply_mapping_index = None;
     let mut runtime_custom_event_index = None;
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-signal-id") => {
-                                wait_signal_id_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-timeout-ms") => {
-                                wait_timeout_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-debug-start") => {
-                                wait_debug_start_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-event") => {
-                                wait_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-output") => {
-                                wait_output_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "step-debug-end") => {
-                                step_debug_end_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
-                                apply_mapping_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
-                                runtime_custom_event_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-signal-id") => {
+                wait_signal_id_index = Some(import.index)
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        if let Operator::Call { function_index } = operator.expect("operator") {
-                            run_calls.push(function_index);
-                        }
-                    }
-                }
-                code_body_index += 1;
+            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-timeout-ms") => {
+                wait_timeout_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-debug-start") => {
+                wait_debug_start_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-event") => {
+                wait_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-output") => {
+                wait_output_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "step-debug-end") => {
+                step_debug_end_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
+                apply_mapping_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
+                runtime_custom_event_index = Some(import.index)
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    if let Operator::Call { function_index } = operator.expect("operator") {
+                        run_calls.push(function_index);
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -9400,7 +9248,6 @@ fn direct_core_run_lowers_wait_for_signal_breakpoint_pause() {
         .validate_all(&core)
         .expect("WaitForSignal breakpoint core module validates");
 
-    let mut next_function_index = 0;
     let mut runtime_debug_mode_enabled_index = None;
     let mut stdlib_breakpoint_key_index = None;
     let mut runtime_checkpoint_index = None;
@@ -9409,53 +9256,45 @@ fn direct_core_run_lowers_wait_for_signal_breakpoint_pause() {
     let mut runtime_breakpoint_pause_index = None;
     let mut runtime_instance_id_index = None;
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow/runtime@1", "debug-mode-enabled") => {
-                                runtime_debug_mode_enabled_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-key") => {
-                                stdlib_breakpoint_key_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "checkpoint") => {
-                                runtime_checkpoint_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-event") => {
-                                stdlib_breakpoint_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
-                                runtime_custom_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "breakpoint-pause") => {
-                                runtime_breakpoint_pause_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "instance-id") => {
-                                runtime_instance_id_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow/runtime@1", "debug-mode-enabled") => {
+                runtime_debug_mode_enabled_index = Some(import.index)
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        if let Operator::Call { function_index } = operator.expect("operator") {
-                            run_calls.push(function_index);
-                        }
-                    }
-                }
-                code_body_index += 1;
+            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-key") => {
+                stdlib_breakpoint_key_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "checkpoint") => {
+                runtime_checkpoint_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "breakpoint-event") => {
+                stdlib_breakpoint_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
+                runtime_custom_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "breakpoint-pause") => {
+                runtime_breakpoint_pause_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow/runtime@1", "instance-id") => {
+                runtime_instance_id_index = Some(import.index)
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    if let Operator::Call { function_index } = operator.expect("operator") {
+                        run_calls.push(function_index);
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -9534,54 +9373,43 @@ fn direct_core_run_executes_wait_on_wait_callback_before_wait_event() {
         .validate_all(&core)
         .expect("WaitForSignal onWait core module validates");
 
-    let mut next_function_index = 0;
     let mut build_source_index = None;
     let mut wait_on_wait_variables_index = None;
     let mut log_event_index = None;
     let mut log_index = None;
     let mut wait_event_index = None;
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
-                                build_source_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-on-wait-variables") => {
-                                wait_on_wait_variables_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "log-event") => {
-                                log_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "log") => {
-                                log_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-event") => {
-                                wait_event_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
+                build_source_index = Some(import.index)
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        if let Operator::Call { function_index } = operator.expect("operator") {
-                            run_calls.push(function_index);
-                        }
-                    }
-                }
-                code_body_index += 1;
+            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-on-wait-variables") => {
+                wait_on_wait_variables_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "log-event") => {
+                log_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "log") => log_index = Some(import.index),
+            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-event") => {
+                wait_event_index = Some(import.index)
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    if let Operator::Call { function_index } = operator.expect("operator") {
+                        run_calls.push(function_index);
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -9654,46 +9482,35 @@ fn direct_core_run_wraps_wait_on_wait_error_before_failed_return() {
         .validate_all(&core)
         .expect("WaitForSignal failing onWait core module validates");
 
-    let mut next_function_index = 0;
     let mut error_index = None;
     let mut wait_on_wait_error_index = None;
     let mut invoke_error_fields_index = None;
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "error") => {
-                                error_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-on-wait-error") => {
-                                wait_on_wait_error_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "invoke-error-fields") => {
-                                invoke_error_fields_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "error") => error_index = Some(import.index),
+            ("cm32p2|runtara:workflow-stdlib/json@1", "wait-on-wait-error") => {
+                wait_on_wait_error_index = Some(import.index)
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        if let Operator::Call { function_index } = operator.expect("operator") {
-                            run_calls.push(function_index);
-                        }
-                    }
-                }
-                code_body_index += 1;
+            ("cm32p2|runtara:workflow-stdlib/json@1", "invoke-error-fields") => {
+                invoke_error_fields_index = Some(import.index)
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    if let Operator::Call { function_index } = operator.expect("operator") {
+                        run_calls.push(function_index);
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -9754,57 +9571,48 @@ fn direct_core_run_lowers_filter_finish_through_stdlib() {
         .validate_all(&core)
         .expect("Filter core module validates");
 
-    let mut next_function_index = 0;
     let mut build_source_index = None;
     let mut filter_index = None;
     let mut apply_mapping_index = None;
     let mut saw_filter_id = false;
     let mut saw_mapping_id = false;
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
-                                build_source_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "filter") => {
-                                filter_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
-                                apply_mapping_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
+                build_source_index = Some(import.index)
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
-                            Operator::Call { function_index } => run_calls.push(function_index),
-                            Operator::I32Const { value } => {
-                                if value == *filter_id as i32 {
-                                    saw_filter_id = true;
-                                }
-                                if value == *mapping_id as i32 {
-                                    saw_mapping_id = true;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                code_body_index += 1;
+            ("cm32p2|runtara:workflow-stdlib/json@1", "filter") => {
+                filter_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
+                apply_mapping_index = Some(import.index)
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    match operator.expect("operator") {
+                        Operator::Call { function_index } => run_calls.push(function_index),
+                        Operator::I32Const { value } => {
+                            if value == *filter_id as i32 {
+                                saw_filter_id = true;
+                            }
+                            if value == *mapping_id as i32 {
+                                saw_mapping_id = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -9866,57 +9674,48 @@ fn direct_core_run_lowers_value_switch_finish_through_stdlib() {
         .validate_all(&core)
         .expect("value Switch core module validates");
 
-    let mut next_function_index = 0;
     let mut build_source_index = None;
     let mut value_switch_index = None;
     let mut apply_mapping_index = None;
     let mut saw_switch_id = false;
     let mut saw_mapping_id = false;
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
-                                build_source_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "value-switch") => {
-                                value_switch_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
-                                apply_mapping_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
+                build_source_index = Some(import.index)
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
-                            Operator::Call { function_index } => run_calls.push(function_index),
-                            Operator::I32Const { value } => {
-                                if value == *switch_id as i32 {
-                                    saw_switch_id = true;
-                                }
-                                if value == *mapping_id as i32 {
-                                    saw_mapping_id = true;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                code_body_index += 1;
+            ("cm32p2|runtara:workflow-stdlib/json@1", "value-switch") => {
+                value_switch_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
+                apply_mapping_index = Some(import.index)
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    match operator.expect("operator") {
+                        Operator::Call { function_index } => run_calls.push(function_index),
+                        Operator::I32Const { value } => {
+                            if value == *switch_id as i32 {
+                                saw_switch_id = true;
+                            }
+                            if value == *mapping_id as i32 {
+                                saw_mapping_id = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -9998,7 +9797,6 @@ fn direct_core_run_lowers_routing_switch_finish_through_stdlib() {
         .validate_all(&core)
         .expect("routing Switch core module validates");
 
-    let mut next_function_index = 0;
     let mut build_source_index = None;
     let mut process_switch_index = None;
     let mut value_switch_index = None;
@@ -10008,55 +9806,47 @@ fn direct_core_run_lowers_routing_switch_finish_through_stdlib() {
     let mut saw_active_label_len = false;
     let mut saw_pending_label_len = false;
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
-                                build_source_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "process-switch") => {
-                                process_switch_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "value-switch") => {
-                                value_switch_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
-                                apply_mapping_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
+                build_source_index = Some(import.index)
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
-                            Operator::Call { function_index } => run_calls.push(function_index),
-                            Operator::I32Const { value } => {
-                                if value == *switch_id as i32 {
-                                    saw_switch_id = true;
-                                }
-                                if mapping_ids.contains(&(value as u32)) {
-                                    seen_mapping_ids.push(value as u32);
-                                }
-                                saw_active_label_len |= value == "active".len() as i32;
-                                saw_pending_label_len |= value == "pending".len() as i32;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                code_body_index += 1;
+            ("cm32p2|runtara:workflow-stdlib/json@1", "process-switch") => {
+                process_switch_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "value-switch") => {
+                value_switch_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
+                apply_mapping_index = Some(import.index)
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    match operator.expect("operator") {
+                        Operator::Call { function_index } => run_calls.push(function_index),
+                        Operator::I32Const { value } => {
+                            if value == *switch_id as i32 {
+                                saw_switch_id = true;
+                            }
+                            if mapping_ids.contains(&(value as u32)) {
+                                seen_mapping_ids.push(value as u32);
+                            }
+                            saw_active_label_len |= value == "active".len() as i32;
+                            saw_pending_label_len |= value == "pending".len() as i32;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -10143,7 +9933,6 @@ fn direct_core_run_lowers_log_finish_through_stdlib_and_runtime() {
         .validate_all(&core)
         .expect("Log core module validates");
 
-    let mut next_function_index = 0;
     let mut build_source_index = None;
     let mut log_event_index = None;
     let mut log_index = None;
@@ -10154,38 +9943,31 @@ fn direct_core_run_lowers_log_finish_through_stdlib_and_runtime() {
     let mut saw_mapping_id = false;
     let mut saw_workflow_log_kind = false;
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
+                build_source_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "log-event") => {
+                log_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "log") => log_index = Some(import.index),
+            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
+                custom_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
+                apply_mapping_index = Some(import.index)
+            }
+            _ => {}
+        }
+    }
     for payload in Parser::new(0).parse_all(&core) {
         match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
-                                build_source_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "log-event") => {
-                                log_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "log") => {
-                                log_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
-                                custom_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
-                                apply_mapping_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
-            }
             Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
+                if code_body_index == run_body {
                     for operator in body.get_operators_reader().expect("operators") {
                         match operator.expect("operator") {
                             Operator::Call { function_index } => run_calls.push(function_index),
@@ -10292,52 +10074,40 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
         .validate_all(&core)
         .expect("Error core module validates");
 
-    let mut next_function_index = 0;
     let mut build_source_index = None;
     let mut error_event_index = None;
     let mut error_index = None;
     let mut custom_event_index = None;
-    let mut saw_runtime_terminal = false;
     let mut saw_error_id = false;
     let mut saw_workflow_error_kind = false;
     let mut invoke_error_fields_index = None;
     let mut run_calls = Vec::new();
     let mut entry_ops = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
+                build_source_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "error-event") => {
+                error_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "error") => error_index = Some(import.index),
+            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
+                custom_event_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "invoke-error-fields") => {
+                invoke_error_fields_index = Some(import.index)
+            }
+            _ => {}
+        }
+    }
     for payload in Parser::new(0).parse_all(&core) {
         match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
-                                build_source_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "error-event") => {
-                                error_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "error") => {
-                                error_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "custom-event") => {
-                                custom_event_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow/runtime@1", "complete" | "fail") => {
-                                saw_runtime_terminal = true
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "invoke-error-fields") => {
-                                invoke_error_fields_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
-            }
             Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
+                if code_body_index == run_body {
                     for operator in body.get_operators_reader().expect("operators") {
                         let operator = operator.expect("operator");
                         match operator {
@@ -10369,8 +10139,8 @@ fn direct_core_run_lowers_error_through_stdlib_and_runtime() {
     let error_index = error_index.expect("error import");
     let custom_event_index = custom_event_index.expect("custom-event import");
     assert!(
-        !saw_runtime_terminal,
-        "the return value is the only terminal channel; no runtime.complete/fail import"
+        !direct_core_posts_outcome(&core),
+        "the return value is the only terminal channel; no run.post-outcome call"
     );
     let invoke_error_fields_index = invoke_error_fields_index.expect("invoke-error-fields import");
     assert_eq!(
@@ -10483,55 +10253,44 @@ fn direct_core_run_lowers_edge_conditions_through_stdlib() {
         .validate_all(&core)
         .expect("edge-condition core module validates");
 
-    let mut next_function_index = 0;
     let mut build_source_index = None;
     let mut eval_condition_index = None;
     let mut apply_mapping_index = None;
     let mut seen_mapping_ids = Vec::new();
     let mut run_calls = Vec::new();
+    let run_body = direct_core_run_body(&core);
     let mut code_body_index = 0;
 
-    for payload in Parser::new(0).parse_all(&core) {
-        match payload.expect("core wasm payload") {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    let import = import.expect("core import");
-                    if matches!(import.ty, TypeRef::Func(_)) {
-                        match (import.module, import.name) {
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
-                                build_source_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "eval-condition") => {
-                                eval_condition_index = Some(next_function_index)
-                            }
-                            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
-                                apply_mapping_index = Some(next_function_index)
-                            }
-                            _ => {}
-                        }
-                        next_function_index += 1;
-                    }
-                }
+    for import in direct_core_functions(&core) {
+        match (import.module, import.name) {
+            ("cm32p2|runtara:workflow-stdlib/json@1", "build-source") => {
+                build_source_index = Some(import.index)
             }
-            Payload::CodeSectionEntry(body) => {
-                if code_body_index == 0 {
-                    for operator in body.get_operators_reader().expect("operators") {
-                        match operator.expect("operator") {
-                            Operator::Call { function_index } => {
-                                run_calls.push(function_index);
-                            }
-                            Operator::I32Const { value }
-                                if mapping_ids.contains(&(value as u32)) =>
-                            {
-                                seen_mapping_ids.push(value as u32);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                code_body_index += 1;
+            ("cm32p2|runtara:workflow-stdlib/json@1", "eval-condition") => {
+                eval_condition_index = Some(import.index)
+            }
+            ("cm32p2|runtara:workflow-stdlib/json@1", "apply-mapping") => {
+                apply_mapping_index = Some(import.index)
             }
             _ => {}
+        }
+    }
+    for payload in Parser::new(0).parse_all(&core) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("core wasm payload") {
+            if code_body_index == run_body {
+                for operator in body.get_operators_reader().expect("operators") {
+                    match operator.expect("operator") {
+                        Operator::Call { function_index } => {
+                            run_calls.push(function_index);
+                        }
+                        Operator::I32Const { value } if mapping_ids.contains(&(value as u32)) => {
+                            seen_mapping_ids.push(value as u32);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            code_body_index += 1;
         }
     }
 
@@ -10590,7 +10349,8 @@ fn direct_compile_writes_component_scaffold_sidecars() {
     assert_eq!(world_wit, result.component_artifacts.world_wit);
     assert_eq!(wac, result.component_artifacts.wac_source);
     assert!(world_wit.contains("import runtara:workflow-stdlib/json@1.0.0;"));
-    assert!(world_wit.contains("import runtara:workflow/runtime@1.0.0;"));
+    assert!(world_wit.contains(&format!("import {};", runtara_wit::api::CHECKPOINTS)));
+    assert!(!world_wit.contains("import runtara:workflow/runtime@1.0.0;"));
     assert!(world_wit.contains("export runtara:agent-workflow-agent/capabilities@1.0.0;"));
     assert!(wac.contains("new runtara:workflow-stdlib"));
     // HostImport default: the runtime component is neither instantiated nor
@@ -10649,9 +10409,8 @@ fn direct_compile_composes_finish_with_shared_components_when_available() {
             .map(|file| file.sha256.as_str()),
         Some(result.wasm_checksum.as_str())
     );
-    // Only the stdlib is a compose-time dependency — the runtime interface is
-    // left unbound and satisfied by the host at run time, so it is never
-    // composed in.
+    // Every workflow composes the stdlib, the run shim and the `runtara:api`
+    // component; the host serves only the workflow API behind them.
     assert_eq!(
         result
             .artifact_metadata
@@ -10659,7 +10418,11 @@ fn direct_compile_composes_finish_with_shared_components_when_available() {
             .iter()
             .map(|component| component.package.as_str())
             .collect::<Vec<_>>(),
-        vec!["runtara:workflow-stdlib"]
+        vec![
+            "runtara:workflow-stdlib",
+            "runtara:workflow-api-run",
+            "runtara:api-component"
+        ]
     );
     for component in &result.artifact_metadata.shared_components {
         let wasm = component.wasm.as_ref().expect("resolved shared component");
@@ -11087,6 +10850,243 @@ fn direct_compile_parallel_split_emits_async_lowered_invoke() {
     assert!(has("[async-lower]invoke"), "async-lowered invoke missing");
 }
 
+/// A parallel Split over a workflow-agent whose published version parks runs
+/// its window as child runs: the body is eligible, it composes nothing (no
+/// pool, no `[async-lower]invoke`, no phantom pool member), and the logic
+/// imports `runtara:api/tasks` for the `child-run` helper.
+#[test]
+fn direct_compile_parallel_split_starts_child_runs() {
+    let info = runtara_dsl::agent_meta::with_workflow_run(
+        runtara_dsl::agent_meta::workflow_agent_info(
+            "maybe-sleep",
+            "maybe-sleep",
+            "fixture",
+            &HashMap::new(),
+            &HashMap::new(),
+        ),
+        runtara_dsl::agent_meta::WorkflowRunTarget {
+            workflow_id: "wf-maybe-sleep".to_string(),
+            version: 2,
+            parks: true,
+        },
+    );
+    let catalog = runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![info]);
+    let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "durable": true,
+        "entryPoint": "split",
+        "steps": {
+            "split": {"id": "split", "stepType": "Split",
+                "config": {"value": {"valueType": "reference", "value": "data.items"},
+                    "parallelism": 10},
+                "subgraph": {"entryPoint": "call", "steps": {
+                    "call": {"id": "call", "stepType": "Agent", "agentId": "maybe-sleep",
+                        "capabilityId": "run", "maxRetries": 0,
+                        "inputMapping": {"item": {"valueType": "reference", "value": "item"}}},
+                    "done": {"id": "done", "stepType": "Finish", "inputMapping": {
+                        "result": {"valueType": "reference", "value": "steps.call.outputs"}}}},
+                    "executionPlan": [{"fromStep": "call", "toStep": "done"}]}},
+            "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
+                "results": {"valueType": "reference", "value": "steps.split.outputs"}}}
+        },
+        "executionPlan": [{"fromStep": "split", "toStep": "finish"}]
+    }))
+    .expect("graph");
+
+    let manifest = super::super::manifest::build_direct_workflow_manifest_with_child_workflows_and_agent_catalog(
+        &graph,
+        &[],
+        Some(&catalog),
+    )
+    .expect("manifest");
+    assert!(manifest.has_child_runs());
+    assert!(manifest.feature_summary.agent_ids.is_empty());
+    let manifest_json = manifest.to_canonical_json().expect("manifest json");
+    let core_config = DirectCoreConfig::new(&manifest, &manifest_json, false).expect("core config");
+    let DirectRunPlan::Split {
+        parallel_window,
+        durable,
+        max_retries,
+        nested_plan,
+        ..
+    } = &core_config.run_plan
+    else {
+        panic!("expected a Split run plan");
+    };
+    let body = split_parallel::parallel_agent_body(
+        &core_config.static_data,
+        *parallel_window,
+        *durable,
+        *max_retries,
+        nested_plan,
+    )
+    .expect("a child-run body runs in a parallel window");
+    assert!(
+        core_config
+            .static_data
+            .agent_child_run(body.agent_id)
+            .is_some()
+    );
+    assert!(
+        split_parallel::parallel_agent_pools(&core_config.static_data, &core_config.run_plan)
+            .is_empty(),
+        "a child run composes no component, so it has no pool"
+    );
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "split-child-runs".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: Some(std::sync::Arc::new(catalog)),
+        agent_slug: None,
+    })
+    .expect("a parallel Split of child runs compiles");
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
+        .validate_all(&wasm)
+        .expect("the artifact validates");
+    let has = |needle: &str| {
+        wasm.windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    };
+    assert!(
+        has("runtara:api/tasks"),
+        "the child-run helper imports tasks"
+    );
+    assert!(has("runtara:api/waits"), "a pending child registers a wait");
+    assert!(
+        !has("[async-lower]invoke"),
+        "nothing is invoked asynchronously"
+    );
+    assert!(
+        !has("runtara:agent-maybe-sleep"),
+        "nothing imports the child-run agent"
+    );
+    assert!(!has("-par1"), "no phantom pool member");
+}
+
+/// A child-run step with a timeout reads the clock for its wait's deadline
+/// and parks on the persisted one; the artifact validates.
+#[test]
+fn direct_compile_child_run_step_with_timeout_validates() {
+    let info = runtara_dsl::agent_meta::with_workflow_run(
+        runtara_dsl::agent_meta::workflow_agent_info(
+            "maybe-sleep",
+            "maybe-sleep",
+            "fixture",
+            &HashMap::new(),
+            &HashMap::new(),
+        ),
+        runtara_dsl::agent_meta::WorkflowRunTarget {
+            workflow_id: "wf-maybe-sleep".to_string(),
+            version: 2,
+            parks: true,
+        },
+    );
+    let catalog = runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![info]);
+    let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "durable": true,
+        "entryPoint": "call",
+        "steps": {
+            "call": {"id": "call", "stepType": "Agent", "agentId": "maybe-sleep",
+                "capabilityId": "run", "maxRetries": 0, "timeout": 2000,
+                "inputMapping": {"x": {"valueType": "reference", "value": "data.x"}}},
+            "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
+                "result": {"valueType": "reference", "value": "steps.call.outputs"}}}
+        },
+        "executionPlan": [{"fromStep": "call", "toStep": "finish"}]
+    }))
+    .expect("graph");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "child-run-timeout".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: Some(std::sync::Arc::new(catalog)),
+        agent_slug: None,
+    })
+    .expect("a timed child-run step compiles");
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
+        .validate_all(&wasm)
+        .expect("the artifact validates");
+}
+
+/// Parallel branches headed by child runs start their children together:
+/// the fan-out lowers sequentially with a prestart of every head, and the
+/// artifact validates.
+#[test]
+fn direct_compile_parallel_branches_prestart_child_runs() {
+    let info = runtara_dsl::agent_meta::with_workflow_run(
+        runtara_dsl::agent_meta::workflow_agent_info(
+            "maybe-sleep",
+            "maybe-sleep",
+            "fixture",
+            &HashMap::new(),
+            &HashMap::new(),
+        ),
+        runtara_dsl::agent_meta::WorkflowRunTarget {
+            workflow_id: "wf-maybe-sleep".to_string(),
+            version: 2,
+            parks: true,
+        },
+    );
+    let catalog = runtara_dsl::agent_meta::AgentCatalog::from_agents(vec![info]);
+    let call = |item: u32| {
+        serde_json::json!({"stepType": "Agent", "agentId": "maybe-sleep",
+            "capabilityId": "run", "maxRetries": 0, "timeoutMs": 60000,
+            "inputMapping": {"item": {"valueType": "immediate", "value": item}}})
+    };
+    let mut first = call(1);
+    first["id"] = "first".into();
+    let mut second = call(2);
+    second["id"] = "second".into();
+    let graph: ExecutionGraph = serde_json::from_value(serde_json::json!({
+        "durable": true,
+        "entryPoint": "start",
+        "steps": {
+            "start": {"id": "start", "stepType": "Log", "message": "fan out"},
+            "first": first,
+            "second": second,
+            "finish": {"id": "finish", "stepType": "Finish", "inputMapping": {
+                "a": {"valueType": "reference", "value": "steps.first.outputs"},
+                "b": {"valueType": "reference", "value": "steps.second.outputs"}}}
+        },
+        "executionPlan": [
+            {"fromStep": "start", "toStep": "first"},
+            {"fromStep": "start", "toStep": "second"},
+            {"fromStep": "first", "toStep": "finish"},
+            {"fromStep": "second", "toStep": "finish"}
+        ]
+    }))
+    .expect("graph");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let result = compile_direct_workflow(DirectCompilationInput {
+        workflow_id: "branch-child-runs".to_string(),
+        version: 1,
+        source_checksum: None,
+        execution_graph: graph,
+        child_workflows: vec![],
+        output_dir: temp.path().to_path_buf(),
+        track_events: false,
+        agent_catalog: Some(std::sync::Arc::new(catalog)),
+        agent_slug: None,
+    })
+    .expect("parallel child-run branches compile");
+    let wasm = fs::read(&result.wasm_path).expect("wasm");
+    Validator::new_with_features(wasmparser::WasmFeatures::all())
+        .validate_all(&wasm)
+        .expect("the artifact validates");
+}
+
 /// Sequential scheduling also uses standard async calls so an individual
 /// operation can cooperate with cancellation.
 #[test]
@@ -11149,7 +11149,7 @@ fn abi_is_part_of_the_lowering_tag() {
         "recompilation must preserve breakpoint checkpoint signals: {tag}"
     );
     assert!(tag.contains("agent-composition=standard-v1"));
-    assert!(tag.contains("parent-cancel=v1"));
+    assert!(tag.contains("parent-cancel=callback-v2"));
     assert!(tag.contains("loop-cooperation=v1"));
     assert!(tag.contains("retry-cooperation=v4"));
     assert!(tag.contains("structured-agent-errors=v1"));
@@ -11282,11 +11282,14 @@ fn split_timeout_keeps_required_runtime_import_in_both_invoke_abis() {
             )
             .unwrap();
             assert!(!compiled.omit_runtime, "{abi:?}, timeout={timeout}");
+            // Both a run's own entry and a published workflow-agent reach the
+            // runtime through `runtara:api` (the default ABI).
             assert!(
                 compiled
                     .component_artifacts
                     .world_wit
-                    .contains("runtara:workflow/runtime")
+                    .contains(runtara_wit::api::CHECKPOINTS),
+                "{abi:?}"
             );
             Validator::new_with_features(wasmparser::WasmFeatures::all())
                 .validate_all(&fs::read(compiled.wasm_path).unwrap())
@@ -11394,7 +11397,7 @@ fn callable_embed_omits_runtime_only_for_a_complete_runtime_free_child() {
                 compiled
                     .component_artifacts
                     .world_wit
-                    .contains("runtara:workflow/runtime"),
+                    .contains(runtara_wit::api::RUN),
                 !runtime_free,
                 "{case}/{retries}"
             );

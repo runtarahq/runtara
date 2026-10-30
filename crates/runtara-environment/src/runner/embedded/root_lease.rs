@@ -8,9 +8,12 @@ use runtara_core::persistence::invocations::{
 /// Bounded deadline for one lease control call (claim, release).
 pub(super) const ROOT_LEASE_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(super) struct RootLease {
+/// A run's ownership of its root: every durable write presents the token.
+pub struct RootLease {
     persistence: Arc<dyn Persistence>,
+    /// The lease every durable write of the run presents.
     pub token: InvocationLease,
+    /// The budget for each lease control call.
     pub timeout: Duration,
 }
 
@@ -73,6 +76,7 @@ impl RootLease {
         }
     }
 
+    /// Give the lease up once nothing of the run writes any more.
     pub async fn release(&self) -> anyhow::Result<()> {
         match tokio::time::timeout(
             self.timeout,

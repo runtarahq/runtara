@@ -24,6 +24,7 @@ direct-component = ["dep:wit-bindgen"]
 
 [dependencies]
 runtara-dsl = { path = "../runtara-dsl", default-features = false }
+runtara-agent-suspension = { path = "../runtara-agent-suspension" }
 # Export glue for the wasm32-wasip2 component build.
 wit-bindgen = { workspace = true, optional = true }
 

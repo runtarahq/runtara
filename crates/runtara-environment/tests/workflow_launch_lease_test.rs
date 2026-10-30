@@ -85,17 +85,35 @@ async fn claim_initial(
 
 async fn mark_running_without_gate_confirmation(
     repository: &LaunchRepository,
+    pool: &PgPool,
     launch_id: &str,
 ) -> i32 {
     let owner = "workflow-launch-lease-test";
-    let claimed = repository
-        .claim_ready(owner, Duration::from_secs(60), 16)
+    // Lease this launch the way `claim_ready` does, but only this one: the
+    // queue is shared with the other tests of this binary (which run at the
+    // same time) and with whatever earlier runs left queued, so a claim of
+    // the oldest ready launches may not include it, or may take theirs.
+    let attempt_count: i32 = sqlx::query_scalar(
+        "UPDATE instance_launches \
+         SET state = 'leased', lease_owner = $2, \
+             lease_expires_at = NOW() + INTERVAL '60 seconds', \
+             attempt_count = attempt_count + 1, updated_at = NOW() \
+         WHERE launch_id = $1 AND state = 'queued' \
+           AND available_at <= NOW() AND deadline_at > NOW() \
+         RETURNING attempt_count",
+    )
+    .bind(launch_id)
+    .bind(owner)
+    .fetch_optional(pool)
+    .await
+    .expect("lease query runs")
+    .expect("target launch must be claimable");
+    let claimed_launch = repository
+        .get(launch_id)
         .await
-        .expect("launch must be claimable");
-    let claimed_launch = claimed
-        .iter()
-        .find(|launch| launch.launch_id == launch_id)
-        .expect("target launch must be claimed");
+        .expect("launch reads")
+        .expect("launch exists");
+    assert_eq!(claimed_launch.attempt_count, attempt_count);
     assert!(
         repository
             .begin_start(launch_id, owner, claimed_launch.attempt_count)
@@ -112,8 +130,8 @@ async fn mark_running_without_gate_confirmation(
     running.attempt_count
 }
 
-async fn promote_running(repository: &LaunchRepository, launch_id: &str) {
-    let attempt_count = mark_running_without_gate_confirmation(repository, launch_id).await;
+async fn promote_running(repository: &LaunchRepository, pool: &PgPool, launch_id: &str) {
+    let attempt_count = mark_running_without_gate_confirmation(repository, pool, launch_id).await;
     assert!(
         repository
             .confirm_gate_open(launch_id, attempt_count)
@@ -229,7 +247,7 @@ async fn parked_history_is_lease_free_and_preserves_the_sleeping_marker() {
     // workflow-wide lease.
     for index in 0..3 {
         let launch = claim_initial(&repository, &fixture, true).await;
-        promote_running(&repository, &launch.launch_id).await;
+        promote_running(&repository, &context.pool, &launch.launch_id).await;
         if index == 0 {
             sqlx::query(
                 r#"
@@ -279,7 +297,7 @@ async fn due_wake_and_new_trigger_compete_for_the_same_durable_scope() {
     let repository = LaunchRepository::new(context.pool.clone());
 
     let parked = claim_initial(&repository, &fixture, true).await;
-    promote_running(&repository, &parked.launch_id).await;
+    promote_running(&repository, &context.pool, &parked.launch_id).await;
     repository
         .mark_suspended(&parked.launch_id)
         .await
@@ -358,7 +376,7 @@ async fn reconciler_releases_a_lease_after_monitor_crash() {
     let repository = LaunchRepository::new(context.pool.clone());
 
     let running = claim_initial(&repository, &fixture, true).await;
-    promote_running(&repository, &running.launch_id).await;
+    promote_running(&repository, &context.pool, &running.launch_id).await;
 
     // Model a host loss after Core committed a durable park but before its
     // monitor released the matching queue generation.
@@ -398,7 +416,8 @@ async fn unconfirmed_running_gate_expires_and_confirmation_removes_its_marker() 
     let repository = LaunchRepository::new(context.pool.clone());
 
     let unconfirmed = claim_initial(&repository, &fixture, true).await;
-    mark_running_without_gate_confirmation(&repository, &unconfirmed.launch_id).await;
+    mark_running_without_gate_confirmation(&repository, &context.pool, &unconfirmed.launch_id)
+        .await;
     sqlx::query(
         r#"
         UPDATE instance_launches
@@ -411,13 +430,24 @@ async fn unconfirmed_running_gate_expires_and_confirmation_removes_its_marker() 
     .await
     .expect("test gate deadline must be writable");
 
-    let expired = repository
-        .expire_due(16)
-        .await
-        .expect("unconfirmed gate expiry must succeed");
-    assert_eq!(expired.len(), 1);
-    assert_eq!(expired[0].launch_id, unconfirmed.launch_id);
-    assert_eq!(expired[0].state, LaunchState::Failed);
+    // Expiry sweeps the whole queue, which other tests and earlier runs share:
+    // sweep until this launch comes back.
+    let mut expired = None;
+    for _ in 0..64 {
+        let batch = repository
+            .expire_due(16)
+            .await
+            .expect("unconfirmed gate expiry must succeed");
+        let done = batch.is_empty();
+        expired = batch
+            .into_iter()
+            .find(|launch| launch.launch_id == unconfirmed.launch_id);
+        if expired.is_some() || done {
+            break;
+        }
+    }
+    let expired = expired.expect("the unconfirmed launch expires");
+    assert_eq!(expired.state, LaunchState::Failed);
     assert_eq!(
         sqlx::query_scalar::<_, String>(
             "SELECT status::TEXT FROM instances WHERE instance_id = $1"
@@ -432,7 +462,8 @@ async fn unconfirmed_running_gate_expires_and_confirmation_removes_its_marker() 
 
     let confirmed = claim_initial(&repository, &fixture, true).await;
     let confirmed_attempt =
-        mark_running_without_gate_confirmation(&repository, &confirmed.launch_id).await;
+        mark_running_without_gate_confirmation(&repository, &context.pool, &confirmed.launch_id)
+            .await;
     assert!(
         repository
             .confirm_gate_open(&confirmed.launch_id, confirmed_attempt)

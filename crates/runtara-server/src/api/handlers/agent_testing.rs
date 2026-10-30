@@ -63,7 +63,7 @@ pub async fn test_agent_handler(
     let agent_name = runtara_dsl::agent_meta::canonical_agent_id(&agent_name);
 
     // Per-agent allowlist check.
-    if let Err(err) = crate::config::entitlements().require_agent(&agent_name) {
+    if let Err(err) = crate::config::entitlements_for(&tenant_id).require_agent(&agent_name) {
         return Err(EntitlementDenial::from(err).into_response());
     }
 

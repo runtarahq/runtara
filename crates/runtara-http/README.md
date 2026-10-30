@@ -8,7 +8,8 @@ Blocking HTTP client that runs identically on native and WASI (wasm32-wasip2).
 ## What it is
 
 One `HttpClient` / `RequestBuilder` / `HttpResponse` API supports native SDK calls
-through `ureq` and WASM calls through `runtara:host/http@1.0.0`.
+through `ureq` and WASM calls through the workflow API's `POST /v1/http`
+(the guest SDK).
 Enable exactly one backend feature: `native` or `wasi`.
 
 All WASM entry points (`call`, `call_async`, `call_agent`, `call_agent_async`) use

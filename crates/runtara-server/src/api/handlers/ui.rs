@@ -145,11 +145,24 @@ pub struct UiState {
     /// Mount prefix (e.g. `/ui`), stripped from the request URI before looking
     /// up the asset. Lets multi-segment mounts like `/ui/foo` work correctly.
     mount: Arc<str>,
+    /// One copy of the SPA per served tenant at `{mount}/{tenant}/`, each with its own
+    /// `<base href>` and inline config (tenant id, entitlements). Only when the base is
+    /// the bare mount: a deployment whose base already names a tenant has none.
+    tenants: Arc<std::collections::HashMap<String, TenantIndex>>,
     /// CSP header for non-HTML asset responses. Script hashes only matter on
     /// documents — an asset response never executes an inline script — so this
     /// carries just the startup-computed config-script hash and doesn't need to
     /// track dist rebuilds the way the HTML CSP does.
     asset_csp: Arc<str>,
+}
+
+/// A served tenant's copy of index.html: its base href and inline config, and the
+/// rendered page when the source cannot change.
+#[derive(Clone)]
+struct TenantIndex {
+    base_href: Arc<str>,
+    inline_script: Arc<str>,
+    index: Option<RenderedIndex>,
 }
 
 /// Build a router that serves the embedded UI under `mount` (e.g. `/ui`).
@@ -179,13 +192,44 @@ pub fn router(mount: &str, base_href: &str, source: AssetSource) -> Router {
             ))
         };
 
+    let mut tenants = std::collections::HashMap::new();
+    let mut script_hashes = vec![inline_script_hash];
+    if base_href == format!("{mount}/") {
+        for tenant in crate::config::try_get()
+            .map(|config| config.served_tenants.clone())
+            .unwrap_or_default()
+        {
+            let tenant_script =
+                inline_config_script_for(&crate::config::entitlements_for(&tenant), Some(&tenant));
+            script_hashes.push(sha256_b64(&tenant_script));
+            let tenant_base = format!("{mount}/{tenant}/");
+            let index = if source.is_mutable() {
+                None
+            } else {
+                Some(
+                    build_index_html(&source, &tenant_base, &tenant_script)
+                        .expect("embed-ui: failed to build a tenant's index.html at startup"),
+                )
+            };
+            tenants.insert(
+                tenant,
+                TenantIndex {
+                    base_href: Arc::from(tenant_base.as_str()),
+                    inline_script: Arc::from(tenant_script.as_str()),
+                    index,
+                },
+            );
+        }
+    }
+
     let state = UiState {
         source,
         index,
         base_href: Arc::from(base_href),
         inline_script: Arc::from(inline_script.as_str()),
         mount: Arc::from(mount),
-        asset_csp: Arc::from(build_html_csp(&[inline_script_hash]).as_str()),
+        tenants: Arc::new(tenants),
+        asset_csp: Arc::from(build_html_csp(&script_hashes).as_str()),
     };
     let wild = format!("{mount}/{{*path}}");
     let with_slash = format!("{mount}/");
@@ -262,10 +306,35 @@ fn inline_script_hashes(html: &str) -> Vec<String> {
 /// (rather than reading the `OnceLock` here) lets tests pass a fixture snapshot
 /// without initialising the global config.
 fn inline_config_script(entitlements: &EntitlementSnapshot) -> String {
+    if tenantless_root() {
+        return format!(
+            "window.__RUNTARA_CONFIG__={};",
+            runtime_config_json_for(None, None)
+        );
+    }
+    inline_config_script_for(entitlements, crate::config::try_tenant_id())
+}
+
+/// The inline config of the SPA served for `tenant`.
+fn inline_config_script_for(entitlements: &EntitlementSnapshot, tenant: Option<&str>) -> String {
     format!(
         "window.__RUNTARA_CONFIG__={};",
-        runtime_config_json(entitlements)
+        runtime_config_json_for(Some(entitlements), tenant)
     )
+}
+
+/// `RUNTARA_UI_TENANTLESS_ROOT`: the SPA at the bare mount names no tenant and
+/// carries no entitlements, so a process in a deployment of many serves the
+/// page a signed-in user without a tenant starts from (picking one, or signing
+/// up) without showing any tenant's id or plan to whoever loads it. Each
+/// served tenant keeps its own copy at `{mount}/{tenant}/`.
+fn tenantless_root() -> bool {
+    std::env::var("RUNTARA_UI_TENANTLESS_ROOT").is_ok_and(|raw| {
+        matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
 }
 
 /// Base64-encoded SHA-256 of an inline script body, the form CSP `script-src`
@@ -519,14 +588,26 @@ fn normalize_plausible_script_src(raw: &str) -> Option<String> {
 /// `entitlements` is the resolved per-process snapshot, inlined as a nested
 /// JSON object (not a stringified blob) so the SPA can branch on features
 /// before any network request completes.
+#[cfg(test)]
 fn runtime_config_json(entitlements: &EntitlementSnapshot) -> String {
+    runtime_config_json_for(Some(entitlements), crate::config::try_tenant_id())
+}
+
+/// The SPA's runtime config: for `tenant` with its `entitlements`, or for no
+/// tenant with neither (the SPA then reads them from the API once it has one).
+fn runtime_config_json_for(
+    entitlements: Option<&EntitlementSnapshot>,
+    tenant: Option<&str>,
+) -> String {
     use std::fmt::Write;
 
     let pairs = [
         ("oidcAuthority", "RUNTARA_UI_OIDC_AUTHORITY"),
         ("oidcClientId", "RUNTARA_UI_OIDC_CLIENT_ID"),
         ("oidcAudience", "RUNTARA_UI_OIDC_AUDIENCE"),
+        ("oidcOrganizations", "RUNTARA_UI_OIDC_ORGANIZATIONS"),
         ("apiBaseUrl", "RUNTARA_UI_API_BASE_URL"),
+        ("eventsBaseUrl", "RUNTARA_UI_EVENTS_BASE_URL"),
         ("plausibleDomain", "RUNTARA_UI_PLAUSIBLE_DOMAIN"),
         ("plausibleHost", "RUNTARA_UI_PLAUSIBLE_HOST"),
     ];
@@ -558,10 +639,10 @@ fn runtime_config_json(entitlements: &EntitlementSnapshot) -> String {
     };
     entries.push(("authMode".to_string(), auth_mode.to_string()));
 
-    if let Ok(tenant) = std::env::var("TENANT_ID")
-        && !tenant.trim().is_empty()
-    {
-        entries.push(("tenantId".to_string(), tenant));
+    // The tenant this copy of the SPA is for: the primary at the bare mount,
+    // a served tenant at `{mount}/{tenant}/`.
+    if let Some(tenant) = tenant.filter(|tenant| !tenant.trim().is_empty()) {
+        entries.push(("tenantId".to_string(), tenant.to_string()));
     }
 
     // Operator switch: when set, the SPA stops prefixing /api/runtime/ with the
@@ -584,14 +665,16 @@ fn runtime_config_json(entitlements: &EntitlementSnapshot) -> String {
         // Keys are fixed identifiers, values are untrusted env content — JSON-escape.
         let _ = write!(out, "\"{}\":{}", key, json_string(val));
     }
-    // `version`, `commit`, and `authMode` are pushed unconditionally above, so
-    // `entries` is never empty in practice — but guard the leading comma anyway
-    // to keep the function safe if the unconditional pushes ever change.
-    if !entries.is_empty() {
-        out.push(',');
+    if let Some(entitlements) = entitlements {
+        // `version`, `commit`, and `authMode` are pushed unconditionally above,
+        // so `entries` is never empty in practice — but guard the leading comma
+        // anyway to keep the function safe if the unconditional pushes change.
+        if !entries.is_empty() {
+            out.push(',');
+        }
+        out.push_str("\"entitlements\":");
+        out.push_str(&entitlements_inline_json(entitlements));
     }
-    out.push_str("\"entitlements\":");
-    out.push_str(&entitlements_inline_json(entitlements));
     out.push('}');
     out
 }
@@ -646,6 +729,19 @@ async fn serve(uri: Uri, State(state): State<UiState>) -> Response {
         .unwrap_or(path)
         .trim_start_matches('/');
 
+    // A served tenant's copy: `{mount}/{tenant}/…` serves that tenant's index.html,
+    // and its asset URLs (relative to its base href) the shared assets.
+    let (tenant_segment, in_tenant) = after_mount.split_once('/').unwrap_or((after_mount, ""));
+    if let Some(tenant) = state.tenants.get(tenant_segment) {
+        if !in_tenant.is_empty()
+            && in_tenant != "index.html"
+            && let Some(asset) = read_asset(&state.source, in_tenant)
+        {
+            return asset_response(in_tenant, asset, &state);
+        }
+        return tenant_index_response(&state, tenant);
+    }
+
     if after_mount.is_empty() || after_mount == "index.html" {
         return index_response(&state);
     }
@@ -681,6 +777,22 @@ fn index_response(state: &UiState) -> Response {
         // Reachable when a `Disk` source is mid-rebuild: `vite build --watch`
         // rewrites dist on every save. Say so plainly instead of 500ing, and
         // never cache it — the next reload should get the real page.
+        None => frontend_unavailable_response(&state.source),
+    }
+}
+
+/// A served tenant's index.html, cached or rebuilt like [`index_response`].
+fn tenant_index_response(state: &UiState, tenant: &TenantIndex) -> Response {
+    let rendered = match &tenant.index {
+        Some(cached) => Some(cached.clone()),
+        None => build_index_html(
+            &state.source,
+            tenant.base_href.as_ref(),
+            tenant.inline_script.as_ref(),
+        ),
+    };
+    match rendered {
+        Some(index) => html_response(index.html, &index.csp),
         None => frontend_unavailable_response(&state.source),
     }
 }
@@ -810,6 +922,21 @@ mod tests {
             &registered_agents(),
         )
         .expect("fixture snapshot parses")
+    }
+
+    #[test]
+    fn a_tenantless_config_names_no_tenant_and_carries_no_entitlements() {
+        let snap = fixture_snapshot("tenant-abc", None);
+        let tenantless: serde_json::Value =
+            serde_json::from_str(&runtime_config_json_for(None, None)).unwrap();
+        assert!(tenantless.get("tenantId").is_none());
+        assert!(tenantless.get("entitlements").is_none());
+        assert!(tenantless.get("authMode").is_some());
+        let tenant: serde_json::Value =
+            serde_json::from_str(&runtime_config_json_for(Some(&snap), Some("tenant-abc")))
+                .unwrap();
+        assert_eq!(tenant["tenantId"], "tenant-abc");
+        assert!(tenant.get("entitlements").is_some());
     }
 
     #[test]
@@ -1158,6 +1285,7 @@ mod tests {
             base_href: Arc::from("/ui/"),
             inline_script: Arc::from(inline_script.as_str()),
             mount: Arc::from("/ui"),
+            tenants: Arc::new(std::collections::HashMap::new()),
             asset_csp: Arc::from(build_html_csp(&[sha256_b64(&inline_script)]).as_str()),
         }
     }
@@ -1247,6 +1375,43 @@ mod tests {
         write_fake_dist(dir.path());
         let (status, html, _) = get(&state, "/ui/").await;
         assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(r#"<base href="/ui/">"#));
+    }
+
+    /// A served tenant's copy of the SPA lives at `/ui/{tenant}/`: its index.html
+    /// carries that tenant's base href and id, and its asset URLs resolve to the
+    /// shared assets.
+    #[tokio::test]
+    async fn a_served_tenants_copy_names_its_base_and_tenant() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_fake_dist(dir.path());
+        let snap = fixture_snapshot("tenant-primary", None);
+        let mut state = disk_state(dir.path(), &snap);
+        let tenant_script = inline_config_script_for(&snap, Some("acme"));
+        state.tenants = Arc::new(std::collections::HashMap::from([(
+            "acme".to_string(),
+            TenantIndex {
+                base_href: Arc::from("/ui/acme/"),
+                inline_script: Arc::from(tenant_script.as_str()),
+                index: None,
+            },
+        )]));
+
+        for path in ["/ui/acme/", "/ui/acme", "/ui/acme/workflows/some-id"] {
+            let (status, html, _) = get(&state, path).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert!(
+                html.contains(r#"<base href="/ui/acme/">"#),
+                "{path}: {html}"
+            );
+            assert!(html.contains(r#""tenantId":"acme""#), "{path}: {html}");
+        }
+        let (status, body, _) = get(&state, "/ui/acme/assets/index-abc123.js").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "console.log(1)");
+
+        // Anything else is the bare mount's copy, as before.
+        let (_, html, _) = get(&state, "/ui/other/").await;
         assert!(html.contains(r#"<base href="/ui/">"#));
     }
 

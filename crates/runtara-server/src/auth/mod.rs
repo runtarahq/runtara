@@ -30,6 +30,10 @@ pub struct JwtConfig {
     /// `audience` is `Some`. Off (default) everywhere else, including the whole API path,
     /// so a missing `aud` keeps today's lax pass-through. See SYN-522.
     pub require_audience_present: bool,
+    /// When true (the default), a JWT without an `org_id` claim is rejected. Off only
+    /// when membership is required (`RUNTARA_AUTH_MEMBERSHIP_POLICY=required`): then the
+    /// request names its tenant and the caller's membership there is what authorizes it.
+    pub require_org_id: bool,
 }
 
 /// Authentication context inserted into request extensions after successful auth.
@@ -57,6 +61,10 @@ pub struct AuthContext {
     pub name: Option<String>,
     /// Human-readable tenant identifier. Logging and `/me` only — `org_id` is the tenant key.
     pub tenant_slug: Option<String>,
+    /// The JWT's issuer. With the subject it is the caller's identity; one deployment
+    /// trusts one issuer, so membership is keyed by the subject alone.
+    #[serde(default)]
+    pub issuer: Option<String>,
 }
 
 impl AuthContext {
@@ -74,6 +82,7 @@ impl AuthContext {
             email: None,
             name: None,
             tenant_slug: None,
+            issuer: None,
         }
     }
 }

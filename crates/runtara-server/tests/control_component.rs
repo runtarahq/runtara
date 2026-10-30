@@ -1,6 +1,6 @@
 //! A compiled workflow calls control on other runs end to end: DSL -> composed
-//! WASM -> environment runner -> the composed control agent calling
-//! `runtara:control/api` in the run's own store -> native control service ->
+//! WASM -> environment runner -> the composed control agent calling the
+//! workflow API's `/v1/instances` in the run's own store -> native control service ->
 //! runtime persistence. The artifact carries no control pin and needs no
 //! approval (decision D2, revised 2026-09-29).
 //!
@@ -78,12 +78,15 @@ impl Harness {
         let dispatcher = ComponentDispatcherService::from_dir(&components()).await?;
         let native = Arc::new(NativeControl::new(Some(tenant.clone())));
         let runtime = Arc::new(RuntimeClient::new(
-            Arc::new(EnvironmentHandlerState::new(
-                pool.clone(),
-                persistence.clone(),
-                Arc::new(MockRunner::new()),
-                std::env::temp_dir(),
-            )),
+            Arc::new(
+                EnvironmentHandlerState::new(
+                    pool.clone(),
+                    persistence.clone(),
+                    Arc::new(MockRunner::new()),
+                    std::env::temp_dir(),
+                )
+                .with_artifacts(artifacts().clone()),
+            ),
             RuntimeClientConfig::new(Default::default()),
         ));
         native.install(runtime.clone());
@@ -163,8 +166,7 @@ impl Harness {
             launch_id: format!("launch-{id}-{}", Uuid::new_v4()),
             instance_id: id.to_owned(),
             tenant_id: self.tenant.clone(),
-            wasm_path: wasm_path.to_owned(),
-            expected_workflow_checksum: None,
+            workflow_digest: artifacts().add(wasm_path),
             preparation_attempt: None,
             preparation_deadline: None,
             input: json!({}),
@@ -174,6 +176,7 @@ impl Harness {
             prepersisted_input: input,
             launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         };
         let handle = runner.try_launch_detached(&options).await?;
         tokio::time::timeout(
@@ -228,21 +231,27 @@ fn runner(
             skip_cert_verification: false,
         },
         persistence.clone(),
+        artifacts().clone(),
     )?
     .with_in_process_precompiler_for_tests()
     .with_control_host(control)?)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_composed_control_get_reads_another_run() -> anyhow::Result<()> {
+async fn a_composed_control_get_reads_a_child_run_only() -> anyhow::Result<()> {
     let harness = Harness::new().await?;
     let (persistence, tenant) = (&harness.persistence, &harness.tenant);
 
-    // The target run.
-    let target = format!("{tenant}-target");
-    persistence
-        .try_register_instance(&target, tenant, None)
-        .await?;
+    // The target run, a child of the caller: a run reads only itself and its
+    // child runs.
+    let (caller, target) = (format!("{tenant}-caller"), format!("{tenant}-target"));
+    let input = harness
+        .family(
+            &caller,
+            std::slice::from_ref(&target),
+            json!({"target": target}),
+        )
+        .await;
     persistence
         .complete_instance(
             CompleteInstanceParams::new(&target, InstanceStatus::Completed)
@@ -260,19 +269,14 @@ async fn a_composed_control_get_reads_another_run() -> anyhow::Result<()> {
         wasm.windows(name.len())
             .any(|bytes| bytes == name.as_bytes())
     };
-    assert!(names("runtara:control/api@1.0.0"));
+    // The composed control agent calls the workflow API's `/v1/instances`
+    // over HTTP: no control interface is linked from the host.
     assert!(
-        !names("runtara:control/executor"),
-        "the composed control agent calls the API itself"
+        !names("runtara:control/"),
+        "the composed control agent imports no control interface"
     );
 
-    let run = harness
-        .launch(
-            &wasm_path,
-            &format!("{tenant}-caller"),
-            json!({"target": target}),
-        )
-        .await?;
+    let run = harness.run(&wasm_path, &caller, input).await?;
     assert_eq!(run.status, InstanceStatus::Completed, "{:?}", run.error);
     let output: Value = serde_json::from_slice(run.output.as_deref().unwrap())?;
     let read = &output["run"];
@@ -280,6 +284,28 @@ async fn a_composed_control_get_reads_another_run() -> anyhow::Result<()> {
     assert_eq!(read["instance"]["status"], "completed");
     assert_eq!(read["output"], json!({"total": 42}));
     assert_eq!(read["outputOmitted"], false);
+
+    // Another run of the tenant is not the caller's to read.
+    let other = format!("{tenant}-other");
+    persistence
+        .try_register_instance(&other, tenant, None)
+        .await?;
+    let run = harness
+        .launch(
+            &wasm_path,
+            &format!("{tenant}-prying"),
+            json!({"target": other}),
+        )
+        .await?;
+    assert_eq!(run.status, InstanceStatus::Failed);
+    assert!(
+        run.error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("CONTROL_NOT_CHILD"),
+        "{:?}",
+        run.error
+    );
     Ok(())
 }
 
@@ -455,13 +481,13 @@ async fn a_composed_control_start_launches_a_real_child() -> anyhow::Result<()> 
     // Registered as a compile registers it: with the agents it was composed
     // with (none), which a launch checks against the allowlist.
     sqlx::query(
-        "INSERT INTO images (image_id, tenant_id, name, binary_path, metadata) \
+        "INSERT INTO images (image_id, tenant_id, name, binary_digest, metadata) \
          VALUES ($1,$2,$3,$4,$5)",
     )
     .bind(&image)
     .bind(&tenant)
     .bind(format!("{child_workflow}:1@fixture"))
-    .bind(child_wasm.to_string_lossy().as_ref())
+    .bind(artifacts().add(&child_wasm).as_str())
     .bind(json!({"workflow": {"directArtifact": {"agentComponents": []}}}))
     .execute(&harness.pool)
     .await?;
@@ -764,4 +790,12 @@ fn init_config_once() {
             );
         }
     });
+}
+
+/// Where this binary's launches find the components they wrote.
+fn artifacts() -> &'static std::sync::Arc<runtara_artifact_store::test_support::FileMapStore> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Arc<runtara_artifact_store::test_support::FileMapStore>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(Default::default)
 }

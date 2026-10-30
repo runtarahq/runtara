@@ -22,6 +22,10 @@ serde_json = { workspace = true }
 runtara-agent-macro = { workspace = true }
 runtara-dsl = { workspace = true }
 
+[target.'cfg(target_family = "wasm")'.dependencies]
+runtara-workflow-sdk = { path = "../../runtara-workflow-sdk" }
+runtara-workflow-api = { path = "../../runtara-workflow-api" }
+
 [features]
 db-integration-tests = []
 

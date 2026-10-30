@@ -141,17 +141,9 @@ pub struct RawConnection {
 // runtara-agents/integrations/mcp.rs for the ConnectionParams macro).
 // ============================================================================
 
-#[cfg(target_family = "wasm")]
-mod connection_bindings {
-    wit_bindgen::generate!({
-        path: "../../runtara-wit/wit/host",
-        world: "connections-client",
-        async: true,
-    });
-}
-
-/// Obtain only MCP tool configuration through the native, tenant-scoped host.
-/// Endpoint URLs and headers remain native because they may contain credentials.
+/// Obtain only MCP tool configuration through the workflow API's
+/// tenant-scoped connection descriptor. Endpoint URLs and headers remain
+/// native because they may contain credentials.
 async fn resolve_connection_params(
     connection: &RawConnection,
 ) -> Result<RawConnection, AgentError> {
@@ -163,16 +155,11 @@ async fn resolve_connection_params(
     }
     #[cfg(target_family = "wasm")]
     {
-        let bytes = connection_bindings::runtara::host::connections::describe(
-            connection.connection_id.clone(),
-        )
-        .await
-        .map_err(|_| {
-            AgentError::permanent("MCP_NO_PARAMS", "Cannot resolve MCP connection metadata")
-        })?;
-        let descriptor: Value = serde_json::from_slice(&bytes).map_err(|_| {
-            AgentError::permanent("MCP_NO_PARAMS", "Invalid MCP connection metadata")
-        })?;
+        let descriptor = runtara_workflow_sdk::describe_connection(&connection.connection_id)
+            .await
+            .map_err(|_| {
+                AgentError::permanent("MCP_NO_PARAMS", "Cannot resolve MCP connection metadata")
+            })?;
         if descriptor["integrationId"] != "mcp" {
             return Err(AgentError::permanent(
                 "MCP_CONNECTION_TYPE",
@@ -187,7 +174,7 @@ async fn resolve_connection_params(
     #[cfg(not(target_family = "wasm"))]
     Err(AgentError::permanent(
         "MCP_NO_PARAMS",
-        "MCP metadata requires the WASM connection host",
+        "MCP metadata requires the workflow API",
     ))
 }
 

@@ -232,6 +232,7 @@ fn init_config() {
         // explicitly rather than mutating environment variables after Tokio starts.
         runtara_server::config::init(runtara_server::config::Config {
             tenant_id: "session-test".into(),
+            served_tenants: vec!["session-test".into()],
             max_concurrent_executions: 100,
             execution_timeout_policy: Default::default(),
             checkpoint_ttl_hours: 48,
@@ -239,7 +240,11 @@ fn init_config() {
             auto_retry_on_429_enabled: false,
             max_429_retries: 0,
             max_retry_delay_ms: 0,
-            object_model_database_url: "postgresql://unused/unused".into(),
+            object_model_database_url: Some("postgresql://unused/unused".into()),
+            database_connection_guard: false,
+            object_model_tenant_pool_max: 16,
+            legacy_member_keys: true,
+            valkey_tenant_scoped: false,
             object_model_max_connections: 1,
             object_model_soft_delete: true,
             object_model_bulk_request_limit: 100,
@@ -269,6 +274,7 @@ fn init_config() {
                     &Default::default(),
                 )
                 .unwrap(),
+            tenant_entitlements: Default::default(),
         });
     });
 }

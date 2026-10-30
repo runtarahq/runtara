@@ -8,7 +8,7 @@ use runtara_environment::execution_timeout::{
     DEFAULT_EXECUTION_TIMEOUT_SECS, ExecutionTimeoutPolicy, MAX_EXECUTION_TIMEOUT_SECS,
 };
 use std::collections::BTreeSet;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 const DEFAULT_MCP_ALLOWED_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
@@ -28,6 +28,9 @@ const RUNTARA_MAX_EXECUTION_TIMEOUT_SECS_ENV: &str = "RUNTARA_MAX_EXECUTION_TIME
 pub struct Config {
     /// Tenant ID for all API operations (required).
     pub tenant_id: String,
+    /// Every tenant this process serves: `tenant_id` first, then those
+    /// `RUNTARA_SERVED_TENANTS` adds (comma-separated). One by default.
+    pub served_tenants: Vec<String>,
     /// Maximum number of concurrent workflow executions.
     pub max_concurrent_executions: usize,
     /// One bounded policy shared by workflow validation, the runtime client,
@@ -43,8 +46,29 @@ pub struct Config {
     pub max_429_retries: u32,
     /// Maximum retry delay in milliseconds.
     pub max_retry_delay_ms: u64,
-    /// Object model database URL (required).
-    pub object_model_database_url: String,
+    /// The platform's object model database URL. Optional: without it there
+    /// is no default database, and the object model, SQL steps and database
+    /// tools use the tenant's own Postgres connections.
+    pub object_model_database_url: Option<String>,
+    /// Whether tenant database connections must not reach private, loopback
+    /// or metadata addresses (`RUNTARA_DATABASE_CONNECTION_GUARD`,
+    /// `enforce`/`off`; enforced by default without a platform database).
+    pub database_connection_guard: bool,
+    /// The most database pools one tenant's connections may hold open at once
+    /// (`OBJECT_MODEL_TENANT_POOL_MAX`).
+    pub object_model_tenant_pool_max: usize,
+    /// Whether the contract version 1 `member:{uid}` record still answers for
+    /// the primary tenant (`RUNTARA_AUTH_LEGACY_MEMBER_KEYS`, default true).
+    /// A Valkey shared by several processes must turn it off: that record
+    /// names no tenant, so it would answer for every process's primary.
+    pub legacy_member_keys: bool,
+    /// Whether this process shares its Valkey with other tenants' processes,
+    /// each confined by Valkey access rules to its own tenants' keys
+    /// (`RUNTARA_VALKEY_TENANT_SCOPED`, default false). It then keeps every
+    /// key it uses under a served tenant (managed session queues at
+    /// `{tenant}:session:…`), and never touches the unscoped legacy keys or
+    /// scans for other tenants' streams. It implies no legacy member keys.
+    pub valkey_tenant_scoped: bool,
     /// Maximum pool connections for the object model database.
     pub object_model_max_connections: u32,
     /// Whether the object model uses soft delete.
@@ -86,7 +110,11 @@ pub struct Config {
     /// builds so `cargo run` exits promptly; production release builds keep
     /// the full drain unless `RUNTARA_DEV_MODE=true` is set explicitly.
     pub dev_mode: bool,
+    /// The primary tenant's entitlements.
     pub entitlement_snapshot: EntitlementSnapshot,
+    /// Other served tenants' own entitlements (`RUNTARA_TENANT_ENTITLEMENTS_JSON`);
+    /// a served tenant without an entry has the primary's.
+    pub tenant_entitlements: std::collections::BTreeMap<String, Arc<EntitlementSnapshot>>,
 }
 
 /// Backing store for MCP Streamable HTTP session recovery.
@@ -115,10 +143,22 @@ impl Config {
     ///
     /// Required:
     /// - `TENANT_ID`: organization identifier
-    /// - `OBJECT_MODEL_DATABASE_URL`: Postgres URL for the object model DB
+    ///
+    /// Optional:
+    /// - `OBJECT_MODEL_DATABASE_URL`: the platform's object model database
     pub fn from_env() -> Result<Self, ConfigError> {
         let tenant_id =
             std::env::var("TENANT_ID").map_err(|_| ConfigError::Missing("TENANT_ID"))?;
+        let served_tenants =
+            served_tenants_from_raw(&tenant_id, std::env::var("RUNTARA_SERVED_TENANTS").ok());
+        // Valkey keys are `{tenant}:…`; a tenant naming a separator could
+        // spell another tenant's key.
+        if let Some(tenant) = served_tenants.iter().find(|t| t.contains(':')) {
+            return Err(ConfigError::InvalidValue(
+                "TENANT_ID / RUNTARA_SERVED_TENANTS",
+                format!("tenant '{tenant}' contains ':'"),
+            ));
+        }
 
         let max_concurrent_executions: usize = parse_usize_or(
             "MAX_CONCURRENT_EXECUTIONS",
@@ -142,7 +182,28 @@ impl Config {
         let execution_timeout_policy = execution_timeout_policy_from_env()?;
 
         let object_model_database_url = std::env::var("OBJECT_MODEL_DATABASE_URL")
-            .map_err(|_| ConfigError::Missing("OBJECT_MODEL_DATABASE_URL"))?;
+            .ok()
+            .map(|url| url.trim().to_owned())
+            .filter(|url| !url.is_empty());
+        let database_connection_guard = match std::env::var("RUNTARA_DATABASE_CONNECTION_GUARD")
+            .ok()
+            .map(|mode| mode.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            None | Some("") => object_model_database_url.is_none(),
+            Some("enforce") => true,
+            Some("off") => false,
+            Some(_) => {
+                return Err(ConfigError::Invalid(
+                    "RUNTARA_DATABASE_CONNECTION_GUARD",
+                    "must be enforce or off",
+                ));
+            }
+        };
+        let object_model_tenant_pool_max: usize =
+            parse_usize_or("OBJECT_MODEL_TENANT_POOL_MAX", 16)?;
+        let legacy_member_keys = parse_bool_or("RUNTARA_AUTH_LEGACY_MEMBER_KEYS", true)?;
+        let valkey_tenant_scoped = parse_bool_or("RUNTARA_VALKEY_TENANT_SCOPED", false)?;
         let object_model_max_connections: u32 = parse_u32_or("OBJECT_MODEL_MAX_CONNECTIONS", 10)?;
         let object_model_soft_delete: bool = parse_bool_or("OBJECT_MODEL_SOFT_DELETE", true)?;
         let object_model_bulk_request_limit: usize = parse_usize_or(
@@ -207,13 +268,18 @@ impl Config {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .map(std::path::PathBuf::from);
-        // Workflows compile with the direct WASM emitter only. The component
-        // directory defaults to `agent_components_dir`.
+        // Workflows compile with the direct WASM emitter only, from the
+        // release this server runs (see `agent_release`) unless an explicit
+        // directory overrides it; without a release, from
+        // `agent_components_dir`.
         let direct_wasm_components_dir = direct_wasm_components_dir_from_raw(
             std::env::var(RUNTARA_DIRECT_WASM_COMPONENTS_DIR_ENV)
                 .ok()
                 .as_deref(),
-            agent_components_dir.as_deref(),
+            COMPONENT_RELEASE
+                .get()
+                .map(|release| release.dir.as_path())
+                .or(agent_components_dir.as_deref()),
         );
 
         let isolation_policy = isolation::IsolationPolicy::from_env()?;
@@ -242,8 +308,8 @@ impl Config {
         let dev_mode: bool = parse_bool_or("RUNTARA_DEV_MODE", cfg!(debug_assertions))?;
 
         // The entitlement allowlist tracks exactly the agents that are
-        // deployable — i.e. the WASM components present at
-        // `RUNTARA_AGENT_COMPONENTS_DIR`. The runtime only dispatches
+        // deployable — i.e. the agents of the release this server runs (see
+        // `agent_release`). The runtime only dispatches
         // components, so an agent that isn't there can't run and must not be
         // "registered". (The static `runtara_agents::registry` is no longer a
         // source here: most of it duplicates components that supersede it, and
@@ -260,9 +326,21 @@ impl Config {
                 .as_deref(),
             &registered_agents,
         )?;
+        let mut tenant_entitlements = tenant_entitlements_from_raw(
+            std::env::var("RUNTARA_TENANT_ENTITLEMENTS_JSON")
+                .ok()
+                .as_deref(),
+            &served_tenants,
+            &registered_agents,
+        )?;
+        // The primary's own entry, which every unlisted tenant shares.
+        tenant_entitlements
+            .entry(tenant_id.clone())
+            .or_insert_with(|| Arc::new(entitlement_snapshot.clone()));
 
         Ok(Self {
             tenant_id,
+            served_tenants,
             max_concurrent_executions,
             execution_timeout_policy,
             checkpoint_ttl_hours,
@@ -271,6 +349,10 @@ impl Config {
             max_429_retries,
             max_retry_delay_ms,
             object_model_database_url,
+            database_connection_guard,
+            object_model_tenant_pool_max,
+            legacy_member_keys,
+            valkey_tenant_scoped,
             object_model_max_connections,
             object_model_soft_delete,
             object_model_bulk_request_limit,
@@ -288,6 +370,7 @@ impl Config {
             mcp_session_ttl_seconds,
             dev_mode,
             entitlement_snapshot,
+            tenant_entitlements,
         })
     }
 }
@@ -369,15 +452,53 @@ fn parse_bool_or(name: &'static str, default: bool) -> Result<bool, ConfigError>
     }
 }
 
-/// Discover the kebab-cased agent ids deployed at
-/// `$RUNTARA_AGENT_COMPONENTS_DIR`, derived from `runtara_agent_*.wasm`
-/// filenames. Returns an empty set when the env var is unset or the directory
+static RELEASE_AGENTS: OnceLock<BTreeSet<String>> = OnceLock::new();
+
+/// The platform release workflows compile against: its name, the digest of
+/// its index, and the directory it is materialized in for composition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComponentRelease {
+    pub release: String,
+    pub index: String,
+    pub dir: std::path::PathBuf,
+}
+
+static COMPONENT_RELEASE: OnceLock<ComponentRelease> = OnceLock::new();
+
+/// Record the release workflows compile against, before the config is
+/// loaded. Set once, at boot.
+pub fn install_component_release(release: ComponentRelease) {
+    let _ = COMPONENT_RELEASE.set(release);
+}
+
+/// The release compilation reads its components from: `None` before boot,
+/// and when `RUNTARA_DIRECT_WASM_COMPONENTS_DIR` overrides it.
+pub fn compile_component_release() -> Option<&'static ComponentRelease> {
+    let release = COMPONENT_RELEASE.get()?;
+    (CONFIG.get()?.direct_wasm_components_dir.as_deref() == Some(release.dir.as_path()))
+        .then_some(release)
+}
+
+/// Record the agents of the release this server runs, before the config is
+/// loaded; the entitlement allowlist is exactly these. Set once, at boot.
+pub fn install_release_agents(ids: impl IntoIterator<Item = String>) {
+    let _ = RELEASE_AGENTS.set(ids.into_iter().collect());
+}
+
+/// The kebab-cased agent ids of the release this server runs, as installed
+/// at boot by [`install_release_agents`]. A config built outside the server's
+/// boot (tests, tools) has no release, and falls back to the agent ids
+/// deployed at `$RUNTARA_AGENT_COMPONENTS_DIR`, derived from
+/// `runtara_agent_*.wasm` filenames. Returns an empty set when the env var is unset or the directory
 /// is unreadable — the static registry alone is enough for CLI / fallback
 /// paths. Doesn't parse the `.meta.json` files (the `ComponentDispatcherService`
 /// already does that at boot for full metadata); the filename stem is all the
 /// entitlement allowlist needs, and parsing has to wait until after env-var
 /// parsing has finished anyway.
 fn discover_component_agent_ids() -> BTreeSet<String> {
+    if let Some(ids) = RELEASE_AGENTS.get() {
+        return ids.clone();
+    }
     let Ok(dir) = std::env::var("RUNTARA_AGENT_COMPONENTS_DIR") else {
         return BTreeSet::new();
     };
@@ -593,6 +714,28 @@ pub fn tenant_id() -> &'static str {
     &get().tenant_id
 }
 
+/// Every tenant this process serves, the primary ([`tenant_id`]) first.
+pub fn served_tenants() -> &'static [String] {
+    &get().served_tenants
+}
+
+/// Whether this process serves `tenant`. Requests and work for any other
+/// tenant are refused.
+pub fn is_served_tenant(tenant: &str) -> bool {
+    try_get().is_some_and(|config| config.served_tenants.iter().any(|served| served == tenant))
+}
+
+fn served_tenants_from_raw(primary: &str, extra: Option<String>) -> Vec<String> {
+    let mut tenants = vec![primary.to_owned()];
+    for tenant in extra.iter().flat_map(|raw| raw.split(',')) {
+        let tenant = tenant.trim();
+        if !tenant.is_empty() && !tenants.iter().any(|served| served == tenant) {
+            tenants.push(tenant.to_owned());
+        }
+    }
+    tenants
+}
+
 /// Get the tenant ID, or `None` when the global config hasn't been
 /// initialised yet. Use this from code paths that may run before
 /// [`init`] — for example, structured-log call sites that want to
@@ -675,9 +818,43 @@ pub fn max_retry_delay_ms() -> u64 {
     get().max_retry_delay_ms
 }
 
-/// Get the object model database URL.
-pub fn object_model_database_url() -> String {
+/// The platform's object model database URL, when the server has one.
+pub fn object_model_database_url() -> Option<String> {
     get().object_model_database_url.clone()
+}
+
+/// Whether tenant database connections are refused private, loopback and
+/// metadata addresses.
+pub fn database_connection_guard() -> bool {
+    get().database_connection_guard
+}
+
+/// Whether the version 1 `member:{uid}` record answers for the primary tenant.
+/// True before config is initialised (unit tests).
+pub fn legacy_member_keys() -> bool {
+    try_get().is_none_or(|config| config.legacy_member_keys && !config.valkey_tenant_scoped)
+}
+
+/// Whether every Valkey key this process uses stays under a served tenant
+/// (`RUNTARA_VALKEY_TENANT_SCOPED`). False before config is initialised.
+pub fn valkey_tenant_scoped() -> bool {
+    try_get().is_some_and(|config| config.valkey_tenant_scoped)
+}
+
+/// Whether a tenant is served only while its status record says it is
+/// `ready` (`RUNTARA_AUTH_TENANT_STATUS=required`): a provisioning plane, such
+/// as Runtara Cloud's customer plane, writes `runtara:tenant_status:{tenant}`.
+/// Off by default, where nothing writes it.
+pub fn tenant_status_required() -> bool {
+    static REQUIRED: OnceLock<bool> = OnceLock::new();
+    *REQUIRED.get_or_init(|| {
+        std::env::var("RUNTARA_AUTH_TENANT_STATUS").is_ok_and(|value| value == "required")
+    })
+}
+
+/// The most database pools one tenant's connections may hold open.
+pub fn object_model_tenant_pool_max() -> usize {
+    get().object_model_tenant_pool_max
 }
 
 /// Get the maximum number of connections for the object model database pool.
@@ -710,9 +887,10 @@ pub fn object_model_pool_cache_ttl() -> std::time::Duration {
     std::time::Duration::from_secs(get().object_model_pool_cache_ttl_secs)
 }
 
-/// Whether the object model uses soft delete.
+/// Whether the object model uses soft delete. True (the default) before
+/// config is initialised (unit tests).
 pub fn object_model_soft_delete() -> bool {
-    get().object_model_soft_delete
+    try_get().is_none_or(|config| config.object_model_soft_delete)
 }
 
 /// Guard rails for caller-supplied raw SQL (workflow capabilities and the
@@ -722,9 +900,13 @@ pub fn raw_sql_guardrails() -> runtara_object_store::SqlGuardrails {
 }
 
 /// Maximum number of items accepted per bulk request (create/upsert/update-by-ids).
+/// The store's default before config is initialised (unit tests).
 pub fn object_model_bulk_request_limit() -> usize {
+    let Some(config) = try_get() else {
+        return runtara_object_store::DEFAULT_BULK_REQUEST_LIMIT;
+    };
     crate::middleware::entitlement::effective_limit(
-        get().object_model_bulk_request_limit,
+        config.object_model_bulk_request_limit,
         entitlements().limits.object_model_bulk_request_limit,
     )
 }
@@ -755,11 +937,119 @@ pub fn dev_mode() -> bool {
     get().dev_mode
 }
 
-/// Resolved entitlement snapshot for the process's single tenant. Built once
-/// at startup by `Config::from_env()`; readers see the same value for the
-/// lifetime of the process.
+/// The primary tenant's entitlement snapshot, built once at startup by
+/// `Config::from_env()`. Work done for a tenant reads that tenant's with
+/// [`entitlements_for`]; this is for process-level decisions (boot logs, plan
+/// change detection, the SPA's inline config).
 pub fn entitlements() -> &'static EntitlementSnapshot {
     &get().entitlement_snapshot
+}
+
+/// Where each tenant's entitlements come from. The default reads them from
+/// the environment at boot; a host serving many tenants supplies its own
+/// (`ServerOptions::entitlements`).
+pub trait EntitlementSource: Send + Sync {
+    fn entitlements(&self, tenant: &str) -> Arc<EntitlementSnapshot>;
+}
+
+static ENTITLEMENT_SOURCE: OnceLock<Arc<dyn EntitlementSource>> = OnceLock::new();
+
+/// Read every tenant's entitlements from `source`. Set once, at boot.
+pub fn install_entitlement_source(source: Arc<dyn EntitlementSource>) {
+    let _ = ENTITLEMENT_SOURCE.set(source);
+}
+
+/// `tenant`'s entitlements: from the installed source, else the environment
+/// (its `RUNTARA_TENANT_ENTITLEMENTS_JSON` entry, else the primary's).
+pub fn entitlements_for(tenant: &str) -> Arc<EntitlementSnapshot> {
+    match ENTITLEMENT_SOURCE.get() {
+        Some(source) => source.entitlements(tenant),
+        None => environment_entitlements_for(tenant),
+    }
+}
+
+/// `tenant`'s entitlements as the environment gives them: its
+/// `RUNTARA_TENANT_ENTITLEMENTS_JSON` entry, else the primary's. What an
+/// installed source may fall back to.
+pub fn environment_entitlements_for(tenant: &str) -> Arc<EntitlementSnapshot> {
+    let config = get();
+    let snapshot = config
+        .tenant_entitlements
+        .get(tenant)
+        .or_else(|| config.tenant_entitlements.get(&config.tenant_id))
+        .cloned()
+        .unwrap_or_else(|| Arc::new(config.entitlement_snapshot.clone()));
+    // A tenant inheriting the primary's entitlements still names itself.
+    if snapshot.tenant_id == tenant {
+        snapshot
+    } else {
+        let mut own = (*snapshot).clone();
+        own.tenant_id = tenant.to_owned();
+        Arc::new(own)
+    }
+}
+
+/// `RUNTARA_TENANT_ENTITLEMENTS_JSON`: an object of served tenant to
+/// `{"pricingTier", "entitlements", "overrides"}`, each optional and read as
+/// `RUNTARA_PRICING_TIER`, `RUNTARA_ENTITLEMENTS_JSON` and
+/// `RUNTARA_ENTITLEMENT_OVERRIDES_JSON` are for the primary.
+fn tenant_entitlements_from_raw(
+    raw: Option<&str>,
+    served_tenants: &[String],
+    registered_agents: &BTreeSet<String>,
+) -> Result<std::collections::BTreeMap<String, Arc<EntitlementSnapshot>>, ConfigError> {
+    let mut snapshots = std::collections::BTreeMap::new();
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(snapshots);
+    };
+    let entries: std::collections::BTreeMap<String, serde_json::Value> = serde_json::from_str(raw)
+        .map_err(|error| {
+            ConfigError::InvalidValue("RUNTARA_TENANT_ENTITLEMENTS_JSON", error.to_string())
+        })?;
+    for (tenant, entry) in entries {
+        if !served_tenants.contains(&tenant) {
+            return Err(ConfigError::InvalidValue(
+                "RUNTARA_TENANT_ENTITLEMENTS_JSON",
+                format!("{tenant} is not a served tenant"),
+            ));
+        }
+        let snapshot = tenant_entry(&tenant, &entry, registered_agents)?;
+        snapshots.insert(tenant, Arc::new(snapshot));
+    }
+    Ok(snapshots)
+}
+
+/// One tenant's `{"pricingTier", "entitlements", "overrides"}` entry.
+fn tenant_entry(
+    tenant: &str,
+    entry: &serde_json::Value,
+    registered_agents: &BTreeSet<String>,
+) -> Result<EntitlementSnapshot, ConfigError> {
+    let field = |name: &str| entry.get(name).filter(|value| !value.is_null());
+    let tier = field("pricingTier").and_then(serde_json::Value::as_str);
+    let entitlements = field("entitlements").map(serde_json::Value::to_string);
+    let overrides = field("overrides").map(serde_json::Value::to_string);
+    EntitlementSnapshot::parse_entitlements(
+        tenant,
+        tier,
+        entitlements.as_deref(),
+        overrides.as_deref(),
+        registered_agents,
+    )
+}
+
+/// `tenant`'s entitlements from an entry shaped as in
+/// `RUNTARA_TENANT_ENTITLEMENTS_JSON`, against this process's agents: how an
+/// [`EntitlementSource`] turns a record it was given into a snapshot.
+pub fn entitlements_from_entry(
+    tenant: &str,
+    entry: &serde_json::Value,
+) -> Result<EntitlementSnapshot, ConfigError> {
+    tenant_entry(
+        tenant,
+        entry,
+        get().entitlement_snapshot.registered_agents(),
+    )
 }
 
 /// Whether source admission counting uses Valkey instead of the
@@ -893,6 +1183,53 @@ mod tests {
         let policy = execution_timeout_policy_from_raw(Some("120"), Some("300")).unwrap();
         assert_eq!(policy.default_timeout().as_secs(), 120);
         assert_eq!(policy.maximum_timeout().as_secs(), 300);
+    }
+
+    #[test]
+    fn each_served_tenant_may_have_its_own_entitlements() {
+        let served = ["a".to_string(), "b".to_string()];
+        let agents = BTreeSet::new();
+        assert!(
+            tenant_entitlements_from_raw(None, &served, &agents)
+                .unwrap()
+                .is_empty()
+        );
+        let parsed = tenant_entitlements_from_raw(
+            Some(r#"{"b": {"overrides": {"limits": {"maxConcurrentExecutions": 1}}}}"#),
+            &served,
+            &agents,
+        )
+        .unwrap();
+        assert_eq!(parsed["b"].limits.max_concurrent_executions, Some(1));
+        assert!(
+            tenant_entitlements_from_raw(Some(r#"{"c": {}}"#), &served, &agents).is_err(),
+            "only served tenants"
+        );
+    }
+
+    #[test]
+    fn a_source_parses_a_tenants_entry_against_this_processs_agents() {
+        init_for_test();
+        let entry = serde_json::json!({"overrides": {"limits": {"maxWorkflows": 1}}});
+        let snapshot = entitlements_from_entry("t2", &entry).unwrap();
+        assert_eq!(snapshot.tenant_id, "t2");
+        assert_eq!(snapshot.limits.max_workflows, Some(1));
+        let invalid = [
+            serde_json::json!({"pricingTier": "gold"}),
+            serde_json::json!({"overrides": {"limits": {"x": 1}}}),
+        ];
+        for entry in invalid {
+            assert!(entitlements_from_entry("t2", &entry).is_err(), "{entry}");
+        }
+    }
+
+    #[test]
+    fn served_tenants_start_with_the_primary_and_add_the_listed_ones_once() {
+        assert_eq!(served_tenants_from_raw("a", None), ["a"]);
+        assert_eq!(
+            served_tenants_from_raw("a", Some(" b, a ,,c,b ".into())),
+            ["a", "b", "c"]
+        );
     }
 
     #[test]

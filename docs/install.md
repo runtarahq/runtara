@@ -169,6 +169,19 @@ Then set `OBJECT_MODEL_DATABASE_URL` to log in as `runtara_objects` and restart.
 The extensions the object model needs (`pg_trgm`, `vector`, `fuzzystrmatch`)
 must already exist in `runtara_objects`; a non-superuser cannot create them.
 
+### Without an object-model database
+
+`OBJECT_MODEL_DATABASE_URL` is optional. Without it the server has no default
+database: the object model, SQL steps, CSV import/export and the MCP database
+tools work only through a Postgres connection the tenant adds, and a request
+for the default answers that one is needed. Tenant database connections must
+then reach public addresses: loopback, private ranges, local sockets and the
+cloud metadata address are refused before anything connects, unless the host
+is listed in `RUNTARA_PROXY_ALLOWED_HOSTS`. `RUNTARA_DATABASE_CONNECTION_GUARD`
+(`enforce` or `off`) overrides that default either way; with a platform
+database it is `off`, as before. `OBJECT_MODEL_TENANT_POOL_MAX` (default 16)
+caps how many database pools one tenant's connections hold open at once.
+
 ## Service management
 
 Unless you passed `--skip-service`, the installer registers and starts a

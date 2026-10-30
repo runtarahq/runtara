@@ -223,18 +223,19 @@ fn measure(
                 }]
             })
             .unwrap_or_default();
-        let mut compiled = compile_direct_workflow(DirectCompilationInput {
-            workflow_id: case.name.into(),
-            version: 1,
-            source_checksum: None,
-            execution_graph: serde_json::from_slice(&graph_bytes).unwrap(),
-            child_workflows: children,
-            output_dir: dir.path().to_owned(),
-            track_events: case.events,
-            agent_catalog: None,
-            agent_slug: None,
-        })
-        .unwrap();
+        let mut compiled =
+            runtara_workflows::direct_wasm::compile_direct_workflow(DirectCompilationInput {
+                workflow_id: case.name.into(),
+                version: 1,
+                source_checksum: None,
+                execution_graph: serde_json::from_slice(&graph_bytes).unwrap(),
+                child_workflows: children,
+                output_dir: dir.path().to_owned(),
+                track_events: case.events,
+                agent_catalog: None,
+                agent_slug: None,
+            })
+            .unwrap();
         emit_times.push(micros(start));
         let start = Instant::now();
         if isolated {
@@ -449,7 +450,7 @@ fn compare(first: Backend, smoke: bool) -> Value {
     ticker.abort();
     let _ = runtime.block_on(ticker);
     json!({"format_version":1,"source_revision":revision,"benchmark_executable_sha256":executable_sha256,"quantile_method":"ceil((n-1)*p)","first_backend":first.name(),"profile":if cfg!(debug_assertions){"debug"}else{"release"},
-        "os":std::env::consts::OS,"arch":std::env::consts::ARCH,"wasmtime":"46.0.1","workers":4,"epoch_tick_ms":100,
+        "os":std::env::consts::OS,"arch":std::env::consts::ARCH,"wasmtime":"50.0.0","workers":4,"epoch_tick_ms":100,
         "disk_cache":false,"preparation_method":"bounded worker encoding with reused explicit cache-disabled engine; no subprocess",
         "runtime":"in-memory CapturingRuntimeHost; no database/network/server queue","child_limits":{"tasks":8,"handles":8,"retained_result_bytes":8*1024*1024},
         "store_limits":{"memory_bytes":spec().limits.max_memory_bytes,"table_elements":spec().limits.max_table_elements},

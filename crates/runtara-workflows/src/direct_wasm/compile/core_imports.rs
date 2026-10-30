@@ -22,6 +22,9 @@ use super::abi::push_core_type;
 
 #[derive(Debug, Default)]
 pub(super) struct DirectCoreImportIndices {
+    /// `runtara:api` functions by `interface.function`, on the workflow API
+    /// ABI, where shims stand in for the runtime imports.
+    pub(super) api_functions: BTreeMap<String, super::api_shims::ApiImport>,
     runtime_custom_event: Option<u32>,
     runtime_debug_mode_enabled: Option<u32>,
     runtime_breakpoint_pause: Option<u32>,
@@ -41,6 +44,10 @@ pub(super) struct DirectCoreImportIndices {
     runtime_record_retry_attempt: Option<u32>,
     runtime_blocking_sleep: Option<u32>,
     pub(super) connection_resolver_describe_async: Option<u32>,
+    /// Set when the lookup is `runtara:api/connections.describe`.
+    pub(super) connection_describe_moves: Option<super::api_shims::DescribeMoves>,
+    /// Where the operation shims keep the entered operation.
+    pub(super) operation_cell: Option<i32>,
     stdlib_init_manifest: Option<u32>,
     stdlib_value_store_retain_scoped: Option<u32>,
     stdlib_value_store_scope: Option<u32>,
@@ -106,6 +113,9 @@ pub(super) struct DirectCoreImportIndices {
     stdlib_state_local_restore: Option<u32>,
     stdlib_state_output: Option<u32>,
     stdlib_state_error: Option<u32>,
+    /// `stdlib.api-error-json`, which the waits and state shims call.
+    pub(super) stdlib_api_error_json: Option<u32>,
+    stdlib_agent_operation_input: Option<u32>,
     stdlib_ai_wait_tool_signal_id: Option<u32>,
     stdlib_ai_wait_tool_result: Option<u32>,
     stdlib_embed_workflow_cache_key: Option<u32>,
@@ -186,11 +196,38 @@ pub(super) struct DirectCoreImportIndices {
     pub(super) monotonic_now: Option<u32>,
     pub(super) agent_invokes_async: BTreeMap<AgentImportKey, DirectAgentInvokeImport>,
     pub(super) operation_scope: Option<DirectOperationScopeImports>,
+    /// The `child-run` helper, when an Agent runs a child run.
+    pub(super) child_run: Option<u32>,
     pub(super) wait_instances: Option<DirectWaitInstancesImports>,
     pub(super) run_state: Option<DirectRunStateImports>,
 }
 
 impl DirectCoreImportIndices {
+    /// Point the runtime function `name`'s slot at its shim.
+    pub(super) fn set_runtime_shim(&mut self, name: &str, index: u32) {
+        let slot = match name {
+            "custom-event" => &mut self.runtime_custom_event,
+            "debug-mode-enabled" => &mut self.runtime_debug_mode_enabled,
+            "breakpoint-pause" => &mut self.runtime_breakpoint_pause,
+            "heartbeat" => &mut self.runtime_heartbeat,
+            "instance-id" => &mut self.runtime_instance_id,
+            "poll-signal" => &mut self.runtime_poll_signal,
+            "is-cancelled" => &mut self.runtime_is_cancelled,
+            "check-signals" => &mut self.runtime_check_signals,
+            "register-input" => &mut self.runtime_register_input,
+            "poll-input" => &mut self.runtime_poll_input,
+            "close-input" => &mut self.runtime_close_input,
+            "now-ms" => &mut self.runtime_now_ms,
+            "get-checkpoint" => &mut self.runtime_get_checkpoint,
+            "checkpoint" => &mut self.runtime_checkpoint,
+            "handle-checkpoint-signal" => &mut self.runtime_handle_checkpoint_signal,
+            "record-retry-attempt" => &mut self.runtime_record_retry_attempt,
+            "blocking-sleep" => &mut self.runtime_blocking_sleep,
+            other => unreachable!("no runtime slot for {other}"),
+        };
+        *slot = Some(index);
+    }
+
     pub(super) fn require_all(
         self,
         abi: crate::direct_wasm::component::WorkflowRole,
@@ -206,6 +243,9 @@ impl DirectCoreImportIndices {
                 self.connection_resolver_describe_async,
                 has_connections,
             )?,
+            connection_describe_moves: self.connection_describe_moves,
+            operation_cell: self.operation_cell,
+            stdlib_agent_operation_input: self.stdlib_agent_operation_input,
             runtime_custom_event: require_runtime(
                 self.runtime_custom_event,
                 "runtime.custom-event",
@@ -749,6 +789,7 @@ impl DirectCoreImportIndices {
             agent_invokes_async: self.agent_invokes_async,
             operation_scope: self.operation_scope,
             wait_instances: self.wait_instances,
+            child_run: self.child_run,
             run_state: self.run_state,
         })
     }
@@ -769,6 +810,12 @@ pub(super) struct DirectCoreFunctionIndices {
     /// [`RUNTIME_OMITTED_POISON`]).
     pub(super) omit_runtime: bool,
     pub(super) connection_resolver_describe_async: u32,
+    /// Moves the lookup's `runtara:api` answer into the old layout.
+    pub(super) connection_describe_moves: Option<super::api_shims::DescribeMoves>,
+    /// The entered operation's cell, on the workflow API ABI.
+    pub(super) operation_cell: Option<i32>,
+    /// `stdlib.agent-operation-input`, which hands it to the Agent.
+    pub(super) stdlib_agent_operation_input: Option<u32>,
     pub(super) runtime_custom_event: u32,
     pub(super) runtime_debug_mode_enabled: u32,
     pub(super) runtime_breakpoint_pause: u32,
@@ -935,6 +982,8 @@ pub(super) struct DirectCoreFunctionIndices {
     /// Present when the workflow has an operation-scoped call site.
     pub(super) operation_scope: Option<DirectOperationScopeImports>,
     /// Present when the workflow has a WaitForInstances step.
+    /// The `child-run` helper (`api_shims`), when an Agent runs a child run.
+    pub(super) child_run: Option<u32>,
     pub(super) wait_instances: Option<DirectWaitInstancesImports>,
     /// Present when a SetState or GetState step publishes state.
     pub(super) run_state: Option<DirectRunStateImports>,
@@ -1089,18 +1138,6 @@ fn require_runtime(
     }
 }
 
-fn is_runtime_import(
-    resolve: &Resolve,
-    interface: Option<&WorldKey>,
-    function: &WitFunction,
-    function_name: &str,
-) -> bool {
-    function.name == function_name
-        && interface
-            .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name.starts_with("runtara:workflow/runtime"))
-}
-
 fn is_stdlib_import(
     resolve: &Resolve,
     interface: Option<&WorldKey>,
@@ -1122,7 +1159,7 @@ pub(super) fn is_connection_resolver_import(
     function.name == function_name
         && interface
             .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name.starts_with("runtara:host/connections"))
+            .is_some_and(|name| name.starts_with("runtara:api/connections"))
 }
 
 /// The `(agent, interface)` of a per-agent import such as
@@ -1138,42 +1175,6 @@ pub(super) fn agent_import_for(
         agent_id.to_string(),
         AgentInterface::from_wit_name(interface_name)?,
     ))
-}
-
-fn is_operation_scope_import(
-    resolve: &Resolve,
-    interface: Option<&WorldKey>,
-    function: &WitFunction,
-    function_name: &str,
-) -> bool {
-    function.name == function_name
-        && interface
-            .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name == runtara_wit::workflow::OPERATION)
-}
-
-fn is_run_state_import(
-    resolve: &Resolve,
-    interface: Option<&WorldKey>,
-    function: &WitFunction,
-    function_name: &str,
-) -> bool {
-    function.name == function_name
-        && interface
-            .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name == runtara_wit::workflow::STATE)
-}
-
-fn is_wait_instances_import(
-    resolve: &Resolve,
-    interface: Option<&WorldKey>,
-    function: &WitFunction,
-    function_name: &str,
-) -> bool {
-    function.name == function_name
-        && interface
-            .map(|key| resolve.name_world_key(key))
-            .is_some_and(|name| name == runtara_wit::workflow::WAITS)
 }
 
 /// True for the workflow-as-agent capability export: an `invoke` in a
@@ -1215,47 +1216,30 @@ pub(super) fn import_core_function(
     );
     imports.import(&module, &name, EntityType::Function(type_index));
 
+    if let Some(api_interface) = interface
+        .map(|key| resolve.name_world_key(key))
+        .and_then(|name| {
+            name.strip_prefix(runtara_wit::api::PREFIX)
+                .and_then(|rest| rest.split('@').next().map(str::to_string))
+        })
+    {
+        import_indices.api_functions.insert(
+            format!("{api_interface}.{}", function.name),
+            super::api_shims::ApiImport {
+                index: function_index,
+                params: signature.params.clone(),
+            },
+        );
+        return;
+    }
+
     if function.name == "now"
         && interface
             .is_some_and(|key| resolve.name_world_key(key) == runtara_wit::wasi::MONOTONIC_CLOCK)
     {
         import_indices.monotonic_now = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "custom-event") {
-        import_indices.runtime_custom_event = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "debug-mode-enabled") {
-        import_indices.runtime_debug_mode_enabled = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "breakpoint-pause") {
-        import_indices.runtime_breakpoint_pause = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "heartbeat") {
-        import_indices.runtime_heartbeat = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "instance-id") {
-        import_indices.runtime_instance_id = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "poll-signal") {
-        import_indices.runtime_poll_signal = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "is-cancelled") {
-        import_indices.runtime_is_cancelled = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "check-signals") {
-        import_indices.runtime_check_signals = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "register-input") {
-        import_indices.runtime_register_input = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "poll-input") {
-        import_indices.runtime_poll_input = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "close-input") {
-        import_indices.runtime_close_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "wait-closed-error") {
         import_indices.stdlib_wait_closed_error = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "now-ms") {
-        import_indices.runtime_now_ms = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "get-checkpoint") {
-        import_indices.runtime_get_checkpoint = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "checkpoint") {
-        import_indices.runtime_checkpoint = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "handle-checkpoint-signal") {
-        import_indices.runtime_handle_checkpoint_signal = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "record-retry-attempt") {
-        import_indices.runtime_record_retry_attempt = Some(function_index);
-    } else if is_runtime_import(resolve, interface, function, "blocking-sleep") {
-        import_indices.runtime_blocking_sleep = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "init-manifest") {
         import_indices.stdlib_init_manifest = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "value-store-scope") {
@@ -1386,6 +1370,10 @@ pub(super) fn import_core_function(
         import_indices.stdlib_state_output = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "state-error") {
         import_indices.stdlib_state_error = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "api-error-json") {
+        import_indices.stdlib_api_error_json = Some(function_index);
+    } else if is_stdlib_import(resolve, interface, function, "agent-operation-input") {
+        import_indices.stdlib_agent_operation_input = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-wait-tool-signal-id") {
         import_indices.stdlib_ai_wait_tool_signal_id = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "ai-wait-tool-result") {
@@ -1522,46 +1510,6 @@ pub(super) fn import_core_function(
         import_indices.stdlib_step_debug_end = Some(function_index);
     } else if is_stdlib_import(resolve, interface, function, "step-debug-error") {
         import_indices.stdlib_step_debug_error = Some(function_index);
-    } else if is_operation_scope_import(resolve, interface, function, "enter") {
-        import_indices
-            .operation_scope
-            .get_or_insert_with(Default::default)
-            .enter = function_index;
-    } else if is_operation_scope_import(resolve, interface, function, "suspend") {
-        import_indices
-            .operation_scope
-            .get_or_insert_with(Default::default)
-            .suspend = function_index;
-    } else if is_operation_scope_import(resolve, interface, function, "exit") {
-        import_indices
-            .operation_scope
-            .get_or_insert_with(Default::default)
-            .exit = function_index;
-    } else if is_operation_scope_import(resolve, interface, function, "release") {
-        import_indices
-            .operation_scope
-            .get_or_insert_with(Default::default)
-            .release = function_index;
-    } else if is_run_state_import(resolve, interface, function, "set") {
-        import_indices
-            .run_state
-            .get_or_insert_with(Default::default)
-            .set = function_index;
-    } else if is_run_state_import(resolve, interface, function, "get") {
-        import_indices
-            .run_state
-            .get_or_insert_with(Default::default)
-            .get = function_index;
-    } else if is_wait_instances_import(resolve, interface, function, "register") {
-        import_indices
-            .wait_instances
-            .get_or_insert_with(Default::default)
-            .register = function_index;
-    } else if is_wait_instances_import(resolve, interface, function, "release") {
-        import_indices
-            .wait_instances
-            .get_or_insert_with(Default::default)
-            .release = function_index;
     } else if function.name == "invoke"
         && let Some(key) = agent_import_for(resolve, interface)
     {

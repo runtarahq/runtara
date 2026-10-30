@@ -72,6 +72,7 @@ const SHOPIFY_SCOPE_FIELDS: &[(&str, &str)] = &[
 
 pub async fn resolve_connection_auth(
     client: &Client,
+    tenant_id: &str,
     connection_id: &str,
     integration_id: &str,
     params: &Value,
@@ -95,6 +96,7 @@ pub async fn resolve_connection_auth(
             client,
             deferred_auth,
             events,
+            tenant_id,
             connection_id,
             integration_id,
         )

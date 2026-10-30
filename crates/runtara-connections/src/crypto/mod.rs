@@ -41,6 +41,11 @@ pub mod aes_gcm;
 pub mod cipher;
 pub mod factory;
 pub mod noop;
+pub mod tenant_keyed;
 
-pub use cipher::{CipherError, CredentialCipher, ENVELOPE_ALG, ENVELOPE_VERSION};
+pub use cipher::{
+    BOUND_ENVELOPE_VERSION, CipherContext, CipherError, CredentialCipher, ENVELOPE_ALG,
+    ENVELOPE_VERSION,
+};
 pub use factory::{ENCRYPTION_KEY_ENV, cipher_from_env};
+pub use tenant_keyed::TenantKeyedCipher;

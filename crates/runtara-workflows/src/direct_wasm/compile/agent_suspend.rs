@@ -8,8 +8,7 @@
 //!
 //! 1. `scope.enter(checkpoint-key, attempt, load)` names the operation. The
 //!    host derives `op_hash = sha256(checkpoint-key)` and hands the saved
-//!    continuation to the capability itself (`runtara:agent/continuation`).
-//!    `invoke` never carries one, so this module passes none.
+//!    continuation to the capability in its input's `_operation`.
 //! 2. `suspended { wakes, state }`: `scope.suspend(state, wakes)` persists the
 //!    continuation for the entered attempt, then the workflow returns the
 //!    unchanged lifecycle
@@ -318,6 +317,48 @@ fn check_graph(
     {
         check_wait_for_instances(graph, &step.id, in_on_wait, in_tool_workflow, target)?;
     }
+    // A child run parks this run while the child runs, so it needs every
+    // place a WaitForInstances step needs.
+    for agent in graph
+        .agents
+        .iter()
+        .filter(|agent| agent.child_run.is_some())
+    {
+        let step = agent.step_id.as_str();
+        let kind = "a workflow-agent that parks, so it runs as a child run, and its";
+        if agent.step_type != "Agent" || agent.purpose != "agent.config" {
+            return refuse(step, kind, "cannot back an AiAgent");
+        }
+        let callers = graph.edges.iter().filter(|edge| edge.to_step == step);
+        if callers.clone().any(|edge| is_ai_edge(graph, edge)) {
+            return refuse(step, kind, "cannot be an AiAgent tool or memory provider");
+        }
+        if in_tool_workflow {
+            return refuse(
+                step,
+                kind,
+                "cannot run in a workflow embedded as an AiAgent tool",
+            );
+        }
+        if in_on_wait {
+            return refuse(step, kind, "cannot run in a WaitForSignal onWait graph");
+        }
+        if target.omit_runtime {
+            return refuse(step, kind, "needs the host-imported workflow runtime");
+        }
+        if target.scoped_agents.contains(&agent.agent_id) {
+            return refuse(step, kind, "cannot run under scoped isolation");
+        }
+        if !agent.durable {
+            return refuse(step, kind, "must be durable");
+        }
+        if callers
+            .clone()
+            .any(|edge| edge.label.as_deref() == Some("onError"))
+        {
+            return refuse(step, kind, "cannot run in an onError handler");
+        }
+    }
     for step in &graph.steps {
         for nested in &step.nested_graphs {
             let on_wait = in_on_wait || nested.role == ON_WAIT_ROLE;
@@ -377,6 +418,7 @@ fn check_wait_for_instances(
 /// runs without an invoke. This opens an `if … else`: the caller emits the
 /// invoke into the `else` arm and closes it with [`emit_entered_end`], then
 /// leaves with [`emit_after_invoke`] or [`emit_exit`].
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_enter(
     body: &mut WasmFunction,
     indices: &DirectCoreFunctionIndices,
@@ -384,6 +426,8 @@ pub(super) fn emit_enter(
     key: (u32, u32),
     attempt_local: Option<u32>,
     load: bool,
+    agent_id: u32,
+    input: (u32, u32),
 ) {
     body.instruction(&Instruction::LocalGet(key.0));
     body.instruction(&Instruction::LocalGet(key.1));
@@ -406,6 +450,69 @@ pub(super) fn emit_enter(
         crate::direct_wasm::static_data::AGENT_OPERATION_SCOPE_FIELDS,
     );
     body.instruction(&Instruction::Else);
+    emit_operation_input(body, indices, static_data, agent_id, input, load);
+}
+
+/// Hand the entered operation to the Agent in its input (`_operation`),
+/// only what it needs: the id to a control site, which names it on its
+/// mutations, and the continuation `enter` loaded to a suspending one.
+/// Where no operation was entered through `runtara:api` (the `wit` ABI),
+/// `_operation` is removed, so a mapped one never reaches the Agent. A
+/// workflow-agent target keeps its envelope.
+fn emit_operation_input(
+    body: &mut WasmFunction,
+    indices: &DirectCoreFunctionIndices,
+    static_data: &DirectCoreStaticData,
+    agent_id: u32,
+    input: (u32, u32),
+    suspends: bool,
+) {
+    let Some(helper) = indices.stdlib_agent_operation_input else {
+        return;
+    };
+    if static_data.agent_is_workflow_agent(agent_id) {
+        return;
+    }
+    use super::api_shims::{
+        OPERATION_CONTINUATION_LEN, OPERATION_CONTINUATION_PTR, OPERATION_CONTINUATION_TAG,
+        OPERATION_ID, OPERATION_ID_LEN,
+    };
+    let none = |body: &mut WasmFunction| {
+        for _ in 0..3 {
+            body.instruction(&Instruction::I32Const(0));
+        }
+    };
+    body.instruction(&Instruction::LocalGet(input.0));
+    body.instruction(&Instruction::LocalGet(input.1));
+    match indices.operation_cell {
+        Some(cell) if !suspends => {
+            body.instruction(&Instruction::I32Const(1));
+            body.instruction(&Instruction::I32Const(cell + OPERATION_ID as i32));
+            body.instruction(&Instruction::I32Const(OPERATION_ID_LEN));
+        }
+        _ => none(body),
+    }
+    match indices.operation_cell {
+        Some(cell) if suspends => {
+            for offset in [
+                OPERATION_CONTINUATION_TAG,
+                OPERATION_CONTINUATION_PTR,
+                OPERATION_CONTINUATION_LEN,
+            ] {
+                body.instruction(&Instruction::I32Const(cell));
+                body.instruction(&Instruction::I32Load(MemArg {
+                    offset,
+                    align: 2,
+                    memory_index: 0,
+                }));
+            }
+        }
+        _ => none(body),
+    }
+    push_retptr_arg(body);
+    body.instruction(&Instruction::Call(helper));
+    super::abi::emit_fail_if_retptr_error_inplace(body, indices);
+    super::abi::load_retptr_list(body, input.0, input.1);
 }
 
 /// Close the `if … else` [`emit_enter`] opened, after the invoke.

@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   input (an explicit `null` clears a nullable field), field labels are
   humanized from the spec, and response fields and enum values the spec does
   not declare are passed through.
+
 - **`scripts/connector_gen` generates an agent's capabilities from an
   OpenAPI 3 spec** into one `src/generated.rs` per agent crate, using
   openapi-generator (the pinned pip package bundles its own JDK) with
@@ -30,9 +31,250 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without re-fetching. Spec shapes the templates cannot send yet (form and
   multipart bodies, object query parameters, required cookies) are refused
   when fetching. `docs/adding-an-agent.md` covers the whole cycle.
+
 - **`#[field(skip)]` on `CapabilityOutput` fields** leaves a field out of the
   output metadata, e.g. a flattened passthrough map. Capability inputs typed
   `Option<Option<T>>` are described as optional `T`.
+
+- **Workflow images live in a content-addressed artifact store.** A new
+  `runtara-artifact-store` crate defines `ArtifactStore` (put, get, exists,
+  local path and delete by SHA-256 digest), with a filesystem store at
+  `<DATA_DIR>/artifacts/blobs/sha256/<digest>` as the default. An image row
+  records `binary_digest` instead of a path (environment migration
+  `20261027000200`, backfilled from the checksum every image recorded), and
+  `LaunchOptions` carries `workflow_digest`, which the runner resolves through
+  its own store (`RunnerParts::artifacts`; a host supplies its own through
+  `ServerOptions::artifacts`). Images with the same bytes share one artifact,
+  released when the last image naming it is deleted. On boot, images stored
+  the old way (`images/<id>/binary`) are moved into the store, except a file
+  whose bytes no longer match the checksum its image recorded.
+  `e2e/test_image_artifact_store.sh` covers both.
+
+- **Platform agents load from a release in the artifact store.** Each
+  agent's `.wasm` and `.meta.json` are one record in the store, a manifest of
+  the content digest and the metadata's exact bytes, written after the
+  content (`agents/<id>/<record>.json`; shared components under
+  `components/`), so the two can no longer drift. A release index
+  (`agents/index/<release>.json`) pins every record by digest. At boot the
+  components directory is published as the server's release
+  (`RUNTARA_AGENT_RELEASE`, default the server version), and the component
+  dispatcher, agent catalog and entitlement allowlist load from that index
+  instead of a directory listing. Without `RUNTARA_AGENT_COMPONENTS_DIR`, the
+  server runs the release the store already holds. A record whose content is
+  missing or does not match its digest is refused.
+
+- **Workflows compile against the release.** The release is materialized for
+  composition under `<DATA_DIR>/releases/<index digest>`, every component
+  verified against the index, and the compiler reads its agents and shared
+  components there unless `RUNTARA_DIRECT_WASM_COMPONENTS_DIR` overrides it.
+  An image records `workflow.componentRelease` (the release and the digest of
+  its index) beside the digest of every component it was composed from, and
+  the release is part of the compile cache identity, so a new release
+  recompiles a workflow instead of reusing an artifact built from other
+  agent bytes.
+
+- **Published workflow-agents are records in the artifact store.** Publishing
+  records the composed `.wasm` and its `.meta.json` (byte for byte, with the
+  lowering it was built with) under
+  `tenants/<hex tenant>/workflow-agents/<slug>.json`, then writes the staging
+  dir, which is now a cache: at boot it is rebuilt from the records, so a
+  lost `DATA_DIR/workflow-agents` loses nothing, and agents staged before the
+  store are recorded from their files. Unpublishing removes the record first.
+
+- **Artifacts can live in object storage.** `RUNTARA_ARTIFACT_STORE_URL`
+  (`s3://bucket/prefix`, `gs://…`, `az://…`, `file://…`) puts every artifact
+  (workflow images, the release and its agent records, published
+  workflow-agents) in a bucket through the `object_store` crate, configured
+  from the provider's standard environment variables (`AWS_ENDPOINT`,
+  `AWS_ACCESS_KEY_ID`, …). The layout is the filesystem store's, content is
+  verified against its digest on every read, and local readers (the runner,
+  the compile view) get files from a verified cache under
+  `<DATA_DIR>/artifact-cache`. A server with an empty data dir and no
+  components directory loads its agents from the bucket, and compiles and
+  runs workflows there (`e2e/test_object_store.sh`, against MinIO). TLS is
+  rustls on ring, so no C crypto build is added.
+  `ArtifactStore::presigned_get` signs a credential-free GET URL for an
+  artifact's content on S3, GCS and Azure stores (the filesystem store
+  returns none), for readers such as fleet nodes that must not hold the
+  store's credentials.
+
+- **A server serves an explicit set of tenants.** `TENANT_ID` is the primary
+  tenant and `RUNTARA_SERVED_TENANTS` (comma-separated) adds more; one by
+  default. Requests and work for any other tenant are refused: an OIDC token
+  or an API key whose org is not served gets 403 (an API key's org was not
+  checked before), and an HTTP trigger webhook runs under its trigger's own
+  tenant only when that tenant is served (404 otherwise); the sync webhook
+  finds the workflow among the served tenants. Product events from
+  background work carry the work's tenant, and a run's `RUNTARA_TENANT_ID`
+  is its own tenant, not the process's. Each served tenant gets its own
+  trigger-stream consumers, cron scheduler (triggers no tenant owns run once,
+  as the primary tenant), session delivery, default object-model connection
+  and workflow-agent restage. Membership roles are read per tenant: the
+  primary tenant keeps `member:{user}`, another served tenant uses
+  `member:{tenant}:{user}`. MCP tools act for the calling request's tenant,
+  not the one the server was built for. Channel webhooks and the intake
+  worker take the tenant from the channel connection, which must be served,
+  and Teams reply refs carry it. Control and instance waits accept any served
+  tenant. `e2e/test_served_tenants.sh` serves two tenants from one process
+  and checks neither reads the other's workflows, versions or runs.
+
+- **Credentials can be sealed with each tenant's own keys.**
+  `ServerOptions::credential_cipher` lets a host supply the credential cipher
+  (boot and `reencrypt-connections` both use it; unset, the environment
+  keyring is built as before). `runtara_connections::TenantKeyedCipher` routes
+  each tenant to its own keyring and others to a default, so rotating one
+  tenant's key and running `reencrypt-connections --tenant-id` rewrites only
+  that tenant's rows (`tests/tenant_key_rotation.rs`, M7.4).
+
+- **A workspace the user does not belong to says so.** Signed in with a
+  token that names no tenant, opening `/ui/{tenant}/` for a workspace the
+  user is not a member of shows "No access" with the workspaces they do
+  belong to, instead of the app with every request refused. A failed
+  `/me/tenants` lookup is no longer read as membership of nothing.
+
+- **MCP sessions belong to their tenant.** The Valkey session-recovery
+  record is kept under the tenant of the request that made the session
+  (`runtara:mcp:sessions:{tenant}:{session}`), so after a restart a request
+  authenticated for another tenant cannot restore it. A layer inside MCP auth
+  binds the request's tenant for the store (SYN-781).
+
+- **A missing connection is named by its id.** The guest-facing connection
+  resolver answers `CONNECTION_NOT_FOUND` with "Connection '<id>' not found",
+  echoing the id the workflow asked for and still nothing else
+  (`e2e/test_connection_ref_workflow.sh` passes again; SYN-780).
+
+- **S3 tests run on RustFS.** MinIO no longer publishes open images, so
+  the artifact store's S3 test (now `tests/object_store_s3.rs`), the trusted
+  signing roundtrip and `e2e/test_object_store.sh` use a pinned
+  `rustfs/rustfs:1.0.4`, which verifies SigV4. Buckets are created with a
+  signed request from the image's own `curl`, and the MinIO source-build
+  Dockerfile is gone.
+
+- **The UI switches tenants.** Where the UI is served at the bare mount, each
+  served tenant also has its own copy at `/ui/{tenant}/`, with that tenant's
+  base href, id and entitlements, so one server's SPA works for any of its
+  tenants without a gateway. The SPA takes its tenant from that path. A user
+  signed in with a token that names no tenant is sent to their only workspace or
+  picks one, and the sidebar offers a workspace switcher when they belong to
+  several (`GET /api/runtime/me/tenants`). `RUNTARA_UI_OIDC_ORGANIZATIONS=false`
+  stops the login from sending Auth0's `organization` parameter. A served tenant
+  that inherits the primary's entitlements now reports its own `tenantId`.
+
+- **The request names the tenant; membership authorizes it.** A path
+  `/api/runtime/{tenant}/…` or `/mcp/{tenant}` naming a served tenant is routed
+  as the tenant-less path, for that tenant (the SPA's org-prefixed URLs now work
+  without a gateway stripping them). With `RUNTARA_AUTH_MEMBERSHIP_POLICY=required`,
+  an OIDC token no longer needs an `org_id` claim: it acts for the tenant the
+  request names (else the primary), authorized by `{tenant}:member:{sub}` there.
+  A token or API key bound to one tenant is refused under another's path. New
+  `GET /api/runtime/me/tenants` lists where the caller may act, with the role.
+  Under any other policy `org_id` is still required, so existing deployments
+  behave as before. The JWT issuer is recorded on the auth context.
+
+- **One Valkey can serve many tenants.** Every key a server uses names its
+  tenant: membership `{tenant}:member:{uid}`, revocation
+  `{tenant}:token:revoked:{jti}`, connection rate limits
+  `{tenant}:rate_limit:{connection}`, the compilation queue
+  `{tenant}:compilation:*` (a server consumes only its served tenants' queues)
+  and the admission counter `{tenant}:admission:reserved` (seeded and
+  reconciled only for served tenants; previously a server reseeding or
+  reconciling would reset every tenant's counter on the same Valkey). The
+  user-management contract is now version 2 (`docs/security/user-management-contracts.md` §3,
+  including every runtara key). Version 1 keys still work: `member:{uid}` answers
+  for the primary tenant unless `RUNTARA_AUTH_LEGACY_MEMBER_KEYS=false`, which a
+  shared Valkey must set, and `token:revoked:{jti}` still revokes; the old
+  compilation queue is drained into the new one at boot. Tenant ids may not
+  contain `:`. `e2e/test_shared_valkey.sh`.
+
+- **OAuth callbacks and connection events belong to the connection's tenant.**
+  An OAuth state is redeemed only at the callback URL of the tenant it was
+  issued for (`/api/oauth/{tenant}/callback`); one presented at another
+  tenant's URL is refused and spent. Connection lifecycle product events
+  (created, deleted, OAuth started/completed/failed, token refreshed) carry
+  the connection's tenant instead of the process's primary tenant:
+  `ConnectionEventSink::emit` now receives it (`None` for a callback that
+  failed before its state matched, which the server files under its primary
+  tenant rather than trust the URL), and
+  `provider_auth::resolve_connection_auth` takes it.
+
+- **Connection credentials are bound to their tenant and connection.** New
+  writes store a version 2 envelope whose AES-256-GCM associated data is the
+  tenant and connection id, so a ciphertext copied to another connection or
+  tenant does not decrypt; version 1 envelopes still decrypt, unbound, until
+  `runtara-server reencrypt-connections` rewrites them. The cipher is a
+  keyring: the current key (`RUNTARA_CONNECTIONS_ENCRYPTION_KEY`, `_KEY_ID`)
+  encrypts, and retired keys (`RUNTARA_CONNECTIONS_RETIRED_KEYS`,
+  `kid:base64,…`) still decrypt the envelopes that name them, so a key is
+  rotated by adding the new one, re-encrypting, then dropping the old.
+  `e2e/test_credential_binding.sh`.
+
+- **Every instance-scoped table records its tenant.** Store migration 053
+  adds `tenant_id` to checkpoints, events, signals, state, waits, leases,
+  attempts, continuations and control receipts, and environment migration
+  `20261028000000` to workflow API receipts. Existing rows are backfilled
+  from their instance (or launch), and a `BEFORE INSERT` trigger fills new
+  rows the same way, so no write path changes. Store migration 054 and
+  environment migration `20261028000100` then enable and force row-level
+  security on every tenant-bearing table: a connection that names a tenant
+  (`runtara.tenant_id`, set by `PostgresPersistence::for_tenant`) reads and
+  writes only that tenant's rows, so a read of another tenant's fails closed,
+  while a connection that names none is the system path (today's pools and
+  the cross-tenant workers) and is unchanged. Row-level security does not
+  bind a superuser or a `BYPASSRLS` role, so a tenant-scoped pool must log in
+  as a plain role.
+
+- **Entitlements are per tenant.** Every entitlement check (features,
+  agents, limits, API keys, SQL, trusted calls, concurrent executions, bulk
+  sizes) reads the tenant it acts for through
+  `config::entitlements_for(tenant)`. The default source is the environment:
+  the primary tenant's `RUNTARA_PRICING_TIER` / `RUNTARA_ENTITLEMENTS_JSON` /
+  `RUNTARA_ENTITLEMENT_OVERRIDES_JSON` as before, and for another served
+  tenant its entry in `RUNTARA_TENANT_ENTITLEMENTS_JSON`
+  (`{"<tenant>": {"pricingTier", "entitlements", "overrides"}}`), else the
+  primary's. A host supplies its own through `ServerOptions::entitlements`
+  (`config::EntitlementSource`). `GET /entitlements` answers for the caller's
+  tenant.
+
+- **The platform object-model database is optional.** Without
+  `OBJECT_MODEL_DATABASE_URL` the server has no default database and creates
+  no default `object_model` connection. The object model, SQL steps, CSV
+  import/export and the MCP database tools then work through a tenant's own
+  Postgres connection, and a request for the default answers that one is
+  needed. Tenant database connections pass an address guard, enforced by
+  default without a platform database (`RUNTARA_DATABASE_CONNECTION_GUARD`):
+  loopback, private, metadata and local-socket addresses are refused before
+  anything connects (allowlist: `RUNTARA_PROXY_ALLOWED_HOSTS`), a URL that
+  names its target in a `host` or `hostaddr` parameter is refused, and the
+  connection is pinned to the vetted address, checked by re-parsing it the
+  way the connector does. `OBJECT_MODEL_TENANT_POOL_MAX`
+  (default 16) caps the pools one tenant's connections hold open. With the
+  variable set, behaviour is unchanged. `e2e/test_optional_platform_db.sh`.
+
+- **A runner can report an executor lost.** `RunExitReport::Lost` (for a
+  node or link that went away) hands the run to recovery instead of failing
+  it: recovery suspends it (`termination_reason = executor_lost`, a new value
+  added by store migration 052), which revokes its root lease, and relaunches
+  it from its checkpoints, under the crash-loop cap. A lost executor that
+  keeps running is stopped at its next durable write, and its workflow API
+  calls answer `fenced` (not a retryable `unavailable`) from then on.
+  `e2e/test_lost_executor_fenced.sh` loses a launch mid-run and checks the
+  run finishes once.
+
+- **A stale executor cannot acknowledge a command or post an outcome.**
+  Lifecycle acks (pause, cancel, shutdown) are admitted by the run's root
+  lease like every other guest write (`Persistence::apply_owned_lifecycle_command`,
+  with a conformance case), so a superseded launch leaves the command pending
+  for the launch that holds the run. `POST /v1/run/outcome` reads the lease
+  first and answers `fenced` to a launch that lost it.
+
+- **The workflow runner is pluggable.** A host binary can boot the stock
+  server with its own runner: `runtara_server::boot::run(ServerOptions {
+  runner_factory })`, where the factory builds a `Runner` from the parts the
+  embedded one is built from (`runtara_environment::runner::RunnerParts`;
+  `build_embedded_runner` is the default). `runtara-runner-delegate` is an
+  out-of-tree runner delegating to the embedded one, with a
+  `runtara-server-delegating` binary the e2e suites run against.
+  `RUNTARA_RUNNER` is no longer read (it was ignored already).
 
 - **DSL 3.7.0: a step id an `onWait` graph shares with the graph around it is
   rejected (E152).** An `onWait` graph runs at its WaitForSignal step's
@@ -330,6 +572,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking: workflows and agents reach the platform only through the
+  workflow API, so every workflow must be recompiled.** A compiled workflow
+  now carries the `runtara:api` component and calls the server's `/v1`
+  workflow API for its run services: checkpoints, signals, events, sleeps,
+  operations, instance waits, state, connections, HTTP, SQL, control and the
+  child runs of isolated and scoped agents (`/v1/tasks`).
+  Agents do the same through the agent SDK. The host interfaces they
+  imported before are no longer linked: `runtara:workflow/*` (`runtime`,
+  `operation`, `waits`, `state` and `tasks`), `runtara:host/*`,
+  `runtara:control/*`, `runtara:trusted/executor` and
+  `runtara:agent/continuation`.
+  - Recompile every workflow after upgrading (compile it, or set its current
+    version again). An artifact built before is refused at load: "built for
+    the removed host ABI … recompile the workflow".
+  - Runs are not carried over. A run parked, paused or waiting on an old
+    artifact cannot wake on an upgraded server; let such runs finish, or
+    cancel them, before upgrading.
+  - Third-party agents built against the old WIT must be rebuilt with the
+    agent SDK. A component that imports any of the interfaces above is
+    refused when a workflow is compiled against it, and at load.
+
+- **Wasmtime 50 (from 46).** The WASI 0.3 interfaces are unchanged, so agents
+  need no rebuild. Wasmtime 50 drops the `cancellable` waits
+  (component-model #716): only the event loop of a callback-lifted export
+  delivers a caller's cancel.
+  - Published workflow-agents are now lifted async with a callback. The
+    emitted body is unchanged; the compiler instruments it so that each wait
+    returns to the event loop and resumes where it stopped. Workflow-agents
+    published before this release are republished from their versions when
+    the server boots: their artifacts use `cancellable` waits that Wasmtime
+    50 refuses to load. One that cannot be republished is logged, and
+    compiling a workflow that calls it asks for a republish.
+  - Raw `wasi:http@0.2` stays denied; `wasi:http@0.3` reaches only the
+    workflow API.
+  - A workflow API request is now served on a task of its own, so it makes
+    progress while the guest runs CPU-bound code. A cleanup alarm armed just
+    before such code starts its clock at once rather than at the guest's
+    next yield.
+
+- **A workflow-agent that can park runs as a child run of its own.** Before,
+  a sleeping or waiting workflow-agent parked its whole calling tree; now its
+  caller parks on a wait for it, and the caller's other children keep going.
+  - Publishing records whether the version parks. Agents published before
+    this release stay composed into their caller until republished.
+  - The step's `timeoutMs` is the child's deadline: past it the caller
+    wakes, cancels the child and fails the step with `AGENT_TIMEOUT`.
+  - A parallel Split starts up to 100 such children per window (its
+    `parallelism`), then parks on one wait over all of them.
+    Parallel branches headed by such calls start all their children before
+    the first branch parks.
+  - Each call is a run with its own instance row, costing a launch instead
+    of an in-process call.
+  - A start refused because the tenant's limit (or control's share of it)
+    is full is not an error: the caller parks for the refusal's retry hint
+    and starts the child again.
+
+- **Breaking: a workflow's memory now limits its runs, and it is a number.**
+  A workflow version has a memory in MiB (`memoryMb`, 1 to 65536, 256 by
+  default), which caps the sum of a run's linear memories; each child Store
+  of an isolated or scoped agent gets the same cap. The S/M/L/XL tiers were
+  stored but never applied; they are now presets (8, 64, 128, 256 MiB) that
+  fill in the number, and existing versions keep their tier's value. A run
+  that grows past its memory fails with "workflow trapped: guest memory limit
+  exceeded".
+  - Compiling records the workflow's memory floor, what it allocates when it
+    starts, and refuses a memory below it ("below this workflow's memory
+    floor of N MiB"). The editor shows a MiB field with the presets, the
+    floor, and disables presets below it.
+  - API: create and update take `memoryMb`; `memoryTier` is still accepted
+    as a preset (deprecated), and workflows report `memoryMb` instead of
+    `memoryTier`. MCP `update_workflow` takes `memory_mb` (or `memory_tier`).
+  - `RUNTARA_INSTANCE_MEMORY_MAX_BYTES` stays the operator ceiling (1 GiB by
+    default), now for the sum of a run's memories rather than for each
+    memory. A workflow's memory never raises it.
+  - A workflow that needs more than its memory fails where it ran before:
+    raise its memory. A version compiled before this release runs under the
+    ceiling alone until it is recompiled.
 - **BREAKING: a Telegram Channel trigger that holds no webhook secret
   rejects inbound calls (401) instead of accepting them unauthenticated.**
   Since 9.0.0 runtara stores a webhook's secret before it calls Telegram, so

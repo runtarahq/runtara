@@ -402,6 +402,147 @@ async fn failure_with_stale_compiler_provenance_is_retryable_and_cleared() {
     );
 }
 
+/// SYN-786: a release-only change (new agent or stdlib bytes, the same
+/// definition, template and lowering) makes a ready artifact stale in every
+/// reader, the compiler's own fast path included, so the compile does not
+/// return the other release's image. This process compiles without a release,
+/// so a row recorded against one stands for an upgrade.
+#[tokio::test]
+async fn ready_artifact_from_another_component_release_recompiles() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let definition = stepless_definition();
+    let (tenant, workflow_id) = seed_workflow(&pool, &definition).await;
+    let repo = WorkflowRepository::new(pool.clone());
+    record_ready(
+        &pool,
+        &tenant,
+        &workflow_id,
+        &definition,
+        false,
+        Some(false),
+    )
+    .await;
+    sqlx::query(
+        "UPDATE workflow_compilations SET compiler_mode = 'direct-wasm'
+         WHERE tenant_id = $1 AND workflow_id = $2 AND version = 1",
+    )
+    .bind(&tenant)
+    .bind(&workflow_id)
+    .execute(&pool)
+    .await
+    .expect("recording the compiler mode must succeed");
+    // Unchanged release: the compiler's fast path reuses the artifact.
+    assert_eq!(
+        repo.get_fresh_registered_image_id_for_compiler(
+            &tenant,
+            &workflow_id,
+            1,
+            "direct-wasm",
+            false
+        )
+        .await
+        .expect("fast-path lookup must succeed")
+        .as_deref(),
+        Some("ready-image")
+    );
+    assert!(matches!(
+        repo.ensure_compilation_ready(&tenant, &workflow_id, Some(1))
+            .await
+            .map(|(_, status)| status)
+            .expect("ready compilation lookup must succeed"),
+        CompilationStatus::Ready { .. }
+    ));
+
+    sqlx::query(
+        "UPDATE workflow_compilations
+         SET component_release = 'index-of-another-release'
+         WHERE tenant_id = $1 AND workflow_id = $2 AND version = 1",
+    )
+    .bind(&tenant)
+    .bind(&workflow_id)
+    .execute(&pool)
+    .await
+    .expect("stamping another release must succeed");
+
+    assert!(
+        matches!(
+            repo.ensure_compilation_ready(&tenant, &workflow_id, Some(1))
+                .await
+                .map(|(_, status)| status)
+                .expect("ready compilation lookup must succeed"),
+            CompilationStatus::NotReady
+        ),
+        "an artifact composed from another release must be rebuilt"
+    );
+    assert_eq!(
+        repo.get_fresh_registered_image_id(&tenant, &workflow_id, 1)
+            .await
+            .expect("fresh-image lookup must succeed"),
+        None
+    );
+    assert_eq!(
+        repo.get_fresh_registered_image_id_for_compiler(
+            &tenant,
+            &workflow_id,
+            1,
+            "direct-wasm",
+            false
+        )
+        .await
+        .expect("fast-path lookup must succeed"),
+        None,
+        "the compiler's fast path must not return the other release's image"
+    );
+    assert!(
+        !repo
+            .list_versions(&tenant, &workflow_id)
+            .await
+            .expect("version list lookup must succeed")[0]
+            .compiled
+    );
+}
+
+/// A failure recorded against another release is retried, and its row is
+/// cleared: the new release's components may compile it.
+#[tokio::test]
+async fn failure_from_another_component_release_is_retryable_and_cleared() {
+    skip_if_no_db!();
+    let pool = get_test_pool().await;
+    let definition = stepless_definition();
+    let (tenant, workflow_id) = seed_workflow(&pool, &definition).await;
+    let checksum = workflow_definition_checksum(&definition);
+    record_failure(&pool, &tenant, &workflow_id, Some(&checksum)).await;
+    let repo = WorkflowRepository::new(pool.clone());
+    sqlx::query(
+        "UPDATE workflow_compilations
+         SET component_release = 'index-of-another-release'
+         WHERE tenant_id = $1 AND workflow_id = $2 AND version = 1",
+    )
+    .bind(&tenant)
+    .bind(&workflow_id)
+    .execute(&pool)
+    .await
+    .expect("stamping another release must succeed");
+
+    let status = repo
+        .ensure_compilation_ready(&tenant, &workflow_id, Some(1))
+        .await
+        .map(|(_, status)| status)
+        .expect("failure lookup must succeed");
+    assert!(
+        matches!(
+            status,
+            CompilationStatus::Failed {
+                terminal: false,
+                ..
+            }
+        ),
+        "a failure from another release must be retried, got {status:?}"
+    );
+    assert_eq!(compilation_row_count(&pool, &tenant, &workflow_id).await, 0);
+}
+
 /// The regression that kept a fixed compiler from ever running: a failure
 /// recorded by an EARLIER build looked current, because `template_major` and
 /// `lowering_mode` deliberately do not move between releases. The stored error
@@ -533,6 +674,7 @@ async fn record_pinned_artifact(
             compiler_mode: "direct-wasm",
             track_events: false,
             trusted_pins: &pins,
+            memory_floor_bytes: None,
         })
         .await
         .expect("recording the pinned artifact must succeed")
@@ -1107,6 +1249,7 @@ async fn recording_a_rebuilt_artifact_clears_the_previous_image_until_registrati
         compiler_mode: "direct-wasm",
         track_events: false,
         trusted_pins: &[],
+        memory_floor_bytes: None,
     })
     .await
     .expect("recording the rebuilt artifact must succeed");
@@ -1179,6 +1322,7 @@ async fn superseded_completion_cannot_replace_a_newer_ready_artifact() {
             compiler_mode: "direct-wasm",
             track_events: false,
             trusted_pins: &[],
+            memory_floor_bytes: None,
         })
         .await
         .expect("stale success check must succeed");
@@ -1337,6 +1481,7 @@ async fn failed_registration_replaces_an_unregistered_current_success() {
             compiler_mode: "direct-wasm",
             track_events: false,
             trusted_pins: &[],
+            memory_floor_bytes: None,
         })
         .await
         .expect("current success must be recorded")

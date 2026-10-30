@@ -18,7 +18,7 @@ impl NativeDatabase {
         tenant: &str,
         connection: &str,
     ) -> Result<Arc<ObjectStore>, DatabaseError> {
-        authorize(crate::config::entitlements(), tenant, connection)?;
+        authorize(&crate::config::entitlements_for(tenant), tenant, connection)?;
         let unavailable = || DatabaseError {
             code: "DATABASE_CONNECTION_UNAVAILABLE".into(),
             message: "Database connection is unavailable".into(),
@@ -35,10 +35,25 @@ impl NativeDatabase {
             tenant,
         )
         .await
-        .map_err(|_| unavailable())?
+        .map_err(|error| match error {
+            // Refused by the address guard: say so, the connection never opened.
+            super::object_model::ServiceError::ValidationError(message)
+                if message.contains("is refused") =>
+            {
+                DatabaseError {
+                    code: "DATABASE_CONNECTION_REFUSED".into(),
+                    message,
+                    outcome: Outcome::NotStarted,
+                    retryable: false,
+                    sqlstate: None,
+                    statement_index: None,
+                }
+            }
+            _ => unavailable(),
+        })?
         .ok_or_else(unavailable)?;
         self.manager
-            .get_database_by_url(&url)
+            .get_database_by_url(tenant, &url)
             .await
             .map_err(|_| unavailable())
     }

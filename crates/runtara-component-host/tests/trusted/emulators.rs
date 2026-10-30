@@ -4,9 +4,9 @@ use super::*;
 use anyhow::Context;
 use std::collections::HashMap;
 use testcontainers::{
-    GenericBuildableImage, GenericImage, ImageExt,
+    GenericImage, ImageExt,
     core::{IntoContainerPort, WaitFor},
-    runners::{AsyncBuilder, AsyncRunner},
+    runners::AsyncRunner,
 };
 
 const S3_USER: &str = "runtara-test-access";
@@ -104,13 +104,13 @@ async fn roundtrip(
     Ok(())
 }
 
-async fn wait_for_minio_bucket(
+async fn wait_for_bucket(
     request: reqwest::RequestBuilder,
     timeout: Duration,
 ) -> anyhow::Result<()> {
-    // MinIO's health probe can succeed before its S3 API accepts writes. Use
-    // bucket creation as the readiness boundary; never retry signing failures
-    // or the actual presigned-URL operations that this fixture is testing.
+    // A health probe can succeed before the S3 API accepts writes. Use bucket
+    // creation as the readiness boundary; never retry signing failures or the
+    // actual presigned-URL operations that this fixture is testing.
     tokio::time::timeout(timeout, async {
         loop {
             let response = request
@@ -126,11 +126,11 @@ async fn wait_for_minio_bucket(
         }
     })
     .await
-    .context("MinIO did not become ready for bucket creation before the deadline")?
+    .context("the S3 service did not become ready for bucket creation before the deadline")?
 }
 
 #[tokio::test]
-async fn minio_bucket_readiness_retries_only_startup_503s() -> anyhow::Result<()> {
+async fn bucket_readiness_retries_only_startup_503s() -> anyhow::Result<()> {
     for final_status in [
         reqwest::StatusCode::OK,
         reqwest::StatusCode::FORBIDDEN,
@@ -154,7 +154,7 @@ async fn minio_bucket_readiness_retries_only_startup_503s() -> anyhow::Result<()
             }),
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
-        let result = wait_for_minio_bucket(
+        let result = wait_for_bucket(
             reqwest::Client::new().put(format!("http://{address}/bucket")),
             Duration::from_secs(5),
         )
@@ -178,7 +178,7 @@ async fn minio_bucket_readiness_retries_only_startup_503s() -> anyhow::Result<()
 }
 
 #[tokio::test]
-async fn minio_bucket_readiness_has_a_deadline() -> anyhow::Result<()> {
+async fn bucket_readiness_has_a_deadline() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let app = axum::Router::new().route(
@@ -186,7 +186,7 @@ async fn minio_bucket_readiness_has_a_deadline() -> anyhow::Result<()> {
         axum::routing::put(|| async { reqwest::StatusCode::SERVICE_UNAVAILABLE }),
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
-    let result = wait_for_minio_bucket(
+    let result = wait_for_bucket(
         reqwest::Client::new().put(format!("http://{address}/bucket")),
         Duration::from_millis(250),
     )
@@ -197,18 +197,13 @@ async fn minio_bucket_readiness_has_a_deadline() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn wasm_presigned_urls_work_against_minio() -> anyhow::Result<()> {
-    // Upstream registry images can disappear independently of the release.
-    // Build the pinned source; Docker caches it for subsequent test runs.
-    let image = GenericBuildableImage::new("runtara-test-minio", "2025-09-07")
-        .with_dockerfile_string(include_str!("minio.Dockerfile"))
-        .build_image()
-        .await?;
-    let container = image
+async fn wasm_presigned_urls_work_against_rustfs() -> anyhow::Result<()> {
+    // RustFS (Apache-2.0) at a pinned release: an S3-compatible service that
+    // checks SigV4 signatures, so presigned URLs are really verified.
+    let container = GenericImage::new("rustfs/rustfs", "1.0.4")
         .with_exposed_port(9000.tcp())
-        .with_env_var("MINIO_ROOT_USER", S3_USER)
-        .with_env_var("MINIO_ROOT_PASSWORD", S3_KEY)
-        .with_cmd(["server", "/data"])
+        .with_env_var("RUSTFS_ACCESS_KEY", S3_USER)
+        .with_env_var("RUSTFS_SECRET_KEY", S3_KEY)
         .start()
         .await?;
     let base = format!(
@@ -222,7 +217,7 @@ async fn wasm_presigned_urls_work_against_minio() -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if client
-                .get(format!("{base}/minio/health/ready"))
+                .get(format!("{base}/health/ready"))
                 .send()
                 .await
                 .is_ok_and(|r| r.status().is_success())
@@ -252,7 +247,7 @@ async fn wasm_presigned_urls_work_against_minio() -> anyhow::Result<()> {
     for (key, value) in headers {
         request = request.header(key, value);
     }
-    wait_for_minio_bucket(request, Duration::from_secs(30)).await?;
+    wait_for_bucket(request, Duration::from_secs(30)).await?;
     let (_bundle, dispatcher) = dispatcher_with_credentials(Arc::new(EmulatorCredentials {
         integration: "s3_compatible", fields: json!({"base_url":base, "access_key_id":S3_USER, "secret_access_key":S3_KEY, "region":"us-east-1"}),
     })).await?;

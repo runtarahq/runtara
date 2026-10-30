@@ -29,7 +29,9 @@ use runtara_environment::runner::{
     EmbeddedWasmRunner, LaunchOptions, Runner, WorkflowRunnerConfig,
 };
 use runtara_store_postgres::PostgresPersistence;
-use runtara_workflows::direct_wasm::{DirectCompilationInput, compile_direct_workflow_composed};
+use runtara_workflows::direct_wasm::{
+    DirectCompilationInput, compile_direct_workflow, compose_direct_workflow,
+};
 use serde_json::{Value, json};
 
 fn components() -> PathBuf {
@@ -140,7 +142,7 @@ impl InstanceWaitHost for StoreWaits {
     }
 }
 
-/// The control service behind `runtara:control/api`: `get` answers every
+/// The control service behind `/v1/instances`: `get` answers every
 /// run as completed, which is all a control call after the wake needs.
 struct Reads;
 
@@ -238,6 +240,7 @@ impl Harness {
                 skip_cert_verification: false,
             },
             self.persistence.clone(),
+            artifacts().clone(),
         )
         .unwrap()
         .with_in_process_precompiler_for_tests()
@@ -263,22 +266,19 @@ impl Harness {
             )
             .unwrap(),
         ]);
-        compile_direct_workflow_composed(
-            DirectCompilationInput {
-                workflow_id: "wait-for-instances-runner".into(),
-                version: 1,
-                source_checksum: None,
-                execution_graph: serde_json::from_value(graph).unwrap(),
-                child_workflows: vec![],
-                output_dir: self.dir.path().join(out),
-                track_events: false,
-                agent_catalog: Some(Arc::new(catalog)),
-                agent_slug: None,
-            },
-            components(),
-        )
-        .unwrap()
-        .wasm_path
+        let mut compiled = compile_direct_workflow(DirectCompilationInput {
+            workflow_id: "wait-for-instances-runner".into(),
+            version: 1,
+            source_checksum: None,
+            execution_graph: serde_json::from_value(graph).unwrap(),
+            child_workflows: vec![],
+            output_dir: self.dir.path().join(out),
+            track_events: false,
+            agent_catalog: Some(Arc::new(catalog)),
+            agent_slug: None,
+        })
+        .unwrap();
+        compose_direct_workflow(&mut compiled, components()).unwrap()
     }
 
     fn options(&self, wasm: &std::path::Path, id: &str, input: Option<Vec<u8>>) -> LaunchOptions {
@@ -286,8 +286,7 @@ impl Harness {
             launch_id: format!("launch-{}", uuid::Uuid::new_v4()),
             instance_id: id.to_owned(),
             tenant_id: self.tenant.clone(),
-            wasm_path: wasm.to_owned(),
-            expected_workflow_checksum: None,
+            workflow_digest: artifacts().add(wasm),
             preparation_attempt: None,
             preparation_deadline: None,
             input: json!({}),
@@ -297,6 +296,7 @@ impl Harness {
             prepersisted_input: input,
             launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
             start_gate: None,
+            memory_limit_bytes: None,
         }
     }
 
@@ -415,6 +415,8 @@ impl Harness {
     }
 }
 
+/// The logic registers the wait over `runtara:api` and the backend attaches
+/// it to the run's suspension.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_wait_for_instances_step_parks_runner_free_and_a_restarted_runner_resumes_it() {
     let h = Harness::new().await;
@@ -656,4 +658,96 @@ async fn a_woken_parent_calls_control_with_its_own_composed_bytes() {
         json!(children[0]),
         "the control call after the wake ran: {output}"
     );
+}
+
+/// A run on the workflow API ABI waits for its children over the API: it
+/// registers the wait, suspends on the read's `waitId`, parks runner-free,
+/// and, woken when the children finish, finds the same wait settled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_workflow_api_run_parks_on_its_wait_and_resumes_when_children_finish() {
+    let h = Harness::new().await;
+    let probe = std::env::var_os("RUNTARA_WORKFLOW_API_PROBE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/wasm32-wasip2/release/runtara_workflow_api_probe.wasm")
+        });
+    assert!(
+        probe.exists(),
+        "missing {}: run scripts/build-agent-components.sh",
+        probe.display()
+    );
+    // The probe reads `data.mode`; the harness puts the children in `data`.
+    let wasm = h.dir.path().join("probe.wasm");
+    std::fs::copy(&probe, &wasm).unwrap();
+    let runner = h.runner();
+    let parent = format!("{}-api", h.tenant);
+    let children = [format!("{parent}-a"), format!("{parent}-b")];
+    let input = serde_json::to_vec(
+        &json!({"data": {"mode": "wait", "children": children}, "variables": {}}),
+    )
+    .unwrap();
+    assert!(
+        h.persistence
+            .try_register_instance(&parent, &h.tenant, Some(&input))
+            .await
+            .unwrap()
+    );
+    for child in &children {
+        let link = ParentLink {
+            parent_instance_id: parent.clone(),
+            parent_close_policy: "cancel".into(),
+            admitted_at: chrono::Utc::now(),
+        };
+        assert!(
+            h.persistence
+                .try_register_child_instance(child, &h.tenant, None, None, &link)
+                .await
+                .unwrap()
+        );
+        h.persistence
+            .update_instance_status(child, InstanceStatus::Running, None)
+            .await
+            .unwrap();
+    }
+    h.run_to_exit(&runner, &h.options(&wasm, &parent, Some(input)))
+        .await;
+    let parked = h.persistence.get_instance(&parent).await.unwrap().unwrap();
+    assert_eq!(
+        parked.status,
+        InstanceStatus::Suspended,
+        "{:?}",
+        parked.error
+    );
+    assert_eq!(
+        parked.termination_reason.as_deref(),
+        Some("waiting_instances")
+    );
+    assert_eq!(h.waits_of(&parent).await, 1, "one wait, kept while parked");
+
+    h.finish(&children).await;
+    let woken = h.persistence.get_instance(&parent).await.unwrap().unwrap();
+    assert_eq!(woken.wake_reason, Some(WakeReason::InstancesTerminal));
+
+    drop(runner);
+    h.run_to_exit(&h.runner(), &h.options(&wasm, &parent, None))
+        .await;
+    let done = h.persistence.get_instance(&parent).await.unwrap().unwrap();
+    assert_eq!(done.status, InstanceStatus::Completed, "{:?}", done.error);
+    let output: Value = serde_json::from_slice(done.output.as_deref().unwrap()).unwrap();
+    assert_eq!(output["result"]["resolution"], "satisfied", "{output}");
+    assert_eq!(output["result"]["finished"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        h.waits_of(&parent).await,
+        0,
+        "the probe released the settled wait"
+    );
+}
+
+/// Where this binary's launches find the components they wrote.
+fn artifacts() -> &'static std::sync::Arc<runtara_artifact_store::test_support::FileMapStore> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Arc<runtara_artifact_store::test_support::FileMapStore>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(Default::default)
 }

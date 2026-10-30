@@ -65,11 +65,49 @@ impl Names {
     }
 }
 
+/// The SCRAM-SHA-256 verifier PostgreSQL stores for `password` (RFC 7677):
+/// the role is created with it, so the password itself never reaches the
+/// server or its statement log.
+fn scram_verifier(password: &str) -> String {
+    use base64::Engine;
+    use hmac::{Hmac, Mac};
+    use sha2::{Digest, Sha256};
+    const ITERATIONS: u32 = 4096;
+    let hmac = |key: &[u8], data: &[u8]| {
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes any key");
+        mac.update(data);
+        mac.finalize().into_bytes()
+    };
+    let salt: [u8; 16] = rand::random();
+    // PBKDF2-HMAC-SHA256, one block.
+    let mut block = hmac(
+        password.as_bytes(),
+        &[&salt[..], &1u32.to_be_bytes()].concat(),
+    );
+    let mut salted = block;
+    for _ in 1..ITERATIONS {
+        block = hmac(password.as_bytes(), &block);
+        for (out, byte) in salted.iter_mut().zip(block.iter()) {
+            *out ^= byte;
+        }
+    }
+    let stored_key = Sha256::digest(hmac(&salted, b"Client Key"));
+    let server_key = hmac(&salted, b"Server Key");
+    let b64 = base64::engine::general_purpose::STANDARD;
+    format!(
+        "SCRAM-SHA-256${ITERATIONS}:{}${}:{}",
+        b64.encode(salt),
+        b64.encode(stored_key),
+        b64.encode(server_key)
+    )
+}
+
 async fn exec(pool: &PgPool, sql: &str) {
     sqlx::query(sql)
         .execute(pool)
         .await
-        .unwrap_or_else(|error| panic!("{sql}: {error}"));
+        // The statement is not echoed: some carry a role's password.
+        .unwrap_or_else(|error| panic!("provisioning statement failed: {error}"));
 }
 
 /// The role statements from the compose/install init script, with this test's
@@ -80,7 +118,7 @@ async fn provision(admin: &PgPool, n: &Names) {
         format!(
             "CREATE ROLE {objects} LOGIN PASSWORD '{}' \
              NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS",
-            n.password
+            scram_verifier(&n.password)
         ),
         format!("CREATE DATABASE {}", n.server_db),
         format!("CREATE DATABASE {} OWNER {objects}", n.objects_db),
@@ -138,7 +176,8 @@ fn service(admin: &PgPool) -> InstanceService {
     )));
     InstanceService::new(
         Arc::new(ObjectStoreManager::new(
-            runtara_server::config::object_model_database_url(),
+            runtara_server::config::object_model_database_url()
+                .expect("this test sets OBJECT_MODEL_DATABASE_URL"),
         )),
         connections,
     )
@@ -169,9 +208,12 @@ fn validation_message(result: Result<impl std::fmt::Debug, ServiceError>) -> Str
 
 async fn assertions(admin: &PgPool, n: &Names) {
     let svc = service(admin);
-    let objects_pool = PgPool::connect(&runtara_server::config::object_model_database_url())
-        .await
-        .unwrap();
+    let objects_pool = PgPool::connect(
+        &runtara_server::config::object_model_database_url()
+            .expect("this test sets OBJECT_MODEL_DATABASE_URL"),
+    )
+    .await
+    .unwrap();
 
     // The boot check sees a non-superuser role on its own database.
     let facts = privileges::collect_facts(&objects_pool, admin)

@@ -58,10 +58,12 @@ pub(super) fn pin_trusted_dependencies(
                     "trusted component changed during composition".into(),
                 ));
             }
+            // The host binds the metadata without its surrounding
+            // whitespace, as a release keeps it.
             pins.insert(runtara_dsl::agent_meta::trusted_artifact_import(
                 agent_id,
                 &artifact.sha256,
-                &meta.file.sha256,
+                &super::sha256_hex(runtara_dsl::agent_meta::pinned_metadata(&bytes)),
             ));
         }
     }
@@ -158,7 +160,7 @@ pub fn bundled_trusted_pin(components_dir: &std::path::Path, agent: &str) -> Opt
     Some(runtara_dsl::agent_meta::trusted_artifact_import(
         agent,
         &super::sha256_hex(&wasm),
-        &super::sha256_hex(&meta),
+        &super::sha256_hex(runtara_dsl::agent_meta::pinned_metadata(&meta)),
     ))
 }
 
@@ -268,10 +270,19 @@ mod tests {
             Some(bundled.as_str())
         );
 
+        // Whitespace around the metadata's JSON is not another version: a
+        // release does not keep it.
+        std::fs::write(&meta_path, [meta.as_slice(), b"\n"].concat()).unwrap();
+        assert_eq!(
+            bundled_trusted_pin(bundle.path(), "s3-storage").as_deref(),
+            Some(bundled.as_str())
+        );
+        require_bundled_version(bundle.path(), "wrapper", &staged, &bundled).unwrap();
+
         // An upgraded bundle, or one without the built-in at all, refuses the
         // older pin with a typed error naming the workflow-agent to republish
         // and carrying the stale pin, so the server can record it.
-        std::fs::write(&meta_path, [meta.as_slice(), b"\n"].concat()).unwrap();
+        std::fs::write(&meta_path, b"{\"id\":\"s3-storage\",\"v\":2}").unwrap();
         assert_ne!(
             bundled_trusted_pin(bundle.path(), "s3-storage").as_deref(),
             Some(bundled.as_str())

@@ -164,6 +164,7 @@ fn parks_under_capability_abi(violation: &WorkflowAgentSafetyViolation) -> bool 
             | ("EmbedWorkflow", "retry-backoff")
             | ("Split", "retry-backoff")
             | ("Agent", "suspending-capability")
+            | ("Agent", "child-run")
             | ("WaitForInstances", "wait-for-instances")
     )
 }
@@ -261,6 +262,24 @@ fn collect_workflow_agent_step_safety(
             "the capability suspends; published as an agent it parks in its caller's place",
         );
     }
+    // A workflow-agent that parks runs as a child run, and its caller parks
+    // on a wait for it.
+    if let Step::Agent(agent) = step
+        && context.catalog.is_some_and(|catalog| {
+            catalog
+                .capability(&agent.agent_id, &agent.capability_id)
+                .and_then(|capability| capability.workflow_run.as_ref())
+                .is_some_and(|target| target.parks)
+        })
+    {
+        push_workflow_agent_safety_violation(
+            violations,
+            path,
+            step,
+            "child-run",
+            "the workflow-agent parks, so it runs as a child run and its caller parks on it",
+        );
+    }
     // A breakpoint is not a publication hazard: the capability lowering strips
     // it, so a published agent carries no breakpoint import and cannot pause.
     // Refusing here would reject a workflow over a debugging aid that does not
@@ -302,6 +321,8 @@ fn collect_workflow_agent_step_safety(
         // Only workflows with no root runtime ownership can keep non-durable
         // retry/rate-limit waits local and unwind them on parent cancellation.
         Step::Agent(_) if cooperative_waits_supported => {}
+        // `0` disables every retry, rate-limited ones included: no backoff.
+        Step::Agent(agent) if agent.max_retries == Some(0) => {}
         Step::Agent(_) => push_workflow_agent_safety_violation(
             violations,
             path,
@@ -2236,8 +2257,13 @@ mod tests {
                 "debug events require runtime"
             );
 
+            // Owning the runtime, a retrying call parks in its backoff; one
+            // with every retry disabled never waits.
             graph.durable = Some(true);
-            assert!(analyze_workflow_agent_safety(&graph, &[], None).may_suspend_or_sleep);
+            assert_eq!(
+                analyze_workflow_agent_safety(&graph, &[], None).may_suspend_or_sleep,
+                retries > 0
+            );
             graph.durable = Some(false);
             // An error path requiring root runtime ownership must be considered
             // even when the HTTP call itself is non-durable.
@@ -2248,7 +2274,10 @@ mod tests {
                 }))
                 .unwrap(),
             );
-            assert!(analyze_workflow_agent_safety(&graph, &[], None).may_suspend_or_sleep);
+            assert_eq!(
+                analyze_workflow_agent_safety(&graph, &[], None).may_suspend_or_sleep,
+                retries > 0
+            );
         }
     }
 

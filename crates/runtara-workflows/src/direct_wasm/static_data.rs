@@ -55,6 +55,28 @@ pub(super) const AGENT_UNEXPECTED_SUSPEND_FIELDS: [&str; 4] = [
     "permanent",
     "error",
 ];
+/// The step error of a child run that was cancelled before it ended.
+pub(super) const CHILD_RUN_CANCELLED_FIELDS: [&str; 4] = [
+    "CANCELLED",
+    "The child run was cancelled",
+    "cancellation",
+    "error",
+];
+/// The step error of a child run that trapped.
+pub(super) const CHILD_RUN_TRAPPED_FIELDS: [&str; 4] = [
+    "CHILD_RUN_TRAPPED",
+    "The child run trapped",
+    "permanent",
+    "error",
+];
+/// The step error of a child run the workflow API could not start or read.
+pub(super) const CHILD_RUN_UNAVAILABLE_FIELDS: [&str; 4] = [
+    "CHILD_RUN_UNAVAILABLE",
+    "The child run could not be started or read",
+    "transient",
+    "error",
+];
+
 /// The step error of a suspension the host refused: it broke the caps (no
 /// wakes, more than 16, a wait id over 64 bytes, a state over 64 KiB) or named
 /// an instance wait its operation did not register.
@@ -231,6 +253,11 @@ pub(super) struct DirectCoreStaticData {
     pub(super) invalid_suspension_error: Option<DirectDataSegment>,
     /// `AGENT_UNEXPECTED_SUSPEND_FIELDS`, laid out whenever an agent is called.
     pub(super) unexpected_suspend_error: Option<DirectDataSegment>,
+    /// The `/v1/tasks` binding of each Agent that runs a child run.
+    agent_child_runs: BTreeMap<u32, DirectDataSegment>,
+    /// The cancelled, trapped and unavailable child-run errors, laid out only
+    /// when a child run exists.
+    pub(super) child_run_errors: Option<[DirectDataSegment; 3]>,
     pub(super) heap_base: i32,
     pub(super) memory_min_pages: u64,
 }
@@ -453,6 +480,26 @@ impl DirectCoreStaticData {
             offset = align_i32(checked_offset_add(offset, fields.len())?, 16);
             Some(segment)
         };
+        let mut agent_child_runs = BTreeMap::new();
+        collect_child_runs(graph, &mut offset, &mut agent_child_runs)?;
+        for child in child_workflows {
+            collect_child_runs(&child.graph, &mut offset, &mut agent_child_runs)?;
+        }
+        let child_run_errors = if agent_child_runs.is_empty() {
+            None
+        } else {
+            let mut segments = Vec::new();
+            for fields in [
+                CHILD_RUN_CANCELLED_FIELDS,
+                CHILD_RUN_TRAPPED_FIELDS,
+                CHILD_RUN_UNAVAILABLE_FIELDS,
+            ] {
+                let fields = fields.concat();
+                segments.push(DirectDataSegment::new(offset, fields.as_bytes()));
+                offset = align_i32(checked_offset_add(offset, fields.len())?, 16);
+            }
+            Some(segments.try_into().expect("three child-run errors"))
+        };
         let unexpected_suspend_error = if agent_capability_ids.is_empty() {
             None
         } else {
@@ -502,6 +549,8 @@ impl DirectCoreStaticData {
             operation_scope_error,
             invalid_suspension_error,
             unexpected_suspend_error,
+            agent_child_runs,
+            child_run_errors,
             heap_base: offset,
             memory_min_pages,
         })
@@ -555,6 +604,12 @@ impl DirectCoreStaticData {
         self.agent_workflow_agents.contains(&agent_id)
     }
 
+    /// The `/v1/tasks` binding of an Agent that runs its workflow-agent as a
+    /// child run of its own, instead of calling a composed component.
+    pub(super) fn agent_child_run(&self, agent_id: u32) -> Option<&DirectDataSegment> {
+        self.agent_child_runs.get(&agent_id)
+    }
+
     /// True when the Agent's capability suspends (catalog `suspends`).
     pub(super) fn agent_suspends(&self, agent_id: u32) -> bool {
         self.agent_suspending.contains(&agent_id)
@@ -596,6 +651,8 @@ impl DirectCoreStaticData {
         segments.extend(self.operation_scope_error.as_ref());
         segments.extend(self.invalid_suspension_error.as_ref());
         segments.extend(self.unexpected_suspend_error.as_ref());
+        segments.extend(self.agent_child_runs.values());
+        segments.extend(self.child_run_errors.iter().flatten());
         segments
     }
 }
@@ -636,6 +693,28 @@ fn collect_static_step_ids(
             let segment = DirectDataSegment::new(*offset, label.as_bytes());
             *offset = align_i32(checked_offset_add(*offset, label.len())?, 16);
             step_ids.insert(label.clone(), segment);
+        }
+    }
+    Ok(())
+}
+
+fn collect_child_runs(
+    graph: &DirectGraphManifest,
+    offset: &mut i32,
+    child_runs: &mut BTreeMap<u32, DirectDataSegment>,
+) -> Result<(), DirectCompileError> {
+    for agent in &graph.agents {
+        if let Some(binding) = &agent.child_run {
+            child_runs.insert(
+                agent.id,
+                DirectDataSegment::new(*offset, binding.as_bytes()),
+            );
+            *offset = align_i32(checked_offset_add(*offset, binding.len())?, 16);
+        }
+    }
+    for step in &graph.steps {
+        for nested in &step.nested_graphs {
+            collect_child_runs(&nested.graph, offset, child_runs)?;
         }
     }
     Ok(())
@@ -978,6 +1057,7 @@ mod tests {
             durable: false,
             rate_limited: false,
             is_workflow_agent: false,
+            child_run: None,
             suspends: false,
             operation_scoped: false,
             input_mapping_id: 0,

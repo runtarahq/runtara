@@ -60,10 +60,18 @@ fn parse_options(mut args: impl Iterator<Item = OsString>) -> Result<ReencryptAr
     Ok(ReencryptArgs { tenant_id })
 }
 
-/// Run the job and print its statistics. Errors when encryption is off, the
-/// job fails, or any row could not be re-encrypted.
-pub async fn run(pool: PgPool, args: ReencryptArgs) -> Result<ReencryptionStats, String> {
-    let cipher = cipher_from_env()?;
+/// Run the job and print its statistics, with the host's cipher if it
+/// supplies one (else the keyring from the environment). Errors when
+/// encryption is off, the job fails, or any row could not be re-encrypted.
+pub async fn run(
+    pool: PgPool,
+    args: ReencryptArgs,
+    cipher: Option<std::sync::Arc<dyn runtara_connections::CredentialCipher>>,
+) -> Result<ReencryptionStats, String> {
+    let cipher = match cipher {
+        Some(cipher) => cipher,
+        None => cipher_from_env()?,
+    };
     if !cipher.is_encrypting() {
         return Err(format!(
             "Encryption is not enabled. Set {ENCRYPTION_KEY_ENV} before running {COMMAND}."

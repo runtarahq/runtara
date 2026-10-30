@@ -29,7 +29,21 @@ async fn get_pool() -> Option<PgPool> {
     Some(pool)
 }
 
+use runtara_environment::artifacts::{ArtifactStore, Digest, FilesystemArtifactStore};
 use runtara_environment::image_registry::{ImageBuilder, ImageRegistry};
+
+/// The artifact store this binary's images keep their bytes in.
+fn store() -> &'static FilesystemArtifactStore {
+    static STORE: std::sync::OnceLock<(tempfile::TempDir, FilesystemArtifactStore)> =
+        std::sync::OnceLock::new();
+    &STORE
+        .get_or_init(|| {
+            let dir = tempfile::tempdir().expect("artifact store dir");
+            let store = FilesystemArtifactStore::new(dir.path());
+            (dir, store)
+        })
+        .1
+}
 
 #[tokio::test]
 async fn test_register_and_get_image() {
@@ -40,7 +54,7 @@ async fn test_register_and_get_image() {
     let tenant_id = "test-tenant";
     let name = format!("test-image-{}", Uuid::new_v4());
 
-    let image = ImageBuilder::new(tenant_id, &name, "/tmp/test-binary")
+    let image = ImageBuilder::new(tenant_id, &name)
         .description("Test image")
         .build();
 
@@ -48,7 +62,7 @@ async fn test_register_and_get_image() {
 
     // Register
     registry
-        .register(&image)
+        .register(&image, b"/tmp/test-binary", store())
         .await
         .expect("Failed to register image");
 
@@ -64,7 +78,7 @@ async fn test_register_and_get_image() {
 
     // Cleanup
     registry
-        .delete(&image_id)
+        .delete(&image_id, store())
         .await
         .expect("Failed to delete image");
 }
@@ -78,12 +92,12 @@ async fn test_get_by_name() {
     let tenant_id = "test-tenant";
     let name = format!("test-image-byname-{}", Uuid::new_v4());
 
-    let image = ImageBuilder::new(tenant_id, &name, "/tmp/test-binary").build();
+    let image = ImageBuilder::new(tenant_id, &name).build();
     let image_id = image.image_id.clone();
 
     // Register
     registry
-        .register(&image)
+        .register(&image, b"/tmp/test-binary", store())
         .await
         .expect("Failed to register image");
 
@@ -98,7 +112,7 @@ async fn test_get_by_name() {
 
     // Cleanup
     registry
-        .delete(&image_id)
+        .delete(&image_id, store())
         .await
         .expect("Failed to delete image");
 }
@@ -115,10 +129,10 @@ async fn test_list_images() {
     // Create multiple images
     for i in 0..3 {
         let name = format!("test-image-{}-{}", i, Uuid::new_v4());
-        let image = ImageBuilder::new(&tenant_id, &name, "/tmp/test-binary").build();
+        let image = ImageBuilder::new(&tenant_id, &name).build();
         let id = image.image_id.clone();
         registry
-            .register(&image)
+            .register(&image, b"/tmp/test-binary", store())
             .await
             .expect("Failed to register image");
         image_ids.push(id);
@@ -147,7 +161,10 @@ async fn test_list_images() {
 
     // Cleanup
     for id in image_ids {
-        registry.delete(&id).await.expect("Failed to delete image");
+        registry
+            .delete(&id, store())
+            .await
+            .expect("Failed to delete image");
     }
 }
 
@@ -160,20 +177,20 @@ async fn test_duplicate_name_updates() {
     let tenant_id = "test-tenant";
     let name = format!("test-image-dup-{}", Uuid::new_v4());
 
-    let image1 = ImageBuilder::new(tenant_id, &name, "/tmp/test-binary-1").build();
-    let image2 = ImageBuilder::new(tenant_id, &name, "/tmp/test-binary-2").build();
+    let image1 = ImageBuilder::new(tenant_id, &name).build();
+    let image2 = ImageBuilder::new(tenant_id, &name).build();
 
     let image_id1 = image1.image_id.clone();
 
     // Register first
     registry
-        .register(&image1)
+        .register(&image1, b"/tmp/test-binary-1", store())
         .await
         .expect("Failed to register first image");
 
     // Register second with same name - should update (ON CONFLICT DO UPDATE)
     registry
-        .register(&image2)
+        .register(&image2, b"/tmp/test-binary-2", store())
         .await
         .expect("Failed to register second image");
 
@@ -186,10 +203,13 @@ async fn test_duplicate_name_updates() {
 
     // The image row keeps its stable primary key so instance_images references remain valid.
     assert_eq!(retrieved.image_id, image_id1);
-    assert_eq!(retrieved.binary_path, "/tmp/test-binary-2");
+    assert_eq!(
+        retrieved.binary_digest.as_deref(),
+        Some(Digest::of(b"/tmp/test-binary-2").as_str())
+    );
 
     registry
-        .delete(&image_id1)
+        .delete(&image_id1, store())
         .await
         .expect("Failed to delete image");
 }
@@ -206,18 +226,8 @@ async fn test_claim_name_returns_one_canonical_id() {
     let second_candidate = Uuid::new_v4().to_string();
 
     let (first, second) = tokio::join!(
-        registry.claim_name(
-            tenant_id,
-            &name,
-            &first_candidate,
-            "/tmp/test-claimed-binary",
-        ),
-        registry.claim_name(
-            tenant_id,
-            &name,
-            &second_candidate,
-            "/tmp/test-claimed-binary",
-        ),
+        registry.claim_name(tenant_id, &name, &first_candidate,),
+        registry.claim_name(tenant_id, &name, &second_candidate,),
     );
     let first = first.expect("first name claim must succeed");
     let second = second.expect("second name claim must succeed");
@@ -230,7 +240,7 @@ async fn test_claim_name_returns_one_canonical_id() {
     assert_eq!(second.image_id, first.image_id);
 
     registry
-        .delete(&first.image_id)
+        .delete(&first.image_id, store())
         .await
         .expect("Failed to delete claimed image");
 }
@@ -245,7 +255,7 @@ async fn test_delete_nonexistent() {
 
     // Delete should return false for nonexistent
     let deleted = registry
-        .delete(&nonexistent_id)
+        .delete(&nonexistent_id, store())
         .await
         .expect("Delete should not error");
     assert!(!deleted);
@@ -280,14 +290,14 @@ async fn test_image_with_metadata() {
         "tags": ["test", "example"]
     });
 
-    let image = ImageBuilder::new(tenant_id, &name, "/tmp/test-binary")
+    let image = ImageBuilder::new(tenant_id, &name)
         .metadata(metadata.clone())
         .build();
 
     let image_id = image.image_id.clone();
 
     registry
-        .register(&image)
+        .register(&image, b"/tmp/test-binary", store())
         .await
         .expect("Failed to register image");
 
@@ -300,7 +310,113 @@ async fn test_image_with_metadata() {
 
     // Cleanup
     registry
-        .delete(&image_id)
+        .delete(&image_id, store())
         .await
         .expect("Failed to delete image");
+}
+
+/// Images with the same bytes share one artifact, which goes with the last
+/// image that names it.
+#[tokio::test]
+async fn an_artifact_is_released_with_the_last_image_naming_it() {
+    skip_if_no_db!();
+    let pool = get_pool().await.expect("Failed to connect to database");
+    let registry = ImageRegistry::new(pool.clone());
+    let bytes = format!("shared-{}", Uuid::new_v4()).into_bytes();
+    let digest = Digest::of(&bytes);
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let image = ImageBuilder::new(
+            "test-tenant",
+            format!("test-image-shared-{}", Uuid::new_v4()),
+        )
+        .build();
+        let registered = registry
+            .register(&image, &bytes, store())
+            .await
+            .expect("register");
+        assert_eq!(registered, digest);
+        ids.push(image.image_id);
+    }
+
+    assert!(registry.delete(&ids[0], store()).await.unwrap());
+    assert!(
+        store().exists(&digest).await.unwrap(),
+        "another image still names it"
+    );
+    assert!(registry.artifact_present(&ids[1], store()).await.unwrap());
+    assert!(registry.delete(&ids[1], store()).await.unwrap());
+    assert!(!store().exists(&digest).await.unwrap());
+}
+
+/// An image registered before the artifact store had its bytes at a path;
+/// the boot import moves them into the store under the digest it recorded,
+/// and leaves a file whose bytes no longer match that digest where it is.
+#[tokio::test]
+async fn legacy_image_artifacts_move_into_the_store() {
+    skip_if_no_db!();
+    let pool = get_pool().await.expect("Failed to connect to database");
+    let registry = ImageRegistry::new(pool.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let insert = |id: String, path: std::path::PathBuf, digest: Digest| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO images (image_id, tenant_id, name, binary_path, binary_digest) \
+                 VALUES ($1, 'test-tenant', $1, $2, $3)",
+            )
+            .bind(&id)
+            .bind(path.to_string_lossy().as_ref())
+            .bind(digest.as_str())
+            .execute(&pool)
+            .await
+            .unwrap();
+            id
+        }
+    };
+
+    let bytes = format!("legacy-{}", Uuid::new_v4()).into_bytes();
+    let legacy_dir = dir.path().join("images").join("legacy");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    let legacy_path = legacy_dir.join("binary");
+    std::fs::write(&legacy_path, &bytes).unwrap();
+    let legacy = insert(
+        Uuid::new_v4().to_string(),
+        legacy_path.clone(),
+        Digest::of(&bytes),
+    )
+    .await;
+
+    let changed_path = dir.path().join("changed");
+    std::fs::write(&changed_path, b"not what was recorded").unwrap();
+    let changed = insert(
+        Uuid::new_v4().to_string(),
+        changed_path.clone(),
+        Digest::of(b"what was recorded"),
+    )
+    .await;
+
+    registry.import_legacy_artifacts(store()).await.unwrap();
+
+    let image = registry.get(&legacy).await.unwrap().unwrap();
+    assert_eq!(image.artifact_digest().unwrap(), Digest::of(&bytes));
+    assert_eq!(
+        store().get(&Digest::of(&bytes)).await.unwrap().unwrap(),
+        bytes
+    );
+    assert!(!legacy_path.exists(), "the old file is removed");
+    assert!(!legacy_dir.exists(), "and its image directory");
+    let path: Option<String> =
+        sqlx::query_scalar("SELECT binary_path FROM images WHERE image_id = $1")
+            .bind(&legacy)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(path, None);
+
+    assert!(!registry.artifact_present(&changed, store()).await.unwrap());
+    assert!(changed_path.exists(), "a mismatched file is left in place");
+
+    registry.delete(&legacy, store()).await.unwrap();
+    registry.delete(&changed, store()).await.unwrap();
 }

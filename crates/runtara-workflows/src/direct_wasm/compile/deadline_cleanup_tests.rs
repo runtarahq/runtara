@@ -9,7 +9,7 @@ fn agent(cpu_body: bool) -> anyhow::Result<Vec<u8>> {
         r#"(global $set (mut i32) (i32.const 0))
         (func (export "invoke") (param i32 i32 i32 i32) (result i32)
           (global.set $set (call $new))
-          (call $join (i32.shr_u (call $sleep (i64.const 300000)) (i32.const 4)) (global.get $set))
+          (call $join (i32.shr_u (call $sleep (i64.const 300000000000)) (i32.const 4)) (global.get $set))
           (i32.or (i32.shl (global.get $set) (i32.const 4)) (i32.const 2)))
         (func (export "callback") (param $event i32) (param i32 i32) (result i32)
           (if (i32.ne (local.get $event) (i32.const 6)) (then unreachable))
@@ -17,9 +17,9 @@ fn agent(cpu_body: bool) -> anyhow::Result<Vec<u8>> {
     };
     Ok(wat::parse_str(format!(
         r#"(component
-      (import "runtara:host/timers@1.0.0" (instance $timers
-        (export "sleep" (func async (param "ms" u64)))))
-      (core func $sleep (canon lower (func $timers "sleep") async))
+      (import "wasi:clocks/monotonic-clock@0.3.0" (instance $timers
+        (export "wait-for" (func async (param "how-long" u64)))))
+      (core func $sleep (canon lower (func $timers "wait-for") async))
       (core func $new (canon waitable-set.new))
       (core func $join (canon waitable.join))
       (core module $code
@@ -42,8 +42,8 @@ fn agent(cpu_body: bool) -> anyhow::Result<Vec<u8>> {
       (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
       (func $invoke async (param "capability-id" string) (param "input" (list u8))
         (result (result $outcome (error $error)))
-        (canon lift (core func $code "invoke") (memory $code "memory")
-          (realloc (func $code "realloc")) {}))
+        (canon lift (core func $code "invoke") (memory (core memory $code "memory"))
+          (realloc (core func $code "realloc")) {}))
       (instance $agent (export "error-info" (type $error))
         (export "signal-wait" (type $signal)) (export "wake" (type $wake))
         (export "suspension" (type $suspension)) (export "outcome" (type $outcome))
@@ -52,7 +52,7 @@ fn agent(cpu_body: bool) -> anyhow::Result<Vec<u8>> {
         if cpu_body {
             ""
         } else {
-            "async (callback (func $code \"callback\"))"
+            "async (callback (core func $code \"callback\"))"
         }
     ))?)
 }

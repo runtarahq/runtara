@@ -81,11 +81,6 @@ pub fn error(code: &str, message: &str) -> String {
     .to_string()
 }
 
-#[cfg(target_arch = "wasm32")]
-mod bindings {
-    wit_bindgen::generate!({path: "../runtara-wit/wit/trusted", world: "client", async: true});
-}
-
 /// Generated ordinary capability wrappers use this path, never the privileged
 /// function. Native unit tests must invoke that function with an explicit context.
 pub async fn invoke(agent: &str, capability: &str, input: Value) -> Result<Value, String> {
@@ -97,17 +92,10 @@ pub async fn invoke(agent: &str, capability: &str, input: Value) -> Result<Value
         .ok_or_else(|| error("TRUSTED_CONNECTION_REQUIRED", "A connection is required"))?;
     #[cfg(target_arch = "wasm32")]
     {
-        let bytes = serde_json::to_vec(&input)
-            .map_err(|_| error("INVALID_INPUT", "Invalid trusted capability input"))?;
-        let output = bindings::runtara::trusted::executor::invoke(
-            agent.to_owned(),
-            capability.to_owned(),
-            connection.to_owned(),
-            bytes,
-        )
-        .await?;
-        serde_json::from_slice(&output)
-            .map_err(|_| error("INVALID_OUTPUT", "Invalid trusted capability output"))
+        // `POST /v1/trusted/{agent}/{capability}`, under the run's pins.
+        runtara_workflow_sdk::trusted(agent, capability, connection, &input, None)
+            .await
+            .map_err(trusted_failure)
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -119,9 +107,76 @@ pub async fn invoke(agent: &str, capability: &str, input: Value) -> Result<Value
     }
 }
 
+/// The agent-facing error of a failed trusted call: the executor's own
+/// envelope when it answered, the host's refusal as before, and otherwise an
+/// envelope whose retryability follows the API's error.
+#[cfg(any(target_arch = "wasm32", test))]
+fn trusted_failure(failure: runtara_workflow_sdk::Error) -> String {
+    use runtara_workflow_api::ErrorCode;
+    use runtara_workflow_sdk::Error as Failure;
+    match failure {
+        Failure::Api(error)
+            if error.code.as_str() == "trusted-error" && error.details.is_some() =>
+        {
+            error
+                .details
+                .map(|details| details.to_string())
+                .unwrap_or_default()
+        }
+        Failure::Api(error) if error.code == ErrorCode::Denied => error_envelope(
+            "TRUSTED_CAPABILITY_DENIED",
+            "Trusted execution is not available in this context",
+            false,
+        ),
+        Failure::Api(error) => error_envelope(
+            "TRUSTED_UNAVAILABLE",
+            &error.message,
+            error.code.retryable(),
+        ),
+        Failure::Transport(message) => error_envelope("TRUSTED_UNAVAILABLE", &message, true),
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn error_envelope(code: &str, message: &str, retryable: bool) -> String {
+    serde_json::json!({"code": code, "message": message,
+        "category": if retryable { "transient" } else { "permanent" },
+        "severity": "error", "retryable": retryable})
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn trusted_failures_keep_the_executors_envelope() {
+        use runtara_workflow_api::{ApiError, ErrorCode};
+        use runtara_workflow_sdk::Error;
+        let envelope = serde_json::json!({"code": "TRUSTED_VERSION_REQUIRED",
+            "message": "Workflow has no matching approved trusted dependency",
+            "category": "permanent", "severity": "error", "retryable": false});
+        let answered = trusted_failure(Error::Api(
+            ApiError::domain("trusted-error", ErrorCode::Denied, "no pin")
+                .with_details(envelope.clone()),
+        ));
+        assert_eq!(serde_json::from_str::<Value>(&answered).unwrap(), envelope);
+
+        let refused = trusted_failure(Error::Api(ApiError::new(ErrorCode::Denied, "no")));
+        let refused: Value = serde_json::from_str(&refused).unwrap();
+        assert_eq!(refused["code"], "TRUSTED_CAPABILITY_DENIED");
+        assert_eq!(refused["retryable"], false);
+
+        for (code, retryable) in [(ErrorCode::Unavailable, true), (ErrorCode::Fenced, false)] {
+            let other: Value =
+                serde_json::from_str(&trusted_failure(Error::Api(ApiError::new(code, "x"))))
+                    .unwrap();
+            assert_eq!(other["retryable"], retryable, "{other}");
+        }
+        let lost: Value =
+            serde_json::from_str(&trusted_failure(Error::Transport("reset".into()))).unwrap();
+        assert_eq!(lost["retryable"], true);
+    }
+
     #[test]
     fn object_paths_remain_under_authorized_endpoint() {
         let base = "https://storage.example.test/tenant";

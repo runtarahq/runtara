@@ -213,14 +213,22 @@ async fn unmatched_integration_ids_return_nothing() {
 /// returning None after decrypting would still violate the trusted boundary.
 #[tokio::test]
 async fn trusted_resolution_checks_tenant_and_exact_type_before_decryption() {
-    use runtara_connections::crypto::{CipherError, CredentialCipher};
+    use runtara_connections::crypto::{CipherContext, CipherError, CredentialCipher};
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct CountingCipher(AtomicUsize);
     impl CredentialCipher for CountingCipher {
-        fn encrypt(&self, value: &serde_json::Value) -> Result<serde_json::Value, CipherError> {
+        fn encrypt(
+            &self,
+            value: &serde_json::Value,
+            _: &CipherContext,
+        ) -> Result<serde_json::Value, CipherError> {
             Ok(value.clone())
         }
-        fn decrypt(&self, value: &serde_json::Value) -> Result<serde_json::Value, CipherError> {
+        fn decrypt(
+            &self,
+            value: &serde_json::Value,
+            _: &CipherContext,
+        ) -> Result<serde_json::Value, CipherError> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(value.clone())
         }

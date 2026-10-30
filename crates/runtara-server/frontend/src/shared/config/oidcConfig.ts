@@ -41,8 +41,8 @@ const onSigninCallback = (user?: User) => {
     return;
   }
 
-  // Already on a per-tenant path (or no org_id): just clean the auth params
-  // off the URL.
+  // Already on a per-tenant path, or a token naming no tenant (the app then
+  // offers the user's workspaces): just clean the auth params off the URL.
   window.history.replaceState({}, document.title, window.location.pathname);
 };
 
@@ -100,7 +100,11 @@ export const oidcConfig = {
   // instead of silently authenticating them into their default org.
   extraQueryParams: {
     ...(OIDC_AUDIENCE ? { audience: OIDC_AUDIENCE } : {}),
-    ...(tenantIdFromUrl ? { organization: tenantIdFromUrl } : {}),
+    // Only for an IdP that models tenants as Auth0 Organizations; where
+    // membership decides the tenant, the login names none.
+    ...(tenantIdFromUrl && config.oidc.organizations
+      ? { organization: tenantIdFromUrl }
+      : {}),
   },
   automaticSilentRenew: isOidcAuth,
   userStore: new WebStorageStateStore({ store: window.localStorage }),

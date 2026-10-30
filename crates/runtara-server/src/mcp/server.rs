@@ -33,6 +33,15 @@ pub struct SmoMcpServer {
     pub(crate) workflow_mutation_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
+impl SmoMcpServer {
+    /// The tenant a tool acts for: the calling request's, falling back to the
+    /// tenant the server was built for when no caller is bound (non-HTTP
+    /// transports, tests).
+    pub(crate) fn tenant(&self) -> String {
+        tools::internal_api::caller_tenant().unwrap_or_else(|| self.tenant_id.clone())
+    }
+}
+
 #[tool_router]
 impl SmoMcpServer {
     pub fn new(

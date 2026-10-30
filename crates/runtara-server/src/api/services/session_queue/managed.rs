@@ -28,6 +28,28 @@ pub enum QueueError {
 }
 pub type QueueResult<T> = Result<T, QueueError>;
 
+/// Where a session's queue keys live: `runtara:session:{digest}`, or, for a
+/// tenant-scoped process (`RUNTARA_VALKEY_TENANT_SCOPED`), under the tenant's
+/// own prefix, `{tenant}:session:{digest}`, which its Valkey access rules
+/// cover. A scoped tenant id must be plain, since it is also a SCAN pattern.
+fn session_prefix(tenant_id: &str, digest: &str) -> QueueResult<String> {
+    if !crate::config::valkey_tenant_scoped() {
+        return Ok(format!("runtara:session:{digest}"));
+    }
+    if !tenant_id
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+    {
+        return Err(QueueError::Invalid);
+    }
+    Ok(format!("{tenant_id}:session:{digest}"))
+}
+
+/// A tenant-scoped process's index of its queues' owner keys.
+fn session_index(tenant_id: &str) -> String {
+    format!("{tenant_id}:session:index")
+}
+
 #[derive(Clone, Debug)]
 pub struct QueueScope {
     tenant_id: String,
@@ -49,7 +71,7 @@ impl QueueScope {
         Ok(Self {
             tenant_id: tenant_id.into(),
             session_id: session_id.into(),
-            prefix: format!("runtara:session:{{{digest:x}}}"),
+            prefix: session_prefix(tenant_id, &format!("{{{digest:x}}}"))?,
         })
     }
     pub fn tenant_id(&self) -> &str {
@@ -67,6 +89,17 @@ impl QueueScope {
         conn: &mut ConnectionManager,
         args: &[String],
     ) -> QueueResult<(String, Option<String>)> {
+        // A tenant-scoped process may not SCAN (it would list every
+        // tenant's key names), so it indexes its queues for discovery. Added
+        // before the script runs, so no queue it creates is missed; an entry
+        // whose queue has since expired is dropped by `scan_scopes`.
+        if crate::config::valkey_tenant_scoped() {
+            let _: () = redis::cmd("SADD")
+                .arg(session_index(&self.tenant_id))
+                .arg(&self.keys()[4])
+                .query_async(conn)
+                .await?;
+        }
         let script = redis::Script::new(SCRIPT);
         let mut call = script.prepare_invoke();
         for key in self.keys() {
@@ -224,14 +257,27 @@ pub async fn scan_scopes(
     if count == 0 || count > 1000 {
         return Err(QueueError::Invalid);
     }
-    let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-        .arg(cursor)
-        .arg("MATCH")
-        .arg("runtara:session:*:owner")
-        .arg("COUNT")
-        .arg(count)
-        .query_async(conn)
-        .await?;
+    let scoped = crate::config::valkey_tenant_scoped();
+    let (next, keys): (u64, Vec<String>) = if scoped {
+        // Its own index rather than the keyspace (see `QueueScope::run`).
+        session_prefix(tenant_id, "")?;
+        redis::cmd("SSCAN")
+            .arg(session_index(tenant_id))
+            .arg(cursor)
+            .arg("COUNT")
+            .arg(count)
+            .query_async(conn)
+            .await?
+    } else {
+        redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(session_prefix(tenant_id, "*")? + ":owner")
+            .arg("COUNT")
+            .arg(count)
+            .query_async(conn)
+            .await?
+    };
     let mut scan = ScopeScan {
         cursor: next,
         scopes: Vec::with_capacity(keys.len()),
@@ -264,6 +310,18 @@ pub async fn scan_scopes(
                     .is_ok_and(|scope| scope.keys()[4] == key) =>
             {
                 scan.corrupt_keys.push(key)
+            }
+            // An indexed queue that has since expired or been cleaned up.
+            // Checked again and dropped in one step, so a queue created
+            // since the HMGET keeps its entry.
+            (None, None) if scoped => {
+                let _: i64 = redis::Script::new(
+                    "if redis.call('EXISTS', KEYS[2]) == 0 then return redis.call('SREM', KEYS[1], KEYS[2]) end return 0",
+                )
+                .key(session_index(tenant_id))
+                .key(&key)
+                .invoke_async(conn)
+                .await?;
             }
             // Another tenant's queue, or an owner that concurrent
             // completed-queue cleanup removed, or one corrupt beyond

@@ -34,6 +34,10 @@ fn request(capability: &str) -> StartRequest {
         },
     }
 }
+/// Children's limits: room for the api component every child composes.
+const CHILD_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+const CHILD_TABLE_ELEMENTS: usize = 10_000;
+
 fn settings(deadline: Instant, cancel: Arc<AtomicBool>) -> Arc<ScopedRunSettings> {
     Arc::new(ScopedRunSettings {
         trusted_instance: None,
@@ -42,8 +46,8 @@ fn settings(deadline: Instant, cancel: Arc<AtomicBool>) -> Arc<ScopedRunSettings
         deadline,
         root_cancel: Some(cancel),
         limits: WorkflowLimits {
-            max_memory_bytes: 2 * 65536,
-            max_table_elements: 100,
+            max_memory_bytes: CHILD_MEMORY_BYTES,
+            max_table_elements: CHILD_TABLE_ELEMENTS,
         },
     })
 }
@@ -70,8 +74,8 @@ async fn scope_factory_binds_root_authority_and_remaining_budget() {
     assert_eq!(child.deadline, Some(deadline));
     assert!(Arc::ptr_eq(child.spec.cancel.as_ref().unwrap(), &cancel));
     assert_eq!(child.spec.env.get("TEST_SCOPE").unwrap(), "root-approved");
-    assert_eq!(child.spec.limits.max_memory_bytes, 2 * 65536);
-    assert_eq!(child.spec.limits.max_table_elements, 100);
+    assert_eq!(child.spec.limits.max_memory_bytes, CHILD_MEMORY_BYTES);
+    assert_eq!(child.spec.limits.max_table_elements, CHILD_TABLE_ELEMENTS);
     let runtime = child.spec.runtime.unwrap();
     assert_eq!(runtime.instance_id().unwrap(), fx.id);
     assert!(runtime.get_checkpoint("sibling/key".into()).await.is_err());
@@ -161,7 +165,14 @@ async fn catalog(
     let mut compiled = Vec::new();
     for (name, source) in [("root", root_wat), ("child", child_wat())] {
         let path = dir.path().join(format!("{name}.wasm"));
-        std::fs::write(&path, wat::parse_str(source).unwrap()).unwrap();
+        let wasm = wat::parse_str(source).unwrap();
+        // The child reaches its run over the workflow API.
+        let wasm = if name == "child" {
+            super::with_api_component(wasm)
+        } else {
+            wasm
+        };
+        std::fs::write(&path, wasm).unwrap();
         let request = PrecompileRequest::for_artifact(fixture_nonce(), path).unwrap();
         let response = PrecompileResponse::Success(
             precompile_artifact_with_engine(&request, fx.executor.engine()).unwrap(),
@@ -202,26 +213,38 @@ async fn catalog(
 fn child_wat() -> String {
     format!(
         r#"(component
-      (import "runtara:workflow/runtime@1.0.0" (instance $runtime
-        (export "heartbeat" (func (result (result (error string)))))
-        (export "check-signals" (func (result (result bool (error string)))))))
-      (alias export $runtime "heartbeat" (func $heartbeat))
-      (alias export $runtime "check-signals" (func $signals))
+      (import "runtara:api/types@1.0.0" (instance $types
+        (type $error-def (record (field "code" string) (field "message" string)
+          (field "retry-after-ms" (option u64)) (field "details" (option string))))
+        (export "api-error" (type (eq $error-def)))))
+      (alias export $types "api-error" (type $api-error))
+      (import "runtara:api/time@1.0.0" (instance $time
+        (alias outer 1 $api-error (type $api-error-outer))
+        (export "api-error" (type $e (eq $api-error-outer)))
+        (export "heartbeat" (func async (result (result (error $e)))))))
+      (import "runtara:api/signals@1.0.0" (instance $signals
+        (alias outer 1 $api-error (type $api-error-outer))
+        (export "api-error" (type $e (eq $api-error-outer)))
+        (export "check-lifecycle" (func async (result (result bool (error $e)))))))
+      (alias export $time "heartbeat" (func $heartbeat))
+      (alias export $signals "check-lifecycle" (func $signals))
       (core module $memory (memory (export "memory") 1)
         (global $heap (mut i32) (i32.const 4096))
         (func (export "realloc") (param i32 i32 i32 i32) (result i32)
           (local $base i32) global.get $heap local.set $base
           global.get $heap local.get 3 i32.add i32.const 7 i32.add i32.const -8 i32.and global.set $heap local.get $base))
       (core instance $memory (instantiate $memory))
-      (core func $heartbeat (canon lower (func $heartbeat) (memory $memory "memory") (realloc (func $memory "realloc"))))
-      (core func $signals (canon lower (func $signals) (memory $memory "memory") (realloc (func $memory "realloc"))))
+      (core func $heartbeat (canon lower (func $heartbeat) (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
+      (core func $signals (canon lower (func $signals) (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
       (core module $code
         (import "memory" "memory" (memory 1))
         (import "host" "heartbeat" (func $heartbeat (param i32)))
         (import "host" "signals" (func $signals (param i32)))
-        (func $start (call $heartbeat (i32.const 64))) (start $start)
-        ;; Echo the input as the child's result; `trap` traps instead.
+        ;; Echo the input as the child's result; `trap` traps instead. The
+        ;; workflow API is async-typed, so its first IO runs in the async
+        ;; invoke rather than a start function, which may not block.
         (func (export "invoke") (param $cap i32) (param i32) (param $in i32) (param $len i32) (result i32)
+          (call $heartbeat (i32.const 64))
           (call $signals (i32.const 64))
           (if (i32.eq (i32.load8_u (local.get $cap)) (i32.const 116)) (then unreachable))
           (i32.store (i32.const 2048) (i32.const 0))
@@ -240,7 +263,7 @@ fn child_wat() -> String {
       (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
       (func $invoke async (param "capability" string) (param "input" (list u8))
         (result (result $outcome (error $error)))
-        (canon lift (core func $code "invoke") (memory $memory "memory") (realloc (func $memory "realloc"))))
+        (canon lift (core func $code "invoke") (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
       (instance $api (export "error-info" (type $error)) (export "signal-wait" (type $signal))
         (export "wake" (type $wake)) (export "suspension" (type $suspension))
         (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
@@ -277,7 +300,11 @@ async fn scope_factory_real_launcher_runs_children_without_root_effects() {
             .unwrap();
         match cap {
             "copy" => {
-                assert!(matches!(result.outcome(), InvokeExit::Completed(bytes) if *bytes == input))
+                assert!(
+                    matches!(result.outcome(), InvokeExit::Completed(bytes) if *bytes == input),
+                    "{:?}",
+                    result.outcome()
+                )
             }
             _ => assert!(matches!(result.outcome(), InvokeExit::Trapped { .. })),
         }

@@ -81,10 +81,12 @@ fn compile(
 fn imports_state(result: &DirectCompilationResult) -> bool {
     let world = fs::read_to_string(&result.world_wit_path).unwrap();
     let logic = fs::read(&result.workflow_logic_wasm_path).unwrap();
+    // A run's own entry publishes through `runtara:api` (the default ABI).
+    let state = runtara_wit::api::STATE;
     let in_logic = logic
-        .windows(runtara_wit::workflow::STATE.len())
-        .any(|window| window == runtara_wit::workflow::STATE.as_bytes());
-    assert_eq!(world.contains(runtara_wit::workflow::STATE), in_logic);
+        .windows(state.len())
+        .any(|window| window == state.as_bytes());
+    assert_eq!(world.contains(state), in_logic);
     assert_eq!(result.component_artifacts.run_state, in_logic);
     in_logic
 }

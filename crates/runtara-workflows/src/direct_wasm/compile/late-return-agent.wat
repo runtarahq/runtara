@@ -1,13 +1,24 @@
 ;; Synthetic Agent ABI fixture: cleanup completes normally after cancellation.
+;; It reports itself through `runtara:api/events.append`; the test composes it
+;; with the api component, so the events reach the run's runtime host.
 ;; Used with publicly compiled DSL parents. A five-minute timer cannot complete
 ;; within the test; the second invocation traps unless cleanup ran exactly once.
 ;; Built HTTP Agents have separate real-network interruption coverage.
 (component
-  (import "runtara:workflow/runtime@1.0.0" (instance $runtime
-    (export "custom-event" (func (param "kind" string) (param "payload" (list u8))
-      (result (result (error string)))))))
-  (import "runtara:host/timers@1.0.0" (instance $timers
-    (export "sleep" (func async (param "ms" u64)))))
+  (import "runtara:api/types@1.0.0" (instance $types
+    (type $error-def (record (field "code" string) (field "message" string)
+      (field "retry-after-ms" (option u64)) (field "details" (option string))))
+    (export "api-error" (type (eq $error-def)))))
+  (alias export $types "api-error" (type $api-error))
+  (import "runtara:api/events@1.0.0" (instance $events
+    (alias outer 1 $api-error (type $api-error-outer))
+    (export "api-error" (type $api-error (eq $api-error-outer)))
+    (type $event-def (record (field "kind" string) (field "payload" (list u8))))
+    (export "event" (type $event (eq $event-def)))
+    (export "append" (func async (param "events" (list $event))
+      (result (result (error $api-error)))))))
+  (import "wasi:clocks/monotonic-clock@0.3.0" (instance $timers
+    (export "wait-for" (func async (param "how-long" u64)))))
   (type $error (record (field "code" string) (field "message" string)
     (field "category" string) (field "severity" string) (field "retryable" bool)
     (field "retry-after-ms" (option u64)) (field "attributes" (option string))
@@ -25,19 +36,21 @@
       (global.set $heap (i32.add (global.get $heap) (local.get $size)))
       (local.get $p)))
   (core instance $memory (instantiate $memory))
-  (core func $request (canon lower (func $timers "sleep") async))
-  (core func $event (canon lower (func $runtime "custom-event")
-    (memory $memory "memory") (realloc (func $memory "realloc"))))
+  (core func $request (canon lower (func $timers "wait-for") async))
+  (core func $event (canon lower (func $events "append") async
+    (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
+  (core func $wait (canon waitable-set.wait (memory (core memory $memory "memory"))))
   (core func $new (canon waitable-set.new))
   (core func $join (canon waitable.join))
   (core func $drop-set (canon waitable-set.drop))
   (core func $cancel (canon subtask.cancel))
   (core func $drop (canon subtask.drop))
-  (core func $return (canon task.return (result (result $outcome (error $error))) (memory $memory "memory")))
+  (core func $return (canon task.return (result (result $outcome (error $error))) (memory (core memory $memory "memory"))))
   (core module $code
     (import "m" "memory" (memory 1))
     (import "h" "request" (func $request (param i64) (result i32)))
-    (import "h" "event" (func $event (param i32 i32 i32 i32 i32)))
+    (import "h" "event" (func $event (param i32 i32 i32) (result i32)))
+    (import "h" "wait" (func $wait (param i32 i32) (result i32)))
     (import "h" "new" (func $new (result i32)))
     (import "h" "join" (func $join (param i32 i32)))
     (import "h" "drop-set" (func $drop-set (param i32)))
@@ -51,9 +64,27 @@
     (data (i32.const 1024) "{\22status_code\22:200,\22body\22:\22ok\22}")
     (data (i32.const 2048) "late-return-start")
     (data (i32.const 2080) "late-return-cleanup")
-    (func $observe (param $ptr i32) (param $len i32)
-      (call $event (local.get $ptr) (local.get $len) (i32.const 0) (i32.const 0) (i32.const 128))
-      (if (i32.load (i32.const 128)) (then unreachable)))
+    (data (i32.const 2112) "{}")
+    ;; Append one `{kind, payload: {}}` event and block until it is recorded.
+    (func $observe (param $ptr i32) (param $len i32) (local $status i32) (local $set i32)
+      (i32.store (i32.const 192) (local.get $ptr))
+      (i32.store (i32.const 196) (local.get $len))
+      (i32.store (i32.const 200) (i32.const 2112))
+      (i32.store (i32.const 204) (i32.const 2))
+      (local.set $status (call $event (i32.const 192) (i32.const 1) (i32.const 128)))
+      (if (i32.ne (i32.and (local.get $status) (i32.const 15)) (i32.const 2)) (then
+        (local.set $set (call $new))
+        (call $join (i32.shr_u (local.get $status) (i32.const 4)) (local.get $set))
+        ;; Subtask progress events until it returns (status 2 at +4).
+        (block $returned
+          (loop $progress
+            (drop (call $wait (local.get $set) (i32.const 160)))
+            (br_if $returned (i32.eq (i32.load (i32.const 164)) (i32.const 2)))
+            (br $progress)))
+        (call $join (i32.shr_u (local.get $status) (i32.const 4)) (i32.const 0))
+        (call $drop (i32.shr_u (local.get $status) (i32.const 4)))
+        (call $drop-set (local.get $set))))
+      (if (i32.load8_u (i32.const 128)) (then unreachable)))
     (func $finish
       ;; `result<outcome, error-info>` flattens past 16 values, so task.return
       ;; takes a pointer to the result in linear memory: the ok tag at +0, the
@@ -71,7 +102,7 @@
         (call $finish) (return (i32.const 0))))
       (if (i32.ne (global.get $calls) (i32.const 1)) (then unreachable))
       (call $observe (i32.const 2048) (i32.const 17))
-      (local.set $status (call $request (i64.const 300000)))
+      (local.set $status (call $request (i64.const 300000000000)))
       (if (i32.eq (i32.and (local.get $status) (i32.const 15)) (i32.const 2))
         (then (call $finish) (return (i32.const 0))))
       (global.set $handle (i32.shr_u (local.get $status) (i32.const 4)))
@@ -99,14 +130,15 @@
   (core instance $code (instantiate $code
     (with "m" (instance $memory))
     (with "h" (instance
-      (export "event" (func $event)) (export "request" (func $request)) (export "new" (func $new))
+      (export "event" (func $event)) (export "wait" (func $wait))
+      (export "request" (func $request)) (export "new" (func $new))
       (export "join" (func $join)) (export "drop-set" (func $drop-set))
       (export "cancel" (func $cancel)) (export "drop" (func $drop))
       (export "return" (func $return))))))
   (func $invoke async (param "capability-id" string) (param "input" (list u8))
     (result (result $outcome (error $error)))
-    (canon lift (core func $code "invoke") async (callback (func $code "callback"))
-      (memory $memory "memory") (realloc (func $memory "realloc"))))
+    (canon lift (core func $code "invoke") async (callback (core func $code "callback"))
+      (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
   (instance $capabilities
     (export "error-info" (type $error))
     (export "signal-wait" (type $signal)) (export "wake" (type $wake))

@@ -1,0 +1,11 @@
+# WASI 0.3 pins for the workflow API guest world (wasi:http/client and
+# wasi:cli/run at 0.3.0), kept apart from the 0.2.3 pins in wit/deps.toml.
+# Managed by `wit-deps` - from crates/runtara-wit run:
+#   wit-deps -m wit-p3/deps.toml -l wit-p3/deps.lock -d wit-p3/deps lock
+
+cli = { url = "https://github.com/WebAssembly/WASI/archive/v0.3.0.tar.gz", prefix = "WASI-0.3.0/proposals/cli/wit" }
+clocks = { url = "https://github.com/WebAssembly/WASI/archive/v0.3.0.tar.gz", prefix = "WASI-0.3.0/proposals/clocks/wit" }
+filesystem = { url = "https://github.com/WebAssembly/WASI/archive/v0.3.0.tar.gz", prefix = "WASI-0.3.0/proposals/filesystem/wit" }
+http = { url = "https://github.com/WebAssembly/WASI/archive/v0.3.0.tar.gz", prefix = "WASI-0.3.0/proposals/http/wit" }
+random = { url = "https://github.com/WebAssembly/WASI/archive/v0.3.0.tar.gz", prefix = "WASI-0.3.0/proposals/random/wit" }
+sockets = { url = "https://github.com/WebAssembly/WASI/archive/v0.3.0.tar.gz", prefix = "WASI-0.3.0/proposals/sockets/wit" }

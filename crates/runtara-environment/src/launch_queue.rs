@@ -20,6 +20,11 @@ pub const LAUNCH_QUEUE_TIMEOUT: &str = "launch_queue_timeout";
 /// Stable detail recorded when a dispatcher found the runner full.
 pub const RUNNER_CAPACITY_UNAVAILABLE: &str = "runner_capacity_unavailable";
 
+/// Stable detail recorded when a launch's workflow artifact is not in the
+/// store: after a restore artifacts are rebuilt from their workflow versions
+/// (the artifact store is not backed up), so the launch waits for that.
+pub const WORKFLOW_ARTIFACT_MISSING: &str = "workflow_artifact_missing";
+
 /// Stable detail recorded when bounded artifact/component preparation outlived
 /// its dispatcher lease. The launch is retried from the durable queue rather
 /// than leaving an unbounded compiler task associated with a runner permit.
@@ -1216,6 +1221,20 @@ impl LaunchRepository {
         lease_for: Duration,
         limit: usize,
     ) -> Result<Vec<Launch>, LaunchQueueError> {
+        self.claim_ready_for_preparation_of(lease_owner, lease_for, limit, None)
+            .await
+    }
+
+    /// [`Self::claim_ready_for_preparation`], of `tenants`' launches only when
+    /// given: a process serving some tenants of a store that others share
+    /// never launches another's runs.
+    pub async fn claim_ready_for_preparation_of(
+        &self,
+        lease_owner: &str,
+        lease_for: Duration,
+        limit: usize,
+        tenants: Option<&[String]>,
+    ) -> Result<Vec<Launch>, LaunchQueueError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -1232,6 +1251,7 @@ impl LaunchRepository {
                 WHERE state = 'queued'
                   AND available_at <= NOW()
                   AND deadline_at > NOW()
+                  AND ($4::text[] IS NULL OR tenant_id = ANY($4))
                 ORDER BY available_at, created_at, launch_id
                 FOR UPDATE SKIP LOCKED
                 LIMIT $3
@@ -1252,6 +1272,7 @@ impl LaunchRepository {
                 .bind(lease_owner)
                 .bind(lease_us)
                 .bind(limit)
+                .bind(tenants.map(<[String]>::to_vec))
                 .fetch_all(&self.pool)
                 .await?,
             "prepare",
@@ -2254,6 +2275,7 @@ fn requeue_reason(error: Option<&str>) -> &'static str {
         Some(RUNNER_CAPACITY_UNAVAILABLE) => "run_capacity",
         Some(PREPARATION_CAPACITY_UNAVAILABLE) => "preparation_capacity",
         Some(PREPARATION_TIMEOUT) => "preparation_timeout",
+        Some(WORKFLOW_ARTIFACT_MISSING) => "artifact_missing",
         _ => "retry",
     }
 }

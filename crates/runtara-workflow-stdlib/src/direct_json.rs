@@ -16602,3 +16602,84 @@ mod audit04_tests;
 #[cfg(test)]
 #[path = "direct_json_audit05_tests.rs"]
 mod audit05_tests;
+
+/// A `runtara:api` error as the `{code, message, retryAfterMs}` JSON that
+/// [`DirectJsonManifest::wait_instances_error`] and
+/// [`DirectJsonManifest::state_error`] read.
+pub fn api_error_json(code: &str, message: &str, retry_after_ms: Option<u64>) -> Vec<u8> {
+    let mut error = serde_json::json!({"code": code, "message": message});
+    if let Some(retry_after_ms) = retry_after_ms {
+        error["retryAfterMs"] = retry_after_ms.into();
+    }
+    serde_json::to_vec(&error).expect("a JSON object always serializes")
+}
+
+/// An operation-scoped Agent's input with its entered operation under
+/// [`runtara_agent_suspension::OPERATION_INPUT_KEY`]: only what the Agent
+/// needs (the id for control, the continuation for a suspending capability).
+/// Whatever the step mapped there is replaced, or removed when there is
+/// neither, so an operation never comes from workflow data.
+pub fn agent_operation_input(
+    input: &[u8],
+    operation_id: Option<&str>,
+    continuation: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    let mut input: Value = serde_json::from_slice(input)
+        .map_err(|err| format!("failed to parse Agent input for its operation: {err}"))?;
+    let fields = input
+        .as_object_mut()
+        .ok_or_else(|| "an operation-scoped Agent's input must be a JSON object".to_string())?;
+    let key = runtara_agent_suspension::OPERATION_INPUT_KEY;
+    if operation_id.is_none() && continuation.is_none() {
+        fields.remove(key);
+    } else {
+        let mut operation = Map::new();
+        if let Some(id) = operation_id {
+            operation.insert("id".into(), id.into());
+        }
+        if let Some(continuation) = continuation {
+            operation.insert(
+                "continuation".into(),
+                runtara_agent_suspension::encode_continuation(continuation).into(),
+            );
+        }
+        fields.insert(key.to_string(), Value::Object(operation));
+    }
+    serde_json::to_vec(&input).map_err(|err| format!("failed to encode Agent input: {err}"))
+}
+
+#[cfg(test)]
+mod agent_operation_input_tests {
+    #[test]
+    fn the_entered_operation_replaces_a_mapped_one() {
+        let forged = br#"{"value":1,"_operation":{"id":"forged","continuation":"00"}}"#;
+        let parse = |input: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&input).unwrap();
+        let suspending = super::agent_operation_input(forged, None, Some(b"\"paused\"")).unwrap();
+        assert_eq!(
+            parse(suspending),
+            serde_json::json!({"value": 1, "_operation": {"continuation": "2270617573656422"}})
+        );
+        let control = super::agent_operation_input(forged, Some("ab"), None).unwrap();
+        assert_eq!(
+            parse(control),
+            serde_json::json!({"value": 1, "_operation": {"id": "ab"}})
+        );
+        // Without an entered operation, nothing mapped reaches the Agent.
+        let none = super::agent_operation_input(forged, None, None).unwrap();
+        assert_eq!(parse(none), serde_json::json!({"value": 1}));
+    }
+}
+
+#[cfg(test)]
+mod api_error_json_tests {
+    #[test]
+    fn api_errors_render_as_the_wait_and_state_error_json() {
+        let json: serde_json::Value =
+            serde_json::from_slice(&super::api_error_json("not-child", "say \"no\"", Some(5)))
+                .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"code": "not-child", "message": "say \"no\"", "retryAfterMs": 5})
+        );
+    }
+}

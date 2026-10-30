@@ -110,7 +110,9 @@ crates/runtara-agent-bundle-emit: agents() calls runtara_agent_<id>::agent_info(
 scripts/build-agent-components.sh: builds every crates/agents/* crate, emits the
   meta.json files, fails if a .wasm has no meta.json, stages both into
   target/agent-components
-server: loads each .wasm + .meta.json pair from RUNTARA_AGENT_COMPONENTS_DIR
+server boot: publishes RUNTARA_AGENT_COMPONENTS_DIR as its agent release in the
+  artifact store (an agent .wasm without its .meta.json is refused) and loads
+  the agents from that release
 ```
 
 ## Hand-written agent

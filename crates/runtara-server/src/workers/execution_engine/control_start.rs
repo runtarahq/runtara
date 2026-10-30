@@ -314,7 +314,7 @@ impl ExecutionEngine {
             Err(other) => return Err(unavailable(other)),
         }
 
-        let cap = self.effective_concurrency_cap();
+        let cap = self.effective_concurrency_cap(tenant_id);
         let limit = u32::try_from(cap).unwrap_or(u32::MAX);
         if !contract::capacity_satisfiable(limit) {
             return Err(StartChildError::Capacity { retryable: false });

@@ -45,10 +45,14 @@ pub(super) struct DirectCoreConfig {
     /// Top-level export shape (see `component::WorkflowRole`). Defaults to
     /// the workflow entry; set via [`Self::with_abi`].
     pub(super) abi: crate::direct_wasm::component::WorkflowRole,
-    /// When true, the component imports no `runtara:workflow/runtime`,
-    /// so the emitter must NOT lower any `runtime.*` call. Only valid for a
-    /// pure workflow (see [`Self::with_omit_runtime`]).
+    /// When true, the component imports no runtime, so the emitter must NOT
+    /// lower any `runtime.*` call. Only valid for a pure workflow (see
+    /// [`Self::with_omit_runtime`]). Otherwise the runtime functions are
+    /// shims over `runtara:api` imports (see `api_shims`).
     pub(super) omit_runtime: bool,
+    /// The logic needs the concurrent timers (`sleep`, `abort-after`), from
+    /// `runtara:api/time`.
+    pub(super) timers: bool,
 }
 
 impl DirectCoreConfig {
@@ -92,17 +96,24 @@ impl DirectCoreConfig {
     ) -> Result<Self, DirectCompileError> {
         let variables_json =
             direct_core_variables_json(&manifest.graph.variables, workflow_id, manifest.version)?;
+        let run_plan = direct_run_plan(manifest)?;
+        let static_data = DirectCoreStaticData::new_with_child_workflows(
+            &manifest.graph,
+            &manifest.child_workflows,
+            manifest_json,
+            &variables_json,
+            DIRECT_EMPTY_STEPS_CONTEXT,
+        )?;
+        // The same condition the world uses to import the timers.
+        let timers = crate::direct_wasm::plan::needs_cooperative_timers(manifest)
+            || !manifest.feature_summary.agent_ids.is_empty()
+            || !super::split_parallel::parallel_agent_pools(&static_data, &run_plan).is_empty();
         Ok(Self {
             abi: crate::direct_wasm::component::WorkflowRole::default(),
             omit_runtime: false,
-            run_plan: direct_run_plan(manifest)?,
-            static_data: DirectCoreStaticData::new_with_child_workflows(
-                &manifest.graph,
-                &manifest.child_workflows,
-                manifest_json,
-                &variables_json,
-                DIRECT_EMPTY_STEPS_CONTEXT,
-            )?,
+            timers,
+            run_plan,
+            static_data,
             track_events,
         })
     }
@@ -195,11 +206,9 @@ pub(super) fn emit_direct_core_module(
         .imports
         .keys()
         .any(|name| agent_import_for(resolve, Some(name)).is_some());
-    let has_async_calls = has_agents
-        || world
-            .imports
-            .keys()
-            .any(|name| resolve.name_world_key(name) == "runtara:host/timers@1.0.0");
+    // The concurrent timers are `runtara:api/time`'s.
+    let timers_module = config.timers.then_some(runtara_wit::api::TIME);
+    let has_async_calls = has_agents || timers_module.is_some();
     if has_async_calls {
         let builtin = |field: &str,
                        params: &[ValType],
@@ -300,11 +309,7 @@ pub(super) fn emit_direct_core_module(
         // Concurrent polling/backoff timer: async-lowered `sleep` from the
         // host-io timers interface. Params ≤4 flats, empty result → no retptr;
         // returns the packed subtask status.
-        if world
-            .imports
-            .keys()
-            .any(|name| resolve.name_world_key(name) == "runtara:host/timers@1.0.0")
-        {
+        if let Some(timers_module) = timers_module {
             let type_index = {
                 let index = type_count;
                 types.ty().function([ValType::I64], [ValType::I32]);
@@ -312,14 +317,14 @@ pub(super) fn emit_direct_core_module(
                 index
             };
             imports.import(
-                "runtara:host/timers@1.0.0",
+                timers_module,
                 "[async-lower]sleep",
                 wasm_encoder::EntityType::Function(type_index),
             );
             import_indices.timer_sleep_async = Some(imported_function_count);
             imported_function_count += 1;
             imports.import(
-                "runtara:host/timers@1.0.0",
+                timers_module,
                 "[async-lower]abort-after",
                 wasm_encoder::EntityType::Function(type_index),
             );
@@ -375,11 +380,48 @@ pub(super) fn emit_direct_core_module(
                 } else {
                     import_indices.connection_resolver_describe_async =
                         Some(imported_function_count);
+                    if resolve
+                        .name_world_key(name)
+                        .starts_with(runtara_wit::api::PREFIX)
+                    {
+                        import_indices.connection_describe_moves =
+                            Some(super::api_shims::describe_moves(resolve)?);
+                    }
                 }
                 imported_function_count += 1;
             }
         }
     }
+
+    // The scratch area of the runtime shims sits where the heap would start;
+    // the heap starts after it.
+    let api_scratch = config.static_data.heap_base;
+    let heap_base = if !config.omit_runtime {
+        let api_functions = std::mem::take(&mut import_indices.api_functions);
+        super::api_shims::emit_runtime_shims(
+            resolve,
+            &api_functions,
+            &mut import_indices,
+            &mut types,
+            &mut type_count,
+            &mut functions,
+            &mut code,
+            imported_function_count,
+            &mut next_defined_function,
+            api_scratch,
+        )?;
+        let child_run_request = if config.static_data.child_run_errors.is_some() {
+            super::api_shims::CHILD_RUN_REQUEST_BYTES
+        } else {
+            0
+        };
+        api_scratch
+            + super::api_shims::API_SCRATCH_BYTES
+            + super::api_shims::OPERATION_CELL_BYTES
+            + child_run_request
+    } else {
+        config.static_data.heap_base
+    };
 
     let mut import_indices = import_indices.require_all(
         config.abi,
@@ -545,7 +587,10 @@ pub(super) fn emit_direct_core_module(
 
     let mut memories = MemorySection::new();
     memories.memory(MemoryType {
-        minimum: config.static_data.memory_min_pages,
+        minimum: config
+            .static_data
+            .memory_min_pages
+            .max((heap_base as u64).div_ceil(WASM_PAGE_SIZE as u64)),
         maximum: None,
         memory64: false,
         shared: false,
@@ -561,7 +606,7 @@ pub(super) fn emit_direct_core_module(
             mutable: true,
             shared: false,
         },
-        &ConstExpr::i32_const(config.static_data.heap_base),
+        &ConstExpr::i32_const(heap_base),
     );
 
     if !early_realloc {

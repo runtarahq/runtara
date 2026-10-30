@@ -10,7 +10,8 @@ use tracing::Instrument;
 use crate::api::handlers::api_keys::ApiKey;
 use crate::auth::{AuthContext, AuthMethod, AuthProviderKind, AuthState, MembershipPolicy};
 use crate::authz::{ApiKeyScope, Role};
-use crate::valkey::auth::{AuthzValkeyError, get_member_role, token_is_revoked};
+use crate::tenant_quota;
+use crate::valkey::auth::{AuthzValkeyError, get_member_role, tenant_is_ready, token_is_revoked};
 
 /// Authentication middleware. Defers to the configured `AuthProvider` for everything
 /// except the in-process bypass and the RUNTARA-issued API-key fast path.
@@ -27,12 +28,40 @@ use crate::valkey::auth::{AuthzValkeyError, get_member_role, token_is_revoked};
 /// construction, so there is nothing to mismatch.
 pub async fn authenticate(
     State(auth_state): State<AuthState>,
-    mut request: Request,
+    request: Request,
     next: Next,
 ) -> Response {
+    authenticate_with(auth_state, request, next, true).await
+}
+
+/// Authenticate the caller without checking membership in the tenant the request
+/// resolves to. Only for routes that answer about the caller across tenants
+/// (`GET /api/runtime/me/tenants`) and check membership themselves.
+pub async fn authenticate_identity(
+    State(auth_state): State<AuthState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    authenticate_with(auth_state, request, next, false).await
+}
+
+async fn authenticate_with(
+    auth_state: AuthState,
+    mut request: Request,
+    next: Next,
+    enforce_membership_here: bool,
+) -> Response {
     if let Some(ctx) = request.extensions().get::<AuthContext>().cloned() {
-        return next.run(request).instrument(auth_span(&ctx)).await;
+        let span = auth_span(&ctx);
+        return as_tenant(enforce_membership_here, &ctx.org_id, next.run(request))
+            .instrument(span)
+            .await;
     }
+
+    let requested_tenant = request
+        .extensions()
+        .get::<crate::middleware::tenant_path::RequestedTenant>()
+        .map(|requested| requested.0.clone());
 
     // Fast path: RUNTARA-issued API key. Works in every provider mode.
     if let Some(token) = api_key_token(request.headers()) {
@@ -40,35 +69,99 @@ pub async fn authenticate(
             Ok(key) => key,
             Err(response) => return response,
         };
+        // A key is its tenant's: one issued for a tenant this process does not
+        // serve authenticates nobody here.
+        if !crate::config::is_served_tenant(&api_key.org_id) {
+            return crate::auth::provider::AuthError::TenantMismatch(api_key.org_id)
+                .into_http_response();
+        }
+        // …and acts only there, whatever tenant the path names.
+        if let Some(requested) = requested_tenant.filter(|t| *t != api_key.org_id) {
+            return crate::auth::provider::AuthError::TenantMismatch(requested)
+                .into_http_response();
+        }
         let mut auth_context = api_key_context(&api_key);
-        // The key inherits the issuing user's current role from Valkey and is
-        // subject to the same revocation denylist.
-        if let Err(response) =
-            enforce_api_key_membership(&auth_state, &api_key, &mut auth_context).await
+        if enforce_membership_here
+            && let Err(response) = enforce_tenant_status(&auth_state, &auth_context.org_id).await
         {
             return response;
         }
+        // The key inherits the issuing user's current role from Valkey and is
+        // subject to the same revocation denylist.
+        if enforce_membership_here
+            && let Err(response) =
+                enforce_api_key_membership(&auth_state, &api_key, &mut auth_context).await
+        {
+            return response;
+        }
+        if enforce_membership_here
+            && let Err(retry_after_ms) =
+                tenant_quota::take(&auth_context.org_id, tenant_quota::Quota::Api).await
+        {
+            return tenant_quota::refusal(tenant_quota::Quota::Api, retry_after_ms);
+        }
         let span = auth_span(&auth_context);
+        let tenant = auth_context.org_id.clone();
         request.extensions_mut().insert(auth_context);
-        return next.run(request).instrument(span).await;
+        return as_tenant(enforce_membership_here, &tenant, next.run(request))
+            .instrument(span)
+            .await;
     }
 
     // Delegate everything else to the configured provider.
-    let mut auth_context = match auth_state.provider.authenticate(request.headers()).await {
+    let mut auth_context = match auth_state
+        .provider
+        .authenticate(request.headers(), requested_tenant.as_deref())
+        .await
+    {
         Ok(ctx) => ctx,
         Err(e) => return e.into_http_response(),
     };
 
-    // Resolve per-tenant membership + token revocation from Valkey, attaching the
-    // caller's role. Governed by `membership_policy`; fails the request closed under
-    // `Required`.
-    if let Err(response) = enforce_membership(&auth_state, &mut auth_context).await {
+    if enforce_membership_here
+        && let Err(response) = enforce_tenant_status(&auth_state, &auth_context.org_id).await
+    {
         return response;
     }
 
+    // Resolve per-tenant membership + token revocation from Valkey, attaching the
+    // caller's role. Governed by `membership_policy`; fails the request closed under
+    // `Required`.
+    if enforce_membership_here
+        && let Err(response) = enforce_membership(&auth_state, &mut auth_context).await
+    {
+        return response;
+    }
+
+    // Counted once the caller is known, so nobody else spends the tenant's.
+    if enforce_membership_here
+        && let Err(retry_after_ms) =
+            tenant_quota::take(&auth_context.org_id, tenant_quota::Quota::Api).await
+    {
+        return tenant_quota::refusal(tenant_quota::Quota::Api, retry_after_ms);
+    }
+
     let span = auth_span(&auth_context);
+    let tenant = auth_context.org_id.clone();
     request.extensions_mut().insert(auth_context);
-    next.run(request).instrument(span).await
+    as_tenant(enforce_membership_here, &tenant, next.run(request))
+        .instrument(span)
+        .await
+}
+
+/// Runs the rest of a request for `tenant` on the runtime database, where row
+/// level security then confines it to that tenant's rows (C11). A request
+/// that answers across tenants (`scoped` false) runs as the system path.
+async fn as_tenant(
+    scoped: bool,
+    tenant: &str,
+    rest: impl std::future::Future<Output = Response>,
+) -> Response {
+    if scoped {
+        runtara_store_postgres::tenant_scope::scoped(tenant, rest).await
+    } else {
+        rest.await
+    }
 }
 
 /// Span carrying the resolved auth identity, used to wrap the rest of the
@@ -164,9 +257,13 @@ async fn enforce_api_key_membership(
     }
 
     let started = std::time::Instant::now();
-    let outcome =
-        resolve_api_key_membership(auth_state, api_key.jti.as_deref(), &api_key.issuing_user_id)
-            .await;
+    let outcome = resolve_api_key_membership(
+        auth_state,
+        api_key.jti.as_deref(),
+        &api_key.org_id,
+        &api_key.issuing_user_id,
+    )
+    .await;
     record_lookup_duration(started, ctx.auth_method.as_str(), outcome.is_ok());
     match outcome {
         Ok(role) => {
@@ -203,6 +300,7 @@ fn record_lookup_duration(started: std::time::Instant, auth_method: &'static str
 async fn resolve_api_key_membership(
     auth_state: &AuthState,
     jti: Option<&str>,
+    tenant: &str,
     issuing_user_id: &str,
 ) -> Result<Option<Role>, MembershipDenial> {
     let Some(manager) = auth_state.valkey.as_ref() else {
@@ -212,14 +310,14 @@ async fn resolve_api_key_membership(
     };
 
     if let Some(jti) = jti {
-        match token_is_revoked(manager, jti).await {
+        match token_is_revoked(manager, tenant, jti).await {
             Ok(true) => return Err(MembershipDenial::TokenRevoked),
             Ok(false) => {}
             Err(e) => return Err(MembershipDenial::ValkeyUnavailable(e.to_string())),
         }
     }
 
-    match get_member_role(manager, issuing_user_id).await {
+    match get_member_role(manager, tenant, issuing_user_id).await {
         Ok(Some(role)) => Ok(Some(role)),
         Ok(None) => Err(MembershipDenial::NotAMember),
         Err(AuthzValkeyError::Parse(detail)) => Err(MembershipDenial::MalformedRecord(detail)),
@@ -352,6 +450,44 @@ impl MembershipDenial {
     }
 }
 
+/// With `RUNTARA_AUTH_TENANT_STATUS=required`, serves `tenant` only while
+/// its status record says it is `ready`; an unreadable record fails closed.
+async fn enforce_tenant_status(auth_state: &AuthState, tenant: &str) -> Result<(), Response> {
+    if !crate::config::tenant_status_required() {
+        return Ok(());
+    }
+    let refuse = |status: StatusCode, code: &str, message: &str| {
+        (status, Json(json!({ "error": code, "message": message }))).into_response()
+    };
+    let Some(manager) = auth_state.valkey.as_ref() else {
+        tracing::error!(tenant_id = %tenant, "tenant status required but Valkey is not configured");
+        return Err(refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TENANT_STATUS_UNAVAILABLE",
+            "the tenant's status cannot be read",
+        ));
+    };
+    match tenant_is_ready(manager, tenant).await {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            tracing::warn!(tenant_id = %tenant, code = "TENANT_NOT_READY", "tenant is not ready");
+            Err(refuse(
+                StatusCode::FORBIDDEN,
+                "TENANT_NOT_READY",
+                "this tenant is not ready to be served",
+            ))
+        }
+        Err(error) => {
+            tracing::error!(tenant_id = %tenant, detail = %error, "tenant status lookup failed");
+            Err(refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "TENANT_STATUS_UNAVAILABLE",
+                "the tenant's status cannot be read",
+            ))
+        }
+    }
+}
+
 /// Apply the per-tenant membership/revocation policy to a freshly authenticated request.
 ///
 /// - `Disabled`: no Valkey lookup; role stays unset.
@@ -407,13 +543,13 @@ async fn resolve_membership(
         ));
     };
 
-    match token_is_revoked(manager, jti).await {
+    match token_is_revoked(manager, &ctx.org_id, jti).await {
         Ok(true) => return Err(MembershipDenial::TokenRevoked),
         Ok(false) => {}
         Err(e) => return Err(MembershipDenial::ValkeyUnavailable(e.to_string())),
     }
 
-    match get_member_role(manager, &ctx.user_id).await {
+    match get_member_role(manager, &ctx.org_id, &ctx.user_id).await {
         Ok(Some(role)) => Ok(Some(role)),
         Ok(None) => Err(MembershipDenial::NotAMember),
         Err(AuthzValkeyError::Parse(detail)) => Err(MembershipDenial::MalformedRecord(detail)),
@@ -442,6 +578,7 @@ mod tests {
         async fn authenticate(
             &self,
             _headers: &axum::http::HeaderMap,
+            _requested_tenant: Option<&str>,
         ) -> Result<AuthContext, AuthError> {
             Err(AuthError::InvalidToken)
         }
@@ -719,7 +856,7 @@ mod tests {
         let mut conn = manager.clone();
         let _: () = conn
             .set(
-                format!("member:{uid}"),
+                format!("org:member:{uid}"),
                 r#"{"role":"admin","updated_at":"2026-05-28T12:00:00Z"}"#,
             )
             .await
@@ -730,7 +867,32 @@ mod tests {
         assert!(enforce_membership(&st, &mut ctx).await.is_ok());
         assert_eq!(ctx.role, Some(Role::Admin));
 
-        let _: () = conn.del(format!("member:{uid}")).await.expect("cleanup");
+        let _: () = conn
+            .del(format!("org:member:{uid}"))
+            .await
+            .expect("cleanup");
+    }
+
+    #[cfg(feature = "valkey-integration-tests")]
+    #[tokio::test]
+    async fn another_tenants_member_record_does_not_answer_403() {
+        let manager = manager_required!();
+        let uid = unique("auth0|member");
+        let mut conn = manager.clone();
+        let _: () = conn
+            .set(format!("other:member:{uid}"), r#"{"role":"owner"}"#)
+            .await
+            .expect("seed member");
+
+        let mut ctx = jwt_ctx(&uid, Some(&unique("jti")));
+        let st = state(MembershipPolicy::Required, Some(manager));
+        let resp = enforce_membership(&st, &mut ctx).await.unwrap_err();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let _: () = conn
+            .del(format!("other:member:{uid}"))
+            .await
+            .expect("cleanup");
     }
 
     #[cfg(feature = "valkey-integration-tests")]
@@ -752,7 +914,7 @@ mod tests {
         let jti = unique("jti");
         let mut conn = manager.clone();
         let _: () = conn
-            .set(format!("member:{uid}"), r#"{"role":"member"}"#)
+            .set(format!("org:member:{uid}"), r#"{"role":"member"}"#)
             .await
             .expect("seed member");
         let _: () = conn
@@ -768,7 +930,10 @@ mod tests {
         let resp = enforce_membership(&st, &mut ctx).await.unwrap_err();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
-        let _: () = conn.del(format!("member:{uid}")).await.expect("cleanup");
+        let _: () = conn
+            .del(format!("org:member:{uid}"))
+            .await
+            .expect("cleanup");
         let _: () = conn
             .del(format!("token:revoked:{jti}"))
             .await
@@ -782,7 +947,7 @@ mod tests {
         let uid = unique("auth0|keyuser");
         let mut conn = manager.clone();
         let _: () = conn
-            .set(format!("member:{uid}"), r#"{"role":"viewer"}"#)
+            .set(format!("org:member:{uid}"), r#"{"role":"viewer"}"#)
             .await
             .expect("seed member");
 
@@ -796,7 +961,10 @@ mod tests {
         );
         assert_eq!(ctx.role, Some(Role::Viewer));
 
-        let _: () = conn.del(format!("member:{uid}")).await.expect("cleanup");
+        let _: () = conn
+            .del(format!("org:member:{uid}"))
+            .await
+            .expect("cleanup");
     }
 
     #[cfg(feature = "valkey-integration-tests")]
@@ -820,11 +988,11 @@ mod tests {
         let jti = unique("jti");
         let mut conn = manager.clone();
         let _: () = conn
-            .set(format!("member:{uid}"), r#"{"role":"member"}"#)
+            .set(format!("org:member:{uid}"), r#"{"role":"member"}"#)
             .await
             .expect("seed member");
         let _: () = conn
-            .set(format!("token:revoked:{jti}"), r#"{"revoked_at":"x"}"#)
+            .set(format!("org:token:revoked:{jti}"), r#"{"revoked_at":"x"}"#)
             .await
             .expect("seed revocation");
 
@@ -836,9 +1004,12 @@ mod tests {
             .unwrap_err();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
-        let _: () = conn.del(format!("member:{uid}")).await.expect("cleanup");
         let _: () = conn
-            .del(format!("token:revoked:{jti}"))
+            .del(format!("org:member:{uid}"))
+            .await
+            .expect("cleanup");
+        let _: () = conn
+            .del(format!("org:token:revoked:{jti}"))
             .await
             .expect("cleanup");
     }

@@ -3,10 +3,10 @@
 //! Central HTTP client abstraction for runtara.
 //!
 //! Provides a blocking HTTP client that works on both native (via ureq)
-//! and WASM (via the typed Runtara outbound host service) targets.
+//! and WASM (over the workflow API, through the guest SDK) targets.
 
 // Exactly one backend feature must be enabled by the consumer. `native`
-// pulls ureq + the Rust TLS stack; `wasi` generates host bindings. The cfg
+// pulls ureq + the Rust TLS stack; `wasi` goes through the guest SDK. The cfg
 // gates below are written so the two cannot accidentally co-link.
 #[cfg(not(any(feature = "native", feature = "wasi")))]
 compile_error!(

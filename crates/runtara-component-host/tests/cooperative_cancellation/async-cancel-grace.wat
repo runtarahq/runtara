@@ -5,8 +5,8 @@
   (import "cleanup" (func $cleanup async))
   (import "ready" (func $ready async))
   (import "trace" (func $trace (param "event" u32)))
-  (import "runtara:host/timers@1.0.0" (instance $timers
-    (export "sleep" (func async (param "ms" u64)))))
+  (import "wasi:clocks/monotonic-clock@0.3.0" (instance $timers
+    (export "wait-for" (func async (param "how-long" u64)))))
   (component $agent
     (import "request" (func $request async))
     (import "cleanup" (func $cleanup async))
@@ -77,14 +77,14 @@
       (export "cancel" (func $cancel)) (export "drop" (func $drop))
       (export "cancelled" (func $cancelled)) (export "return" (func $return))))))
     (func (export "run") async
-      (canon lift (core func $code "run") async (callback (func $code "callback")))))
+      (canon lift (core func $code "run") async (callback (core func $code "callback")))))
   (instance $agent (instantiate $agent
     (with "request" (func $request)) (with "cleanup" (func $cleanup))
     (with "trace" (func $trace))))
   (component $workflow
     (import "target" (func $target async))
     (import "ready" (func $ready async))
-    (import "sleep" (func $sleep async (param "ms" u64)))
+    (import "sleep" (func $sleep async (param "how-long" u64)))
     (import "trace" (func $trace (param "event" u32)))
     (core module $memory (memory (export "memory") 1))
     (core instance $memory (instantiate $memory))
@@ -96,7 +96,7 @@
     (core func $drop (canon subtask.drop))
     (core func $new (canon waitable-set.new))
     (core func $join (canon waitable.join))
-    (core func $wait (canon waitable-set.wait (memory $memory "memory")))
+    (core func $wait (canon waitable-set.wait (memory (core memory $memory "memory"))))
     (core func $drop-set (canon waitable-set.drop))
     (core module $code
       (import "m" "memory" (memory 1))
@@ -118,15 +118,19 @@
         (local $target i32) (local $timer i32) (local $set i32) (local $event i32)
         (local.set $target (call $handle (call $target)))
         (call $ready)
-        (local.set $timer (call $handle (call $sleep (i64.const {{GRACE_MS}}))))
+        (local.set $timer (call $handle (call $sleep (i64.const {{GRACE_NS}}))))
         (local.set $set (call $new))
         (call $join (local.get $target) (local.get $set))
         (call $join (local.get $timer) (local.get $set))
         (call $trace (i32.const 10))
         ;; BLOCKED means resolution must be awaited on the original handle.
         ;; It does not permit dropping the handle or issuing another cancel.
+        ;; A subtask leaves its waitable set to be cancelled, then rejoins to
+        ;; be awaited.
+        (call $join (local.get $target) (i32.const 0))
         (if (i32.ne (call $cancel (local.get $target)) (i32.const -1))
           (then unreachable))
+        (call $join (local.get $target) (local.get $set))
         (call $trace (i32.const 40))
         (loop $wait
           (local.set $event (call $wait (local.get $set) (i32.const 0)))
@@ -143,8 +147,10 @@
         (call $drop (local.get $target))
         ;; Cancel the generous success-case timer rather than racing cleanup
         ;; against a short fixture deadline. Resolve this host subtask too.
+        (call $join (local.get $timer) (i32.const 0))
         (if (i32.ne (call $cancel (local.get $timer)) (i32.const -1))
           (then unreachable))
+        (call $join (local.get $timer) (local.get $set))
         (loop $timer
           (if (i32.ne (call $wait (local.get $set) (i32.const 0)) (i32.const 1)) (then unreachable))
           (br_if $timer (i32.lt_u (i32.load (i32.const 4)) (i32.const 2)))
@@ -165,5 +171,5 @@
     (func (export "run") async (result u32) (canon lift (core func $code "run"))))
   (instance $workflow (instantiate $workflow
     (with "target" (func $agent "run")) (with "ready" (func $ready))
-    (with "sleep" (func $timers "sleep")) (with "trace" (func $trace))))
+    (with "sleep" (func $timers "wait-for")) (with "trace" (func $trace))))
   (export "run" (func $workflow "run")))

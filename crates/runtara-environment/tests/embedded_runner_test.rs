@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use runtara_core::persistence::Persistence;
 use runtara_environment::runner::{
-    EmbeddedWasmRunner, LaunchOptions, Result as RunnerResult, Runner, RunnerError, StartGate,
-    StartGateConfirmation, WorkflowRunnerConfig,
+    EmbeddedWasmRunner, LaunchOptions, Result as RunnerResult, RunExitReport, Runner, RunnerError,
+    StartGate, StartGateConfirmation, WorkflowRunnerConfig,
 };
 use runtara_store_postgres::PostgresPersistence;
 use uuid::Uuid;
@@ -74,7 +74,7 @@ async fn harness() -> Harness {
         default_timeout: Duration::from_secs(30),
         skip_cert_verification: false,
     };
-    let runner = EmbeddedWasmRunner::new(config, Arc::clone(&persistence))
+    let runner = EmbeddedWasmRunner::new(config, Arc::clone(&persistence), artifacts().clone())
         .expect("embedded runner")
         // The integration binary is not `runtara-server`, so it cannot serve
         // the production hidden precompile-child command. Opt in explicitly
@@ -316,8 +316,7 @@ fn options(instance_id: &str, wasm_path: &Path) -> LaunchOptions {
         launch_id: format!("launch-{instance_id}"),
         instance_id: instance_id.to_string(),
         tenant_id: "embedded-test".to_string(),
-        wasm_path: wasm_path.to_path_buf(),
-        expected_workflow_checksum: None,
+        workflow_digest: artifacts().add(wasm_path),
         preparation_attempt: None,
         preparation_deadline: None,
         input: serde_json::Value::Null,
@@ -327,6 +326,32 @@ fn options(instance_id: &str, wasm_path: &Path) -> LaunchOptions {
         prepersisted_input: None,
         launch_kind: runtara_environment::launch_queue::LaunchKind::Start,
         start_gate: None,
+        memory_limit_bytes: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_over_its_memory_setting_reports_the_limit() {
+    let h = harness().await;
+    let id = unique("memory-setting");
+    let wasm = write_component(h.dir.path(), "ok.wasm", &run_ok());
+    seed_detached_instance(&h, &id).await;
+    let mut launch = options(&id, &wasm);
+    // Below the guest's one initial page.
+    launch.memory_limit_bytes = Some(1024);
+    let handle = h.runner.try_launch_detached(&launch).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(10)),
+    )
+    .await
+    .unwrap();
+    match h.runner.take_exit_report(&handle).await {
+        Some(RunExitReport::Trapped { reason }) => assert!(
+            reason.contains("memory limit exceeded (1024 bytes)"),
+            "{reason}"
+        ),
+        other => panic!("expected a trap report, got {other:?}"),
     }
 }
 
@@ -751,7 +776,7 @@ fn entry_core_wat(core_items: &str, result: &str) -> String {
   (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
   (func $invoke async (param "capability-id" string) (param "input" (list u8))
     (result (result $outcome (error $error)))
-    (canon lift (core func $i "invoke") (memory $i "memory") (realloc (func $i "realloc"))))
+    (canon lift (core func $i "invoke") (memory (core memory $i "memory")) (realloc (core func $i "realloc"))))
   (instance $entry (export "error-info" (type $error)) (export "signal-wait" (type $signal))
     (export "wake" (type $wake)) (export "suspension" (type $suspension))
     (export "outcome" (type $outcome)) (export "invoke" (func $invoke)))
@@ -913,4 +938,1146 @@ async fn a_supervised_run_adopts_the_lease_bound_into_its_gate() {
     let (_, epoch, active) = root_lease_row(&h.pool, &inst_id).await.unwrap();
     assert_eq!(epoch, 4);
     assert!(!active, "the run releases the adopted lease when it ends");
+}
+
+/// The probe workflow on the workflow API ABI (`wasi:cli/run` over
+/// `wasi:http@0.3`), built by `scripts/build-agent-components.sh`.
+fn workflow_api_probe() -> PathBuf {
+    std::env::var_os("RUNTARA_WORKFLOW_API_PROBE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/wasm32-wasip2/release/runtara_workflow_api_probe.wasm")
+        })
+}
+
+/// A run on the workflow API ABI reads its input from the instance and its
+/// identity from its root lease over the API, and the outcome it posts is the
+/// persisted terminal.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflow_api_run_persists_the_outcome_it_posted() {
+    let h = harness().await;
+    let probe = workflow_api_probe();
+    assert!(
+        probe.exists(),
+        "missing {}: run scripts/build-agent-components.sh",
+        probe.display()
+    );
+    for mode in ["complete", "fail"] {
+        let inst_id = unique(&format!("inst-workflow-api-{mode}"));
+        let input = serde_json::to_vec(&serde_json::json!({
+            "data": {"mode": mode, "greeting": "hello"},
+            "variables": {}
+        }))
+        .unwrap();
+        assert!(
+            h.persistence
+                .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+                .await
+                .expect("register instance")
+        );
+        let handle = h
+            .runner
+            .try_launch_detached(&options(inst_id.as_str(), &probe))
+            .await
+            .expect("launch");
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+        )
+        .await
+        .expect("wait_for_exit hung");
+        let instance = h
+            .persistence
+            .get_instance(inst_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        if mode == "complete" {
+            assert_eq!(
+                instance.status,
+                runtara_core::domain::InstanceStatus::Completed,
+                "{instance:?}"
+            );
+            let output: serde_json::Value =
+                serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+            assert_eq!(output["instanceId"], inst_id.as_str());
+            assert_eq!(output["tenantId"], "embedded-test");
+            assert_eq!(output["echo"]["greeting"], "hello");
+        } else {
+            assert_eq!(
+                instance.status,
+                runtara_core::domain::InstanceStatus::Failed,
+                "{instance:?}"
+            );
+            let error = instance.error.as_deref().unwrap_or_default();
+            assert!(error.contains(inst_id.as_str()), "{error}");
+        }
+    }
+}
+
+/// A run that never posts an outcome, because it traps or runs out its
+/// timeout, stops being served by the workflow API all the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflow_api_run_that_never_posts_is_released() {
+    let h = harness().await;
+    let probe = workflow_api_probe();
+    for mode in ["trap", "spin"] {
+        let inst_id = unique(&format!("inst-workflow-api-{mode}"));
+        let input =
+            serde_json::to_vec(&serde_json::json!({"data": {"mode": mode}, "variables": {}}))
+                .unwrap();
+        assert!(
+            h.persistence
+                .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+                .await
+                .expect("register instance")
+        );
+        let mut launch = options(inst_id.as_str(), &probe);
+        launch.timeout = Duration::from_secs(2);
+        let handle = h.runner.try_launch_detached(&launch).await.expect("launch");
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+        )
+        .await
+        .expect("wait_for_exit hung");
+        let instance = h
+            .persistence
+            .get_instance(inst_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            instance.status,
+            runtara_core::domain::InstanceStatus::Completed,
+            "{mode}: {instance:?}"
+        );
+        assert_eq!(h.runner.workflow_api_launches().serving(), 0, "{mode}");
+    }
+}
+
+/// Run services over the workflow API go through the run's own runtime host:
+/// the checkpoint and the event the probe wrote are in persistence.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_api_run_services_reach_persistence() {
+    let h = harness().await;
+    let probe = workflow_api_probe();
+    let inst_id = unique("inst-workflow-api-durable");
+    let input =
+        serde_json::to_vec(&serde_json::json!({"data": {"mode": "durable"}, "variables": {}}))
+            .unwrap();
+    assert!(
+        h.persistence
+            .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+            .await
+            .expect("register instance")
+    );
+    let handle = h
+        .runner
+        .try_launch_detached(&options(inst_id.as_str(), &probe))
+        .await
+        .expect("launch");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+    )
+    .await
+    .expect("wait_for_exit hung");
+    let instance = h
+        .persistence
+        .get_instance(inst_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        instance.status,
+        runtara_core::domain::InstanceStatus::Completed,
+        "{instance:?}"
+    );
+    let output: serde_json::Value =
+        serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+    assert_eq!(output["firstStored"], true);
+    assert_eq!(output["secondStored"], false);
+    assert_eq!(output["secondState"], "first");
+    assert_eq!(output["read"], "first");
+    assert_eq!(output["missing"], true);
+    assert!(output["nowMs"].as_u64().unwrap() > 1_700_000_000_000);
+
+    let checkpoint = h
+        .persistence
+        .load_checkpoint(inst_id.as_str(), "probe/step:1")
+        .await
+        .unwrap()
+        .expect("the probe's checkpoint is persisted");
+    assert_eq!(checkpoint.state, b"first");
+
+    let events = h
+        .persistence
+        .list_events(
+            inst_id.as_str(),
+            &runtara_core::persistence::ListEventsFilter {
+                subtype: Some("probe".into()),
+                ..Default::default()
+            },
+            10,
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        events[0].payload.as_deref(),
+        Some(br#"{"step":1}"#.as_slice())
+    );
+}
+
+/// Published state over the workflow API goes through the runner's state
+/// service: what the probe set is what persistence holds, and a malformed
+/// step key is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_api_published_state_reaches_persistence() {
+    let h = harness().await;
+    let probe = workflow_api_probe();
+    let inst_id = unique("inst-workflow-api-state");
+    let input =
+        serde_json::to_vec(&serde_json::json!({"data": {"mode": "state"}, "variables": {}}))
+            .unwrap();
+    assert!(
+        h.persistence
+            .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+            .await
+            .expect("register instance")
+    );
+    let handle = h
+        .runner
+        .try_launch_detached(&options(inst_id.as_str(), &probe))
+        .await
+        .expect("launch");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+    )
+    .await
+    .expect("wait_for_exit hung");
+    let instance = h
+        .persistence
+        .get_instance(inst_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        instance.status,
+        runtara_core::domain::InstanceStatus::Completed,
+        "{instance:?}"
+    );
+    let output: serde_json::Value =
+        serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+    assert_eq!(output["state"], serde_json::json!({"stage": "probed"}));
+    assert_eq!(output["refused"], "invalid");
+
+    let stored = h
+        .persistence
+        .run_state()
+        .expect("postgres persistence keeps run state")
+        .get_state("embedded-test", inst_id.as_str())
+        .await
+        .unwrap()
+        .expect("the probe published state");
+    assert_eq!(
+        stored.state.get("stage"),
+        Some(&serde_json::json!("probed")),
+        "{stored:?}"
+    );
+}
+
+/// Managed inputs over the workflow API go through the run's runtime host: a
+/// registered input reads open, a replayed registration finds it again, and
+/// closing it reports it closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_api_managed_inputs_open_and_close() {
+    let h = harness().await;
+    let probe = workflow_api_probe();
+    let inst_id = unique("inst-workflow-api-input");
+    let input =
+        serde_json::to_vec(&serde_json::json!({"data": {"mode": "input"}, "variables": {}}))
+            .unwrap();
+    assert!(
+        h.persistence
+            .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+            .await
+            .expect("register instance")
+    );
+    let handle = h
+        .runner
+        .try_launch_detached(&options(inst_id.as_str(), &probe))
+        .await
+        .expect("launch");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+    )
+    .await
+    .expect("wait_for_exit hung");
+    let instance = h
+        .persistence
+        .get_instance(inst_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        instance.status,
+        runtara_core::domain::InstanceStatus::Completed,
+        "{instance:?}"
+    );
+    let output: serde_json::Value =
+        serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+    assert_eq!(output["open"], serde_json::json!({"state": "open"}));
+    assert_eq!(output["closed"]["state"], "closed", "{output}");
+}
+
+/// `PUT /v1/run/deadline` brings the run's deadline forward: a probe that
+/// sets 200ms and then spins ends long before its 30s launch timeout.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflow_api_run_can_shorten_its_deadline() {
+    let h = harness().await;
+    let probe = workflow_api_probe();
+    let inst_id = unique("inst-workflow-api-deadline");
+    let input =
+        serde_json::to_vec(&serde_json::json!({"data": {"mode": "deadline"}, "variables": {}}))
+            .unwrap();
+    assert!(
+        h.persistence
+            .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+            .await
+            .expect("register instance")
+    );
+    let started = std::time::Instant::now();
+    let handle = h
+        .runner
+        .try_launch_detached(&options(inst_id.as_str(), &probe))
+        .await
+        .expect("launch");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+    )
+    .await
+    .expect("wait_for_exit hung");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "ended after {:?}",
+        started.elapsed()
+    );
+    let instance = h
+        .persistence
+        .get_instance(inst_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        instance.status,
+        runtara_core::domain::InstanceStatus::Completed,
+        "{instance:?}"
+    );
+    assert_eq!(h.runner.workflow_api_launches().serving(), 0);
+}
+
+mod workflow_api_connections {
+    use super::*;
+    use runtara_component_host::outbound_http::{
+        Destination, OutboundContext, OutboundError, RequestOptions, Response,
+    };
+    use runtara_database_contract::{
+        BatchRequest, BatchResult, DatabaseError, ExecutionResult, QueryRequest, RowSet, Statement,
+    };
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Seen {
+        http: Mutex<Vec<(String, RequestOptions)>>,
+        sql: Mutex<Vec<(String, String, String)>>,
+        resolved: Mutex<Vec<(String, String)>>,
+    }
+
+    struct Http(Arc<Seen>);
+
+    #[async_trait::async_trait]
+    impl runtara_component_host::OutboundHttpHost for Http {
+        async fn request(
+            &self,
+            context: &OutboundContext,
+            request: RequestOptions,
+        ) -> Result<Response, OutboundError> {
+            let public = matches!(request.destination, Destination::Public(_));
+            self.0
+                .http
+                .lock()
+                .unwrap()
+                .push((context.tenant_id.clone(), request));
+            if public {
+                Err(OutboundError {
+                    code: "HTTP_DESTINATION_DENIED".into(),
+                    message: "blocked".into(),
+                    status: Some(403),
+                    body: b"nope".to_vec(),
+                    retry_after_ms: None,
+                })
+            } else {
+                Ok(Response {
+                    status: 201,
+                    headers: vec![("x-upstream".into(), "1".into())],
+                    body: b"pong".to_vec(),
+                })
+            }
+        }
+    }
+
+    struct Database(Arc<Seen>);
+
+    #[async_trait::async_trait]
+    impl runtara_component_host::DatabaseHost for Database {
+        async fn query(
+            &self,
+            tenant: &str,
+            connection_id: &str,
+            request: QueryRequest,
+        ) -> Result<RowSet, DatabaseError> {
+            self.0.sql.lock().unwrap().push((
+                tenant.to_string(),
+                connection_id.to_string(),
+                request.sql,
+            ));
+            Ok(RowSet {
+                columns: Vec::new(),
+                rows: Vec::new(),
+            })
+        }
+        async fn execute(
+            &self,
+            _: &str,
+            _: &str,
+            _: Statement,
+        ) -> Result<ExecutionResult, DatabaseError> {
+            Err(DatabaseError::invalid("not in this test"))
+        }
+        async fn execute_batch(
+            &self,
+            _: &str,
+            _: &str,
+            _: BatchRequest,
+        ) -> Result<BatchResult, DatabaseError> {
+            Err(DatabaseError::invalid("not in this test"))
+        }
+    }
+
+    struct Resolver(Arc<Seen>);
+
+    #[async_trait::async_trait]
+    impl runtara_component_host::ConnectionResolverHost for Resolver {
+        async fn describe(&self, tenant: &str, connection_id: String) -> Result<Vec<u8>, String> {
+            self.0
+                .resolved
+                .lock()
+                .unwrap()
+                .push((tenant.to_string(), connection_id.clone()));
+            Ok(
+                serde_json::to_vec(&serde_json::json!({"id": connection_id, "tenant": tenant}))
+                    .unwrap(),
+            )
+        }
+        async fn resolve_resource(
+            &self,
+            tenant: &str,
+            connection_id: String,
+            _request: Vec<u8>,
+        ) -> Result<Vec<u8>, String> {
+            self.0
+                .resolved
+                .lock()
+                .unwrap()
+                .push((tenant.to_string(), connection_id));
+            Ok(br#"{"items":[1,2]}"#.to_vec())
+        }
+    }
+
+    /// Connection metadata, resources, SQL and outbound HTTP over the workflow
+    /// API reach the runner's connection services with the binding's tenant,
+    /// and their failures come back in the API's shapes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_api_connections_reach_the_connection_services() {
+        let h = harness().await;
+        let seen = Arc::new(Seen::default());
+        let runner = EmbeddedWasmRunner::new(
+            WorkflowRunnerConfig {
+                data_dir: h.dir.path().join("connections"),
+                default_timeout: Duration::from_secs(30),
+                skip_cert_verification: false,
+            },
+            Arc::clone(&h.persistence),
+            artifacts().clone(),
+        )
+        .unwrap()
+        .with_in_process_precompiler_for_tests()
+        .with_outbound_http(Arc::new(Http(seen.clone())))
+        .unwrap()
+        .with_database(Arc::new(Database(seen.clone())))
+        .unwrap()
+        .with_connection_resolver(Arc::new(Resolver(seen.clone())))
+        .unwrap();
+        let probe = workflow_api_probe();
+        let inst_id = unique("inst-workflow-api-connections");
+        let input = serde_json::to_vec(
+            &serde_json::json!({"data": {"mode": "connections"}, "variables": {}}),
+        )
+        .unwrap();
+        assert!(
+            h.persistence
+                .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+                .await
+                .expect("register instance")
+        );
+        let handle = runner
+            .try_launch_detached(&options(inst_id.as_str(), &probe))
+            .await
+            .expect("launch");
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            runner.wait_for_exit(&handle, Duration::from_millis(50)),
+        )
+        .await
+        .expect("wait_for_exit hung");
+        let instance = h
+            .persistence
+            .get_instance(inst_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            instance.status,
+            runtara_core::domain::InstanceStatus::Completed,
+            "{instance:?}"
+        );
+        let output: serde_json::Value =
+            serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            output["describe"],
+            serde_json::json!({"id": "conn-1", "tenant": "embedded-test"})
+        );
+        assert_eq!(output["resource"], serde_json::json!({"items": [1, 2]}));
+        assert_eq!(
+            output["rows"],
+            serde_json::json!({"columns": [], "rows": []})
+        );
+        assert_eq!(output["refused"], "database-error");
+        assert_eq!(output["reply"]["status"], 201);
+        assert_eq!(output["reply"]["body"], "pong");
+        assert_eq!(
+            output["reply"]["headers"],
+            serde_json::json!([["x-upstream", "1"]])
+        );
+        assert_eq!(output["failed"]["code"], "HTTP_DESTINATION_DENIED");
+        assert_eq!(output["failed"]["status"], 403);
+        assert_eq!(output["failed"]["body"], "nope");
+
+        let http = seen.http.lock().unwrap();
+        assert_eq!(http.len(), 2);
+        assert!(http.iter().all(|(tenant, _)| tenant == "embedded-test"));
+        assert_eq!(http[0].1.method, "POST");
+        assert_eq!(http[0].1.body.as_deref(), Some(b"ping".as_slice()));
+        assert_eq!(
+            seen.sql.lock().unwrap().as_slice(),
+            &[(
+                "embedded-test".to_string(),
+                "conn-1".to_string(),
+                "select 1".to_string()
+            )]
+        );
+        assert!(
+            seen.resolved
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(tenant, connection)| tenant == "embedded-test" && connection == "conn-1")
+        );
+    }
+}
+
+/// An operation-scoped call site over the workflow API: entering yields a
+/// stable id, a suspension keeps its continuation in persistence, re-entering
+/// with `load` reads it back, and a suspension an agent may not make is
+/// refused with the suspension caps' error.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflow_api_operations_keep_their_continuation() {
+    let h = harness().await;
+    let probe = workflow_api_probe();
+    let inst_id = unique("inst-workflow-api-operation");
+    let input =
+        serde_json::to_vec(&serde_json::json!({"data": {"mode": "operation"}, "variables": {}}))
+            .unwrap();
+    assert!(
+        h.persistence
+            .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+            .await
+            .expect("register instance")
+    );
+    let handle = h
+        .runner
+        .try_launch_detached(&options(inst_id.as_str(), &probe))
+        .await
+        .expect("launch");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+    )
+    .await
+    .expect("wait_for_exit hung");
+    let instance = h
+        .persistence
+        .get_instance(inst_id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        instance.status,
+        runtara_core::domain::InstanceStatus::Completed,
+        "{instance:?}"
+    );
+    let output: serde_json::Value =
+        serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+    assert_eq!(output["sameId"], true);
+    assert_eq!(output["first"], serde_json::Value::Null);
+    assert_eq!(output["loaded"], "saved");
+    assert_eq!(output["refused"], "agent-invalid-suspension");
+}
+
+mod workflow_api_control {
+    use super::*;
+    use runtara_component_host::control_host::{
+        CancelRequest, CommandOutcome, CommandResult, ControlAuthority, ControlError,
+        ControlErrorCode, ControlHost, InstanceDetail, InstancePage, InstanceStatus,
+        InstanceSummary, QueryRequest, StartRequest, StartResult, TerminalResult,
+    };
+    use std::sync::Mutex;
+
+    /// A control service with today's mutation rules (a mutation needs an
+    /// operation; only `child-1` is a child), recording who each call was for.
+    #[derive(Default)]
+    struct Control {
+        calls: Mutex<Vec<(&'static str, ControlAuthority)>>,
+        started: Mutex<Option<StartRequest>>,
+    }
+
+    fn summary(id: &str) -> InstanceSummary {
+        InstanceSummary {
+            instance_id: id.into(),
+            workflow_id: "child-wf".into(),
+            version: Some(1),
+            run_label: None,
+            parent_instance_id: Some("parent".into()),
+            status: InstanceStatus::Running,
+            suspension_reason: None,
+            termination_reason: None,
+            created_at_ms: 1,
+            started_at_ms: Some(2),
+            finished_at_ms: None,
+        }
+    }
+
+    impl Control {
+        fn record(&self, call: &'static str, authority: &ControlAuthority) {
+            self.calls.lock().unwrap().push((call, authority.clone()));
+        }
+        fn mutation(&self, authority: &ControlAuthority, target: &str) -> Result<(), ControlError> {
+            if authority.operation.is_none() {
+                return Err(ControlError::new(
+                    ControlErrorCode::RequiresOperation,
+                    "needs an operation",
+                ));
+            }
+            if target != "child-1" {
+                return Err(ControlError::new(ControlErrorCode::NotChild, "not a child"));
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ControlHost for Control {
+        async fn start(
+            &self,
+            authority: &ControlAuthority,
+            request: StartRequest,
+        ) -> Result<StartResult, ControlError> {
+            self.record("start", authority);
+            self.mutation(authority, "child-1")?;
+            *self.started.lock().unwrap() = Some(request);
+            Ok(StartResult {
+                instance_id: "child-1".into(),
+                workflow_id: "child-wf".into(),
+                version: 1,
+                run_label: None,
+                replayed: false,
+            })
+        }
+        async fn get(
+            &self,
+            authority: &ControlAuthority,
+            instance_id: String,
+        ) -> Result<InstanceDetail, ControlError> {
+            self.record("get", authority);
+            Ok(InstanceDetail {
+                instance: summary(&instance_id),
+                terminal: TerminalResult {
+                    output: None,
+                    output_bytes: None,
+                    output_omitted: false,
+                    error: None,
+                    error_omitted: false,
+                },
+            })
+        }
+        async fn query(
+            &self,
+            authority: &ControlAuthority,
+            request: QueryRequest,
+        ) -> Result<InstancePage, ControlError> {
+            self.record("query", authority);
+            assert_eq!(request.statuses, vec![InstanceStatus::Running]);
+            Ok(InstancePage {
+                items: vec![summary("child-1")],
+                total: 1,
+                next_page_token: None,
+            })
+        }
+        async fn cancel(
+            &self,
+            authority: &ControlAuthority,
+            request: CancelRequest,
+        ) -> Result<CommandResult, ControlError> {
+            self.record("cancel", authority);
+            self.mutation(authority, &request.instance_id)?;
+            Ok(CommandResult {
+                instance_id: request.instance_id,
+                outcome: CommandOutcome::Requested,
+                replayed: false,
+            })
+        }
+        async fn pause(
+            &self,
+            authority: &ControlAuthority,
+            instance_id: String,
+        ) -> Result<CommandResult, ControlError> {
+            self.record("pause", authority);
+            self.mutation(authority, &instance_id)?;
+            Ok(CommandResult {
+                instance_id,
+                outcome: CommandOutcome::Applied,
+                replayed: false,
+            })
+        }
+    }
+
+    /// Control calls over the workflow API reach the runner's control service
+    /// as the run itself: the binding's tenant and instance, and the operation
+    /// only when the run entered it. Control refusals keep their codes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_api_control_calls_act_as_the_run() {
+        let h = harness().await;
+        let control = Arc::new(Control::default());
+        let runner = EmbeddedWasmRunner::new(
+            WorkflowRunnerConfig {
+                data_dir: h.dir.path().join("control"),
+                default_timeout: Duration::from_secs(30),
+                skip_cert_verification: false,
+            },
+            Arc::clone(&h.persistence),
+            artifacts().clone(),
+        )
+        .unwrap()
+        .with_in_process_precompiler_for_tests()
+        .with_control_host(control.clone())
+        .unwrap();
+        let probe = workflow_api_probe();
+        let inst_id = unique("inst-workflow-api-control");
+        let input =
+            serde_json::to_vec(&serde_json::json!({"data": {"mode": "control"}, "variables": {}}))
+                .unwrap();
+        assert!(
+            h.persistence
+                .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+                .await
+                .expect("register instance")
+        );
+        let handle = runner
+            .try_launch_detached(&options(inst_id.as_str(), &probe))
+            .await
+            .expect("launch");
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            runner.wait_for_exit(&handle, Duration::from_millis(50)),
+        )
+        .await
+        .expect("wait_for_exit hung");
+        let instance = h
+            .persistence
+            .get_instance(inst_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            instance.status,
+            runtara_core::domain::InstanceStatus::Completed,
+            "{instance:?}"
+        );
+        let output: serde_json::Value =
+            serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+        assert_eq!(output["started"]["instanceId"], "child-1");
+        assert_eq!(output["detail"]["instance"]["status"], "running");
+        assert_eq!(output["page"]["items"][0]["instanceId"], "child-1");
+        assert_eq!(output["page"]["total"], 1);
+        assert_eq!(output["outside"], "requires-operation");
+        assert_eq!(output["stranger"], "not-found");
+        assert_eq!(output["notChild"], "not-child");
+
+        let started = control.started.lock().unwrap().clone().expect("start");
+        assert_eq!(started.workflow_id, "child-wf");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&started.input).unwrap(),
+            serde_json::json!({"data": {"n": 1}, "variables": {}})
+        );
+        let calls = control.calls.lock().unwrap();
+        let names: Vec<_> = calls.iter().map(|(name, _)| *name).collect();
+        // The stranger operation never reaches the service.
+        assert_eq!(names, ["start", "get", "query", "pause", "cancel"]);
+        let operation = calls[0]
+            .1
+            .operation
+            .clone()
+            .expect("start runs in the operation");
+        for (name, authority) in calls.iter() {
+            assert_eq!(authority.tenant, "embedded-test", "{name}");
+            assert_eq!(
+                authority.caller.as_deref(),
+                Some(inst_id.as_str()),
+                "{name}"
+            );
+        }
+        assert_eq!(calls[1].1.operation, None);
+        assert_eq!(calls[3].1.operation, None, "pause went without one");
+        assert_eq!(calls[4].1.operation.as_ref(), Some(&operation));
+    }
+}
+
+mod workflow_api_trusted {
+    use super::*;
+    use runtara_agent_trusted::{TrustedContext, error};
+    use runtara_component_host::ComponentDispatcherService;
+    use runtara_component_host::trusted::TrustedCredentials;
+
+    #[derive(Default)]
+    struct Credentials(AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl TrustedCredentials for Credentials {
+        async fn resolve(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[String],
+        ) -> Result<TrustedContext, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(error("DENIED", "not in this test"))
+        }
+    }
+
+    /// A trusted call over the workflow API is decided by the run's artifact
+    /// pins like on the old ABI: a run that pins no trusted artifact is
+    /// refused before any credential lookup. (The probe cannot pin one; a
+    /// pinned success lands with the emitter's move to the new ABI.)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_api_trusted_calls_fail_closed_without_a_pin() {
+        let h = harness().await;
+        let release =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/wasm32-wasip2/release");
+        let bundle = tempfile::tempdir().unwrap();
+        for suffix in ["wasm", "meta.json"] {
+            let file = format!("runtara_agent_s3_storage.{suffix}");
+            std::fs::copy(release.join(&file), bundle.path().join(&file)).unwrap_or_else(|e| {
+                panic!("missing {file}: run scripts/build-agent-components.sh ({e})")
+            });
+        }
+        let dispatcher = ComponentDispatcherService::from_dir(bundle.path())
+            .await
+            .unwrap();
+        let credentials = Arc::new(Credentials::default());
+        dispatcher
+            .trusted_executor()
+            .set_credentials(credentials.clone())
+            .unwrap();
+        let runner = EmbeddedWasmRunner::new(
+            WorkflowRunnerConfig {
+                data_dir: h.dir.path().join("trusted"),
+                default_timeout: Duration::from_secs(30),
+                skip_cert_verification: false,
+            },
+            Arc::clone(&h.persistence),
+            artifacts().clone(),
+        )
+        .unwrap()
+        .with_in_process_precompiler_for_tests()
+        .with_trusted_executor(dispatcher.trusted_executor())
+        .unwrap();
+        let probe = workflow_api_probe();
+        let inst_id = unique("inst-workflow-api-trusted");
+        let input =
+            serde_json::to_vec(&serde_json::json!({"data": {"mode": "trusted"}, "variables": {}}))
+                .unwrap();
+        assert!(
+            h.persistence
+                .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+                .await
+                .expect("register instance")
+        );
+        let handle = runner
+            .try_launch_detached(&options(inst_id.as_str(), &probe))
+            .await
+            .expect("launch");
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            runner.wait_for_exit(&handle, Duration::from_millis(50)),
+        )
+        .await
+        .expect("wait_for_exit hung");
+        let instance = h
+            .persistence
+            .get_instance(inst_id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            instance.status,
+            runtara_core::domain::InstanceStatus::Completed,
+            "{instance:?}"
+        );
+        let output: serde_json::Value =
+            serde_json::from_slice(instance.output.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            output["refusal"],
+            serde_json::json!({"code": "trusted-error", "envelope": "TRUSTED_VERSION_REQUIRED"})
+        );
+        assert_eq!(credentials.0.load(Ordering::SeqCst), 0);
+    }
+}
+
+/// Real workflows compiled for the workflow API: the logic imports
+/// `runtara:api`, composed with the `runtara:api` component and the run shim,
+/// and the artifact imports only WASI. Each case must end with its expected
+/// status and output: an agent step's checkpoint with
+/// debug events on, a While loop
+/// with Log steps (signal checks at loop boundaries), a durable Delay that
+/// parks the run (a suspended outcome with its wake), and published state
+/// written by SetState and read back by GetState.
+#[tokio::test(flavor = "multi_thread")]
+async fn workflows_compiled_for_the_workflow_api_end_as_expected() {
+    use runtara_workflows::direct_wasm::{
+        DirectCompilationInput, compile_direct_workflow, compose_direct_workflow,
+    };
+    let h = harness().await;
+    let components =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/wasm32-wasip2/release");
+    let fixture = |name: &str| -> serde_json::Value {
+        serde_json::from_slice(
+            &std::fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../runtara-workflows/tests/fixtures")
+                    .join(name),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let echo = serde_json::json!({
+        "durable": true,
+        "steps": {
+            "agent": {
+                "stepType": "Agent", "id": "agent", "name": "Echo",
+                "agentId": "utils", "capabilityId": "return-input", "maxRetries": 0,
+                "inputMapping": {"value": {"valueType": "reference", "value": "data.value"}}
+            },
+            "finish": {
+                "stepType": "Finish", "id": "finish",
+                "inputMapping": {"result": {"valueType": "reference", "value": "steps.agent.outputs"}}
+            }
+        },
+        "entryPoint": "agent",
+        "executionPlan": [{"fromStep": "agent", "toStep": "finish"}],
+        "variables": {},
+        "inputSchema": {"value": {"type": "string"}},
+        "outputSchema": {}
+    });
+    let delay = serde_json::json!({
+        "durable": true,
+        "steps": {
+            "delay": {
+                "stepType": "Delay", "id": "delay", "name": "Wait",
+                "durationMs": {"valueType": "immediate", "value": 3_600_000}
+            },
+            "finish": {
+                "stepType": "Finish", "id": "finish",
+                "inputMapping": {"done": {"valueType": "immediate", "value": true}}
+            }
+        },
+        "entryPoint": "delay",
+        "executionPlan": [{"fromStep": "delay", "toStep": "finish"}],
+        "variables": {},
+        "inputSchema": {},
+        "outputSchema": {}
+    });
+    let state = serde_json::json!({
+        "durable": true,
+        "stateSchema": {"stage": {"type": "string"}, "n": {"type": "integer"}},
+        "steps": {
+            "s1": {"id": "s1", "stepType": "SetState", "values": {
+                "stage": {"valueType": "immediate", "value": "before"},
+                "n": {"valueType": "reference", "value": "data.n"}}},
+            "s2": {"id": "s2", "stepType": "SetState", "values": {
+                "stage": {"valueType": "immediate", "value": "after"}}},
+            "g": {"id": "g", "stepType": "GetState"},
+            "done": {"id": "done", "stepType": "Finish", "inputMapping": {
+                "value": {"valueType": "reference", "value": "steps.g.outputs"}}}
+        },
+        "entryPoint": "s1",
+        "executionPlan": [
+            {"fromStep": "s1", "toStep": "s2"},
+            {"fromStep": "s2", "toStep": "g"},
+            {"fromStep": "g", "toStep": "done"}
+        ],
+        "variables": {},
+        "inputSchema": {"n": {"type": "integer"}},
+        "outputSchema": {}
+    });
+    use runtara_core::domain::InstanceStatus::{Completed, Suspended};
+    let cases = [
+        (
+            "echo",
+            echo,
+            serde_json::json!({"value": "hello"}),
+            true,
+            Completed,
+        ),
+        (
+            "log-in-loop",
+            fixture("log_in_loop.json"),
+            serde_json::json!({"count": 3}),
+            true,
+            Completed,
+        ),
+        ("delay", delay, serde_json::json!({}), false, Suspended),
+        (
+            "state",
+            state,
+            serde_json::json!({"n": 7}),
+            false,
+            Completed,
+        ),
+    ];
+    let catalog = Arc::new(runtara_dsl::agent_meta::AgentCatalog::from_agents(
+        ["utils", "transform"]
+            .iter()
+            .map(|agent| {
+                serde_json::from_slice(
+                    &std::fs::read(components.join(format!("runtara_agent_{agent}.meta.json")))
+                        .unwrap(),
+                )
+                .unwrap()
+            })
+            .collect(),
+    ));
+
+    for (case, graph, data, track_events, status) in cases {
+        let mut runs = Vec::new();
+        for abi in ["workflow-api"] {
+            let mut compiled = compile_direct_workflow(DirectCompilationInput {
+                workflow_id: format!("workflow-api-{case}"),
+                version: 1,
+                source_checksum: None,
+                execution_graph: serde_json::from_value(graph.clone()).unwrap(),
+                child_workflows: vec![],
+                output_dir: h.dir.path().join(format!("workflow-api-{case}-{abi}")),
+                track_events,
+                agent_catalog: Some(Arc::clone(&catalog)),
+                agent_slug: None,
+            })
+            .unwrap();
+            let wasm = compose_direct_workflow(&mut compiled, &components).unwrap();
+
+            let inst_id = unique(&format!("inst-workflow-api-{case}"));
+            let input =
+                serde_json::to_vec(&serde_json::json!({"data": data, "variables": {}})).unwrap();
+            assert!(
+                h.persistence
+                    .try_register_instance(inst_id.as_str(), "embedded-test", Some(&input))
+                    .await
+                    .expect("register instance")
+            );
+            let handle = h
+                .runner
+                .try_launch_detached(&options(inst_id.as_str(), &wasm))
+                .await
+                .expect("launch");
+            tokio::time::timeout(
+                Duration::from_secs(60),
+                h.runner.wait_for_exit(&handle, Duration::from_millis(50)),
+            )
+            .await
+            .expect("wait_for_exit hung");
+            let instance = h
+                .persistence
+                .get_instance(inst_id.as_str())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(instance.status, status, "{case} {abi}: {instance:?}");
+            let output: Option<serde_json::Value> = instance
+                .output
+                .as_deref()
+                .map(|output| serde_json::from_slice(output).unwrap());
+            let mut events: Vec<(String, Option<String>)> = h
+                .persistence
+                .list_events(
+                    inst_id.as_str(),
+                    &runtara_core::persistence::ListEventsFilter::default(),
+                    10_000,
+                    0,
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|event| (format!("{:?}", event.event_type), event.subtype))
+                .collect();
+            events.sort();
+            runs.push((output, events));
+        }
+        if case == "echo" {
+            assert_eq!(runs[0].0, Some(serde_json::json!({"result": "hello"})));
+        }
+        if case == "state" {
+            assert_eq!(
+                runs[0].0.as_ref().map(|output| output["value"].clone()),
+                Some(serde_json::json!({"stage": "after", "n": 7})),
+                "the published state"
+            );
+        }
+    }
+    assert_eq!(h.runner.workflow_api_launches().serving(), 0);
+}
+
+/// Where this binary's launches find the components they wrote.
+fn artifacts() -> &'static std::sync::Arc<runtara_artifact_store::test_support::FileMapStore> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Arc<runtara_artifact_store::test_support::FileMapStore>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(Default::default)
 }

@@ -124,7 +124,8 @@
 //! `RUNTARA_SDK_BACKEND`,
 //! `RUNTARA_INSTANCE_MEMORY_MAX_BYTES`, `RUNTARA_MAX_CONCURRENT_RUNS`,
 //! `RUNTARA_PREPARATION_CONCURRENCY`, `RUNTARA_PRECOMPILE_CHILD_CONCURRENCY`.
-//! `RUNTARA_RUNNER` is accepted and ignored with a warning.
+//! A host that runs workflows elsewhere supplies its own runner
+//! ([`runner::RunnerFactory`]).
 //!
 //! Background workers: the `RUNTARA_{RUN_DIR,DB,IMAGE}_CLEANUP_*` families,
 //! `RUNTARA_EVENT_DEBUG_RETENTION_HOURS`, `RUNTARA_AUTO_RECOVER` and
@@ -239,6 +240,9 @@ pub mod step_vocabulary;
 /// Durable sleep wake scheduling.
 pub mod wake_scheduler;
 
+/// Whose work this process claims.
+pub mod claim_scope;
+
 /// Pure configuration parsing shared by environment and server callers.
 pub mod config;
 
@@ -274,6 +278,15 @@ pub mod runtime;
 /// Persistence-backed implementation of the component host's `RuntimeHost` —
 /// the native replacement for the composed guest runtime's HTTP loopback.
 pub mod runtime_host;
+
+/// Content-addressed artifact storage: images name their workflow artifact by
+/// digest and runners read it from the store.
+pub use runtara_artifact_store as artifacts;
+/// The workflow API served to runs of the embedded runner.
+/// The in-process workflow API now lives in the component host.
+pub use runtara_component_host::api_launches as workflow_api;
+/// Workflow API idempotency receipts in the runtime database.
+pub mod workflow_api_receipts;
 
 /// Shared Postgres fixtures for this crate's database-backed unit tests.
 #[cfg(all(test, feature = "db-integration-tests"))]

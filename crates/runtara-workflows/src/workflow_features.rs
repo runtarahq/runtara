@@ -169,8 +169,8 @@ impl WorkflowFeatureSummary {
         })
     }
 
-    /// Whether the emitted component must import `runtara:workflow/runtime`
-    /// — i.e. any lowered step would call a `runtime.*` host function. The
+    /// Whether the emitted component must import the run services of
+    /// `runtara:api` — i.e. any lowered step would call one. The
     /// terminal result is always the invoke return value.
     ///
     /// A workflow that needs NO runtime import is a "pure" transformation

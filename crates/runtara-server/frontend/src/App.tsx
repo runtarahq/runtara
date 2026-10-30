@@ -1,5 +1,5 @@
 import { RouterProvider } from 'react-router/dom';
-import { router } from '@/router';
+import { isOpenPath, openRouter, router } from '@/router';
 import { Loader } from '@/shared/components/loader.tsx';
 import { useAutoSignin } from '@/shared/hooks/useAutoSignin';
 import { useMe } from '@/shared/hooks/useMe';
@@ -10,6 +10,15 @@ import { useEffect } from 'react';
 import { cleanupPointerEvents } from '@/lib/utils';
 import { MaintenancePage } from '@/shared/components/maintenance-page';
 import { useHealthCheck } from '@/shared/hooks/useHealthCheck';
+import { tenantIdFromUrl } from '@/shared/config/oidcConfig';
+import { isOidcAuth } from '@/shared/config/runtimeConfig';
+import { TenantGate } from '@/shared/tenant/TenantGate';
+import { canOpen, useMyTenants } from '@/shared/tenant/myTenants';
+import { edition } from '@edition';
+
+// Where the signed-in user's tenants come from: the edition's, or this
+// server's. Chosen once, so every render calls the same hook.
+const useTenants = edition.useTenants ?? useMyTenants;
 
 function App() {
   const auth = useAutoSignin();
@@ -19,6 +28,7 @@ function App() {
   useUserGroups();
   useMe();
   const isMaintenanceMode = useHealthCheck();
+  const myTenants = useTenants();
 
   // Global cleanup for pointer-events
   useEffect(() => {
@@ -41,6 +51,32 @@ function App() {
 
   if (isMaintenanceMode) {
     return <MaintenancePage />;
+  }
+
+  // The edition's open pages are for any signed-in user, a member of this
+  // tenant or not, so they come before the tenant gates.
+  if (isOpenPath(window.location.pathname)) {
+    return isOidcAuth && !auth.isAuthenticated ? (
+      <Loader />
+    ) : (
+      <RouterProvider router={openRouter()} />
+    );
+  }
+
+  // Signed in with a token that names no tenant: at the bare mount the user
+  // picks (or is sent to) a workspace they belong to, and at a workspace they
+  // do not belong to they are told so instead of shown a page of 403s.
+  const tenantless =
+    isOidcAuth && auth.isAuthenticated && !auth.user?.profile?.org_id;
+  if (tenantless && !tenantIdFromUrl) {
+    return <TenantGate tenants={myTenants} />;
+  }
+  if (
+    tenantless &&
+    tenantIdFromUrl &&
+    canOpen(myTenants, tenantIdFromUrl) === false
+  ) {
+    return <TenantGate tenants={myTenants} deniedTenant={tenantIdFromUrl} />;
   }
 
   return <RouterProvider router={router} />;

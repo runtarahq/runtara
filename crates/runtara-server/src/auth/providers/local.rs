@@ -47,7 +47,15 @@ impl LocalProvider {
 
 #[async_trait]
 impl AuthProvider for LocalProvider {
-    async fn authenticate(&self, _headers: &HeaderMap) -> Result<AuthContext, AuthError> {
+    async fn authenticate(
+        &self,
+        _headers: &HeaderMap,
+        requested_tenant: Option<&str>,
+    ) -> Result<AuthContext, AuthError> {
+        // Self-hosted modes act for their configured tenant only.
+        if let Some(requested) = requested_tenant.filter(|t| *t != self.tenant_id) {
+            return Err(AuthError::TenantMismatch(requested.to_owned()));
+        }
         let mut ctx = AuthContext::new(
             self.tenant_id.clone(),
             self.user_id.clone(),
@@ -69,7 +77,10 @@ mod tests {
     #[tokio::test]
     async fn returns_local_user_for_empty_headers() {
         let provider = LocalProvider::new("org_123".into());
-        let ctx = provider.authenticate(&HeaderMap::new()).await.unwrap();
+        let ctx = provider
+            .authenticate(&HeaderMap::new(), None)
+            .await
+            .unwrap();
         assert_eq!(ctx.org_id, "org_123");
         assert_eq!(ctx.user_id, "local");
         assert_eq!(ctx.auth_method, AuthMethod::Unauthenticated);
@@ -86,7 +97,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("Authorization", "Bearer garbage".parse().unwrap());
         headers.insert("X-Forwarded-User", "attacker".parse().unwrap());
-        let ctx = provider.authenticate(&headers).await.unwrap();
+        let ctx = provider.authenticate(&headers, None).await.unwrap();
         assert_eq!(ctx.user_id, "local", "local mode must not trust any header");
         assert_eq!(ctx.org_id, "org_123");
     }

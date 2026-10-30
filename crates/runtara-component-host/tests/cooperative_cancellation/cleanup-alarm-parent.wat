@@ -5,7 +5,7 @@
     (import "target" (func $target async))
     (import "ready" (func $ready async))
     (import "alarm" (func $alarm async (param "ms" u64)))
-    (import "sleep" (func $sleep async (param "ms" u64)))
+    (import "sleep" (func $sleep async (param "how-long" u64)))
     (import "trace" (func $trace (param "event" u32)))
     (core module $memory
       (memory (export "memory") 1)
@@ -47,7 +47,7 @@
         (if (i32.ne (call $cancel (local.get $alarm)) (i32.const 4)) (then unreachable))
         (call $drop (local.get $alarm))
         ;; Advance past the disposed alarm's deadline in this same Store.
-        (call $sleep (i64.const 600))
+        (call $sleep (i64.const 600000000))
         (call $trace (i32.const 60))
         (i32.store (i32.const 2060) (i32.const 3500))
         (i32.store (i32.const 2064) (i32.const 2))
@@ -67,7 +67,7 @@
     (type $suspension (record (field "wakes" (list $wake)) (field "state" (list u8))))
     (type $outcome (variant (case "completed" (list u8)) (case "suspended" $suspension)))
     (func $invoke async (param "capability-id" string) (param "input" (list u8)) (result (result $outcome (error $error)))
-      (canon lift (core func $code "invoke") (memory $memory "memory") (realloc (func $memory "realloc"))))
+      (canon lift (core func $code "invoke") (memory (core memory $memory "memory")) (realloc (core func $memory "realloc"))))
     (instance $lifecycle
       (export "error-info" (type $error)) (export "signal-wait" (type $signal))
       (export "wake" (type $wake)) (export "suspension" (type $suspension))
@@ -75,7 +75,7 @@
     (export "runtara:agent-workflow-agent/capabilities@1.0.0" (instance $lifecycle)))
   (instance $workflow (instantiate $workflow
     (with "target" (func $agent "run")) (with "ready" (func $ready))
-    (with "alarm" (func $timers "abort-after")) (with "sleep" (func $timers "sleep"))
+    (with "alarm" (func $abort-after)) (with "sleep" (func $timers "wait-for"))
     (with "trace" (func $trace))))
   (alias export $workflow "runtara:agent-workflow-agent/capabilities@1.0.0" (instance $lifecycle))
   (export "runtara:agent-workflow-agent/capabilities@1.0.0" (instance $lifecycle)))

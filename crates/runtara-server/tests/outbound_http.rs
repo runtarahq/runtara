@@ -989,7 +989,7 @@ async fn native_preflight_rate_limit_returns_retry_headers_without_provider_io()
     sqlx::query("UPDATE connection_data_entity SET rate_limit_config=$1 WHERE id=$2")
         .bind(json!({"requestsPerSecond":1,"burstSize":1,"retryOnLimit":true,"maxRetries":1,"maxWaitMs":1000}))
         .bind(&connection).execute(&pool).await?;
-    let key = format!("rate_limit:{connection}");
+    let key = runtara_connections::service::rate_limits::rate_limit_key(&tenant, &connection);
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis() as u64;

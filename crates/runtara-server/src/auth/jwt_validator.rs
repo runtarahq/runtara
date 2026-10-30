@@ -110,8 +110,9 @@ pub fn validate_token(
     let token_data = decode::<Claims>(token, key, &validation)
         .map_err(|e| JwtError::ValidationFailed(e.to_string()))?;
 
-    // Ensure org_id is present
-    if token_data.claims.org_id.is_none() {
+    // Ensure org_id is present, unless the request names the tenant and membership
+    // authorizes the caller there.
+    if config.require_org_id && token_data.claims.org_id.is_none() {
         return Err(JwtError::MissingOrgId);
     }
 

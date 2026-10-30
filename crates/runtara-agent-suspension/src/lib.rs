@@ -7,6 +7,40 @@
 //! canonical layout, and the guest-side [`Suspendable`] / [`SuspendContext`]
 //! types. Natively this crate has no dependencies.
 
+/// Where an operation-scoped Agent call finds its operation on the workflow
+/// API ABI: the compiler puts `{"id": <hex id>, "continuation": <hex> | null}`
+/// in its input under this key, overwriting anything the step mapped there,
+/// so the continuation is still host-owned. Control agents name the id on
+/// their mutations; a suspending capability reads the continuation.
+pub const OPERATION_INPUT_KEY: &str = "_operation";
+
+/// A continuation as the `_operation` input carries it: lowercase hex.
+pub fn encode_continuation(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        text.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        text.push(char::from(DIGITS[usize::from(byte & 0xf)]));
+    }
+    text
+}
+
+/// The bytes of an [`encode_continuation`] text; `None` when it is not one.
+pub fn decode_continuation(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    let digit = |byte: u8| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    };
+    text.as_bytes()
+        .chunks(2)
+        .map(|pair| Some(digit(pair[0])? << 4 | digit(pair[1])?))
+        .collect()
+}
+
 /// Largest continuation (`suspension.state`) the host keeps per operation.
 pub const MAX_CONTINUATION_BYTES: usize = 64 * 1024;
 
@@ -142,6 +176,18 @@ pub fn validate_suspension(wakes: &[Wake], state: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuations_round_trip_as_hex() {
+        let bytes = [0u8, 1, 0x7f, 0x80, 0xff, b'"'];
+        let text = encode_continuation(&bytes);
+        assert_eq!(text, "00017f80ff22");
+        assert_eq!(decode_continuation(&text).as_deref(), Some(&bytes[..]));
+        assert_eq!(decode_continuation(""), Some(vec![]));
+        for bad in ["0", "0g", "FF"] {
+            assert_eq!(decode_continuation(bad), None, "{bad}");
+        }
+    }
     use wit_parser::{Resolve, TypeDefKind};
 
     fn resolve() -> Resolve {
@@ -178,27 +224,6 @@ mod tests {
         assert_eq!(cases("outcome"), ["completed", "suspended"]);
     }
 
-    #[test]
-    fn the_generated_suspending_agent_imports_its_continuation() {
-        let mut resolve = resolve();
-        let shape = runtara_wit::AgentShape {
-            suspendable: true,
-            ..Default::default()
-        };
-        let id = resolve
-            .push_str("probe.wit", &runtara_wit::agent_package("probe", shape))
-            .unwrap();
-        let package = &resolve.packages[id];
-        assert!(!package.interfaces.contains_key("suspendable"));
-        let world = &resolve.worlds[package.worlds["agent"]];
-        assert!(
-            world
-                .imports
-                .keys()
-                .any(|key| resolve.name_world_key(key) == runtara_wit::agent::CONTINUATION)
-        );
-    }
-
     /// The canonical layout of the suspension types equals the constants the
     /// emitter reads and the host mirrors ([`layout`]).
     #[test]
@@ -206,14 +231,10 @@ mod tests {
         use wit_parser::{Int, SizeAlign, Type};
 
         let mut resolve = resolve();
-        let shape = runtara_wit::AgentShape {
-            suspendable: true,
-            ..Default::default()
-        };
         let id = resolve
             .push_str(
                 "probe.wit",
-                &runtara_wit::agent_package("layout-probe", shape),
+                &runtara_wit::agent_package("layout-probe", Default::default()),
             )
             .unwrap();
         let mut sizes = SizeAlign::default();

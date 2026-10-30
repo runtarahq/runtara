@@ -57,6 +57,7 @@ async fn generic_client_credentials_mints_via_form_body_and_basic() {
         let mut headers = std::collections::HashMap::new();
         let resolved = runtara_connections::auth::provider_auth::resolve_connection_auth(
             &client,
+            "tenant-1",
             &format!("conn-{style}"),
             "http_oauth2_client_credentials",
             &params,

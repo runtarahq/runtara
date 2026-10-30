@@ -524,6 +524,44 @@ pub async fn superseded_execution_cannot_write_guest_state(p: &dyn Persistence) 
     p.delete_instances_batch(&[id]).await.unwrap();
 }
 
+/// A superseded execution cannot acknowledge a lifecycle command: the command
+/// stays pending for the execution that holds the run, which can.
+pub async fn superseded_execution_cannot_acknowledge_a_command(p: &dyn Persistence) {
+    use crate::lifecycle::Decision;
+    let id = running(p, "stale-ack").await;
+    let stale = claim(p, &id, "runner-a").await;
+    let current = relaunch(p, &id, "runner-b").await;
+    p.insert_signal(&id, SignalType::Pause, b"").await.unwrap();
+    let command = p.get_pending_signal(&id).await.unwrap().unwrap();
+
+    superseded(
+        p.apply_owned_lifecycle_command(&id, &command.command_id, SignalType::Pause, Some(&stale))
+            .await
+            .map(|_| ()),
+        "a stale acknowledgement",
+    );
+    assert_eq!(
+        p.get_instance(&id).await.unwrap().unwrap().status,
+        InstanceStatus::Running
+    );
+    assert_eq!(
+        p.get_pending_signal(&id).await.unwrap().unwrap().command_id,
+        command.command_id,
+        "the command stays pending for the execution that holds the run"
+    );
+
+    let decision = p
+        .apply_owned_lifecycle_command(&id, &command.command_id, SignalType::Pause, Some(&current))
+        .await
+        .unwrap();
+    assert!(matches!(decision, Decision::Applied(_)), "{decision:?}");
+    assert_eq!(
+        p.get_instance(&id).await.unwrap().unwrap().status,
+        InstanceStatus::Suspended
+    );
+    p.delete_instances_batch(&[id]).await.unwrap();
+}
+
 /// A writer outside any launched execution (no lease) is refused while an
 /// execution owns the root, and admitted when none does.
 pub async fn unowned_writes_yield_to_an_owning_execution(p: &dyn Persistence) {
@@ -604,6 +642,7 @@ pub async fn run_all(p: &dyn Persistence) {
     only_the_committed_transition_is_already_applied(p).await;
     pause_or_cancel_before_completion_supersedes_it(p).await;
     superseded_execution_cannot_write_guest_state(p).await;
+    superseded_execution_cannot_acknowledge_a_command(p).await;
     unowned_writes_yield_to_an_owning_execution(p).await;
     fenced_child_lookup_reads_only_under_its_fence(p).await;
 }

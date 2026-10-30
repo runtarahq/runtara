@@ -130,7 +130,7 @@ pub async fn create_api_key(
     Source(source): Source,
     Json(request): Json<CreateApiKeyRequest>,
 ) -> (StatusCode, Json<Value>) {
-    let snapshot = crate::config::entitlements();
+    let snapshot = crate::config::entitlements_for(&tenant_id);
     match sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM public.api_keys WHERE org_id = $1 AND is_revoked = false",
     )
@@ -341,7 +341,9 @@ pub async fn revoke_api_key(
             // block for `rt_*` keys, so a Valkey failure here is logged, not fatal.
             if let (Some(jti), Some(manager)) = (jti.as_deref(), valkey.as_ref()) {
                 let ttl = expires_at.map(|exp| (exp - Utc::now()).num_seconds().max(0) as u64);
-                if let Err(e) = crate::valkey::auth::revoke_token(manager, jti, ttl).await {
+                if let Err(e) =
+                    crate::valkey::auth::revoke_token(manager, &tenant_id, jti, ttl).await
+                {
                     tracing::warn!(error = %e, "failed to write token revocation to Valkey");
                 }
             }
