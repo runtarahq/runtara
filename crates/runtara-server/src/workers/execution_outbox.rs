@@ -1520,6 +1520,11 @@ impl ExecutionOutbox {
                     (o.state = 'pending' AND o.available_at <= NOW())
                     OR (o.state = 'leased' AND o.lease_expires_at <= NOW())
                   )
+                  -- Where processes serving other tenants share the store
+                  -- (RUNTARA_CLAIM_ONLY_SERVED_TENANTS), only the served
+                  -- tenants' requests: another's stream is not this
+                  -- process's to publish to.
+                  AND ($4::text[] IS NULL OR o.tenant_id = ANY($4))
                 ORDER BY o.available_at, o.created_at
                 FOR UPDATE OF o SKIP LOCKED
                 LIMIT $2
@@ -1539,6 +1544,7 @@ impl ExecutionOutbox {
         .bind(worker_id)
         .bind(batch_size)
         .bind(lease_ms)
+        .bind(runtara_environment::claim_scope::claim_tenants())
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
