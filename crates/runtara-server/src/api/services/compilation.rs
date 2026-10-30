@@ -23,7 +23,7 @@ use runtara_workflows::direct_wasm::{
 };
 use runtara_workflows::{
     ChildWorkflowInput, CompilationInput, DirectWorkflowCompileOptions, NativeCompilationResult,
-    ValidationError, WorkflowCompilerMode, compile_workflow_direct,
+    ValidationError, WorkflowCompilerMode,
 };
 
 /// Global semaphore limiting concurrent compilations across all code paths.
@@ -440,7 +440,7 @@ fn compile_workflow_direct_only(
         source_checksum: Some(source_checksum),
     };
 
-    match compile_workflow_direct(input.clone(), options) {
+    match crate::compile_executor::compile(input.clone(), options) {
         Ok(result) => {
             record_direct_compilation_outcome("success", "none", direct_start.elapsed());
             info!(
