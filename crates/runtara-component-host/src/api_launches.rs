@@ -496,13 +496,43 @@ impl ApiLaunches {
     /// [`Binding`] as an extension, derived from where the request came from,
     /// never from the request itself.
     pub fn router(self: &Arc<Self>) -> axum::Router {
+        let launches = Arc::clone(self);
         router(WorkflowApiState {
             backend: Arc::new(Backend(Arc::clone(self))),
             receipts: Arc::clone(&self.receipts),
             limiter: Some(Arc::new(Paced(Arc::clone(self)))),
             caps: Caps::default(),
         })
+        // A compile launch is served its run, its input, its outcome and its
+        // artifacts, and nothing else: a compiler a tenant's workflow
+        // compromised reaches none of the tenant's connections, databases or
+        // runs (M7.15).
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let launches = Arc::clone(&launches);
+                async move {
+                    let compiling = request
+                        .extensions()
+                        .get::<Binding>()
+                        .and_then(|binding| launches.slot(binding))
+                        .is_some_and(|slot| slot.compile.is_some());
+                    if compiling && !compile_path(request.uri().path()) {
+                        return runtara_workflow_api::server::error_response(&ApiError::new(
+                            ErrorCode::Denied,
+                            "a compile launch is served only its run, input, outcome and artifacts",
+                        ));
+                    }
+                    next.run(request).await
+                }
+            },
+        ))
     }
+}
+
+/// What a compile launch is served.
+fn compile_path(path: &str) -> bool {
+    matches!(path, "/v1/run" | "/v1/run/input" | "/v1/run/outcome")
+        || path.starts_with("/v1/artifacts/")
 }
 
 struct Backend(Arc<ApiLaunches>);
@@ -2225,6 +2255,18 @@ mod tests {
         assert_eq!(launches.made("launch-1"), None, "not whole yet");
         assert!(whole(put(0, b"com").await.unwrap()).await);
         assert_eq!(launches.made("launch-1").as_deref(), Some(&b"composed"[..]));
+
+        // Nothing else: not its tenant's connections, databases or runs.
+        for (method, path) in [
+            ("POST", "/v1/connections/c1/request"),
+            ("POST", "/v1/tasks"),
+            ("GET", "/v1/time"),
+        ] {
+            let refused = call(method, path.into(), b"{}".to_vec(), binding(1))
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), 403, "{method} {path}");
+        }
 
         // A launch that is not a compile neither fetches nor hands back.
         let mut run = binding(1);

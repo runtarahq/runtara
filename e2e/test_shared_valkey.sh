@@ -160,7 +160,8 @@ start_server() {
     db=$(echo "${name}" | tr 'AB' 'ab')
     print_step "Starting server ${name} (tenant ${tenant}) on :${port}..."
     RUNTARA_SERVER_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DB_PREFIX}_${db}_server" \
-    OBJECT_MODEL_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DB_PREFIX}_${db}_server" \
+    RUNTARA_DATABASE_CONNECTION_GUARD="${served:+off}" \
+    OBJECT_MODEL_DATABASE_URL="${served:+}${served:-postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DB_PREFIX}_${db}_server}" \
     RUNTARA_DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${DB_PREFIX}_${db}_runtime" \
     TENANT_ID="${tenant}" \
     RUNTARA_SERVED_TENANTS="${served}" \

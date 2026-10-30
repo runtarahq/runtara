@@ -33,6 +33,10 @@
 #   9. PACED CALLS (SYN-917) — the second tenant may make 12 calls a minute
 #      that start external work: its run of 15 outbound HTTP calls waits for
 #      the last three and completes, while the primary's same run does not.
+#  10. CROSS-TENANT SWEEP (M7.16) — every GET route of the server's OpenAPI
+#      document, its path filled with the second tenant's workflow, run,
+#      trigger, connection and API key ids, asked as the primary tenant:
+#      none answers 2xx with the second tenant's object.
 #
 # With SERVED_TENANTS_KEY_ID_PER_TENANT, a host that seals each tenant's
 # credentials under its own keys (key id `{tenant}-k1`) is checked to.
@@ -171,12 +175,13 @@ for extension in uuid-ossp vector fuzzystrmatch pg_trgm; do
 done
 psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_RUNTIME} OWNER ${RUNTIME_ROLE}" >/dev/null
 SERVER_DB_URL="postgresql://${RUNTIME_ROLE}:${RUNTIME_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}"
-OBJECT_MODEL_DB_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}"
+# No platform object-model database: tenants sharing a process take none
+# (M7.16).
 
 start_server() {
     print_step "Starting runtara-server on :${TEST_PORT_PUBLIC}..."
     RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
-    OBJECT_MODEL_DATABASE_URL="${OBJECT_MODEL_DB_URL}" \
+    RUNTARA_DATABASE_CONNECTION_GUARD=off \
     RUNTARA_DATABASE_URL="postgresql://${RUNTIME_ROLE}:${RUNTIME_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_RUNTIME}" \
     TENANT_ID="${TENANT}" \
     RUNTARA_SERVED_TENANTS="${SECOND_TENANT}" \
@@ -261,16 +266,19 @@ WF_ID=$(create_and_compile "Answer" "${GRAPH}")
 RESP=$(api_post /triggers "{\"workflow_id\": \"${WF_ID}\", \"trigger_type\": \"HTTP\", \"active\": true}")
 TRIGGER=$(echo "${RESP}" | jq -r '.data.id // .id // empty' 2>/dev/null || true)
 [ -n "${TRIGGER}" ] || { print_error "trigger create failed: ${RESP}"; exit 1; }
-CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{"n": 1}' "${API}/events/http/${TRIGGER}/run")
+CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{"n": 1}' "${API}/${TENANT}/events/http/${TRIGGER}/run")
 case "${CODE}" in 2??) ;; *) print_error "the primary tenant's webhook answered ${CODE}"; exit 1 ;; esac
-RESP=$(curl -sS -X POST -H 'Content-Type: application/json' -d '{}' "${API}/events/http-sync/${WF_ID}")
+RESP=$(curl -sS -X POST -H 'Content-Type: application/json' -d '{}' "${API}/${TENANT}/events/http-sync/${WF_ID}")
 echo "${RESP}" | jq -e '.success == true and .outputs.answer == 42' >/dev/null \
     || { print_error "the sync webhook did not run the workflow: ${RESP}"; exit 1; }
 server_sql "CREATE TEMP TABLE t AS SELECT * FROM invocation_trigger WHERE id = '${TRIGGER}';
             UPDATE t SET id = 'outsider-trigger', tenant_id = 'outsider';
             INSERT INTO invocation_trigger SELECT * FROM t;" >/dev/null
-CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{}' "${API}/events/http/outsider-trigger/run")
+CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{}' "${API}/${TENANT}/events/http/outsider-trigger/run")
 [ "${CODE}" = "404" ] || { print_error "an unserved tenant's trigger answered ${CODE}, not 404"; exit 1; }
+# Tenants share this process: a webhook names its tenant (M7.16).
+CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{}' "${API}/events/http/${TRIGGER}/run")
+[ "${CODE}" = "404" ] || { print_error "a webhook naming no tenant answered ${CODE}, not 404"; exit 1; }
 echo "  the primary tenant's webhook and sync run; an unserved tenant's trigger is not found ✓"
 
 #-------------------------------------------------------------------------
@@ -313,7 +321,7 @@ B_TRIGGER=$(echo "${RESP}" | jq -r '.data.id // .id // empty' 2>/dev/null || tru
 RESP=$(api_post /triggers "{\"workflow_id\": \"${B_WF}\", \"trigger_type\": \"CRON\", \"active\": true, \"configuration\": {\"expression\": \"* * * * *\", \"timezone\": \"UTC\"}}")
 echo "${RESP}" | jq -e '.data.id // .id' >/dev/null 2>&1 || { print_error "the second tenant's cron create failed: ${RESP}"; exit 1; }
 AUTH=()
-CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{}' "${API}/events/http/${B_TRIGGER}/run")
+CODE=$(http_status -X POST -H 'Content-Type: application/json' -d '{}' "${API}/${SECOND_TENANT}/events/http/${B_TRIGGER}/run")
 case "${CODE}" in 2??) ;; *) print_error "the second tenant's webhook answered ${CODE}"; exit 1 ;; esac
 # Runs land under the second tenant: the webhook's, then the cron's.
 b_runs() {
@@ -533,5 +541,64 @@ A_SECONDS=$(timed_run "${A_CALLS}")
 [ "${B_SECONDS}" -ge 15 ] && [ "${A_SECONDS}" -lt "${B_SECONDS}" ] \
     || { print_error "the second tenant's 15 calls took ${B_SECONDS} s against the primary's ${A_SECONDS} s: not paced"; exit 1; }
 echo "  15 outbound calls: the second tenant's run, at 12 a minute, completed in ${B_SECONDS} s (at least 15), the primary's in ${A_SECONDS} s ✓"
+
+#-------------------------------------------------------------------------
+print_step "10. Every GET route, asked as the primary for the second tenant's objects..."
+DUMP_BIN="$(dirname "${RUNTARA_SERVER_BIN}")/dump_openapi"
+[ -x "${DUMP_BIN}" ] || SQLX_OFFLINE="${SQLX_OFFLINE}" cargo build -q -p runtara-server --bin dump_openapi >&2
+"${DUMP_BIN}" > "${TEST_DATA_DIR}/openapi.json"
+B_RUN=$(runtime_sql "SELECT instance_id FROM instances WHERE tenant_id = '${SECOND_TENANT}' LIMIT 1")
+B_KEY_ID=$(server_sql "SELECT id FROM api_keys WHERE org_id = '${SECOND_TENANT}' LIMIT 1")
+python3 - "${TEST_DATA_DIR}/openapi.json" "http://127.0.0.1:${TEST_PORT_PUBLIC}" \
+    "${B_WF}" "${B_RUN}" "${B_TRIGGER}" "${B_CONN}" "${B_KEY_ID}" <<'PY' || exit 1
+import json, re, sys, urllib.request, urllib.error, uuid
+def normal(body, value):
+    body = body.replace(value, "<id>")
+    return re.sub(r"\d{4}-\d\d-\d\dT[0-9:.]+(Z|[+-]\d\d:?\d\d)?", "<time>", body)
+spec, base, workflow, run, trigger, connection, key = sys.argv[1:]
+ids = {"workflow": workflow, "instance": run, "execution": run, "run": run,
+       "trigger": trigger, "connection": connection, "key": key}
+def values(param):
+    name = param.lower()
+    for word, value in ids.items():
+        if word in name:
+            return [value]
+    return list(ids.values())
+asked = leaked = 0
+for path, item in json.load(open(spec))["paths"].items():
+    if "get" not in item or "{" not in path:
+        continue
+    params = re.findall(r"{([^}]+)}", path)
+    first = values(params[0])
+    for value in first:
+        url = path
+        for param in params:
+            url = url.replace("{" + param + "}", value if param == params[0] else values(param)[0])
+        asked += 1
+        try:
+            with urllib.request.urlopen(base + url, timeout=30) as response:
+                status, body = response.status, response.read().decode(errors="replace")
+        except urllib.error.HTTPError as error:
+            status, body = error.code, ""
+        except Exception:
+            continue
+        if 200 <= status < 300 and value in body:
+            # A route may echo the id it was asked for: it leaks only if it
+            # answers otherwise for an id that names nothing.
+            unknown = str(uuid.uuid4())
+            try:
+                with urllib.request.urlopen(base + url.replace(value, unknown), timeout=30) as response:
+                    other = response.read().decode(errors="replace")
+            except urllib.error.HTTPError as error:
+                other = f"HTTP {error.code}"
+            if normal(body, value) != normal(other, unknown):
+                leaked += 1
+                print(f"  GET {url} answered {status} with the second tenant's {value}", file=sys.stderr)
+if leaked:
+    sys.exit(f"{leaked} of {asked} cross-tenant reads answered with the second tenant's object")
+if asked < 20:
+    sys.exit(f"only {asked} routes were asked; the OpenAPI document lists too few")
+print(f"  {asked} GET routes asked as the primary for the second tenant's objects: none answered with one ✓")
+PY
 
 print_success "served tenants: webhooks, API keys, triggers, cron, OAuth callbacks and connection events reach exactly the tenants this server serves, each its own, under its own limits"

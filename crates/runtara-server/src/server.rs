@@ -1200,10 +1200,16 @@ pub async fn start_with(
 
     // Triggers from before every trigger named its tenant ran as the primary
     // tenant; they become its own, so row-level security covers them too.
-    match api::repositories::triggers::TriggerRepository::new(pool.clone())
-        .claim_untenanted(&tenant_id)
-        .await
-    {
+    // Only where the process serves that tenant alone: in a shared store
+    // whose tenant an untenanted trigger was is unknown.
+    let claimed = if config::served_tenants().len() == 1 {
+        api::repositories::triggers::TriggerRepository::new(pool.clone())
+            .claim_untenanted(&tenant_id)
+            .await
+    } else {
+        Ok(0)
+    };
+    match claimed {
         Ok(0) => {}
         Ok(claimed) => {
             tracing::info!(claimed, tenant_id = %tenant_id, "Gave untenanted triggers to the primary tenant")

@@ -4,8 +4,8 @@
 //!
 //! With `RUNTARA_VALIDATOR_WASM` naming the `runtara-validate-guest` WASI
 //! command, a closure is validated by it in a Wasmtime store of its own, with
-//! no filesystem, network or environment, bounded fuel and memory, rather than
-//! natively in this process: a tenant's graph reaches only the validator's
+//! no filesystem, network or environment, bounded fuel, memory and time (ten
+//! seconds), a few at once, rather than natively in this process: a tenant's graph reaches only the validator's
 //! sandbox. A closure the validator cannot finish within those bounds, or any
 //! failure of the sandbox, is refused as an unsupported graph (E138), never
 //! validated natively instead. Without it, validation runs natively, as
@@ -28,7 +28,13 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 const MEMORY_BYTES: usize = 256 * 1024 * 1024;
 /// The instructions it may run: far beyond what validating a large graph
 /// takes, and a bound on a graph that would take more.
-const FUEL: u64 = 50_000_000_000;
+const FUEL: u64 = 10_000_000_000;
+/// How long it may run, in epoch ticks of a second each.
+const DEADLINE_TICKS: u64 = 10;
+/// How many validations run in the sandbox at once, process-wide: each
+/// holds a thread and up to [`MEMORY_BYTES`], so one tenant's many saves
+/// cannot take them all.
+const CONCURRENT: usize = 2;
 /// The report it may write.
 const REPORT_BYTES: usize = 16 * 1024 * 1024;
 
@@ -70,8 +76,20 @@ fn sandbox() -> Option<&'static Result<Sandbox, String>> {
 
 fn load(path: &str) -> Result<Sandbox, String> {
     let mut config = Config::new();
-    config.consume_fuel(true);
+    config.consume_fuel(true).epoch_interruption(true);
     let engine = Engine::new(&config).map_err(|error| error.to_string())?;
+    // The clock a validation's deadline is counted in.
+    let ticking = engine.weak();
+    std::thread::Builder::new()
+        .name("validator-epoch".into())
+        .spawn(move || {
+            while let Some(engine) = ticking.upgrade() {
+                engine.increment_epoch();
+                drop(engine);
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        })
+        .map_err(|error| error.to_string())?;
     let component =
         Component::from_file(&engine, path).map_err(|error| format!("{path}: {error}"))?;
     let mut linker = Linker::new(&engine);
@@ -102,6 +120,7 @@ impl Sandbox {
         );
         store.limiter(|state| &mut state.limits);
         store.set_fuel(FUEL).map_err(|error| error.to_string())?;
+        store.set_epoch_deadline(DEADLINE_TICKS);
         let command = wasmtime_wasi::p2::bindings::sync::Command::instantiate(
             &mut store,
             &self.component,
@@ -158,14 +177,51 @@ fn in_sandbox(
         children: children.to_vec(),
     })
     .map_err(|error| error.to_string())?;
-    // A thread of its own: WASI's synchronous calls run their own runtime,
-    // which a caller's async context would not allow.
-    std::thread::scope(|scope| {
-        scope
-            .spawn(|| sandbox.validate(&request))
-            .join()
-            .map_err(|_| "the validator panicked".to_owned())?
-    })
+    let run = || {
+        let _turn = Turn::take();
+        // A thread of its own: WASI's synchronous calls run their own
+        // runtime, which a caller's async context would not allow.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| sandbox.validate(&request))
+                .join()
+                .map_err(|_| "the validator panicked".to_owned())?
+        })
+    };
+    // Off the async worker while it waits, where the runtime allows.
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(run)
+        }
+        _ => run(),
+    }
+}
+
+/// One of the sandbox's [`CONCURRENT`] turns, waited for and held while a
+/// validation runs.
+struct Turn;
+
+static TURNS: (std::sync::Mutex<usize>, std::sync::Condvar) =
+    (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+impl Turn {
+    fn take() -> Self {
+        let (running, freed) = &TURNS;
+        let mut running = running.lock().expect("validator turns poisoned");
+        while *running >= CONCURRENT {
+            running = freed.wait(running).expect("validator turns poisoned");
+        }
+        *running += 1;
+        Turn
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let (running, freed) = &TURNS;
+        *running.lock().expect("validator turns poisoned") -= 1;
+        freed.notify_one();
+    }
 }
 
 /// A closure the sandbox could not validate: refused, as a graph the

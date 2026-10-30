@@ -35,18 +35,59 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// The memory the compiler takes at once, before it compiles (see `run`).
+#[cfg(target_os = "wasi")]
+const PREGROW: usize = 192 * 1024 * 1024;
+
 #[cfg(target_os = "wasi")]
 fn run() -> Result<(), String> {
+    let started = std::time::Instant::now();
+    // Grow the linear memory once, now: a Fenders guest has no room reserved
+    // for growth, so each growth moves the whole memory, and a compile that
+    // grew step by step to its peak spent most of its time so. Freed, the
+    // memory stays, and the compile's allocations reuse it.
+    drop(Vec::<u8>::with_capacity(PREGROW));
+    let fetching = std::sync::Arc::new(std::sync::Mutex::new((
+        0usize,
+        0usize,
+        std::time::Duration::ZERO,
+    )));
+    let fetched = fetching.clone();
     let request: CompileRequest =
         serde_json::from_slice(&http::call("GET", "/v1/run/input", None)?)
             .map_err(|error| format!("the request: {error}"))?;
-    let outcome = match runtara_workflows::compile_request::compile(request, |digest| {
-        fetch(digest).map_err(std::io::Error::other)
+    let compiling = std::time::Instant::now();
+    let outcome = match runtara_workflows::compile_request::compile(request, move |digest| {
+        let at = std::time::Instant::now();
+        let bytes = fetch(digest).map_err(std::io::Error::other)?;
+        let mut fetched = fetched.lock().expect("fetch timings");
+        *fetched = (
+            fetched.0 + 1,
+            fetched.1 + bytes.len(),
+            fetched.2 + at.elapsed(),
+        );
+        Ok(bytes)
     }) {
-        Ok((outcome, wasm)) => GuestOutcome::Compiled {
-            outcome: Box::new(outcome),
-            workflow_wasm: hand_back(&wasm)?,
-        },
+        Ok((outcome, wasm)) => {
+            let compiled = compiling.elapsed();
+            let handing_back = std::time::Instant::now();
+            let workflow_wasm = hand_back(&wasm)?;
+            // On stderr, which a node keeps as the run's output: where a
+            // compile's time went.
+            let (files, bytes, fetch_time) = *fetching.lock().expect("fetch timings");
+            eprintln!(
+                "runtara-compile-guest: fetched {files} files ({bytes} bytes) in {} ms, compiled in {} ms (fetches included), handed back {} bytes in {} ms, {} ms in all",
+                fetch_time.as_millis(),
+                compiled.as_millis(),
+                wasm.len(),
+                handing_back.elapsed().as_millis(),
+                started.elapsed().as_millis()
+            );
+            GuestOutcome::Compiled {
+                outcome: Box::new(outcome),
+                workflow_wasm,
+            }
+        }
         Err(failure) => GuestOutcome::Failed(failure),
     };
     let body = serde_json::to_vec(&outcome).map_err(|error| error.to_string())?;

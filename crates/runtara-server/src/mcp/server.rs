@@ -1124,6 +1124,15 @@ impl ServerHandler for SmoMcpServer {
             }
             // No HTTP-derived identity (non-HTTP transport / tests): dispatch without
             // binding; in-process calls fall back to their role-less synthetic context.
+            // Where tenants share a process, no call goes unscoped (M7.16).
+            None if crate::config::try_get()
+                .is_some_and(|config| config.served_tenants.len() > 1) =>
+            {
+                Err(rmcp::ErrorData::invalid_request(
+                    "a tool call names no tenant",
+                    None,
+                ))
+            }
             None => self.tool_router.call(tcc).await,
         }
     }
