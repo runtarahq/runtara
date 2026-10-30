@@ -32,6 +32,7 @@ pub mod runtime_types;
 pub mod server;
 pub mod shutdown;
 pub mod step_events;
+pub mod tenant_concurrency;
 pub mod tenant_quota;
 pub mod tenant_status;
 #[cfg(test)]

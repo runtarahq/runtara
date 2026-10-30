@@ -141,6 +141,17 @@ async fn authenticate_with(
         return tenant_quota::refusal(tenant_quota::Quota::Api, retry_after_ms);
     }
 
+    // One of the tenant's slots in this process, held while the request
+    // runs, so no tenant holds them all (M7.16).
+    let _slot = if enforce_membership_here {
+        match crate::tenant_concurrency::enter(&auth_context.org_id) {
+            Ok(slot) => slot,
+            Err(response) => return *response,
+        }
+    } else {
+        None
+    };
+
     let span = auth_span(&auth_context);
     let tenant = auth_context.org_id.clone();
     request.extensions_mut().insert(auth_context);
