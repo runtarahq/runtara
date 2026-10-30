@@ -67,14 +67,15 @@ def load_config(crate: Path) -> dict:
 
 
 class SpecLoader(yaml.SafeLoader):
-    """YAML 1.1 reads `yes`/`no`/`on`/`off` as booleans and unquoted dates as
-    dates; OpenAPI (YAML 1.2 / JSON) means strings by both."""
+    """YAML 1.1 reads `yes`/`no`/`on`/`off` as booleans, unquoted dates as
+    dates and a bare `=` as its "value" tag, which PyYAML cannot even load;
+    OpenAPI (YAML 1.2 / JSON) means strings by all of them."""
 
 
 SpecLoader.yaml_implicit_resolvers = {
     first: [
         (tag, regexp) for tag, regexp in resolvers
-        if tag not in ("tag:yaml.org,2002:bool", "tag:yaml.org,2002:timestamp")
+        if tag not in ("tag:yaml.org,2002:bool", "tag:yaml.org,2002:timestamp", "tag:yaml.org,2002:value")
     ]
     for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
 }
@@ -155,29 +156,112 @@ def clean_text(text: str) -> str:
     return text.replace('"#', '" #')
 
 
-def check_operation(spec: dict, path: str, method: str, op: dict, item: dict) -> None:
-    """Refuse the shapes the templates cannot express yet, and normalize the rest."""
+def is_scalar(schema: dict) -> bool:
+    return schema.get("type") not in ("object", "array") and "properties" not in schema
+
+
+def check_parameter(spec: dict, name: str, parameter: dict) -> list:
+    """The parameters `parameter` is sent as: none (an optional cookie), itself,
+    or one per field of an object (deepObject) query parameter."""
+    resolved = deref(spec, parameter)
+    if resolved.get("in") == "cookie":
+        if resolved.get("required"):
+            sys.exit(f"{name}: required cookie parameter `{resolved['name']}` is not supported")
+        print(f"note: {name}: dropped optional cookie parameter `{resolved['name']}`")
+        return []
+    schema = deref(spec, resolved.get("schema") or {})
+    if resolved.get("in") == "query" and (
+        resolved.get("style") == "deepObject" or schema.get("type") == "object"
+    ):
+        return expand_deep_object(spec, name, resolved, schema)
+    alternatives = [deref(spec, s) for s in schema.get("oneOf") or schema.get("anyOf") or []]
+    if alternatives:
+        if not all(is_scalar(s) for s in alternatives):
+            sys.exit(f"{name}: parameter `{resolved['name']}` has non-scalar alternatives (oneOf/anyOf)")
+        # Sent as text whichever alternative the value is.
+        return [{**resolved, "schema": {"type": "string"}}]
+    return [parameter]
+
+
+def expand_deep_object(spec: dict, name: str, parameter: dict, schema: dict) -> list:
+    """`page` with the fields `size` and `after` becomes the query parameters
+    `page[size]` and `page[after]`, as `style: deepObject` sends them. Of a
+    oneOf/anyOf, the one alternative that declares fields is kept."""
+    param = parameter["name"]
+    alternatives = [deref(spec, s) for s in schema.get("oneOf") or schema.get("anyOf") or [schema]]
+    objects = [s for s in alternatives if s.get("properties")]
+    if len(objects) != 1:
+        sys.exit(f"{name}: object query parameter `{param}` (deepObject) without declared fields is not supported")
+    fields = objects[0]["properties"]
+    if len(alternatives) > 1:
+        print(f"note: {name}: `{param}` is sent as {', '.join(f'{param}[{f}]' for f in fields)}; "
+              "its other alternatives are dropped")
+    required = objects[0].get("required") or []
+    expanded = []
+    for field, field_schema in fields.items():
+        field_schema = copy.deepcopy(deref(spec, field_schema))
+        if not is_scalar(field_schema):
+            sys.exit(f"{name}: deepObject field `{param}[{field}]` is not a scalar")
+        description = field_schema.pop("description", None) or parameter.get("description")
+        expanded.append({
+            "name": f"{param}[{field}]",
+            "in": "query",
+            **({"description": description} if description else {}),
+            **({"required": True} if parameter.get("required") and field in required else {}),
+            "schema": field_schema,
+        })
+    return expanded
+
+
+def unwrap_envelope(spec: dict, name: str, body: dict, media: dict, envelopes: list) -> str:
+    """A body such as `{"ticket": {...}}` takes the ticket's fields as step
+    inputs: the body schema becomes the envelope's schema, and the template
+    wraps the fields back into `ticket`. Returns the envelope it unwrapped."""
+    properties = deref(spec, media.get("schema") or {}).get("properties") or {}
+    found = [key for key in properties if key in envelopes]
+    if not found:
+        return None
+    if len(found) > 1:
+        sys.exit(f"{name}: request body has several envelopes {found}")
+    key = found[0]
+    envelope = deref(spec, properties[key])
+    schema = properties[key]
+    if not envelope.get("properties"):
+        # One of several shapes (create or merge, say): offer every field of
+        # every shape, all optional, and let the vendor validate the mix.
+        alternatives = [deref(spec, s) for s in envelope.get("anyOf") or envelope.get("oneOf") or []]
+        if not alternatives or not all(s.get("properties") for s in alternatives):
+            print(f"note: {name}: `{key}` declares no fields, so it stays one `{key}` input")
+            return key
+        fields = {}
+        for alternative in alternatives:
+            for field, field_schema in alternative["properties"].items():
+                fields.setdefault(field, field_schema)
+        print(f"note: {name}: `{key}` is one of {len(alternatives)} shapes; "
+              "the fields of all of them are optional inputs")
+        schema = {"type": "object", "properties": fields}
+    dropped = [other for other in properties if other != key]
+    if dropped:
+        print(f"note: {name}: dropped the body fields {dropped} beside the `{key}` envelope")
+    media["schema"] = schema
+    # On the request body, where the template's body section can see it.
+    body["x-runtara-body-envelope"] = key
+    return key
+
+
+def check_operation(spec: dict, path: str, method: str, op: dict, item: dict, envelopes: list = ()) -> set:
+    """Refuse the shapes the templates cannot express yet, and normalize the rest.
+    Returns the `envelopes` the operation's body uses."""
     name = op["operationId"]
 
-    parameters = []
-    for parameter in item.get("parameters", []) + op.get("parameters", []):
-        resolved = deref(spec, parameter)
-        if resolved.get("in") == "cookie":
-            if resolved.get("required"):
-                sys.exit(f"{name}: required cookie parameter `{resolved['name']}` is not supported")
-            print(f"note: {name}: dropped optional cookie parameter `{resolved['name']}`")
-            continue
-        schema = deref(spec, resolved.get("schema") or {})
-        if resolved.get("in") == "query" and (
-            resolved.get("style") == "deepObject" or schema.get("type") == "object"
-        ):
-            sys.exit(f"{name}: object query parameter `{resolved['name']}` (deepObject) is not supported yet")
-        parameters.append(parameter)
-    if "parameters" in op:
-        op["parameters"] = [p for p in op["parameters"] if p in parameters]
-    if "parameters" in item:
-        item["parameters"] = [p for p in item["parameters"] if p in parameters]
+    for owner in (item, op):
+        if "parameters" in owner:
+            owner["parameters"] = [
+                kept for parameter in owner["parameters"]
+                for kept in check_parameter(spec, name, parameter)
+            ]
 
+    used = set()
     body = deref(spec, op.get("requestBody"))
     if isinstance(body, dict) and body.get("content"):
         json_types = {k: v for k, v in body["content"].items() if is_json(k)}
@@ -187,6 +271,8 @@ def check_operation(spec: dict, path: str, method: str, op: dict, item: dict) ->
                 "only JSON bodies are (form and multipart bodies need template support)"
             )
         body["content"] = json_types
+        for media in json_types.values():
+            used.add(unwrap_envelope(spec, name, body, media, envelopes))
 
     # An operation with several tags would be rendered once per tag.
     if len(op.get("tags") or []) > 1:
@@ -196,6 +282,7 @@ def check_operation(spec: dict, path: str, method: str, op: dict, item: dict) ->
     if method != "get":
         op["x-runtara-side-effects"] = True
     op["x-runtara-summary"] = clean_text(op.get("summary") or humanize(name))
+    return used - {None}
 
 
 def inline_refs(sliced: dict, spec: dict) -> None:
@@ -264,16 +351,74 @@ def prune_components(sliced: dict) -> None:
             del sliced["components"][kind]
 
 
+def inline_example_refs(sliced: dict, spec: dict) -> None:
+    """`refs_in` skips examples (they are data), so a `$ref` to
+    `#/components/examples/…` is replaced by the example it names."""
+    def visit(node):
+        examples = node.get("examples")
+        if isinstance(examples, dict):
+            for key, example in examples.items():
+                if isinstance(example, dict) and isinstance(example.get("$ref"), str):
+                    examples[key] = copy.deepcopy(deref(spec, example))
+
+    walk_schema(sliced, visit)
+
+
 def normalize_schemas(sliced: dict) -> None:
     def visit(node):
         # Plain `integer` would become i32; vendor ids and amounts outgrow it.
         if node.get("type") == "integer" and "format" not in node:
             node["format"] = "int64"
+        # Beside declared fields, `additionalProperties: true` makes the generator
+        # lose the model type; every output struct keeps undeclared fields anyway.
+        if node.get("properties") and node.get("additionalProperties") in (True, {}):
+            del node["additionalProperties"]
         for key in ("description", "summary", "title"):
             if isinstance(node.get(key), str):
                 node[key] = clean_text(node[key])
 
     walk_schema(sliced, visit)
+
+
+def rust_model_name(name: str) -> str:
+    """openapi-generator's Rust model name: `EmailCCObject` -> `EmailCcObject`."""
+    spaced = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+    spaced = re.sub(r"([a-z\d])([A-Z])", r"\1_\2", spaced)
+    return "".join(word[:1].upper() + word[1:].lower() for word in re.split(r"[^A-Za-z0-9]+", spaced) if word)
+
+
+def rename_schemas(sliced: dict, model_names: dict) -> None:
+    """Rename schemas whose Rust struct name differs from the name the templates
+    spell their references with (`EmailCCObject` is generated as `EmailCcObject`)
+    to the struct name, so both agree, including the inline types named after
+    them. A `model_names` entry takes precedence."""
+    schemas = sliced["components"].get("schemas", {})
+    renames = {
+        name: rust_model_name(name) for name in schemas
+        if name not in model_names and rust_model_name(name) != model_name(name)
+    }
+    for old, new in renames.items():
+        if new in schemas:
+            sys.exit(f"schema `{old}` is generated as `{new}`, which the spec also defines; "
+                     f"rename it with `model_names: {{{old}: <OtherName>}}` in connector.yaml")
+    if not renames:
+        return
+
+    def visit(node):
+        if isinstance(node, list):
+            for value in node:
+                visit(value)
+        elif isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+                parts = ref.split("/")
+                parts[3] = renames.get(parts[3], parts[3])
+                node["$ref"] = "/".join(parts)
+            for value in node.values():
+                visit(value)
+
+    visit(sliced)
+    sliced["components"]["schemas"] = {renames.get(name, name): schema for name, schema in schemas.items()}
 
 
 def check_names(sliced: dict, operation_ids: list, model_names: dict) -> None:
@@ -288,7 +433,7 @@ def check_names(sliced: dict, operation_ids: list, model_names: dict) -> None:
             )
 
 
-def slice_spec(spec: dict, operation_ids: list, model_names: dict = None) -> dict:
+def slice_spec(spec: dict, operation_ids: list, model_names: dict = None, body_envelopes: list = ()) -> dict:
     """Keep the listed operations and every component they reference.
 
     openapi-generator's FILTER normalizer drops unlisted operations but still
@@ -297,6 +442,7 @@ def slice_spec(spec: dict, operation_ids: list, model_names: dict = None) -> dic
     """
     if "openapi" not in spec:
         sys.exit("only OpenAPI 3.x specs are supported (Swagger 2.0 needs converting first)")
+    model_names = model_names or {}
 
     wanted = set(operation_ids)
     paths = {}
@@ -307,18 +453,21 @@ def slice_spec(spec: dict, operation_ids: list, model_names: dict = None) -> dic
                 kept["parameters"] = item["parameters"]
             paths[path] = kept
 
-    found = set()
+    found, used_envelopes = set(), set()
     for path, item in paths.items():
         for method, op in item.items():
             if method not in HTTP_METHODS:
                 continue
             found.add(op["operationId"])
-            check_operation(spec, path, method, op, item)
+            used_envelopes |= check_operation(spec, path, method, op, item, body_envelopes)
             if op["operationId"] == operation_ids[0]:
                 op["x-runtara-first"] = True
     missing = wanted - found
     if missing:
         sys.exit(f"operations not found in the spec: {sorted(missing)}")
+    unused = set(body_envelopes) - used_envelopes
+    if unused:
+        sys.exit(f"body_envelopes {sorted(unused)} wrap no request body of the listed operations")
 
     pending, seen = set(), set()
     refs_in(paths, pending)
@@ -338,9 +487,11 @@ def slice_spec(spec: dict, operation_ids: list, model_names: dict = None) -> dic
     sliced = {key: spec[key] for key in ("openapi", "info", "servers", "security") if key in spec}
     sliced["paths"] = paths
     sliced["components"] = components
+    inline_example_refs(sliced, spec)
     inline_refs(sliced, spec)
     normalize_schemas(sliced)
-    check_names(sliced, operation_ids, model_names or {})
+    rename_schemas(sliced, model_names)
+    check_names(sliced, operation_ids, model_names)
     return sliced
 
 
@@ -356,10 +507,11 @@ LABEL_WORDS = {
 
 
 def humanize(name: str) -> str:
-    """`person_id`, `personId` and `person-id` all become `Person ID`."""
+    """`person_id`, `personId` and `person-id` all become `Person ID`, and
+    `page[size]` becomes `Page Size`."""
     spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name)
     spaced = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", spaced)
-    words = [word for word in re.split(r"[\s_\-.]+", spaced) if word]
+    words = [word for word in re.split(r"[\s_\-.\[\]]+", spaced) if word]
     return " ".join(LABEL_WORDS.get(word.lower(), word[:1].upper() + word[1:]) for word in words)
 
 
@@ -460,7 +612,9 @@ def write_json(path: Path, value) -> None:
 def fetch(crate: Path) -> None:
     config = load_config(crate)
     source = config["spec"]
-    with urllib.request.urlopen(source["url"]) as response:
+    # Some vendor CDNs (Zendesk's) refuse urllib's default `Python-urllib` agent.
+    request = urllib.request.Request(source["url"], headers={"User-Agent": "runtara-connector-gen"})
+    with urllib.request.urlopen(request) as response:
         raw = response.read()
     digest = hashlib.sha256(raw).hexdigest()
     if digest != source["sha256"]:
@@ -469,7 +623,10 @@ def fetch(crate: Path) -> None:
             "Review the vendor's change, update the pin, then fetch again."
         )
 
-    sliced = slice_spec(load_spec(raw), config["operations"], config.get("model_names") or {})
+    sliced = slice_spec(
+        load_spec(raw), config["operations"], config.get("model_names") or {},
+        config.get("body_envelopes") or [],
+    )
     describe_fields(sliced, config.get("labels") or {})
     write_json(crate / "spec.slice.json", sliced)
     fixtures = crate / "tests" / "fixtures"
@@ -497,10 +654,34 @@ def generator_cli() -> str:
     sys.exit("openapi-generator-cli not found; see scripts/connector_gen/README.md")
 
 
+def integration_ids(agent: dict) -> list:
+    """`integration_id` names one connection type, or a list of them."""
+    ids = agent["integration_id"]
+    return [ids] if isinstance(ids, str) else list(ids)
+
+
+def parameter_name_mappings(sliced: dict) -> dict:
+    """`page[size]` would become the Rust field
+    `page_left_square_bracket_size_right_square_bracket`; name it `page_size`.
+    The step input keeps the wire name."""
+    names = set()
+
+    def visit(node):
+        if isinstance(node.get("name"), str) and node.get("in") in ("path", "query", "header"):
+            names.add(node["name"])
+
+    walk_schema(sliced, visit)
+    return {
+        name: re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").lower()
+        for name in sorted(names) if re.search(r"[\[\]]", name)
+    }
+
+
 def render(crate: Path) -> str:
     """Render `generated.rs` for `crate` and return its rustfmt-ed text."""
     config = load_config(crate)
     agent = config["agent"]
+    sliced = json.loads((crate / "spec.slice.json").read_text())
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "out"
         out.mkdir()
@@ -520,11 +701,13 @@ def render(crate: Path) -> str:
                 "agentId": agent["id"],
                 "agentName": clean_text(agent["name"]),
                 "agentDescription": clean_text(agent["description"]),
-                "integrationId": agent["integration_id"],
+                "integrationIds": integration_ids(agent),
+                "integrationIdList": ",".join(integration_ids(agent)),
                 "errorPrefix": agent["error_prefix"],
             },
             "typeMappings": TYPE_MAPPINGS,
             "modelNameMappings": config.get("model_names") or {},
+            "parameterNameMappings": parameter_name_mappings(sliced),
         }))
         result = subprocess.run(
             [generator_cli(), "generate", "-c", str(config_path),

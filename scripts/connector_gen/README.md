@@ -53,7 +53,7 @@ agent:
   id: pipedrive                      # agent id and capability module
   name: Pipedrive
   description: Pipedrive CRM — deals.
-  integration_id: pipedrive_api_token  # connection type the agent binds to
+  integration_id: pipedrive_api_token  # connection type the agent binds to (or a list)
   error_prefix: PIPEDRIVE            # error codes: PIPEDRIVE_RATE_LIMITED, …
 spec:
   url: https://developers.pipedrive.com/docs/api/v1/openapi-v2.yaml
@@ -162,6 +162,31 @@ model_names:
   Value: Amount
 ```
 
+**The vendor wraps request bodies** in one object named after the resource,
+as Zendesk does (`{"ticket": {"subject": …}}`). List the wrapper names, and
+the wrapped fields become the step's inputs instead of one `ticket` object:
+
+```yaml
+body_envelopes:
+  - ticket
+  - user
+```
+
+`fetch` notes what it did per operation: other body fields beside the envelope
+are dropped, and an envelope that is one of several shapes (`anyOf` of create
+and merge fields, say) offers the fields of all of them, all optional. A
+listed name that wraps no request body is an error.
+
+**The agent accepts several connection types** for the same API (an OAuth
+client and an API token, say): list them all.
+
+```yaml
+agent:
+  integration_id:
+    - hubspot_private_app
+    - hubspot_access_token
+```
+
 ## A generated agent crate
 
 ```
@@ -187,6 +212,11 @@ crates/agents/runtara-agent-<id>/
 - An exploded array query parameter (the OpenAPI default) is sent as
   `ids=1&ids=2`; with `explode: false` it is sent as `ids=1,2`. Optional cookie
   parameters are dropped by `fetch`.
+- An object (`deepObject`) query parameter is one input per field, named as
+  it is sent: `page` with `size` and `after` becomes `page[size]` and
+  `page[after]` (Rust fields `page_size`, `page_after`). Of a `oneOf` such as
+  Zendesk's "page number or cursor", the alternative with fields is kept.
+- A parameter whose schema is a `oneOf`/`anyOf` of scalars is a string input.
 - An optional body field the spec marks `nullable` is an `Option<Option<T>>`
   (deserialized with `kit::nullable`): omitted is not sent, an explicit `null`
   is sent as `null` (to clear the vendor's value), and a value is sent as is.
@@ -217,7 +247,13 @@ crates/agents/runtara-agent-<id>/
   vendor returns but does not declare.
 - Type names are written bare (no `models::` prefix) so the output macro can
   resolve nested types; the `pascalcase` lambda turns raw inline schema names
-  into the generated struct names.
+  into the generated struct names. The Rust generator spells runs of capitals
+  differently (`EmailCCObject` → `EmailCcObject`), so `fetch` renames such
+  schemas in the slice to the generated spelling.
+- `fetch` also rewrites what openapi-generator would render wrongly: examples
+  given as `$ref`s to `#/components/examples` are inlined, and
+  `additionalProperties: true` beside declared fields is dropped (`__extra`
+  keeps undeclared fields anyway).
 - `fetch` marks operations with `x-runtara-*` vendor extensions (side effects,
   summaries, which capability carries the agent's module attributes) because
   the templates cannot compute them. An operation with several tags keeps its
@@ -229,7 +265,10 @@ crates/agents/runtara-agent-<id>/
 - OpenAPI 3 only; convert Swagger 2.0 specs first.
 - `fetch` refuses, naming the operation, what the templates cannot send yet:
   request bodies that are not JSON (form-encoded, multipart), object
-  (`deepObject`) query parameters, and required cookie parameters.
+  (`deepObject`) query parameters without declared scalar fields, and required
+  cookie parameters.
+- An input typed by a schema (a ticket's `comment`, say) is described to the
+  step editor as `any`, without its fields.
 - Hand-written extra capabilities cannot be added to a generated agent yet.
 - A request-body field named like a path or query parameter of the same
   operation produces a compile error.

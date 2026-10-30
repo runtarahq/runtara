@@ -1,0 +1,37 @@
+{
+  "audit": {
+    "events": [
+      {
+        "field_name": "subject",
+        "id": 206091192546,
+        "type": "Create",
+        "value": "My printer is on fire!"
+      },
+      {
+        "body": "The smoke is very colorful.",
+        "id": 206091192547,
+        "type": "Comment"
+      },
+      {
+        "field_name": "status",
+        "id": 206091192548,
+        "type": "Create",
+        "value": "open"
+      },
+      {
+        "field_name": "custom_status_id",
+        "id": 206091192549,
+        "type": "Create",
+        "value": 123
+      }
+    ]
+  },
+  "ticket": {
+    "brand_id": 123,
+    "custom_status_id": 123,
+    "id": 35436,
+    "requester_id": 123453,
+    "status": "open",
+    "subject": "My printer is on fire!"
+  }
+}

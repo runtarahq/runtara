@@ -1,0 +1,24 @@
+{
+  "count": 1234,
+  "facets": null,
+  "next_page": "https://foo.zendesk.com/api/v2/search?query=\"type:Group hello\"&sort_by=created_at&sort_order=desc&page=2",
+  "previous_page": null,
+  "results": [
+    {
+      "created_at": "2009-05-13T00:07:08Z",
+      "id": 211,
+      "name": "Hello DJs",
+      "result_type": "group",
+      "updated_at": "2011-07-22T00:11:12Z",
+      "url": "https://foo.zendesk.com/api/v2/groups/211"
+    },
+    {
+      "created_at": "2009-08-26T00:07:08Z",
+      "id": 122,
+      "name": "Hello MCs",
+      "result_type": "group",
+      "updated_at": "2010-05-13T00:07:08Z",
+      "url": "https://foo.zendesk.com/api/v2/groups/122"
+    }
+  ]
+}

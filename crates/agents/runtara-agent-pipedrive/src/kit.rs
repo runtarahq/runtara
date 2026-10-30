@@ -190,6 +190,14 @@ impl Body {
         }
     }
 
+    /// Moves the fields set so far into one object: `{"ticket": {...}}` for a
+    /// vendor that wraps its request bodies.
+    pub fn envelope(mut self, name: &str) -> Self {
+        let fields = std::mem::take(&mut self.fields);
+        self.fields.insert(name.to_string(), Value::Object(fields));
+        self
+    }
+
     fn build(self, prefix: &str) -> Result<Value, AgentError> {
         match self.error {
             Some(e) => Err(AgentError::permanent(

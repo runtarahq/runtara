@@ -43,5 +43,6 @@ runtara-agent-transform = { path = "../agents/runtara-agent-transform" }
 runtara-agent-utils = { path = "../agents/runtara-agent-utils" }
 runtara-agent-xlsx = { path = "../agents/runtara-agent-xlsx" }
 runtara-agent-xml = { path = "../agents/runtara-agent-xml" }
+runtara-agent-zendesk = { path = "../agents/runtara-agent-zendesk" }
 serde_json = { workspace = true }
 anyhow = "1"

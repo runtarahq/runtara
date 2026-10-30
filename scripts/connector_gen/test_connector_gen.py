@@ -34,20 +34,20 @@ def generator_available() -> bool:
         return False
 
 
-def write_crate(crate: Path, spec: dict, operations: list, **config) -> dict:
+def write_crate(crate: Path, spec: dict, operations: list, integration_id="sample_token", **config) -> dict:
     (crate / "connector.yaml").write_text(yaml.safe_dump({
         "agent": {
             "id": "sample",
             "name": "Sample & Co",
             "description": 'Sample "agent".',
-            "integration_id": "sample_token",
+            "integration_id": integration_id,
             "error_prefix": "SAMPLE",
         },
         "spec": {"url": "unused", "sha256": "unused"},
         "operations": operations,
         **config,
     }))
-    sliced = cg.slice_spec(spec, operations, config.get("model_names"))
+    sliced = cg.slice_spec(spec, operations, config.get("model_names"), config.get("body_envelopes") or [])
     cg.describe_fields(sliced, config.get("labels") or {})
     cg.write_json(crate / "spec.slice.json", sliced)
     return sliced
@@ -71,6 +71,9 @@ class LoadSpecTest(unittest.TestCase):
         self.assertEqual(spec["enum"], ["yes", "no", "on", "off"])
         self.assertIs(spec["flag"], True)
 
+    def test_bare_equals_sign_is_a_string(self):
+        self.assertEqual(cg.load_spec(b"example:\n  - change: =\n"), {"example": [{"change": "="}]})
+
 
 class HumanizeTest(unittest.TestCase):
     def test_splits_words_and_keeps_acronyms(self):
@@ -79,6 +82,7 @@ class HumanizeTest(unittest.TestCase):
         self.assertEqual(cg.humanize("x-api-token"), "X API Token")
         self.assertEqual(cg.humanize("HTMLBody"), "HTML Body")
         self.assertEqual(cg.humanize("label_ids"), "Label IDs")
+        self.assertEqual(cg.humanize("page[size]"), "Page Size")
 
 
 class SliceTest(unittest.TestCase):
@@ -125,6 +129,109 @@ class SliceTest(unittest.TestCase):
             cg.slice_spec(sample_spec(), ["noSuchOperation"])
 
 
+def spec_with(op: dict, schemas: dict = None, method: str = "post", **components) -> dict:
+    op = {"operationId": "op", "responses": {"204": {"description": "ok"}}, **op}
+    return {"openapi": "3.0.1", "info": {"title": "t", "version": "1"},
+            "paths": {"/x": {method: op}}, "components": {"schemas": schemas or {}, **components}}
+
+
+def json_body(schema: dict) -> dict:
+    return {"requestBody": {"content": {"application/json": {"schema": schema}}}}
+
+
+def ok_json(schema: dict, **media) -> dict:
+    return {"responses": {"200": {"description": "ok", "content": {"application/json": {
+        "schema": schema, **media}}}}}
+
+
+class NormalizeTest(unittest.TestCase):
+    """Spec shapes the templates could not render as written are rewritten by `fetch`."""
+
+    def test_example_refs_are_inlined(self):
+        spec = spec_with(
+            ok_json({"type": "object"}, examples={"one": {"$ref": "#/components/examples/One"}}),
+            examples={"One": {"value": {"id": 1}}},
+        )
+        sliced = cg.slice_spec(spec, ["op"])
+        self.assertEqual(cg.response_examples(sliced), {"op": {"id": 1}})
+        self.assertNotIn("examples", sliced["components"])
+
+    def test_deep_object_query_parameter_is_one_parameter_per_field(self):
+        page = {"in": "query", "name": "page", "style": "deepObject", "description": "Pagination", "schema": {
+            "oneOf": [
+                {"type": "integer"},
+                {"type": "object", "properties": {
+                    "size": {"type": "integer", "description": "Page size"},
+                    "after": {"type": "string"},
+                }},
+            ]}}
+        sliced = cg.slice_spec(spec_with({"parameters": [page]}, method="get"), ["op"])
+        params = operation(sliced, "op")["parameters"]
+        self.assertEqual([p["name"] for p in params], ["page[size]", "page[after]"])
+        self.assertEqual(params[0]["description"], "Page size")
+        self.assertEqual(params[1]["description"], "Pagination")
+        self.assertEqual(params[0]["schema"], {"type": "integer", "format": "int64"})
+
+    def test_scalar_alternatives_of_a_parameter_are_sent_as_text(self):
+        brand = {"in": "query", "name": "brand", "schema": {"oneOf": [{"type": "string"}, {"type": "integer"}]}}
+        sliced = cg.slice_spec(spec_with({"parameters": [brand]}, method="get"), ["op"])
+        self.assertEqual(operation(sliced, "op")["parameters"][0]["schema"], {"type": "string"})
+
+    def test_open_object_with_fields_keeps_its_model(self):
+        schema = {"type": "object", "additionalProperties": True, "properties": {"id": {"type": "string"}}}
+        sliced = cg.slice_spec(spec_with(ok_json(schema)), ["op"])
+        kept = operation(sliced, "op")["responses"]["200"]["content"]["application/json"]["schema"]
+        self.assertNotIn("additionalProperties", kept)
+
+    def test_schema_names_match_the_generated_struct(self):
+        schemas = {
+            "EmailCCObject": {"type": "object", "properties": {"user": {"$ref": "#/components/schemas/UserObject"}}},
+            "UserObject": {"type": "object", "properties": {"id": {"type": "string"}}},
+        }
+        spec = spec_with(ok_json({"$ref": "#/components/schemas/EmailCCObject"}), schemas)
+        sliced = cg.slice_spec(spec, ["op"])
+        self.assertEqual(sorted(sliced["components"]["schemas"]), ["EmailCcObject", "UserObject"])
+        response = operation(sliced, "op")["responses"]["200"]["content"]["application/json"]
+        self.assertEqual(response["schema"], {"$ref": "#/components/schemas/EmailCcObject"})
+        # A `model_names` entry wins.
+        sliced = cg.slice_spec(spec_with(ok_json({"$ref": "#/components/schemas/EmailCCObject"}), schemas),
+                               ["op"], {"EmailCCObject": "EmailCopy"})
+        self.assertIn("EmailCCObject", sliced["components"]["schemas"])
+
+    def test_body_envelope_becomes_the_body(self):
+        ticket = {"type": "object", "properties": {"subject": {"type": "string"}}}
+        body = json_body({"type": "object", "required": ["ticket"], "properties": {
+            "ticket": {"$ref": "#/components/schemas/Ticket"},
+            "system_metadata": {"type": "object"},
+        }})
+        sliced = cg.slice_spec(spec_with(body, {"Ticket": ticket}), ["op"], body_envelopes=["ticket"])
+        body = operation(sliced, "op")["requestBody"]
+        self.assertEqual(body["x-runtara-body-envelope"], "ticket")
+        self.assertEqual(body["content"]["application/json"]["schema"], {"$ref": "#/components/schemas/Ticket"})
+
+    def test_envelope_of_several_shapes_offers_all_their_fields(self):
+        body = json_body({"type": "object", "properties": {"user": {"anyOf": [
+            {"type": "object", "properties": {"name": {"type": "string"}, "email": {"type": "string"}}},
+            {"type": "object", "properties": {"email": {"type": "string"}, "password": {"type": "string"}}},
+        ]}}})
+        sliced = cg.slice_spec(spec_with(body), ["op"], body_envelopes=["user"])
+        body = operation(sliced, "op")["requestBody"]
+        self.assertEqual(body["x-runtara-body-envelope"], "user")
+        schema = body["content"]["application/json"]["schema"]
+        self.assertEqual(list(schema["properties"]), ["name", "email", "password"])
+        self.assertNotIn("required", schema)
+
+    def test_envelope_without_fields_stays_one_input(self):
+        body = json_body({"type": "object", "properties": {"user": {"oneOf": [{"type": "object"}]}}})
+        sliced = cg.slice_spec(spec_with(body), ["op"], body_envelopes=["user"])
+        self.assertNotIn("x-runtara-body-envelope", operation(sliced, "op")["requestBody"])
+
+    def test_unmatched_envelope_fails(self):
+        with self.assertRaises(SystemExit) as raised:
+            cg.slice_spec(spec_with(json_body({"type": "object"})), ["op"], body_envelopes=["tikcet"])
+        self.assertIn("tikcet", str(raised.exception))
+
+
 class RefusalTest(unittest.TestCase):
     """Shapes the templates cannot express yet fail at fetch, not at runtime."""
 
@@ -156,6 +263,11 @@ class RefusalTest(unittest.TestCase):
         spec = self.spec_with({"parameters": [{"in": "query", "name": "filter", "style": "deepObject",
                                                "schema": {"type": "object"}}]})
         self.assert_refused(spec, "deepObject")
+
+    def test_deep_object_without_fields_or_with_object_fields(self):
+        spec = self.spec_with({"parameters": [{"in": "query", "name": "filter", "style": "deepObject", "schema": {
+            "type": "object", "properties": {"range": {"type": "object"}}}}]})
+        self.assert_refused(spec, "filter[range]")
 
     def test_required_cookie_parameter(self):
         spec = self.spec_with({"parameters": [{"in": "cookie", "name": "sid", "required": True,
@@ -255,6 +367,42 @@ class RenderTest(unittest.TestCase):
         self.assertIn('display_name = r##"Delete Item"##', self.text)
         self.assertNotIn("&amp;", self.text)
         self.assertNotIn('\\"', self.text)
+
+
+@unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
+class EnvelopeRenderTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        ticket = {"type": "object", "properties": {
+            "subject": {"type": "string"},
+            "id": {"type": "integer", "readOnly": True},
+        }}
+        page = {"in": "query", "name": "page", "style": "deepObject", "schema": {
+            "type": "object", "properties": {"size": {"type": "integer"}}}}
+        spec = spec_with({
+            "parameters": [page],
+            **json_body({"type": "object", "properties": {"ticket": {"$ref": "#/components/schemas/Ticket"}}}),
+        }, {"Ticket": ticket})
+        with tempfile.TemporaryDirectory() as tmp:
+            write_crate(Path(tmp), spec, ["op"], integration_id=["sample_oauth", "sample_token"],
+                        body_envelopes=["ticket"])
+            cls.text = cg.render(Path(tmp))
+
+    def test_envelope_fields_are_inputs_wrapped_back_into_the_body(self):
+        self.assertIn("pub subject: Option<String>,", self.text)
+        self.assertNotIn("pub ticket:", self.text)
+        self.assertIn('.field_opt("subject", &self.subject)', self.text)
+        self.assertIn('.envelope("ticket")', self.text)
+        self.assertNotIn('.field_opt("id"', self.text)
+
+    def test_bracketed_parameter_keeps_its_wire_name(self):
+        self.assertIn('rename = "page[size]"', self.text)
+        self.assertIn("pub page_size: Option<i64>,", self.text)
+        self.assertIn('.query_opt("page[size]", &self.page_size)', self.text)
+
+    def test_several_integrations(self):
+        self.assertIn('module_integration_ids = "sample_oauth,sample_token"', self.text)
+        self.assertIn('integration_ids: vec!["sample_oauth".to_string(), "sample_token".to_string()]', self.text)
 
 
 @unittest.skipUnless(generator_available(), "openapi-generator-cli is not installed")
