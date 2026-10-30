@@ -818,7 +818,7 @@ impl WorkflowService {
         // catalog overlay (a parent may target `agentId: <slug>`).
         let effective_catalog =
             crate::workflow_agents::catalog_with_workflow_agents(&self.agent_catalog, tenant_id);
-        let report = runtara_workflows::validate_workflow_closure(
+        let report = crate::validation_sandbox::validate_workflow_closure(
             workflow_id,
             &workflow.execution_graph,
             &effective_catalog,

@@ -145,9 +145,9 @@ pub use schema_fields_validation::{
     EditableSchemaField, SchemaFieldValidationIssue, validate_schema_fields,
 };
 pub use validation::{
-    ChildValidationReport, ClosureChildGraph, ClosureValidationReport, MissingInputField,
-    ValidationError, ValidationResult, validate_workflow, validate_workflow_closure,
-    validate_workflow_with_children,
+    ChildValidationReport, ClosureChildGraph, ClosureValidationReport, ClosureValidationRequest,
+    MissingInputField, ValidationError, ValidationResult, validate_workflow,
+    validate_workflow_closure, validate_workflow_with_children,
 };
 pub use workflow_features::{
     ChildWorkflowReference, WorkflowFeature, WorkflowFeatureSummary, analyze_workflow_features,

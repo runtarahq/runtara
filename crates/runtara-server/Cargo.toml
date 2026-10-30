@@ -29,6 +29,9 @@ path = "src/bin/dump_openapi.rs"
 # Run `npm run build` inside ./frontend before building with this feature enabled.
 embed-ui = ["dep:rust-embed"]
 db-integration-tests = []
+# The save-time validator sandbox against a built runtara-validate-guest
+# (RUNTARA_VALIDATOR_WASM).
+validator-sandbox-tests = []
 # The composed control test drives the environment runner with its
 # in-process test precompiler.
 component-integration-tests = ["runtara-environment/db-integration-tests"]
@@ -193,6 +196,9 @@ runtara-connections = { path = "../runtara-connections", features = ["utoipa"] }
 # HTTP client (and no ureq) is linked into the server.
 runtara-ai = { path = "../runtara-ai", default-features = false, features = ["tracing"] }
 runtara-component-host = { path = "../runtara-component-host" }
+# The save-time validator's sandbox (validation_sandbox).
+wasmtime = { version = "50", default-features = false, features = ["std", "runtime", "component-model", "cranelift"] }
+wasmtime-wasi = { version = "50" }
 runtara-workflow-api = { path = "../runtara-workflow-api", features = ["server"] }
 
 # Database
