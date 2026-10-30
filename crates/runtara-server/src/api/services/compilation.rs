@@ -404,7 +404,7 @@ fn require_publishable_workflow_agent(
     execution_graph: &runtara_dsl::ExecutionGraph,
     child_workflows: &[ChildWorkflowInput],
     catalog: Option<&runtara_dsl::agent_meta::AgentCatalog>,
-) -> Result<(), ServiceError> {
+) -> Result<runtara_workflows::direct_wasm::WorkflowAgentSafetyReport, ServiceError> {
     let workflow_agent_safety = runtara_workflows::direct_wasm::analyze_workflow_agent_safety(
         execution_graph,
         child_workflows,
@@ -416,7 +416,7 @@ fn require_publishable_workflow_agent(
             violation.path, violation.step_type, violation.feature, violation.reason,
         )));
     }
-    Ok(())
+    Ok(workflow_agent_safety)
 }
 
 fn compile_workflow_direct_only(
@@ -1663,7 +1663,9 @@ impl CompilationService {
             .agent_catalog
             .as_ref()
             .map(|base| crate::workflow_agents::catalog_with_workflow_agents(base, tenant_id));
-        require_publishable_workflow_agent(
+        // This process's own proof of whether the agent parks: a compiler
+        // elsewhere reports one too, which is not taken on its word.
+        let safety = require_publishable_workflow_agent(
             &execution_graph,
             &child_workflows,
             agent_catalog.as_deref(),
@@ -1746,10 +1748,18 @@ impl CompilationService {
 
         // A caller runs a workflow-agent that may park as a child run of its
         // own: it needs the version it runs, and that version's root image.
-        let parks = result
+        let parks = safety.may_suspend_or_sleep;
+        if result
             .artifact_metadata
             .workflow_agent_safety
-            .may_suspend_or_sleep;
+            .may_suspend_or_sleep
+            != parks
+        {
+            return Err(ServiceError::CompilationError(
+                "Agent publish failed: the compiled agent does not match whether its workflow parks"
+                    .to_string(),
+            ));
+        }
         let info = runtara_dsl::agent_meta::with_workflow_run(
             info,
             runtara_dsl::agent_meta::WorkflowRunTarget {
@@ -2245,8 +2255,12 @@ mod tests {
         }))
         .expect("graph parses");
 
-        require_publishable_workflow_agent(&graph, &[], None)
+        let safety = require_publishable_workflow_agent(&graph, &[], None)
             .expect("a sleeping workflow-agent parks rather than holding a runner");
+        assert!(
+            safety.may_suspend_or_sleep,
+            "the publish runs it as a child run of its own on this process's proof"
+        );
     }
 
     #[test]
