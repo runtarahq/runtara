@@ -18,12 +18,15 @@ names = {}
 for name in sorted(os.listdir(components_dir)):
     path = os.path.join(components_dir, name)
     if os.path.isfile(path):
-        digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+        with open(path, "rb") as component:
+            digest = hashlib.sha256(component.read()).hexdigest()
         files[digest] = path
         names[name] = digest
+with open(workflow) as graph:
+    execution_graph = json.load(graph)
 REQUEST = json.dumps({
     "tenant_id": "t", "workflow_id": "guest", "version": 1,
-    "execution_graph": json.load(open(workflow)), "track_events": False,
+    "execution_graph": execution_graph, "track_events": False,
     "child_workflows": [], "agent_catalog": None, "agent_slug": None,
     "source_checksum": None, "components": names, "extra_components": [],
 }).encode()
@@ -48,11 +51,12 @@ class Host(http.server.BaseHTTPRequestHandler):
         if digest in files:
             with open(os.path.join(out_dir, "fetched"), "a") as fetched:
                 fetched.write(digest + "\n")
-            data = open(files[digest], "rb").read()
+            with open(files[digest], "rb") as component:
+                data = component.read()
             offset = int(query.get("offset", ["0"])[0])
             length = int(query.get("length", [str(len(data))])[0])
             return self.reply(200, data[offset:offset + length])
-        self.reply(404, b"{}")
+        return self.reply(404, b"{}")
 
     # The composed component, in parts, as a node's host origin bounds a
     # request.
@@ -68,11 +72,13 @@ class Host(http.server.BaseHTTPRequestHandler):
         if whole:
             wasm = b"".join(Host.PARTS[i] for i in range(parts))
             assert hashlib.sha256(wasm).hexdigest() == digest
-            open(os.path.join(out_dir, "workflow.wasm"), "wb").write(wasm)
+            with open(os.path.join(out_dir, "workflow.wasm"), "wb") as out:
+                out.write(wasm)
         self.reply(200, json.dumps({"sha256": digest, "whole": whole}).encode())
 
     def do_POST(self):
-        open(os.path.join(out_dir, "outcome.json"), "wb").write(self.body())
+        with open(os.path.join(out_dir, "outcome.json"), "wb") as out:
+            out.write(self.body())
         self.reply(200, b"{}")
 
     def log_message(self, *args):
