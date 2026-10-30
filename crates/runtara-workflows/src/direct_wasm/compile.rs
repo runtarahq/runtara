@@ -1046,6 +1046,9 @@ pub fn compile_direct_workflow_composed_configured(
 /// memory: pages are only touched as the recursion actually deepens, and it
 /// buys two orders of magnitude of headroom over the largest graphs seen in
 /// practice.
+/// (On WASI, which has no threads, the compiler's own build gives its main
+/// thread the stack instead; see `build.rs`.)
+#[cfg(not(target_os = "wasi"))]
 const DIRECT_COMPILE_STACK_SIZE: usize = 256 * 1024 * 1024;
 
 /// Compile a workflow through the direct path — the only compile path.
@@ -1201,18 +1204,27 @@ fn compile_direct_workflow_selected(
     omit_runtime: bool,
     selection: AgentLoweringSelection,
 ) -> Result<DirectCompilationResult, DirectCompileError> {
-    let span = tracing::Span::current();
-    let handle = std::thread::Builder::new()
-        .name("direct-compile".to_string())
-        .stack_size(DIRECT_COMPILE_STACK_SIZE)
-        .spawn(move || {
-            let _span = span.entered();
-            compile_direct_workflow_inner(input, abi, omit_runtime, selection)
-        })
-        .map_err(DirectCompileError::Io)?;
-    match handle.join() {
-        Ok(result) => result,
-        Err(panic) => std::panic::resume_unwind(panic),
+    // WASI has no threads: a compiler built as a WASI command (to compile in
+    // a sandbox) runs inline, on the stack its build gives the main thread.
+    #[cfg(target_os = "wasi")]
+    {
+        compile_direct_workflow_inner(input, abi, omit_runtime, selection)
+    }
+    #[cfg(not(target_os = "wasi"))]
+    {
+        let span = tracing::Span::current();
+        let handle = std::thread::Builder::new()
+            .name("direct-compile".to_string())
+            .stack_size(DIRECT_COMPILE_STACK_SIZE)
+            .spawn(move || {
+                let _span = span.entered();
+                compile_direct_workflow_inner(input, abi, omit_runtime, selection)
+            })
+            .map_err(DirectCompileError::Io)?;
+        match handle.join() {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 }
 
