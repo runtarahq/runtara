@@ -18,10 +18,13 @@ trap 'rm -rf "${WORK}"' EXIT
 
 cd "${ROOT}"
 cargo build -q -p runtara-workflows --bin runtara-compile --features compiler --release
-cargo build -q -p runtara-workflows --bin runtara-compile --features compiler --release --target wasm32-wasip2
-cargo build -q -p runtara-compile-guest --release --target wasm32-wasip2
-GUEST="${ROOT}/target/wasm32-wasip2/release/runtara-compile.wasm"
-API_GUEST="${ROOT}/target/wasm32-wasip2/release/runtara-compile-guest.wasm"
+# A target directory of their own: built here, the stdlib these guests link
+# would replace the component build's in target/wasm32-wasip2.
+GUESTS="${ROOT}/target/guests"
+cargo build -q -p runtara-workflows --bin runtara-compile --features compiler --release --target wasm32-wasip2 --target-dir "${GUESTS}"
+cargo build -q -p runtara-compile-guest --release --target wasm32-wasip2 --target-dir "${GUESTS}"
+GUEST="${GUESTS}/wasm32-wasip2/release/runtara-compile.wasm"
+API_GUEST="${GUESTS}/wasm32-wasip2/release/runtara-compile-guest.wasm"
 
 # chain N: a workflow of N chained agent steps and a finish.
 chain() {
