@@ -158,8 +158,12 @@ fn a_publish_elsewhere_makes_what_one_in_process_does() {
         true,
     )
     .expect("in process");
-    compose_direct_workflow_with_extra_dirs(&mut local, &components_dir(), &[staged.clone()])
-        .expect("composed in process");
+    compose_direct_workflow_with_extra_dirs(
+        &mut local,
+        components_dir(),
+        std::slice::from_ref(&staged),
+    )
+    .expect("composed in process");
 
     let (req, paths) = request_published_agent(
         "acme",

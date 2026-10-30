@@ -635,6 +635,7 @@ mod tests {
         };
         let subscriber = tracing_subscriber::registry().with(filter).with(layer);
 
+        let _lock = crate::test_env::TRACING_SUBSCRIBER_MUTEX.blocking_lock();
         tracing::subscriber::with_default(subscriber, emit);
 
         captured.lock().unwrap().clone()

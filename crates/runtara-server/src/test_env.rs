@@ -16,6 +16,13 @@ use tokio::sync::Mutex;
 /// `clippy::await_holding_lock`.
 pub static ENV_MUTEX: Mutex<()> = Mutex::const_new(());
 
+/// Crate-wide lock serializing lib tests that install a scoped tracing
+/// subscriber (`set_default`/`with_default`). Installing one rebuilds
+/// tracing's process-global callsite interest and max-level caches from the
+/// subscribers live at that moment; two rebuilds racing let one overwrite the
+/// other's, so a test's own subscriber can be skipped and its events lost.
+pub static TRACING_SUBSCRIBER_MUTEX: Mutex<()> = Mutex::const_new(());
+
 /// Records prior values on `set`/`remove` and restores them (in reverse
 /// order) on drop. Must only be used while holding [`ENV_MUTEX`].
 pub struct EnvGuard {
