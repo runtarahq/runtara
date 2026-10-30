@@ -9,22 +9,45 @@
 //! build the same way, with the compile itself unchanged.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+/// Loads a known file's bytes the first time the compile reads it.
+pub type Loader = Box<dyn Fn(&Path) -> io::Result<Vec<u8>> + Send + Sync>;
+
 /// Files kept in memory, by path. Directories are implied by the files
-/// under them.
-#[derive(Debug, Default)]
+/// under them. A file may be known before it is loaded: it exists, and is
+/// loaded (and kept) when first read.
+#[derive(Default)]
 pub struct MemoryFs {
     files: Mutex<BTreeMap<PathBuf, Vec<u8>>>,
+    known: BTreeSet<PathBuf>,
+    loader: Option<Loader>,
+}
+
+impl std::fmt::Debug for MemoryFs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryFs")
+            .field("known", &self.known.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl MemoryFs {
     /// An empty one.
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// One whose `known` files are loaded by `loader` when first read.
+    pub fn with_loader(known: impl IntoIterator<Item = PathBuf>, loader: Loader) -> Arc<Self> {
+        Arc::new(Self {
+            files: Mutex::default(),
+            known: known.into_iter().collect(),
+            loader: Some(loader),
+        })
     }
 
     /// Puts `bytes` at `path`, replacing what was there.
@@ -60,11 +83,32 @@ impl MemoryFs {
     }
 
     fn is_dir(&self, path: &Path) -> bool {
-        self.files
-            .lock()
-            .expect("memory filesystem poisoned")
-            .keys()
-            .any(|file| file != path && file.starts_with(path))
+        let under = |file: &PathBuf| file != path && file.starts_with(path);
+        self.known.iter().any(under)
+            || self
+                .files
+                .lock()
+                .expect("memory filesystem poisoned")
+                .keys()
+                .any(under)
+    }
+
+    fn is_file(&self, path: &Path) -> bool {
+        self.known.contains(path) || self.get(path).is_some()
+    }
+
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        if let Some(bytes) = self.get(path) {
+            return Ok(bytes);
+        }
+        match &self.loader {
+            Some(loader) if self.known.contains(path) => {
+                let bytes = loader(path)?;
+                self.insert(path, bytes.clone());
+                Ok(bytes)
+            }
+            _ => Err(not_found(path)),
+        }
     }
 }
 
@@ -96,7 +140,7 @@ fn not_found(path: &Path) -> io::Error {
 pub(crate) fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     let path = path.as_ref();
     match current() {
-        Some(fs) => fs.get(path).ok_or_else(|| not_found(path)),
+        Some(fs) => fs.read(path),
         None => std::fs::read(path),
     }
 }
@@ -121,7 +165,7 @@ pub(crate) fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
 pub(crate) fn exists(path: impl AsRef<Path>) -> bool {
     let path = path.as_ref();
     match current() {
-        Some(fs) => fs.get(path).is_some() || fs.is_dir(path),
+        Some(fs) => fs.is_file(path) || fs.is_dir(path),
         None => path.exists(),
     }
 }
@@ -130,10 +174,7 @@ pub(crate) fn exists(path: impl AsRef<Path>) -> bool {
 pub(crate) fn file_len(path: impl AsRef<Path>) -> io::Result<u64> {
     let path = path.as_ref();
     match current() {
-        Some(fs) => fs
-            .get(path)
-            .map(|bytes| bytes.len() as u64)
-            .ok_or_else(|| not_found(path)),
+        Some(fs) => fs.read(path).map(|bytes| bytes.len() as u64),
         None => std::fs::metadata(path).map(|metadata| metadata.len()),
     }
 }
@@ -165,5 +206,36 @@ mod tests {
         // Outside it, the real filesystem again.
         assert_eq!(read(&on_disk).unwrap(), b"disk");
         assert!(current().is_none());
+    }
+
+    #[test]
+    fn a_known_file_is_loaded_once_when_first_read() {
+        let loads = Arc::new(Mutex::new(Vec::new()));
+        let seen = loads.clone();
+        let fs = MemoryFs::with_loader(
+            [
+                PathBuf::from("/components/a.wasm"),
+                PathBuf::from("/components/b.wasm"),
+            ],
+            Box::new(move |path| {
+                seen.lock().unwrap().push(path.to_path_buf());
+                Ok(path.to_string_lossy().into_owned().into_bytes())
+            }),
+        );
+        in_memory(fs, || {
+            assert!(exists("/components/b.wasm"), "known, before it is loaded");
+            assert!(exists("/components"));
+            assert!(!exists("/components/c.wasm"));
+            assert_eq!(read("/components/a.wasm").unwrap(), b"/components/a.wasm");
+            assert_eq!(read("/components/a.wasm").unwrap(), b"/components/a.wasm");
+            assert!(
+                read("/components/c.wasm").is_err(),
+                "an unknown file is not loaded"
+            );
+        });
+        assert_eq!(
+            *loads.lock().unwrap(),
+            [PathBuf::from("/components/a.wasm")]
+        );
     }
 }

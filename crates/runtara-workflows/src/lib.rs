@@ -78,6 +78,14 @@ pub mod compile;
 ))]
 pub mod compile_fs;
 
+/// A compile handed to a compiler elsewhere (a WASI command in a VM), and
+/// its outcome handed back.
+#[cfg(all(
+    feature = "compiler",
+    not(all(target_family = "wasm", not(target_os = "wasi")))
+))]
+pub mod compile_request;
+
 /// Dependency analysis for child workflows.
 pub mod dependency_analysis;
 

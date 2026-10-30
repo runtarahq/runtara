@@ -1905,7 +1905,7 @@ fn component_error(error: impl fmt::Display) -> DirectCompileError {
     DirectCompileError::Component(format!("{error:#}"))
 }
 
-fn sanitize_path_segment(value: &str) -> String {
+pub(crate) fn sanitize_path_segment(value: &str) -> String {
     let sanitized = value
         .chars()
         .map(|ch| {
