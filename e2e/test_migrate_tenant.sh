@@ -83,9 +83,13 @@ http_status() { curl -sS -o /dev/null -w '%{http_code}' "$@"; }
 # start SIDE TENANT_ID [SERVED]: a server on SIDE's databases (DB_SIDE's,
 # when set) and data dir.
 start() {
+    # A platform object-model database only where the server serves one
+    # tenant: one serving several refuses it (M7.16).
+    local platform=""
+    [ -n "${3:-}" ] || platform=$(url "${DB_SIDE:-$1}_server")
     RUNTARA_SERVER_DATABASE_URL="$(url "${DB_SIDE:-$1}_server")" \
     RUNTARA_DATABASE_CONNECTION_GUARD="${3:+off}" \
-    OBJECT_MODEL_DATABASE_URL="${3:+}${3:-$(url "${DB_SIDE:-$1}_server")}" \
+    OBJECT_MODEL_DATABASE_URL="${platform}" \
     RUNTARA_DATABASE_URL="$(url "${DB_SIDE:-$1}_runtime")" \
     TENANT_ID="$2" RUNTARA_SERVED_TENANTS="${3:-}" \
     SERVER_HOST=127.0.0.1 SERVER_PORT="${TEST_PORT_PUBLIC}" \
