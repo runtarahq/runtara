@@ -149,9 +149,10 @@ async fn authenticate_with(
         .await
 }
 
-/// Runs the rest of a request for `tenant` on the runtime database, where row
-/// level security then confines it to that tenant's rows (C11). A request
-/// that answers across tenants (`scoped` false) runs as the system path.
+/// Runs the rest of a request for `tenant` on the runtime and server
+/// databases, where row level security then confines it to that tenant's rows
+/// (C11, M7.11). A request that answers across tenants (`scoped` false) runs as
+/// the system path.
 async fn as_tenant(
     scoped: bool,
     tenant: &str,

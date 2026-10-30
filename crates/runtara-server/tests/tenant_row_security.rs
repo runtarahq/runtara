@@ -166,6 +166,12 @@ async fn a_scoped_connection_reaches_only_its_tenants_rows() {
     }
     let restricted = Restricted::new(&admin).await;
     let pool = restricted.pool.clone();
+    assert!(
+        !runtara_store_postgres::tenant_scope::escapes_row_security(&pool)
+            .await
+            .unwrap(),
+        "a plain role is bound by row-level security"
+    );
     let tenants = [a.clone(), b.clone()];
 
     let counted = |tenant: Option<String>, sql: &'static str| {

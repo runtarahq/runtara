@@ -108,12 +108,21 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
         .unwrap_or(10);
 
     println!("Connecting to database...");
-    let pool = PgPoolOptions::new()
+    // Shared by every tenant, as the runtime pool is: work inside a tenant's
+    // scope (an authenticated request) sees only that tenant's rows under row
+    // level security; everything else is the system path.
+    let pool = runtara_store_postgres::tenant_scope::scoping(PgPoolOptions::new())
         .max_connections(max_connections)
         .acquire_timeout(std::time::Duration::from_secs(30))
         .connect(&database_url)
         .await
         .expect("Failed to connect to database");
+    if let Err(message) =
+        runtara_store_postgres::tenant_scope::require_row_security(&pool, "server").await
+    {
+        eprintln!("❌ {message}");
+        std::process::exit(1);
+    }
 
     // Maintenance command: runs against the existing schema and exits without
     // migrating or starting the server.

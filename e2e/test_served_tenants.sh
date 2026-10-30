@@ -20,15 +20,16 @@
 #      primary tenant still creates more, and each reads its own entitlements.
 #   6. OAUTH AND CONNECTION EVENTS — the second tenant's authorize URL
 #      redirects to its own callback path; that state is refused at the
-#      primary tenant's callback and is spent; its connection.created product
+#      primary tenant's callback and left alone; its connection.created product
 #      event carries the second tenant, and a failed callback's event is not
 #      filed under the tenant named in its URL.
 #   7. MCP SESSIONS — the second tenant's MCP session is kept under its own
 #      tenant; after a restart, restoring it with the primary tenant's
 #      credentials fails, while its owner restores it.
-#   8. RUNTIME ROW SECURITY (C11) — the server reaches the runtime database
-#      as a plain role that owns it, so row-level security binds everything
-#      above; that role, naming one tenant, sees none of the other's runs.
+#   8. ROW SECURITY (C11, M7.11) — the server reaches the runtime and server
+#      databases as a plain role that owns them, so row-level security binds
+#      everything above; that role, naming one tenant, sees none of the
+#      other's runs, workflows, triggers or API keys.
 #   9. PACED CALLS (SYN-917) — the second tenant may make 12 calls a minute
 #      that start external work: its run of 15 outbound HTTP calls waits for
 #      the last three and completes, while the primary's same run does not.
@@ -159,20 +160,27 @@ for _ in {1..20}; do
 done
 
 print_step "Creating test databases..."
-psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_SERVER}" >/dev/null
-# Neither a superuser nor BYPASSRLS: row-level security binds the server.
+# Neither a superuser nor BYPASSRLS: row-level security binds the server, on
+# both databases it owns. The extensions its migrations ask for are made
+# beforehand, as an administrator makes them on a deployment.
 RUNTIME_PASSWORD=$(openssl rand -hex 16)
 psql_quiet -d postgres -c "CREATE ROLE ${RUNTIME_ROLE} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '${RUNTIME_PASSWORD}'" >/dev/null
+psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_SERVER} OWNER ${RUNTIME_ROLE}" >/dev/null
+for extension in uuid-ossp vector fuzzystrmatch pg_trgm; do
+    psql_quiet -d "${TEST_DB_SERVER}" -c "CREATE EXTENSION IF NOT EXISTS \"${extension}\"" >/dev/null
+done
 psql_quiet -d postgres -c "CREATE DATABASE ${TEST_DB_RUNTIME} OWNER ${RUNTIME_ROLE}" >/dev/null
-SERVER_DB_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}"
+SERVER_DB_URL="postgresql://${RUNTIME_ROLE}:${RUNTIME_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}"
+OBJECT_MODEL_DB_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_SERVER}"
 
 start_server() {
     print_step "Starting runtara-server on :${TEST_PORT_PUBLIC}..."
     RUNTARA_SERVER_DATABASE_URL="${SERVER_DB_URL}" \
-    OBJECT_MODEL_DATABASE_URL="${SERVER_DB_URL}" \
+    OBJECT_MODEL_DATABASE_URL="${OBJECT_MODEL_DB_URL}" \
     RUNTARA_DATABASE_URL="postgresql://${RUNTIME_ROLE}:${RUNTIME_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${TEST_DB_RUNTIME}" \
     TENANT_ID="${TENANT}" \
     RUNTARA_SERVED_TENANTS="${SECOND_TENANT}" \
+    RUNTARA_REQUIRE_ROW_SECURITY=true \
     RUNTARA_TENANT_ENTITLEMENTS_JSON="{\"${SECOND_TENANT}\": {\"overrides\": {\"limits\": {\"maxWorkflows\": 1, \"workflowCallsPerMinute\": 12}}}}" \
     RUNTARA_PROXY_ALLOWED_HOSTS=127.0.0.1 \
     SERVER_HOST=127.0.0.1 \
@@ -376,8 +384,12 @@ STATE=$(python3 -c 'import sys,urllib.parse as u; print(u.parse_qs(u.urlparse(sy
 CALLBACK="http://127.0.0.1:${TEST_PORT_PUBLIC}/api/oauth"
 curl -sS "${CALLBACK}/${TENANT}/callback?state=${STATE}&code=c1" | grep -q "Invalid or expired authorization" \
     || { print_error "the primary tenant's callback accepted the second tenant's state"; exit 1; }
-curl -sS "${CALLBACK}/${SECOND_TENANT}/callback?state=${STATE}&code=c1" | grep -q "Invalid or expired authorization" \
-    || { print_error "a state refused at the wrong callback was not spent"; exit 1; }
+# Row-level security (M7.11) keeps the primary tenant's callback away from the
+# second tenant's state altogether: refused there, it is neither seen nor
+# spent, so another tenant cannot burn a flow it does not own.
+[ "$(server_sql "SELECT count(*) FROM oauth_state WHERE state = '${STATE}' AND tenant_id = '${SECOND_TENANT}'")" = "1" ] \
+    || { print_error "the primary tenant's callback reached the second tenant's state"; exit 1; }
+echo "  the primary tenant's callback refuses the second tenant's state and leaves it alone ✓"
 # A failed callback names no tenant it could prove: its event is not filed
 # under the tenant in its path.
 curl -sS -o /dev/null "${CALLBACK}/not-a-served-tenant/callback?error=access_denied"
@@ -405,7 +417,7 @@ for _ in {1..10}; do
 done
 [ "${FAILED_TENANT}" = "${TENANT}" ] \
     || { print_error "a failed callback's event was filed under '${FAILED_TENANT}', not the primary tenant"; exit 1; }
-echo "  the redirect names the second tenant; its state is refused at the primary's callback and spent; its connection event is its own; a failed callback's path tenant is not trusted ✓"
+echo "  the redirect names the second tenant; its state is refused at the primary's callback and left alone; its connection event is its own; a failed callback's path tenant is not trusted ✓"
 
 #-------------------------------------------------------------------------
 print_step "7. An MCP session is kept, and restored, under its own tenant..."
@@ -447,10 +459,10 @@ AUTH=()
 echo "  the session is kept under the second tenant; after a restart the primary is refused it and its owner restores it ✓"
 
 #-------------------------------------------------------------------------
-print_step "8. The runtime database binds the server to each request's tenant..."
+print_step "8. The runtime and server databases bind the server to each request's tenant..."
 as_runtime_role() {
     PGPASSWORD="${RUNTIME_PASSWORD}" psql -qtA -U "${RUNTIME_ROLE}" -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" \
-        -d "${TEST_DB_RUNTIME}" -c "$1"
+        -d "${2:-${TEST_DB_RUNTIME}}" -c "$1"
 }
 [ "$(as_runtime_role "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user")" = "f" ] \
     || { print_error "the runtime role escapes row-level security"; exit 1; }
@@ -459,6 +471,14 @@ SECOND_RUNS=$(runtime_sql "SELECT count(*) FROM instances WHERE tenant_id = '${S
 SEEN=$(as_runtime_role "SELECT set_config('runtara.tenant_id', '${TENANT}', false); SELECT count(*) FROM instances WHERE tenant_id = '${SECOND_TENANT}'" | tail -1)
 [ "${SEEN}" = "0" ] || { print_error "as ${TENANT} the runtime role saw ${SEEN} of the second tenant's runs"; exit 1; }
 echo "  every stage ran on a runtime role bound by row-level security; naming ${TENANT}, it sees none of the second tenant's ${SECOND_RUNS} runs ✓"
+for table in "workflows tenant_id" "invocation_trigger tenant_id" "api_keys org_id"; do
+    set -- ${table}
+    OWN=$(server_sql "SELECT count(*) FROM $1 WHERE $2 = '${SECOND_TENANT}'")
+    [ "${OWN}" -gt 0 ] || { print_error "the second tenant has no $1 rows to hide"; exit 1; }
+    SEEN=$(as_runtime_role "SELECT set_config('runtara.tenant_id', '${TENANT}', false); SELECT count(*) FROM $1 WHERE $2 = '${SECOND_TENANT}'" "${TEST_DB_SERVER}" | tail -1)
+    [ "${SEEN}" = "0" ] || { print_error "as ${TENANT} the server role saw ${SEEN} of the second tenant's $1"; exit 1; }
+done
+echo "  on the server database, naming ${TENANT}, it sees none of the second tenant's workflows, triggers or API keys ✓"
 
 #-------------------------------------------------------------------------
 print_step "9. A run's outbound calls wait for its tenant's limit..."

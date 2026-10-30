@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures::stream::StreamExt;
+use runtara_store_postgres::tenant_scope::scoped;
 use serde_json::Value;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use thiserror::Error;
@@ -2270,8 +2271,10 @@ impl ExecutionOutboxRelay {
         // database and the runners mostly idle. Rows address different
         // requests and the stream is unordered across them, so overlapping
         // them changes no ordering the consumer relies on.
+        // Each row is one tenant's: row level security keeps its delivery's
+        // database work to that tenant's rows.
         let results = futures::stream::iter(claimed)
-            .map(|claim| self.deliver_one(claim))
+            .map(|claim| scoped(claim.tenant_id.clone(), self.deliver_one(claim)))
             .buffer_unordered(relay_delivery_concurrency())
             .collect::<Vec<_>>()
             .await;
