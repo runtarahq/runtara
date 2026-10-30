@@ -1706,20 +1706,38 @@ impl CompilationService {
         let permit = compilation_semaphore().acquire().await.map_err(|e| {
             ServiceError::CompilationError(format!("Compilation queue closed: {e}"))
         })?;
+        let publishing_tenant = tenant_id.to_string();
         let result = tokio::task::spawn_blocking(move || {
+            // Where this process compiles: elsewhere, with an executor set.
+            if let Some(executor) = crate::compile_executor::executor() {
+                return executor
+                    .compile_published_agent(
+                        &publishing_tenant,
+                        direct_input,
+                        &components_dir,
+                        &extra_dirs,
+                    )
+                    .map_err(|error| error.to_string());
+            }
             let mut result = runtara_workflows::direct_wasm::compile_direct_workflow_with_abi(
                 direct_input,
                 runtara_workflows::direct_wasm::WorkflowRole::PublishedAgent,
                 // Omit the runtime where the graph allows; the compiler keeps
                 // it for anything that parks or runs under the caller's instance.
                 true,
-            )?;
+            )
+            .map_err(|error| error.to_string())?;
             runtara_workflows::direct_wasm::compose_direct_workflow_with_extra_dirs(
                 &mut result,
                 &components_dir,
                 &extra_dirs,
-            )?;
-            Ok::<_, runtara_workflows::direct_wasm::DirectCompileError>(result)
+            )
+            .map_err(|error| error.to_string())?;
+            Ok::<_, String>(runtara_workflows::compile_request::PublishedAgent {
+                wasm_path: result.wasm_path,
+                wasm_size: result.wasm_size,
+                artifact_metadata: result.artifact_metadata,
+            })
         })
         .await
         .map_err(|e| ServiceError::CompilationError(format!("Publish task panicked: {e}")))?

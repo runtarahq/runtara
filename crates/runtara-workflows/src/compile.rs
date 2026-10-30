@@ -305,7 +305,7 @@ fn direct_artifact_package_size(build_dir: &std::path::Path) -> usize {
         .sum()
 }
 
-fn direct_compile_error_to_io(err: DirectCompileError) -> io::Error {
+pub(crate) fn direct_compile_error_to_io(err: DirectCompileError) -> io::Error {
     match err {
         DirectCompileError::Manifest(err) => io::Error::new(io::ErrorKind::InvalidData, err),
         DirectCompileError::Serialize(err) => io::Error::new(io::ErrorKind::InvalidData, err),

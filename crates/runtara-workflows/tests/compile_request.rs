@@ -128,3 +128,55 @@ fn a_failed_compile_elsewhere_fails_as_in_process() {
     assert_eq!(remote.kind(), local.kind());
     assert_eq!(remote.to_string(), local.to_string());
 }
+
+#[test]
+fn a_publish_elsewhere_makes_what_one_in_process_does() {
+    use runtara_workflows::compile_request::{apply_published_agent, request_published_agent};
+    use runtara_workflows::direct_wasm::{
+        DirectCompilationInput, WorkflowRole, compile_direct_workflow_with_abi,
+        compose_direct_workflow_with_extra_dirs,
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let staged = temp.path().join("staged");
+    let direct = |output_dir: PathBuf| {
+        let compile = input(agent_graph());
+        DirectCompilationInput {
+            workflow_id: "remote".into(),
+            version: 2,
+            source_checksum: Some("source".into()),
+            execution_graph: compile.execution_graph,
+            child_workflows: vec![],
+            output_dir,
+            track_events: false,
+            agent_catalog: compile.agent_catalog,
+            agent_slug: Some("remote-agent".into()),
+        }
+    };
+    let mut local = compile_direct_workflow_with_abi(
+        direct(temp.path().join("local")),
+        WorkflowRole::PublishedAgent,
+        true,
+    )
+    .expect("in process");
+    compose_direct_workflow_with_extra_dirs(&mut local, &components_dir(), &[staged.clone()])
+        .expect("composed in process");
+
+    let (req, paths) = request_published_agent(
+        "acme",
+        &direct(temp.path().join("unused")),
+        &components_dir(),
+        &[staged],
+    )
+    .expect("request");
+    let req = serde_json::from_slice(&serde_json::to_vec(&req).unwrap()).unwrap();
+    let (outcome, wasm) =
+        compile(req, move |digest| std::fs::read(&paths[digest])).expect("elsewhere");
+    let remote = apply_published_agent(outcome, &wasm, "remote", 2, &temp.path().join("remote"))
+        .expect("applied");
+
+    assert_eq!(
+        std::fs::read(&remote.wasm_path).unwrap(),
+        std::fs::read(&local.wasm_path).unwrap()
+    );
+    assert_eq!(remote.artifact_metadata, local.artifact_metadata);
+}

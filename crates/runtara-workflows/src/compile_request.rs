@@ -56,9 +56,25 @@ pub struct RequestChild {
     pub execution_graph: ExecutionGraph,
 }
 
+/// What a compile is for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompileRole {
+    /// A workflow, as [`compile_workflow_direct`] compiles it.
+    #[default]
+    Workflow,
+    /// A workflow published as an agent, as its publish compiles it
+    /// ([`crate::direct_wasm::WorkflowRole::PublishedAgent`], the runtime
+    /// omitted where the graph allows).
+    PublishedAgent,
+}
+
 /// A compile, for a compiler elsewhere.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompileRequest {
+    /// What it is for.
+    #[serde(default)]
+    pub role: CompileRole,
     /// The tenant the workflow is.
     pub tenant_id: String,
     /// The workflow.
@@ -209,6 +225,7 @@ pub fn request(
         .collect::<io::Result<_>>()?;
     Ok((
         CompileRequest {
+            role: CompileRole::Workflow,
             tenant_id: input.tenant_id.clone(),
             workflow_id: input.workflow_id.clone(),
             version: input.version,
@@ -228,6 +245,50 @@ pub fn request(
             agent_catalog: input.agent_catalog.as_deref().cloned(),
             agent_slug: input.agent_slug.clone(),
             source_checksum: options.source_checksum.clone(),
+            components,
+            extra_components,
+        },
+        paths,
+    ))
+}
+
+/// The request for publishing `input`, `tenant`'s workflow, as an agent
+/// with the components in `components_dir` and `extra_component_dirs`, and
+/// where each file it names is, by SHA-256.
+pub fn request_published_agent(
+    tenant: &str,
+    input: &crate::direct_wasm::DirectCompilationInput,
+    components_dir: &Path,
+    extra_component_dirs: &[PathBuf],
+) -> io::Result<(CompileRequest, BTreeMap<String, PathBuf>)> {
+    let mut paths = BTreeMap::new();
+    let components = listed(components_dir, &mut paths)?;
+    let extra_components = extra_component_dirs
+        .iter()
+        .map(|dir| listed(dir, &mut paths))
+        .collect::<io::Result<_>>()?;
+    Ok((
+        CompileRequest {
+            role: CompileRole::PublishedAgent,
+            tenant_id: tenant.to_owned(),
+            workflow_id: input.workflow_id.clone(),
+            version: input.version,
+            execution_graph: input.execution_graph.clone(),
+            track_events: input.track_events,
+            child_workflows: input
+                .child_workflows
+                .iter()
+                .map(|child| RequestChild {
+                    step_id: child.step_id.clone(),
+                    workflow_id: child.workflow_id.clone(),
+                    version_requested: child.version_requested.clone(),
+                    version_resolved: child.version_resolved,
+                    execution_graph: child.execution_graph.clone(),
+                })
+                .collect(),
+            agent_catalog: input.agent_catalog.as_deref().cloned(),
+            agent_slug: input.agent_slug.clone(),
+            source_checksum: input.source_checksum.clone(),
             components,
             extra_components,
         },
@@ -272,6 +333,9 @@ pub fn compile(
             Ok(bytes)
         }),
     );
+    if request.role == CompileRole::PublishedAgent {
+        return compile_published_agent(request, extra_dirs, memory);
+    }
     let input = CompilationInput {
         tenant_id: request.tenant_id,
         workflow_id: request.workflow_id,
@@ -301,23 +365,7 @@ pub fn compile(
     };
     let result =
         in_memory(memory.clone(), || compile_workflow_direct(input, options)).map_err(failure)?;
-    let mut files = BTreeMap::new();
-    let mut wasm = None;
-    for (relative, bytes) in memory.under(&result.build_dir) {
-        if relative == Path::new(WORKFLOW_WASM) {
-            wasm = Some(bytes);
-        } else {
-            files.insert(
-                relative.to_string_lossy().into_owned(),
-                STANDARD.encode(bytes),
-            );
-        }
-    }
-    let wasm = wasm.ok_or_else(|| CompileFailure {
-        kind: format!("{:?}", io::ErrorKind::Other),
-        message: "the compile composed no workflow.wasm".into(),
-        stale: None,
-    })?;
+    let (files, wasm) = handed_back(&memory, &result.build_dir)?;
     Ok((
         CompileOutcome {
             files,
@@ -339,6 +387,85 @@ pub fn compile(
         },
         wasm,
     ))
+}
+
+/// [`compile`] for a workflow published as an agent.
+fn compile_published_agent(
+    request: CompileRequest,
+    extra_dirs: Vec<PathBuf>,
+    memory: Arc<MemoryFs>,
+) -> Result<(CompileOutcome, Vec<u8>), CompileFailure> {
+    use crate::direct_wasm::{
+        DirectCompilationInput, WorkflowRole, compile_direct_workflow_with_abi,
+        compose_direct_workflow_with_extra_dirs,
+    };
+    let input = DirectCompilationInput {
+        workflow_id: request.workflow_id,
+        version: request.version,
+        source_checksum: request.source_checksum,
+        execution_graph: request.execution_graph,
+        child_workflows: request
+            .child_workflows
+            .into_iter()
+            .map(|child| ChildWorkflowInput {
+                step_id: child.step_id,
+                workflow_id: child.workflow_id,
+                version_requested: child.version_requested,
+                version_resolved: child.version_resolved,
+                execution_graph: child.execution_graph,
+            })
+            .collect(),
+        output_dir: PathBuf::from(BUILD),
+        track_events: request.track_events,
+        agent_catalog: request.agent_catalog.map(Arc::new),
+        agent_slug: request.agent_slug,
+    };
+    let result = in_memory(memory.clone(), || {
+        let mut result =
+            compile_direct_workflow_with_abi(input, WorkflowRole::PublishedAgent, true)?;
+        compose_direct_workflow_with_extra_dirs(&mut result, Path::new(COMPONENTS), &extra_dirs)?;
+        Ok::<_, DirectCompileError>(result)
+    })
+    .map_err(|error| failure(crate::compile::direct_compile_error_to_io(error)))?;
+    let (files, wasm) = handed_back(&memory, &result.build_dir)?;
+    Ok((
+        CompileOutcome {
+            files,
+            binary_size: result.wasm_size,
+            binary_checksum: result.wasm_checksum,
+            package_size: 0,
+            child_dependencies: Vec::new(),
+            default_variables: Value::Null,
+            trusted_pins: Vec::new(),
+        },
+        wasm,
+    ))
+}
+
+/// The build in `build_dir`: its files but the composed component, base64,
+/// and that component.
+fn handed_back(
+    memory: &MemoryFs,
+    build_dir: &Path,
+) -> Result<(BTreeMap<String, String>, Vec<u8>), CompileFailure> {
+    let mut files = BTreeMap::new();
+    let mut wasm = None;
+    for (relative, bytes) in memory.under(build_dir) {
+        if relative == Path::new(WORKFLOW_WASM) {
+            wasm = Some(bytes);
+        } else {
+            files.insert(
+                relative.to_string_lossy().into_owned(),
+                STANDARD.encode(bytes),
+            );
+        }
+    }
+    let wasm = wasm.ok_or_else(|| CompileFailure {
+        kind: format!("{:?}", io::ErrorKind::Other),
+        message: "the compile composed no workflow.wasm".into(),
+        stale: None,
+    })?;
+    Ok((files, wasm))
 }
 
 fn failure(error: io::Error) -> CompileFailure {
@@ -433,6 +560,80 @@ pub fn apply(
     version: u32,
     options: &DirectWorkflowCompileOptions,
 ) -> io::Result<NativeCompilationResult> {
+    let (build_dir, binary_path) = write_build(
+        &outcome,
+        workflow_wasm,
+        workflow_id,
+        version,
+        &options.output_dir,
+    )?;
+    Ok(NativeCompilationResult {
+        binary_path,
+        binary_size: outcome.binary_size,
+        binary_checksum: outcome.binary_checksum,
+        build_dir,
+        package_size: outcome.package_size,
+        child_dependencies: outcome
+            .child_dependencies
+            .into_iter()
+            .map(|child| ChildDependency {
+                step_id: child.step_id,
+                child_workflow_id: child.child_workflow_id,
+                child_version_requested: child.child_version_requested,
+                child_version_resolved: child.child_version_resolved,
+            })
+            .collect(),
+        default_variables: outcome.default_variables,
+        compiler_mode: WorkflowCompilerMode::DirectWasm,
+        trusted_pins: outcome.trusted_pins,
+    })
+}
+
+/// A workflow-agent compiled for publishing elsewhere: its composed
+/// component and its artifact metadata, written where its publish would
+/// have written them.
+#[derive(Debug)]
+pub struct PublishedAgent {
+    /// The composed component.
+    pub wasm_path: PathBuf,
+    /// Its size.
+    pub wasm_size: usize,
+    /// Its artifact metadata.
+    pub artifact_metadata: crate::direct_wasm::DirectArtifactMetadata,
+}
+
+/// Writes what a publish compile elsewhere made into `output_dir`, as the
+/// compile would have.
+pub fn apply_published_agent(
+    outcome: CompileOutcome,
+    workflow_wasm: &[u8],
+    workflow_id: &str,
+    version: u32,
+    output_dir: &Path,
+) -> io::Result<PublishedAgent> {
+    let (build_dir, wasm_path) =
+        write_build(&outcome, workflow_wasm, workflow_id, version, output_dir)?;
+    let metadata = std::fs::read(
+        build_dir.join(crate::direct_wasm::DIRECT_WORKFLOW_ARTIFACT_METADATA_FILENAME),
+    )?;
+    let artifact_metadata = serde_json::from_slice(&metadata)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok(PublishedAgent {
+        wasm_path,
+        wasm_size: workflow_wasm.len(),
+        artifact_metadata,
+    })
+}
+
+/// Writes a compile's build into `output_dir`, as the compile would have:
+/// answers its directory and composed component.
+fn write_build(
+    outcome: &CompileOutcome,
+    workflow_wasm: &[u8],
+    workflow_id: &str,
+    version: u32,
+    output_dir: &Path,
+) -> io::Result<(PathBuf, PathBuf)> {
     if sha256_hex(workflow_wasm) != outcome.binary_checksum
         || workflow_wasm.len() != outcome.binary_size
     {
@@ -441,7 +642,7 @@ pub fn apply(
             "the composed component is not the one the compile made",
         ));
     }
-    let build_dir = options.output_dir.join(format!(
+    let build_dir = output_dir.join(format!(
         "{}-v{}-direct",
         crate::direct_wasm::compile::sanitize_path_segment(workflow_id),
         version
@@ -472,24 +673,5 @@ pub fn apply(
     }
     let binary_path = build_dir.join(WORKFLOW_WASM);
     std::fs::write(&binary_path, workflow_wasm)?;
-    Ok(NativeCompilationResult {
-        binary_path,
-        binary_size: outcome.binary_size,
-        binary_checksum: outcome.binary_checksum,
-        build_dir,
-        package_size: outcome.package_size,
-        child_dependencies: outcome
-            .child_dependencies
-            .into_iter()
-            .map(|child| ChildDependency {
-                step_id: child.step_id,
-                child_workflow_id: child.child_workflow_id,
-                child_version_requested: child.child_version_requested,
-                child_version_resolved: child.child_version_resolved,
-            })
-            .collect(),
-        default_variables: outcome.default_variables,
-        compiler_mode: WorkflowCompilerMode::DirectWasm,
-        trusted_pins: outcome.trusted_pins,
-    })
+    Ok((build_dir, binary_path))
 }
