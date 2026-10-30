@@ -13,6 +13,10 @@
 #      parked run wakes and completes, its webhook runs its workflow (compiled
 #      again here), its connection's credentials open, and the other tenant
 #      sees none of it. A second copy is refused.
+#   4. SHARED DATABASES — a tenant whose own server already used the target's
+#      databases, with artifacts in a data dir of its own: migrate-tenant
+#      copies only its artifacts, and the target, serving it too, runs its
+#      compiled workflow by its key without compiling again.
 #
 # Prerequisites: Postgres (POSTGRES_PASSWORD or PGPASSWORD; a superuser for
 # the copy), docker (Valkey), and the workflow components in
@@ -41,6 +45,7 @@ SERVER_PID=""
 VALKEY_CONTAINER=""
 MOVED="mig_e2e"
 OTHER="mig_e2e_host"
+NEAR="mig_e2e_near"
 
 RUNTARA_SERVER_BIN="${RUNTARA_SERVER_BIN:-${PROJECT_ROOT}/target/debug/runtara-server}"
 COMPONENTS_DIR="${RUNTARA_AGENT_COMPONENTS_DIR:-${PROJECT_ROOT}/target/wasm32-wasip2/release}"
@@ -75,11 +80,12 @@ api() { # METHOD PATH [BODY]
 }
 http_status() { curl -sS -o /dev/null -w '%{http_code}' "$@"; }
 
-# start SIDE TENANT_ID [SERVED]: a server on SIDE's databases and data dir.
+# start SIDE TENANT_ID [SERVED]: a server on SIDE's databases (DB_SIDE's,
+# when set) and data dir.
 start() {
-    RUNTARA_SERVER_DATABASE_URL="$(url "$1_server")" \
-    OBJECT_MODEL_DATABASE_URL="$(url "$1_server")" \
-    RUNTARA_DATABASE_URL="$(url "$1_runtime")" \
+    RUNTARA_SERVER_DATABASE_URL="$(url "${DB_SIDE:-$1}_server")" \
+    OBJECT_MODEL_DATABASE_URL="$(url "${DB_SIDE:-$1}_server")" \
+    RUNTARA_DATABASE_URL="$(url "${DB_SIDE:-$1}_runtime")" \
     TENANT_ID="$2" RUNTARA_SERVED_TENANTS="${3:-}" \
     SERVER_HOST=127.0.0.1 SERVER_PORT="${TEST_PORT_PUBLIC}" \
     RUNTARA_CORE_PORT="${TEST_CORE_PORT}" RUNTARA_ENVIRONMENT_PORT=$((TEST_CORE_PORT + 1)) \
@@ -199,5 +205,34 @@ DATA_DIR="${TEST_DATA_DIR}/to" SQLX_OFFLINE="${SQLX_OFFLINE}" \
     && { print_error "a second copy was not refused"; exit 1; }
 grep -q "already has" "${TEST_DATA_DIR}/again.log" || { print_error "a second copy failed otherwise: $(tail -2 "${TEST_DATA_DIR}/again.log")"; exit 1; }
 echo "  by its old key: its two workflows, its completed run, its parked run woken and completed, its webhook run (compiled again), its connection opened; the host tenant sees none of it; a second copy refused ✓"
+
+#-------------------------------------------------------------------------
+print_step "4. A tenant already on the target's databases has only its artifacts copied..."
+DB_SIDE=to start near "${NEAR}"
+NEAR_KEY=$(api POST /api-keys '{"name":"near"}' | jq -r '.key // .data.key // empty')
+[ -n "${NEAR_KEY}" ] || { print_error "api key create failed"; exit 1; }
+NEAR_WF=$(compiled Near "${ANSWER}")
+stop
+MIGRATE_FROM_SERVER_DATABASE_URL="$(url to_server)" MIGRATE_FROM_RUNTIME_DATABASE_URL="$(url to_runtime)" \
+MIGRATE_FROM_DATA_DIR="${TEST_DATA_DIR}/near" \
+MIGRATE_TO_SERVER_DATABASE_URL="$(url to_server)" MIGRATE_TO_RUNTIME_DATABASE_URL="$(url to_runtime)" \
+DATA_DIR="${TEST_DATA_DIR}/to" SQLX_OFFLINE="${SQLX_OFFLINE}" \
+    "${RUNTARA_SERVER_BIN}" migrate-tenant --tenant-id "${NEAR}" > "${TEST_DATA_DIR}/near.json" 2> "${TEST_DATA_DIR}/near-migrate.log" \
+    || { print_error "migrate-tenant failed: $(tail -3 "${TEST_DATA_DIR}/near-migrate.log")"; exit 1; }
+REPORT=$(grep '^{' "${TEST_DATA_DIR}/near.json" | tail -1)
+echo "${REPORT}" | jq -e '.shared == true and .rows == {} and .artifacts >= 1' >/dev/null \
+    || { print_error "unexpected copy: ${REPORT}"; exit 1; }
+DIGEST=$(psql_quiet -d "${DB}_to_runtime" -c "SELECT binary_digest FROM images WHERE tenant_id = '${NEAR}' AND binary_digest IS NOT NULL LIMIT 1")
+DIGEST_HEX=${DIGEST#sha256:}
+[ -n "${DIGEST_HEX}" ] && find "${TEST_DATA_DIR}/to" -name "*${DIGEST_HEX}*" | grep -q . \
+    || { print_error "the near tenant's artifact ${DIGEST} is not in the target's store"; exit 1; }
+start to "${OTHER}" "${MOVED},${NEAR}"
+AUTH=(-H "Authorization: Bearer ${NEAR_KEY}")
+RUN=$(api POST "/workflows/${NEAR_WF}/execute" '{"inputs":{"data":{}}}' | jq -r '.data.instanceId // empty')
+[ -n "${RUN}" ] || { print_error "the near tenant's workflow did not start"; exit 1; }
+until_status "${RUN}" completed 60
+AUTH=()
+stop
+echo "  only its artifacts copied ($(echo "${REPORT}" | jq -c '{artifacts, shared}')); the target ran its compiled workflow by its key ✓"
 
 print_success "migrate tenant: a tenant moved from its own server onto a shared one keeps its workflows, runs, triggers, connections and keys"

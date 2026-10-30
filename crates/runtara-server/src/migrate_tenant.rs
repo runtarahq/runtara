@@ -33,6 +33,10 @@
 //! It refuses when the target already holds the tenant, and when the tenant
 //! keeps object-model data in its process's default database, which a shared
 //! process does not provide.
+//!
+//! When the source databases are the target's (the same host, port and
+//! database), as for a process that already shared them with others, the
+//! rows are where they belong: only the artifacts are copied.
 
 use std::ffi::OsString;
 
@@ -215,6 +219,24 @@ pub async fn run(
     let to_server = connect("MIGRATE_TO_SERVER_DATABASE_URL").await?;
     let to_runtime = connect("MIGRATE_TO_RUNTIME_DATABASE_URL").await?;
     let from_store = source_store()?;
+    let shared = match (
+        same_database(
+            "MIGRATE_FROM_SERVER_DATABASE_URL",
+            "MIGRATE_TO_SERVER_DATABASE_URL",
+        )?,
+        same_database(
+            "MIGRATE_FROM_RUNTIME_DATABASE_URL",
+            "MIGRATE_TO_RUNTIME_DATABASE_URL",
+        )?,
+    ) {
+        (true, true) => true,
+        (false, false) => false,
+        _ => {
+            return Err(
+                "the source shares one database with the target but not the other".to_owned(),
+            );
+        }
+    };
 
     // A service that has not run yet holds no tables: bring both targets to
     // this process's schema, as it would at boot.
@@ -224,7 +246,17 @@ pub async fn run(
     crate::embedded_runtara::run_migrations(&to_runtime)
         .await
         .map_err(|error| format!("migrating the target runtime database: {error}"))?;
-    preconditions(tenant, &from_server, &from_runtime, &to_server, &to_runtime).await?;
+    preconditions(
+        tenant,
+        &from_server,
+        &from_runtime,
+        (!shared).then_some((&to_server, &to_runtime)),
+    )
+    .await?;
+    if shared {
+        let artifacts = copy_artifacts(tenant, &from_runtime, &*from_store, &*target_store).await?;
+        return Ok(json!({"tenant": tenant, "rows": {}, "artifacts": artifacts, "shared": true}));
+    }
 
     let mut runtime_tx = replica(&to_runtime).await?;
     let mut server_tx = replica(&to_server).await?;
@@ -252,11 +284,48 @@ pub async fn run(
 
     // The artifacts the copied images name, before the rows that name them
     // are committed.
+    let artifacts = copy_artifacts(tenant, &from_runtime, &*from_store, &*target_store).await?;
+
+    runtime_tx
+        .commit()
+        .await
+        .map_err(|error| format!("committing the runtime rows: {error}"))?;
+    server_tx.commit().await.map_err(|error| {
+        format!(
+            "committing the server rows failed after the runtime rows were committed; \
+             remove the tenant's runtime rows from the target before running again: {error}"
+        )
+    })?;
+    Ok(json!({"tenant": tenant, "rows": copied, "artifacts": artifacts}))
+}
+
+/// Whether the databases at the URLs in `from` and `to` are one (the same
+/// host, port and database), whatever role each names.
+fn same_database(from: &str, to: &str) -> Result<bool, String> {
+    let parse = |name: &str| -> Result<sqlx::postgres::PgConnectOptions, String> {
+        env(name)?
+            .parse()
+            .map_err(|error| format!("{name}: {error}"))
+    };
+    let (from, to) = (parse(from)?, parse(to)?);
+    Ok(from.get_host() == to.get_host()
+        && from.get_port() == to.get_port()
+        && from.get_database() == to.get_database())
+}
+
+/// Copies the artifacts `tenant`'s images name from `from_store` into
+/// `target_store`, answering how many it copied.
+async fn copy_artifacts(
+    tenant: &str,
+    from_runtime: &PgPool,
+    from_store: &dyn ArtifactStore,
+    target_store: &dyn ArtifactStore,
+) -> Result<usize, String> {
     let digests: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT binary_digest FROM images WHERE tenant_id = $1 AND binary_digest IS NOT NULL",
     )
     .bind(tenant)
-    .fetch_all(&from_runtime)
+    .fetch_all(from_runtime)
     .await
     .map_err(|error| format!("image digests: {error}"))?;
     let mut artifacts = 0;
@@ -284,18 +353,7 @@ pub async fn run(
         }
         artifacts += 1;
     }
-
-    runtime_tx
-        .commit()
-        .await
-        .map_err(|error| format!("committing the runtime rows: {error}"))?;
-    server_tx.commit().await.map_err(|error| {
-        format!(
-            "committing the server rows failed after the runtime rows were committed; \
-             remove the tenant's runtime rows from the target before running again: {error}"
-        )
-    })?;
-    Ok(json!({"tenant": tenant, "rows": copied, "artifacts": artifacts}))
+    Ok(artifacts)
 }
 
 async fn replica(pool: &PgPool) -> Result<Transaction<'static, Postgres>, String> {
@@ -411,13 +469,13 @@ async fn copy_table(
     }
 }
 
-/// The checks before anything is written.
+/// The checks before anything is written; `targets`, the target server and
+/// runtime databases when the rows are copied into them.
 async fn preconditions(
     tenant: &str,
     from_server: &PgPool,
     from_runtime: &PgPool,
-    to_server: &PgPool,
-    to_runtime: &PgPool,
+    targets: Option<(&PgPool, &PgPool)>,
 ) -> Result<(), String> {
     let count = |pool: &PgPool, sql: &'static str| {
         let pool = pool.clone();
@@ -455,20 +513,22 @@ async fn preconditions(
         ));
     }
     // The target must not hold it already.
-    for (pool, sql, what) in [
-        (
-            to_server,
-            "SELECT count(*) FROM workflows WHERE tenant_id = $1",
-            "workflows",
-        ),
-        (
-            to_runtime,
-            "SELECT count(*) FROM instances WHERE tenant_id = $1",
-            "runs",
-        ),
-    ] {
-        if count(pool, sql).await? > 0 {
-            return Err(format!("the target already has {tenant}'s {what}"));
+    if let Some((to_server, to_runtime)) = targets {
+        for (pool, sql, what) in [
+            (
+                to_server,
+                "SELECT count(*) FROM workflows WHERE tenant_id = $1",
+                "workflows",
+            ),
+            (
+                to_runtime,
+                "SELECT count(*) FROM instances WHERE tenant_id = $1",
+                "runs",
+            ),
+        ] {
+            if count(pool, sql).await? > 0 {
+                return Err(format!("the target already has {tenant}'s {what}"));
+            }
         }
     }
     // Object-model data in the process's own default database has nowhere
