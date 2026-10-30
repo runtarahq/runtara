@@ -676,7 +676,16 @@ fn extract_zip_archive(bytes: &[u8]) -> Result<ExtractArchiveOutput, AgentError>
             .with_attr("entry_index", i.to_string())
         })?;
 
-        let path = file.name().to_string();
+        let path = file
+            .name()
+            .map_err(|e| {
+                AgentError::permanent(
+                    "ARCHIVE_READ_ERROR",
+                    format!("Failed to read name of archive entry {}: {}", i, e),
+                )
+                .with_attr("entry_index", i.to_string())
+            })?
+            .into_owned();
         let is_directory = file.is_dir();
         let size = file.size();
 
@@ -814,7 +823,16 @@ fn list_zip_archive(bytes: &[u8], format: ArchiveFormat) -> Result<ListArchiveOu
             .with_attr("entry_index", i.to_string())
         })?;
 
-        let path = file.name().to_string();
+        let path = file
+            .name()
+            .map_err(|e| {
+                AgentError::permanent(
+                    "ARCHIVE_READ_ERROR",
+                    format!("Failed to read name of archive entry {}: {}", i, e),
+                )
+                .with_attr("entry_index", i.to_string())
+            })?
+            .into_owned();
         let size = file.size();
         let compressed_size = file.compressed_size();
         let is_directory = file.is_dir();
