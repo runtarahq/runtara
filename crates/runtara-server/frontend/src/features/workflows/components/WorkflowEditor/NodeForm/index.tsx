@@ -47,7 +47,7 @@ export function NodeForm({
 
   const formProps = useMemo(() => ({ stepTypes, agents }), [stepTypes, agents]);
 
-  const entireForm = useForm<form.SchemaType>({
+  const entireForm = useForm<form.SchemaInput, unknown, form.SchemaType>({
     resolver: zodResolver(form.schema()),
     defaultValues: (values || form.initialValues) as form.SchemaType,
     mode: 'onChange',
