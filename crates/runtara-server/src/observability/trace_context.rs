@@ -102,7 +102,6 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(
             tracing_opentelemetry::layer().with_tracer(provider.tracer("trace-context-test")),
         );
-        let _lock = crate::test_env::TRACING_SUBSCRIBER_MUTEX.blocking_lock();
         tracing::subscriber::with_default(subscriber, f)
     }
 
@@ -112,7 +111,6 @@ mod tests {
         // there is nothing to propagate. Pinning the subscriber makes the
         // answer deterministic instead of depending on whether some other test
         // in this binary happened to initialise OTel first.
-        let _lock = crate::test_env::TRACING_SUBSCRIBER_MUTEX.blocking_lock();
         let result = tracing::subscriber::with_default(tracing_subscriber::registry(), || {
             let span = tracing::info_span!("no_otel_layer");
             let _entered = span.enter();

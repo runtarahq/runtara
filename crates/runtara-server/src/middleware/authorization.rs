@@ -1767,26 +1767,20 @@ mod tests {
 
     /// Install a capturing subscriber for the current thread (`#[tokio::test]` runs on a
     /// current-thread runtime, so the layer's `tracing::warn!` lands here).
-    /// Holds the crate-wide subscriber lock for the test's duration (see
-    /// `TRACING_SUBSCRIBER_MUTEX`); the lock comes first so it drops last.
-    async fn capture_logs() -> (
-        tokio::sync::MutexGuard<'static, ()>,
-        LogCapture,
-        tracing::subscriber::DefaultGuard,
-    ) {
-        let lock = crate::test_env::TRACING_SUBSCRIBER_MUTEX.lock().await;
+    fn capture_logs() -> (LogCapture, tracing::subscriber::DefaultGuard) {
+        crate::test_env::install_permissive_global_subscriber();
         let capture = LogCapture::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(capture.clone())
             .with_ansi(false)
             .finish();
         let guard = tracing::subscriber::set_default(subscriber);
-        (lock, capture, guard)
+        (capture, guard)
     }
 
     #[tokio::test]
     async fn authorize_shadow_logs_denial_with_enforced_false_under_logging() {
-        let (_lock, capture, _guard) = capture_logs().await;
+        let (capture, _guard) = capture_logs();
         let app = matched_path_app(Some(Role::Viewer), MembershipPolicy::Logging);
         let resp = app
             .oneshot(
@@ -1816,7 +1810,7 @@ mod tests {
 
     #[tokio::test]
     async fn authorize_logs_denial_with_enforced_true_under_required() {
-        let (_lock, capture, _guard) = capture_logs().await;
+        let (capture, _guard) = capture_logs();
         let app = matched_path_app(Some(Role::Viewer), MembershipPolicy::Required);
         let resp = app
             .oneshot(
@@ -1841,7 +1835,7 @@ mod tests {
     #[tokio::test]
     async fn authorize_logs_nothing_for_allowed_requests_under_logging() {
         // An allowed request under Logging produces no shadow noise.
-        let (_lock, capture, _guard) = capture_logs().await;
+        let (capture, _guard) = capture_logs();
         let app = matched_path_app(Some(Role::Viewer), MembershipPolicy::Logging);
         let resp = app
             .oneshot(
@@ -2097,9 +2091,9 @@ mod tests {
 
     // ── require_ownership: shadow-denial log emission ────────────────────────
 
-    #[tokio::test]
-    async fn require_ownership_shadow_logs_denial_with_enforced_false_under_logging() {
-        let (_lock, capture, _guard) = capture_logs().await;
+    #[test]
+    fn require_ownership_shadow_logs_denial_with_enforced_false_under_logging() {
+        let (capture, _guard) = capture_logs();
         let result = require_ownership(
             MembershipPolicy::Logging,
             "tenant",
@@ -2126,9 +2120,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn require_ownership_logs_denial_with_enforced_true_under_required() {
-        let (_lock, capture, _guard) = capture_logs().await;
+    #[test]
+    fn require_ownership_logs_denial_with_enforced_true_under_required() {
+        let (capture, _guard) = capture_logs();
         let result = require_ownership(
             MembershipPolicy::Required,
             "tenant",
@@ -2149,10 +2143,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn require_ownership_logs_nothing_for_the_owner_under_logging() {
+    #[test]
+    fn require_ownership_logs_nothing_for_the_owner_under_logging() {
         // The owner acting on their own resource produces no shadow noise.
-        let (_lock, capture, _guard) = capture_logs().await;
+        let (capture, _guard) = capture_logs();
         let result = require_ownership(
             MembershipPolicy::Logging,
             "tenant",
